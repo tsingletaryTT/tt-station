@@ -52,14 +52,19 @@ fn find_runpy_cmd(commands: &[Vec<String>]) -> &Vec<String> {
 }
 
 /// The DEFAULT `start` invocation -- no device/image/impl/engine override
-/// configured -- must be the MINIMAL `run.py` command: `--model`,
-/// `--workflow server`, `--docker-server`, `--service-port`, plus
-/// `--no-auth` (default-on) and `--host-hf-cache` (the one non-hardware
-/// default this codebase still sets, see `RunPyConfig::default`). It must
-/// NOT carry `--tt-device`, `--override-docker-image`, `--impl`, or
-/// `--engine` -- that's the whole point: `run.py` resolves all four itself
-/// from `model_spec.json` and detected hardware, and hardcoding/guessing a
-/// value here would just be a worse, staler copy of that resolution.
+/// configured, and (for this test) no `tt-smi`/`docker images` stubs set up
+/// either, so both auto-resolution probes come back empty/unparseable --
+/// must be the MINIMAL `run.py` command: `--model`, `--workflow server`,
+/// `--docker-server`, `--service-port`, plus `--no-auth` (default-on) and
+/// `--host-hf-cache` (the one non-hardware default this codebase still
+/// sets, see `RunPyConfig::default`). It must NOT carry `--tt-device`,
+/// `--override-docker-image`, `--impl`, or `--engine`. `--impl`/`--engine`
+/// are still entirely `run.py`'s job to default from `model_spec.json`; for
+/// `--tt-device`/`--override-docker-image`, this codebase now ALSO tries to
+/// auto-resolve them itself (see `resolve_tt_device`/`resolve_image` in
+/// `src/serving/runpy.rs`) -- but with no real board/no local images to
+/// find, both resolve to `None` here, just like `run.py`'s own resolution
+/// would if it had nothing to go on either.
 #[test]
 fn runpy_start_default_omits_device_image_impl_engine() {
     let runner = FakeRunner::new(0); // healthy on the very first probe
@@ -80,9 +85,11 @@ fn runpy_start_default_omits_device_image_impl_engine() {
     let commands = runner.commands();
     assert_eq!(
         commands.len(),
-        3,
+        5,
         "expected the stop-stale docker-ps query, the default board-reset \
-         command, and the run.py invocation: {commands:?}"
+         command, the tt-smi -s device-auto-detect probe, the docker images \
+         release-image auto-pick query, and the run.py invocation: \
+         {commands:?}"
     );
     let cmd = find_runpy_cmd(&commands);
 
@@ -335,11 +342,13 @@ fn runpy_start_resets_board_before_launching_runpy_by_default() {
     );
 }
 
-/// `reset_before_serve = false` must skip the reset entirely -- but the
-/// stop-stale-serving-container check still runs unconditionally (it's not
-/// gated by `reset_before_serve` at all), so the first command is the
-/// `docker ps` stale-container query and the second is the run.py
-/// invocation itself.
+/// `reset_before_serve = false` must skip the `tt-smi -r` RESET entirely --
+/// but the stop-stale-serving-container check still runs unconditionally
+/// (it's not gated by `reset_before_serve` at all), so the first command is
+/// the `docker ps` stale-container query. NOTE: this must NOT also skip the
+/// unrelated `tt-smi -s` device-auto-detect PROBE (see `resolve_tt_device`
+/// in `src/serving/runpy.rs`) -- that's a read-only query, not a board
+/// reset, and `reset_before_serve` only controls the latter.
 #[test]
 fn runpy_start_skips_reset_when_disabled() {
     let runner = FakeRunner::new(0);
@@ -353,16 +362,18 @@ fn runpy_start_skips_reset_when_disabled() {
     assert!(
         !commands
             .iter()
-            .any(|cmd| cmd.first().map(String::as_str) == Some("tt-smi")),
-        "no tt-smi/reset command should be issued when reset_before_serve is false: {commands:?}"
+            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-r".to_string()]),
+        "no tt-smi -r reset command should be issued when reset_before_serve is false: {commands:?}"
     );
     assert_eq!(
         commands[0][0], "docker",
         "stop-stale docker ps query should still run even when reset is disabled: {commands:?}"
     );
-    assert_eq!(
-        commands[1][0], "python3",
-        "run.py should be the next command when reset is disabled: {commands:?}"
+    assert!(
+        commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("python3")),
+        "run.py should still be invoked when reset is disabled: {commands:?}"
     );
 }
 
@@ -461,6 +472,199 @@ fn runpy_start_skips_docker_stop_when_no_stale_container() {
             .any(|cmd| cmd.first().map(String::as_str) == Some("docker")
                 && cmd.get(1).map(String::as_str) == Some("stop")),
         "no docker stop should be issued when docker ps returns nothing: {commands:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// `--tt-device` auto-detection from `tt-smi -s`: `run.py`'s OWN
+// auto-detect is known to fail on this box (`Unable to map tt-smi board
+// counts ... {'p300c': 4}`), so `RunPyBackend::resolve_tt_device` fills the
+// gap by parsing `tt-smi -s`'s JSON itself and mapping known board
+// combinations to a `--tt-device` string. See that method's doc comment in
+// `src/serving/runpy.rs`.
+// ---------------------------------------------------------------------
+
+/// `tt-smi -s` JSON fixture for THIS box: 4x `p300c` boards, verified on
+/// real hardware to map to `p300x2`.
+const TT_SMI_FOUR_P300C: &str = r#"{
+    "device_info": [
+        {"board_info": {"board_type": "p300c"}},
+        {"board_info": {"board_type": "p300c"}},
+        {"board_info": {"board_type": "p300c"}},
+        {"board_info": {"board_type": "p300c"}}
+    ]
+}"#;
+
+/// With no explicit `tt_device` configured, `start` must shell out to
+/// `tt-smi -s`, parse its `device_info[].board_info.board_type` list, and
+/// map 4x `p300c` to `--tt-device p300x2` -- CONFIRMED for this box.
+#[test]
+fn runpy_start_auto_detects_tt_device_from_tt_smi() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    assert!(
+        commands
+            .iter()
+            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-s".to_string()]),
+        "expected a tt-smi -s device-detect probe among the recorded commands: {commands:?}"
+    );
+
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        cmd.windows(2)
+            .any(|w| w[0] == "--tt-device" && w[1] == "p300x2"),
+        "argv should carry the auto-detected --tt-device p300x2 (4x p300c): {cmd:?}"
+    );
+}
+
+/// An explicit `tt_device` override must win outright -- `start` must not
+/// even bother calling `tt-smi -s` at all.
+#[test]
+fn runpy_start_explicit_tt_device_skips_tt_smi_probe() {
+    let runner = FakeRunner::new(0);
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.tt_device = Some("n300".to_string());
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("tt-smi")
+                && cmd.get(1).map(String::as_str) == Some("-s")),
+        "an explicit tt_device override must skip the tt-smi -s probe entirely: {commands:?}"
+    );
+
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        cmd.windows(2)
+            .any(|w| w[0] == "--tt-device" && w[1] == "n300"),
+        "argv should carry the explicit override n300, not an auto-detected value: {cmd:?}"
+    );
+}
+
+/// A board combination the map doesn't cover (here: mixed board types) must
+/// NOT produce a guessed `--tt-device` -- `start` should just omit the flag
+/// and let `run.py` try its own (broken, on this box) auto-detection rather
+/// than this codebase inventing a value it has no confirmed mapping for.
+#[test]
+fn runpy_start_omits_tt_device_when_board_combination_unmappable() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output(
+        "tt-smi -s",
+        r#"{"device_info": [
+            {"board_info": {"board_type": "p300c"}},
+            {"board_info": {"board_type": "n300"}}
+        ]}"#,
+    );
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        !cmd.iter().any(|a| a == "--tt-device"),
+        "an unmappable board combination must not produce a guessed --tt-device: {cmd:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// `--override-docker-image` auto-pick from `docker images`: `run.py`'s
+// model_spec default image tag isn't pulled/on GHCR on this box, so
+// `RunPyBackend::resolve_image` picks the newest locally-present RELEASE
+// image itself. See that method's doc comment in `src/serving/runpy.rs`.
+// ---------------------------------------------------------------------
+
+/// `docker images --format ...` fixture mixing: an older RELEASE tag, a
+/// newer RELEASE tag, a DEV tag (must be excluded), and a `<none>` tag
+/// (must be excluded) -- verified shapes from this box's real `docker
+/// images` output.
+const DOCKER_IMAGES_MIXED: &str = "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.14.0-80180b9-7678b70\t2026-05-15 06:35:43 -0700 PDT
+ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.17.0-8c48a10-f52987a\t2026-06-25 14:22:23 -0700 PDT
+ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:qb2_launch-6900b0c-22be241\t2026-05-06 12:42:22 -0700 PDT
+ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:<none>\t2026-03-09 02:53:04 -0700 PDT";
+
+/// With no explicit `image` configured, `start` must shell out to `docker
+/// images`, keep only RELEASE-repo, non-`<none>`-tag lines, and pick the
+/// NEWEST by `CreatedAt` -- here, `0.17.0-...` over the older `0.14.0-...`,
+/// and never the `-dev-` or `<none>` lines.
+#[test]
+fn runpy_start_auto_picks_newest_local_release_image() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker images", DOCKER_IMAGES_MIXED);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    assert!(
+        commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("images")),
+        "expected a docker images query among the recorded commands: {commands:?}"
+    );
+
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        cmd.windows(2).any(|w| w[0] == "--override-docker-image"
+            && w[1]
+                == "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.17.0-8c48a10-f52987a"),
+        "argv should carry the NEWEST release image, not the older release \
+         or the dev/none images: {cmd:?}"
+    );
+}
+
+/// An explicit `image` override must win outright -- `start` must not even
+/// bother calling `docker images` at all.
+#[test]
+fn runpy_start_explicit_image_skips_docker_images_query() {
+    let runner = FakeRunner::new(0);
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.image = Some("some/image:tag".to_string());
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("images")),
+        "an explicit image override must skip the docker images query entirely: {commands:?}"
+    );
+
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        cmd.windows(2)
+            .any(|w| w[0] == "--override-docker-image" && w[1] == "some/image:tag"),
+        "argv should carry the explicit override, not an auto-picked value: {cmd:?}"
+    );
+}
+
+/// When `docker images` reports nothing matching the release repo, `start`
+/// must not produce a guessed `--override-docker-image` at all.
+#[test]
+fn runpy_start_omits_override_image_when_no_release_image_present() {
+    let runner = FakeRunner::new(0); // docker images defaults to empty output
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        !cmd.iter().any(|a| a == "--override-docker-image"),
+        "no local release image present must not produce a guessed override: {cmd:?}"
     );
 }
 

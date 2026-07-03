@@ -93,11 +93,11 @@ struct Cli {
     /// (`run.py --override-docker-image`, or `docker run <image>` for the
     /// `docker` fallback backend).
     ///
-    /// OPTIONAL for the `runpy` backend (the default): without it, `run.py`
-    /// picks the correct image itself from the model's own entry in
-    /// `model_spec.json` -- the flag name says it all, it's an OVERRIDE, not
-    /// a requirement, and is normally unnecessary. Setting this bypasses
-    /// that resolution.
+    /// OPTIONAL override for the `runpy` backend (the default). When unset,
+    /// the agent auto-picks the newest locally-present release image
+    /// (`RunPyBackend::resolve_image` -- `run.py`'s own `model_spec.json`
+    /// image tag isn't always pulled/on GHCR on a given box); set this only
+    /// to override that.
     ///
     /// The `docker` fallback backend has no such resolution of its own (it
     /// has no `model_spec.json` to consult), so when this is unset it falls
@@ -110,11 +110,11 @@ struct Cli {
     /// `--tt-device` value passed to `tt-inference-server`, e.g. `n300`,
     /// `p150x4`, `p300x2`. Shared by both the `runpy` and `docker` backends.
     ///
-    /// OPTIONAL for the `runpy` backend (the default): per `run.py --help`,
-    /// omitting it "Defaults to the largest supported device available on
-    /// the host" -- i.e. `run.py` detects this box's hardware and picks the
-    /// mesh itself. Setting this OVERRIDES that auto-detection and is
-    /// normally unnecessary.
+    /// OPTIONAL override for the `runpy` backend (the default). When unset,
+    /// the agent auto-detects the device from `tt-smi`
+    /// (`RunPyBackend::resolve_tt_device` -- `run.py`'s own hardware
+    /// auto-detect is known to fail on some boards, e.g. this one); set
+    /// this only to override that.
     ///
     /// The `docker` fallback backend has no auto-detection of its own, so
     /// when this is unset it falls back to `"p300x2"` -- CONFIRMED as the
@@ -343,10 +343,12 @@ async fn main() -> Result<()> {
                 .clone()
                 .unwrap_or_else(default_host_hf_cache),
         ),
-        // Passed straight through as `Option`s -- `None` here means "let
-        // run.py auto-resolve it," which is the DEFAULT for a fresh CLI
-        // invocation (see each flag's own doc comment above). Do NOT apply
-        // a fallback the way `docker_config` above does.
+        // Passed straight through as `Option`s -- `None` here (the DEFAULT
+        // for a fresh CLI invocation) means "auto-resolve it," which
+        // `RunPyBackend::start` does itself via `resolve_tt_device`/
+        // `resolve_image` (see each flag's own doc comment above, and the
+        // module doc in serving/runpy.rs). Do NOT apply a fallback the way
+        // `docker_config` above does -- that would bypass auto-resolution.
         tt_device: cli.tt_device.clone(),
         image: cli.serving_image.clone(),
         engine: cli.engine.clone(),
