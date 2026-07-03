@@ -48,13 +48,32 @@ pub struct FakeRunner {
     /// `run` with `Err` before it ever records success or consults
     /// `run_outputs`.
     run_failures: Arc<Mutex<Vec<(String, String)>>>,
-    /// Canned response body for `http_get` -- e.g. `RunPyBackend::start`'s
-    /// `GET /v1/models` fetch of the authoritative served model id. `None`
-    /// (the default, unset) means `http_get` reports an error, exercising
-    /// the "fall back to the original model argument" path without any
-    /// setup at all.
+    /// Canned response body every `http_get` call returns (regardless of
+    /// `url`) once `set_http_get` is called -- e.g. `RunPyBackend::start`'s
+    /// `GET /v1/models` readiness poll. `None` (the default, unset) means
+    /// `http_get` returns `DEFAULT_HTTP_GET_BODY` (see below), NOT an error.
     http_get_response: Arc<Mutex<Option<String>>>,
+    /// Canned SEQUENCE of `http_get` responses, consumed one per call and
+    /// STICKING at the last entry once exhausted, so a test can model
+    /// `/v1/models` erroring/empty for the first few polls and then coming
+    /// up populated (exactly what `RunPyBackend::start`'s readiness poll
+    /// waits for). Each entry is `Some(body)` (returned `Ok`) or `None`
+    /// (returned `Err`). Takes precedence over `http_get_response` whenever
+    /// it's non-empty. Mirrors `set_run_output`/`set_http_get`.
+    http_get_sequence: Arc<Mutex<Vec<Option<String>>>>,
+    /// How many `http_get` calls have been seen -- indexes into
+    /// `http_get_sequence`.
+    http_get_calls_seen: Arc<Mutex<usize>>,
 }
+
+/// Default `http_get` body when nothing is configured: a non-empty `data`
+/// array (so `RunPyBackend::start`'s `/v1/models` readiness gate is
+/// satisfied and `start` succeeds) whose single entry carries NO `id` (so
+/// `Endpoint.model` falls back to the caller's original `model` argument).
+/// This lets the many argv-focused tests build a bare `FakeRunner::new(..)`
+/// and still have `start` succeed with `endpoint.model == <arg>`, without
+/// each having to stub `/v1/models` by hand.
+const DEFAULT_HTTP_GET_BODY: &str = r#"{"data":[{}]}"#;
 
 impl FakeRunner {
     #[allow(dead_code)]
@@ -66,6 +85,8 @@ impl FakeRunner {
             run_outputs: Arc::new(Mutex::new(Vec::new())),
             run_failures: Arc::new(Mutex::new(Vec::new())),
             http_get_response: Arc::new(Mutex::new(None)),
+            http_get_sequence: Arc::new(Mutex::new(Vec::new())),
+            http_get_calls_seen: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -103,15 +124,29 @@ impl FakeRunner {
 
     /// Set the canned body every future `http_get` call returns, regardless
     /// of `url` -- e.g. `set_http_get(r#"{"data":[{"id":"Qwen/Qwen3-32B"}]}"#)`
-    /// to exercise `RunPyBackend::start`'s "ask the server what it's
-    /// serving" fetch of `/v1/models`. Left unset (the default), `http_get`
-    /// returns `Err`, exercising the fallback-to-original-argument path.
+    /// to exercise `RunPyBackend::start`'s `/v1/models` readiness poll.
+    /// Left unset (the default), `http_get` returns `DEFAULT_HTTP_GET_BODY`.
     #[allow(dead_code)]
     pub fn set_http_get(&self, body: &str) {
         *self
             .http_get_response
             .lock()
             .expect("http_get_response mutex poisoned") = Some(body.to_string());
+    }
+
+    /// Set a SEQUENCE of `http_get` responses, consumed one per call and
+    /// sticking at the last once exhausted -- each entry `Some(body)` returns
+    /// `Ok(body)`, `None` returns `Err`. Lets a test model `/v1/models`
+    /// erroring/empty at first and then coming up populated, driving
+    /// `RunPyBackend::start`'s readiness poll through more than one round.
+    /// Takes precedence over `set_http_get` while non-empty.
+    #[allow(dead_code)]
+    pub fn set_http_get_sequence(&self, bodies: &[Option<&str>]) {
+        *self
+            .http_get_sequence
+            .lock()
+            .expect("http_get_sequence mutex poisoned") =
+            bodies.iter().map(|b| b.map(str::to_string)).collect();
     }
 }
 
@@ -155,10 +190,34 @@ impl CommandRunner for FakeRunner {
     }
 
     fn http_get(&self, _url: &str) -> Result<String> {
-        self.http_get_response
+        // A configured sequence wins: consume one entry per call, sticking at
+        // the last once exhausted (so a "ready" tail keeps answering ready).
+        {
+            let sequence = self
+                .http_get_sequence
+                .lock()
+                .expect("http_get_sequence mutex poisoned");
+            if !sequence.is_empty() {
+                let mut seen = self
+                    .http_get_calls_seen
+                    .lock()
+                    .expect("http_get_calls_seen mutex poisoned");
+                let idx = (*seen).min(sequence.len() - 1);
+                *seen += 1;
+                return match &sequence[idx] {
+                    Some(body) => Ok(body.clone()),
+                    None => Err(anyhow::anyhow!("FakeRunner: sequenced http_get error")),
+                };
+            }
+        }
+
+        // Otherwise: an explicitly-set single body, else the default "ready
+        // but idless" body (see `DEFAULT_HTTP_GET_BODY`).
+        Ok(self
+            .http_get_response
             .lock()
             .expect("http_get_response mutex poisoned")
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("FakeRunner: no http_get response configured"))
+            .unwrap_or_else(|| DEFAULT_HTTP_GET_BODY.to_string()))
     }
 }

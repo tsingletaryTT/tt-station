@@ -793,38 +793,85 @@ fn runpy_start_endpoint_model_is_served_id_from_v1_models() {
     );
 }
 
-/// If the `/v1/models` fetch fails (or can't be parsed), `start` must not
-/// fail outright -- it should fall back to the original `model` argument
-/// passed to `start`.
+/// When `/v1/models` reports a model (non-empty `data`, so the readiness
+/// gate is satisfied) but that entry carries NO `id` field, `Endpoint.model`
+/// must fall back to the original `model` argument -- the model IS queryable,
+/// so `start` succeeds; only the served-id extraction falls back.
 #[test]
-fn runpy_start_endpoint_model_falls_back_when_http_get_fails() {
-    let runner = FakeRunner::new(0); // http_get left unconfigured -> Err
+fn runpy_start_endpoint_model_falls_back_to_arg_when_id_missing() {
+    let runner = FakeRunner::new(0);
+    runner.set_http_get(r#"{"data":[{}]}"#); // ready, but no id in the entry
     let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
 
     let endpoint = backend
         .start("Qwen/Qwen3-32B")
-        .expect("start should succeed even when the /v1/models fetch fails");
+        .expect("start should succeed: /v1/models lists a model");
 
     assert_eq!(
         endpoint.model, "Qwen/Qwen3-32B",
-        "when /v1/models can't be fetched, Endpoint.model should fall back \
-         to the original start() argument"
+        "with a queryable-but-idless /v1/models entry, Endpoint.model should \
+         fall back to the original start() argument"
     );
 }
 
-/// Malformed JSON from `/v1/models` must also fall back to the original
-/// `model` argument rather than failing `start`.
+/// THE POINT OF FIX 1: `/health` returning 200 is NOT enough -- if
+/// `/v1/models` never lists a model within the budget (the model never
+/// becomes queryable on `/v1`), `start` must return an `Err`, must NOT flip
+/// status to `Serving`, and must NOT hand back an `Endpoint`. This is what
+/// prevents reporting a dead endpoint as serving. Here `/v1/models` always
+/// answers with an EMPTY `data` array (vLLM up but no model loaded).
 #[test]
-fn runpy_start_endpoint_model_falls_back_on_unparseable_response() {
+fn runpy_start_errs_when_v1_models_never_lists_a_model() {
+    let runner = FakeRunner::new(0); // /health is healthy immediately...
+    runner.set_http_get(r#"{"data":[]}"#); // ...but /v1/models is always empty
+    let backend = RunPyBackend::new(config("127.0.0.1", 8003), Box::new(runner.clone()))
+        .with_health_poll(3, Duration::from_millis(1)); // shrunk test budget
+
+    let err = backend
+        .start("Qwen/Qwen3-32B")
+        .expect_err("start must fail when /v1/models never lists a model");
+    assert!(
+        err.to_string().contains("Qwen/Qwen3-32B"),
+        "error should name the model that never became queryable: {err}"
+    );
+    assert!(
+        err.to_string().contains("v1/models"),
+        "error should point at the /v1/models readiness gate: {err}"
+    );
+
+    // Status must stay Idle -- no dead endpoint reported as serving.
+    assert_eq!(backend.status().unwrap(), ServingStatus::Idle);
+}
+
+/// `/v1/models` that errors (or returns garbage) for the first few polls and
+/// only THEN comes up with a populated `data` must make `start` wait for the
+/// populated response and succeed with the served id from it -- the readiness
+/// poll retries within its budget rather than giving up on the first miss.
+#[test]
+fn runpy_start_waits_for_v1_models_then_uses_served_id() {
     let runner = FakeRunner::new(0);
-    runner.set_http_get("not json");
-    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+    // First poll: empty; second: unparseable; third onward: populated.
+    runner.set_http_get_sequence(&[
+        Some(r#"{"data":[]}"#),
+        Some("not json"),
+        Some(r#"{"data":[{"id":"Qwen/Qwen3-32B"}]}"#),
+    ]);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8003), Box::new(runner.clone()))
+        .with_health_poll(10, Duration::from_millis(1));
 
     let endpoint = backend
-        .start("Qwen/Qwen3-32B")
-        .expect("start should succeed even when /v1/models returns garbage");
+        .start("Qwen3-32B")
+        .expect("start should succeed once /v1/models lists a model");
 
-    assert_eq!(endpoint.model, "Qwen/Qwen3-32B");
+    assert_eq!(
+        endpoint.model, "Qwen/Qwen3-32B",
+        "Endpoint.model should be the served id from the eventually-populated \
+         /v1/models response"
+    );
+    assert_eq!(
+        backend.status().unwrap(),
+        ServingStatus::Serving("Qwen/Qwen3-32B".to_string())
+    );
 }
 
 /// The health poll should actually poll more than once when the first

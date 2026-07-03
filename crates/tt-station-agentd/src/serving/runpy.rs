@@ -643,57 +643,87 @@ impl ServingBackend for RunPyBackend {
             &[("MODEL_SOURCE", self.config.model_source.as_str())],
         )?;
 
-        // `run.py` (and `DockerBackend`) poll `/health`, not `/v1/models` --
-        // see docs/reference/tt-inference-server-docker.md.
+        // Gate "serving" on the model actually being QUERYABLE on `/v1`, not
+        // merely on `/health` returning 200. Verified on real hardware:
+        // `GET /health` can go 200 while the model is still loading, so the
+        // container is "up" but `/v1` chat/completion requests still fail
+        // (a 70B reported "serving" per status while `:8003` was
+        // connection-refused). Handing back that endpoint reports a DEAD
+        // server as serving. The authoritative readiness signal is
+        // `/v1/models` listing at least one model: that only happens once
+        // vLLM has the weights loaded and its OpenAI server is answering on
+        // `/v1`.
+        //
+        // So poll `/v1/models` (with a cheap `/health` liveness check first
+        // each round, since `/health` comes up strictly before `/v1` and
+        // skips a pointless HTTP GET while the container is still booting)
+        // until the response parses as JSON with a NON-EMPTY `data` array,
+        // within the SAME bounded budget the old `/health` poll used
+        // (`health_poll_attempts` x `health_poll_interval`) -- no infinite
+        // loop, no lock held across any of it.
         let health_url = format!(
             "http://{}:{}/health",
             self.config.host, self.config.service_port
         );
-        let healthy = super::poll_until_healthy(
-            self.runner.as_ref(),
-            &health_url,
-            self.health_poll_attempts,
-            self.health_poll_interval,
-        );
-
-        if !healthy {
-            return Err(anyhow::anyhow!(
-                "runpy backend: model '{model}' did not become healthy at {health_url} \
-                 within {} attempts",
-                self.health_poll_attempts
-            ));
-        }
-
-        // Ask the server what it's ACTUALLY serving, rather than guessing.
-        // `run.py --model` got the short name (`run_model`, above), but the
-        // OpenAI-compatible `/v1/models` endpoint reports the real served
-        // id -- the same HF id `model_spec.json` keys off of and that a
-        // client needs in its own `model` field. Fetching it directly here
-        // removes all guesswork about which form (`org/name` vs. `name`)
-        // the caller originally passed. If the fetch fails, or the body
-        // isn't the expected `{"data":[{"id": ...}]}` shape, this falls
-        // back to the ORIGINAL `model` argument rather than failing `start`
-        // outright -- the server is confirmed healthy at this point, so a
-        // `/v1/models` hiccup shouldn't take down an otherwise-successful
-        // `start`.
         let models_url = format!(
             "http://{}:{}/v1/models",
             self.config.host, self.config.service_port
         );
-        let served_model = self
-            .runner
-            .http_get(&models_url)
-            .ok()
-            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
-            .and_then(|value| {
-                value
-                    .get("data")?
-                    .get(0)?
-                    .get("id")?
-                    .as_str()
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| model.to_string());
+
+        // On success this holds the served model id to report back. `run.py
+        // --model` got the SHORT name (`run_model`, above), but the served
+        // OpenAI `/v1/models` id is the real HF id (`Qwen/Qwen3-32B`) a
+        // client needs in its own `model` field, so prefer it. Fall back to
+        // the ORIGINAL `model` argument only when `data` is non-empty (the
+        // model IS queryable) but the `id` field itself can't be read.
+        let mut served_model: Option<String> = None;
+        for _ in 0..self.health_poll_attempts {
+            // Cheap liveness gate: while the container is still coming up,
+            // `/health` isn't 200 yet, so skip the `/v1/models` GET until it
+            // is. `/v1/models` (below) is the AUTHORITATIVE gate.
+            if self.runner.health_ok(&health_url) {
+                if let Some(id) = self
+                    .runner
+                    .http_get(&models_url)
+                    .ok()
+                    .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                    .and_then(|value| {
+                        // A non-empty `data` array means vLLM has the model
+                        // loaded and is answering on `/v1` -- the whole point
+                        // of this gate. An empty `data` (or a missing/wrong
+                        // shape) means "not ready yet": keep polling.
+                        let data = value.get("data")?.as_array()?;
+                        if data.is_empty() {
+                            return None;
+                        }
+                        Some(
+                            data[0]
+                                .get("id")
+                                .and_then(|id| id.as_str())
+                                .map(str::to_string)
+                                .unwrap_or_else(|| model.to_string()),
+                        )
+                    })
+                {
+                    served_model = Some(id);
+                    break;
+                }
+            }
+            std::thread::sleep(self.health_poll_interval);
+        }
+
+        // Timed out: the model never became queryable on `/v1/models` within
+        // the budget. Return an error and DO NOT flip status to serving or
+        // hand back an Endpoint -- status stays `Idle`, and `/run` turns this
+        // into a 500, which is the whole point: never report a dead endpoint
+        // as serving.
+        let served_model = served_model.ok_or_else(|| {
+            anyhow::anyhow!(
+                "runpy backend: model '{model}' did not become queryable on \
+                 {models_url} within {} attempts",
+                self.health_poll_attempts
+            )
+        })?;
 
         *self.status.lock().expect("status mutex poisoned") =
             ServingStatus::Serving(served_model.clone());
