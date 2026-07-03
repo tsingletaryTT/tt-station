@@ -18,6 +18,7 @@ use libttstation::model::{txt_encode, BoxRecord, ServingStatus};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 use tt_station_agentd::routes::{app, AppState};
+use tt_station_agentd::serving::docker::DockerConfig;
 use tt_station_agentd::serving::make_backend;
 
 /// Which serving backend to use for running models. Only the *choice* is
@@ -82,24 +83,101 @@ struct Cli {
 
     /// Container image `docker run` for model serving. Only meaningful for
     /// the Docker backend today.
+    ///
+    /// NO `latest` tag exists for `tt-inference-server` -- tags are
+    /// `<semver>-<tt-metal-commit>-<vllm-commit>` (e.g.
+    /// `0.9.0-84b4c53-222ee06`). The default below is an EXAMPLE tag only;
+    /// it MUST be reviewed and pinned to the tag actually intended for a
+    /// given release before real use. See
+    /// `docs/reference/tt-inference-server-docker.md`.
     #[arg(
         long = "serving-image",
-        default_value = "tenstorrent/tt-inference-server:latest"
+        default_value = "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.9.0-84b4c53-222ee06"
     )]
     serving_image: String,
+
+    /// `--tt-device` value passed to `tt-inference-server`, e.g. `n300`,
+    /// `p150x4`, `p300x2`. Only meaningful for the Docker backend today.
+    ///
+    /// QuietBox 2 (QB2) is 2x p300 = 4 Blackhole chips, but the exact string
+    /// tt-inference-server expects for that topology is not confirmed in
+    /// sources (both `p150x4` and `p300x2` have been seen) -- confirm on
+    /// real hardware before trusting this default. See
+    /// `docs/reference/tt-inference-server-docker.md`'s "Uncertainties"
+    /// section.
+    #[arg(long = "tt-device", default_value = "p150x4")]
+    tt_device: String,
+
+    /// Hugging Face access token for gated model repos (e.g. Llama), passed
+    /// into the serving container as `--env HF_TOKEN=...`. Only meaningful
+    /// for the Docker backend today.
+    ///
+    /// If not given on the command line, falls back to the `HF_TOKEN`
+    /// environment variable. Passed through to the container only when the
+    /// resulting value is non-empty -- most local/open models need no token
+    /// at all.
+    #[arg(long = "hf-token")]
+    hf_token: Option<String>,
+
+    /// Name of the Docker volume mounted at
+    /// `/home/container_app_user/cache_root` inside the serving container,
+    /// used to persist downloaded model weights/HF cache across container
+    /// restarts. Only meaningful for the Docker backend today.
+    #[arg(long = "cache-volume", default_value = "tt-station-cache")]
+    cache_volume: String,
+
+    /// Require JWT bearer auth on the serving container instead of running
+    /// it with `--no-auth`. Only meaningful for the Docker backend today.
+    ///
+    /// Defaults to `false` -- i.e. the server runs with `--no-auth` by
+    /// default -- for PoC simplicity, since minting/managing a JWT
+    /// client-side is out of scope here.
+    #[arg(long = "require-auth", action = clap::ArgAction::SetTrue)]
+    require_auth: bool,
+
+    /// Host path passed to `docker run --device` so the container can reach
+    /// the Tenstorrent accelerator. Only meaningful for the Docker backend
+    /// today.
+    #[arg(long = "device-path", default_value = "/dev/tenstorrent")]
+    device_path: String,
+
+    /// Host path bind-mounted onto itself inside the container (`--mount
+    /// type=bind,src=...,dst=...`) for tt-metal's 1G-hugepages DMA
+    /// requirement. Only meaningful for the Docker backend today.
+    #[arg(long = "hugepages-src", default_value = "/dev/hugepages-1G")]
+    hugepages_src: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let backend = make_backend(
-        &cli.backend.to_string(),
-        &cli.serving_host,
-        cli.serving_port,
-        &cli.serving_image,
-    )
-    .context("failed to construct serving backend")?;
+    // `--hf-token` wins if given explicitly; otherwise fall back to the
+    // `HF_TOKEN` environment variable so operators can keep the token out of
+    // shell history / process listings. Either way, only pass through a
+    // non-empty value -- `DockerBackend` already guards on this too, but
+    // resolving it here keeps `main`'s CLI-to-config mapping honest about
+    // where the value actually comes from.
+    let hf_token = cli
+        .hf_token
+        .clone()
+        .or_else(|| std::env::var("HF_TOKEN").ok())
+        .filter(|token| !token.is_empty());
+
+    let docker_config = DockerConfig {
+        image: cli.serving_image.clone(),
+        host: cli.serving_host.clone(),
+        host_port: cli.serving_port,
+        tt_device: cli.tt_device.clone(),
+        hf_token,
+        cache_volume: cli.cache_volume.clone(),
+        no_auth: !cli.require_auth,
+        device_path: cli.device_path.clone(),
+        hugepages_src: cli.hugepages_src.clone(),
+    };
+
+    let backend = make_backend(&cli.backend.to_string(), docker_config)
+        .context("failed to construct serving backend")?;
 
     let state = AppState::new(cli.name.clone(), cli.chips.clone(), Arc::from(backend));
 

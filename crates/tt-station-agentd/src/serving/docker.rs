@@ -90,18 +90,94 @@ impl CommandRunner for RealCommandRunner {
     }
 }
 
-/// Docker-backed `ServingBackend`: runs `tt-inference-server` in a
-/// container on `host_port` and polls `GET /v1/models` until it's healthy.
-pub struct DockerBackend {
-    /// Container image to run, e.g. `"tenstorrent/tt-inference-server:latest"`.
-    image: String,
+/// Everything `DockerBackend` needs to know to build a real
+/// `tt-inference-server` `docker run` invocation. Grouped into one struct
+/// (rather than a growing `DockerBackend::new` argument list) because
+/// `main.rs` builds this straight from CLI flags and tests build it straight
+/// from `Default::default()` plus targeted overrides -- see
+/// `docs/reference/tt-inference-server-docker.md` for why each field exists
+/// and where its value comes from on real hardware.
+#[derive(Clone, Debug)]
+pub struct DockerConfig {
+    /// Container image to run. There is deliberately no sane hardcoded
+    /// default here in production (see `main.rs`'s `--serving-image` doc
+    /// comment) -- `tt-inference-server` publishes no `latest` tag, so any
+    /// default is an example tag that must be reviewed per release. Tests
+    /// that don't care about the image still need a value, which is why
+    /// `Default` below sets a placeholder rather than omitting the field.
+    pub image: String,
     /// Host the serving container is reachable on -- baked into the
     /// returned `Endpoint`'s `base_url` rather than always assuming
     /// `localhost`, since the agent and the client calling it aren't
     /// necessarily the same machine.
-    host: String,
-    /// Host port the container's serving port is mapped to.
-    host_port: u16,
+    pub host: String,
+    /// Host port mapped onto the container's fixed serving port (8000 --
+    /// see `CONTAINER_PORT`). This is the only port that's actually
+    /// configurable; the container always listens on 8000 internally.
+    pub host_port: u16,
+    /// `--tt-device` value, e.g. `n300`, `p150x4`, `p300x2`. Not pinned to a
+    /// single hardcoded default in the codebase beyond the CLI's
+    /// `--tt-device` flag default, since the correct string depends on the
+    /// physical box and isn't 100% confirmed for QuietBox 2 -- see the doc's
+    /// "Uncertainties" section.
+    pub tt_device: String,
+    /// Hugging Face access token for gated repos (e.g. Llama). Passed
+    /// through as `--env HF_TOKEN=...` only when `Some` and non-empty --
+    /// most local/open models need no token at all, so the argv shouldn't
+    /// carry an empty or placeholder one.
+    pub hf_token: Option<String>,
+    /// Name of the Docker volume mounted at
+    /// `/home/container_app_user/cache_root` to persist downloaded
+    /// weights/HF cache across container restarts.
+    pub cache_volume: String,
+    /// When `true`, the container is started with `--no-auth` (JWT bearer
+    /// auth disabled) -- the PoC default, since minting a JWT client-side
+    /// is out of scope here. When `false`, `--no-auth` is omitted and the
+    /// returned `Endpoint.requires_key` is `true`.
+    pub no_auth: bool,
+    /// Host path passed to `--device`, e.g. `/dev/tenstorrent`. Configurable
+    /// (rather than hardcoded) so tests and non-standard hosts can override
+    /// it without touching this file.
+    pub device_path: String,
+    /// Host path bind-mounted onto itself inside the container via `--mount
+    /// type=bind,src=...,dst=...` -- tt-metal needs 1G hugepages for DMA,
+    /// provisioned on the host ahead of time by `tt-installer`.
+    pub hugepages_src: String,
+}
+
+impl Default for DockerConfig {
+    /// Defaults chosen to make hermetic tests concise (override only the
+    /// field a given test cares about via struct-update syntax); NOT
+    /// necessarily what a real deployment should run unexamined -- `main.rs`
+    /// builds a `DockerConfig` from explicit CLI flags rather than relying
+    /// on this impl.
+    fn default() -> Self {
+        DockerConfig {
+            image: "tenstorrent/tt-inference-server:unset".to_string(),
+            host: "127.0.0.1".to_string(),
+            host_port: 8000,
+            tt_device: "p150x4".to_string(),
+            hf_token: None,
+            cache_volume: "tt-station-cache".to_string(),
+            no_auth: true,
+            device_path: "/dev/tenstorrent".to_string(),
+            hugepages_src: "/dev/hugepages-1G".to_string(),
+        }
+    }
+}
+
+/// Port `tt-inference-server`'s OpenAI-compatible HTTP server listens on
+/// *inside* the container. Fixed by the image itself (overridable only via
+/// `$SERVICE_PORT` inside the container, which this PoC doesn't touch) --
+/// the only thing actually configurable is what host port it's published
+/// to, via `DockerConfig::host_port`.
+const CONTAINER_PORT: u16 = 8000;
+
+/// Docker-backed `ServingBackend`: runs `tt-inference-server` in a
+/// container on `host_port` (mapped to the container's fixed
+/// `CONTAINER_PORT`) and polls `GET /health` until it's healthy.
+pub struct DockerBackend {
+    config: DockerConfig,
     runner: Box<dyn CommandRunner>,
     /// Tracks the last-known serving status in-process. Chosen over
     /// deriving status from a `docker ps` call on every `status()` because
@@ -121,16 +197,9 @@ impl DockerBackend {
     /// (`DEFAULT_HEALTH_POLL_ATTEMPTS` / `DEFAULT_HEALTH_POLL_INTERVAL`).
     /// Starts `Idle` -- constructing a backend never implies anything is
     /// already serving.
-    pub fn new(
-        image: String,
-        host: String,
-        host_port: u16,
-        runner: Box<dyn CommandRunner>,
-    ) -> Self {
+    pub fn new(config: DockerConfig, runner: Box<dyn CommandRunner>) -> Self {
         DockerBackend {
-            image,
-            host,
-            host_port,
+            config,
             runner,
             status: Arc::new(Mutex::new(ServingStatus::Idle)),
             health_poll_attempts: DEFAULT_HEALTH_POLL_ATTEMPTS,
@@ -160,9 +229,8 @@ impl DockerBackend {
     /// first -- real model ids commonly contain characters (like the `/` in
     /// `meta-llama/Llama-3.1-8B`) that Docker rejects in a `--name` value.
     /// Only the container name is sanitized; `start` still passes the
-    /// *original* `model` string to `--model`/`-e MODEL=`, since that's what
-    /// the server inside the container needs to actually load the right
-    /// model.
+    /// *original* `model` string to `--model`, since that's what the server
+    /// inside the container needs to actually load the right model.
     fn container_name(&self, model: &str) -> String {
         format!("tt-inference-{}", sanitize_container_name(model))
     }
@@ -195,31 +263,74 @@ fn sanitize_container_name(model: &str) -> String {
 impl ServingBackend for DockerBackend {
     fn start(&self, model: &str) -> Result<Endpoint> {
         let container_name = self.container_name(model);
-        // Host and container listen on the same port -- simplest mapping
-        // that still makes the port genuinely load-bearing in the command
-        // (a stray typo swapping host/container ports would be a real bug,
-        // not just a style nit).
-        let port_mapping = format!("{}:{}", self.host_port, self.host_port);
-        let port_str = self.host_port.to_string();
 
-        self.runner.run(&[
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            &container_name,
-            "-p",
-            &port_mapping,
-            "-e",
-            &format!("MODEL={model}"),
-            &self.image,
-            "--model",
-            model,
-            "--port",
-            &port_str,
-        ])?;
+        // The container's serving port is fixed at `CONTAINER_PORT`; only
+        // the host side of the `--publish` mapping is configurable.
+        let publish_mapping = format!("{}:{}", self.config.host_port, CONTAINER_PORT);
+        // `--mount type=bind,src=X,dst=X`: the hugepages path is bind-mounted
+        // onto the SAME path inside the container, since that's the path
+        // tt-metal's DMA code expects to find inside the container too.
+        let mount_spec = format!("type=bind,src={0},dst={0}", self.config.hugepages_src);
+        let volume_spec = format!(
+            "{}:/home/container_app_user/cache_root",
+            self.config.cache_volume
+        );
+        // Only pass `--env HF_TOKEN=...` when a real, non-empty token is
+        // configured -- most local/open models need no token, and shipping
+        // an empty one would be actively misleading in a `docker inspect`.
+        let hf_token_env = self
+            .config
+            .hf_token
+            .as_ref()
+            .filter(|token| !token.is_empty())
+            .map(|token| format!("HF_TOKEN={token}"));
 
-        let health_url = format!("http://{}:{}/v1/models", self.host, self.host_port);
+        // Built as owned `String`s (several pieces are computed at runtime,
+        // e.g. `publish_mapping`) then borrowed as `&str` for
+        // `CommandRunner::run`, which takes `&[&str]` -- argv-style, no
+        // shell involved, so callers never need to worry about quoting.
+        let mut args: Vec<String> = vec![
+            "run".to_string(),
+            "-d".to_string(),
+            "--rm".to_string(),
+            "--name".to_string(),
+            container_name,
+            "--ipc".to_string(),
+            "host".to_string(),
+            "--device".to_string(),
+            self.config.device_path.clone(),
+            "--mount".to_string(),
+            mount_spec,
+            "--volume".to_string(),
+            volume_spec,
+        ];
+        if let Some(env) = hf_token_env {
+            args.push("--env".to_string());
+            args.push(env);
+        }
+        args.push("--publish".to_string());
+        args.push(publish_mapping);
+        args.push(self.config.image.clone());
+        // Everything from here on is passed straight through to
+        // `tt-inference-server`'s own CLI, after the image name -- NOT
+        // docker flags.
+        args.push("--model".to_string());
+        args.push(model.to_string());
+        args.push("--tt-device".to_string());
+        args.push(self.config.tt_device.clone());
+        if self.config.no_auth {
+            args.push("--no-auth".to_string());
+        }
+
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.runner.run(&arg_refs)?;
+
+        // `run.py` (and this backend) poll `/health`, not `/v1/models` --
+        // see docs/reference/tt-inference-server-docker.md.
+        let health_url = format!(
+            "http://{}:{}/health",
+            self.config.host, self.config.host_port
+        );
         let mut healthy = false;
         for _ in 0..self.health_poll_attempts {
             if self.runner.health_ok(&health_url) {
@@ -241,9 +352,11 @@ impl ServingBackend for DockerBackend {
             ServingStatus::Serving(model.to_string());
 
         Ok(Endpoint {
-            base_url: format!("http://{}:{}/v1", self.host, self.host_port),
+            base_url: format!("http://{}:{}/v1", self.config.host, self.config.host_port),
             model: model.to_string(),
-            requires_key: false,
+            // Auth is required exactly when the container was NOT started
+            // with `--no-auth`.
+            requires_key: !self.config.no_auth,
         })
     }
 
@@ -317,18 +430,24 @@ mod tests {
 
     /// The container name built from a slashed model id must be valid, but
     /// the `docker run` argv must still carry the ORIGINAL model string in
-    /// both `--model` and `-e MODEL=` -- the server inside the container
-    /// needs the real model id to know what to load, not the
-    /// name-safe-but-mangled version.
+    /// `--model` -- the server inside the container needs the real model id
+    /// to know what to load, not the name-safe-but-mangled version.
+    ///
+    /// (The exhaustive shape of the real `tt-inference-server` argv --
+    /// `--device`, `--tt-device`, `--publish`, `--no-auth`, HF token
+    /// handling, ... -- is covered by `tests/serving.rs`, which can share
+    /// the richer `FakeRunner` in `tests/support/mod.rs`. This unit test
+    /// stays focused on the one property that's specific to sanitization.)
     #[test]
     fn start_sanitizes_container_name_but_keeps_original_model_in_argv() {
         let runner = RecordingFakeRunner::new();
-        let backend = DockerBackend::new(
-            "tenstorrent/tt-inference-server:latest".to_string(),
-            "127.0.0.1".to_string(),
-            8080,
-            Box::new(runner.clone()),
-        );
+        let config = DockerConfig {
+            image: "some/image:tag".to_string(),
+            host: "127.0.0.1".to_string(),
+            host_port: 8080,
+            ..Default::default()
+        };
+        let backend = DockerBackend::new(config, Box::new(runner.clone()));
 
         let model = "meta-llama/Llama-3.1-8B";
         backend.start(model).expect("start should succeed");
@@ -348,13 +467,14 @@ mod tests {
             "container name must not contain '/': {container_name}"
         );
 
-        assert!(
-            run_cmd.iter().any(|a| a == model),
-            "docker run argv should still carry the original model id somewhere: {run_cmd:?}"
-        );
-        assert!(
-            run_cmd.iter().any(|a| a == &format!("MODEL={model}")),
-            "MODEL env var should carry the original model id: {run_cmd:?}"
+        let model_idx = run_cmd
+            .iter()
+            .position(|a| a == "--model")
+            .expect("--model flag should be present");
+        assert_eq!(
+            run_cmd[model_idx + 1],
+            model,
+            "--model should carry the ORIGINAL, unsanitized model id"
         );
     }
 }

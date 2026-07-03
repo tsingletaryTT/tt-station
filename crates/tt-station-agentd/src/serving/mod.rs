@@ -60,21 +60,19 @@ pub trait ServingBackend: Send + Sync {
 /// an error rather than a silent fallback, since a typo'd backend name
 /// should fail loudly at startup rather than quietly serving nothing.
 ///
-/// `host`/`host_port`/`image` are only meaningful for the Docker backend
-/// today (dstack's stub needs none of them); they're threaded through here
-/// rather than hardcoded so the eventual CLI wiring (Task 10) has a single
-/// function to call regardless of which backend was chosen.
+/// `docker_config` is only meaningful for the Docker backend today (dstack's
+/// stub needs none of it); it's threaded through here rather than the
+/// individual fields being hardcoded so the CLI wiring in `main.rs` has a
+/// single function to call regardless of which backend was chosen, and so
+/// adding a new Docker-only knob doesn't mean touching this function's
+/// signature again.
 pub fn make_backend(
     kind: &str,
-    host: &str,
-    host_port: u16,
-    image: &str,
+    docker_config: docker::DockerConfig,
 ) -> Result<Box<dyn ServingBackend>> {
     match kind {
         "docker" => Ok(Box::new(docker::DockerBackend::new(
-            image.to_string(),
-            host.to_string(),
-            host_port,
+            docker_config,
             Box::new(docker::RealCommandRunner),
         ))),
         "dstack" => Ok(Box::new(dstack::DstackBackend)),
@@ -88,8 +86,8 @@ mod tests {
 
     #[test]
     fn make_backend_constructs_docker_and_dstack() {
-        assert!(make_backend("docker", "127.0.0.1", 8080, "some/image:latest").is_ok());
-        assert!(make_backend("dstack", "127.0.0.1", 8080, "some/image:latest").is_ok());
+        assert!(make_backend("docker", docker::DockerConfig::default()).is_ok());
+        assert!(make_backend("dstack", docker::DockerConfig::default()).is_ok());
     }
 
     #[test]
@@ -97,7 +95,7 @@ mod tests {
         // `Box<dyn ServingBackend>` isn't `Debug`, so `unwrap_err` (which
         // requires the `Ok` side to be `Debug` for its panic message)
         // doesn't work here -- match instead.
-        match make_backend("bogus", "127.0.0.1", 8080, "some/image:latest") {
+        match make_backend("bogus", docker::DockerConfig::default()) {
             Err(err) => assert!(err.to_string().contains("bogus")),
             Ok(_) => panic!("expected an error for an unknown backend kind"),
         }

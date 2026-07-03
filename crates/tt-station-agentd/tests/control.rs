@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::docker::DockerBackend;
+use tt_station_agentd::serving::docker::{DockerBackend, DockerConfig};
 use tt_station_agentd::serving::ServingBackend;
 
 mod support;
@@ -25,14 +25,14 @@ use support::FakeRunner;
 /// and the base URL.
 async fn spawn() -> (AppState, String) {
     let runner = FakeRunner::new(0);
+    let config = DockerConfig {
+        image: "some/image:tag".to_string(),
+        host: "127.0.0.1".to_string(),
+        host_port: 8080,
+        ..Default::default()
+    };
     let backend: Arc<dyn ServingBackend> = Arc::new(
-        DockerBackend::new(
-            "tenstorrent/tt-inference-server:latest".to_string(),
-            "127.0.0.1".to_string(),
-            8080,
-            Box::new(runner),
-        )
-        .with_health_poll(5, Duration::from_millis(1)),
+        DockerBackend::new(config, Box::new(runner)).with_health_poll(5, Duration::from_millis(1)),
     );
 
     let state = AppState::new("qb2-lab".to_string(), "4xBH".to_string(), backend);
