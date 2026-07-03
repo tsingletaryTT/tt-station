@@ -33,6 +33,13 @@ pub struct FakeRunner {
     commands: Arc<Mutex<Vec<Vec<String>>>>,
     health_calls_before_ok: u32,
     health_calls_seen: Arc<Mutex<u32>>,
+    /// Canned stdout for `run` calls whose argv (space-joined) CONTAINS a
+    /// registered substring -- e.g. `"docker ps"` -- so `RunPyBackend::stop`
+    /// (which parses `docker ps`'s stdout for container ids) can be
+    /// exercised without a real `docker` binary. Checked in insertion order;
+    /// first match wins. Calls that match nothing get `""`, same as before
+    /// this field existed.
+    run_outputs: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl FakeRunner {
@@ -42,6 +49,7 @@ impl FakeRunner {
             commands: Arc::new(Mutex::new(Vec::new())),
             health_calls_before_ok,
             health_calls_seen: Arc::new(Mutex::new(0)),
+            run_outputs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -52,6 +60,18 @@ impl FakeRunner {
             .expect("commands mutex poisoned")
             .clone()
     }
+
+    /// Register canned stdout `output` for the next (and any subsequent)
+    /// `run` call whose space-joined argv contains `matcher`. See the
+    /// `run_outputs` field doc for why this exists (`docker ps` parsing in
+    /// `RunPyBackend::stop`).
+    #[allow(dead_code)]
+    pub fn set_run_output(&self, matcher: &str, output: &str) {
+        self.run_outputs
+            .lock()
+            .expect("run_outputs mutex poisoned")
+            .push((matcher.to_string(), output.to_string()));
+    }
 }
 
 impl CommandRunner for FakeRunner {
@@ -60,7 +80,17 @@ impl CommandRunner for FakeRunner {
             .lock()
             .expect("commands mutex poisoned")
             .push(args.iter().map(|s| s.to_string()).collect());
-        Ok(String::new())
+
+        let joined = args.join(" ");
+        let output = self
+            .run_outputs
+            .lock()
+            .expect("run_outputs mutex poisoned")
+            .iter()
+            .find(|(matcher, _)| joined.contains(matcher.as_str()))
+            .map(|(_, output)| output.clone())
+            .unwrap_or_default();
+        Ok(output)
     }
 
     fn health_ok(&self, _url: &str) -> bool {

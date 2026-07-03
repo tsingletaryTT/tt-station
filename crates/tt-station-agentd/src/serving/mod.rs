@@ -12,6 +12,9 @@
 
 pub mod docker;
 pub mod dstack;
+pub mod runpy;
+
+use std::time::Duration;
 
 use anyhow::Result;
 use libttstation::model::{Endpoint, ServingStatus};
@@ -54,23 +57,54 @@ pub trait ServingBackend: Send + Sync {
     fn status(&self) -> Result<ServingStatus>;
 }
 
+/// Poll `runner.health_ok(url)` up to `attempts` times, sleeping `interval`
+/// between attempts, returning `true` as soon as one probe succeeds (or
+/// `false` if every attempt is exhausted).
+///
+/// Shared by every `ServingBackend` that starts a long-lived server process
+/// out-of-band (a container, a `run.py` invocation, ...) and needs to block
+/// `start` until it's actually answering requests -- `DockerBackend` and
+/// `RunPyBackend` both call this rather than each rolling their own
+/// poll loop, so the "bounded wait, sleep between attempts" policy lives in
+/// exactly one place.
+pub(crate) fn poll_until_healthy(
+    runner: &dyn docker::CommandRunner,
+    url: &str,
+    attempts: u32,
+    interval: Duration,
+) -> bool {
+    for _ in 0..attempts {
+        if runner.health_ok(url) {
+            return true;
+        }
+        std::thread::sleep(interval);
+    }
+    false
+}
+
 /// Construct a `ServingBackend` for the given `--backend` CLI choice.
 ///
-/// `"docker"` and `"dstack"` are the only recognized kinds; anything else is
-/// an error rather than a silent fallback, since a typo'd backend name
-/// should fail loudly at startup rather than quietly serving nothing.
+/// `"runpy"`, `"docker"`, and `"dstack"` are the only recognized kinds;
+/// anything else is an error rather than a silent fallback, since a typo'd
+/// backend name should fail loudly at startup rather than quietly serving
+/// nothing.
 ///
-/// `docker_config` is only meaningful for the Docker backend today (dstack's
-/// stub needs none of it); it's threaded through here rather than the
-/// individual fields being hardcoded so the CLI wiring in `main.rs` has a
-/// single function to call regardless of which backend was chosen, and so
-/// adding a new Docker-only knob doesn't mean touching this function's
-/// signature again.
+/// `docker_config`/`runpy_config` are each only meaningful for their own
+/// backend (dstack's stub needs neither); both are threaded through here
+/// rather than the individual fields being hardcoded so the CLI wiring in
+/// `main.rs` has a single function to call regardless of which backend was
+/// chosen, and so adding a new per-backend knob doesn't mean touching this
+/// function's signature again.
 pub fn make_backend(
     kind: &str,
     docker_config: docker::DockerConfig,
+    runpy_config: runpy::RunPyConfig,
 ) -> Result<Box<dyn ServingBackend>> {
     match kind {
+        "runpy" => Ok(Box::new(runpy::RunPyBackend::new(
+            runpy_config,
+            Box::new(docker::RealCommandRunner),
+        ))),
         "docker" => Ok(Box::new(docker::DockerBackend::new(
             docker_config,
             Box::new(docker::RealCommandRunner),
@@ -85,9 +119,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn make_backend_constructs_docker_and_dstack() {
-        assert!(make_backend("docker", docker::DockerConfig::default()).is_ok());
-        assert!(make_backend("dstack", docker::DockerConfig::default()).is_ok());
+    fn make_backend_constructs_runpy_docker_and_dstack() {
+        assert!(make_backend(
+            "runpy",
+            docker::DockerConfig::default(),
+            runpy::RunPyConfig::default()
+        )
+        .is_ok());
+        assert!(make_backend(
+            "docker",
+            docker::DockerConfig::default(),
+            runpy::RunPyConfig::default()
+        )
+        .is_ok());
+        assert!(make_backend(
+            "dstack",
+            docker::DockerConfig::default(),
+            runpy::RunPyConfig::default()
+        )
+        .is_ok());
     }
 
     #[test]
@@ -95,7 +145,11 @@ mod tests {
         // `Box<dyn ServingBackend>` isn't `Debug`, so `unwrap_err` (which
         // requires the `Ok` side to be `Debug` for its panic message)
         // doesn't work here -- match instead.
-        match make_backend("bogus", docker::DockerConfig::default()) {
+        match make_backend(
+            "bogus",
+            docker::DockerConfig::default(),
+            runpy::RunPyConfig::default(),
+        ) {
             Err(err) => assert!(err.to_string().contains("bogus")),
             Ok(_) => panic!("expected an error for an unknown backend kind"),
         }

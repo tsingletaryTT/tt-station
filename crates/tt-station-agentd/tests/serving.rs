@@ -63,7 +63,8 @@ fn docker_start_issues_run_command_and_returns_endpoint() {
     let commands = runner.commands();
     assert_eq!(commands.len(), 1, "expected exactly one docker run command");
     let run_cmd = &commands[0];
-    assert_eq!(run_cmd[0], "run");
+    assert_eq!(run_cmd[0], "docker");
+    assert_eq!(run_cmd[1], "run");
 
     assert!(
         run_cmd.iter().any(|a| a == "--device"),
@@ -106,6 +107,31 @@ fn docker_start_issues_run_command_and_returns_endpoint() {
     assert!(
         run_cmd.iter().any(|a| a == "--no-auth"),
         "docker run args should carry --no-auth by default: {run_cmd:?}"
+    );
+
+    // Gap flagged in review: the shared-memory, hugepages-mount, and
+    // cache-volume flags were built by `DockerBackend::start` but never
+    // actually asserted on here -- easy for a future edit to silently break
+    // any of the three without a single test noticing. Pin down the EXACT
+    // values (not just "some --ipc flag exists"), matching
+    // docs/reference/tt-inference-server-docker.md's canonical invocation.
+    assert!(
+        run_cmd
+            .windows(2)
+            .any(|w| w[0] == "--ipc" && w[1] == "host"),
+        "docker run args should carry --ipc host: {run_cmd:?}"
+    );
+    assert!(
+        run_cmd
+            .iter()
+            .any(|a| a == "type=bind,src=/dev/hugepages-1G,dst=/dev/hugepages-1G"),
+        "docker run args should carry the exact hugepages --mount spec: {run_cmd:?}"
+    );
+    assert!(
+        run_cmd
+            .iter()
+            .any(|a| a == "tt-station-cache:/home/container_app_user/cache_root"),
+        "docker run args should carry the exact cache --volume spec: {run_cmd:?}"
     );
 }
 
@@ -270,7 +296,8 @@ fn docker_stop_issues_stop_command() {
         1,
         "expected exactly one docker stop command"
     );
-    assert_eq!(commands[0][0], "stop");
+    assert_eq!(commands[0][0], "docker");
+    assert_eq!(commands[0][1], "stop");
     assert!(
         commands[0].iter().any(|a| a.contains("llama3")),
         "docker stop args should mention the model: {:?}",

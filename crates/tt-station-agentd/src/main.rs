@@ -20,12 +20,19 @@ use mdns_sd::{ServiceDaemon, ServiceInfo};
 use tt_station_agentd::routes::{app, AppState};
 use tt_station_agentd::serving::docker::DockerConfig;
 use tt_station_agentd::serving::make_backend;
+use tt_station_agentd::serving::runpy::RunPyConfig;
 
-/// Which serving backend to use for running models. Only the *choice* is
-/// wired up in Task 6 -- actually dispatching to Docker or dstack arrives
-/// in Task 9.
+/// Which serving backend to use for running models.
+///
+/// `Runpy` is the DEFAULT: it's how the operator's PROVEN scripts actually
+/// launch LLMs (`tt-inference-server/run.py`, not a hand-rolled `docker
+/// run` -- see `docs/reference/tt-inference-server-docker.md`'s "⭐ Ground
+/// truth" section). `Docker` remains available as a best-effort fallback
+/// for when `run.py`/its repo checkout isn't available. `Dstack` is the M4
+/// direction and still an intentional stub.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Backend {
+    Runpy,
     Docker,
     Dstack,
 }
@@ -33,6 +40,7 @@ enum Backend {
 impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Backend::Runpy => write!(f, "runpy"),
             Backend::Docker => write!(f, "docker"),
             Backend::Dstack => write!(f, "dstack"),
         }
@@ -53,10 +61,10 @@ struct Cli {
     #[arg(long = "ctrl-port")]
     ctrl_port: u16,
 
-    /// Which serving backend to use. `serving::make_backend` (Task 9) turns
-    /// this into the real `ServingBackend` trait object `/run`/`/stop`
-    /// (Task 10) delegate to.
-    #[arg(long, value_enum, default_value_t = Backend::Docker)]
+    /// Which serving backend to use. `serving::make_backend` turns this
+    /// into the real `ServingBackend` trait object `/run`/`/stop` delegate
+    /// to. Defaults to `runpy` -- see `Backend`'s doc comment.
+    #[arg(long, value_enum, default_value_t = Backend::Runpy)]
     backend: Backend,
 
     /// Chip inventory string advertised in the `chips` TXT key and returned
@@ -97,15 +105,15 @@ struct Cli {
     serving_image: String,
 
     /// `--tt-device` value passed to `tt-inference-server`, e.g. `n300`,
-    /// `p150x4`, `p300x2`. Only meaningful for the Docker backend today.
+    /// `p150x4`, `p300x2`. Shared by both the `runpy` and `docker` backends.
     ///
-    /// QuietBox 2 (QB2) is 2x p300 = 4 Blackhole chips, but the exact string
-    /// tt-inference-server expects for that topology is not confirmed in
-    /// sources (both `p150x4` and `p300x2` have been seen) -- confirm on
-    /// real hardware before trusting this default. See
-    /// `docs/reference/tt-inference-server-docker.md`'s "Uncertainties"
-    /// section.
-    #[arg(long = "tt-device", default_value = "p150x4")]
+    /// Defaults to `p300x2` -- CONFIRMED as the string for *this* box (a
+    /// P300X2 machine, 4x p300c) in
+    /// `docs/reference/tt-inference-server-docker.md`'s "Device string is
+    /// box- AND model-specific" section. `p150x4` is the OTHER Blackhole
+    /// "BH QuietBox" variant, not this box -- override this flag if you're
+    /// actually targeting that hardware.
+    #[arg(long = "tt-device", default_value = "p300x2")]
     tt_device: String,
 
     /// Hugging Face access token for gated model repos (e.g. Llama), passed
@@ -146,6 +154,74 @@ struct Cli {
     /// requirement. Only meaningful for the Docker backend today.
     #[arg(long = "hugepages-src", default_value = "/dev/hugepages-1G")]
     hugepages_src: String,
+
+    /// Local checkout of `tt-inference-server`, whose `run.py` is the
+    /// ground-truth way to launch LLM serving (see
+    /// `docs/reference/tt-inference-server-docker.md`). Only meaningful for
+    /// the `runpy` backend.
+    ///
+    /// No static default: resolved at startup by `default_tt_inference_repo`
+    /// so operators who vendor the repo (`<checkout>/vendor/tt-inference-server`)
+    /// get that for free, while a bare clone falls back to
+    /// `$HOME/code/tt-inference-server` -- the operator's convention
+    /// elsewhere on this box.
+    #[arg(long = "tt-inference-repo")]
+    tt_inference_repo: Option<String>,
+
+    /// Host path bind-mounted for the Hugging Face weights cache
+    /// (`run.py`'s `--host-hf-cache`). Only meaningful for the `runpy`
+    /// backend.
+    ///
+    /// No static default: resolved at startup as `$HOME/.cache/huggingface`
+    /// so it doesn't hardcode a stale absolute path for whichever operator
+    /// happens to build this.
+    #[arg(long = "host-hf-cache")]
+    host_hf_cache: Option<String>,
+
+    /// `run.py`'s `--engine` flag, e.g. `vllm`. Only meaningful for the
+    /// `runpy` backend.
+    #[arg(long = "engine", default_value = "vllm")]
+    engine: String,
+
+    /// `run.py`'s `--impl` flag, e.g. `tt-transformers`. Only meaningful for
+    /// the `runpy` backend.
+    #[arg(long = "impl", default_value = "tt-transformers")]
+    impl_name: String,
+
+    /// `run.py`'s `--device-id` flag, e.g. `0,1`, to pin serving to specific
+    /// chips. Only meaningful for the `runpy` backend. Omitted from the
+    /// `run.py` invocation entirely when not given.
+    #[arg(long = "device-id")]
+    device_id: Option<String>,
+
+    /// `run.py`'s `MODEL_SOURCE` environment variable, e.g. `huggingface`.
+    /// Only meaningful for the `runpy` backend.
+    #[arg(long = "model-source", default_value = "huggingface")]
+    model_source: String,
+}
+
+/// Resolve the default `tt-inference-server` checkout to use when
+/// `--tt-inference-repo` isn't given: prefer a vendored copy at
+/// `./vendor/tt-inference-server` (relative to the current working
+/// directory the agent was launched from) if one exists on disk, else fall
+/// back to `$HOME/code/tt-inference-server` -- the operator's convention
+/// for standalone checkouts elsewhere on this box.
+fn default_tt_inference_repo() -> String {
+    let vendored = std::path::Path::new("./vendor/tt-inference-server");
+    if vendored.exists() {
+        return vendored.to_string_lossy().into_owned();
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    format!("{home}/code/tt-inference-server")
+}
+
+/// Resolve the default Hugging Face cache path used when `--host-hf-cache`
+/// isn't given: `$HOME/.cache/huggingface`, matching the operator's real
+/// `HF_HOME`/`huggingface-cli` default rather than a hardcoded absolute
+/// path baked in at build time.
+fn default_host_hf_cache() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    format!("{home}/.cache/huggingface")
 }
 
 #[tokio::main]
@@ -176,7 +252,27 @@ async fn main() -> Result<()> {
         hugepages_src: cli.hugepages_src.clone(),
     };
 
-    let backend = make_backend(&cli.backend.to_string(), docker_config)
+    let runpy_config = RunPyConfig {
+        repo_dir: cli
+            .tt_inference_repo
+            .clone()
+            .unwrap_or_else(default_tt_inference_repo),
+        host: cli.serving_host.clone(),
+        service_port: cli.serving_port,
+        tt_device: cli.tt_device.clone(),
+        image: cli.serving_image.clone(),
+        engine: cli.engine.clone(),
+        impl_name: cli.impl_name.clone(),
+        host_hf_cache: cli
+            .host_hf_cache
+            .clone()
+            .unwrap_or_else(default_host_hf_cache),
+        no_auth: !cli.require_auth,
+        device_ids: cli.device_id.clone(),
+        model_source: cli.model_source.clone(),
+    };
+
+    let backend = make_backend(&cli.backend.to_string(), docker_config, runpy_config)
         .context("failed to construct serving backend")?;
 
     let state = AppState::new(cli.name.clone(), cli.chips.clone(), Arc::from(backend));

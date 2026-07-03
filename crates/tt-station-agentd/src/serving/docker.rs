@@ -41,11 +41,33 @@ const DEFAULT_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// `FakeRunner` does.
 pub trait CommandRunner: Send + Sync {
     /// Run a command and return its stdout as a `String` on success.
-    /// `args[0]` is conventionally the docker subcommand (`"run"`,
-    /// `"stop"`, ...) -- the real implementation always invokes the
-    /// `docker` binary itself, so callers pass only the subcommand and its
-    /// arguments, not the program name.
+    ///
+    /// `args[0]` is the PROGRAM to execute (e.g. `"docker"`, `"python3"`) --
+    /// this trait is deliberately generic over what gets run, not
+    /// docker-specific, since `RunPyBackend` (serving/runpy.rs) needs to
+    /// exec `python3 run.py ...` through the exact same seam `DockerBackend`
+    /// uses for `docker run ...`. (Earlier revisions of this trait had the
+    /// real implementation hardcode the `docker` binary and callers pass
+    /// only the subcommand; that stopped working once a second backend
+    /// needed to run a different program through the same trait, so
+    /// `RealCommandRunner::run` now execs whatever `args[0]` names.)
     fn run(&self, args: &[&str]) -> Result<String>;
+
+    /// Like `run`, but with the child process's working directory set to
+    /// `dir` first.
+    ///
+    /// Default implementation ignores `dir` and just calls `run` -- fine
+    /// for `DockerBackend` (which invokes `docker`, a `$PATH`-resolved
+    /// binary with no relative-path dependencies) and for any
+    /// `CommandRunner` fake that never actually shells out. `RunPyBackend`
+    /// is the one caller that needs a real working-directory change: `run.py`
+    /// lives inside a `tt-inference-server` checkout and is invoked as a
+    /// relative path (`python3 run.py ...`), so `RealCommandRunner`
+    /// overrides this to set `Command::current_dir`.
+    fn run_in_dir(&self, dir: &str, args: &[&str]) -> Result<String> {
+        let _ = dir;
+        self.run(args)
+    }
 
     /// Probe `GET {url}` and report whether it responded with a success
     /// status. Used to poll a freshly-started container until its serving
@@ -67,20 +89,22 @@ pub struct RealCommandRunner;
 
 impl CommandRunner for RealCommandRunner {
     fn run(&self, args: &[&str]) -> Result<String> {
-        let output = std::process::Command::new("docker")
-            .args(args)
-            .output()
-            .with_context(|| format!("failed to spawn docker {}", args.join(" ")))?;
+        let (program, rest) = args
+            .split_first()
+            .ok_or_else(|| anyhow::anyhow!("CommandRunner::run called with empty argv"))?;
+        run_and_capture(std::process::Command::new(program).args(rest), args)
+    }
 
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "docker {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    fn run_in_dir(&self, dir: &str, args: &[&str]) -> Result<String> {
+        let (program, rest) = args
+            .split_first()
+            .ok_or_else(|| anyhow::anyhow!("CommandRunner::run_in_dir called with empty argv"))?;
+        run_and_capture(
+            std::process::Command::new(program)
+                .args(rest)
+                .current_dir(dir),
+            args,
+        )
     }
 
     fn health_ok(&self, url: &str) -> bool {
@@ -88,6 +112,26 @@ impl CommandRunner for RealCommandRunner {
             .map(|resp| resp.status().is_success())
             .unwrap_or(false)
     }
+}
+
+/// Shared plumbing for `RealCommandRunner::run`/`run_in_dir`: spawn `cmd`,
+/// wait for it, and turn a non-zero exit into an `Err` that names the full
+/// argv (`display_args`, kept separate from `cmd` since `Command` doesn't
+/// expose its own argv back out) and stderr for debugging.
+fn run_and_capture(cmd: &mut std::process::Command, display_args: &[&str]) -> Result<String> {
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to spawn {}", display_args.join(" ")))?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "{} failed: {}",
+            display_args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Everything `DockerBackend` needs to know to build a real
@@ -290,6 +334,7 @@ impl ServingBackend for DockerBackend {
         // `CommandRunner::run`, which takes `&[&str]` -- argv-style, no
         // shell involved, so callers never need to worry about quoting.
         let mut args: Vec<String> = vec![
+            "docker".to_string(),
             "run".to_string(),
             "-d".to_string(),
             "--rm".to_string(),
@@ -331,14 +376,12 @@ impl ServingBackend for DockerBackend {
             "http://{}:{}/health",
             self.config.host, self.config.host_port
         );
-        let mut healthy = false;
-        for _ in 0..self.health_poll_attempts {
-            if self.runner.health_ok(&health_url) {
-                healthy = true;
-                break;
-            }
-            std::thread::sleep(self.health_poll_interval);
-        }
+        let healthy = super::poll_until_healthy(
+            self.runner.as_ref(),
+            &health_url,
+            self.health_poll_attempts,
+            self.health_poll_interval,
+        );
 
         if !healthy {
             return Err(anyhow::anyhow!(
@@ -362,7 +405,7 @@ impl ServingBackend for DockerBackend {
 
     fn stop(&self, model: &str) -> Result<()> {
         let container_name = self.container_name(model);
-        self.runner.run(&["stop", &container_name])?;
+        self.runner.run(&["docker", "stop", &container_name])?;
         *self.status.lock().expect("status mutex poisoned") = ServingStatus::Idle;
         Ok(())
     }
