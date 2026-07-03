@@ -23,64 +23,14 @@ const TOKEN: &str = "tok-abc123";
 /// header at all -- the positive-side counterpart to every other test in
 /// this file, which matches ON `header("Authorization", ...)`. Used by
 /// [`get_status_sends_no_authorization_header`] below to prove
-/// `get_status` (the free-function, unauthed counterpart to
-/// `AgentClient::status`) really doesn't attach a bearer token, not just
-/// that the mock happens to accept requests regardless of headers.
+/// `get_status` really doesn't attach a bearer token, not just that the mock
+/// happens to accept requests regardless of headers.
 struct NoAuthorizationHeader;
 
 impl Match for NoAuthorizationHeader {
     fn matches(&self, request: &Request) -> bool {
         !request.headers.contains_key("authorization")
     }
-}
-
-/// `status()` should GET `{base}/status` with the bearer header and parse
-/// the `status` field (`serving:<model>` / `idle`) via `ServingStatus::from_txt`.
-#[tokio::test]
-async fn status_parses_serving_status_from_response_body() {
-    let server = MockServer::start().await;
-
-    Mock::given(method("GET"))
-        .and(path("/status"))
-        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "name": "qb2-lab",
-            "chips": "4xBH",
-            "status": "serving:llama3"
-        })))
-        .mount(&server)
-        .await;
-
-    let client = AgentClient::new(server.uri(), TOKEN);
-    let status = client
-        .status()
-        .await
-        .expect("status() should succeed against a mocked 200 response");
-
-    assert_eq!(status, ServingStatus::Serving("llama3".to_string()));
-}
-
-/// `status()` should also parse the `idle` case correctly (not just
-/// `serving:<model>`).
-#[tokio::test]
-async fn status_parses_idle_from_response_body() {
-    let server = MockServer::start().await;
-
-    Mock::given(method("GET"))
-        .and(path("/status"))
-        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "name": "qb2-lab",
-            "chips": "4xBH",
-            "status": "idle"
-        })))
-        .mount(&server)
-        .await;
-
-    let client = AgentClient::new(server.uri(), TOKEN);
-    let status = client.status().await.expect("status() should succeed");
-
-    assert_eq!(status, ServingStatus::Idle);
 }
 
 /// `run(model)` should POST `{"model": "..."}` to `{base}/run` with the
@@ -246,11 +196,10 @@ async fn list_models_parses_models_response_with_no_auth_header() {
     assert_eq!(resp.models[0].devices, vec!["P300X2", "T3K"]);
 }
 
-/// `get_status(base)` -- the free-function, UNAUTHED counterpart to
-/// `AgentClient::status()` that `tt status` now calls so it works against
-/// an unpaired box -- should GET `{base}/status` with no `Authorization`
-/// header and parse the `serving:<model>` case via `ServingStatus::from_txt`,
-/// same as `AgentClient::status()` does.
+/// `get_status(base)` -- the free function `tt status` calls so it works
+/// against an unpaired box -- should GET `{base}/status` with no
+/// `Authorization` header and parse the `serving:<model>` case via
+/// `ServingStatus::from_txt`.
 #[tokio::test]
 async fn get_status_parses_serving_status_with_no_auth_header() {
     let server = MockServer::start().await;

@@ -37,8 +37,8 @@ pub async fn list_models(base: &str) -> anyhow::Result<ModelsResponse> {
 
 /// `GET /status` (UNAUTHED, mirroring the agent's own route -- see
 /// `tt-station-agentd::routes::get_status`, which has no `BearerAuth`
-/// extractor): the agent's current serving status, parsed the same way
-/// [`AgentClient::status`] does.
+/// extractor): the agent's current serving status, parsed via
+/// [`ServingStatus::from_txt`].
 ///
 /// A FREE function rather than an `AgentClient` method, same reasoning as
 /// [`list_models`] and [`crate::pairing::pair_init`]: a client that hasn't
@@ -109,21 +109,6 @@ impl AgentClient {
         }
     }
 
-    /// `GET /status`: the agent's name, chip inventory, and current serving
-    /// status. Only the `status` field (`idle` / `serving:<model>`) is
-    /// returned here -- name/chips matter for discovery (Task 4), not for a
-    /// client that's already paired with a specific box.
-    pub async fn status(&self) -> anyhow::Result<ServingStatus> {
-        #[derive(Deserialize)]
-        struct StatusResponse {
-            status: String,
-        }
-
-        let resp = self.get(&join(&self.base, "status")).await?;
-        let body: StatusResponse = resp.json().await?;
-        ServingStatus::from_txt(&body.status)
-    }
-
     /// `POST /run { "model": "..." }`: ask the agent to start serving
     /// `model`, returning the resulting [`Endpoint`].
     pub async fn run(&self, model: &str) -> anyhow::Result<Endpoint> {
@@ -185,13 +170,6 @@ impl AgentClient {
             .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
 
         Ok(resp.json().await?)
-    }
-
-    /// Shared `GET` helper built on [`Self::send`]: attach the bearer
-    /// header, issue the request, and turn any non-2xx status into a clear
-    /// `anyhow::Error` that names the URL.
-    async fn get(&self, url: &str) -> anyhow::Result<reqwest::Response> {
-        self.send(reqwest::Client::new().get(url), url).await
     }
 
     /// Shared request-sending helper for every method above: attach the
