@@ -54,12 +54,42 @@ final class BoxViewModelTests: XCTestCase {
     }
 
     func testUnpairedRefreshDoesNotCallStatusAndKeepsSeededStatus() async {
+        // Renamed in spirit (fix #7): refresh now ALWAYS probes status and
+        // derives paired-state from the result — a "no token" failure is the
+        // normal unpaired signal, not an error. Kept the seeded-status
+        // assertion; dropped the "does not call status" assertion since that
+        // behavior is intentionally reversed.
         let client = FakeTTClient()
+        client.statusError = .commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080")
         let (vm, _) = makeVM(paired: false, client: client, statusRaw: "serving:Foo")
         await vm.refresh()
-        XCTAssertFalse(client.statusCalled)
+        XCTAssertTrue(client.statusCalled)
+        XCTAssertFalse(vm.isPaired)
         XCTAssertNil(vm.errorText)
         XCTAssertEqual(vm.status, .serving(model: "Foo"))
+    }
+
+    func testRefreshWithValidTokenReconcilesToPaired() async {
+        let client = FakeTTClient()
+        client.statusResult = .serving(model: "Foo")
+        let (vm, reg) = makeVM(paired: false, client: client)
+        XCTAssertFalse(vm.isPaired)
+        await vm.refresh()
+        XCTAssertTrue(vm.isPaired)
+        XCTAssertEqual(vm.status, .serving(model: "Foo"))
+        XCTAssertNil(vm.errorText)
+        XCTAssertTrue(reg.pairedHosts.contains("h:8080"))
+    }
+
+    func testUnpairedRefreshSurfacesNoError() async {
+        let client = FakeTTClient()
+        client.statusError = .commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080")
+        let (vm, reg) = makeVM(paired: true, client: client, statusRaw: "serving:Foo")
+        await vm.refresh()
+        XCTAssertFalse(vm.isPaired)
+        XCTAssertNil(vm.errorText)
+        XCTAssertEqual(vm.status, .serving(model: "Foo"))
+        XCTAssertFalse(reg.pairedHosts.contains("h:8080"))
     }
 
     func testPairedServingRefreshFetchesEndpoint() async {

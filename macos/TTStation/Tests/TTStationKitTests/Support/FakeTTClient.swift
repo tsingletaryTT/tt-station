@@ -4,6 +4,7 @@ import Foundation
 final class FakeTTClient: TTCommands {
     var models_ = [ModelInfo(name: "Qwen3-8B", devices: ["P300X2"])]
     var statusResult: ServingStatus = .idle
+    var statusError: TTError?
     var pairShouldSucceed = true
     var runEndpoint = Endpoint(baseURL: "http://h:8000/v1", model: "Qwen3-8B", requiresKey: false)
     var runError: TTError?
@@ -15,6 +16,7 @@ final class FakeTTClient: TTCommands {
     func status(host: String) async throws -> ServingStatus {
         statusCalled = true
         statusCallCount += 1
+        if let statusError { throw statusError }
         return statusResult
     }
     func endpoint(host: String) async throws -> Endpoint { runEndpoint }

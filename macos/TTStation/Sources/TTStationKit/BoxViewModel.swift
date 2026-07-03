@@ -36,19 +36,36 @@ public final class BoxViewModel: Identifiable {
     }
 
     public func refresh() async {
-        // Unpaired boxes have no stored token, so `commands.status()` would
-        // always fail locally with "no token stored..." — which matches
-        // `isAuthError` and would spuriously flip errorText. Leave the
-        // discover-seeded `status` as-is instead of hitting the authed API.
-        guard isPaired else { return }
+        // Always probe `status()`, regardless of our locally-remembered
+        // `isPaired` flag. UserDefaults-backed pairing state can go stale —
+        // e.g. a pairing done via the CLI directly never touches this app's
+        // registry — so it isn't a source of truth. The CLI's own token
+        // store is: a successful authed `status` call means the CLI holds a
+        // valid bearer token for this box (paired), and a "no token"/auth
+        // failure means it doesn't (unpaired). `tt status` for an unpaired
+        // box fails locally with no network round-trip, so probing it on
+        // every refresh is cheap.
+        errorText = nil
         do {
-            status = try await commands.status(host: record.hostPort)
-            if case .serving = status {
-                endpoint = try await commands.endpoint(host: record.hostPort)
-            }
+            let s = try await commands.status(host: record.hostPort)
+            isPaired = true
+            registry.markPaired(record.hostPort)
+            status = s
+            if s.isServing { endpoint = try? await commands.endpoint(host: record.hostPort) }
             await loadModels()
-            errorText = nil
-        } catch { record(error) }
+        } catch let e as TTError where commands.isAuthError(e) {
+            // Normal unpaired signal, not an error to surface — keep
+            // whatever status the discovery record seeded us with.
+            isPaired = false
+            registry.markUnpaired(record.hostPort)
+            status = record.status
+        } catch {
+            if let tt = error as? TTError, case let .commandFailed(_, _, stderr) = tt {
+                errorText = stderr.isEmpty ? "Command failed." : stderr
+            } else {
+                errorText = error.localizedDescription
+            }
+        }
     }
 
     public func loadModels() async {

@@ -29,6 +29,14 @@ final class ModelsTests: XCTestCase {
         XCTAssertTrue(resp.models.isEmpty)
     }
 
+    func testHostPortStripsTrailingDot() {
+        let dotted = BoxRecord(name: "b", host: "qb2-lab.local.", ctrlPort: 8765, chips: "x", statusRaw: "idle", apiver: 1)
+        XCTAssertEqual(dotted.hostPort, "qb2-lab.local:8765")
+
+        let plain = BoxRecord(name: "b", host: "qb2-lab.local", ctrlPort: 8765, chips: "x", statusRaw: "idle", apiver: 1)
+        XCTAssertEqual(plain.hostPort, "qb2-lab.local:8765")
+    }
+
     func testDecodeEndpoint() throws {
         let ep = try JSONDecoder().decode(Endpoint.self, from: fixture("endpoint"))
         XCTAssertEqual(ep.baseURL, "http://192.168.5.119:8000/v1")

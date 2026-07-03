@@ -20,7 +20,17 @@ public struct BoxRecord: Codable, Equatable {
     }
 
     /// `host:port` — the identity string every `tt` command keys off of.
-    public var hostPort: String { "\(host):\(ctrlPort)" }
+    ///
+    /// mDNS resolvers hand back hostnames as FQDNs with a trailing `.`
+    /// (e.g. `qb2-lab.local.`), but the `tt` CLI keys its stored bearer
+    /// token by the exact `--host` string used at pair time, which never
+    /// has the dot (`qb2-lab.local:8765`). Stripping a single trailing dot
+    /// here keeps mDNS-discovered and manually-entered hosts canonical and
+    /// identical, so the app's identity always matches what the CLI stored.
+    public var hostPort: String {
+        let canonicalHost = host.hasSuffix(".") ? String(host.dropLast()) : host
+        return "\(canonicalHost):\(ctrlPort)"
+    }
 
     public var status: ServingStatus? { try? ServingStatus(raw: statusRaw) }
 }
