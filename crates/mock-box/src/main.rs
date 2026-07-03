@@ -33,7 +33,10 @@ use std::sync::{Arc, Mutex};
 const SERVICE_TYPE: &str = "_tenstorrent._tcp.local.";
 
 #[derive(Parser)]
-#[command(name = "mock-box", about = "Pretend to be a Tenstorrent box for dev/test")]
+#[command(
+    name = "mock-box",
+    about = "Pretend to be a Tenstorrent box for dev/test"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -281,7 +284,10 @@ struct RunResponse {
 /// endpoint at this same server's own `/v1` routes, so a client that then
 /// POSTs to `{base_url}/chat/completions` hits the canned response below --
 /// no separate fake vLLM process needed.
-async fn run_model(State(state): State<MockState>, Json(req): Json<RunRequest>) -> Json<RunResponse> {
+async fn run_model(
+    State(state): State<MockState>,
+    Json(req): Json<RunRequest>,
+) -> Json<RunResponse> {
     let mut inner = state.lock();
     let endpoint = Endpoint {
         base_url: format!("http://127.0.0.1:{}/v1", inner.ctrl_port),
@@ -305,7 +311,12 @@ async fn stop_model(State(state): State<MockState>) -> Json<serde_json::Value> {
 /// contract as the real agent's `GET /endpoint` (Task 10), so `AgentClient`
 /// (Task 11) can be pointed at either without special-casing the mock.
 async fn get_endpoint(State(state): State<MockState>) -> Result<Json<Endpoint>, StatusCode> {
-    state.lock().endpoint.clone().map(Json).ok_or(StatusCode::CONFLICT)
+    state
+        .lock()
+        .endpoint
+        .clone()
+        .map(Json)
+        .ok_or(StatusCode::CONFLICT)
 }
 
 /// `POST /v1/chat/completions`: a canned OpenAI-style chat completion. The

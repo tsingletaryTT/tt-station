@@ -39,7 +39,10 @@ impl std::fmt::Display for Backend {
 }
 
 #[derive(Parser)]
-#[command(name = "tt-station-agentd", about = "Box-side daemon for a Tenstorrent QuietBox")]
+#[command(
+    name = "tt-station-agentd",
+    about = "Box-side daemon for a Tenstorrent QuietBox"
+)]
 struct Cli {
     /// Box name; used as both the mDNS instance name and the `name` TXT/JSON key.
     #[arg(long)]

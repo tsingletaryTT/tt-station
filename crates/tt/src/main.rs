@@ -43,7 +43,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use libttstation::agent_client::AgentClient;
-use libttstation::discovery::{aggregate, manual::ManualProvider, mdns::MdnsProvider, DiscoveryProvider};
+use libttstation::discovery::{
+    aggregate, manual::ManualProvider, mdns::MdnsProvider, DiscoveryProvider,
+};
 use libttstation::model::{BoxRecord, Endpoint, ServingStatus};
 use libttstation::pairing::{pair_complete, pair_init};
 use libttstation::secrets::{default_store, FileStore, SecretStore};
@@ -292,9 +294,9 @@ async fn cmd_endpoint(host: &str) -> Result<Endpoint> {
 /// Build an `AgentClient` for `host`, using the token stored by a prior
 /// `tt pair`. Shared by every command that needs an authenticated call.
 fn authed_client(host: &str) -> Result<AgentClient> {
-    let token = build_store()?.get(host)?.ok_or_else(|| {
-        anyhow::anyhow!("no token stored for {host}; run `tt pair {host}` first")
-    })?;
+    let token = build_store()?
+        .get(host)?
+        .ok_or_else(|| anyhow::anyhow!("no token stored for {host}; run `tt pair {host}` first"))?;
     Ok(AgentClient::new(format!("http://{host}"), token))
 }
 
@@ -388,7 +390,10 @@ impl<'a> From<&'a BoxRecord> for DiscoveredBox<'a> {
 fn print_discover(boxes: &[BoxRecord], json: bool) {
     if json {
         let entries: Vec<DiscoveredBox> = boxes.iter().map(DiscoveredBox::from).collect();
-        println!("{}", serde_json::to_string(&entries).expect("DiscoveredBox always serializes"));
+        println!(
+            "{}",
+            serde_json::to_string(&entries).expect("DiscoveredBox always serializes")
+        );
     } else if boxes.is_empty() {
         println!("no boxes found");
     } else {
@@ -411,7 +416,10 @@ fn print_pair(host: &str, token: &str, json: bool) {
 
 fn print_endpoint_result(ep: &Endpoint, json: bool) {
     if json {
-        println!("{}", serde_json::to_string(ep).expect("Endpoint always serializes"));
+        println!(
+            "{}",
+            serde_json::to_string(ep).expect("Endpoint always serializes")
+        );
     } else {
         println!(
             "serving {} at {} (requires_key={})",
@@ -441,7 +449,10 @@ fn print_status(status: &ServingStatus, json: bool) {
 /// directly `eval`-able.
 fn print_endpoint_export(ep: &Endpoint, json: bool) {
     if json {
-        println!("{}", serde_json::to_string(ep).expect("Endpoint always serializes"));
+        println!(
+            "{}",
+            serde_json::to_string(ep).expect("Endpoint always serializes")
+        );
     } else {
         println!("{}", endpoint_export_line(ep));
     }

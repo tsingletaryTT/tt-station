@@ -5,4 +5,9 @@ pub mod pairing;
 pub mod secrets;
 
 #[cfg(test)]
-mod smoke { #[test] fn builds() { assert_eq!(2 + 2, 4); } }
+mod smoke {
+    #[test]
+    fn builds() {
+        assert_eq!(2 + 2, 4);
+    }
+}

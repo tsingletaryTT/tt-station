@@ -106,7 +106,10 @@ mod tests {
             ServingStatus::Serving("llama3".into()).to_txt(),
             "serving:llama3"
         );
-        assert_eq!(ServingStatus::from_txt("idle").unwrap(), ServingStatus::Idle);
+        assert_eq!(
+            ServingStatus::from_txt("idle").unwrap(),
+            ServingStatus::Idle
+        );
         assert_eq!(
             ServingStatus::from_txt("serving:llama3").unwrap(),
             ServingStatus::Serving("llama3".into())

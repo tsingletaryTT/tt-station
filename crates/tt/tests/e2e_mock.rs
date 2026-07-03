@@ -115,7 +115,11 @@ fn discover_pair_run_endpoint_completion_against_mock_box() {
     let boxes: serde_json::Value =
         serde_json::from_slice(&discover_stdout).expect("discover output is valid JSON");
     let boxes = boxes.as_array().expect("discover JSON is an array");
-    assert_eq!(boxes.len(), 1, "expected exactly one discovered box, got {boxes:?}");
+    assert_eq!(
+        boxes.len(),
+        1,
+        "expected exactly one discovered box, got {boxes:?}"
+    );
     assert_eq!(boxes[0]["host"], "127.0.0.1");
     assert_eq!(boxes[0]["ctrl_port"], port);
 
@@ -131,9 +135,15 @@ fn discover_pair_run_endpoint_completion_against_mock_box() {
         .success();
 
     let secrets_path = config_dir.0.join("secrets.json");
-    assert!(secrets_path.exists(), "pair should have written a secrets file");
+    assert!(
+        secrets_path.exists(),
+        "pair should have written a secrets file"
+    );
     let secrets = std::fs::read_to_string(&secrets_path).unwrap();
-    assert!(secrets.contains(&host), "secrets file should be keyed by the paired host");
+    assert!(
+        secrets.contains(&host),
+        "secrets file should be keyed by the paired host"
+    );
 
     // --- 3. `tt --json run llama3 --host <host>` returns an Endpoint JSON
     // whose base_url contains "/v1". ---
