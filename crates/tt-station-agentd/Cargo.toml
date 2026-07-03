@@ -5,3 +5,13 @@ edition = "2021"
 
 [dependencies]
 libttstation = { path = "../libttstation" }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+mdns-sd = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
