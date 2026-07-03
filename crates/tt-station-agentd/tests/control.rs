@@ -8,22 +8,24 @@
 //! `FakeRunner` test double (see `tests/support/mod.rs`) so no real `docker`
 //! binary or HTTP health probe is ever touched.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tt_station_agentd::routes::{app, AppState};
+use libttstation::model::ServingStatus;
+use tt_station_agentd::routes::{app, AppState, StatusAdvertiser};
 use tt_station_agentd::serving::docker::{DockerBackend, DockerConfig};
 use tt_station_agentd::serving::ServingBackend;
 
 mod support;
 use support::FakeRunner;
 
-/// Spin up the real router on an ephemeral port, backed by a `DockerBackend`
-/// wired to a fresh `FakeRunner` that reports healthy on the very first
-/// probe (so `/run` resolves immediately rather than polling). Returns the
-/// `AppState` (so tests can read `/status` state Rust-side if ever needed)
-/// and the base URL.
-async fn spawn() -> (AppState, String) {
+/// Build an `AppState` backed by a `DockerBackend` wired to a fresh
+/// `FakeRunner` that reports healthy on the very first probe (so `/run`
+/// resolves immediately rather than polling) -- the same backend shape
+/// every test in this file needs, factored out so `spawn` and the
+/// `StatusAdvertiser` tests (which also need to attach a fake advertiser
+/// before the state is ever cloned into a router) can both build one.
+fn fresh_state() -> AppState {
     let runner = FakeRunner::new(0);
     let config = DockerConfig {
         image: "some/image:tag".to_string(),
@@ -35,8 +37,14 @@ async fn spawn() -> (AppState, String) {
         DockerBackend::new(config, Box::new(runner)).with_health_poll(5, Duration::from_millis(1)),
     );
 
-    let state = AppState::new("qb2-lab".to_string(), "4xBH".to_string(), backend);
-    let router = app(state.clone());
+    AppState::new("qb2-lab".to_string(), "4xBH".to_string(), backend)
+}
+
+/// Bind `state`'s router to an ephemeral port and serve it in the
+/// background, handing back the base URL. Shared tail end of `spawn` and
+/// the `StatusAdvertiser` tests below.
+async fn serve(state: AppState) -> String {
+    let router = app(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -47,7 +55,18 @@ async fn spawn() -> (AppState, String) {
         axum::serve(listener, router).await.unwrap();
     });
 
-    (state, format!("http://{addr}"))
+    format!("http://{addr}")
+}
+
+/// Spin up the real router on an ephemeral port, backed by a `DockerBackend`
+/// wired to a fresh `FakeRunner` that reports healthy on the very first
+/// probe (so `/run` resolves immediately rather than polling). Returns the
+/// `AppState` (so tests can read `/status` state Rust-side if ever needed)
+/// and the base URL.
+async fn spawn() -> (AppState, String) {
+    let state = fresh_state();
+    let base = serve(state.clone()).await;
+    (state, base)
 }
 
 /// Pair against a freshly-spawned agent (the same two-step dance
@@ -260,4 +279,98 @@ async fn stop_without_bearer_returns_401() {
         .await
         .expect("POST /stop failed");
     assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------
+// StatusAdvertiser seam (re-publishing mDNS `status` on run/stop)
+// ---------------------------------------------------------------------
+
+/// Test double for `StatusAdvertiser`: records every status it's told
+/// about, in order, instead of doing any real mDNS I/O. Exercises exactly
+/// the seam `main.rs`'s real `MdnsStatusAdvertiser` plugs into -- the actual
+/// mDNS re-registration is I/O and deliberately NOT unit-tested here (see
+/// the task brief); what's under test is that `/run`/`/stop` call the trait
+/// at all, with the right status, at the right time (after the in-memory
+/// state change, per `AppState::set_serving`/`set_idle`).
+#[derive(Default)]
+struct FakeStatusAdvertiser {
+    seen: Mutex<Vec<ServingStatus>>,
+}
+
+impl StatusAdvertiser for FakeStatusAdvertiser {
+    fn advertise_status(&self, status: &ServingStatus) {
+        self.seen
+            .lock()
+            .expect("seen mutex poisoned")
+            .push(status.clone());
+    }
+}
+
+impl FakeStatusAdvertiser {
+    fn seen(&self) -> Vec<ServingStatus> {
+        self.seen.lock().expect("seen mutex poisoned").clone()
+    }
+}
+
+/// A successful `POST /run` must re-publish `Serving(<model>)` through the
+/// attached `StatusAdvertiser` -- the fix for `tt discover` over mDNS
+/// showing a stale `idle` while the box is actually serving.
+#[tokio::test]
+async fn run_notifies_status_advertiser_of_serving() {
+    let client = reqwest::Client::new();
+    let advertiser = Arc::new(FakeStatusAdvertiser::default());
+    let state = fresh_state().with_status_advertiser(advertiser.clone());
+    let base = serve(state.clone()).await;
+    let token = pair(&client, &state, &base).await;
+
+    let run_resp = client
+        .post(format!("{base}/run"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "model": "llama3" }))
+        .send()
+        .await
+        .expect("POST /run failed");
+    assert_eq!(run_resp.status(), reqwest::StatusCode::OK);
+
+    assert_eq!(
+        advertiser.seen(),
+        vec![ServingStatus::Serving("llama3".to_string())]
+    );
+}
+
+/// `POST /stop` after a `/run` must re-publish `Idle` through the attached
+/// `StatusAdvertiser`, in addition to the `Serving` re-publish `/run` itself
+/// triggered -- both state transitions get their own re-publish, not just
+/// the first one.
+#[tokio::test]
+async fn stop_notifies_status_advertiser_of_idle() {
+    let client = reqwest::Client::new();
+    let advertiser = Arc::new(FakeStatusAdvertiser::default());
+    let state = fresh_state().with_status_advertiser(advertiser.clone());
+    let base = serve(state.clone()).await;
+    let token = pair(&client, &state, &base).await;
+
+    client
+        .post(format!("{base}/run"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "model": "llama3" }))
+        .send()
+        .await
+        .expect("POST /run failed");
+
+    let stop_resp = client
+        .post(format!("{base}/stop"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("POST /stop failed");
+    assert_eq!(stop_resp.status(), reqwest::StatusCode::OK);
+
+    assert_eq!(
+        advertiser.seen(),
+        vec![
+            ServingStatus::Serving("llama3".to_string()),
+            ServingStatus::Idle,
+        ]
+    );
 }

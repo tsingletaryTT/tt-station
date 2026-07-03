@@ -46,6 +46,28 @@ const PAIR_TTL: Duration = Duration::from_secs(120);
 /// fat-fingers the code a few real chances to correct themselves.
 pub const MAX_PAIR_ATTEMPTS: u32 = 5;
 
+/// Seam for re-publishing this box's advertised `status` whenever it
+/// changes (`/run` succeeding, `/stop` completing), so the mDNS TXT record
+/// `tt discover` reads over the LAN never goes stale the way it did before
+/// this trait existed (see the module-level findings doc: `tt discover`
+/// over mDNS kept reporting `idle` while the box was actually serving,
+/// because the TXT record was only ever published once, at boot).
+///
+/// Implemented for real by `tt-station-agentd`'s `main.rs`
+/// (`MdnsStatusAdvertiser`, which re-registers the mDNS `ServiceInfo` with
+/// the daemon it already created for the boot-time advertisement) and left
+/// as a trait here -- rather than `routes.rs`/`AppState` depending on
+/// `mdns_sd` directly -- so tests can swap in a fake that just records what
+/// it was told, without any real network I/O.
+pub trait StatusAdvertiser: Send + Sync {
+    /// Re-publish `status` as this box's current advertised status.
+    /// Implementations must not panic on failure (log and move on instead)
+    /// -- a failed re-publish shouldn't fail the `/run`/`/stop` request that
+    /// triggered it, since the control-plane state change already
+    /// succeeded.
+    fn advertise_status(&self, status: &ServingStatus);
+}
+
 /// Shared application state, cheap to `Clone` (just bumps the `Arc`
 /// refcount) so it can be handed to every axum handler via `State`.
 #[derive(Clone)]
@@ -97,6 +119,14 @@ struct Inner {
     /// `AppState::new_persisting`, which also loads any tokens already at
     /// this path into `tokens` up front.
     token_store: Option<PathBuf>,
+    /// Optional hook for re-publishing this box's advertised `status`
+    /// whenever `set_serving`/`set_idle` change it. `None` (what every
+    /// constructor here builds by default) is a no-op -- exactly the
+    /// pre-existing behavior every test other than the `StatusAdvertiser`
+    /// ones relies on. Attached after construction via
+    /// `AppState::with_status_advertiser` (`main.rs` wires the real mDNS
+    /// impl in; tests wire in a fake).
+    advertiser: Option<Arc<dyn StatusAdvertiser>>,
 }
 
 impl AppState {
@@ -155,8 +185,29 @@ impl AppState {
                 pending_pairs: Mutex::new(HashMap::new()),
                 tokens: Mutex::new(tokens),
                 token_store,
+                advertiser: None,
             }),
         }
+    }
+
+    /// Attach a [`StatusAdvertiser`] hook, so `set_serving`/`set_idle`
+    /// re-publish this box's status whenever it changes.
+    ///
+    /// Meant to be called immediately after construction (`main.rs` does
+    /// `AppState::new(..).with_status_advertiser(..)` before ever cloning
+    /// the result into a handler/router), while this `AppState` is still
+    /// the sole owner of its `Arc<Inner>` -- `Arc::get_mut` only succeeds
+    /// under that condition. If it's ever called after a clone exists
+    /// (which shouldn't happen in practice), this logs a warning and leaves
+    /// the advertiser unset rather than panicking.
+    pub fn with_status_advertiser(mut self, advertiser: Arc<dyn StatusAdvertiser>) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.advertiser = Some(advertiser),
+            None => eprintln!(
+                "tt-station-agentd: with_status_advertiser called on an already-shared AppState; advertiser not attached"
+            ),
+        }
+        self
     }
 
     pub fn name(&self) -> &str {
@@ -209,20 +260,44 @@ impl AppState {
     /// fields are updated while holding both locks so a concurrent
     /// `/status` or `/endpoint` request never observes one updated without
     /// the other.
+    ///
+    /// The new status is then re-published via `advertise_status` -- but
+    /// only after both locks above are dropped (the block ends first), so
+    /// the mDNS re-registration (real I/O in the `main.rs` impl) never runs
+    /// while either mutex is held.
     fn set_serving(&self, endpoint: Endpoint) {
-        let mut status = self.inner.status.lock().expect("status mutex poisoned");
-        let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
-        *status = ServingStatus::Serving(endpoint.model.clone());
-        *stored_endpoint = Some(endpoint);
+        let new_status = ServingStatus::Serving(endpoint.model.clone());
+        {
+            let mut status = self.inner.status.lock().expect("status mutex poisoned");
+            let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
+            *status = new_status.clone();
+            *stored_endpoint = Some(endpoint);
+        }
+        self.advertise_status(&new_status);
     }
 
     /// Record a successful `/stop` (or a no-op `/stop` while already idle):
-    /// `status` goes back to `Idle` and any stored `Endpoint` is cleared.
+    /// `status` goes back to `Idle` and any stored `Endpoint` is cleared,
+    /// then (same lock-drop-then-advertise discipline as `set_serving`) the
+    /// `Idle` status is re-published.
     fn set_idle(&self) {
-        let mut status = self.inner.status.lock().expect("status mutex poisoned");
-        let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
-        *status = ServingStatus::Idle;
-        *stored_endpoint = None;
+        {
+            let mut status = self.inner.status.lock().expect("status mutex poisoned");
+            let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
+            *status = ServingStatus::Idle;
+            *stored_endpoint = None;
+        }
+        self.advertise_status(&ServingStatus::Idle);
+    }
+
+    /// Re-publish `status` via the attached `StatusAdvertiser`, if any.
+    /// No-op when `advertiser` is `None` (every test that doesn't care about
+    /// mDNS re-publishing, plus any agent run with persistence/advertising
+    /// disabled).
+    fn advertise_status(&self, status: &ServingStatus) {
+        if let Some(advertiser) = &self.inner.advertiser {
+            advertiser.advertise_status(status);
+        }
     }
 
     /// Check a bearer token against the valid-token set minted by
