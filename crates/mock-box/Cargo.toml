@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 libttstation = { path = "../libttstation" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+mdns-sd = { workspace = true }
+tokio = { workspace = true }
