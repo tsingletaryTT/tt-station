@@ -47,6 +47,30 @@ parses correctly on the client (`ServingStatus` strips the `serving:` prefix and
 slashes included). The recent agent change to accept HF model ids works with the client's parser.
 No change needed.
 
+## 4. `tt run` returns an endpoint before the model is actually healthy (agentd)
+
+**Observed:** `tt run meta-llama/Llama-3.3-70B-Instruct` returned an `Endpoint`
+(`http://qb2-lab.local:8003/v1`) and `/status` immediately reported
+`serving:…Llama-3.3-70B`, but `:8003` was **connection-refused** — the vLLM server had not
+finished coming up (a 70B on p300x2 is slow to load / may have OOM'd). So a client that
+copies the endpoint and hits `/v1` gets a connection error even though the box says "serving".
+
+**Suggested fix:** have `/run` (or the run.py backend) gate the "serving" transition on the
+serving container's `/health` actually being ready before returning the endpoint / flipping
+status to `serving:<model>`. Otherwise clients need to poll `:8003/health` themselves.
+
+## 5. Authed `GET /status` hangs when the serving backend is down (agentd + AgentClient)
+
+**Observed:** with `:8003` refused (model not up), the **unauthed** `GET /status` returns
+instantly (cached status string), but the **authed** path (`tt status` → `AgentClient`) hangs
+indefinitely (>2 min). This appears to block on the dead backend somewhere in the authed
+handler or client. It made the macOS app's `refresh()` spin forever (the client now guards
+this with a subprocess timeout — see below — but the underlying hang is worth fixing).
+
+**Suggested fix:** ensure the authed `/status` path never blocks on backend reachability
+(return the same cached status the unauthed path does), or bound it with a short server-side
+timeout.
+
 ## Not for the agent (tracked client-side)
 
 - macOS **Local Network Privacy**: the app auto-discovery (mDNS via the spawned `tt`) needs the
