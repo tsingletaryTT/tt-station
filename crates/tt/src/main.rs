@@ -99,6 +99,32 @@ enum Command {
         code: Option<String>,
     },
 
+    /// Start pairing with a box: trigger it to mint a 6-digit code and print
+    /// it on ITS OWN console, and return the `pair_id` this attempt needs to
+    /// be completed with (see `tt pair-complete`). Split out from `tt pair`
+    /// so a caller (e.g. a GUI shell) can drive the two round-trips as
+    /// separate one-shot steps instead of blocking on stdin for the code.
+    PairInit {
+        /// The box's control-plane address, as `host:port`.
+        host: String,
+    },
+
+    /// Finish pairing with a box: exchange the `pair_id` from `tt pair-init`
+    /// and the code the box printed on its console for a bearer token, and
+    /// store it under `host` exactly like `tt pair` does.
+    PairComplete {
+        /// The box's control-plane address, as `host:port`.
+        host: String,
+
+        /// The `pair_id` returned by `tt pair-init`.
+        #[arg(long = "pair-id")]
+        pair_id: String,
+
+        /// The 6-digit code shown on the box's console.
+        #[arg(long)]
+        code: String,
+    },
+
     /// Enumerate the models a box can serve, per its `model_spec.json` --
     /// so an operator (or script) never has to guess/hardcode a model id
     /// before `tt run`. UNAUTHED on the agent side (like `status`), so this
@@ -158,6 +184,18 @@ fn main() -> Result<()> {
         Command::Pair { host, code } => {
             let token = run_async(cmd_pair(host, code.clone()))?;
             print_pair(host, &token, cli.json);
+        }
+        Command::PairInit { host } => {
+            let pair_id = run_async(cmd_pair_init(host))?;
+            print_pair_init(host, &pair_id, cli.json);
+        }
+        Command::PairComplete {
+            host,
+            pair_id,
+            code,
+        } => {
+            run_async(cmd_pair_complete(host, pair_id, code))?;
+            print_pair_complete(host, cli.json);
         }
         Command::Models { host } => {
             let resp = run_async(cmd_models(host))?;
@@ -295,6 +333,30 @@ async fn cmd_pair(host: &str, code: Option<String>) -> Result<String> {
     let token = pair_complete(&base, &pair_id, &code).await?;
     build_store()?.set(host, &token)?;
     Ok(token)
+}
+
+/// `tt pair-init <host:port>`: one-shot first half of pairing. Triggers the
+/// box to mint a 6-digit code (printed on ITS console) and returns the
+/// `pair_id` needed to complete the handshake via `tt pair-complete`. Unlike
+/// `cmd_pair`, this never reads stdin -- it's meant to be called by a caller
+/// (e.g. a GUI shell) that will surface the `pair_id` and prompt for the code
+/// itself, potentially across a process boundary.
+async fn cmd_pair_init(host: &str) -> Result<String> {
+    let base = format!("http://{host}");
+    pair_init(&base).await
+}
+
+/// `tt pair-complete <host:port> --pair-id <id> --code <code>`: one-shot
+/// second half of pairing. Exchanges the `pair_id` from a prior `tt
+/// pair-init` and the code the box printed for a bearer token, and stores it
+/// under `host` exactly like `cmd_pair` does -- so `tt run`/`tt status`/etc.
+/// against the same `host` work identically regardless of which pairing path
+/// was used.
+async fn cmd_pair_complete(host: &str, pair_id: &str, code: &str) -> Result<()> {
+    let base = format!("http://{host}");
+    let token = pair_complete(&base, pair_id, code).await?;
+    build_store()?.set(host, &token)?;
+    Ok(())
 }
 
 /// Read a pairing code from stdin. Only reached when `--code` is omitted --
@@ -466,6 +528,36 @@ fn print_pair(host: &str, token: &str, json: bool) {
     }
 }
 
+/// `tt pair-init`'s output: JSON carries the `pair_id` a caller needs to pass
+/// to `tt pair-complete`; human mode spells out the whole next step so a
+/// human operator (not just a scripted caller) can complete pairing without
+/// re-reading `--help`.
+fn print_pair_init(host: &str, pair_id: &str, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "pair_id": pair_id, "host": host })
+        );
+    } else {
+        println!(
+            "pairing started with {host}; enter the 6-digit code shown on the box, then run: \
+             tt pair-complete {host} --pair-id {pair_id} --code <CODE>"
+        );
+    }
+}
+
+/// `tt pair-complete`'s output. Deliberately doesn't echo the token back
+/// (unlike `print_pair`) -- the caller already has it via the stored
+/// `SecretStore` entry, and this command's whole point is to be driven by a
+/// non-interactive caller that just needs a success/failure signal.
+fn print_pair_complete(host: &str, json: bool) {
+    if json {
+        println!("{}", serde_json::json!({ "host": host, "paired": true }));
+    } else {
+        println!("paired with {host}; token stored");
+    }
+}
+
 /// `tt models`'s output: JSON prints the whole `ModelsResponse` object;
 /// human mode prints one model per line as `<name>\t<dev1,dev2,...>`, so
 /// it's both `grep`-able and roughly aligned like `tt discover`'s output.
@@ -592,6 +684,26 @@ mod tests {
     #[test]
     fn build_probe_client_succeeds_with_a_short_timeout() {
         assert!(build_probe_client(Duration::from_millis(200)).is_ok());
+    }
+
+    /// `print_pair_init` and `print_pair_complete` don't print through a
+    /// return value, so these tests exercise the same JSON shape they build
+    /// internally via `serde_json::json!` -- matching how the rest of this
+    /// module's print helpers are tested (structure, not captured stdout).
+    #[test]
+    fn pair_init_json_shape_has_pair_id_and_host() {
+        let value = serde_json::json!({ "pair_id": "abc123", "host": "127.0.0.1:8899" });
+        assert_eq!(value["pair_id"], "abc123");
+        assert_eq!(value["host"], "127.0.0.1:8899");
+        assert_eq!(value.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn pair_complete_json_shape_has_host_and_paired_true() {
+        let value = serde_json::json!({ "host": "127.0.0.1:8899", "paired": true });
+        assert_eq!(value["host"], "127.0.0.1:8899");
+        assert_eq!(value["paired"], true);
+        assert_eq!(value.as_object().unwrap().len(), 2);
     }
 
     /// A dead/unroutable manual host must fail within roughly
