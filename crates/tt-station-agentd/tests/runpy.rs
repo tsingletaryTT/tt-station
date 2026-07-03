@@ -92,8 +92,9 @@ fn runpy_start_issues_run_py_command_and_returns_endpoint() {
         "argv should carry --service-port <port>: {cmd:?}"
     );
     assert!(
-        cmd.windows(2).any(|w| w[0] == "--host-hf-cache"),
-        "argv should carry --host-hf-cache <cache>: {cmd:?}"
+        cmd.windows(2)
+            .any(|w| w[0] == "--host-hf-cache" && w[1] == "~/.cache/huggingface"),
+        "argv should carry --host-hf-cache <cache> with the configured value: {cmd:?}"
     );
     assert!(
         cmd.iter().any(|a| a == "--no-auth"),

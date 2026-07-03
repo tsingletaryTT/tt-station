@@ -43,7 +43,7 @@ const DEFAULT_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub struct RunPyConfig {
     /// Local checkout of `tt-inference-server` -- `run.py` is invoked as a
     /// relative path from inside this directory (`python3 run.py ...`), so
-    /// this is passed to `CommandRunner::run_in_dir` as the working
+    /// this is passed to `CommandRunner::run_in_dir_with_env` as the working
     /// directory rather than baked into the argv itself. Operator
     /// convention: prefer `<checkout>/vendor/tt-inference-server`, else
     /// `$HOME/code/tt-inference-server` -- see `main.rs`.
@@ -100,6 +100,13 @@ impl Default for RunPyConfig {
             image: "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:unset".to_string(),
             engine: "vllm".to_string(),
             impl_name: "tt-transformers".to_string(),
+            // NOTE: a literal `~` is test-fixture shorthand only -- it's
+            // passed straight through as an argv value with no shell in
+            // between to expand it, so this would be a broken path if it
+            // ever reached a real `run.py` invocation. The REAL runtime
+            // default is `main.rs::default_host_hf_cache`, which resolves
+            // `$HOME` itself via `std::env::var("HOME")` before this struct
+            // is ever built from CLI flags.
             host_hf_cache: "~/.cache/huggingface".to_string(),
             no_auth: true,
             device_ids: None,
@@ -195,22 +202,27 @@ impl ServingBackend for RunPyBackend {
 
         // `run.py` reads `MODEL_SOURCE` from its environment, not from an
         // argv flag (see docs/reference/tt-inference-server-docker.md's
-        // `MODEL_SOURCE=huggingface python3 run.py ...` invocation).
-        // `CommandRunner::run_in_dir`'s signature is argv-only -- it has no
-        // env parameter, on purpose, so it stays a straightforward argv-in
-        // seam for BOTH backends -- so this sets the var on the CURRENT
-        // process instead. `RealCommandRunner::run_in_dir` builds its
-        // `std::process::Command` without ever clearing the environment,
-        // and a freshly-spawned `Command` inherits the parent's environment
-        // by default, so the child sees it. `CommandRunner` fakes (e.g.
-        // `tests/support/mod.rs`'s `FakeRunner`) never spawn a real process
-        // at all, so this is a no-op from their point of view -- exactly
-        // why the task description says the env need not be captured by
-        // tests, only the argv.
-        std::env::set_var("MODEL_SOURCE", &self.config.model_source);
-
+        // `MODEL_SOURCE=huggingface python3 run.py ...` invocation). This is
+        // passed via `CommandRunner::run_in_dir_with_env`, which sets it on
+        // the CHILD `Command` only -- NOT via `std::env::set_var` on this
+        // process. `start` is reachable from `POST /run` through
+        // `tokio::task::spawn_blocking` on a multithreaded runtime with no
+        // mutex serializing concurrent calls, so mutating the process-wide
+        // environment here would race with any other in-flight `start` call
+        // (and `std::env::set_var` is `unsafe` as of Rust 2024 for exactly
+        // this reason). `RealCommandRunner::run_in_dir_with_env` builds its
+        // `std::process::Command` with `.envs(...)` before spawning, so the
+        // child sees `MODEL_SOURCE` without any shared mutable state.
+        // `CommandRunner` fakes (e.g. `tests/support/mod.rs`'s `FakeRunner`)
+        // never spawn a real process at all, so the env is a no-op from
+        // their point of view -- exactly why tests only need to assert on
+        // the argv, not the environment.
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.runner.run_in_dir(&self.config.repo_dir, &arg_refs)?;
+        self.runner.run_in_dir_with_env(
+            &self.config.repo_dir,
+            &arg_refs,
+            &[("MODEL_SOURCE", self.config.model_source.as_str())],
+        )?;
 
         // `run.py` (and `DockerBackend`) poll `/health`, not `/v1/models` --
         // see docs/reference/tt-inference-server-docker.md.

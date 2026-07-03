@@ -69,6 +69,38 @@ pub trait CommandRunner: Send + Sync {
         self.run(args)
     }
 
+    /// Like `run_in_dir`, but with the given `(key, value)` pairs also set
+    /// on the CHILD process's environment before it's spawned -- e.g.
+    /// `run.py`'s `MODEL_SOURCE`, which it reads from its own environment
+    /// rather than an argv flag (see `RunPyBackend::start`).
+    ///
+    /// Deliberately scoped to the child `Command` only, never the calling
+    /// process's environment: `std::env::set_var` mutates GLOBAL, per-process
+    /// state, which is unsound to touch from a multithreaded program without
+    /// external synchronization (it's `unsafe` as of the Rust 2024 edition
+    /// for exactly this reason). `RunPyBackend::start` is reachable from
+    /// `POST /run` via `tokio::task::spawn_blocking` on a multithreaded
+    /// runtime with no mutex serializing concurrent calls, so two overlapping
+    /// requests setting different `MODEL_SOURCE` values would otherwise race
+    /// on the process environment and could leak the wrong value into
+    /// whichever child happens to fork during the window.
+    ///
+    /// Default implementation ignores `env` and just calls `run_in_dir` --
+    /// fine for `DockerBackend` (which passes env via `docker run --env
+    /// KEY=value` in its own argv, not the child-process environment) and
+    /// for any `CommandRunner` fake that never actually shells out.
+    /// `RealCommandRunner` overrides this to set `Command::envs` on the
+    /// child before spawning it.
+    fn run_in_dir_with_env(
+        &self,
+        dir: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<String> {
+        let _ = env;
+        self.run_in_dir(dir, args)
+    }
+
     /// Probe `GET {url}` and report whether it responded with a success
     /// status. Used to poll a freshly-started container until its serving
     /// process is actually accepting requests, not just until the
@@ -103,6 +135,27 @@ impl CommandRunner for RealCommandRunner {
             std::process::Command::new(program)
                 .args(rest)
                 .current_dir(dir),
+            args,
+        )
+    }
+
+    fn run_in_dir_with_env(
+        &self,
+        dir: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<String> {
+        let (program, rest) = args.split_first().ok_or_else(|| {
+            anyhow::anyhow!("CommandRunner::run_in_dir_with_env called with empty argv")
+        })?;
+        run_and_capture(
+            std::process::Command::new(program)
+                .args(rest)
+                .current_dir(dir)
+                // Set on the CHILD `Command` only -- never
+                // `std::env::set_var` on the parent process. See the trait
+                // method's doc comment for why that distinction matters.
+                .envs(env.iter().copied()),
             args,
         )
     }
