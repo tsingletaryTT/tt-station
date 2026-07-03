@@ -55,6 +55,32 @@ alarming; most of it is Quick-win-sized.
 | The image-compatibility matrix has no data representation, only a policy of caution | `crates/tt-station-agentd/src/serving/runpy.rs:400-505` (`resolve_image`) and `docs/reference/tt-inference-server-docker.md`'s narrative | Today the only defense against picking a `run.py`-incompatible serving image is "don't auto-pick by default; document that it's risky." That's a real, working policy, but it's not a *matrix* anywhere — no code or doc enumerates which image tag ranges are known-good against which `run.py`/`tt-inference-server` checkout ranges. As more image tags and checkout versions accumulate, "newest local + operator judgment" stops scaling. | Not proposing to build this now — naming it as the concrete form the "image-compat-matrix problem" (flagged in the task brief) actually takes in this codebase today, for whoever picks it up. | L | N/A (not proposing now) |
 | Box-local config is entirely re-derived from CLI flags/environment on every process start, with three near-identical `default_*` resolvers | `crates/tt-station-agentd/src/main.rs:301-333` (`default_tt_inference_repo`, `default_host_hf_cache`, `default_token_store`) | Each function re-derives a `$HOME`-relative path independently (and, per the Quick-win above, inconsistently) rather than reading a single per-box config file. As the box-local knob count grows (repo path, HF cache, device override, image pin, reset command, token store...), a flat and-growing CLI flag list is a weaker box-local/client-config boundary than a single on-box config file that `main.rs` loads once, with flags only for overrides. | Not proposing to build this now — naming it as the concrete shape of the "box-local vs client config boundary" question from the task brief. | L | N/A (not proposing now) |
 
+## Done (quick wins)
+
+Executed 2026-07-03 on `main`, one commit per item, `crates/tt` changes kept minimal
+since it's co-edited by another session:
+
+1. `3a32f62` -- removed dead `AgentClient::status()` (and its now-unreachable `self.get()`
+   helper) plus the two tests that only pinned its behavior; `get_status`'s existing tests
+   already cover serving/idle parsing.
+2. `42ca1ec` -- `ServingStatus` now has hand-written `Serialize`/`Deserialize` built on
+   `to_txt`/`from_txt` instead of the derive; deleted the `DiscoveredBox` shadow struct in
+   `crates/tt/src/main.rs`. Verified wire-compat by hand (`tt --json discover` against
+   `mock-box` still emits `"status":"idle"`/`"status":"serving:<model>"` as a plain string,
+   byte-identical to before) plus new unit tests pinning the shape and the serde round-trip.
+3. `a460bbb` -- consolidated `TempModelSpec` into `tests/support/mod.rs` (keeping the
+   `AtomicU64`-counter unique-path version from `tests/runpy.rs`, since `tests/models.rs`'s
+   `Instant::now().elapsed()` variant wasn't actually unique); both `tests/models.rs` and
+   `tests/runpy.rs` now share it.
+4. `6fcdfef` -- `discover_returns_empty_when_nothing_advertising` now browses a randomized,
+   definitely-unadvertised mDNS service type instead of asserting global silence on
+   `_tenstorrent._tcp`. Confirmed the fix for real: `cargo test --workspace` passed pristine
+   with this repo's own `tt-station-agentd` actively advertising `_tenstorrent._tcp` on the LAN
+   at the time.
+
+Verification: `cargo test --workspace` pristine (0 failures across every crate/test binary),
+`cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo fmt --all -- --check` clean.
+
 ## Notes on what's *not* cruft
 
 - `DstackBackend` (`crates/tt-station-agentd/src/serving/dstack.rs`) is a small, clearly-labeled
