@@ -4,8 +4,61 @@ A native SwiftUI **`MenuBarExtra`** veneer over the `tt` CLI. This is the "as yo
 sees it" surface from the microsite: pick a box, run/stop a model, copy the endpoint — all
 from the menu bar.
 
-**Status:** not built yet. This is the landing spot / contract for Task 14
-(see `docs/superpowers/plans/2026-07-02-tt-station-poc.md`). Build it under `macos/TTStation/`.
+**Status:** v1 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
+(32 passing tests via `swift test`); the SwiftUI app target is generated with XcodeGen and
+builds clean. End-to-end verified against `mock-box` (no hardware) — see below.
+
+## Build & run
+
+    cd macos/TTStation && swift test                     # unit tests (32 tests, layers 1–10)
+    cd macos/TTStation/AppShell && xcodegen generate \
+      && xcodebuild -project TTStation.xcodeproj -scheme TTStation \
+           -destination 'platform=macOS' build
+
+The built app lands under Xcode's DerivedData; find the exact path with:
+
+    xcodebuild -project macos/TTStation/AppShell/TTStation.xcodeproj -scheme TTStation \
+      -showBuildSettings | awk '/ BUILT_PRODUCTS_DIR /{d=$3} /FULL_PRODUCT_NAME/{p=$3} END{print d"/"p}'
+
+## End-to-end with no hardware (`mock-box`)
+
+`mock-box` (`crates/mock-box`) fakes an agent's control API + a canned `/v1` over plain
+HTTP — no real box or Docker needed. Two verification paths, both proven for this task:
+
+1. **CLI path** (what `crates/tt/tests/e2e_mock.rs` automates): build `tt` and `mock-box`
+   (`cargo build --release -p tt -p mock-box`), then drive the same `tt --json` calls the
+   app's `TTClient` issues, against `./target/release/mock-box serve --ctrl-port 18899
+   --name quietbox-mock --chips 4xBH`:
+
+       tt --json discover --host 127.0.0.1:18899 --no-mdns
+       tt --json models   --host 127.0.0.1:18899
+       tt --json pair     127.0.0.1:18899 --code 000000   # mock-box accepts any code
+       tt --json run      mock-model --host 127.0.0.1:18899
+       tt --json endpoint --host 127.0.0.1:18899
+       tt --json status   --host 127.0.0.1:18899
+       tt --json stop     --host 127.0.0.1:18899
+
+   This proves the app's exact backend contract (argv shape + JSON decode types) without
+   driving the GUI. The CLI stores the pairing token in the macOS Keychain, same as the app.
+
+2. **GUI path** — see the manual checklist below; a menu-bar `MenuBarExtra` can't be driven
+   programmatically, so a human has to click through it at least once per release.
+
+### Manual smoke checklist (owner, at the Mac)
+
+With `mock-box serve --ctrl-port 18899 --name quietbox-mock --chips 4xBH` running:
+
+- [ ] Open `TTStation.app` — the menu-bar icon appears, no crash.
+- [ ] The mock box appears in the list (or add it manually as `127.0.0.1:18899` if mDNS
+      discovery is off/blocked on this network).
+- [ ] Click **Pair**, read the 6-digit code mock-box prints to its console, enter it.
+- [ ] Pick a model from the picker (`mock-model` / `mock-model-large`).
+- [ ] Click **Run** — an endpoint (`http://127.0.0.1:18899/v1`) appears; status dot goes
+      green.
+- [ ] **Copy endpoint** — paste somewhere and confirm it matches.
+- [ ] **Stop** — status returns to idle.
+- [ ] Any CLI stderr shows up honestly in the UI (no silent failure) if you kill mock-box
+      mid-flow and retry.
 
 ## The one rule: it's a veneer, not a brain
 
