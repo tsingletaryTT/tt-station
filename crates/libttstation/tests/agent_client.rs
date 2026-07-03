@@ -12,12 +12,27 @@
 //! with the exact configured token -- that's the one behavior all four
 //! methods share and the brief calls out explicitly.
 
-use libttstation::agent_client::{list_models, AgentClient};
+use libttstation::agent_client::{get_status, list_models, AgentClient};
 use libttstation::model::{Endpoint, ServingStatus};
 use wiremock::matchers::{header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 const TOKEN: &str = "tok-abc123";
+
+/// Custom `wiremock` matcher asserting a request carries NO `Authorization`
+/// header at all -- the positive-side counterpart to every other test in
+/// this file, which matches ON `header("Authorization", ...)`. Used by
+/// [`get_status_sends_no_authorization_header`] below to prove
+/// `get_status` (the free-function, unauthed counterpart to
+/// `AgentClient::status`) really doesn't attach a bearer token, not just
+/// that the mock happens to accept requests regardless of headers.
+struct NoAuthorizationHeader;
+
+impl Match for NoAuthorizationHeader {
+    fn matches(&self, request: &Request) -> bool {
+        !request.headers.contains_key("authorization")
+    }
+}
 
 /// `status()` should GET `{base}/status` with the bearer header and parse
 /// the `status` field (`serving:<model>` / `idle`) via `ServingStatus::from_txt`.
@@ -209,4 +224,58 @@ async fn list_models_parses_models_response_with_no_auth_header() {
     assert_eq!(resp.models.len(), 2);
     assert_eq!(resp.models[0].name, "Qwen/Qwen3-32B");
     assert_eq!(resp.models[0].devices, vec!["P300X2", "T3K"]);
+}
+
+/// `get_status(base)` -- the free-function, UNAUTHED counterpart to
+/// `AgentClient::status()` that `tt status` now calls so it works against
+/// an unpaired box -- should GET `{base}/status` with no `Authorization`
+/// header and parse the `serving:<model>` case via `ServingStatus::from_txt`,
+/// same as `AgentClient::status()` does.
+#[tokio::test]
+async fn get_status_parses_serving_status_with_no_auth_header() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/status"))
+        .and(NoAuthorizationHeader)
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "qb2-lab",
+            "chips": "4xBH",
+            "status": "serving:meta-llama/Llama-3.3-70B-Instruct"
+        })))
+        .mount(&server)
+        .await;
+
+    let status = get_status(&server.uri())
+        .await
+        .expect("get_status() should succeed against a mocked 200 response");
+
+    assert_eq!(
+        status,
+        ServingStatus::Serving("meta-llama/Llama-3.3-70B-Instruct".to_string())
+    );
+}
+
+/// `get_status(base)` should also parse the `idle` case correctly, still
+/// with no `Authorization` header required.
+#[tokio::test]
+async fn get_status_parses_idle_with_no_auth_header() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/status"))
+        .and(NoAuthorizationHeader)
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "qb2-lab",
+            "chips": "4xBH",
+            "status": "idle"
+        })))
+        .mount(&server)
+        .await;
+
+    let status = get_status(&server.uri())
+        .await
+        .expect("get_status() should succeed");
+
+    assert_eq!(status, ServingStatus::Idle);
 }

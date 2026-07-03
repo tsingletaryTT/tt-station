@@ -35,6 +35,37 @@ pub async fn list_models(base: &str) -> anyhow::Result<ModelsResponse> {
     Ok(resp.json().await?)
 }
 
+/// `GET /status` (UNAUTHED, mirroring the agent's own route -- see
+/// `tt-station-agentd::routes::get_status`, which has no `BearerAuth`
+/// extractor): the agent's current serving status, parsed the same way
+/// [`AgentClient::status`] does.
+///
+/// A FREE function rather than an `AgentClient` method, same reasoning as
+/// [`list_models`] and [`crate::pairing::pair_init`]: a client that hasn't
+/// paired yet (no bearer token to construct an `AgentClient` with) still
+/// wants a live status dot for discovery/UI purposes, and the agent's
+/// `/status` route doesn't require a token to answer that. `tt status`
+/// (`crates/tt/src/main.rs::cmd_status`) calls this directly instead of
+/// going through `authed_client()`, so a `tt status` on an unpaired box
+/// works instead of failing with "no token stored".
+pub async fn get_status(base: &str) -> anyhow::Result<ServingStatus> {
+    #[derive(Deserialize)]
+    struct StatusResponse {
+        status: String,
+    }
+
+    let url = join(base, "status");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
+
+    let body: StatusResponse = resp.json().await?;
+    ServingStatus::from_txt(&body.status)
+}
+
 /// A handle to one paired agent: its control-plane base URL plus the bearer
 /// token minted for it by [`crate::pairing::pair_complete`].
 pub struct AgentClient {
