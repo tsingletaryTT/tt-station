@@ -4,3 +4,4 @@
 
 pub mod pairing;
 pub mod routes;
+pub mod serving;

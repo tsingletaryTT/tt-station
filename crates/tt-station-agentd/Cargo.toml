@@ -13,15 +13,24 @@ mdns-sd = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rand = { workspace = true }
+# `blocking` on top of the workspace's `default-features = false` + `json`
+# base: `DockerBackend`'s health probe (serving/docker.rs) runs from a sync
+# `ServingBackend::start`, with no async runtime guaranteed to be available
+# to await a request against, so it uses `reqwest::blocking` rather than the
+# async client `tests/status.rs` uses elsewhere in this crate. Both APIs
+# coexist fine in the same dependency -- `blocking` just adds the extra
+# module, it doesn't change how the async client behaves.
+reqwest = { workspace = true, features = ["blocking"] }
 
 [features]
 # Compiled in for `cargo test` (see the self-dependency below) so
 # integration tests can read pairing codes that would otherwise never leave
-# the process. Never enabled for a normal `cargo build`/release binary.
+# the process, and (Task 9) so `DockerBackend::with_health_poll` -- which
+# shrinks health-poll timing for tests -- is visible to them too. Never
+# enabled for a normal `cargo build`/release binary.
 test-hooks = []
 
 [dev-dependencies]
-reqwest = { workspace = true }
 # Integration tests (crates/tt-station-agentd/tests/*.rs) link against the
 # library as a separate compilation unit from the one `cargo test` builds
 # for unit tests, so a plain `#[cfg(test)]` on a helper is invisible to
