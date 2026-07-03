@@ -35,11 +35,24 @@ public struct Endpoint: Codable, Equatable {
         case baseURL = "base_url"
         case requiresKey = "requires_key"
     }
+
+    // Swift's synthesized memberwise initializer for a struct is always
+    // `internal`, even when every stored property is `public` — so this
+    // couldn't be constructed from outside the module (e.g. the test
+    // target's `FakeTTClient`) without an explicit public init. (Declared
+    // here, not in an extension: a same-signature init added via extension
+    // collides with the compiler's own synthesized memberwise init and is
+    // rejected as an "invalid redeclaration".)
+    public init(baseURL: String, model: String, requiresKey: Bool) {
+        self.baseURL = baseURL; self.model = model; self.requiresKey = requiresKey
+    }
 }
 
 public struct ModelInfo: Codable, Equatable {
     public let name: String
     public let devices: [String]
+
+    public init(name: String, devices: [String]) { self.name = name; self.devices = devices }
 }
 
 public struct ModelsResponse: Codable, Equatable {
@@ -50,11 +63,17 @@ public struct ModelsResponse: Codable, Equatable {
         case models
         case releaseVersion = "release_version"
     }
+
+    public init(releaseVersion: String?, models: [ModelInfo]) {
+        self.releaseVersion = releaseVersion; self.models = models
+    }
 }
 
 public struct PairResult: Codable, Equatable {
     public let host: String
     public let paired: Bool
+
+    public init(host: String, paired: Bool) { self.host = host; self.paired = paired }
 }
 
 public struct StatusResponse: Codable, Equatable {

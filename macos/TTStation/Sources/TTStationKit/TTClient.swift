@@ -1,5 +1,17 @@
 import Foundation
 
+/// Protocol so view-models can be tested against a fake.
+public protocol TTCommands {
+    func discover(manualHosts: [String], noMdns: Bool) async throws -> [BoxRecord]
+    func models(host: String) async throws -> [ModelInfo]
+    func status(host: String) async throws -> ServingStatus
+    func endpoint(host: String) async throws -> Endpoint
+    func pair(host: String, code: String) async throws -> PairResult
+    func run(host: String, model: String) async throws -> Endpoint
+    func stop(host: String) async throws
+    func isAuthError(_ error: TTError) -> Bool
+}
+
 /// Typed façade over `tt --json`. One method per subcommand; the only place
 /// argv is assembled and stdout is decoded.
 public final class TTClient {
@@ -69,3 +81,5 @@ extension TTClient {
         return false
     }
 }
+
+extension TTClient: TTCommands {}
