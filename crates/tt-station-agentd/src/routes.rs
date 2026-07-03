@@ -1052,7 +1052,14 @@ async fn telemetry_ws(
 /// follows.
 async fn telemetry_stream(mut socket: WebSocket, state: AppState) {
     let tt_smi_bin = state.tt_smi_bin().to_string();
-    let mut ticker = tokio::time::interval(Duration::from_millis(state.telemetry_interval_ms()));
+    // Clamp to >=1ms: `tokio::time::interval` panics on a zero duration, and this
+    // runs in a per-connection task, so `--telemetry-interval-ms 0` would panic
+    // every telemetry client (the CLI also rejects 0; this is belt-and-suspenders).
+    // `Delay` missed-tick behavior so a slow `tt-smi` under serving load can't make
+    // the ticker burst-fire back-to-back and flood the client.
+    let mut ticker =
+        tokio::time::interval(Duration::from_millis(state.telemetry_interval_ms().max(1)));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {

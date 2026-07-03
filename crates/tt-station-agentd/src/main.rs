@@ -283,7 +283,7 @@ struct Cli {
     /// "remote QuietBox" feature -- see src/telemetry.rs). Each connected
     /// client receives one frame per interval. Defaults to `1000` (1s), a
     /// live-but-not-hammering cadence for a chip-telemetry dashboard.
-    #[arg(long = "telemetry-interval-ms", default_value_t = 1000)]
+    #[arg(long = "telemetry-interval-ms", default_value_t = 1000, value_parser = clap::value_parser!(u64).range(1..))]
     telemetry_interval_ms: u64,
 
     /// `tt-smi` binary the `GET /telemetry` stream runs (as `<bin> -s`) to
