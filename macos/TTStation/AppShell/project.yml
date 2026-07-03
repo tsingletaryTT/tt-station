@@ -12,6 +12,7 @@ targets:
     platform: macOS
     sources:
       - Sources
+      - Assets.xcassets
     dependencies:
       - package: TTStationKit
         product: TTStationKit

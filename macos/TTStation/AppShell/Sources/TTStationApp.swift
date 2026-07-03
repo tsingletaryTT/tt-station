@@ -13,7 +13,7 @@ struct TTStationApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("TTStation", systemImage: "cpu") {
+        MenuBarExtra("TTStation", image: "MenuBarIcon") {
             MenuContentView(model: model)
                 .frame(width: 340)
         }
