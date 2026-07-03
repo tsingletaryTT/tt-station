@@ -587,43 +587,15 @@ fn endpoint_export_line(ep: &Endpoint) -> String {
 // Output
 // ---------------------------------------------------------------------
 
-/// JSON shape for one `tt discover` result. Not just `#[derive(Serialize)]`
-/// on `BoxRecord` directly: `BoxRecord.status` is a `ServingStatus` enum,
-/// and serde's default derive would encode it as `"Idle"` or
-/// `{"Serving":"llama3"}` -- diverging from the `to_txt()` wire format
-/// (`"idle"` / `"serving:llama3"`) that `tt --json status` and every HTTP
-/// route in this codebase already use. Re-encoding `status` through
-/// `to_txt()` here keeps every JSON-emitting command speaking the same
-/// status representation.
-#[derive(serde::Serialize)]
-struct DiscoveredBox<'a> {
-    name: &'a str,
-    host: &'a str,
-    ctrl_port: u16,
-    chips: &'a str,
-    status: String,
-    apiver: u8,
-}
-
-impl<'a> From<&'a BoxRecord> for DiscoveredBox<'a> {
-    fn from(rec: &'a BoxRecord) -> Self {
-        DiscoveredBox {
-            name: &rec.name,
-            host: &rec.host,
-            ctrl_port: rec.ctrl_port,
-            chips: &rec.chips,
-            status: rec.status.to_txt(),
-            apiver: rec.apiver,
-        }
-    }
-}
-
 fn print_discover(boxes: &[BoxRecord], json: bool) {
     if json {
-        let entries: Vec<DiscoveredBox> = boxes.iter().map(DiscoveredBox::from).collect();
+        // `BoxRecord` serializes directly now -- `ServingStatus` has its own
+        // hand-written `Serialize` impl (see `libttstation::model`) that
+        // emits the canonical `idle`/`serving:<model>` txt string, so no
+        // shadow struct is needed to avoid serde's default enum encoding.
         println!(
             "{}",
-            serde_json::to_string(&entries).expect("DiscoveredBox always serializes")
+            serde_json::to_string(boxes).expect("BoxRecord always serializes")
         );
     } else if boxes.is_empty() {
         println!("no boxes found");

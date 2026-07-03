@@ -1,10 +1,42 @@
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ServingStatus {
     Idle,
     Serving(String),
+}
+
+/// Hand-written rather than `#[derive(Serialize)]`: serde's default enum
+/// encoding would emit `"Idle"` / `{"Serving":"llama3"}`, which diverges
+/// from the `idle` / `serving:<model>` STRING form every HTTP route and the
+/// mDNS TXT record actually use (see [`ServingStatus::to_txt`]). Anything
+/// that serializes a `ServingStatus` -- directly, or nested in a
+/// `BoxRecord` -- gets the canonical wire form for free instead of having to
+/// re-encode it by hand (see the removed `DiscoveredBox` workaround in
+/// `crates/tt/src/main.rs`, which existed only because this wasn't true).
+impl Serialize for ServingStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_txt())
+    }
+}
+
+/// Counterpart to the `Serialize` impl above: parse the same `idle` /
+/// `serving:<model>` string form via [`ServingStatus::from_txt`], so a
+/// `ServingStatus` round-trips through `serde_json` byte-for-byte with the
+/// txt encoding used everywhere else.
+impl<'de> Deserialize<'de> for ServingStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        ServingStatus::from_txt(&s).map_err(D::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -138,6 +170,45 @@ mod tests {
         assert_eq!(
             ServingStatus::from_txt("serving:llama3").unwrap(),
             ServingStatus::Serving("llama3".into())
+        );
+    }
+
+    /// `ServingStatus` must serde-round-trip through the same txt form
+    /// `to_txt`/`from_txt` use, NOT serde's default derived enum shape
+    /// (`"Idle"` / `{"Serving":"llama3"}`) -- see the hand-written
+    /// `Serialize`/`Deserialize` impls above.
+    #[test]
+    fn serving_status_roundtrips_through_serde_json_txt_form() {
+        for status in [
+            ServingStatus::Idle,
+            ServingStatus::Serving("llama3".to_string()),
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            assert_eq!(json, format!("{:?}", status.to_txt())); // both are just a quoted string
+            let round_tripped: ServingStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(round_tripped, status);
+        }
+    }
+
+    /// Wire-compat guard: `BoxRecord` (as serialized by `tt --json discover`,
+    /// decoded by the macOS app) must emit `status` as the plain
+    /// `idle`/`serving:<model>` STRING, not the derived-enum shape. This is
+    /// exactly the shape `DiscoveredBox` in `crates/tt/src/main.rs` used to
+    /// hand-roll before `ServingStatus` grew its own `Serialize` impl.
+    #[test]
+    fn boxrecord_serializes_status_as_canonical_txt_string() {
+        let rec = BoxRecord {
+            name: "qb2-lab".to_string(),
+            host: "127.0.0.1".to_string(),
+            ctrl_port: 8899,
+            chips: "4xBH".to_string(),
+            status: ServingStatus::Serving("llama3".to_string()),
+            apiver: 1,
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(
+            json.contains(r#""status":"serving:llama3""#),
+            "expected canonical txt-string status, got: {json}"
         );
     }
 
