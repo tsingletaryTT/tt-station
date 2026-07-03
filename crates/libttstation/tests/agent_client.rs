@@ -12,7 +12,7 @@
 //! with the exact configured token -- that's the one behavior all four
 //! methods share and the brief calls out explicitly.
 
-use libttstation::agent_client::{get_status, list_models, AgentClient};
+use libttstation::agent_client::{get_status, list_models, reset, AgentClient};
 use libttstation::model::{Endpoint, ServingStatus};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
@@ -133,6 +133,26 @@ async fn stop_succeeds_on_empty_response_body() {
 
     let client = AgentClient::new(server.uri(), TOKEN);
     client.stop().await.expect("stop() should succeed");
+}
+
+/// `reset(base, token)` -- the free-function counterpart to the agent's
+/// bearer-guarded `POST /reset` -- should POST to `{base}/reset` WITH the
+/// bearer header and succeed on an empty `{}` response body, same shape as
+/// `AgentClient::stop`.
+#[tokio::test]
+async fn reset_posts_to_reset_with_bearer_and_succeeds_on_empty_body() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/reset"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&server)
+        .await;
+
+    reset(&server.uri(), TOKEN)
+        .await
+        .expect("reset() should succeed against a mocked 200 response");
 }
 
 /// `endpoint()` should GET `{base}/endpoint` with the bearer header and

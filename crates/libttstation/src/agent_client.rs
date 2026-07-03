@@ -66,6 +66,32 @@ pub async fn get_status(base: &str) -> anyhow::Result<ServingStatus> {
     ServingStatus::from_txt(&body.status)
 }
 
+/// `POST /reset` (bearer-guarded): ask the agent at `base` to return the box
+/// to a fresh-install state -- stop any serving container, reset the board,
+/// and clear ALL of its issued bearer tokens (see
+/// `tt-station-agentd::routes::reset`). Used by `tt reset --host <h>` to reset
+/// the remote box before it forgets its local copy of the token.
+///
+/// A FREE function rather than an [`AgentClient`] method, mirroring the
+/// action-command style of [`list_models`]/[`get_status`]: the one caller
+/// (`tt reset`) already has the `host`+`token` in hand and doesn't otherwise
+/// build an `AgentClient`, and `reset` deliberately invalidates the very
+/// token it authenticates with (a fresh box has no tokens), so there's no
+/// reusable authenticated handle to hang onto afterward anyway.
+///
+/// The agent responds `{}` on success -- nothing to parse out of it.
+pub async fn reset(base: &str, token: &str) -> anyhow::Result<()> {
+    let url = join(base, "reset");
+    reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
+    Ok(())
+}
+
 /// A handle to one paired agent: its control-plane base URL plus the bearer
 /// token minted for it by [`crate::pairing::pair_complete`].
 pub struct AgentClient {

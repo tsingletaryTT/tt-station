@@ -167,6 +167,21 @@ enum Command {
         #[arg(long)]
         host: String,
     },
+
+    /// Reset to a fresh install: forget EVERY paired box on this machine
+    /// (clear all locally stored tokens). With `--host`, first ask that box
+    /// to reset itself (stop serving, clear its tokens, reset the board)
+    /// before forgetting it locally. Meant for demos.
+    Reset {
+        /// A specific box to reset remotely BEFORE clearing local state, as
+        /// `host:port`. Omit to only clear local state (forget all boxes).
+        #[arg(long)]
+        host: Option<String>,
+
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -216,6 +231,18 @@ fn main() -> Result<()> {
         Command::Endpoint { host } => {
             let endpoint = run_async(cmd_endpoint(host))?;
             print_endpoint_export(&endpoint, cli.json);
+        }
+        Command::Reset { host, yes } => {
+            // Confirm BEFORE spinning up a runtime or clearing anything:
+            // unless `--yes`, spell out exactly what will be cleared and
+            // require the operator to type `y`. A declined prompt aborts
+            // without touching local or remote state.
+            if !*yes && !confirm_reset(host.as_deref())? {
+                print_reset_aborted(cli.json);
+                return Ok(());
+            }
+            let summary = run_async(cmd_reset(host.as_deref()))?;
+            print_reset(&summary, cli.json);
         }
     }
 
@@ -414,6 +441,87 @@ async fn cmd_endpoint(host: &str) -> Result<Endpoint> {
     authed_client(host)?.endpoint().await
 }
 
+/// Outcome of a `tt reset`, surfaced both to `--json` output and human text.
+/// `local_cleared` is effectively always `true` on success (clearing local
+/// state is the one thing `reset` always does); `box_reset` is `true` only
+/// when a `--host` box was actually reset over the wire.
+struct ResetSummary {
+    local_cleared: bool,
+    box_reset: bool,
+}
+
+/// `tt reset [--host <h>] [--yes]`: return this machine (and optionally one
+/// box) to a fresh-install state.
+///
+/// When `host` is given, the box is reset FIRST -- while its token is still
+/// stored locally -- via `agent_client::reset`. A missing token or a failed
+/// call is a warning, NOT a hard error: local state is still cleared
+/// afterward (the whole point of `reset` is to forget everything on this
+/// machine), so a box that's already gone/unreachable never blocks the local
+/// cleanup.
+///
+/// Local cleanup then clears EVERY stored token via `SecretStore::clear`
+/// (`secrets.json` is the only state this CLI persists -- there's no separate
+/// known-hosts file to purge). The confirmation prompt is handled by the
+/// caller (`main`) before this runs, so by the time we're here the operator
+/// has already consented (or passed `--yes`).
+async fn cmd_reset(host: Option<&str>) -> Result<ResetSummary> {
+    let mut box_reset = false;
+
+    if let Some(host) = host {
+        // Reset the remote box BEFORE forgetting its token locally.
+        match build_store()?.get(host)? {
+            Some(token) => {
+                let base = format!("http://{host}");
+                match libttstation::agent_client::reset(&base, &token).await {
+                    Ok(()) => box_reset = true,
+                    Err(e) => eprintln!(
+                        "warning: failed to reset box {host}: {e}; clearing local state anyway"
+                    ),
+                }
+            }
+            None => eprintln!(
+                "warning: no token stored for {host}; cannot reset it remotely; \
+                 clearing local state anyway"
+            ),
+        }
+    }
+
+    // Always clear local state -- forget every paired box on this machine.
+    build_store()?.clear()?;
+
+    Ok(ResetSummary {
+        local_cleared: true,
+        box_reset,
+    })
+}
+
+/// Print exactly what `tt reset` will clear and require the operator to type
+/// `y` (one stdin line) to proceed. Returns `true` only on an affirmative
+/// `y`/`Y`; anything else (including EOF/empty) declines. Skipped entirely by
+/// `--yes` (see `main`).
+fn confirm_reset(host: Option<&str>) -> Result<bool> {
+    use std::io::Write;
+
+    println!(
+        "This will FORGET every paired box on this machine (clear all locally stored tokens)."
+    );
+    if let Some(host) = host {
+        println!(
+            "It will also ask the box at {host} to reset to a fresh install \
+             (stop serving, clear its tokens, reset the board)."
+        );
+    }
+    print!("Proceed? Type 'y' to continue: ");
+    std::io::stdout().flush().ok();
+
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("reading confirmation from stdin")?;
+    Ok(matches!(line.trim(), "y" | "Y"))
+}
+
 /// Build an `AgentClient` for `host`, using the token stored by a prior
 /// `tt pair`. Shared by every command that needs an authenticated call.
 fn authed_client(host: &str) -> Result<AgentClient> {
@@ -604,6 +712,39 @@ fn print_stop(json: bool) {
         println!("{}", serde_json::json!({}));
     } else {
         println!("stopped");
+    }
+}
+
+/// `tt reset`'s success output: JSON is the machine-readable summary the
+/// task spec calls for (`{"local_cleared":..,"box_reset":..}`); human mode
+/// says what happened in plain words.
+fn print_reset(summary: &ResetSummary, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "local_cleared": summary.local_cleared,
+                "box_reset": summary.box_reset,
+            })
+        );
+    } else {
+        println!("local state cleared (all paired boxes forgotten)");
+        if summary.box_reset {
+            println!("box reset requested");
+        }
+    }
+}
+
+/// `tt reset`'s output when the operator declines the confirmation prompt:
+/// nothing was cleared, locally or remotely.
+fn print_reset_aborted(json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "local_cleared": false, "box_reset": false })
+        );
+    } else {
+        println!("reset aborted; nothing was cleared");
     }
 }
 

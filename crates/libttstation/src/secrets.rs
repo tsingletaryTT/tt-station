@@ -29,6 +29,11 @@ pub trait SecretStore {
     fn get(&self, box_name: &str) -> Result<Option<String>>;
     /// Remove the token for `box_name`, if present. Not an error if absent.
     fn delete(&self, box_name: &str) -> Result<()>;
+
+    /// Remove EVERY stored token at once -- "forget all paired boxes on this
+    /// machine", the local half of `tt reset`. Not an error if nothing is
+    /// stored (an already-empty store is the desired end state).
+    fn clear(&self) -> Result<()>;
 }
 
 /// File-backed `SecretStore`: a single JSON file holding a `box_name ->
@@ -102,6 +107,21 @@ impl SecretStore for FileStore {
         }
         Ok(())
     }
+
+    /// Clear every stored token by deleting the whole secrets file. A
+    /// missing file is already the desired end state, so `NotFound` is not
+    /// an error. Deleting (rather than writing back an empty `{}`) matches a
+    /// machine that never paired anything: `load` treats a missing file as
+    /// an empty map, so subsequent `get`s just return `None`.
+    fn clear(&self) -> Result<()> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => {
+                Err(e).with_context(|| format!("removing secrets file {}", self.path.display()))
+            }
+        }
+    }
 }
 
 /// macOS Keychain-backed `SecretStore`. Only compiled on macOS: this is
@@ -150,6 +170,49 @@ impl SecretStore for KeychainStore {
             Err(e) if e.code() == -25300 => Ok(()),
             Err(e) => Err(e).context("deleting token from macOS Keychain"),
         }
+    }
+
+    /// Clear every tt-station token by enumerating this service's
+    /// generic-password items and deleting each one -- the Keychain has no
+    /// single "delete all for service" call, so `tt reset` has to find the
+    /// accounts (box names) first, then delete them one at a time via the
+    /// same `delete` path above.
+    ///
+    /// Enumeration filters strictly to `Self::SERVICE` so this only ever
+    /// removes tt-station's own items, never any other app's Keychain
+    /// entries. An empty Keychain (`errSecItemNotFound`) is the desired end
+    /// state, not an error.
+    fn clear(&self) -> Result<()> {
+        use security_framework::item::{ItemClass, ItemSearchOptions, Limit, SearchResult};
+
+        let results = match ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .load_attributes(true)
+            .limit(Limit::All)
+            .search()
+        {
+            Ok(results) => results,
+            // Nothing stored at all -- already the end state we want.
+            Err(e) if e.code() == -25300 => return Ok(()),
+            Err(e) => return Err(e).context("enumerating macOS Keychain items"),
+        };
+
+        // Collect the accounts (box names) whose service is ours, then
+        // delete each via the trait's own `delete` (idempotent, absent-safe).
+        for result in results {
+            if let SearchResult::Dict(_) = &result {
+                if let Some(attrs) = result.simplify_dict() {
+                    let is_ours = attrs.get("svce").map(String::as_str) == Some(Self::SERVICE);
+                    if is_ours {
+                        if let Some(account) = attrs.get("acct") {
+                            self.delete(account)?;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -258,6 +321,29 @@ mod tests {
         let store = FileStore::new(path);
 
         store.delete("never-paired").unwrap();
+    }
+
+    #[test]
+    fn clear_removes_all_stored_tokens() {
+        let (_dir, path) = temp_store_path();
+        let store = FileStore::new(path);
+
+        store.set("box-a", "tok-a").unwrap();
+        store.set("box-b", "tok-b").unwrap();
+
+        store.clear().unwrap();
+
+        assert_eq!(store.get("box-a").unwrap(), None);
+        assert_eq!(store.get("box-b").unwrap(), None);
+    }
+
+    #[test]
+    fn clear_on_empty_store_is_not_an_error() {
+        let (_dir, path) = temp_store_path();
+        let store = FileStore::new(path);
+
+        // Never wrote anything -- the file doesn't exist yet.
+        store.clear().unwrap();
     }
 
     #[test]

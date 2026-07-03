@@ -56,6 +56,27 @@ pub trait ServingBackend: Send + Sync {
     /// this PoC, it doesn't.
     fn status(&self) -> Result<ServingStatus>;
 
+    /// Return the box to a fresh state for a demo reset (`POST /reset`):
+    /// stop whatever's serving and, on backends that manage board state,
+    /// reset the board too.
+    ///
+    /// The default implementation is a no-op that succeeds -- the sane
+    /// answer for backends with no serving container or board of their own
+    /// to clear (`DstackBackend`, still a stub) and for `DockerBackend`
+    /// (whose containers are addressed by model name, which a `reset` with
+    /// no model in hand doesn't have; `/reset` still clears the agent's own
+    /// tokens/status regardless). `RunPyBackend` is the one backend that
+    /// overrides this, since it owns both a stale-container stop path
+    /// (`stop_serving_containers`) and a board reset (`reset_cmd`, `tt-smi
+    /// -r`) worth running on a reset.
+    ///
+    /// Sync like every other method on this trait (see the trait doc): a
+    /// caller in async context must hop off the runtime (e.g.
+    /// `tokio::task::spawn_blocking`) before calling it.
+    fn reset(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Enumerate the models this backend can serve, so a caller (`GET
     /// /models`, `tt models`) never has to guess or hardcode a model id --
     /// see `libttstation::model::ModelsResponse`.

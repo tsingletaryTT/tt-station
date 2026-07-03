@@ -746,6 +746,44 @@ impl ServingBackend for RunPyBackend {
         Ok(())
     }
 
+    /// Return the box to a fresh state (`POST /reset`): stop any serving
+    /// container, then reset the board -- exactly the "clear the chips" work
+    /// `start` does up front, but run on demand for a demo reset instead of
+    /// just before a serve.
+    ///
+    /// The container stop reuses the same `stop_serving_containers` helper
+    /// `start`/`stop` use (idempotent: an empty `docker ps` is success), and
+    /// its failure IS propagated -- if we can't even clear a stale container,
+    /// the caller should know the reset didn't fully land.
+    ///
+    /// The board reset (`reset_cmd`, `tt-smi -r`), by contrast, is
+    /// best-effort: a failed reset is logged and swallowed rather than
+    /// failing the whole `/reset`, so a demo reset still clears serving state
+    /// (and, above this call, the agent's tokens/status) even on a box where
+    /// `tt-smi` is flaky or absent. It's gated on `reset_before_serve` for
+    /// the same reason `start` gates its reset: a box configured with
+    /// `--no-device-reset` doesn't want `tt-smi -r` run at all.
+    fn reset(&self) -> Result<()> {
+        // Stop any serving container first (same helper start/stop use).
+        self.stop_serving_containers()
+            .context("failed to stop serving container during reset")?;
+
+        // Reset the board best-effort: log on failure, don't fail /reset.
+        if self.config.reset_before_serve {
+            let reset_cmd_str = self.config.reset_cmd.join(" ");
+            eprintln!("resetting board during reset: {reset_cmd_str}");
+            let reset_refs: Vec<&str> = self.config.reset_cmd.iter().map(String::as_str).collect();
+            if let Err(err) = self.runner.run(&reset_refs) {
+                eprintln!(
+                    "board reset ({reset_cmd_str}) failed during reset: {err:#} -- continuing"
+                );
+            }
+        }
+
+        *self.status.lock().expect("status mutex poisoned") = ServingStatus::Idle;
+        Ok(())
+    }
+
     fn status(&self) -> Result<ServingStatus> {
         Ok(self.status.lock().expect("status mutex poisoned").clone())
     }
