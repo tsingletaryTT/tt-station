@@ -251,6 +251,32 @@ struct Cli {
     /// unavailable. Only meaningful for the `runpy` backend.
     #[arg(long = "no-device-reset", action = clap::ArgAction::SetTrue)]
     no_device_reset: bool,
+
+    /// File to persist issued bearer tokens (from `/pair/complete`) to, so a
+    /// paired client (e.g. the macOS app) doesn't have to re-pair every time
+    /// this agent process restarts. Tokens are bearer secrets: the file (and
+    /// its parent directory, if this agent creates it) is written mode
+    /// `0600`/`0700` on unix.
+    ///
+    /// No static default: resolved at startup by `default_token_store` to
+    /// `$HOME/.config/tt-station/agentd-tokens.json`, same pattern as
+    /// `--host-hf-cache`. Ignored entirely when `--no-token-persistence` is
+    /// set.
+    #[arg(long = "token-store")]
+    token_store: Option<String>,
+
+    /// Opt OUT of persisting bearer tokens across restarts: with this set,
+    /// `--token-store` is ignored and the agent behaves exactly as it did
+    /// before this feature existed -- issued tokens live in memory only, so
+    /// every restart forces every paired client to re-pair.
+    ///
+    /// Off by default because the whole point of `--token-store` is to
+    /// spare the common case (an agent that gets restarted -- a reboot, a
+    /// `systemctl restart`, an upgrade) from re-pairing; pass this only if
+    /// persisting bearer secrets to disk on this box is unacceptable for
+    /// some reason.
+    #[arg(long = "no-token-persistence", action = clap::ArgAction::SetTrue)]
+    no_token_persistence: bool,
 }
 
 /// `docker` fallback-backend default serving image, used only when
@@ -294,6 +320,15 @@ fn default_tt_inference_repo() -> String {
 fn default_host_hf_cache() -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     format!("{home}/.cache/huggingface")
+}
+
+/// Resolve the default bearer-token store path used when `--token-store`
+/// isn't given: `$HOME/.config/tt-station/agentd-tokens.json`, following
+/// the same "resolve a real path at startup rather than hardcoding one"
+/// pattern as `default_host_hf_cache`/`default_tt_inference_repo` above.
+fn default_token_store() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    format!("{home}/.config/tt-station/agentd-tokens.json")
 }
 
 #[tokio::main]
@@ -386,7 +421,22 @@ async fn main() -> Result<()> {
     let backend = make_backend(&cli.backend.to_string(), docker_config, runpy_config)
         .context("failed to construct serving backend")?;
 
-    let state = AppState::new(cli.name.clone(), cli.chips.clone(), Arc::from(backend));
+    // Persist issued bearer tokens across restarts by default (see
+    // `--token-store`'s doc comment) -- `--no-token-persistence` opts back
+    // out to the pre-persistence in-memory-only behavior.
+    let backend: Arc<dyn tt_station_agentd::serving::ServingBackend> = Arc::from(backend);
+    let state = if cli.no_token_persistence {
+        AppState::new(cli.name.clone(), cli.chips.clone(), backend)
+    } else {
+        let token_store = cli.token_store.clone().unwrap_or_else(default_token_store);
+        println!("tt-station-agentd: persisting bearer tokens to {token_store}");
+        AppState::new_persisting(
+            cli.name.clone(),
+            cli.chips.clone(),
+            backend,
+            std::path::PathBuf::from(token_store),
+        )
+    };
 
     // Bind the control-plane socket FIRST, then advertise on the LAN, so
     // discovery never races ahead of the control-plane API actually being
