@@ -8,7 +8,8 @@
 //! hugepages, cache binds, and auth -- all the things `DockerBackend` has to
 //! approximate by hand.
 //!
-//! ## Defer to `run.py`, don't second-guess it
+//! ## Defer to `run.py`, don't second-guess it -- except where it's proven
+//! ## wrong on THIS box
 //!
 //! `run.py` was verified (on real hardware) to auto-resolve everything but
 //! the model itself:
@@ -22,13 +23,37 @@
 //!     the correct image from the model config itself (the flag name says
 //!     it all: it's an override, not a requirement).
 //!
-//! So `RunPyConfig`'s device/image/impl/engine/device-id fields are all
-//! `Option<String>`, and `start` only appends the corresponding `run.py`
-//! flag when a caller has explicitly set one -- the DEFAULT invocation
-//! carries none of them, letting `run.py` do exactly the auto-resolution it
-//! was built to do. Hardcoding a guessed device string or image tag here
-//! would just be a worse, staler copy of logic `run.py` already gets right
-//! from `model_spec.json` plus real hardware detection.
+//! In practice, one of those four auto-resolutions was ALSO verified (on
+//! this box, today) to not actually work:
+//!   - `run.py`'s own `--tt-device` auto-detect FAILS here with `Unable to
+//!     map tt-smi board counts ... {'p300c': 4}` -- it doesn't know this
+//!     board combination.
+//!
+//! So this backend fills that gap itself, via `resolve_tt_device` (parses
+//! `tt-smi -s` and maps known board combinations); this is default-ON,
+//! since it's a safe, purely-additive fix for a confirmed `run.py` bug.
+//! `--impl`/`--engine` genuinely have no such problem and are left entirely
+//! to `run.py`/`model_spec.json`.
+//!
+//! `resolve_image` (picks the newest locally-present RELEASE image from
+//! `docker images`) exists for the OTHER gap -- `run.py`'s default image
+//! tag (from `model_spec.json`) isn't always pulled/on GHCR on a given box
+//! -- but is DELIBERATELY opt-in (`RunPyConfig::auto_image`, default
+//! `false`), NOT default-on like `resolve_tt_device`. Verified on real
+//! hardware: auto-picking the newest local image chose a tag whose
+//! container server rejects `--override-tt-config`, a flag this repo's
+//! `run.py` always passes -- image<->`run.py` compatibility is a curated
+//! matrix, and "newest" is not a safe stand-in for that curation. See
+//! `resolve_image`'s doc comment for the full rationale.
+//!
+//! `RunPyConfig`'s device/image/impl/engine/device-id fields are all
+//! `Option<String>`; `start` computes the RESOLVED device/image once (an
+//! explicit `Some(..)` always wins over auto-resolution -- see each
+//! `resolve_*` method) and appends the corresponding `run.py` flag only
+//! when that resolution produced a value. A known box (this one) therefore
+//! needs zero `--tt-device` configuration (auto-detected) but DOES need
+//! either `--serving-image` pinned or `--auto-image` opted into, since the
+//! image auto-pick is no longer on by default.
 //!
 //! Like `DockerBackend`, process execution and the health probe are routed
 //! through `CommandRunner` (defined in `serving::docker`, reused here rather
@@ -59,6 +84,15 @@ const DEFAULT_HEALTH_POLL_ATTEMPTS: u32 = 1200;
 /// Delay between health-poll attempts. See `DEFAULT_HEALTH_POLL_ATTEMPTS`.
 /// 2s keeps the probe rate gentle over a multi-minute bring-up.
 const DEFAULT_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The repository name (no registry host, no tag) of the RELEASE serving
+/// image `resolve_image` looks for -- as opposed to the `-dev-` variant
+/// (`vllm-tt-metal-src-dev-ubuntu-22.04-amd64`), which is a development
+/// build this codebase never wants to auto-pick for serving. Matched via
+/// `str::ends_with` against each `docker images` repository column, since
+/// the full repo also carries a registry/org prefix (e.g.
+/// `ghcr.io/tenstorrent/tt-inference-server/`) that varies by mirror.
+const RELEASE_IMAGE_REPO_SUFFIX: &str = "vllm-tt-metal-src-release-ubuntu-22.04-amd64";
 
 /// Everything `RunPyBackend` needs to build the real `run.py` invocation
 /// documented in `docs/reference/tt-inference-server-docker.md`. Grouped
@@ -104,15 +138,27 @@ pub struct RunPyConfig {
     pub host_hf_cache: Option<String>,
     /// `--tt-device` value, e.g. `p300x2` (this box), `p300` (single card),
     /// `p150x4` (the OTHER Blackhole QuietBox variant). `None` (the
-    /// default) lets `run.py` auto-detect "the largest supported device
-    /// available on the host" itself -- see the module doc. `Some(..)`
-    /// OVERRIDES that auto-detection.
+    /// default) means "auto-resolve" -- see `resolve_tt_device`, which
+    /// tries `run.py`'s own hardware auto-detection first and, if that's
+    /// known to fail (as it does on this box), falls back to parsing
+    /// `tt-smi -s` itself. `Some(..)` is an explicit OVERRIDE that skips
+    /// auto-resolution entirely.
     pub tt_device: Option<String>,
     /// `--override-docker-image`: the image `run.py` runs the resolved
-    /// model in. `None` (the default) lets `run.py` pick the correct image
-    /// from the model's own `model_spec.json` entry -- the flag is an
-    /// override, not a requirement. `Some(..)` forces a specific image.
+    /// model in. `None` (the default) means "let `run.py`/`auto_image`
+    /// decide" -- see `resolve_image`. `Some(..)` is an explicit OVERRIDE
+    /// that skips auto-resolution entirely (and skips consulting
+    /// `auto_image` too).
     pub image: Option<String>,
+    /// Opt-in switch for the newest-local-release auto-pick `resolve_image`
+    /// performs when `image` is `None`. Defaults to `false` -- see this
+    /// field's extensive rationale in `resolve_image`'s doc comment: image
+    /// vs. `run.py` compatibility is a curated matrix, not something
+    /// "newest locally-present" can safely stand in for. When `false` (the
+    /// default) and `image` is `None`, `resolve_image` returns `None`
+    /// outright without even running `docker images` -- `run.py` then uses
+    /// its own `model_spec.json` default image tag.
+    pub auto_image: bool,
     /// `--impl`, e.g. `tt-transformers`. `None` (the default) lets `run.py`
     /// fall back to the model spec's own implementation choice.
     pub impl_name: Option<String>,
@@ -158,8 +204,13 @@ impl Default for RunPyConfig {
     ///
     /// Every device/image/impl/engine/device-id field defaults to `None` --
     /// deliberately, since that's also what a REAL default deployment wants
-    /// (see the module doc): letting `run.py` auto-resolve them all rather
-    /// than this codebase guessing on its behalf.
+    /// (see the module doc): `impl`/`engine`/`device-id` are left entirely
+    /// to `run.py`, `tt_device` is auto-RESOLVED by this backend itself
+    /// (`resolve_tt_device`), and `image` is left to `run.py`'s own
+    /// `model_spec.json` default UNLESS `auto_image` is explicitly opted
+    /// into (see `resolve_image` and `auto_image`'s own doc comments) --
+    /// this codebase does not hardcode a guessed value for any of them up
+    /// front.
     fn default() -> Self {
         RunPyConfig {
             repo_dir: "tt-inference-server".to_string(),
@@ -177,6 +228,7 @@ impl Default for RunPyConfig {
             host_hf_cache: Some("~/.cache/huggingface".to_string()),
             tt_device: None,
             image: None,
+            auto_image: false,
             impl_name: None,
             engine: None,
             device_id: None,
@@ -266,6 +318,191 @@ impl RunPyBackend {
 
         Ok(())
     }
+
+    /// Resolve the `--tt-device` value: `config.tt_device` if the caller
+    /// explicitly set one (an explicit override always wins, and skips
+    /// shelling out to `tt-smi` entirely), otherwise auto-detect it by
+    /// parsing `tt-smi -s`'s JSON.
+    ///
+    /// This exists because `run.py`'s OWN `--tt-device` auto-detection is
+    /// verified (on real hardware) to fail on this box with `Unable to map
+    /// tt-smi board counts ... {'p300c': 4}` -- it doesn't know this board
+    /// combination. Rather than leave the operator to pass `--tt-device`
+    /// by hand every time, this fills the gap: run `tt-smi -s`, collect
+    /// `device_info[].board_info.board_type` for every board, and map
+    /// known (board-type, count) combinations to a `--tt-device` string.
+    ///
+    /// The map below is DELIBERATELY small and covers only what's needed
+    /// to unblock boards where `run.py`'s own detection is known to be
+    /// broken -- it is NOT trying to reimplement `run.py`'s full device
+    /// catalog. Anything it doesn't recognize (a board type it's never
+    /// seen, a mixed fleet, an unparseable `tt-smi` response, or a
+    /// `tt-smi` invocation that fails outright) resolves to `None`, which
+    /// means `start` omits `--tt-device` and lets `run.py` make its own
+    /// attempt (and fail loudly with its own error) rather than this code
+    /// inventing a value it has no confirmed mapping for.
+    fn resolve_tt_device(&self) -> Option<String> {
+        if let Some(device) = &self.config.tt_device {
+            return Some(device.clone());
+        }
+
+        let output = self.runner.run(&["tt-smi", "-s"]).ok()?;
+        let value: serde_json::Value = serde_json::from_str(&output).ok()?;
+
+        // Verified `tt-smi -s` schema: top-level `device_info` is a list,
+        // one entry per board, each with a `board_info.board_type` string
+        // (e.g. `"p300c"`). Lower-cased for a case-insensitive match, per
+        // the board-combination map below.
+        let board_types: Vec<String> = value
+            .get("device_info")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|device| {
+                device
+                    .get("board_info")?
+                    .get("board_type")?
+                    .as_str()
+                    .map(str::to_lowercase)
+            })
+            .collect();
+
+        let count = board_types.len();
+        let all_same_type = board_types.windows(2).all(|pair| pair[0] == pair[1]);
+        let board_type = if count > 0 && all_same_type {
+            board_types[0].as_str()
+        } else {
+            // Empty `device_info`, or a mixed fleet -- neither is a
+            // combination this map has a confirmed answer for.
+            ""
+        };
+
+        // Board-type/count -> `--tt-device` map. Covers only what run.py's
+        // own auto-detect gets wrong (see this method's doc comment above),
+        // not a general-purpose device catalog.
+        let resolved = match (board_type, count) {
+            ("p300c", 4) => Some("p300x2"),
+            ("p300c", 2) => Some("p300"),
+            ("p150" | "p150c", 4) => Some("p150x4"),
+            ("n300", 4) => Some("n300x4"),
+            ("n300", 1) => Some("n300"),
+            _ => None,
+        };
+
+        match resolved {
+            Some(device) => eprintln!("auto-detected tt-device: {device} ({count}x {board_type})"),
+            None => eprintln!("could not auto-detect tt-device; letting run.py try"),
+        }
+
+        resolved.map(str::to_string)
+    }
+
+    /// Resolve the `--override-docker-image` value: `config.image` if the
+    /// caller explicitly set one (an explicit override always wins, and
+    /// skips shelling out to `docker` entirely); else, ONLY when
+    /// `config.auto_image` is opted into, auto-pick the newest
+    /// locally-present RELEASE serving image via `docker images`; else
+    /// `None` (no `docker images` call at all).
+    ///
+    /// ## Why the auto-pick is opt-in, NOT the default
+    ///
+    /// This used to unconditionally auto-pick the newest local release
+    /// image whenever `config.image` was unset. That was verified (on real
+    /// hardware) to be UNSAFE: on one box, the newest locally-present image
+    /// (`0.17.0-...`) was auto-picked over an older one, but that image's
+    /// container server REJECTS a flag this repo's `run.py` unconditionally
+    /// passes (`--override-tt-config`), so serving failed outright.
+    /// Image<->`run.py` compatibility is a CURATED matrix, not something
+    /// "whichever tag happens to sort newest by `docker images`
+    /// `CreatedAt`" can stand in for -- a newer image is not guaranteed
+    /// compatible with an older (or differently-patched) `run.py` checkout,
+    /// and vice versa. So this now defaults to doing nothing: an unset
+    /// `--serving-image` yields no `--override-docker-image` at all, and
+    /// `run.py` falls back to its own `model_spec.json` default image
+    /// (which, per the module doc, isn't always pulled locally either --
+    /// the operator is expected to pin `--serving-image` on boxes where
+    /// that default isn't available, rather than this code silently
+    /// picking a possibly-incompatible substitute).
+    ///
+    /// The newest-local-release scan logic itself is UNCHANGED and only
+    /// runs when `config.auto_image` is `true`: it queries `docker images
+    /// --format '{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}'`, keeps only
+    /// lines whose repository ends in `RELEASE_IMAGE_REPO_SUFFIX`
+    /// (excluding the `-dev-` variant and any untagged `<none>` image), and
+    /// returns the newest one by `CreatedAt`.
+    ///
+    /// `CreatedAt` looks like `2026-06-25 14:22:23 -0700 PDT` -- comparing
+    /// the full string lexically does NOT sort correctly across timezone
+    /// suffixes, so only the leading `YYYY-MM-DD HH:MM:SS` (the first 19
+    /// bytes, which IS a fixed-width, lexically-sortable format) is used
+    /// for ordering. Ties -- including two lines with an unparseable/short
+    /// `CreatedAt` -- keep whichever was seen FIRST rather than replacing
+    /// it, and any line that doesn't parse as `repo:tag<TAB>created` is
+    /// simply skipped rather than aborting the whole scan. If nothing
+    /// matches, this returns `None` and `start` omits
+    /// `--override-docker-image`, letting `run.py` make its own (possibly
+    /// failing) attempt rather than this code inventing an image.
+    fn resolve_image(&self) -> Option<String> {
+        if let Some(image) = &self.config.image {
+            return Some(image.clone());
+        }
+
+        if !self.config.auto_image {
+            return None;
+        }
+
+        let output = self
+            .runner
+            .run(&[
+                "docker",
+                "images",
+                "--format",
+                "{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}",
+            ])
+            .ok()?;
+
+        // Tracks the best candidate seen so far as (created-prefix,
+        // "repo:tag"); replaced only on a STRICTLY newer timestamp so ties
+        // keep the first-seen line.
+        let mut best: Option<(&str, &str)> = None;
+
+        for line in output.lines() {
+            let Some((image_ref, created)) = line.split_once('\t') else {
+                continue; // malformed line -- skip rather than abort the scan
+            };
+            // The tag is whatever follows the LAST `:` (a registry host
+            // like `ghcr.io` never itself contains one after the repo
+            // path, so `rsplit_once` is unambiguous here).
+            let Some((repo, tag)) = image_ref.rsplit_once(':') else {
+                continue;
+            };
+            if tag == "<none>" || !repo.ends_with(RELEASE_IMAGE_REPO_SUFFIX) {
+                continue;
+            }
+            // `created`'s leading 19 bytes (`YYYY-MM-DD HH:MM:SS`) are
+            // fixed-width and lexically sortable; anything shorter than
+            // that isn't a `CreatedAt` this can order at all.
+            let Some(created_prefix) = created.get(..19) else {
+                continue;
+            };
+
+            let is_newer = best.is_none_or(|(best_created, _)| created_prefix > best_created);
+            if is_newer {
+                best = Some((created_prefix, image_ref));
+            }
+        }
+
+        match best {
+            Some((_, image_ref)) => {
+                eprintln!("auto-picked local release image: {image_ref}");
+                Some(image_ref.to_string())
+            }
+            None => {
+                eprintln!("could not auto-pick a local release image; letting run.py try");
+                None
+            }
+        }
+    }
 }
 
 impl ServingBackend for RunPyBackend {
@@ -316,6 +553,16 @@ impl ServingBackend for RunPyBackend {
         // fallback, never actually exercised.
         let run_model = model.rsplit('/').next().unwrap_or(model);
 
+        // Resolve the two values `run.py`'s own auto-detection is verified
+        // to get wrong on this box -- see `resolve_tt_device`/
+        // `resolve_image`'s doc comments. Computed ONCE here (after the
+        // stale-container stop and board reset above, so a board reset
+        // doesn't race a `tt-smi -s` probe) and reused below when building
+        // argv; an explicit `config.tt_device`/`config.image` always wins
+        // over auto-resolution.
+        let device = self.resolve_tt_device();
+        let image = self.resolve_image();
+
         // Built as owned `String`s (several pieces are computed at
         // runtime) then borrowed as `&str` for `CommandRunner::run_in_dir`,
         // which takes `&[&str]` -- argv-style, no shell involved, so
@@ -324,11 +571,14 @@ impl ServingBackend for RunPyBackend {
         // This is the MINIMAL invocation: `--model` (required), `--workflow
         // server --docker-server` (how this codebase always launches
         // serving), and `--service-port`. Everything else below is an
-        // OPTIONAL override appended only when the corresponding
-        // `RunPyConfig` field is `Some`/enabled -- see the module doc's
-        // "Defer to `run.py`, don't second-guess it" section for why the
-        // default omits `--tt-device`/`--override-docker-image`/`--impl`/
-        // `--engine` entirely rather than guessing values for them.
+        // OPTIONAL flag appended only when a value is available:
+        // `--tt-device`/`--override-docker-image` from the RESOLVED
+        // `device`/`image` above (explicit override or auto-resolved --
+        // either way, a known box like this one ends up needing zero
+        // model-serving flags), and `--impl`/`--engine` only when the
+        // caller explicitly configured them -- see the module doc's
+        // "Defer to `run.py`, don't second-guess it" section for why those
+        // two are left entirely to `run.py`/`model_spec.json`.
         let mut args: Vec<String> = vec![
             "python3".to_string(),
             "run.py".to_string(),
@@ -348,11 +598,11 @@ impl ServingBackend for RunPyBackend {
             args.push("--host-hf-cache".to_string());
             args.push(cache.clone());
         }
-        if let Some(device) = &self.config.tt_device {
+        if let Some(device) = &device {
             args.push("--tt-device".to_string());
             args.push(device.clone());
         }
-        if let Some(image) = &self.config.image {
+        if let Some(image) = &image {
             args.push("--override-docker-image".to_string());
             args.push(image.clone());
         }
