@@ -3,9 +3,15 @@
 //! `aggregate()` to run a set of providers and merge their results.
 
 pub mod manual;
+pub mod mdns;
 
 use crate::model::BoxRecord;
 use std::time::Duration;
+
+/// mDNS service type all Tenstorrent boxes (real and mocked) advertise
+/// under. Owned here so the advertiser (`mock-box`) and the browser
+/// (`MdnsProvider`) can't drift apart on the string.
+pub const SERVICE_TYPE: &str = "_tenstorrent._tcp.local.";
 
 /// A source of `BoxRecord`s (e.g. a manual host list, mDNS browsing, ...).
 ///
