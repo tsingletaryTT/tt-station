@@ -1,2 +1,4 @@
 target/
 .superpowers/
+macos/TTStation/AppShell/TTStation.xcodeproj/
+macos/TTStation/.build/

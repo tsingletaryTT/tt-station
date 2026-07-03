@@ -1,0 +1,25 @@
+name: TTStation
+options:
+  bundleIdPrefix: com.tenstorrent
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  TTStationKit:
+    path: ..
+targets:
+  TTStation:
+    type: application
+    platform: macOS
+    sources:
+      - Sources
+    dependencies:
+      - package: TTStationKit
+        product: TTStationKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tenstorrent.ttstation
+        SWIFT_VERSION: "5.0"
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
