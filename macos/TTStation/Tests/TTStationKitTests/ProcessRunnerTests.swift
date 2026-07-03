@@ -21,3 +21,25 @@ final class ProcessRunnerTests: XCTestCase {
         }
     }
 }
+
+extension ProcessRunnerTests {
+    // Uses /bin/echo as a deterministic stand-in for `tt` to prove spawn/capture.
+    func testRealRunnerCapturesStdoutAndExit() async throws {
+        let locator = TTBinaryLocator(override: "/bin/echo", candidates: []) { _ in true }
+        let runner = RealProcessRunner(locator: locator)
+        let result = try await runner.run(["hello"])
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(String(data: result.stdout, encoding: .utf8), "hello\n")
+    }
+
+    func testRealRunnerThrowsWhenBinaryMissing() async {
+        let locator = TTBinaryLocator(override: nil, candidates: ["/nope/tt"]) { _ in false }
+        let runner = RealProcessRunner(locator: locator)
+        do {
+            _ = try await runner.run(["--json", "discover"])
+            XCTFail("expected throw")
+        } catch {
+            XCTAssertEqual(error as? TTError, .binaryNotFound(triedPaths: ["/nope/tt"]))
+        }
+    }
+}
