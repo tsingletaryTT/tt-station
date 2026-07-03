@@ -38,6 +38,19 @@ fn config(host: &str, service_port: u16) -> RunPyConfig {
     }
 }
 
+/// Find the `python3 run.py ...` invocation among `commands` -- since
+/// `RunPyConfig::reset_before_serve` defaults to `true`, `start` now issues
+/// a `tt-smi -r` board reset (see `reset_before_serve_*` tests below)
+/// BEFORE the run.py command, so tests that only care about the run.py
+/// argv itself must look it up by content rather than assuming it's
+/// `commands[0]`.
+fn find_runpy_cmd(commands: &[Vec<String>]) -> &Vec<String> {
+    commands
+        .iter()
+        .find(|cmd| cmd.first().map(String::as_str) == Some("python3"))
+        .expect("expected a python3 run.py invocation among the recorded commands")
+}
+
 /// The DEFAULT `start` invocation -- no device/image/impl/engine override
 /// configured -- must be the MINIMAL `run.py` command: `--model`,
 /// `--workflow server`, `--docker-server`, `--service-port`, plus
@@ -65,8 +78,12 @@ fn runpy_start_default_omits_device_image_impl_engine() {
     assert!(!endpoint.requires_key, "no_auth defaults to true");
 
     let commands = runner.commands();
-    assert_eq!(commands.len(), 1, "expected exactly one run.py invocation");
-    let cmd = &commands[0];
+    assert_eq!(
+        commands.len(),
+        2,
+        "expected the default board-reset command plus the run.py invocation: {commands:?}"
+    );
+    let cmd = find_runpy_cmd(&commands);
 
     assert_eq!(cmd[0], "python3", "argv[0] must be python3: {cmd:?}");
     assert_eq!(cmd[1], "run.py", "argv[1] must be run.py: {cmd:?}");
@@ -138,7 +155,7 @@ fn runpy_start_includes_tt_device_when_configured() {
     backend.start("llama3").expect("start should succeed");
 
     let commands = runner.commands();
-    let cmd = &commands[0];
+    let cmd = find_runpy_cmd(&commands);
     assert!(
         cmd.windows(2)
             .any(|w| w[0] == "--tt-device" && w[1] == "p300x2"),
@@ -157,7 +174,7 @@ fn runpy_start_includes_override_docker_image_when_configured() {
     backend.start("llama3").expect("start should succeed");
 
     let commands = runner.commands();
-    let cmd = &commands[0];
+    let cmd = find_runpy_cmd(&commands);
     assert!(
         cmd.windows(2)
             .any(|w| w[0] == "--override-docker-image" && w[1] == "some/image:tag"),
@@ -176,7 +193,7 @@ fn runpy_start_includes_impl_when_configured() {
     backend.start("llama3").expect("start should succeed");
 
     let commands = runner.commands();
-    let cmd = &commands[0];
+    let cmd = find_runpy_cmd(&commands);
     assert!(
         cmd.windows(2)
             .any(|w| w[0] == "--impl" && w[1] == "tt-transformers"),
@@ -195,7 +212,7 @@ fn runpy_start_includes_engine_when_configured() {
     backend.start("llama3").expect("start should succeed");
 
     let commands = runner.commands();
-    let cmd = &commands[0];
+    let cmd = find_runpy_cmd(&commands);
     assert!(
         cmd.windows(2).any(|w| w[0] == "--engine" && w[1] == "vllm"),
         "argv should carry --engine when configured: {cmd:?}"
@@ -218,7 +235,7 @@ fn runpy_start_omits_no_auth_and_requires_key_when_auth_required() {
     );
 
     let commands = runner.commands();
-    let cmd = &commands[0];
+    let cmd = find_runpy_cmd(&commands);
     assert!(
         !cmd.iter().any(|a| a == "--no-auth"),
         "argv should not carry --no-auth when auth is required: {cmd:?}"
@@ -236,7 +253,7 @@ fn runpy_start_omits_host_hf_cache_when_not_configured() {
     backend.start("llama3").expect("start should succeed");
 
     let commands = runner.commands();
-    let cmd = &commands[0];
+    let cmd = find_runpy_cmd(&commands);
     assert!(
         !cmd.iter().any(|a| a == "--host-hf-cache"),
         "argv should not carry --host-hf-cache when unconfigured: {cmd:?}"
@@ -254,7 +271,7 @@ fn runpy_start_includes_device_id_when_configured() {
     backend.start("llama3").expect("start should succeed");
 
     let commands = runner.commands();
-    let cmd = &commands[0];
+    let cmd = find_runpy_cmd(&commands);
     assert!(
         cmd.windows(2)
             .any(|w| w[0] == "--device-id" && w[1] == "0,1"),
@@ -271,10 +288,99 @@ fn runpy_start_omits_device_id_when_not_configured() {
     backend.start("llama3").expect("start should succeed");
 
     let commands = runner.commands();
-    let cmd = &commands[0];
+    let cmd = find_runpy_cmd(&commands);
     assert!(
         !cmd.iter().any(|a| a == "--device-id"),
         "argv should not carry --device-id when unconfigured: {cmd:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// `reset_before_serve`: `tt-smi -r` clears wedged mesh ethernet cores left
+// by a previously-stopped/crashed model BEFORE launching a new one. See
+// the module doc in `src/serving/runpy.rs`.
+// ---------------------------------------------------------------------
+
+/// Default config (`reset_before_serve: true`) must issue the reset
+/// command as the FIRST recorded `run` call, strictly before the `python3
+/// run.py ...` invocation -- ordering matters here, not just presence,
+/// since a reset that ran (say) after run.py would be useless.
+#[test]
+fn runpy_start_resets_board_before_launching_runpy_by_default() {
+    let runner = FakeRunner::new(0);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    let reset_index = commands
+        .iter()
+        .position(|cmd| cmd.first().map(String::as_str) == Some("tt-smi"))
+        .expect("expected a tt-smi reset command among the recorded commands");
+    let runpy_index = commands
+        .iter()
+        .position(|cmd| cmd.first().map(String::as_str) == Some("python3"))
+        .expect("expected a python3 run.py invocation among the recorded commands");
+
+    let reset_cmd = &commands[reset_index];
+    assert_eq!(
+        reset_cmd,
+        &vec!["tt-smi".to_string(), "-r".to_string()],
+        "default reset command should be exactly `tt-smi -r`: {reset_cmd:?}"
+    );
+    assert!(
+        reset_index < runpy_index,
+        "reset ({reset_index}) must run before run.py ({runpy_index}): {commands:?}"
+    );
+}
+
+/// `reset_before_serve = false` must skip the reset entirely -- the first
+/// (and only pre-health-poll) command is the run.py invocation itself.
+#[test]
+fn runpy_start_skips_reset_when_disabled() {
+    let runner = FakeRunner::new(0);
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.reset_before_serve = false;
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("tt-smi")),
+        "no tt-smi/reset command should be issued when reset_before_serve is false: {commands:?}"
+    );
+    assert_eq!(
+        commands[0][0], "python3",
+        "first command should be the run.py invocation when reset is disabled: {commands:?}"
+    );
+}
+
+/// A failing reset must fail `start` outright and must NEVER launch
+/// run.py -- a wedged mesh would almost certainly make the serve attempt
+/// fail anyway, so surface the reset failure instead of masking it.
+#[test]
+fn runpy_start_fails_and_skips_runpy_when_reset_fails() {
+    let runner = FakeRunner::new(0);
+    runner.fail_run("tt-smi -r", "board reset timed out");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    let err = backend
+        .start("llama3")
+        .expect_err("start should fail when the board reset fails");
+    assert!(
+        err.to_string().contains("tt-smi -r"),
+        "error should mention the failing reset command: {err}"
+    );
+
+    let commands = runner.commands();
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("python3")),
+        "run.py must never be launched after a failed reset: {commands:?}"
     );
 }
 

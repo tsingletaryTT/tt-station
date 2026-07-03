@@ -128,6 +128,25 @@ pub struct RunPyConfig {
     /// default) resolves to `<repo_dir>/model_spec.json` at call time --
     /// see `list_models`'s doc comment.
     pub model_spec_path: Option<String>,
+    /// When `true` (the default), `start` runs `reset_cmd` (`tt-smi -r` by
+    /// default) BEFORE launching `run.py`.
+    ///
+    /// Validated on real hardware: stopping a serving container leaves the
+    /// p300x2 mesh's ethernet cores wedged, and the NEXT launch fails with
+    /// `TT_THROW: ... Timed out while waiting for active ethernet core ...
+    /// Try resetting the board`. Resetting before every serve attempt
+    /// (rather than only on `stop`) is the robust choice: it also covers
+    /// models that were stopped externally (e.g. `docker stop` by hand) or
+    /// that crashed without this backend's `stop` ever running.
+    ///
+    /// Set to `false` on boards where the reset is unwanted or `tt-smi` is
+    /// unavailable -- see `main.rs`'s `--no-device-reset` flag.
+    pub reset_before_serve: bool,
+    /// Argv for the pre-serve board reset (see `reset_before_serve`),
+    /// e.g. `["tt-smi", "-r"]`. Kept configurable (rather than a hardcoded
+    /// `tt-smi -r` string) so tests can assert on it precisely and so a
+    /// board that needs a different reset invocation can supply one.
+    pub reset_cmd: Vec<String>,
 }
 
 impl Default for RunPyConfig {
@@ -162,6 +181,8 @@ impl Default for RunPyConfig {
             engine: None,
             device_id: None,
             model_spec_path: None,
+            reset_before_serve: true,
+            reset_cmd: vec!["tt-smi".to_string(), "-r".to_string()],
         }
     }
 }
@@ -222,6 +243,26 @@ impl RunPyBackend {
 
 impl ServingBackend for RunPyBackend {
     fn start(&self, model: &str) -> Result<Endpoint> {
+        // Reset the board BEFORE touching run.py at all -- validated on
+        // real hardware: stopping a serving container leaves the p300x2
+        // mesh's ethernet cores wedged, and the NEXT launch fails with
+        // `TT_THROW: ... Timed out while waiting for active ethernet core
+        // ... Try resetting the board`. Doing this here (rather than only
+        // in `stop`) also covers models that were stopped externally or
+        // crashed without `stop` ever running -- see `RunPyConfig::
+        // reset_before_serve`'s doc comment. A failed reset means the
+        // upcoming serve attempt will almost certainly fail too (the mesh
+        // is still wedged), so surface the error immediately rather than
+        // pressing on to a doomed `run.py` invocation.
+        if self.config.reset_before_serve {
+            let reset_cmd_str = self.config.reset_cmd.join(" ");
+            eprintln!("resetting board before serving: {reset_cmd_str}");
+            let reset_refs: Vec<&str> = self.config.reset_cmd.iter().map(String::as_str).collect();
+            self.runner
+                .run(&reset_refs)
+                .with_context(|| format!("board reset ({reset_cmd_str}) failed"))?;
+        }
+
         // Built as owned `String`s (several pieces are computed at
         // runtime) then borrowed as `&str` for `CommandRunner::run_in_dir`,
         // which takes `&[&str]` -- argv-style, no shell involved, so

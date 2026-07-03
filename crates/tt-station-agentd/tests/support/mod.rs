@@ -40,6 +40,14 @@ pub struct FakeRunner {
     /// first match wins. Calls that match nothing get `""`, same as before
     /// this field existed.
     run_outputs: Arc<Mutex<Vec<(String, String)>>>,
+    /// Canned failures for `run` calls whose argv (space-joined) CONTAINS a
+    /// registered substring -- e.g. `"tt-smi -r"` -- so tests can exercise
+    /// what happens when a specific command (like the pre-serve board
+    /// reset) fails, without making every `run` call fail. Checked in
+    /// insertion order, same as `run_outputs`; a match short-circuits
+    /// `run` with `Err` before it ever records success or consults
+    /// `run_outputs`.
+    run_failures: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl FakeRunner {
@@ -50,6 +58,7 @@ impl FakeRunner {
             health_calls_before_ok,
             health_calls_seen: Arc::new(Mutex::new(0)),
             run_outputs: Arc::new(Mutex::new(Vec::new())),
+            run_failures: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -72,6 +81,18 @@ impl FakeRunner {
             .expect("run_outputs mutex poisoned")
             .push((matcher.to_string(), output.to_string()));
     }
+
+    /// Make any future `run` call whose space-joined argv contains `matcher`
+    /// return `Err` with `message` instead of succeeding -- e.g.
+    /// `fail_run("tt-smi -r", "board reset timed out")` to exercise a
+    /// failing pre-serve board reset without a real `tt-smi` binary.
+    #[allow(dead_code)]
+    pub fn fail_run(&self, matcher: &str, message: &str) {
+        self.run_failures
+            .lock()
+            .expect("run_failures mutex poisoned")
+            .push((matcher.to_string(), message.to_string()));
+    }
 }
 
 impl CommandRunner for FakeRunner {
@@ -82,6 +103,17 @@ impl CommandRunner for FakeRunner {
             .push(args.iter().map(|s| s.to_string()).collect());
 
         let joined = args.join(" ");
+
+        if let Some((_, message)) = self
+            .run_failures
+            .lock()
+            .expect("run_failures mutex poisoned")
+            .iter()
+            .find(|(matcher, _)| joined.contains(matcher.as_str()))
+        {
+            return Err(anyhow::anyhow!(message.clone()));
+        }
+
         let output = self
             .run_outputs
             .lock()
