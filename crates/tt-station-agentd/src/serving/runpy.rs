@@ -758,15 +758,29 @@ impl ServingBackend for RunPyBackend {
     /// `model_spec.json`'s shape (verified on real hardware):
     /// ```json
     /// { "release_version": "0.12.0",
-    ///   "model_specs": { "<model-id>": { "<DEVICE_MESH>": {...}, ... }, ... } }
+    ///   "model_specs": {
+    ///     "<model-id>": { "<DEVICE_MESH>": { "<engine>": {...}, ... }, ... },
+    ///     ... } }
     /// ```
     /// The model id is the top-level key under `model_specs`; the supported
     /// device meshes are that entry's own keys (e.g. `GALAXY`, `T3K`,
-    /// `P300X2`). Parsed via `serde_json::Value` rather than a strict typed
-    /// struct so an entry shaped unexpectedly (or a non-object value) is
-    /// just skipped rather than failing the whole enumeration -- this is a
-    /// read-only "what's available" listing, not validation of the spec
-    /// file itself (that's `run.py`'s job).
+    /// `P300X2`); and EACH mesh's own keys are engine names -- `"vLLM"` (an
+    /// LLM this backend serves via the `run.py` path in `start`) or
+    /// `"media"` (a different tt-media server this backend does NOT drive).
+    ///
+    /// This backend can only serve `"vLLM"` models, so a model is INCLUDED
+    /// only if at least one of its meshes has a `"vLLM"` engine key
+    /// (case-insensitive), and its reported `devices` are ONLY the meshes
+    /// that have one (media-only meshes are dropped). A model with no vLLM
+    /// mesh at all (e.g. an image/video/embedding model that's `"media"`
+    /// everywhere) is omitted entirely -- otherwise `tt models` would list
+    /// models this box can't actually run.
+    ///
+    /// Parsed via `serde_json::Value` rather than a strict typed struct so an
+    /// entry shaped unexpectedly (a non-object model value, or a non-object
+    /// mesh value) is just skipped rather than failing the whole enumeration
+    /// -- this is a read-only "what's available" listing, not validation of
+    /// the spec file itself (that's `run.py`'s job).
     fn list_models(&self) -> Result<ModelsResponse> {
         let path = self.model_spec_path();
         let content = std::fs::read_to_string(&path)
@@ -786,7 +800,26 @@ impl ServingBackend for RunPyBackend {
             .flatten()
             .filter_map(|(name, devices_val)| {
                 let devices_obj = devices_val.as_object()?;
-                let mut devices: Vec<String> = devices_obj.keys().cloned().collect();
+                // Keep only meshes that expose a `vLLM` engine (the engine
+                // this backend actually serves). Each mesh value is itself an
+                // object whose keys are engine names; a mesh whose value
+                // isn't an object, or that has no `vLLM` key, is dropped.
+                let mut devices: Vec<String> = devices_obj
+                    .iter()
+                    .filter(|(_, engines_val)| {
+                        engines_val.as_object().is_some_and(|engines| {
+                            engines
+                                .keys()
+                                .any(|engine| engine.eq_ignore_ascii_case("vLLM"))
+                        })
+                    })
+                    .map(|(mesh, _)| mesh.clone())
+                    .collect();
+                // No vLLM-servable mesh at all -> this backend can't run the
+                // model (e.g. a media/embedding-only model), so omit it.
+                if devices.is_empty() {
+                    return None;
+                }
                 devices.sort();
                 Some(libttstation::model::ModelInfo {
                     name: name.clone(),
