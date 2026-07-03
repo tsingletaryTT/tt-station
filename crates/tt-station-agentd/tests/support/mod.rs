@@ -40,6 +40,20 @@ pub struct FakeRunner {
     /// first match wins. Calls that match nothing get `""`, same as before
     /// this field existed.
     run_outputs: Arc<Mutex<Vec<(String, String)>>>,
+    /// Canned failures for `run` calls whose argv (space-joined) CONTAINS a
+    /// registered substring -- e.g. `"tt-smi -r"` -- so tests can exercise
+    /// what happens when a specific command (like the pre-serve board
+    /// reset) fails, without making every `run` call fail. Checked in
+    /// insertion order, same as `run_outputs`; a match short-circuits
+    /// `run` with `Err` before it ever records success or consults
+    /// `run_outputs`.
+    run_failures: Arc<Mutex<Vec<(String, String)>>>,
+    /// Canned response body for `http_get` -- e.g. `RunPyBackend::start`'s
+    /// `GET /v1/models` fetch of the authoritative served model id. `None`
+    /// (the default, unset) means `http_get` reports an error, exercising
+    /// the "fall back to the original model argument" path without any
+    /// setup at all.
+    http_get_response: Arc<Mutex<Option<String>>>,
 }
 
 impl FakeRunner {
@@ -50,6 +64,8 @@ impl FakeRunner {
             health_calls_before_ok,
             health_calls_seen: Arc::new(Mutex::new(0)),
             run_outputs: Arc::new(Mutex::new(Vec::new())),
+            run_failures: Arc::new(Mutex::new(Vec::new())),
+            http_get_response: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -72,6 +88,31 @@ impl FakeRunner {
             .expect("run_outputs mutex poisoned")
             .push((matcher.to_string(), output.to_string()));
     }
+
+    /// Make any future `run` call whose space-joined argv contains `matcher`
+    /// return `Err` with `message` instead of succeeding -- e.g.
+    /// `fail_run("tt-smi -r", "board reset timed out")` to exercise a
+    /// failing pre-serve board reset without a real `tt-smi` binary.
+    #[allow(dead_code)]
+    pub fn fail_run(&self, matcher: &str, message: &str) {
+        self.run_failures
+            .lock()
+            .expect("run_failures mutex poisoned")
+            .push((matcher.to_string(), message.to_string()));
+    }
+
+    /// Set the canned body every future `http_get` call returns, regardless
+    /// of `url` -- e.g. `set_http_get(r#"{"data":[{"id":"Qwen/Qwen3-32B"}]}"#)`
+    /// to exercise `RunPyBackend::start`'s "ask the server what it's
+    /// serving" fetch of `/v1/models`. Left unset (the default), `http_get`
+    /// returns `Err`, exercising the fallback-to-original-argument path.
+    #[allow(dead_code)]
+    pub fn set_http_get(&self, body: &str) {
+        *self
+            .http_get_response
+            .lock()
+            .expect("http_get_response mutex poisoned") = Some(body.to_string());
+    }
 }
 
 impl CommandRunner for FakeRunner {
@@ -82,6 +123,17 @@ impl CommandRunner for FakeRunner {
             .push(args.iter().map(|s| s.to_string()).collect());
 
         let joined = args.join(" ");
+
+        if let Some((_, message)) = self
+            .run_failures
+            .lock()
+            .expect("run_failures mutex poisoned")
+            .iter()
+            .find(|(matcher, _)| joined.contains(matcher.as_str()))
+        {
+            return Err(anyhow::anyhow!(message.clone()));
+        }
+
         let output = self
             .run_outputs
             .lock()
@@ -100,5 +152,13 @@ impl CommandRunner for FakeRunner {
             .expect("health mutex poisoned");
         *seen += 1;
         *seen > self.health_calls_before_ok
+    }
+
+    fn http_get(&self, _url: &str) -> Result<String> {
+        self.http_get_response
+            .lock()
+            .expect("http_get_response mutex poisoned")
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("FakeRunner: no http_get response configured"))
     }
 }

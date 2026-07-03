@@ -230,6 +230,13 @@ struct Cli {
     /// duplicate `default_tt_inference_repo`'s logic.
     #[arg(long = "model-spec")]
     model_spec: Option<String>,
+
+    /// Skip the `tt-smi -r` board reset before serving. The reset clears
+    /// wedged mesh ethernet cores left by a previously-stopped model;
+    /// disable only on boards where it's unwanted or `tt-smi` is
+    /// unavailable. Only meaningful for the `runpy` backend.
+    #[arg(long = "no-device-reset", action = clap::ArgAction::SetTrue)]
+    no_device_reset: bool,
 }
 
 /// `docker` fallback-backend default serving image, used only when
@@ -346,6 +353,12 @@ async fn main() -> Result<()> {
         impl_name: cli.impl_name.clone(),
         device_id: cli.device_id.clone(),
         model_spec_path: cli.model_spec.clone(),
+        // `--no-device-reset` is an opt-OUT flag (default `false`), so the
+        // real default here is `reset_before_serve: true` -- see
+        // `RunPyConfig::reset_before_serve`'s doc comment for why resetting
+        // before every serve is the robust default.
+        reset_before_serve: !cli.no_device_reset,
+        reset_cmd: vec!["tt-smi".to_string(), "-r".to_string()],
     };
 
     let backend = make_backend(&cli.backend.to_string(), docker_config, runpy_config)

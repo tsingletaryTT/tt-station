@@ -44,16 +44,21 @@ use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 use super::docker::CommandRunner;
 use super::ServingBackend;
 
-/// How many times `start` polls the health endpoint before giving up. See
-/// `docker::DEFAULT_HEALTH_POLL_ATTEMPTS` -- kept as a separate constant
-/// (rather than shared) since `run.py`'s bring-up is a strict superset of
-/// `docker run`'s (it builds/resolves the container itself first), so the
-/// two backends' defaults are free to diverge later even though they match
-/// today. `RunPyBackend::with_health_poll` overrides both for tests.
-const DEFAULT_HEALTH_POLL_ATTEMPTS: u32 = 40;
+/// How many times `start` polls the health endpoint before giving up.
+///
+/// Sized for a REAL `run.py` bring-up, not a test: launching an LLM on
+/// hardware downloads/compiles/loads weights and can take many minutes
+/// (observed ~10 min for 8B, up to ~40 min for 70B on first run). At the
+/// `DEFAULT_HEALTH_POLL_INTERVAL` below this is a ceiling of ~40 minutes,
+/// after which `start` returns an error rather than hanging forever. This
+/// is deliberately far larger than `docker::DEFAULT_HEALTH_POLL_ATTEMPTS`
+/// (the raw `docker run` path assumes an already-built image).
+/// `RunPyBackend::with_health_poll` overrides both for tests.
+const DEFAULT_HEALTH_POLL_ATTEMPTS: u32 = 1200;
 
 /// Delay between health-poll attempts. See `DEFAULT_HEALTH_POLL_ATTEMPTS`.
-const DEFAULT_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// 2s keeps the probe rate gentle over a multi-minute bring-up.
+const DEFAULT_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Everything `RunPyBackend` needs to build the real `run.py` invocation
 /// documented in `docs/reference/tt-inference-server-docker.md`. Grouped
@@ -123,6 +128,25 @@ pub struct RunPyConfig {
     /// default) resolves to `<repo_dir>/model_spec.json` at call time --
     /// see `list_models`'s doc comment.
     pub model_spec_path: Option<String>,
+    /// When `true` (the default), `start` runs `reset_cmd` (`tt-smi -r` by
+    /// default) BEFORE launching `run.py`.
+    ///
+    /// Validated on real hardware: stopping a serving container leaves the
+    /// p300x2 mesh's ethernet cores wedged, and the NEXT launch fails with
+    /// `TT_THROW: ... Timed out while waiting for active ethernet core ...
+    /// Try resetting the board`. Resetting before every serve attempt
+    /// (rather than only on `stop`) is the robust choice: it also covers
+    /// models that were stopped externally (e.g. `docker stop` by hand) or
+    /// that crashed without this backend's `stop` ever running.
+    ///
+    /// Set to `false` on boards where the reset is unwanted or `tt-smi` is
+    /// unavailable -- see `main.rs`'s `--no-device-reset` flag.
+    pub reset_before_serve: bool,
+    /// Argv for the pre-serve board reset (see `reset_before_serve`),
+    /// e.g. `["tt-smi", "-r"]`. Kept configurable (rather than a hardcoded
+    /// `tt-smi -r` string) so tests can assert on it precisely and so a
+    /// board that needs a different reset invocation can supply one.
+    pub reset_cmd: Vec<String>,
 }
 
 impl Default for RunPyConfig {
@@ -157,6 +181,8 @@ impl Default for RunPyConfig {
             engine: None,
             device_id: None,
             model_spec_path: None,
+            reset_before_serve: true,
+            reset_cmd: vec!["tt-smi".to_string(), "-r".to_string()],
         }
     }
 }
@@ -213,10 +239,83 @@ impl RunPyBackend {
             .clone()
             .unwrap_or_else(|| format!("{}/model_spec.json", self.config.repo_dir))
     }
+
+    /// Stop whatever container is publishing `service_port`, exactly like
+    /// the operator's own `start_artgen.sh --stop`: `run.py` doesn't hand
+    /// back a predictable container name the way `DockerBackend`'s own
+    /// `--name` flag does, so this finds it by the one thing that IS
+    /// predictable -- the published port -- via `docker ps --filter
+    /// publish=<port> -q`, then `docker stop`s whatever comes back. Empty
+    /// `docker ps` output (nothing running) is treated as success: this is
+    /// idempotent, same contract as `DockerBackend::stop`.
+    ///
+    /// Shared by both `stop` (the explicit "stop serving" call) and `start`
+    /// (which calls this FIRST, before even the board reset, to clear a
+    /// stale/crashed container that would otherwise hold the chips and make
+    /// run.py's own container-start check time out on the next launch --
+    /// see `start`'s doc comment).
+    fn stop_serving_containers(&self) -> Result<()> {
+        let publish_filter = format!("publish={}", self.config.service_port);
+        let ps_output = self
+            .runner
+            .run(&["docker", "ps", "--filter", &publish_filter, "-q"])?;
+
+        for container_id in ps_output.split_whitespace() {
+            self.runner.run(&["docker", "stop", container_id])?;
+        }
+
+        Ok(())
+    }
 }
 
 impl ServingBackend for RunPyBackend {
     fn start(&self, model: &str) -> Result<Endpoint> {
+        // Stop any STALE serving container FIRST -- before even the board
+        // reset. Validated on real hardware: a leftover/crashed container
+        // that's still publishing `service_port` holds the chips, so
+        // run.py's own container-start check times out on the next launch.
+        // This is unconditional (NOT gated by `reset_before_serve`): a
+        // stale container is a problem regardless of whether the board also
+        // needs resetting, and clearing it before the reset means the
+        // reset itself isn't fighting a container that still has the mesh
+        // open.
+        self.stop_serving_containers()
+            .context("failed to stop stale serving container before launch")?;
+
+        // Reset the board next -- validated on real hardware: stopping a
+        // serving container leaves the p300x2 mesh's ethernet cores wedged,
+        // and the NEXT launch fails with `TT_THROW: ... Timed out while
+        // waiting for active ethernet core ... Try resetting the board`.
+        // Doing this here (rather than only in `stop`) also covers models
+        // that were stopped externally or crashed without `stop` ever
+        // running -- see `RunPyConfig::reset_before_serve`'s doc comment. A
+        // failed reset means the upcoming serve attempt will almost
+        // certainly fail too (the mesh is still wedged), so surface the
+        // error immediately rather than pressing on to a doomed `run.py`
+        // invocation.
+        if self.config.reset_before_serve {
+            let reset_cmd_str = self.config.reset_cmd.join(" ");
+            eprintln!("resetting board before serving: {reset_cmd_str}");
+            let reset_refs: Vec<&str> = self.config.reset_cmd.iter().map(String::as_str).collect();
+            self.runner
+                .run(&reset_refs)
+                .with_context(|| format!("board reset ({reset_cmd_str}) failed"))?;
+        }
+
+        // `run.py --model` wants the SHORT model name (e.g. `Qwen3-32B`,
+        // matching `model_spec.json`'s own keys' basenames), but callers
+        // (and `tt models`, which lists `model_spec.json`'s HF-id keys
+        // verbatim) naturally pass a Hugging Face id like `Qwen/Qwen3-32B`.
+        // Stripping any `org/` prefix here means BOTH forms work: `run.py`
+        // gets the short name it validates against, while `model` (the
+        // original, possibly-HF-id argument) is still available below as
+        // the fallback `Endpoint.model` if the authoritative served id
+        // can't be fetched. `rsplit('/').next()` always yields `Some(..)`
+        // (even for a string with no `/` at all, in which case it's the
+        // whole string), so `unwrap_or(model)` is just a defensive
+        // fallback, never actually exercised.
+        let run_model = model.rsplit('/').next().unwrap_or(model);
+
         // Built as owned `String`s (several pieces are computed at
         // runtime) then borrowed as `&str` for `CommandRunner::run_in_dir`,
         // which takes `&[&str]` -- argv-style, no shell involved, so
@@ -234,7 +333,7 @@ impl ServingBackend for RunPyBackend {
             "python3".to_string(),
             "run.py".to_string(),
             "--model".to_string(),
-            model.to_string(),
+            run_model.to_string(),
             "--workflow".to_string(),
             "server".to_string(),
             "--docker-server".to_string(),
@@ -315,15 +414,46 @@ impl ServingBackend for RunPyBackend {
             ));
         }
 
+        // Ask the server what it's ACTUALLY serving, rather than guessing.
+        // `run.py --model` got the short name (`run_model`, above), but the
+        // OpenAI-compatible `/v1/models` endpoint reports the real served
+        // id -- the same HF id `model_spec.json` keys off of and that a
+        // client needs in its own `model` field. Fetching it directly here
+        // removes all guesswork about which form (`org/name` vs. `name`)
+        // the caller originally passed. If the fetch fails, or the body
+        // isn't the expected `{"data":[{"id": ...}]}` shape, this falls
+        // back to the ORIGINAL `model` argument rather than failing `start`
+        // outright -- the server is confirmed healthy at this point, so a
+        // `/v1/models` hiccup shouldn't take down an otherwise-successful
+        // `start`.
+        let models_url = format!(
+            "http://{}:{}/v1/models",
+            self.config.host, self.config.service_port
+        );
+        let served_model = self
+            .runner
+            .http_get(&models_url)
+            .ok()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+            .and_then(|value| {
+                value
+                    .get("data")?
+                    .get(0)?
+                    .get("id")?
+                    .as_str()
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| model.to_string());
+
         *self.status.lock().expect("status mutex poisoned") =
-            ServingStatus::Serving(model.to_string());
+            ServingStatus::Serving(served_model.clone());
 
         Ok(Endpoint {
             base_url: format!(
                 "http://{}:{}/v1",
                 self.config.host, self.config.service_port
             ),
-            model: model.to_string(),
+            model: served_model,
             // Auth is required exactly when `run.py` was NOT invoked with
             // `--no-auth`.
             requires_key: !self.config.no_auth,
@@ -331,21 +461,7 @@ impl ServingBackend for RunPyBackend {
     }
 
     fn stop(&self, _model: &str) -> Result<()> {
-        // `run.py` doesn't hand back a predictable container name the way
-        // `DockerBackend`'s own `--name` flag does, so -- exactly like the
-        // operator's `start_artgen.sh --stop` -- find whatever container is
-        // publishing our configured port and stop it directly. Empty
-        // `docker ps` output (nothing running) is treated as success: `stop`
-        // is idempotent, same contract as `DockerBackend::stop`.
-        let publish_filter = format!("publish={}", self.config.service_port);
-        let ps_output = self
-            .runner
-            .run(&["docker", "ps", "--filter", &publish_filter, "-q"])?;
-
-        for container_id in ps_output.split_whitespace() {
-            self.runner.run(&["docker", "stop", container_id])?;
-        }
-
+        self.stop_serving_containers()?;
         *self.status.lock().expect("status mutex poisoned") = ServingStatus::Idle;
         Ok(())
     }
