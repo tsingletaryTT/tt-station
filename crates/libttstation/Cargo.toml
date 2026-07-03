@@ -1,0 +1,9 @@
+[package]
+name = "libttstation"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
