@@ -44,3 +44,37 @@ final class TTClientTests: XCTestCase {
         }
     }
 }
+
+extension TTClientTests {
+    func testPairBuildsArgs() async throws {
+        let fake = FakeProcessRunner()
+        fake.nextResult = ProcessResult(stdout: Data(#"{"host":"h:8080","paired":true,"token":"deadbeef"}"#.utf8), stderr: "", exitCode: 0)
+        let client = TTClient(runner: fake)
+        let result = try await client.pair(host: "h:8080", code: "042817")
+        XCTAssertEqual(fake.lastArgs, ["--json", "pair", "h:8080", "--code", "042817"])
+        XCTAssertTrue(result.paired)
+    }
+
+    func testRunBuildsArgsModelFirst() async throws {
+        let fake = FakeProcessRunner()
+        fake.nextResult = ProcessResult(stdout: Data(#"{"base_url":"http://h:8000/v1","model":"Qwen3-8B","requires_key":false}"#.utf8), stderr: "", exitCode: 0)
+        let client = TTClient(runner: fake)
+        let ep = try await client.run(host: "h:8080", model: "Qwen3-8B")
+        XCTAssertEqual(fake.lastArgs, ["--json", "run", "Qwen3-8B", "--host", "h:8080"])
+        XCTAssertEqual(ep.model, "Qwen3-8B")
+    }
+
+    func testStopBuildsArgsAndIgnoresBody() async throws {
+        let fake = FakeProcessRunner()
+        fake.nextResult = ProcessResult(stdout: Data("{}".utf8), stderr: "", exitCode: 0)
+        let client = TTClient(runner: fake)
+        try await client.stop(host: "h:8080")
+        XCTAssertEqual(fake.lastArgs, ["--json", "stop", "--host", "h:8080"])
+    }
+
+    func testIsAuthError() {
+        let client = TTClient(runner: FakeProcessRunner())
+        XCTAssertTrue(client.isAuthError(.commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080; run `tt pair`")))
+        XCTAssertFalse(client.isAuthError(.commandFailed(command: [], exitCode: 1, stderr: "connection refused")))
+    }
+}
