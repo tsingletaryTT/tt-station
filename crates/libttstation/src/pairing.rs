@@ -79,7 +79,11 @@ pub async fn pair_complete(base: &str, pair_id: &str, code: &str) -> anyhow::Res
 /// `base` either way (`http://host:port` and `http://host:port/` both
 /// produce `http://host:port/pair/init`) so callers don't have to think
 /// about it.
-fn join(base: &str, path: &str) -> String {
+///
+/// `pub(crate)` rather than private: `agent_client` (Task 11) talks to the
+/// same base-URL-shaped agent addresses and reuses this instead of
+/// duplicating the trailing-slash handling.
+pub(crate) fn join(base: &str, path: &str) -> String {
     format!("{}/{path}", base.trim_end_matches('/'))
 }
 

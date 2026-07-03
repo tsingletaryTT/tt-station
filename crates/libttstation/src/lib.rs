@@ -1,3 +1,4 @@
+pub mod agent_client;
 pub mod discovery;
 pub mod model;
 pub mod pairing;
