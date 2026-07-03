@@ -7,6 +7,8 @@ public protocol TTCommands {
     func status(host: String) async throws -> ServingStatus
     func endpoint(host: String) async throws -> Endpoint
     func pair(host: String, code: String) async throws -> PairResult
+    func pairInit(host: String) async throws -> PairInitResult
+    func pairComplete(host: String, pairId: String, code: String) async throws -> PairResult
     func run(host: String, model: String) async throws -> Endpoint
     func stop(host: String) async throws
     func isAuthError(_ error: TTError) -> Bool
@@ -59,6 +61,14 @@ extension TTClient {
 
     public func pair(host: String, code: String) async throws -> PairResult {
         try await call(["--json", "pair", host, "--code", code], decode: PairResult.self)
+    }
+
+    public func pairInit(host: String) async throws -> PairInitResult {
+        try await call(["--json", "pair-init", host], decode: PairInitResult.self)
+    }
+
+    public func pairComplete(host: String, pairId: String, code: String) async throws -> PairResult {
+        try await call(["--json", "pair-complete", host, "--pair-id", pairId, "--code", code], decode: PairResult.self)
     }
 
     public func run(host: String, model: String) async throws -> Endpoint {

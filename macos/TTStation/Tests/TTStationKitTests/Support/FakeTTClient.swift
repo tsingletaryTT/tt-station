@@ -10,6 +10,12 @@ final class FakeTTClient: TTCommands {
     var runError: TTError?
     var statusCalled = false
     var statusCallCount = 0
+    var pairInitResult = "mock-pair-id"
+    var pairInitError: TTError?
+    var pairInitCalled = false
+    var pairCompleteSucceeds = true
+    var pairCompleteError: TTError?
+    var pairCompleteCalled = false
 
     func discover(manualHosts: [String], noMdns: Bool) async throws -> [BoxRecord] { [] }
     func models(host: String) async throws -> [ModelInfo] { models_ }
@@ -22,6 +28,17 @@ final class FakeTTClient: TTCommands {
     func endpoint(host: String) async throws -> Endpoint { runEndpoint }
     func pair(host: String, code: String) async throws -> PairResult {
         if pairShouldSucceed { return PairResult(host: host, paired: true) }
+        throw TTError.commandFailed(command: [], exitCode: 1, stderr: "invalid code")
+    }
+    func pairInit(host: String) async throws -> PairInitResult {
+        pairInitCalled = true
+        if let pairInitError { throw pairInitError }
+        return PairInitResult(pairId: pairInitResult)
+    }
+    func pairComplete(host: String, pairId: String, code: String) async throws -> PairResult {
+        pairCompleteCalled = true
+        if let pairCompleteError { throw pairCompleteError }
+        if pairCompleteSucceeds { return PairResult(host: host, paired: true) }
         throw TTError.commandFailed(command: [], exitCode: 1, stderr: "invalid code")
     }
     func run(host: String, model: String) async throws -> Endpoint {

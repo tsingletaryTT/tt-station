@@ -21,12 +21,35 @@ final class BoxViewModelTests: XCTestCase {
         XCTAssertEqual(vm.status, .serving(model: "Qwen3-8B"))
     }
 
-    func testPairSuccessMarksPairedAndLoadsModels() async {
+    func testStartPairingSetsPairId() async {
+        let client = FakeTTClient()
+        client.pairInitResult = "pid-123"
+        let (vm, _) = makeVM(paired: false, client: client)
+        await vm.startPairing()
+        XCTAssertEqual(vm.pairId, "pid-123")
+        XCTAssertNil(vm.errorText)
+    }
+
+    func testCompletePairingSuccessMarksPairedAndLoadsModels() async {
         let (vm, reg) = makeVM(paired: false)
-        await vm.pair(code: "042817")
+        await vm.startPairing()
+        await vm.completePairing(code: "123456")
         XCTAssertTrue(vm.isPaired)
+        XCTAssertNil(vm.pairId)
         XCTAssertTrue(reg.pairedHosts.contains("h:8080"))
         XCTAssertEqual(vm.models.map(\.name), ["Qwen3-8B"])
+        XCTAssertNil(vm.errorText)
+    }
+
+    func testCompletePairingFailureShowsErrorAndClearsPairId() async {
+        let client = FakeTTClient()
+        client.pairCompleteError = .commandFailed(command: [], exitCode: 1, stderr: "invalid or expired code")
+        let (vm, _) = makeVM(paired: false, client: client)
+        await vm.startPairing()
+        await vm.completePairing(code: "000000")
+        XCTAssertFalse(vm.isPaired)
+        XCTAssertEqual(vm.errorText, "invalid or expired code")
+        XCTAssertNil(vm.pairId)
     }
 
     func testRunSetsEndpoint() async {

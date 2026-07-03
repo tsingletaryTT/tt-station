@@ -86,6 +86,19 @@ public struct PairResult: Codable, Equatable {
     public init(host: String, paired: Bool) { self.host = host; self.paired = paired }
 }
 
+/// Response from `tt --json pair-init <host>`. The agent may also send back
+/// `host` in the same payload, but we only need `pair_id` here — the extra
+/// key is simply ignored by `JSONDecoder`.
+public struct PairInitResult: Codable, Equatable {
+    public let pairId: String
+
+    enum CodingKeys: String, CodingKey {
+        case pairId = "pair_id"
+    }
+
+    public init(pairId: String) { self.pairId = pairId }
+}
+
 public struct StatusResponse: Codable, Equatable {
     public let status: String
 }

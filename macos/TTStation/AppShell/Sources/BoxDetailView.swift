@@ -8,12 +8,24 @@ struct BoxDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if !box.isPaired {
-                Text("Enter the 6-digit code shown on the box:").font(.caption)
-                HStack {
-                    TextField("000000", text: $code)
-                        .textFieldStyle(.roundedBorder).frame(width: 100)
-                    Button("Pair") { Task { await box.pair(code: code) } }
-                        .disabled(code.count != 6 || box.inFlight)
+                if box.pairId == nil {
+                    Text("Pair to control this box.").font(.caption)
+                    HStack {
+                        Button("Start pairing") { Task { await box.startPairing() } }
+                            .disabled(box.inFlight)
+                        if box.inFlight { ProgressView().scaleEffect(0.6) }
+                    }
+                } else {
+                    Text("Enter the 6-digit code shown on the box:").font(.caption)
+                    HStack {
+                        TextField("000000", text: $code)
+                            .textFieldStyle(.roundedBorder).frame(width: 100)
+                        Button("Pair") { Task { await box.completePairing(code: code) } }
+                            .disabled(code.count != 6 || box.inFlight)
+                        Button("Start over") { box.cancelPairing() }
+                            .disabled(box.inFlight)
+                        if box.inFlight { ProgressView().scaleEffect(0.6) }
+                    }
                 }
             } else {
                 Picker("Model", selection: Binding(

@@ -19,6 +19,12 @@ public final class BoxViewModel: Identifiable {
     public var isPaired: Bool
     public var inFlight = false
     public var errorText: String?
+    /// Non-nil once `startPairing()` has minted a pairing session and the
+    /// box's console is showing a code, and cleared again once
+    /// `completePairing`/`cancelPairing` end that session. Its presence is
+    /// what the view uses to decide between the "Start pairing" button and
+    /// the code-entry form.
+    public var pairId: String?
 
     private let commands: TTCommands
     private let registry: HostRegistry
@@ -75,15 +81,45 @@ public final class BoxViewModel: Identifiable {
         } catch { record(error) }
     }
 
-    public func pair(code: String) async {
+    /// Step 1 of pairing: ask the agent to mint a pairing session. This is
+    /// what makes the box print a fresh 6-digit code on its own console.
+    public func startPairing() async {
+        inFlight = true; defer { inFlight = false }
+        errorText = nil
+        do {
+            pairId = try await commands.pairInit(host: record.hostPort).pairId
+        } catch { record(error) }
+    }
+
+    /// Step 2 of pairing: submit the code the user read off the box's
+    /// console against the session `startPairing()` opened.
+    public func completePairing(code: String) async {
+        guard let id = pairId else { return }
         inFlight = true; defer { inFlight = false }
         do {
-            _ = try await commands.pair(host: record.hostPort, code: code)
+            _ = try await commands.pairComplete(host: record.hostPort, pairId: id, code: code)
             isPaired = true
             registry.markPaired(record.hostPort)
+            pairId = nil
             errorText = nil
             await loadModels()
-        } catch { record(error) }
+        } catch {
+            // Clear pairId on failure rather than letting the user retry the
+            // same session: the agent expires pairing sessions and caps
+            // attempts, so retrying a stale pair_id risks tripping the
+            // lockout. Clearing sends them back to "Start pairing" for a
+            // fresh code instead.
+            record(error)
+            pairId = nil
+        }
+    }
+
+    /// Abandon an in-progress pairing session (e.g. the user wants to back
+    /// out before entering a code). Mints nothing new — just returns to the
+    /// "Start pairing" state.
+    public func cancelPairing() {
+        pairId = nil
+        errorText = nil
     }
 
     public func run() async {
