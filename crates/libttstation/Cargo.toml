@@ -8,3 +8,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 mdns-sd = { workspace = true }
+
+# Only ever built on macOS: the `KeychainStore` `SecretStore` impl in
+# secrets.rs is itself `#[cfg(target_os = "macos")]`-gated, so this crate
+# (and its FFI bindings to the macOS `Security.framework`) never needs to
+# compile on Linux/CI.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2"
