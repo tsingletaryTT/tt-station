@@ -23,28 +23,37 @@
 //!     the correct image from the model config itself (the flag name says
 //!     it all: it's an override, not a requirement).
 //!
-//! In practice, two of those four auto-resolutions were ALSO verified (on
+//! In practice, one of those four auto-resolutions was ALSO verified (on
 //! this box, today) to not actually work:
 //!   - `run.py`'s own `--tt-device` auto-detect FAILS here with `Unable to
 //!     map tt-smi board counts ... {'p300c': 4}` -- it doesn't know this
 //!     board combination.
-//!   - `run.py`'s default image tag (from `model_spec.json`) isn't
-//!     pulled/on GHCR on this box, so serving fails unless overridden.
 //!
-//! So this backend fills BOTH gaps itself, via `resolve_tt_device` (parses
-//! `tt-smi -s` and maps known board combinations) and `resolve_image`
-//! (picks the newest locally-present RELEASE image from `docker images`) --
-//! see each method's own doc comment. `--impl`/`--engine` genuinely have no
-//! such problem and are left entirely to `run.py`/`model_spec.json`.
+//! So this backend fills that gap itself, via `resolve_tt_device` (parses
+//! `tt-smi -s` and maps known board combinations); this is default-ON,
+//! since it's a safe, purely-additive fix for a confirmed `run.py` bug.
+//! `--impl`/`--engine` genuinely have no such problem and are left entirely
+//! to `run.py`/`model_spec.json`.
+//!
+//! `resolve_image` (picks the newest locally-present RELEASE image from
+//! `docker images`) exists for the OTHER gap -- `run.py`'s default image
+//! tag (from `model_spec.json`) isn't always pulled/on GHCR on a given box
+//! -- but is DELIBERATELY opt-in (`RunPyConfig::auto_image`, default
+//! `false`), NOT default-on like `resolve_tt_device`. Verified on real
+//! hardware: auto-picking the newest local image chose a tag whose
+//! container server rejects `--override-tt-config`, a flag this repo's
+//! `run.py` always passes -- image<->`run.py` compatibility is a curated
+//! matrix, and "newest" is not a safe stand-in for that curation. See
+//! `resolve_image`'s doc comment for the full rationale.
 //!
 //! `RunPyConfig`'s device/image/impl/engine/device-id fields are all
 //! `Option<String>`; `start` computes the RESOLVED device/image once (an
 //! explicit `Some(..)` always wins over auto-resolution -- see each
 //! `resolve_*` method) and appends the corresponding `run.py` flag only
 //! when that resolution produced a value. A known box (this one) therefore
-//! needs ZERO model-serving flags: `resolve_tt_device`/`resolve_image` fill
-//! in the two `run.py` can't, and `run.py` itself still handles
-//! `--impl`/`--engine` from `model_spec.json`.
+//! needs zero `--tt-device` configuration (auto-detected) but DOES need
+//! either `--serving-image` pinned or `--auto-image` opted into, since the
+//! image auto-pick is no longer on by default.
 //!
 //! Like `DockerBackend`, process execution and the health probe are routed
 //! through `CommandRunner` (defined in `serving::docker`, reused here rather
@@ -136,12 +145,20 @@ pub struct RunPyConfig {
     /// auto-resolution entirely.
     pub tt_device: Option<String>,
     /// `--override-docker-image`: the image `run.py` runs the resolved
-    /// model in. `None` (the default) means "auto-resolve" -- see
-    /// `resolve_image`, which picks the newest locally-present RELEASE
-    /// image via `docker images` when `run.py`'s own `model_spec.json`
-    /// image isn't available locally. `Some(..)` is an explicit OVERRIDE
-    /// that skips auto-resolution entirely.
+    /// model in. `None` (the default) means "let `run.py`/`auto_image`
+    /// decide" -- see `resolve_image`. `Some(..)` is an explicit OVERRIDE
+    /// that skips auto-resolution entirely (and skips consulting
+    /// `auto_image` too).
     pub image: Option<String>,
+    /// Opt-in switch for the newest-local-release auto-pick `resolve_image`
+    /// performs when `image` is `None`. Defaults to `false` -- see this
+    /// field's extensive rationale in `resolve_image`'s doc comment: image
+    /// vs. `run.py` compatibility is a curated matrix, not something
+    /// "newest locally-present" can safely stand in for. When `false` (the
+    /// default) and `image` is `None`, `resolve_image` returns `None`
+    /// outright without even running `docker images` -- `run.py` then uses
+    /// its own `model_spec.json` default image tag.
+    pub auto_image: bool,
     /// `--impl`, e.g. `tt-transformers`. `None` (the default) lets `run.py`
     /// fall back to the model spec's own implementation choice.
     pub impl_name: Option<String>,
@@ -188,9 +205,12 @@ impl Default for RunPyConfig {
     /// Every device/image/impl/engine/device-id field defaults to `None` --
     /// deliberately, since that's also what a REAL default deployment wants
     /// (see the module doc): `impl`/`engine`/`device-id` are left entirely
-    /// to `run.py`, while `tt_device`/`image` are auto-RESOLVED by this
-    /// backend itself (`resolve_tt_device`/`resolve_image`) rather than
-    /// this codebase hardcoding a guessed value up front.
+    /// to `run.py`, `tt_device` is auto-RESOLVED by this backend itself
+    /// (`resolve_tt_device`), and `image` is left to `run.py`'s own
+    /// `model_spec.json` default UNLESS `auto_image` is explicitly opted
+    /// into (see `resolve_image` and `auto_image`'s own doc comments) --
+    /// this codebase does not hardcode a guessed value for any of them up
+    /// front.
     fn default() -> Self {
         RunPyConfig {
             repo_dir: "tt-inference-server".to_string(),
@@ -208,6 +228,7 @@ impl Default for RunPyConfig {
             host_hf_cache: Some("~/.cache/huggingface".to_string()),
             tt_device: None,
             image: None,
+            auto_image: false,
             impl_name: None,
             engine: None,
             device_id: None,
@@ -378,15 +399,35 @@ impl RunPyBackend {
 
     /// Resolve the `--override-docker-image` value: `config.image` if the
     /// caller explicitly set one (an explicit override always wins, and
-    /// skips shelling out to `docker` entirely), otherwise auto-pick the
-    /// newest locally-present RELEASE serving image via `docker images`.
+    /// skips shelling out to `docker` entirely); else, ONLY when
+    /// `config.auto_image` is opted into, auto-pick the newest
+    /// locally-present RELEASE serving image via `docker images`; else
+    /// `None` (no `docker images` call at all).
     ///
-    /// This exists because `run.py`'s default image tag (from the
-    /// resolved model's `model_spec.json` entry) isn't always pulled/on
-    /// GHCR on this box, so serving fails unless overridden. Rather than
-    /// leave the operator to look up and pass a tag by hand, this queries
-    /// `docker images --format '{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}'`,
-    /// keeps only lines whose repository ends in `RELEASE_IMAGE_REPO_SUFFIX`
+    /// ## Why the auto-pick is opt-in, NOT the default
+    ///
+    /// This used to unconditionally auto-pick the newest local release
+    /// image whenever `config.image` was unset. That was verified (on real
+    /// hardware) to be UNSAFE: on one box, the newest locally-present image
+    /// (`0.17.0-...`) was auto-picked over an older one, but that image's
+    /// container server REJECTS a flag this repo's `run.py` unconditionally
+    /// passes (`--override-tt-config`), so serving failed outright.
+    /// Image<->`run.py` compatibility is a CURATED matrix, not something
+    /// "whichever tag happens to sort newest by `docker images`
+    /// `CreatedAt`" can stand in for -- a newer image is not guaranteed
+    /// compatible with an older (or differently-patched) `run.py` checkout,
+    /// and vice versa. So this now defaults to doing nothing: an unset
+    /// `--serving-image` yields no `--override-docker-image` at all, and
+    /// `run.py` falls back to its own `model_spec.json` default image
+    /// (which, per the module doc, isn't always pulled locally either --
+    /// the operator is expected to pin `--serving-image` on boxes where
+    /// that default isn't available, rather than this code silently
+    /// picking a possibly-incompatible substitute).
+    ///
+    /// The newest-local-release scan logic itself is UNCHANGED and only
+    /// runs when `config.auto_image` is `true`: it queries `docker images
+    /// --format '{{.Repository}}:{{.Tag}}\t{{.CreatedAt}}'`, keeps only
+    /// lines whose repository ends in `RELEASE_IMAGE_REPO_SUFFIX`
     /// (excluding the `-dev-` variant and any untagged `<none>` image), and
     /// returns the newest one by `CreatedAt`.
     ///
@@ -404,6 +445,10 @@ impl RunPyBackend {
     fn resolve_image(&self) -> Option<String> {
         if let Some(image) = &self.config.image {
             return Some(image.clone());
+        }
+
+        if !self.config.auto_image {
+            return None;
         }
 
         let output = self

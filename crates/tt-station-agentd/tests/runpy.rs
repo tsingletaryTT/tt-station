@@ -52,19 +52,21 @@ fn find_runpy_cmd(commands: &[Vec<String>]) -> &Vec<String> {
 }
 
 /// The DEFAULT `start` invocation -- no device/image/impl/engine override
-/// configured, and (for this test) no `tt-smi`/`docker images` stubs set up
-/// either, so both auto-resolution probes come back empty/unparseable --
-/// must be the MINIMAL `run.py` command: `--model`, `--workflow server`,
-/// `--docker-server`, `--service-port`, plus `--no-auth` (default-on) and
-/// `--host-hf-cache` (the one non-hardware default this codebase still
-/// sets, see `RunPyConfig::default`). It must NOT carry `--tt-device`,
+/// configured, `auto_image` left at its default (`false`), and (for this
+/// test) no `tt-smi` stub set up either, so the device auto-resolution
+/// probe comes back empty/unparseable -- must be the MINIMAL `run.py`
+/// command: `--model`, `--workflow server`, `--docker-server`,
+/// `--service-port`, plus `--no-auth` (default-on) and `--host-hf-cache`
+/// (the one non-hardware default this codebase still sets, see
+/// `RunPyConfig::default`). It must NOT carry `--tt-device`,
 /// `--override-docker-image`, `--impl`, or `--engine`. `--impl`/`--engine`
-/// are still entirely `run.py`'s job to default from `model_spec.json`; for
-/// `--tt-device`/`--override-docker-image`, this codebase now ALSO tries to
-/// auto-resolve them itself (see `resolve_tt_device`/`resolve_image` in
-/// `src/serving/runpy.rs`) -- but with no real board/no local images to
-/// find, both resolve to `None` here, just like `run.py`'s own resolution
-/// would if it had nothing to go on either.
+/// are still entirely `run.py`'s job to default from `model_spec.json`;
+/// `--tt-device` is auto-resolved by this codebase itself (see
+/// `resolve_tt_device` in `src/serving/runpy.rs`) but resolves to `None`
+/// here with no real board to probe; `--override-docker-image` is simply
+/// never attempted at all by default (see `resolve_image`'s doc comment --
+/// auto-picking an image is opt-in via `auto_image`, NOT a default
+/// behavior, since image<->run.py compatibility is a curated matrix).
 #[test]
 fn runpy_start_default_omits_device_image_impl_engine() {
     let runner = FakeRunner::new(0); // healthy on the very first probe
@@ -85,11 +87,18 @@ fn runpy_start_default_omits_device_image_impl_engine() {
     let commands = runner.commands();
     assert_eq!(
         commands.len(),
-        5,
+        4,
         "expected the stop-stale docker-ps query, the default board-reset \
-         command, the tt-smi -s device-auto-detect probe, the docker images \
-         release-image auto-pick query, and the run.py invocation: \
-         {commands:?}"
+         command, the tt-smi -s device-auto-detect probe, and the run.py \
+         invocation -- NO docker images query, since auto_image defaults \
+         to false: {commands:?}"
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("images")),
+        "docker images must not be queried by default (auto_image: false): {commands:?}"
     );
     let cmd = find_runpy_cmd(&commands);
 
@@ -592,15 +601,20 @@ ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-a
 ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:qb2_launch-6900b0c-22be241\t2026-05-06 12:42:22 -0700 PDT
 ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-dev-ubuntu-22.04-amd64:<none>\t2026-03-09 02:53:04 -0700 PDT";
 
-/// With no explicit `image` configured, `start` must shell out to `docker
-/// images`, keep only RELEASE-repo, non-`<none>`-tag lines, and pick the
-/// NEWEST by `CreatedAt` -- here, `0.17.0-...` over the older `0.14.0-...`,
-/// and never the `-dev-` or `<none>` lines.
+/// With `auto_image: true` and no explicit `image` configured, `start`
+/// must shell out to `docker images`, keep only RELEASE-repo,
+/// non-`<none>`-tag lines, and pick the NEWEST by `CreatedAt` -- here,
+/// `0.17.0-...` over the older `0.14.0-...`, and never the `-dev-` or
+/// `<none>` lines. `auto_image` must be explicitly opted into for this
+/// behavior -- see `runpy_start_omits_override_image_by_default_without_auto_image`
+/// for the (now-default) opposite behavior.
 #[test]
-fn runpy_start_auto_picks_newest_local_release_image() {
+fn runpy_start_auto_picks_newest_local_release_image_when_auto_image_enabled() {
     let runner = FakeRunner::new(0);
     runner.set_run_output("docker images", DOCKER_IMAGES_MIXED);
-    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.auto_image = true;
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
 
     backend.start("llama3").expect("start should succeed");
 
@@ -623,13 +637,17 @@ fn runpy_start_auto_picks_newest_local_release_image() {
     );
 }
 
-/// An explicit `image` override must win outright -- `start` must not even
-/// bother calling `docker images` at all.
+/// An explicit `image` override must win outright regardless of
+/// `auto_image` -- `start` must not even bother calling `docker images` at
+/// all.
 #[test]
 fn runpy_start_explicit_image_skips_docker_images_query() {
     let runner = FakeRunner::new(0);
     let mut cfg = config("127.0.0.1", 8080);
     cfg.image = Some("some/image:tag".to_string());
+    // `auto_image: true` too, to prove the explicit override wins even when
+    // auto-pick is enabled -- it's checked first in `resolve_image`.
+    cfg.auto_image = true;
     let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
 
     backend.start("llama3").expect("start should succeed");
@@ -651,12 +669,15 @@ fn runpy_start_explicit_image_skips_docker_images_query() {
     );
 }
 
-/// When `docker images` reports nothing matching the release repo, `start`
-/// must not produce a guessed `--override-docker-image` at all.
+/// With `auto_image: true` but `docker images` reporting nothing matching
+/// the release repo, `start` must not produce a guessed
+/// `--override-docker-image` at all.
 #[test]
 fn runpy_start_omits_override_image_when_no_release_image_present() {
     let runner = FakeRunner::new(0); // docker images defaults to empty output
-    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.auto_image = true;
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
 
     backend.start("llama3").expect("start should succeed");
 
@@ -665,6 +686,42 @@ fn runpy_start_omits_override_image_when_no_release_image_present() {
     assert!(
         !cmd.iter().any(|a| a == "--override-docker-image"),
         "no local release image present must not produce a guessed override: {cmd:?}"
+    );
+}
+
+/// THE POINT OF THIS CHANGE: with `auto_image` left at its default
+/// (`false`) and no explicit `image` configured, `start` must NOT call
+/// `docker images` at all, and must NOT carry `--override-docker-image` --
+/// even when a newer, auto-pickable release image IS present locally.
+/// Auto-picking the newest local image was verified (on real hardware) to
+/// be unsafe as a default: a newer image can reject a flag this repo's
+/// `run.py` always passes (`--override-tt-config`). See `resolve_image`'s
+/// doc comment in `src/serving/runpy.rs`.
+#[test]
+fn runpy_start_omits_override_image_by_default_without_auto_image() {
+    let runner = FakeRunner::new(0);
+    // Even with a perfectly good release image available locally, the
+    // default (`auto_image: false`) must ignore it entirely.
+    runner.set_run_output("docker images", DOCKER_IMAGES_MIXED);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("images")),
+        "auto_image defaults to false, so docker images must never be \
+         queried when image is unset: {commands:?}"
+    );
+
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        !cmd.iter().any(|a| a == "--override-docker-image"),
+        "auto_image defaults to false, so no --override-docker-image should \
+         be guessed even with a release image locally present: {cmd:?}"
     );
 }
 

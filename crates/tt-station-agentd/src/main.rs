@@ -93,11 +93,13 @@ struct Cli {
     /// (`run.py --override-docker-image`, or `docker run <image>` for the
     /// `docker` fallback backend).
     ///
-    /// OPTIONAL override for the `runpy` backend (the default). When unset,
-    /// the agent auto-picks the newest locally-present release image
-    /// (`RunPyBackend::resolve_image` -- `run.py`'s own `model_spec.json`
-    /// image tag isn't always pulled/on GHCR on a given box); set this only
-    /// to override that.
+    /// This is the RELIABLE per-box choice for the `runpy` backend (the
+    /// default): pin it explicitly to whatever image is confirmed
+    /// compatible with this checkout's `run.py` on this box. When unset,
+    /// the agent does NOT guess -- `run.py` falls back to its own
+    /// `model_spec.json` default image tag, which isn't always pulled/on
+    /// GHCR on a given box (see `--auto-image` for an opt-in, but riskier,
+    /// alternative to pinning this).
     ///
     /// The `docker` fallback backend has no such resolution of its own (it
     /// has no `model_spec.json` to consult), so when this is unset it falls
@@ -106,6 +108,18 @@ struct Cli {
     /// `docs/reference/tt-inference-server-docker.md`.
     #[arg(long = "serving-image")]
     serving_image: Option<String>,
+
+    /// Opt in to auto-picking the newest locally-present release image
+    /// (`RunPyBackend::resolve_image`) when `--serving-image` is unset.
+    /// Only meaningful for the `runpy` backend (the default).
+    ///
+    /// OFF by default because image<->run.py compatibility is a curated
+    /// matrix -- a newer local image can be incompatible with this
+    /// checkout's run.py (observed: run.py passes `--override-tt-config`,
+    /// which a newer image's server rejects). Pin `--serving-image` per box
+    /// unless you know only compatible images are present there.
+    #[arg(long = "auto-image", action = clap::ArgAction::SetTrue)]
+    auto_image: bool,
 
     /// `--tt-device` value passed to `tt-inference-server`, e.g. `n300`,
     /// `p150x4`, `p300x2`. Shared by both the `runpy` and `docker` backends.
@@ -351,6 +365,12 @@ async fn main() -> Result<()> {
         // `docker_config` above does -- that would bypass auto-resolution.
         tt_device: cli.tt_device.clone(),
         image: cli.serving_image.clone(),
+        // Opt-in only -- see `--auto-image`'s doc comment and
+        // `RunPyConfig::auto_image`/`RunPyBackend::resolve_image` for why
+        // this defaults to `false` (image<->run.py compatibility is a
+        // curated matrix, not something "newest locally-present" can
+        // safely stand in for).
+        auto_image: cli.auto_image,
         engine: cli.engine.clone(),
         impl_name: cli.impl_name.clone(),
         device_id: cli.device_id.clone(),
