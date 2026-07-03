@@ -793,38 +793,85 @@ fn runpy_start_endpoint_model_is_served_id_from_v1_models() {
     );
 }
 
-/// If the `/v1/models` fetch fails (or can't be parsed), `start` must not
-/// fail outright -- it should fall back to the original `model` argument
-/// passed to `start`.
+/// When `/v1/models` reports a model (non-empty `data`, so the readiness
+/// gate is satisfied) but that entry carries NO `id` field, `Endpoint.model`
+/// must fall back to the original `model` argument -- the model IS queryable,
+/// so `start` succeeds; only the served-id extraction falls back.
 #[test]
-fn runpy_start_endpoint_model_falls_back_when_http_get_fails() {
-    let runner = FakeRunner::new(0); // http_get left unconfigured -> Err
+fn runpy_start_endpoint_model_falls_back_to_arg_when_id_missing() {
+    let runner = FakeRunner::new(0);
+    runner.set_http_get(r#"{"data":[{}]}"#); // ready, but no id in the entry
     let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
 
     let endpoint = backend
         .start("Qwen/Qwen3-32B")
-        .expect("start should succeed even when the /v1/models fetch fails");
+        .expect("start should succeed: /v1/models lists a model");
 
     assert_eq!(
         endpoint.model, "Qwen/Qwen3-32B",
-        "when /v1/models can't be fetched, Endpoint.model should fall back \
-         to the original start() argument"
+        "with a queryable-but-idless /v1/models entry, Endpoint.model should \
+         fall back to the original start() argument"
     );
 }
 
-/// Malformed JSON from `/v1/models` must also fall back to the original
-/// `model` argument rather than failing `start`.
+/// THE POINT OF FIX 1: `/health` returning 200 is NOT enough -- if
+/// `/v1/models` never lists a model within the budget (the model never
+/// becomes queryable on `/v1`), `start` must return an `Err`, must NOT flip
+/// status to `Serving`, and must NOT hand back an `Endpoint`. This is what
+/// prevents reporting a dead endpoint as serving. Here `/v1/models` always
+/// answers with an EMPTY `data` array (vLLM up but no model loaded).
 #[test]
-fn runpy_start_endpoint_model_falls_back_on_unparseable_response() {
+fn runpy_start_errs_when_v1_models_never_lists_a_model() {
+    let runner = FakeRunner::new(0); // /health is healthy immediately...
+    runner.set_http_get(r#"{"data":[]}"#); // ...but /v1/models is always empty
+    let backend = RunPyBackend::new(config("127.0.0.1", 8003), Box::new(runner.clone()))
+        .with_health_poll(3, Duration::from_millis(1)); // shrunk test budget
+
+    let err = backend
+        .start("Qwen/Qwen3-32B")
+        .expect_err("start must fail when /v1/models never lists a model");
+    assert!(
+        err.to_string().contains("Qwen/Qwen3-32B"),
+        "error should name the model that never became queryable: {err}"
+    );
+    assert!(
+        err.to_string().contains("v1/models"),
+        "error should point at the /v1/models readiness gate: {err}"
+    );
+
+    // Status must stay Idle -- no dead endpoint reported as serving.
+    assert_eq!(backend.status().unwrap(), ServingStatus::Idle);
+}
+
+/// `/v1/models` that errors (or returns garbage) for the first few polls and
+/// only THEN comes up with a populated `data` must make `start` wait for the
+/// populated response and succeed with the served id from it -- the readiness
+/// poll retries within its budget rather than giving up on the first miss.
+#[test]
+fn runpy_start_waits_for_v1_models_then_uses_served_id() {
     let runner = FakeRunner::new(0);
-    runner.set_http_get("not json");
-    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+    // First poll: empty; second: unparseable; third onward: populated.
+    runner.set_http_get_sequence(&[
+        Some(r#"{"data":[]}"#),
+        Some("not json"),
+        Some(r#"{"data":[{"id":"Qwen/Qwen3-32B"}]}"#),
+    ]);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8003), Box::new(runner.clone()))
+        .with_health_poll(10, Duration::from_millis(1));
 
     let endpoint = backend
-        .start("Qwen/Qwen3-32B")
-        .expect("start should succeed even when /v1/models returns garbage");
+        .start("Qwen3-32B")
+        .expect("start should succeed once /v1/models lists a model");
 
-    assert_eq!(endpoint.model, "Qwen/Qwen3-32B");
+    assert_eq!(
+        endpoint.model, "Qwen/Qwen3-32B",
+        "Endpoint.model should be the served id from the eventually-populated \
+         /v1/models response"
+    );
+    assert_eq!(
+        backend.status().unwrap(),
+        ServingStatus::Serving("Qwen/Qwen3-32B".to_string())
+    );
 }
 
 /// The health poll should actually poll more than once when the first
@@ -919,10 +966,17 @@ struct TempModelSpec(std::path::PathBuf);
 
 impl TempModelSpec {
     fn write(contents: &str) -> Self {
+        // A process-unique monotonic counter -- `Instant::now().elapsed()` is
+        // ~0ns for a freshly-taken instant, so it does NOT make the filename
+        // unique and parallel tests would collide on the same path (one
+        // test's Drop deleting another's file mid-read). An atomic counter is
+        // genuinely unique per call.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "tt-station-model-spec-{}-{}.json",
             std::process::id(),
-            std::time::Instant::now().elapsed().as_nanos()
+            COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::write(&path, contents).expect("write temp model_spec.json fixture");
         TempModelSpec(path)
@@ -942,8 +996,8 @@ impl Drop for TempModelSpec {
 const MODEL_SPEC_FIXTURE: &str = r#"{
     "release_version": "0.12.0",
     "model_specs": {
-        "Qwen/Qwen3-32B": { "P300X2": {}, "T3K": {} },
-        "Qwen/Qwen3-8B": { "P150X4": {} }
+        "Qwen/Qwen3-32B": { "P300X2": {"vLLM": {}}, "T3K": {"vLLM": {}} },
+        "Qwen/Qwen3-8B": { "P150X4": {"vLLM": {}} }
     }
 }"#;
 
@@ -970,6 +1024,59 @@ fn runpy_list_models_reads_and_sorts_model_spec() {
 
     assert_eq!(resp.models[1].name, "Qwen/Qwen3-8B");
     assert_eq!(resp.models[1].devices, vec!["P150X4"]);
+}
+
+/// FIX 2: `list_models` must return ONLY vLLM-servable models. Given a
+/// vLLM-only model, a media-only model (image/video/embedding -- a different
+/// server this backend doesn't drive), and a MIXED model (one vLLM mesh, one
+/// media mesh), it must: include the vLLM-only and mixed models, OMIT the
+/// media-only model entirely, and report the mixed model's `devices` as ONLY
+/// its vLLM meshes (dropping the media-only mesh). Engine-key compare is
+/// case-insensitive (`"vLLM"` here).
+#[test]
+fn runpy_list_models_includes_only_vllm_servable_models() {
+    let fixture = TempModelSpec::write(
+        r#"{
+            "release_version": "0.14.0",
+            "model_specs": {
+                "Qwen/Qwen3-8B":     { "P300X2": {"vLLM": {}} },
+                "black-forest/FLUX.1-dev": { "T3K": {"media": {}} },
+                "some/Mixed-Model":  { "P300X2": {"vLLM": {}}, "T3K": {"media": {}} },
+                "baai/bge-large-en-v1.5": { "N150": {"media": {}} }
+            }
+        }"#,
+    );
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.model_spec_path = Some(fixture.path());
+    let backend = RunPyBackend::new(cfg, Box::new(FakeRunner::new(0)));
+
+    let resp = backend
+        .list_models()
+        .expect("list_models should succeed against the fixture");
+
+    let names: Vec<&str> = resp.models.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["Qwen/Qwen3-8B", "some/Mixed-Model"],
+        "only the vLLM-only and mixed models should be listed, sorted by name; \
+         the media-only models must be omitted: {names:?}"
+    );
+
+    // The mixed model must report ONLY its vLLM mesh, not the media one.
+    let mixed = resp
+        .models
+        .iter()
+        .find(|m| m.name == "some/Mixed-Model")
+        .expect("mixed model should be present");
+    assert_eq!(
+        mixed.devices,
+        vec!["P300X2"],
+        "mixed model's devices must be only the vLLM meshes (media-only T3K \
+         dropped): {:?}",
+        mixed.devices
+    );
+
+    assert_eq!(resp.release_version.as_deref(), Some("0.14.0"));
 }
 
 /// `model_spec_path` defaults to `<repo_dir>/model_spec.json` when

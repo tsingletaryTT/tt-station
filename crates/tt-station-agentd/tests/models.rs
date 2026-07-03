@@ -47,7 +47,7 @@ impl Drop for TempModelSpec {
 async fn models_returns_catalog_from_runpy_backend_with_no_auth() {
     let fixture = TempModelSpec::write(
         r#"{ "release_version": "0.12.0",
-             "model_specs": { "Qwen/Qwen3-32B": { "P300X2": {}, "T3K": {} } } }"#,
+             "model_specs": { "Qwen/Qwen3-32B": { "P300X2": {"vLLM": {}}, "T3K": {"vLLM": {}} } } }"#,
     );
     let config = RunPyConfig {
         model_spec_path: Some(fixture.path()),

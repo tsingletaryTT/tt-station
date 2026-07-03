@@ -471,6 +471,48 @@ impl AppState {
         }
     }
 
+    /// Clear ALL issued bearer tokens: empty the in-memory set AND, if
+    /// persistence is enabled, delete the on-disk token store -- so a demo
+    /// `POST /reset` returns the box to "never been paired" and every token
+    /// any client is still holding stops working.
+    ///
+    /// Same lock discipline as `persist_tokens`: the in-memory clear happens
+    /// under the `tokens` lock, which is then DROPPED before any disk I/O
+    /// runs (file work is serialized under `write_lock` instead), because
+    /// `is_valid_token` locks `tokens` on every authed request and must
+    /// never block on the disk. Deleting the file (rather than writing an
+    /// empty JSON array) matches a fresh box, which has no token store at all
+    /// -- and `load_tokens` treats a missing file as "no tokens yet", so a
+    /// later restart comes up empty either way.
+    fn clear_tokens(&self) {
+        {
+            self.inner
+                .tokens
+                .lock()
+                .expect("tokens mutex poisoned")
+                .clear();
+        }
+
+        let Some(path) = &self.inner.token_store else {
+            return;
+        };
+
+        let _write_guard = self
+            .inner
+            .write_lock
+            .lock()
+            .expect("token-store write lock poisoned");
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            // A missing store is already the desired end state -- not an error.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => eprintln!(
+                "tt-station-agentd: failed to remove token store at {} during reset: {err}",
+                path.display()
+            ),
+        }
+    }
+
     /// Test-only accessor: look up the code currently pending for
     /// `pair_id`, i.e. what a human would be reading off the box's screen
     /// right now.
@@ -867,6 +909,42 @@ async fn stop_model(
     Ok(Json(serde_json::json!({})))
 }
 
+/// `POST /reset` (bearer-guarded): return the box to a fresh-install state
+/// for a demo. In order:
+///
+///   1. Ask the backend to reset (`ServingBackend::reset`) -- stop any
+///      serving container and, on `RunPyBackend`, reset the board too. Run
+///      via `spawn_blocking` since it shells out (`docker`, `tt-smi`), same
+///      rule `/run` and `/stop` follow for the backend's sync methods.
+///   2. Clear ALL issued bearer tokens (in-memory set + persisted store).
+///   3. Flip `status` back to `Idle`, drop the stored `Endpoint`, and
+///      re-advertise `Idle` (all via `set_idle`).
+///
+/// Clearing the tokens invalidates the caller's OWN bearer token -- that's
+/// expected for a reset, and harmless here: auth was already checked at
+/// entry (the `BearerAuth` extractor), so this handler still runs to
+/// completion and returns `200 {}`.
+async fn reset(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let backend = state.backend();
+
+    // Backend reset shells out (docker/tt-smi) -- never on the async runtime.
+    tokio::task::spawn_blocking(move || backend.reset())
+        .await
+        .map_err(|join_err| backend_error(anyhow::anyhow!("reset task panicked: {join_err}")))?
+        .map_err(backend_error)?;
+
+    // Forget every issued token (invalidates the caller's own -- expected).
+    state.clear_tokens();
+
+    // Back to idle: status Idle, endpoint cleared, Idle re-advertised.
+    state.set_idle();
+
+    Ok(Json(serde_json::json!({})))
+}
+
 /// `GET /endpoint` (bearer-guarded): the `Endpoint` of whatever's currently
 /// serving, or `409 Conflict` if the box is idle. `409` rather than `404`
 /// because the route itself exists and is reachable -- what's missing is a
@@ -889,6 +967,7 @@ pub fn app(state: AppState) -> Router {
         .route("/pair/complete", post(pair_complete))
         .route("/run", post(run_model))
         .route("/stop", post(stop_model))
+        .route("/reset", post(reset))
         .route("/endpoint", get(get_endpoint))
         .with_state(state)
 }
