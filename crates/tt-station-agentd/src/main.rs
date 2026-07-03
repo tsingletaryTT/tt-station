@@ -9,6 +9,8 @@
 //! Keep this file to bootstrap only: parse args, build state, spawn mDNS,
 //! serve. Route handlers live in `routes.rs`.
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use libttstation::discovery::SERVICE_TYPE;
@@ -16,6 +18,7 @@ use libttstation::model::{txt_encode, BoxRecord, ServingStatus};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 use tt_station_agentd::routes::{app, AppState};
+use tt_station_agentd::serving::make_backend;
 
 /// Which serving backend to use for running models. Only the *choice* is
 /// wired up in Task 6 -- actually dispatching to Docker or dstack arrives
@@ -46,8 +49,9 @@ struct Cli {
     #[arg(long = "ctrl-port")]
     ctrl_port: u16,
 
-    /// Which serving backend to use. Backend dispatch itself lands in Task 9;
-    /// for now the choice is just parsed and stored on `AppState`.
+    /// Which serving backend to use. `serving::make_backend` (Task 9) turns
+    /// this into the real `ServingBackend` trait object `/run`/`/stop`
+    /// (Task 10) delegate to.
     #[arg(long, value_enum, default_value_t = Backend::Docker)]
     backend: Backend,
 
@@ -59,13 +63,42 @@ struct Cli {
     /// API version advertised in the `apiver` TXT key.
     #[arg(long, default_value_t = 1)]
     apiver: u8,
+
+    /// Host the serving container/VM is reachable on, baked into the
+    /// `base_url` of any `Endpoint` `/run` returns. Only meaningful for the
+    /// Docker backend today. Defaults to loopback since the PoC's client and
+    /// agent are expected to run on the same box; a real deployment would
+    /// pass the box's LAN address.
+    #[arg(long = "serving-host", default_value = "127.0.0.1")]
+    serving_host: String,
+
+    /// Host port the serving container/VM's HTTP port is mapped to. Only
+    /// meaningful for the Docker backend today.
+    #[arg(long = "serving-port", default_value_t = 8000)]
+    serving_port: u16,
+
+    /// Container image `docker run` for model serving. Only meaningful for
+    /// the Docker backend today.
+    #[arg(
+        long = "serving-image",
+        default_value = "tenstorrent/tt-inference-server:latest"
+    )]
+    serving_image: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let state = AppState::new(cli.name.clone(), cli.chips.clone(), cli.backend.to_string());
+    let backend = make_backend(
+        &cli.backend.to_string(),
+        &cli.serving_host,
+        cli.serving_port,
+        &cli.serving_image,
+    )
+    .context("failed to construct serving backend")?;
+
+    let state = AppState::new(cli.name.clone(), cli.chips.clone(), Arc::from(backend));
 
     // Bind the control-plane socket FIRST, then advertise on the LAN, so
     // discovery never races ahead of the control-plane API actually being

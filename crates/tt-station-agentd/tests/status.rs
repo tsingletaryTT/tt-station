@@ -5,15 +5,24 @@
 //! port, with no mDNS side effects -- mDNS advertisement is `main.rs`'s job,
 //! not the router's.
 
+use std::sync::Arc;
+
 use libttstation::model::ServingStatus;
 use tt_station_agentd::routes::{app, AppState};
+use tt_station_agentd::serving::dstack::DstackBackend;
 
 /// `GET /status` should return 200 with a JSON body whose `name` field
 /// matches the name the `AppState` was constructed with, and whose `status`
 /// field is the TXT string form (`idle`) of the initial `ServingStatus`.
 #[tokio::test]
 async fn status_returns_name_and_idle_status() {
-    let state = AppState::new("qb2-lab".to_string(), "4xBH".to_string(), "docker".to_string());
+    // `/status` doesn't touch the backend at all -- `DstackBackend`'s
+    // no-op stub is enough of a `ServingBackend` for this test.
+    let state = AppState::new(
+        "qb2-lab".to_string(),
+        "4xBH".to_string(),
+        Arc::new(DstackBackend),
+    );
     let router = app(state);
 
     // Bind to an ephemeral port so the test doesn't collide with anything

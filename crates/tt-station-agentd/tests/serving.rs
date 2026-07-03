@@ -9,67 +9,15 @@
 //! `DstackBackend` is exercised directly since it's a documented stub with
 //! no external dependencies to fake.
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
 use libttstation::model::{Endpoint, ServingStatus};
-use tt_station_agentd::serving::docker::{CommandRunner, DockerBackend};
+use tt_station_agentd::serving::docker::DockerBackend;
 use tt_station_agentd::serving::dstack::DstackBackend;
 use tt_station_agentd::serving::ServingBackend;
 
-/// A fake `CommandRunner` that records every command it's asked to `run`
-/// (so tests can assert on the exact argv `DockerBackend` builds) and
-/// reports `health_ok` as healthy either immediately or after a configured
-/// number of prior probes (so `DockerBackend`'s poll-until-healthy loop is
-/// exercised for real, not just its "healthy on the first try" path).
-///
-/// Cheap to `Clone`: all state lives behind `Arc<Mutex<_>>`, so a test can
-/// hand one clone to `DockerBackend` (which needs to own a
-/// `Box<dyn CommandRunner>`) while keeping another clone around to inspect
-/// what happened after the call returns.
-#[derive(Clone)]
-struct FakeRunner {
-    commands: Arc<Mutex<Vec<Vec<String>>>>,
-    health_calls_before_ok: u32,
-    health_calls_seen: Arc<Mutex<u32>>,
-}
-
-impl FakeRunner {
-    fn new(health_calls_before_ok: u32) -> Self {
-        FakeRunner {
-            commands: Arc::new(Mutex::new(Vec::new())),
-            health_calls_before_ok,
-            health_calls_seen: Arc::new(Mutex::new(0)),
-        }
-    }
-
-    fn commands(&self) -> Vec<Vec<String>> {
-        self.commands
-            .lock()
-            .expect("commands mutex poisoned")
-            .clone()
-    }
-}
-
-impl CommandRunner for FakeRunner {
-    fn run(&self, args: &[&str]) -> Result<String> {
-        self.commands
-            .lock()
-            .expect("commands mutex poisoned")
-            .push(args.iter().map(|s| s.to_string()).collect());
-        Ok(String::new())
-    }
-
-    fn health_ok(&self, _url: &str) -> bool {
-        let mut seen = self
-            .health_calls_seen
-            .lock()
-            .expect("health mutex poisoned");
-        *seen += 1;
-        *seen > self.health_calls_before_ok
-    }
-}
+mod support;
+use support::FakeRunner;
 
 /// `start` should issue exactly one `docker run` command whose args contain
 /// both the model name and the host port (the two things the brief calls

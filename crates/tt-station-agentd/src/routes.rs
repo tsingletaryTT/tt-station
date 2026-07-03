@@ -18,14 +18,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::{
-    http::StatusCode,
+    extract::FromRequestParts,
+    http::{request::Parts, StatusCode},
     routing::{get, post},
     Json, Router,
 };
-use libttstation::model::ServingStatus;
+use libttstation::model::{Endpoint, ServingStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::pairing;
+use crate::serving::ServingBackend;
 
 /// How long a pairing code stays valid after `/pair/init` mints it. Short
 /// enough that a code seen once (e.g. shoulder-surfed, or left in shell
@@ -60,12 +62,21 @@ struct Inner {
     /// Chip inventory string, e.g. `"4xBH"`.
     chips: String,
     /// Current serving status. `Mutex`-guarded because Task 10's control
-    /// routes will need to flip it between `Idle` and `Serving(model)`.
+    /// routes flip it between `Idle` and `Serving(model)`.
     status: Mutex<ServingStatus>,
-    /// Which serving backend was requested on the command line
-    /// (`"docker"` or `"dstack"`). Task 9 turns this into a real
-    /// `ServingBackend` trait object; for now we just remember the choice.
-    backend: String,
+    /// The `Endpoint` handed back by the backend's last successful `start`,
+    /// if anything is currently serving. Kept alongside (not derived from)
+    /// `status` so `GET /endpoint` doesn't need to reconstruct `base_url`
+    /// from scratch -- `status` only round-trips the model name, not the
+    /// full `Endpoint` a backend chose to return.
+    endpoint: Mutex<Option<Endpoint>>,
+    /// The real serving backend (Docker or dstack, chosen on the command
+    /// line -- see `make_backend` in `serving/mod.rs`) that `/run`/`/stop`
+    /// delegate to. `Arc<dyn ServingBackend>` rather than `Box` so route
+    /// handlers can cheaply clone a handle to move into
+    /// `tokio::task::spawn_blocking` (the trait's `start`/`stop` are sync
+    /// and must never run directly on the async runtime -- see `serving/mod.rs`).
+    backend: Arc<dyn ServingBackend>,
     /// Pairing attempts started by `/pair/init` but not yet completed:
     /// `pair_id -> (code, expiry, wrong_attempts)`. An entry is removed the
     /// moment it's consumed -- successfully, because it expired, or because
@@ -79,13 +90,19 @@ struct Inner {
 }
 
 impl AppState {
-    /// Construct fresh state for a box that starts out idle.
-    pub fn new(name: String, chips: String, backend: String) -> Self {
+    /// Construct fresh state for a box that starts out idle, wired to
+    /// `backend` for actually starting/stopping model serving. Callers
+    /// (`main.rs`, and this crate's tests) build `backend` via
+    /// `serving::make_backend` or a test double and hand it in already
+    /// wrapped in an `Arc`, since `AppState` never needs to construct a
+    /// backend itself.
+    pub fn new(name: String, chips: String, backend: Arc<dyn ServingBackend>) -> Self {
         AppState {
             inner: Arc::new(Inner {
                 name,
                 chips,
                 status: Mutex::new(ServingStatus::Idle),
+                endpoint: Mutex::new(None),
                 backend,
                 pending_pairs: Mutex::new(HashMap::new()),
                 tokens: Mutex::new(HashSet::new()),
@@ -101,8 +118,12 @@ impl AppState {
         &self.inner.chips
     }
 
-    pub fn backend(&self) -> &str {
-        &self.inner.backend
+    /// Cheap `Arc` clone of the serving backend, for a handler to move into
+    /// `tokio::task::spawn_blocking` -- `ServingBackend::start`/`stop` are
+    /// sync and must never be called directly from an async fn (see
+    /// `serving/mod.rs`).
+    fn backend(&self) -> Arc<dyn ServingBackend> {
+        Arc::clone(&self.inner.backend)
     }
 
     /// Snapshot the current serving status (locks briefly, then clones out).
@@ -112,6 +133,57 @@ impl AppState {
             .lock()
             .expect("status mutex poisoned")
             .clone()
+    }
+
+    /// Snapshot the currently-serving `Endpoint`, or `None` if idle.
+    fn endpoint(&self) -> Option<Endpoint> {
+        self.inner
+            .endpoint
+            .lock()
+            .expect("endpoint mutex poisoned")
+            .clone()
+    }
+
+    /// Which model is currently serving, read off `status` -- `None` when
+    /// idle. Used by `/stop` to know which model to tell the backend to
+    /// stop, without needing a separate "current model" field that could
+    /// drift from `status`.
+    fn current_model(&self) -> Option<String> {
+        match &*self.inner.status.lock().expect("status mutex poisoned") {
+            ServingStatus::Serving(model) => Some(model.clone()),
+            ServingStatus::Idle => None,
+        }
+    }
+
+    /// Record a successful `/run`: flip `status` to `Serving(endpoint.model)`
+    /// and remember `endpoint` for `/endpoint` to hand back later. Both
+    /// fields are updated while holding both locks so a concurrent
+    /// `/status` or `/endpoint` request never observes one updated without
+    /// the other.
+    fn set_serving(&self, endpoint: Endpoint) {
+        let mut status = self.inner.status.lock().expect("status mutex poisoned");
+        let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
+        *status = ServingStatus::Serving(endpoint.model.clone());
+        *stored_endpoint = Some(endpoint);
+    }
+
+    /// Record a successful `/stop` (or a no-op `/stop` while already idle):
+    /// `status` goes back to `Idle` and any stored `Endpoint` is cleared.
+    fn set_idle(&self) {
+        let mut status = self.inner.status.lock().expect("status mutex poisoned");
+        let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
+        *status = ServingStatus::Idle;
+        *stored_endpoint = None;
+    }
+
+    /// Check a bearer token against the valid-token set minted by
+    /// `/pair/complete`.
+    fn is_valid_token(&self, token: &str) -> bool {
+        self.inner
+            .tokens
+            .lock()
+            .expect("tokens mutex poisoned")
+            .contains(token)
     }
 
     /// Record a freshly-issued pairing attempt: `pair_id` will be accepted
@@ -305,6 +377,135 @@ async fn pair_complete(
     Ok(Json(PairCompleteResponse { token }))
 }
 
+/// Extractor guarding the control routes (`/run`, `/stop`, `/endpoint`):
+/// requires `Authorization: Bearer <token>` where `<token>` is in the
+/// valid-token set minted by `/pair/complete`. Missing header, a non-Bearer
+/// scheme, or a token not in the set all reject identically with `401` --
+/// deliberately indistinguishable, same reasoning as `pair_complete` not
+/// saying *why* a pairing attempt failed.
+///
+/// Implemented as a real extractor (rather than an inline check duplicated
+/// in each handler) so adding it to a route is just adding it to the
+/// handler's argument list, and so it composes with axum's normal extractor
+/// ordering instead of needing a separate middleware layer wired up per
+/// route.
+struct BearerAuth;
+
+impl FromRequestParts<AppState> for BearerAuth {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, StatusCode> {
+        let token = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "));
+
+        match token {
+            Some(token) if state.is_valid_token(token) => Ok(BearerAuth),
+            _ => Err(StatusCode::UNAUTHORIZED),
+        }
+    }
+}
+
+/// JSON body accepted by `POST /run`.
+#[derive(Deserialize)]
+struct RunRequest {
+    model: String,
+}
+
+/// JSON body returned by `POST /run` on success.
+#[derive(Serialize)]
+struct RunResponse {
+    endpoint: Endpoint,
+}
+
+/// JSON body returned when a control route fails after auth passes (backend
+/// `start`/`stop` error, or a `spawn_blocking` join failure). Kept as a
+/// simple `{ "error": "<message>" }` shape -- there's exactly one consumer
+/// (Task 11's `AgentClient`) and it doesn't need anything richer than a
+/// human-readable reason to log/surface.
+#[derive(Serialize)]
+struct ErrorResponse {
+    error: String,
+}
+
+fn backend_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: err.to_string(),
+        }),
+    )
+}
+
+/// `POST /run { "model": "..." }` (bearer-guarded): ask the backend to start
+/// serving `model`.
+///
+/// `backend.start` is sync and, for the real Docker backend, blocks on a
+/// `reqwest::blocking` health probe -- calling it directly here would panic
+/// (blocking calls are forbidden inside a Tokio worker thread). It's run via
+/// `tokio::task::spawn_blocking` instead, on a cloned `Arc<dyn
+/// ServingBackend>` handle so the closure doesn't need to borrow `state`
+/// across the `.await`. On success, `status`/`endpoint` are updated only
+/// *after* the blocking call returns -- no mutex guard is ever held across
+/// the `.await`.
+async fn run_model(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(req): Json<RunRequest>,
+) -> Result<Json<RunResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let backend = state.backend();
+    let model = req.model;
+
+    let result = tokio::task::spawn_blocking(move || backend.start(&model))
+        .await
+        .map_err(|join_err| backend_error(anyhow::anyhow!("run task panicked: {join_err}")))?;
+
+    let endpoint = result.map_err(backend_error)?;
+    state.set_serving(endpoint.clone());
+
+    Ok(Json(RunResponse { endpoint }))
+}
+
+/// `POST /stop` (bearer-guarded): ask the backend to stop whatever model is
+/// currently serving.
+///
+/// If nothing is serving (`current_model()` is `None`), this is a no-op
+/// success -- there's no model name to hand the backend, and "stop" on an
+/// already-idle box isn't an error (same idempotency `DockerBackend::stop`
+/// itself documents for `docker stop` on a missing container). Otherwise the
+/// same `spawn_blocking` treatment as `/run` applies: the sync
+/// `backend.stop` call must never run directly on the async runtime.
+async fn stop_model(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(model) = state.current_model() {
+        let backend = state.backend();
+
+        tokio::task::spawn_blocking(move || backend.stop(&model))
+            .await
+            .map_err(|join_err| backend_error(anyhow::anyhow!("stop task panicked: {join_err}")))?
+            .map_err(backend_error)?;
+    }
+
+    state.set_idle();
+    Ok(Json(serde_json::json!({})))
+}
+
+/// `GET /endpoint` (bearer-guarded): the `Endpoint` of whatever's currently
+/// serving, or `409 Conflict` if the box is idle. `409` rather than `404`
+/// because the route itself exists and is reachable -- what's missing is a
+/// *resource* (a live endpoint), which is exactly what `409` communicates:
+/// the request is well-formed but conflicts with the box's current state.
+async fn get_endpoint(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Result<Json<Endpoint>, StatusCode> {
+    state.endpoint().map(Json).ok_or(StatusCode::CONFLICT)
+}
+
 /// Build the router for a given `AppState`. Side-effect-free: no sockets,
 /// no mDNS -- safe to call directly from tests.
 pub fn app(state: AppState) -> Router {
@@ -312,5 +513,8 @@ pub fn app(state: AppState) -> Router {
         .route("/status", get(get_status))
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
+        .route("/run", post(run_model))
+        .route("/stop", post(stop_model))
+        .route("/endpoint", get(get_endpoint))
         .with_state(state)
 }

@@ -8,15 +8,20 @@
 //! the test read the code the agent generated for a given `pair_id` --
 //! standing in for a human reading the code off the box's screen.
 
+use std::sync::Arc;
+
 use tt_station_agentd::routes::{app, AppState};
+use tt_station_agentd::serving::dstack::DstackBackend;
 
 /// Spin up the real router on an ephemeral port and hand back both the
 /// `AppState` (so the test can call the `last_code` hook) and the base URL.
 async fn spawn() -> (AppState, String) {
+    // The pairing flow never touches the backend -- `DstackBackend`'s no-op
+    // stub is enough of a `ServingBackend` for these tests.
     let state = AppState::new(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        "docker".to_string(),
+        Arc::new(DstackBackend),
     );
     let router = app(state.clone());
 
