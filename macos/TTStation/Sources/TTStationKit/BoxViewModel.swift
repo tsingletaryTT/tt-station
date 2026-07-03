@@ -68,10 +68,20 @@ public final class BoxViewModel: Identifiable {
         } catch {
             if let tt = error as? TTError, case let .commandFailed(_, _, stderr) = tt {
                 errorText = stderr.isEmpty ? "Command failed." : stderr
+            } else if let tt = error as? TTError, case let .timedOut(_, seconds) = tt {
+                // A hang (e.g. the box's serving backend is down) is not an
+                // auth signal — leave `isPaired`/`registry` untouched so a
+                // genuinely paired box doesn't get bounced to "unpaired" just
+                // because it's slow or wedged right now.
+                errorText = Self.timeoutMessage(seconds: seconds)
             } else {
                 errorText = error.localizedDescription
             }
         }
+    }
+
+    private static func timeoutMessage(seconds: Double) -> String {
+        "Timed out after \(Int(seconds))s — the box may be busy or unreachable."
     }
 
     public func loadModels() async {
@@ -144,12 +154,18 @@ public final class BoxViewModel: Identifiable {
 
     private func record(_ error: Error) {
         if let tt = error as? TTError {
+            // `isAuthError` only matches `.commandFailed`, so `.timedOut`
+            // (and any other non-auth case) never flips `isPaired` here —
+            // a hang isn't evidence the token is bad.
             if commands.isAuthError(tt) {
                 isPaired = false
                 registry.markUnpaired(record.hostPort)
             }
-            if case let .commandFailed(_, _, stderr) = tt { errorText = stderr.isEmpty ? "Command failed." : stderr }
-            else { errorText = String(describing: tt) }
+            switch tt {
+            case let .commandFailed(_, _, stderr): errorText = stderr.isEmpty ? "Command failed." : stderr
+            case let .timedOut(_, seconds): errorText = Self.timeoutMessage(seconds: seconds)
+            default: errorText = String(describing: tt)
+            }
         } else {
             errorText = error.localizedDescription
         }

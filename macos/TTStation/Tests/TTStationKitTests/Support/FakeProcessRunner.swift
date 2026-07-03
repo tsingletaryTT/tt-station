@@ -7,8 +7,11 @@ final class FakeProcessRunner: TTProcessRunner {
     private(set) var lastArgs: [String] = []
     private(set) var callCount = 0
 
-    func run(_ args: [String]) async throws -> ProcessResult {
+    private(set) var lastTimeout: TimeInterval?
+
+    func run(_ args: [String], timeout: TimeInterval) async throws -> ProcessResult {
         lastArgs = args
+        lastTimeout = timeout
         callCount += 1
         if let nextError { throw nextError }
         return nextResult ?? ProcessResult(stdout: Data(), stderr: "", exitCode: 0)

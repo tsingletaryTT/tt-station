@@ -115,6 +115,17 @@ final class BoxViewModelTests: XCTestCase {
         XCTAssertFalse(reg.pairedHosts.contains("h:8080"))
     }
 
+    func testRefreshTimeoutShowsErrorNotUnpaired() async {
+        let client = FakeTTClient()
+        client.statusError = .timedOut(command: [], seconds: 20)
+        let (vm, reg) = makeVM(paired: true, client: client)
+        let wasPaired = vm.isPaired
+        await vm.refresh()
+        XCTAssertNotNil(vm.errorText)
+        XCTAssertEqual(vm.isPaired, wasPaired)
+        XCTAssertTrue(reg.pairedHosts.contains("h:8080"))
+    }
+
     func testPairedServingRefreshFetchesEndpoint() async {
         let client = FakeTTClient()
         client.statusResult = .serving(model: "Foo")

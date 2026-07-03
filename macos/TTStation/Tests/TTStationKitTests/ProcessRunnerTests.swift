@@ -42,4 +42,18 @@ extension ProcessRunnerTests {
             XCTAssertEqual(error as? TTError, .binaryNotFound(triedPaths: ["/nope/tt"]))
         }
     }
+
+    func testRealRunnerTimesOutAndThrows() async throws {
+        let locator = TTBinaryLocator(override: "/bin/sleep", candidates: []) { _ in true }
+        let runner = RealProcessRunner(locator: locator)
+        let start = Date()
+        do {
+            _ = try await runner.run(["5"], timeout: 0.5)
+            XCTFail("expected timeout throw")
+        } catch {
+            XCTAssertEqual(error as? TTError, .timedOut(command: ["5"], seconds: 0.5))
+        }
+        // Should resolve well before the sleep's own 5s duration would elapse.
+        XCTAssertLessThan(Date().timeIntervalSince(start), 3.0)
+    }
 }

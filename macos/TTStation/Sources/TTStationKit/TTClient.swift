@@ -26,7 +26,9 @@ public final class TTClient {
         var args = ["--json", "discover"]
         for h in manualHosts { args += ["--host", h] }
         if noMdns { args.append("--no-mdns") }
-        return try await call(args, decode: [BoxRecord].self)
+        // mDNS discovery can legitimately take longer than a typical control
+        // call while it waits out its own scan window.
+        return try await call(args, decode: [BoxRecord].self, timeout: 25)
     }
 
     public func models(host: String) async throws -> [ModelInfo] {
@@ -46,8 +48,12 @@ public final class TTClient {
 
     // MARK: Helpers
 
-    func call<T: Decodable>(_ args: [String], decode type: T.Type) async throws -> T {
-        let result = try await runner.run(args)
+    /// `timeout` defaults to 20s, generous for a local control-plane
+    /// round-trip but short enough that a hung box (e.g. serving backend
+    /// down) fails the UI action instead of spinning it forever. `run(...)`
+    /// overrides it — model loads are slow — and `discover` overrides it too.
+    func call<T: Decodable>(_ args: [String], decode type: T.Type, timeout: TimeInterval = 20) async throws -> T {
+        let result = try await runner.run(args, timeout: timeout)
         guard result.exitCode == 0 else {
             throw TTError.commandFailed(command: args, exitCode: result.exitCode, stderr: result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         }
@@ -72,12 +78,14 @@ extension TTClient {
     }
 
     public func run(host: String, model: String) async throws -> Endpoint {
-        try await call(["--json", "run", model, "--host", host], decode: Endpoint.self)
+        // Model loads can be slow (large weights, cold cache) — give this
+        // one a long leash instead of the default 20s.
+        try await call(["--json", "run", model, "--host", host], decode: Endpoint.self, timeout: 600)
     }
 
     public func stop(host: String) async throws {
         let args = ["--json", "stop", "--host", host]
-        let result = try await runner.run(args)
+        let result = try await runner.run(args, timeout: 20)
         guard result.exitCode == 0 else {
             throw TTError.commandFailed(command: args, exitCode: result.exitCode, stderr: result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         }
