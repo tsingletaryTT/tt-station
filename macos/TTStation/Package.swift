@@ -9,6 +9,10 @@ let package = Package(
     ],
     targets: [
         .target(name: "TTStationKit"),
-        .testTarget(name: "TTStationKitTests", dependencies: ["TTStationKit"]),
+        .testTarget(
+            name: "TTStationKitTests",
+            dependencies: ["TTStationKit"],
+            resources: [.copy("Fixtures")]
+        ),
     ]
 )
