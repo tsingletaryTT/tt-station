@@ -24,6 +24,31 @@ pub struct Endpoint {
     pub requires_key: bool,
 }
 
+/// One model a box's serving backend can run, per its `model_spec.json` --
+/// the model id (the top-level key under `model_specs`) plus the device
+/// meshes it supports (that entry's own keys, e.g. `GALAXY`, `T3K`,
+/// `P300X2`). See `ServingBackend::list_models`
+/// (`tt-station-agentd/src/serving/mod.rs`) for how this is populated and
+/// `agent_client::list_models`/`tt models` for how a client consumes it --
+/// the point of enumerating this at all is so a caller never has to guess
+/// or hardcode which models a given box can serve.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub name: String,
+    pub devices: Vec<String>,
+}
+
+/// `GET /models`'s response body: every model a box can serve (see
+/// `ModelInfo`) plus the `model_spec.json` release version they were read
+/// from, if the backend has one to report (the default, empty
+/// `ServingBackend::list_models` impl -- used by backends with no model
+/// catalog of their own, e.g. `DstackBackend` -- reports `None`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelsResponse {
+    pub release_version: Option<String>,
+    pub models: Vec<ModelInfo>,
+}
+
 impl ServingStatus {
     pub fn to_txt(&self) -> String {
         match self {

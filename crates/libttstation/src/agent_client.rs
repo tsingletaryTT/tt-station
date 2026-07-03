@@ -9,9 +9,31 @@
 //! `/status` isn't currently bearer-gated on the agent side, but sending the
 //! header anyway costs nothing and keeps all four calls uniform.
 
-use crate::model::{Endpoint, ServingStatus};
+use crate::model::{Endpoint, ModelsResponse, ServingStatus};
 use crate::pairing::join;
 use serde::{Deserialize, Serialize};
+
+/// `GET /models` (UNAUTHED, mirroring the agent's own route -- see
+/// `tt-station-agentd::routes::get_models`): enumerate the models the agent
+/// at `base` can serve, so a caller (the `tt` CLI's `models` command today)
+/// never has to guess or hardcode a model id before calling
+/// [`AgentClient::run`].
+///
+/// A FREE function rather than an `AgentClient` method, same reasoning as
+/// [`crate::pairing::pair_init`]: no bearer token exists yet at this point
+/// in a fresh interaction (a client may want to see what's servable BEFORE
+/// pairing), and the agent's `/models` route doesn't require one anyway.
+pub async fn list_models(base: &str) -> anyhow::Result<ModelsResponse> {
+    let url = join(base, "models");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
+
+    Ok(resp.json().await?)
+}
 
 /// A handle to one paired agent: its control-plane base URL plus the bearer
 /// token minted for it by [`crate::pairing::pair_complete`].

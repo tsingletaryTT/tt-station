@@ -6,6 +6,7 @@
 //!
 //!   tt [--json] discover [--host <h:p>]... [--no-mdns] [--timeout-ms <ms>]
 //!   tt [--json] pair <host:port> [--code <code>]
+//!   tt [--json] models --host <host:port>
 //!   tt [--json] run <model> --host <host:port>
 //!   tt [--json] stop --host <host:port>
 //!   tt [--json] status --host <host:port>
@@ -46,7 +47,7 @@ use libttstation::agent_client::AgentClient;
 use libttstation::discovery::{
     aggregate, manual::ManualProvider, mdns::MdnsProvider, DiscoveryProvider,
 };
-use libttstation::model::{BoxRecord, Endpoint, ServingStatus};
+use libttstation::model::{BoxRecord, Endpoint, ModelsResponse, ServingStatus};
 use libttstation::pairing::{pair_complete, pair_init};
 use libttstation::secrets::{default_store, FileStore, SecretStore};
 use serde::Deserialize;
@@ -98,6 +99,16 @@ enum Command {
         code: Option<String>,
     },
 
+    /// Enumerate the models a box can serve, per its `model_spec.json` --
+    /// so an operator (or script) never has to guess/hardcode a model id
+    /// before `tt run`. UNAUTHED on the agent side (like `status`), so this
+    /// works even against a box `tt pair` was never run against.
+    Models {
+        /// The box's control-plane address, as `host:port`.
+        #[arg(long)]
+        host: String,
+    },
+
     /// Ask a paired box to start serving `model`.
     Run {
         /// The model identifier to serve (backend-specific, e.g. a Docker
@@ -147,6 +158,10 @@ fn main() -> Result<()> {
         Command::Pair { host, code } => {
             let token = run_async(cmd_pair(host, code.clone()))?;
             print_pair(host, &token, cli.json);
+        }
+        Command::Models { host } => {
+            let resp = run_async(cmd_models(host))?;
+            print_models(&resp, cli.json);
         }
         Command::Run { model, host } => {
             let endpoint = run_async(cmd_run(host, model))?;
@@ -298,6 +313,14 @@ fn prompt_for_code() -> Result<String> {
     Ok(line.trim().to_string())
 }
 
+/// `tt models --host <host:port>`: enumerate the models `host` can serve.
+/// UNAUTHED on the agent side, so this needs no stored token -- unlike
+/// every other command below, it doesn't go through `authed_client`.
+async fn cmd_models(host: &str) -> Result<ModelsResponse> {
+    let base = format!("http://{host}");
+    libttstation::agent_client::list_models(&base).await
+}
+
 /// `tt run <model> --host <host:port>`: load the stored token for `host` and
 /// ask the agent to start serving `model`.
 async fn cmd_run(host: &str, model: &str) -> Result<Endpoint> {
@@ -440,6 +463,24 @@ fn print_pair(host: &str, token: &str, json: bool) {
         );
     } else {
         println!("paired with {host}; token stored");
+    }
+}
+
+/// `tt models`'s output: JSON prints the whole `ModelsResponse` object;
+/// human mode prints one model per line as `<name>\t<dev1,dev2,...>`, so
+/// it's both `grep`-able and roughly aligned like `tt discover`'s output.
+fn print_models(resp: &ModelsResponse, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(resp).expect("ModelsResponse always serializes")
+        );
+    } else if resp.models.is_empty() {
+        println!("no models available");
+    } else {
+        for model in &resp.models {
+            println!("{}\t{}", model.name, model.devices.join(","));
+        }
     }
 }
 

@@ -89,32 +89,42 @@ struct Cli {
     #[arg(long = "serving-port", default_value_t = 8000)]
     serving_port: u16,
 
-    /// Container image `docker run` for model serving. Only meaningful for
-    /// the Docker backend today.
+    /// Container image to run the resolved model in
+    /// (`run.py --override-docker-image`, or `docker run <image>` for the
+    /// `docker` fallback backend).
     ///
-    /// NO `latest` tag exists for `tt-inference-server` -- tags are
-    /// `<semver>-<tt-metal-commit>-<vllm-commit>` (e.g.
-    /// `0.9.0-84b4c53-222ee06`). The default below is an EXAMPLE tag only;
-    /// it MUST be reviewed and pinned to the tag actually intended for a
-    /// given release before real use. See
+    /// OPTIONAL for the `runpy` backend (the default): without it, `run.py`
+    /// picks the correct image itself from the model's own entry in
+    /// `model_spec.json` -- the flag name says it all, it's an OVERRIDE, not
+    /// a requirement, and is normally unnecessary. Setting this bypasses
+    /// that resolution.
+    ///
+    /// The `docker` fallback backend has no such resolution of its own (it
+    /// has no `model_spec.json` to consult), so when this is unset it falls
+    /// back to `DEFAULT_DOCKER_SERVING_IMAGE` below -- an EXAMPLE tag that
+    /// MUST be reviewed and pinned before real use. See
     /// `docs/reference/tt-inference-server-docker.md`.
-    #[arg(
-        long = "serving-image",
-        default_value = "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.9.0-84b4c53-222ee06"
-    )]
-    serving_image: String,
+    #[arg(long = "serving-image")]
+    serving_image: Option<String>,
 
     /// `--tt-device` value passed to `tt-inference-server`, e.g. `n300`,
     /// `p150x4`, `p300x2`. Shared by both the `runpy` and `docker` backends.
     ///
-    /// Defaults to `p300x2` -- CONFIRMED as the string for *this* box (a
-    /// P300X2 machine, 4x p300c) in
+    /// OPTIONAL for the `runpy` backend (the default): per `run.py --help`,
+    /// omitting it "Defaults to the largest supported device available on
+    /// the host" -- i.e. `run.py` detects this box's hardware and picks the
+    /// mesh itself. Setting this OVERRIDES that auto-detection and is
+    /// normally unnecessary.
+    ///
+    /// The `docker` fallback backend has no auto-detection of its own, so
+    /// when this is unset it falls back to `"p300x2"` -- CONFIRMED as the
+    /// string for *this* box (a P300X2 machine, 4x p300c) in
     /// `docs/reference/tt-inference-server-docker.md`'s "Device string is
     /// box- AND model-specific" section. `p150x4` is the OTHER Blackhole
-    /// "BH QuietBox" variant, not this box -- override this flag if you're
-    /// actually targeting that hardware.
-    #[arg(long = "tt-device", default_value = "p300x2")]
-    tt_device: String,
+    /// "BH QuietBox" variant, not this box -- pass this flag explicitly if
+    /// you're actually targeting that hardware with the `docker` backend.
+    #[arg(long = "tt-device")]
+    tt_device: Option<String>,
 
     /// Hugging Face access token for gated model repos (e.g. Llama), passed
     /// into the serving container as `--env HF_TOKEN=...`. Only meaningful
@@ -180,17 +190,26 @@ struct Cli {
 
     /// `run.py`'s `--engine` flag, e.g. `vllm`. Only meaningful for the
     /// `runpy` backend.
-    #[arg(long = "engine", default_value = "vllm")]
-    engine: String,
+    ///
+    /// OPTIONAL: `run.py` defaults it to the model's own entry in
+    /// `model_spec.json` when omitted. Setting this OVERRIDES that
+    /// resolution and is normally unnecessary.
+    #[arg(long = "engine")]
+    engine: Option<String>,
 
     /// `run.py`'s `--impl` flag, e.g. `tt-transformers`. Only meaningful for
     /// the `runpy` backend.
-    #[arg(long = "impl", default_value = "tt-transformers")]
-    impl_name: String,
+    ///
+    /// OPTIONAL: `run.py` defaults it to the model's own entry in
+    /// `model_spec.json` when omitted. Setting this OVERRIDES that
+    /// resolution and is normally unnecessary.
+    #[arg(long = "impl")]
+    impl_name: Option<String>,
 
     /// `run.py`'s `--device-id` flag, e.g. `0,1`, to pin serving to specific
     /// chips. Only meaningful for the `runpy` backend. Omitted from the
-    /// `run.py` invocation entirely when not given.
+    /// `run.py` invocation entirely when not given -- most runs let `run.py`
+    /// pick the device mesh itself.
     #[arg(long = "device-id")]
     device_id: Option<String>,
 
@@ -198,7 +217,39 @@ struct Cli {
     /// Only meaningful for the `runpy` backend.
     #[arg(long = "model-source", default_value = "huggingface")]
     model_source: String,
+
+    /// Path to `model_spec.json` -- the ground-truth model/device-mesh
+    /// catalog `run.py` validates `--model`/`--tt-device` against, and that
+    /// `RunPyBackend::list_models` (`GET /models`, `tt models`) reads to
+    /// enumerate what this box can serve. Only meaningful for the `runpy`
+    /// backend.
+    ///
+    /// OPTIONAL: when omitted, `RunPyBackend` itself resolves this to
+    /// `<tt-inference-repo>/model_spec.json` at call time (see
+    /// `RunPyBackend::model_spec_path`), so this file doesn't need to
+    /// duplicate `default_tt_inference_repo`'s logic.
+    #[arg(long = "model-spec")]
+    model_spec: Option<String>,
 }
+
+/// `docker` fallback-backend default serving image, used only when
+/// `--serving-image` is omitted AND `--backend docker` is selected. The
+/// `runpy` backend (the default) never uses this -- it lets `run.py`
+/// resolve the image itself; see `--serving-image`'s doc comment.
+///
+/// NO `latest` tag exists for `tt-inference-server` -- tags are
+/// `<semver>-<tt-metal-commit>-<vllm-commit>` (e.g. `0.9.0-84b4c53-222ee06`).
+/// This is an EXAMPLE tag only; it MUST be reviewed and pinned to the tag
+/// actually intended for a given release before real use. See
+/// `docs/reference/tt-inference-server-docker.md`.
+const DEFAULT_DOCKER_SERVING_IMAGE: &str =
+    "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.9.0-84b4c53-222ee06";
+
+/// `docker` fallback-backend default `--tt-device`, used only when
+/// `--tt-device` is omitted AND `--backend docker` is selected. The `runpy`
+/// backend (the default) never uses this -- it lets `run.py` auto-detect
+/// the device mesh itself; see `--tt-device`'s doc comment.
+const DEFAULT_DOCKER_TT_DEVICE: &str = "p300x2";
 
 /// Resolve the default `tt-inference-server` checkout to use when
 /// `--tt-inference-repo` isn't given: prefer a vendored copy at
@@ -240,11 +291,24 @@ async fn main() -> Result<()> {
         .or_else(|| std::env::var("HF_TOKEN").ok())
         .filter(|token| !token.is_empty());
 
+    // `DockerBackend` (the manual escape hatch -- see `Backend`'s doc
+    // comment) has no auto-resolution of its own the way `run.py` does, so
+    // it needs CONCRETE device/image values even when the operator didn't
+    // pass `--tt-device`/`--serving-image` -- fall back to this box's known
+    // values rather than leaving it half-configured. `RunPyConfig` below
+    // deliberately does NOT do this: it passes the raw `Option`s straight
+    // through so `run.py` can auto-resolve them itself.
     let docker_config = DockerConfig {
-        image: cli.serving_image.clone(),
+        image: cli
+            .serving_image
+            .clone()
+            .unwrap_or_else(|| DEFAULT_DOCKER_SERVING_IMAGE.to_string()),
         host: cli.serving_host.clone(),
         host_port: cli.serving_port,
-        tt_device: cli.tt_device.clone(),
+        tt_device: cli
+            .tt_device
+            .clone()
+            .unwrap_or_else(|| DEFAULT_DOCKER_TT_DEVICE.to_string()),
         hf_token,
         cache_volume: cli.cache_volume.clone(),
         no_auth: !cli.require_auth,
@@ -259,17 +323,29 @@ async fn main() -> Result<()> {
             .unwrap_or_else(default_tt_inference_repo),
         host: cli.serving_host.clone(),
         service_port: cli.serving_port,
+        no_auth: !cli.require_auth,
+        model_source: cli.model_source.clone(),
+        // `--host-hf-cache` isn't part of run.py's device/image/impl/engine
+        // auto-resolution (see the module doc in serving/runpy.rs) -- it's
+        // just a real host path this codebase always wants bind-mounted, so
+        // (unlike tt_device/image/impl/engine below) this always resolves
+        // to `Some`, never passed through as a bare, possibly-absent
+        // `Option`.
+        host_hf_cache: Some(
+            cli.host_hf_cache
+                .clone()
+                .unwrap_or_else(default_host_hf_cache),
+        ),
+        // Passed straight through as `Option`s -- `None` here means "let
+        // run.py auto-resolve it," which is the DEFAULT for a fresh CLI
+        // invocation (see each flag's own doc comment above). Do NOT apply
+        // a fallback the way `docker_config` above does.
         tt_device: cli.tt_device.clone(),
         image: cli.serving_image.clone(),
         engine: cli.engine.clone(),
         impl_name: cli.impl_name.clone(),
-        host_hf_cache: cli
-            .host_hf_cache
-            .clone()
-            .unwrap_or_else(default_host_hf_cache),
-        no_auth: !cli.require_auth,
-        device_ids: cli.device_id.clone(),
-        model_source: cli.model_source.clone(),
+        device_id: cli.device_id.clone(),
+        model_spec_path: cli.model_spec.clone(),
     };
 
     let backend = make_backend(&cli.backend.to_string(), docker_config, runpy_config)

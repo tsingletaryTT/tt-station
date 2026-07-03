@@ -17,7 +17,7 @@ pub mod runpy;
 use std::time::Duration;
 
 use anyhow::Result;
-use libttstation::model::{Endpoint, ServingStatus};
+use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 
 /// Starts, stops, and reports on model-serving for a box.
 ///
@@ -55,6 +55,24 @@ pub trait ServingBackend: Send + Sync {
     /// /status`'s response reflects this method's return value -- as of
     /// this PoC, it doesn't.
     fn status(&self) -> Result<ServingStatus>;
+
+    /// Enumerate the models this backend can serve, so a caller (`GET
+    /// /models`, `tt models`) never has to guess or hardcode a model id --
+    /// see `libttstation::model::ModelsResponse`.
+    ///
+    /// Default implementation reports an empty catalog with no known
+    /// release version -- correct for any backend with no model spec of its
+    /// own to read (`DockerBackend`, whose image/model are supplied
+    /// entirely via CLI flags with no catalog file, and `DstackBackend`,
+    /// still a stub). `RunPyBackend` is the one backend that overrides
+    /// this, since `run.py`'s `model_spec.json` is an actual catalog to
+    /// read.
+    fn list_models(&self) -> Result<ModelsResponse> {
+        Ok(ModelsResponse {
+            release_version: None,
+            models: vec![],
+        })
+    }
 }
 
 /// Poll `runner.health_ok(url)` up to `attempts` times, sleeping `interval`

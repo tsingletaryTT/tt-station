@@ -4,6 +4,15 @@
 //! `docs/reference/tt-inference-server-docker.md`'s "⭐ Ground truth: launch
 //! via run.py" section for the validated invocation this mirrors.
 //!
+//! The central behavior under test: `run.py` itself auto-resolves the
+//! device mesh (`--tt-device` "Defaults to the largest supported device
+//! available on the host"), the serving image (`--override-docker-image` is
+//! an OVERRIDE, not a requirement), and `--impl`/`--engine` (default to the
+//! model spec) -- so `RunPyBackend::start`'s DEFAULT invocation must NOT
+//! guess values for any of them. Each is only appended when a caller
+//! explicitly configures it (`Some(..)`), proven below by the
+//! `*_overrides_when_configured` tests alongside the default-omission test.
+//!
 //! Like `tests/serving.rs`, everything here goes through the shared
 //! `FakeRunner` test double (`tests/support/mod.rs`) -- no real `python3`,
 //! `run.py`, or `docker` binary, and no real HTTP health probe.
@@ -18,27 +27,30 @@ mod support;
 use support::FakeRunner;
 
 /// Build a `RunPyConfig` with production-shaped defaults, overriding only
-/// `image`/`host`/`service_port` -- the fields most tests in this file vary.
-fn config(image: &str, host: &str, service_port: u16) -> RunPyConfig {
+/// `host`/`service_port` -- the two fields most tests in this file vary.
+/// Every device/image/impl/engine field starts `None` (the real default --
+/// see `RunPyConfig::default`'s doc comment).
+fn config(host: &str, service_port: u16) -> RunPyConfig {
     RunPyConfig {
-        image: image.to_string(),
         host: host.to_string(),
         service_port,
         ..Default::default()
     }
 }
 
-/// `start` should invoke `python3 run.py` (NOT a raw `docker run`) with the
-/// full ground-truth argv from `docs/reference/tt-inference-server-docker.md`,
-/// poll `/health` until OK, and return an `Endpoint` whose `base_url` ends in
-/// `/v1`.
+/// The DEFAULT `start` invocation -- no device/image/impl/engine override
+/// configured -- must be the MINIMAL `run.py` command: `--model`,
+/// `--workflow server`, `--docker-server`, `--service-port`, plus
+/// `--no-auth` (default-on) and `--host-hf-cache` (the one non-hardware
+/// default this codebase still sets, see `RunPyConfig::default`). It must
+/// NOT carry `--tt-device`, `--override-docker-image`, `--impl`, or
+/// `--engine` -- that's the whole point: `run.py` resolves all four itself
+/// from `model_spec.json` and detected hardware, and hardcoding/guessing a
+/// value here would just be a worse, staler copy of that resolution.
 #[test]
-fn runpy_start_issues_run_py_command_and_returns_endpoint() {
+fn runpy_start_default_omits_device_image_impl_engine() {
     let runner = FakeRunner::new(0); // healthy on the very first probe
-    let backend = RunPyBackend::new(
-        config("some/image:tag", "127.0.0.1", 8080),
-        Box::new(runner.clone()),
-    );
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
 
     let model = "Llama-3.1-8B-Instruct";
     let endpoint = backend.start(model).expect("start should succeed");
@@ -69,22 +81,8 @@ fn runpy_start_issues_run_py_command_and_returns_endpoint() {
         "argv should carry --workflow server: {cmd:?}"
     );
     assert!(
-        cmd.windows(2)
-            .any(|w| w[0] == "--tt-device" && w[1] == "p300x2"),
-        "argv should carry the default --tt-device p300x2: {cmd:?}"
-    );
-    assert!(
-        cmd.windows(2).any(|w| w[0] == "--engine" && w[1] == "vllm"),
-        "argv should carry the default --engine vllm: {cmd:?}"
-    );
-    assert!(
         cmd.iter().any(|a| a == "--docker-server"),
         "argv should carry --docker-server: {cmd:?}"
-    );
-    assert!(
-        cmd.windows(2)
-            .any(|w| w[0] == "--override-docker-image" && w[1] == "some/image:tag"),
-        "argv should carry --override-docker-image <image>: {cmd:?}"
     );
     assert!(
         cmd.windows(2)
@@ -92,13 +90,115 @@ fn runpy_start_issues_run_py_command_and_returns_endpoint() {
         "argv should carry --service-port <port>: {cmd:?}"
     );
     assert!(
+        cmd.iter().any(|a| a == "--no-auth"),
+        "argv should carry --no-auth by default: {cmd:?}"
+    );
+    assert!(
         cmd.windows(2)
             .any(|w| w[0] == "--host-hf-cache" && w[1] == "~/.cache/huggingface"),
         "argv should carry --host-hf-cache <cache> with the configured value: {cmd:?}"
     );
+
+    // The whole point of this change: none of these should be present.
     assert!(
-        cmd.iter().any(|a| a == "--no-auth"),
-        "argv should carry --no-auth by default: {cmd:?}"
+        !cmd.iter().any(|a| a == "--tt-device"),
+        "DEFAULT argv must NOT carry --tt-device -- run.py auto-detects the \
+         largest supported device on the host: {cmd:?}"
+    );
+    assert!(
+        !cmd.iter().any(|a| a == "--override-docker-image"),
+        "DEFAULT argv must NOT carry --override-docker-image -- run.py \
+         resolves the image from model_spec.json itself: {cmd:?}"
+    );
+    assert!(
+        !cmd.iter().any(|a| a == "--impl"),
+        "DEFAULT argv must NOT carry --impl -- run.py defaults it to the \
+         model spec: {cmd:?}"
+    );
+    assert!(
+        !cmd.iter().any(|a| a == "--engine"),
+        "DEFAULT argv must NOT carry --engine -- run.py defaults it to the \
+         model spec: {cmd:?}"
+    );
+    assert!(
+        !cmd.iter().any(|a| a == "--device-id"),
+        "DEFAULT argv must NOT carry --device-id when unconfigured: {cmd:?}"
+    );
+}
+
+/// Setting `tt_device` must make `--tt-device <value>` appear -- an
+/// explicit OVERRIDE of run.py's own hardware auto-detection.
+#[test]
+fn runpy_start_includes_tt_device_when_configured() {
+    let runner = FakeRunner::new(0);
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.tt_device = Some("p300x2".to_string());
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = &commands[0];
+    assert!(
+        cmd.windows(2)
+            .any(|w| w[0] == "--tt-device" && w[1] == "p300x2"),
+        "argv should carry --tt-device p300x2 when configured: {cmd:?}"
+    );
+}
+
+/// Setting `image` must make `--override-docker-image <value>` appear.
+#[test]
+fn runpy_start_includes_override_docker_image_when_configured() {
+    let runner = FakeRunner::new(0);
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.image = Some("some/image:tag".to_string());
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = &commands[0];
+    assert!(
+        cmd.windows(2)
+            .any(|w| w[0] == "--override-docker-image" && w[1] == "some/image:tag"),
+        "argv should carry --override-docker-image when configured: {cmd:?}"
+    );
+}
+
+/// Setting `impl_name` must make `--impl <value>` appear.
+#[test]
+fn runpy_start_includes_impl_when_configured() {
+    let runner = FakeRunner::new(0);
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.impl_name = Some("tt-transformers".to_string());
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = &commands[0];
+    assert!(
+        cmd.windows(2)
+            .any(|w| w[0] == "--impl" && w[1] == "tt-transformers"),
+        "argv should carry --impl when configured: {cmd:?}"
+    );
+}
+
+/// Setting `engine` must make `--engine <value>` appear.
+#[test]
+fn runpy_start_includes_engine_when_configured() {
+    let runner = FakeRunner::new(0);
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.engine = Some("vllm".to_string());
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = &commands[0];
+    assert!(
+        cmd.windows(2).any(|w| w[0] == "--engine" && w[1] == "vllm"),
+        "argv should carry --engine when configured: {cmd:?}"
     );
 }
 
@@ -107,7 +207,7 @@ fn runpy_start_issues_run_py_command_and_returns_endpoint() {
 #[test]
 fn runpy_start_omits_no_auth_and_requires_key_when_auth_required() {
     let runner = FakeRunner::new(0);
-    let mut cfg = config("some/image:tag", "127.0.0.1", 8080);
+    let mut cfg = config("127.0.0.1", 8080);
     cfg.no_auth = false;
     let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
 
@@ -125,12 +225,30 @@ fn runpy_start_omits_no_auth_and_requires_key_when_auth_required() {
     );
 }
 
-/// A configured `--device-id` should show up verbatim in the argv.
+/// `--host-hf-cache` must not appear at all when unconfigured (`None`).
+#[test]
+fn runpy_start_omits_host_hf_cache_when_not_configured() {
+    let runner = FakeRunner::new(0);
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.host_hf_cache = None;
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = &commands[0];
+    assert!(
+        !cmd.iter().any(|a| a == "--host-hf-cache"),
+        "argv should not carry --host-hf-cache when unconfigured: {cmd:?}"
+    );
+}
+
+/// A configured `device_id` should show up verbatim in the argv.
 #[test]
 fn runpy_start_includes_device_id_when_configured() {
     let runner = FakeRunner::new(0);
-    let mut cfg = config("some/image:tag", "127.0.0.1", 8080);
-    cfg.device_ids = Some("0,1".to_string());
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.device_id = Some("0,1".to_string());
     let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
 
     backend.start("llama3").expect("start should succeed");
@@ -144,14 +262,11 @@ fn runpy_start_includes_device_id_when_configured() {
     );
 }
 
-/// Without a configured `device_ids`, `--device-id` must not appear at all.
+/// Without a configured `device_id`, `--device-id` must not appear at all.
 #[test]
 fn runpy_start_omits_device_id_when_not_configured() {
     let runner = FakeRunner::new(0);
-    let backend = RunPyBackend::new(
-        config("some/image:tag", "127.0.0.1", 8080),
-        Box::new(runner.clone()),
-    );
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
 
     backend.start("llama3").expect("start should succeed");
 
@@ -168,11 +283,8 @@ fn runpy_start_omits_device_id_when_not_configured() {
 #[test]
 fn runpy_start_polls_health_until_ok() {
     let runner = FakeRunner::new(2); // unhealthy for the first two probes
-    let backend = RunPyBackend::new(
-        config("some/image:tag", "127.0.0.1", 8081),
-        Box::new(runner),
-    )
-    .with_health_poll(10, Duration::from_millis(1));
+    let backend = RunPyBackend::new(config("127.0.0.1", 8081), Box::new(runner))
+        .with_health_poll(10, Duration::from_millis(1));
 
     backend
         .start("llama3")
@@ -184,11 +296,8 @@ fn runpy_start_polls_health_until_ok() {
 #[test]
 fn runpy_start_times_out_when_never_healthy() {
     let runner = FakeRunner::new(u32::MAX); // never reports healthy
-    let backend = RunPyBackend::new(
-        config("some/image:tag", "127.0.0.1", 8082),
-        Box::new(runner),
-    )
-    .with_health_poll(3, Duration::from_millis(1));
+    let backend = RunPyBackend::new(config("127.0.0.1", 8082), Box::new(runner))
+        .with_health_poll(3, Duration::from_millis(1));
 
     let err = backend.start("llama3").expect_err("start should time out");
     assert!(err.to_string().contains("llama3"));
@@ -201,10 +310,7 @@ fn runpy_start_times_out_when_never_healthy() {
 fn runpy_stop_queries_and_stops_by_publish_port() {
     let runner = FakeRunner::new(0);
     runner.set_run_output("docker ps", "abc123\n");
-    let backend = RunPyBackend::new(
-        config("some/image:tag", "127.0.0.1", 8080),
-        Box::new(runner.clone()),
-    );
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
 
     backend.stop("llama3").expect("stop should succeed");
 
@@ -239,10 +345,7 @@ fn runpy_stop_queries_and_stops_by_publish_port() {
 #[test]
 fn runpy_stop_is_ok_when_nothing_running() {
     let runner = FakeRunner::new(0);
-    let backend = RunPyBackend::new(
-        config("some/image:tag", "127.0.0.1", 8080),
-        Box::new(runner.clone()),
-    );
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
 
     backend.stop("llama3").expect("stop should succeed");
 
@@ -253,4 +356,95 @@ fn runpy_stop_is_ok_when_nothing_running() {
         "expected only the ps query, no stop call: {commands:?}"
     );
     assert_eq!(backend.status().unwrap(), ServingStatus::Idle);
+}
+
+// ---------------------------------------------------------------------
+// `list_models`: enumerate model_spec.json's catalog.
+// ---------------------------------------------------------------------
+
+/// A scratch `model_spec.json` fixture, unique per test run and cleaned up
+/// on drop -- same pattern as `crates/tt/tests/e2e_mock.rs`'s
+/// `TempConfigDir`, kept local here since this is the only file that needs
+/// it.
+struct TempModelSpec(std::path::PathBuf);
+
+impl TempModelSpec {
+    fn write(contents: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "tt-station-model-spec-{}-{}.json",
+            std::process::id(),
+            std::time::Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::write(&path, contents).expect("write temp model_spec.json fixture");
+        TempModelSpec(path)
+    }
+
+    fn path(&self) -> String {
+        self.0.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for TempModelSpec {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+const MODEL_SPEC_FIXTURE: &str = r#"{
+    "release_version": "0.12.0",
+    "model_specs": {
+        "Qwen/Qwen3-32B": { "P300X2": {}, "T3K": {} },
+        "Qwen/Qwen3-8B": { "P150X4": {} }
+    }
+}"#;
+
+/// `list_models` should read `model_spec.json`, return every model with its
+/// device meshes sorted, the whole list sorted by model name, and echo back
+/// `release_version`.
+#[test]
+fn runpy_list_models_reads_and_sorts_model_spec() {
+    let fixture = TempModelSpec::write(MODEL_SPEC_FIXTURE);
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.model_spec_path = Some(fixture.path());
+    let backend = RunPyBackend::new(cfg, Box::new(FakeRunner::new(0)));
+
+    let resp = backend
+        .list_models()
+        .expect("list_models should succeed against the fixture");
+
+    assert_eq!(resp.release_version.as_deref(), Some("0.12.0"));
+    assert_eq!(resp.models.len(), 2);
+
+    // Sorted by name: "Qwen/Qwen3-32B" < "Qwen/Qwen3-8B" (ASCII '3' < '8').
+    assert_eq!(resp.models[0].name, "Qwen/Qwen3-32B");
+    assert_eq!(resp.models[0].devices, vec!["P300X2", "T3K"]);
+
+    assert_eq!(resp.models[1].name, "Qwen/Qwen3-8B");
+    assert_eq!(resp.models[1].devices, vec!["P150X4"]);
+}
+
+/// `model_spec_path` defaults to `<repo_dir>/model_spec.json` when
+/// unconfigured -- proven by pointing `repo_dir` at a scratch directory
+/// containing exactly that filename with no explicit `model_spec_path` set.
+#[test]
+fn runpy_list_models_defaults_path_to_repo_dir_slash_model_spec_json() {
+    let dir = std::env::temp_dir().join(format!(
+        "tt-station-repo-dir-{}-{}",
+        std::process::id(),
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("create scratch repo dir");
+    std::fs::write(dir.join("model_spec.json"), MODEL_SPEC_FIXTURE)
+        .expect("write model_spec.json into scratch repo dir");
+
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.repo_dir = dir.to_string_lossy().into_owned();
+    let backend = RunPyBackend::new(cfg, Box::new(FakeRunner::new(0)));
+
+    let resp = backend
+        .list_models()
+        .expect("list_models should find model_spec.json under repo_dir");
+    assert_eq!(resp.models.len(), 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

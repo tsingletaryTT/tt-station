@@ -24,7 +24,9 @@ use axum::{
 };
 use clap::{Parser, Subcommand};
 use libttstation::discovery::SERVICE_TYPE;
-use libttstation::model::{txt_encode, BoxRecord, Endpoint, ServingStatus};
+use libttstation::model::{
+    txt_encode, BoxRecord, Endpoint, ModelInfo, ModelsResponse, ServingStatus,
+};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -305,6 +307,26 @@ async fn stop_model(State(state): State<MockState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({}))
 }
 
+/// `GET /models`: a small canned `ModelsResponse` -- doesn't consult
+/// `MockState` at all (there's no real `model_spec.json` behind this mock),
+/// just enough shape for `tt models` (and the e2e test) to exercise the
+/// discover -> models -> pair -> run flow with no real agent/hardware.
+async fn get_models() -> Json<ModelsResponse> {
+    Json(ModelsResponse {
+        release_version: Some("0.0.0-mock".to_string()),
+        models: vec![
+            ModelInfo {
+                name: "mock-model".to_string(),
+                devices: vec!["P300X2".to_string()],
+            },
+            ModelInfo {
+                name: "mock-model-large".to_string(),
+                devices: vec!["GALAXY".to_string(), "T3K".to_string()],
+            },
+        ],
+    })
+}
+
 /// `GET /endpoint`: the current `Endpoint`, or `409` if idle -- same
 /// contract as the real agent's `GET /endpoint` (Task 10), so `AgentClient`
 /// (Task 11) can be pointed at either without special-casing the mock.
@@ -350,6 +372,7 @@ async fn list_models(State(state): State<MockState>) -> Json<serde_json::Value> 
 fn app(state: MockState) -> Router {
     Router::new()
         .route("/status", get(get_status))
+        .route("/models", get(get_models))
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
         .route("/run", post(run_model))

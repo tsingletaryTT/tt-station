@@ -23,7 +23,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use libttstation::model::{Endpoint, ServingStatus};
+use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::pairing;
@@ -330,6 +330,32 @@ async fn get_status(
     })
 }
 
+/// `GET /models` (UNAUTHED, like `GET /status`): enumerate the models this
+/// box's backend can serve (see `ServingBackend::list_models`), so a client
+/// never has to guess or hardcode a model id before calling `/run`.
+/// Unauthed for the same reason `/status` is -- it's read-only discovery
+/// info, not a control action, and a client needs it to even know what to
+/// pass to the (bearer-gated) `/run`.
+///
+/// `ServingBackend::list_models` is sync (like `start`/`stop`), so it's run
+/// via `spawn_blocking` rather than called directly from this async
+/// handler -- same rule the module doc in `serving/mod.rs` states for every
+/// `ServingBackend` method, even though `RunPyBackend`'s implementation
+/// (a single small file read) is fast in practice.
+async fn get_models(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<Json<ModelsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let backend = state.backend();
+
+    let result = tokio::task::spawn_blocking(move || backend.list_models())
+        .await
+        .map_err(|join_err| {
+            backend_error(anyhow::anyhow!("list_models task panicked: {join_err}"))
+        })?;
+
+    result.map(Json).map_err(backend_error)
+}
+
 /// JSON body returned by `POST /pair/init`.
 #[derive(Serialize)]
 struct PairInitResponse {
@@ -524,6 +550,7 @@ async fn get_endpoint(
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/status", get(get_status))
+        .route("/models", get(get_models))
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
         .route("/run", post(run_model))

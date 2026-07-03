@@ -12,7 +12,7 @@
 //! with the exact configured token -- that's the one behavior all four
 //! methods share and the brief calls out explicitly.
 
-use libttstation::agent_client::AgentClient;
+use libttstation::agent_client::{list_models, AgentClient};
 use libttstation::model::{Endpoint, ServingStatus};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -181,4 +181,32 @@ async fn endpoint_maps_409_to_no_model_serving_error() {
             || message.contains("serving"),
         "expected the error to mention no model/serving, got: {message}"
     );
+}
+
+/// `list_models(base)` should GET `{base}/models` -- UNAUTHED, unlike every
+/// `AgentClient` method above -- and parse the `ModelsResponse` body.
+#[tokio::test]
+async fn list_models_parses_models_response_with_no_auth_header() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "release_version": "0.12.0",
+            "models": [
+                { "name": "Qwen/Qwen3-32B", "devices": ["P300X2", "T3K"] },
+                { "name": "Qwen/Qwen3-8B", "devices": ["P150X4"] }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let resp = list_models(&server.uri())
+        .await
+        .expect("list_models() should succeed against a mocked 200 response");
+
+    assert_eq!(resp.release_version.as_deref(), Some("0.12.0"));
+    assert_eq!(resp.models.len(), 2);
+    assert_eq!(resp.models[0].name, "Qwen/Qwen3-32B");
+    assert_eq!(resp.models[0].devices, vec!["P300X2", "T3K"]);
 }

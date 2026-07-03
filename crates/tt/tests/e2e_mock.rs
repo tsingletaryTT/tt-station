@@ -123,6 +123,29 @@ fn discover_pair_run_endpoint_completion_against_mock_box() {
     assert_eq!(boxes[0]["host"], "127.0.0.1");
     assert_eq!(boxes[0]["ctrl_port"], port);
 
+    // --- 1b. `tt --json models --host <mock>` lists the mock's canned
+    // models -- UNAUTHED, so this works even before `tt pair`. ---
+    let models_stdout = AssertCommand::cargo_bin("tt")
+        .unwrap()
+        .env("TT_CONFIG_DIR", &config_dir.0)
+        .args(["--json", "models", "--host", &host])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let models: serde_json::Value =
+        serde_json::from_slice(&models_stdout).expect("models output is valid JSON");
+    let models_array = models["models"]
+        .as_array()
+        .expect("models JSON has a models array");
+    assert!(
+        !models_array.is_empty(),
+        "expected at least one model from mock-box, got {models:?}"
+    );
+    assert_eq!(models_array[0]["name"], "mock-model");
+
     // --- 2. `tt --json pair <host> --code 000000` stores a token. ---
     // The mock accepts any code (see mock-box/src/main.rs's pair_complete),
     // so "000000" is arbitrary -- what matters is that pairing succeeds and
