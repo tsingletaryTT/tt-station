@@ -155,9 +155,41 @@ impl DockerBackend {
     /// Name of the container this backend runs a given model in. Shared
     /// between `start` and `stop` so they always agree on which container
     /// they're talking about.
+    ///
+    /// The model id itself is passed through `sanitize_container_name`
+    /// first -- real model ids commonly contain characters (like the `/` in
+    /// `meta-llama/Llama-3.1-8B`) that Docker rejects in a `--name` value.
+    /// Only the container name is sanitized; `start` still passes the
+    /// *original* `model` string to `--model`/`-e MODEL=`, since that's what
+    /// the server inside the container needs to actually load the right
+    /// model.
     fn container_name(&self, model: &str) -> String {
-        format!("tt-inference-{model}")
+        format!("tt-inference-{}", sanitize_container_name(model))
     }
+}
+
+/// Replace every character not valid in a Docker `--name` value
+/// (`[A-Za-z0-9_.-]`) with `-`.
+///
+/// Docker container names must match `[a-zA-Z0-9][a-zA-Z0-9_.-]*` --
+/// notably no `/`, which shows up constantly in real model ids (e.g. a
+/// Hugging Face-style `org/model-name`). Without this, `docker run --name
+/// tt-inference-meta-llama/Llama-3.1-8B ...` fails outright on the first
+/// real (non-mock) hardware run. The leading `tt-inference-` prefix this is
+/// always appended to already starts with an alphanumeric character, so
+/// sanitizing only the model portion is enough to satisfy Docker's "must
+/// start with an alphanumeric" rule too.
+fn sanitize_container_name(model: &str) -> String {
+    model
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 impl ServingBackend for DockerBackend {
@@ -224,5 +256,105 @@ impl ServingBackend for DockerBackend {
 
     fn status(&self) -> Result<ServingStatus> {
         Ok(self.status.lock().expect("status mutex poisoned").clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A model id with both a `/` (org/model-style Hugging Face ids) and a
+    /// `.` (version numbers) must sanitize into something Docker will
+    /// accept as a container name -- `.` is already valid so it passes
+    /// through unchanged, `/` is the character that would otherwise break
+    /// `docker run --name`.
+    #[test]
+    fn sanitize_container_name_replaces_invalid_characters() {
+        assert_eq!(
+            sanitize_container_name("meta-llama/Llama-3.1-8B"),
+            "meta-llama-Llama-3.1-8B"
+        );
+    }
+
+    /// Minimal local fake `CommandRunner`: always healthy on the first
+    /// probe, just records the argv it was asked to `run` so the test below
+    /// can inspect it. `tests/support/mod.rs`'s richer `FakeRunner` isn't
+    /// reachable from here -- integration tests under `tests/` are separate
+    /// compilation units from this crate's own `src/`-internal unit tests.
+    #[derive(Clone)]
+    struct RecordingFakeRunner {
+        commands: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl RecordingFakeRunner {
+        fn new() -> Self {
+            RecordingFakeRunner {
+                commands: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn commands(&self) -> Vec<Vec<String>> {
+            self.commands
+                .lock()
+                .expect("commands mutex poisoned")
+                .clone()
+        }
+    }
+
+    impl CommandRunner for RecordingFakeRunner {
+        fn run(&self, args: &[&str]) -> Result<String> {
+            self.commands
+                .lock()
+                .expect("commands mutex poisoned")
+                .push(args.iter().map(|s| s.to_string()).collect());
+            Ok(String::new())
+        }
+
+        fn health_ok(&self, _url: &str) -> bool {
+            true
+        }
+    }
+
+    /// The container name built from a slashed model id must be valid, but
+    /// the `docker run` argv must still carry the ORIGINAL model string in
+    /// both `--model` and `-e MODEL=` -- the server inside the container
+    /// needs the real model id to know what to load, not the
+    /// name-safe-but-mangled version.
+    #[test]
+    fn start_sanitizes_container_name_but_keeps_original_model_in_argv() {
+        let runner = RecordingFakeRunner::new();
+        let backend = DockerBackend::new(
+            "tenstorrent/tt-inference-server:latest".to_string(),
+            "127.0.0.1".to_string(),
+            8080,
+            Box::new(runner.clone()),
+        );
+
+        let model = "meta-llama/Llama-3.1-8B";
+        backend.start(model).expect("start should succeed");
+
+        let commands = runner.commands();
+        assert_eq!(commands.len(), 1);
+        let run_cmd = &commands[0];
+
+        let name_idx = run_cmd
+            .iter()
+            .position(|a| a == "--name")
+            .expect("--name flag should be present");
+        let container_name = &run_cmd[name_idx + 1];
+        assert_eq!(container_name, "tt-inference-meta-llama-Llama-3.1-8B");
+        assert!(
+            !container_name.contains('/'),
+            "container name must not contain '/': {container_name}"
+        );
+
+        assert!(
+            run_cmd.iter().any(|a| a == model),
+            "docker run argv should still carry the original model id somewhere: {run_cmd:?}"
+        );
+        assert!(
+            run_cmd.iter().any(|a| a == &format!("MODEL={model}")),
+            "MODEL env var should carry the original model id: {run_cmd:?}"
+        );
     }
 }

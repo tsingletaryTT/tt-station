@@ -214,3 +214,38 @@ async fn complete_locks_out_pair_id_after_max_wrong_attempts() {
         .expect("POST /pair/complete failed");
     assert_eq!(final_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
+
+/// A pending pair that's never completed (e.g. a client that hits
+/// `/pair/init` and walks away) must not linger in `AppState` forever --
+/// otherwise repeated `/pair/init` calls grow that map unbounded, an easy,
+/// unauthenticated way to slowly exhaust an agent's memory. `insert_pending_pair`
+/// sweeps out expired entries every time it's called, so a *subsequent*
+/// `/pair/init` (from anyone) should clear out an already-expired one. Uses
+/// the `insert_expired_pair` test hook to seed an already-expired pending
+/// pair without sleeping for the real `PAIR_TTL` (120s), and `last_code` to
+/// observe whether it's still present.
+#[tokio::test]
+async fn expired_pending_pair_is_swept_on_a_later_pair_init() {
+    let (state, base) = spawn().await;
+    let client = reqwest::Client::new();
+
+    state.insert_expired_pair("abandoned-pair-id", "123456");
+    assert!(
+        state.last_code("abandoned-pair-id").is_some(),
+        "sanity check: the seeded pair should be present before any sweep"
+    );
+
+    // Any later /pair/init call should sweep expired entries as a side
+    // effect, regardless of whose pair_id it's minting.
+    let resp = client
+        .post(format!("{base}/pair/init"))
+        .send()
+        .await
+        .expect("POST /pair/init failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    assert!(
+        state.last_code("abandoned-pair-id").is_none(),
+        "expired pending pair should have been swept out by the later /pair/init"
+    );
+}

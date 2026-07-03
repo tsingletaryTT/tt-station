@@ -189,13 +189,26 @@ impl AppState {
     /// Record a freshly-issued pairing attempt: `pair_id` will be accepted
     /// by `complete_pair` if presented with the matching `code` before
     /// `PAIR_TTL` elapses.
+    ///
+    /// Before inserting, sweeps out any *other* pending entries whose expiry
+    /// has already passed. `complete_pair` only ever removes the one
+    /// `pair_id` it was asked about, so a client that repeatedly hits
+    /// `/pair/init` and never follows up with `/pair/complete` would
+    /// otherwise grow `pending_pairs` unbounded -- a cheap, unauthenticated
+    /// way to slowly exhaust memory. Sweeping here (rather than on a
+    /// timer/background task) keeps the fix O(n) in the number of currently
+    /// pending pairs and needs no extra moving parts: every `/pair/init`
+    /// call is already a natural point to tidy up.
     fn insert_pending_pair(&self, pair_id: String, code: String) {
-        let expiry = Instant::now() + PAIR_TTL;
-        self.inner
+        let now = Instant::now();
+        let expiry = now + PAIR_TTL;
+        let mut pending = self
+            .inner
             .pending_pairs
             .lock()
-            .expect("pending_pairs mutex poisoned")
-            .insert(pair_id, (code, expiry, 0));
+            .expect("pending_pairs mutex poisoned");
+        pending.retain(|_, (_, exp, _)| *exp > now);
+        pending.insert(pair_id, (code, expiry, 0));
     }
 
     /// Check `code` against the pending pairing attempt for `pair_id`.

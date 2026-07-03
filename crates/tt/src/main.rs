@@ -193,7 +193,14 @@ fn cmd_discover(hosts: &[String], no_mdns: bool, timeout_ms: u64) -> Result<Vec<
         for h in hosts {
             parsed.push(parse_host_port(h)?);
         }
-        providers.push(Box::new(ManualProvider::new(parsed, manual_status_fetch)));
+        // Thread the operator's `--timeout-ms` into the fetch closure so a
+        // dead/unroutable manual host fails fast within the configured
+        // window instead of hanging on the OS's default TCP connect timeout
+        // (~2 minutes on Linux) -- see `manual_status_fetch`.
+        let timeout = Duration::from_millis(timeout_ms);
+        providers.push(Box::new(ManualProvider::new(parsed, move |host, port| {
+            manual_status_fetch(host, port, timeout)
+        })));
     }
 
     if !no_mdns {
@@ -203,12 +210,31 @@ fn cmd_discover(hosts: &[String], no_mdns: bool, timeout_ms: u64) -> Result<Vec<
     Ok(aggregate(&providers, Duration::from_millis(timeout_ms)))
 }
 
+/// Build the `reqwest::blocking::Client` used to probe a manual host's
+/// `/status`. Both the overall request timeout and the TCP connect timeout
+/// are set to `timeout` -- without this, `reqwest::blocking::get` uses no
+/// request timeout at all and falls back to the OS's default TCP connect
+/// timeout (on the order of minutes) when a host is routable but not
+/// answering, which makes `tt discover --host <dead-ip>:<port> --timeout-ms
+/// <n>` hang far longer than `--timeout-ms` promises. Split out as its own
+/// function so it's unit-testable without making a real network call.
+fn build_probe_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout)
+        .build()
+        .context("building HTTP client for manual host probe")
+}
+
 /// The `fetch` closure `ManualProvider` calls per configured host: a plain
 /// blocking `GET /status`, decoded into a `BoxRecord`. Blocking (not async)
 /// because `ManualProvider::discover` is a synchronous trait method -- see
 /// the module doc for why that's fine here (no runtime is active when
 /// `discover` runs).
-fn manual_status_fetch(host: &str, port: u16) -> Result<BoxRecord> {
+///
+/// `timeout` is the same duration as `discover`'s `--timeout-ms`: a manual
+/// probe shouldn't get to hang longer than mDNS browsing is allowed to run.
+fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> Result<BoxRecord> {
     #[derive(Deserialize)]
     struct StatusResponse {
         name: String,
@@ -217,7 +243,10 @@ fn manual_status_fetch(host: &str, port: u16) -> Result<BoxRecord> {
     }
 
     let url = format!("http://{host}:{port}/status");
-    let resp: StatusResponse = reqwest::blocking::get(&url)
+    let client = build_probe_client(timeout)?;
+    let resp: StatusResponse = client
+        .get(&url)
+        .send()
         .with_context(|| format!("GET {url}"))?
         .error_for_status()
         .with_context(|| format!("GET {url}"))?
@@ -506,6 +535,48 @@ mod tests {
         assert_eq!(
             endpoint_export_line(&ep),
             "export OPENAI_BASE_URL=http://127.0.0.1:8899/v1"
+        );
+    }
+
+    /// `build_probe_client` must actually apply the requested timeout as
+    /// both the request and connect timeout -- this is the fix for `tt
+    /// discover --host <dead-ip>:<port>` hanging on the OS's default TCP
+    /// connect timeout instead of respecting `--timeout-ms`. `reqwest`
+    /// doesn't expose a getter to read the configured timeout back off a
+    /// built `Client`, so this test only asserts the client builds
+    /// successfully with a timeout wired in; the behavioral guarantee (a
+    /// dead host fails fast) is covered by
+    /// `manual_status_fetch_against_unroutable_host_fails_fast_within_timeout`
+    /// below.
+    #[test]
+    fn build_probe_client_succeeds_with_a_short_timeout() {
+        assert!(build_probe_client(Duration::from_millis(200)).is_ok());
+    }
+
+    /// A dead/unroutable manual host must fail within roughly
+    /// `--timeout-ms`, not the OS's default TCP connect timeout (which on
+    /// Linux is on the order of minutes). `192.0.2.1` is in `TEST-NET-1`
+    /// (RFC 5737): reserved for documentation/testing, guaranteed to never
+    /// be a real routable host, and doesn't send back a fast "connection
+    /// refused" the way `localhost:<closed-port>` would -- packets to it
+    /// are dropped or blackholed, which is exactly the "routable-but-dead"
+    /// scenario the fix targets (a closed local port already fails fast
+    /// today, timeout or not).
+    ///
+    /// Generous 5s wall-clock bound (vs. a 200ms configured timeout) to
+    /// absorb scheduler jitter on a loaded CI box without making this test
+    /// flaky; the important assertion is "fails in low single-digit
+    /// seconds," not "fails in exactly 200ms."
+    #[test]
+    fn manual_status_fetch_against_unroutable_host_fails_fast_within_timeout() {
+        let start = std::time::Instant::now();
+        let result = manual_status_fetch("192.0.2.1", 9, Duration::from_millis(200));
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "expected the unroutable host to error");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "manual_status_fetch took {elapsed:?}, expected it to respect the ~200ms timeout"
         );
     }
 }

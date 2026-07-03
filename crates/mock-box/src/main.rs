@@ -23,14 +23,12 @@ use axum::{
     Json, Router,
 };
 use clap::{Parser, Subcommand};
+use libttstation::discovery::SERVICE_TYPE;
 use libttstation::model::{txt_encode, BoxRecord, Endpoint, ServingStatus};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-
-/// mDNS service type all Tenstorrent boxes (real and mocked) advertise under.
-const SERVICE_TYPE: &str = "_tenstorrent._tcp.local.";
 
 #[derive(Parser)]
 #[command(

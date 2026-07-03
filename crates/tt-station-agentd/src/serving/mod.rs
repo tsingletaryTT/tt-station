@@ -40,6 +40,17 @@ pub trait ServingBackend: Send + Sync {
     /// Current serving status, independent of any particular `start`/`stop`
     /// call in this process -- e.g. so `/status` can report reality even
     /// after the agent itself restarted.
+    ///
+    /// NOTE: this is a deliberate, currently-unused seam. `AppState` tracks
+    /// its own `status` (updated by `routes.rs`'s `set_serving`/`set_idle`
+    /// on every successful `/run`/`/stop`), and `GET /status` reads that,
+    /// not this method -- nothing in `tt-station-agentd` calls
+    /// `ServingBackend::status()` today. It's here ahead of the dstack
+    /// backend (M4), where a backend that can lose track of what it's
+    /// serving across an agent restart will need `/status` to ask it
+    /// directly instead of trusting in-process state. Don't assume `GET
+    /// /status`'s response reflects this method's return value -- as of
+    /// this PoC, it doesn't.
     fn status(&self) -> Result<ServingStatus>;
 }
 
