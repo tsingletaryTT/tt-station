@@ -34,6 +34,14 @@ use crate::pairing;
 /// client isn't in a race against the clock.
 const PAIR_TTL: Duration = Duration::from_secs(120);
 
+/// How many wrong-code guesses a single `pair_id` tolerates before
+/// `complete_pair` invalidates it outright. A 6-digit code (10^6 possible
+/// values) with a 120s TTL and no attempt cap would let a LAN client just
+/// hammer `/pair/complete` with every value in range; capping wrong guesses
+/// at a small number closes that off while still giving a human who
+/// fat-fingers the code a few real chances to correct themselves.
+pub const MAX_PAIR_ATTEMPTS: u32 = 5;
+
 /// Shared application state, cheap to `Clone` (just bumps the `Arc`
 /// refcount) so it can be handed to every axum handler via `State`.
 #[derive(Clone)]
@@ -59,10 +67,11 @@ struct Inner {
     /// `ServingBackend` trait object; for now we just remember the choice.
     backend: String,
     /// Pairing attempts started by `/pair/init` but not yet completed:
-    /// `pair_id -> (code, expiry)`. An entry is removed the moment it's
-    /// consumed (successfully or because it expired) by `complete_pair`, so
+    /// `pair_id -> (code, expiry, wrong_attempts)`. An entry is removed the
+    /// moment it's consumed -- successfully, because it expired, or because
+    /// `wrong_attempts` hit `MAX_PAIR_ATTEMPTS` -- by `complete_pair`, so
     /// this map only ever holds pairing attempts that are still "live".
-    pending_pairs: Mutex<HashMap<String, (String, Instant)>>,
+    pending_pairs: Mutex<HashMap<String, (String, Instant, u32)>>,
     /// Bearer tokens minted by successful `/pair/complete` calls. Task 10's
     /// control routes will check incoming requests against this set; for
     /// now `/pair/complete` is the only thing that populates it.
@@ -114,7 +123,7 @@ impl AppState {
             .pending_pairs
             .lock()
             .expect("pending_pairs mutex poisoned")
-            .insert(pair_id, (code, expiry));
+            .insert(pair_id, (code, expiry, 0));
     }
 
     /// Check `code` against the pending pairing attempt for `pair_id`.
@@ -122,27 +131,48 @@ impl AppState {
     /// Returns `true` only when `pair_id` is known, unexpired, and `code`
     /// matches -- in which case the pending entry is consumed (removed) so
     /// the same code can't be replayed. Returns `false` for an unknown
-    /// pair_id, an expired one (also removed, since it can never succeed
-    /// again), or a code mismatch (left in place so the human gets another
-    /// shot before the TTL runs out).
+    /// pair_id or an expired one (also removed, since it can never succeed
+    /// again).
+    ///
+    /// A code mismatch bumps that pair_id's wrong-attempt counter instead of
+    /// leaving it untouched forever: once it reaches `MAX_PAIR_ATTEMPTS` the
+    /// entry is removed too, so a LAN client can't keep guessing values from
+    /// the 6-digit code space against the same pair_id. Below the cap the
+    /// entry is left in place (with the bumped counter) so a human who
+    /// mistyped the code still gets a few more real chances before the TTL
+    /// runs out.
     fn complete_pair(&self, pair_id: &str, code: &str) -> bool {
         let mut pending = self
             .inner
             .pending_pairs
             .lock()
             .expect("pending_pairs mutex poisoned");
-        match pending.get(pair_id) {
-            None => false,
-            Some((_, expiry)) if Instant::now() >= *expiry => {
-                pending.remove(pair_id);
-                false
-            }
-            Some((stored_code, _)) if stored_code == code => {
-                pending.remove(pair_id);
-                true
-            }
-            Some(_) => false,
+
+        // Clone the current entry out (rather than holding a borrow into
+        // `pending`) so the branches below are free to call
+        // `pending.insert`/`pending.remove` without fighting the borrow
+        // checker over a mutex we're already holding.
+        let Some((stored_code, expiry, attempts)) = pending.get(pair_id).cloned() else {
+            return false;
+        };
+
+        if Instant::now() >= expiry {
+            pending.remove(pair_id);
+            return false;
         }
+
+        if stored_code == code {
+            pending.remove(pair_id);
+            return true;
+        }
+
+        let attempts = attempts + 1;
+        if attempts >= MAX_PAIR_ATTEMPTS {
+            pending.remove(pair_id);
+        } else {
+            pending.insert(pair_id.to_string(), (stored_code, expiry, attempts));
+        }
+        false
     }
 
     /// Add a newly-minted bearer token to the valid-token set. Task 10's
@@ -173,7 +203,24 @@ impl AppState {
             .lock()
             .expect("pending_pairs mutex poisoned")
             .get(pair_id)
-            .map(|(code, _)| code.clone())
+            .map(|(code, _, _)| code.clone())
+    }
+
+    /// Test-only seam: insert a pending pair whose expiry is already in the
+    /// past, so tests can exercise `complete_pair`'s TTL-expiry branch
+    /// without actually sleeping for `PAIR_TTL` (120s).
+    ///
+    /// Gated the same way as `last_code` -- compiled in only for this
+    /// crate's own unit tests or the `test-hooks` feature (integration
+    /// tests), never for a normal build.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn insert_expired_pair(&self, pair_id: &str, code: &str) {
+        let already_expired = Instant::now() - Duration::from_secs(1);
+        self.inner
+            .pending_pairs
+            .lock()
+            .expect("pending_pairs mutex poisoned")
+            .insert(pair_id.to_string(), (code.to_string(), already_expired, 0));
     }
 }
 

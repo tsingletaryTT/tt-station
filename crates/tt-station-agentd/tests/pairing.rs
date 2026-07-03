@@ -140,3 +140,72 @@ async fn complete_with_unknown_pair_id_returns_401() {
         .expect("POST /pair/complete failed");
     assert_eq!(complete_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
+
+/// An expired pair_id must be rejected with 401 even when the code
+/// presented is the correct one -- the TTL is a hard cutoff, not just a
+/// "prefer unexpired" hint. Uses the `insert_expired_pair` test hook to
+/// seed a pair whose expiry is already in the past, rather than sleeping
+/// for the real `PAIR_TTL` (120s) in a test.
+#[tokio::test]
+async fn complete_with_expired_pair_returns_401_even_with_correct_code() {
+    let (state, base) = spawn().await;
+    let client = reqwest::Client::new();
+
+    state.insert_expired_pair("expired-pair-id", "123456");
+
+    let complete_resp = client
+        .post(format!("{base}/pair/complete"))
+        .json(&serde_json::json!({ "pair_id": "expired-pair-id", "code": "123456" }))
+        .send()
+        .await
+        .expect("POST /pair/complete failed");
+    assert_eq!(complete_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+/// A `pair_id` that racks up `MAX_PAIR_ATTEMPTS` wrong guesses in a row gets
+/// invalidated -- so even a subsequent attempt with the CORRECT code is
+/// rejected with 401. This is the anti-brute-force cap: without it, a LAN
+/// client could just try all 10^6 codes for a pair_id within the 120s TTL.
+#[tokio::test]
+async fn complete_locks_out_pair_id_after_max_wrong_attempts() {
+    let (state, base) = spawn().await;
+    let client = reqwest::Client::new();
+
+    let init_resp: serde_json::Value = client
+        .post(format!("{base}/pair/init"))
+        .send()
+        .await
+        .expect("POST /pair/init failed")
+        .json()
+        .await
+        .expect("init response was not valid JSON");
+    let pair_id = init_resp["pair_id"]
+        .as_str()
+        .expect("pair_id missing")
+        .to_string();
+
+    let code = state
+        .last_code(&pair_id)
+        .expect("expected a pending code for the freshly-issued pair_id");
+
+    // Burn through the attempt cap with wrong guesses. Each one must be
+    // rejected with 401 just like the single-wrong-guess case.
+    for _ in 0..tt_station_agentd::routes::MAX_PAIR_ATTEMPTS {
+        let resp = client
+            .post(format!("{base}/pair/complete"))
+            .json(&serde_json::json!({ "pair_id": pair_id, "code": "000000" }))
+            .send()
+            .await
+            .expect("POST /pair/complete failed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    // The pair_id is now locked out: even the CORRECT code no longer works.
+    let final_resp = client
+        .post(format!("{base}/pair/complete"))
+        .json(&serde_json::json!({ "pair_id": pair_id, "code": code }))
+        .send()
+        .await
+        .expect("POST /pair/complete failed");
+    assert_eq!(final_resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
