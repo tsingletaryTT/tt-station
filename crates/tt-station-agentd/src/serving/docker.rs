@@ -107,6 +107,26 @@ pub trait CommandRunner: Send + Sync {
     /// container exists (a container can be "running" for a while before
     /// the model is loaded and the HTTP server inside it is ready).
     fn health_ok(&self, url: &str) -> bool;
+
+    /// `GET {url}` and return the response body as a `String`.
+    ///
+    /// Used by `RunPyBackend::start` to ask the just-started server what
+    /// model id it's ACTUALLY serving (`GET /v1/models`) -- `run.py`'s
+    /// `--model` flag wants a short name (`Qwen3-32B`), but the served
+    /// OpenAI `model` field (and `model_spec.json`'s own keys) use the full
+    /// Hugging Face id (`Qwen/Qwen3-32B`); asking the server directly avoids
+    /// guessing which form to report back to a caller.
+    ///
+    /// Default implementation returns an error -- fine for any
+    /// `CommandRunner` (real or fake) that has no need to answer an HTTP GET
+    /// with a body, e.g. `DockerBackend`'s `RecordingFakeRunner` unit-test
+    /// double, which never calls this. `RealCommandRunner` overrides it with
+    /// a real blocking GET; `tests/support/mod.rs`'s `FakeRunner` overrides
+    /// it with a settable canned body.
+    fn http_get(&self, url: &str) -> Result<String> {
+        let _ = url;
+        Err(anyhow::anyhow!("CommandRunner::http_get not implemented"))
+    }
 }
 
 /// Real `CommandRunner`: shells out to the `docker` binary on `$PATH` for
@@ -164,6 +184,19 @@ impl CommandRunner for RealCommandRunner {
         reqwest::blocking::get(url)
             .map(|resp| resp.status().is_success())
             .unwrap_or(false)
+    }
+
+    fn http_get(&self, url: &str) -> Result<String> {
+        let resp =
+            reqwest::blocking::get(url).with_context(|| format!("GET {url} failed to send"))?;
+        if !resp.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "GET {url} returned non-success status {}",
+                resp.status()
+            ));
+        }
+        resp.text()
+            .with_context(|| format!("reading response body of GET {url}"))
     }
 }
 

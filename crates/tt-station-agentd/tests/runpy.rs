@@ -80,8 +80,9 @@ fn runpy_start_default_omits_device_image_impl_engine() {
     let commands = runner.commands();
     assert_eq!(
         commands.len(),
-        2,
-        "expected the default board-reset command plus the run.py invocation: {commands:?}"
+        3,
+        "expected the stop-stale docker-ps query, the default board-reset \
+         command, and the run.py invocation: {commands:?}"
     );
     let cmd = find_runpy_cmd(&commands);
 
@@ -334,8 +335,11 @@ fn runpy_start_resets_board_before_launching_runpy_by_default() {
     );
 }
 
-/// `reset_before_serve = false` must skip the reset entirely -- the first
-/// (and only pre-health-poll) command is the run.py invocation itself.
+/// `reset_before_serve = false` must skip the reset entirely -- but the
+/// stop-stale-serving-container check still runs unconditionally (it's not
+/// gated by `reset_before_serve` at all), so the first command is the
+/// `docker ps` stale-container query and the second is the run.py
+/// invocation itself.
 #[test]
 fn runpy_start_skips_reset_when_disabled() {
     let runner = FakeRunner::new(0);
@@ -353,8 +357,12 @@ fn runpy_start_skips_reset_when_disabled() {
         "no tt-smi/reset command should be issued when reset_before_serve is false: {commands:?}"
     );
     assert_eq!(
-        commands[0][0], "python3",
-        "first command should be the run.py invocation when reset is disabled: {commands:?}"
+        commands[0][0], "docker",
+        "stop-stale docker ps query should still run even when reset is disabled: {commands:?}"
+    );
+    assert_eq!(
+        commands[1][0], "python3",
+        "run.py should be the next command when reset is disabled: {commands:?}"
     );
 }
 
@@ -382,6 +390,180 @@ fn runpy_start_fails_and_skips_runpy_when_reset_fails() {
             .any(|cmd| cmd.first().map(String::as_str) == Some("python3")),
         "run.py must never be launched after a failed reset: {commands:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// Stop stale serving containers BEFORE (reset+)launch: a leftover/crashed
+// container still publishing the serving port holds the chips, so run.py's
+// own container-start check times out on the next launch. See the module
+// doc in `src/serving/runpy.rs`.
+// ---------------------------------------------------------------------
+
+/// When a stale container is still publishing the serving port, `start`
+/// must stop it FIRST -- strictly before the board reset and before
+/// launching run.py.
+#[test]
+fn runpy_start_stops_stale_serving_container_before_reset_and_launch() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker ps", "stale123\n");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8003), Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+
+    let stop_index = commands
+        .iter()
+        .position(|cmd| {
+            cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")
+        })
+        .expect("expected a docker stop for the stale container");
+    assert!(
+        commands[stop_index].iter().any(|a| a == "stale123"),
+        "docker stop should target the stale container id: {:?}",
+        commands[stop_index]
+    );
+
+    let reset_index = commands
+        .iter()
+        .position(|cmd| cmd.first().map(String::as_str) == Some("tt-smi"))
+        .expect("expected a tt-smi reset command among the recorded commands");
+    let runpy_index = commands
+        .iter()
+        .position(|cmd| cmd.first().map(String::as_str) == Some("python3"))
+        .expect("expected a python3 run.py invocation among the recorded commands");
+
+    assert!(
+        stop_index < reset_index,
+        "stale-container stop ({stop_index}) must run before board reset \
+         ({reset_index}): {commands:?}"
+    );
+    assert!(
+        reset_index < runpy_index,
+        "board reset ({reset_index}) must run before run.py ({runpy_index}): {commands:?}"
+    );
+}
+
+/// When `docker ps` reports nothing publishing the port, `start` must not
+/// issue a `docker stop` at all -- and should proceed normally.
+#[test]
+fn runpy_start_skips_docker_stop_when_no_stale_container() {
+    let runner = FakeRunner::new(0); // docker ps defaults to empty output
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")),
+        "no docker stop should be issued when docker ps returns nothing: {commands:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Model identifier: run.py wants the SHORT name; the served /v1 id is the
+// authoritative HF id. See the module doc in `src/serving/runpy.rs`.
+// ---------------------------------------------------------------------
+
+/// `start` must strip any `org/` prefix before passing `--model` to run.py
+/// -- `run.py` validates `--model` against `model_spec.json`'s SHORT model
+/// names, but `tt models` (and callers generally) deal in HF ids.
+#[test]
+fn runpy_start_strips_org_prefix_for_runpy_model_flag() {
+    let runner = FakeRunner::new(0);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend
+        .start("Qwen/Qwen3-32B")
+        .expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        cmd.windows(2)
+            .any(|w| w[0] == "--model" && w[1] == "Qwen3-32B"),
+        "argv should carry the STRIPPED short model name, not the HF id: {cmd:?}"
+    );
+    assert!(
+        !cmd.iter().any(|a| a == "Qwen/Qwen3-32B"),
+        "argv must not carry the full HF id anywhere: {cmd:?}"
+    );
+}
+
+/// A model id with no `org/` prefix must pass through to `--model`
+/// unchanged.
+#[test]
+fn runpy_start_passes_through_model_with_no_org_prefix() {
+    let runner = FakeRunner::new(0);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend.start("Qwen3-32B").expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        cmd.windows(2)
+            .any(|w| w[0] == "--model" && w[1] == "Qwen3-32B"),
+        "argv should carry --model Qwen3-32B unchanged when there's no org prefix: {cmd:?}"
+    );
+}
+
+/// The returned `Endpoint.model` must be the AUTHORITATIVE served id
+/// fetched from `GET /v1/models`, not whatever form the caller passed to
+/// `start` -- proven here by passing the short form while the fake
+/// `/v1/models` response reports the full HF id.
+#[test]
+fn runpy_start_endpoint_model_is_served_id_from_v1_models() {
+    let runner = FakeRunner::new(0);
+    runner.set_http_get(r#"{"data":[{"id":"Qwen/Qwen3-32B"}]}"#);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    let endpoint = backend.start("Qwen3-32B").expect("start should succeed");
+
+    assert_eq!(
+        endpoint.model, "Qwen/Qwen3-32B",
+        "Endpoint.model should be the served id from /v1/models, even \
+         though --model got the short form and the caller passed the short \
+         form too"
+    );
+}
+
+/// If the `/v1/models` fetch fails (or can't be parsed), `start` must not
+/// fail outright -- it should fall back to the original `model` argument
+/// passed to `start`.
+#[test]
+fn runpy_start_endpoint_model_falls_back_when_http_get_fails() {
+    let runner = FakeRunner::new(0); // http_get left unconfigured -> Err
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    let endpoint = backend
+        .start("Qwen/Qwen3-32B")
+        .expect("start should succeed even when the /v1/models fetch fails");
+
+    assert_eq!(
+        endpoint.model, "Qwen/Qwen3-32B",
+        "when /v1/models can't be fetched, Endpoint.model should fall back \
+         to the original start() argument"
+    );
+}
+
+/// Malformed JSON from `/v1/models` must also fall back to the original
+/// `model` argument rather than failing `start`.
+#[test]
+fn runpy_start_endpoint_model_falls_back_on_unparseable_response() {
+    let runner = FakeRunner::new(0);
+    runner.set_http_get("not json");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    let endpoint = backend
+        .start("Qwen/Qwen3-32B")
+        .expect("start should succeed even when /v1/models returns garbage");
+
+    assert_eq!(endpoint.model, "Qwen/Qwen3-32B");
 }
 
 /// The health poll should actually poll more than once when the first

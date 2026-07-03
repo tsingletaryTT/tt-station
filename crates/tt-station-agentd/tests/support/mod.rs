@@ -48,6 +48,12 @@ pub struct FakeRunner {
     /// `run` with `Err` before it ever records success or consults
     /// `run_outputs`.
     run_failures: Arc<Mutex<Vec<(String, String)>>>,
+    /// Canned response body for `http_get` -- e.g. `RunPyBackend::start`'s
+    /// `GET /v1/models` fetch of the authoritative served model id. `None`
+    /// (the default, unset) means `http_get` reports an error, exercising
+    /// the "fall back to the original model argument" path without any
+    /// setup at all.
+    http_get_response: Arc<Mutex<Option<String>>>,
 }
 
 impl FakeRunner {
@@ -59,6 +65,7 @@ impl FakeRunner {
             health_calls_seen: Arc::new(Mutex::new(0)),
             run_outputs: Arc::new(Mutex::new(Vec::new())),
             run_failures: Arc::new(Mutex::new(Vec::new())),
+            http_get_response: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -92,6 +99,19 @@ impl FakeRunner {
             .lock()
             .expect("run_failures mutex poisoned")
             .push((matcher.to_string(), message.to_string()));
+    }
+
+    /// Set the canned body every future `http_get` call returns, regardless
+    /// of `url` -- e.g. `set_http_get(r#"{"data":[{"id":"Qwen/Qwen3-32B"}]}"#)`
+    /// to exercise `RunPyBackend::start`'s "ask the server what it's
+    /// serving" fetch of `/v1/models`. Left unset (the default), `http_get`
+    /// returns `Err`, exercising the fallback-to-original-argument path.
+    #[allow(dead_code)]
+    pub fn set_http_get(&self, body: &str) {
+        *self
+            .http_get_response
+            .lock()
+            .expect("http_get_response mutex poisoned") = Some(body.to_string());
     }
 }
 
@@ -132,5 +152,13 @@ impl CommandRunner for FakeRunner {
             .expect("health mutex poisoned");
         *seen += 1;
         *seen > self.health_calls_before_ok
+    }
+
+    fn http_get(&self, _url: &str) -> Result<String> {
+        self.http_get_response
+            .lock()
+            .expect("http_get_response mutex poisoned")
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("FakeRunner: no http_get response configured"))
     }
 }
