@@ -44,16 +44,21 @@ use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 use super::docker::CommandRunner;
 use super::ServingBackend;
 
-/// How many times `start` polls the health endpoint before giving up. See
-/// `docker::DEFAULT_HEALTH_POLL_ATTEMPTS` -- kept as a separate constant
-/// (rather than shared) since `run.py`'s bring-up is a strict superset of
-/// `docker run`'s (it builds/resolves the container itself first), so the
-/// two backends' defaults are free to diverge later even though they match
-/// today. `RunPyBackend::with_health_poll` overrides both for tests.
-const DEFAULT_HEALTH_POLL_ATTEMPTS: u32 = 40;
+/// How many times `start` polls the health endpoint before giving up.
+///
+/// Sized for a REAL `run.py` bring-up, not a test: launching an LLM on
+/// hardware downloads/compiles/loads weights and can take many minutes
+/// (observed ~10 min for 8B, up to ~40 min for 70B on first run). At the
+/// `DEFAULT_HEALTH_POLL_INTERVAL` below this is a ceiling of ~40 minutes,
+/// after which `start` returns an error rather than hanging forever. This
+/// is deliberately far larger than `docker::DEFAULT_HEALTH_POLL_ATTEMPTS`
+/// (the raw `docker run` path assumes an already-built image).
+/// `RunPyBackend::with_health_poll` overrides both for tests.
+const DEFAULT_HEALTH_POLL_ATTEMPTS: u32 = 1200;
 
 /// Delay between health-poll attempts. See `DEFAULT_HEALTH_POLL_ATTEMPTS`.
-const DEFAULT_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// 2s keeps the probe rate gentle over a multi-minute bring-up.
+const DEFAULT_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Everything `RunPyBackend` needs to build the real `run.py` invocation
 /// documented in `docs/reference/tt-inference-server-docker.md`. Grouped
