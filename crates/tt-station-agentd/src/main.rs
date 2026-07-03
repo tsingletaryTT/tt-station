@@ -67,29 +67,69 @@ async fn main() -> Result<()> {
 
     let state = AppState::new(cli.name.clone(), cli.chips.clone(), cli.backend.to_string());
 
-    // Advertise on the LAN before we start serving, so discovery never races
-    // ahead of the control-plane API actually being reachable.
-    let _mdns_guard = advertise(&cli).context("failed to start mDNS advertisement")?;
-
+    // Bind the control-plane socket FIRST, then advertise on the LAN, so
+    // discovery never races ahead of the control-plane API actually being
+    // reachable.
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", cli.ctrl_port))
         .await
         .with_context(|| format!("failed to bind control port {}", cli.ctrl_port))?;
+
+    // Advertise the box's current status (read from the same `AppState` that
+    // backs `/status`) so the mDNS TXT record and the HTTP status endpoint
+    // can never desync at boot -- there's exactly one source of truth.
+    let _mdns_guard =
+        advertise(&cli, state.status()).context("failed to start mDNS advertisement")?;
 
     println!(
         "tt-station-agentd: '{}' serving on port {} (backend={}, chips={})",
         cli.name, cli.ctrl_port, cli.backend, cli.chips
     );
 
+    // Serve until a shutdown signal arrives, then return normally so
+    // `_mdns_guard` drops and unregisters the mDNS service. Without this,
+    // the usual way to stop a daemon (SIGINT/SIGTERM) would kill the
+    // process before Rust destructors run, leaving the box falsely
+    // advertised until the mDNS TTL expires.
     axum::serve(listener, app(state))
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .context("agent HTTP server failed")?;
+
+    println!("tt-station-agentd: shutdown signal received, unregistering mDNS and exiting");
 
     Ok(())
 }
 
+/// Resolves once a shutdown signal (Ctrl-C, or on Unix also SIGTERM) is
+/// received, so it can be handed to `axum::serve(..).with_graceful_shutdown`.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl-C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+}
+
 /// Handle to the running mDNS advertisement. Unregisters and shuts down the
-/// daemon on drop so the box cleanly disappears from discovery if the
-/// process exits normally.
+/// daemon on drop so the box cleanly disappears from discovery. `main`'s
+/// graceful-shutdown handling (see `shutdown_signal`) ensures this drop runs
+/// on a normal exit *and* on Ctrl-C/SIGTERM, not just process exit.
 struct MdnsGuard {
     daemon: ServiceDaemon,
     fullname: String,
@@ -104,18 +144,23 @@ impl Drop for MdnsGuard {
     }
 }
 
-/// Build a [`BoxRecord`] from CLI flags, encode it into mDNS TXT records via
-/// `libttstation`'s `txt_encode` (the exact same helper `mock-box` uses, so
-/// the keys can't drift from what `MdnsProvider` decodes), and register the
-/// `_tenstorrent._tcp` service with the local mDNS responder.
-fn advertise(cli: &Cli) -> Result<MdnsGuard> {
+/// Build a [`BoxRecord`] from CLI flags plus the box's current `status`,
+/// encode it into mDNS TXT records via `libttstation`'s `txt_encode` (the
+/// exact same helper `mock-box` uses, so the keys can't drift from what
+/// `MdnsProvider` decodes), and register the `_tenstorrent._tcp` service
+/// with the local mDNS responder.
+///
+/// `status` is passed in (rather than hardcoded) so the caller can source it
+/// straight from the same `AppState` that backs `/status` -- one source of
+/// truth for what the box's status is at boot.
+fn advertise(cli: &Cli, status: ServingStatus) -> Result<MdnsGuard> {
     let host = format!("{}.local.", cli.name);
     let record = BoxRecord {
         name: cli.name.clone(),
         host: host.clone(),
         ctrl_port: cli.ctrl_port,
         chips: cli.chips.clone(),
-        status: ServingStatus::Idle,
+        status,
         apiver: cli.apiver,
     };
 
