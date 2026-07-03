@@ -20,8 +20,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::{
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::FromRequestParts,
     http::{request::Parts, StatusCode},
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
@@ -29,7 +31,20 @@ use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::pairing;
+use crate::serving::docker::{CommandRunner, RealCommandRunner};
 use crate::serving::ServingBackend;
+use crate::telemetry;
+
+/// Default interval between `tt-smi -s` telemetry snapshots pushed on the
+/// `GET /telemetry` WebSocket stream, when `AppState` isn't told otherwise.
+/// Mirrors `main.rs`'s `--telemetry-interval-ms` default so an `AppState`
+/// built without `with_telemetry_config` (e.g. in a test that doesn't care)
+/// still behaves like a default agent.
+const DEFAULT_TELEMETRY_INTERVAL_MS: u64 = 1000;
+
+/// Default `tt-smi` binary name resolved on `$PATH`, when `AppState` isn't
+/// told otherwise. Mirrors `main.rs`'s `--tt-smi-bin` default.
+const DEFAULT_TT_SMI_BIN: &str = "tt-smi";
 
 /// How long a pairing code stays valid after `/pair/init` mints it. Short
 /// enough that a code seen once (e.g. shoulder-surfed, or left in shell
@@ -139,6 +154,16 @@ struct Inner {
     /// `AppState::with_status_advertiser` (`main.rs` wires the real mDNS
     /// impl in; tests wire in a fake).
     advertiser: Option<Arc<dyn StatusAdvertiser>>,
+    /// `tt-smi` binary the `GET /telemetry` stream runs to collect snapshots.
+    /// Defaults to `DEFAULT_TT_SMI_BIN` (`"tt-smi"`, resolved on `$PATH`);
+    /// `main.rs` overrides it from `--tt-smi-bin` via `with_telemetry_config`,
+    /// and tests point it at a stub script. Purely additive: nothing outside
+    /// the `/telemetry` route reads it.
+    tt_smi_bin: String,
+    /// Milliseconds between telemetry snapshots pushed on `GET /telemetry`.
+    /// Defaults to `DEFAULT_TELEMETRY_INTERVAL_MS`; set via
+    /// `with_telemetry_config` from `--telemetry-interval-ms`.
+    telemetry_interval_ms: u64,
 }
 
 impl AppState {
@@ -199,6 +224,8 @@ impl AppState {
                 token_store,
                 write_lock: Mutex::new(()),
                 advertiser: None,
+                tt_smi_bin: DEFAULT_TT_SMI_BIN.to_string(),
+                telemetry_interval_ms: DEFAULT_TELEMETRY_INTERVAL_MS,
             }),
         }
     }
@@ -223,12 +250,45 @@ impl AppState {
         self
     }
 
+    /// Configure the `GET /telemetry` stream: which `tt-smi` binary to run
+    /// and how often (ms) to push a snapshot. Additive counterpart to
+    /// `with_status_advertiser` -- same "call immediately after construction,
+    /// while this is still the sole owner of its `Arc<Inner>`" contract
+    /// (`Arc::get_mut` only succeeds then). Called after a clone exists, it
+    /// logs a warning and leaves the defaults in place rather than panicking.
+    ///
+    /// Optional: an `AppState` never given this config still streams
+    /// telemetry, using `tt-smi` on `$PATH` at the default 1s cadence
+    /// (`DEFAULT_TT_SMI_BIN` / `DEFAULT_TELEMETRY_INTERVAL_MS`).
+    pub fn with_telemetry_config(mut self, tt_smi_bin: String, telemetry_interval_ms: u64) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => {
+                inner.tt_smi_bin = tt_smi_bin;
+                inner.telemetry_interval_ms = telemetry_interval_ms;
+            }
+            None => eprintln!(
+                "tt-station-agentd: with_telemetry_config called on an already-shared AppState; telemetry config not applied"
+            ),
+        }
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.inner.name
     }
 
     pub fn chips(&self) -> &str {
         &self.inner.chips
+    }
+
+    /// `tt-smi` binary the `/telemetry` stream runs (see `with_telemetry_config`).
+    fn tt_smi_bin(&self) -> &str {
+        &self.inner.tt_smi_bin
+    }
+
+    /// Interval (ms) between `/telemetry` snapshots (see `with_telemetry_config`).
+    fn telemetry_interval_ms(&self) -> u64 {
+        self.inner.telemetry_interval_ms
     }
 
     /// Cheap `Arc` clone of the serving backend, for a handler to move into
@@ -957,12 +1017,106 @@ async fn get_endpoint(
     state.endpoint().map(Json).ok_or(StatusCode::CONFLICT)
 }
 
+/// `GET /telemetry` (UNAUTHED, like `GET /status` and `GET /models`):
+/// upgrade to a WebSocket and stream `tt-smi -s` telemetry snapshots.
+///
+/// Unauthed for the same reason `/status`/`/models` are -- a telemetry stream
+/// is exactly as read-only as they are (it mutates no box state), and the
+/// remote-QuietBox design deliberately decided telemetry is unauthed (see
+/// `REMOTE_QUIETBOX_DESIGN.md` §1: "the WebSocket upgrade should be unauthed
+/// for v1, consistent with `/status`/`/models`"). Anyone on the LAN who can
+/// reach the control port can already read `/status`; this extends that same
+/// exposure rather than creating a new class of it.
+///
+/// The handshake itself does no I/O -- it just hands the upgraded socket to
+/// [`telemetry_stream`], which owns the collect-and-push loop.
+async fn telemetry_ws(
+    ws: WebSocketUpgrade,
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Response {
+    ws.on_upgrade(move |socket| telemetry_stream(socket, state))
+}
+
+/// The per-connection telemetry loop behind `GET /telemetry`.
+///
+/// Every `telemetry_interval_ms`, produce a snapshot (the verbatim stdout of
+/// `tt-smi -s`) and push it as a `Message::Text` frame. The loop is bounded by
+/// the client: it exits the moment the socket closes or errors. A transient
+/// `tt-smi` failure does NOT kill the connection -- it's logged and sent as a
+/// small JSON error frame so the client learns this tick had no data but the
+/// stream stays alive (`tt-smi` is known to flake under serving load).
+///
+/// `tt-smi` is a blocking subprocess, so it runs on `spawn_blocking` (via
+/// [`collect_snapshot`]) rather than directly on the async runtime -- the same
+/// off-the-runtime discipline every `ServingBackend` call in this crate
+/// follows.
+async fn telemetry_stream(mut socket: WebSocket, state: AppState) {
+    let tt_smi_bin = state.tt_smi_bin().to_string();
+    let mut ticker = tokio::time::interval(Duration::from_millis(state.telemetry_interval_ms()));
+
+    loop {
+        tokio::select! {
+            // Time to push another snapshot. `interval`'s first tick fires
+            // immediately, so a freshly-connected client gets a frame right
+            // away rather than waiting a full interval.
+            _ = ticker.tick() => {
+                let frame = match collect_snapshot(tt_smi_bin.clone()).await {
+                    Ok(json) => json,
+                    Err(err) => {
+                        // Log and send an error frame rather than dropping the
+                        // connection -- a transient `tt-smi` failure shouldn't
+                        // end the stream.
+                        eprintln!("tt-station-agentd: telemetry snapshot failed: {err:#}");
+                        telemetry_error_frame(&err)
+                    }
+                };
+                if socket.send(Message::Text(frame.into())).await.is_err() {
+                    // Client hung up between ticks -- nothing left to send to.
+                    break;
+                }
+            }
+            // Watch the inbound half so a client disconnect (or a Close frame,
+            // or a socket error) ends the loop promptly instead of only being
+            // noticed on the next failed send. We don't act on client
+            // payloads -- this is a one-way telemetry push.
+            msg = socket.recv() => {
+                match msg {
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+        }
+    }
+}
+
+/// Run `tt-smi -s` off the async runtime and return its stdout (the telemetry
+/// frame). Wraps [`telemetry::snapshot`] with the real command runner inside
+/// `spawn_blocking`, turning a join failure into an `Err` rather than a panic.
+async fn collect_snapshot(tt_smi_bin: String) -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(move || {
+        let runner = RealCommandRunner;
+        telemetry::snapshot(&tt_smi_bin, &|args| runner.run(args))
+    })
+    .await
+    .map_err(|join_err| anyhow::anyhow!("telemetry snapshot task panicked: {join_err}"))?
+}
+
+/// Build the small JSON error frame sent when a `tt-smi` snapshot fails, so a
+/// client can distinguish "this tick had no data" from a real telemetry
+/// payload without the stream dropping. Deliberately a distinct, tiny shape
+/// (an object with a single `error` string) -- a real `tt-smi -s` snapshot is
+/// a far larger object and never carries a top-level `error` key.
+fn telemetry_error_frame(err: &anyhow::Error) -> String {
+    serde_json::json!({ "error": err.to_string() }).to_string()
+}
+
 /// Build the router for a given `AppState`. Side-effect-free: no sockets,
 /// no mDNS -- safe to call directly from tests.
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/status", get(get_status))
         .route("/models", get(get_models))
+        .route("/telemetry", get(telemetry_ws))
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
         .route("/run", post(run_model))

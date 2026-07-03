@@ -277,6 +277,20 @@ struct Cli {
     /// some reason.
     #[arg(long = "no-token-persistence", action = clap::ArgAction::SetTrue)]
     no_token_persistence: bool,
+
+    /// Interval (milliseconds) between `tt-smi -s` telemetry snapshots pushed
+    /// on the `GET /telemetry` WebSocket stream (the publisher half of the
+    /// "remote QuietBox" feature -- see src/telemetry.rs). Each connected
+    /// client receives one frame per interval. Defaults to `1000` (1s), a
+    /// live-but-not-hammering cadence for a chip-telemetry dashboard.
+    #[arg(long = "telemetry-interval-ms", default_value_t = 1000)]
+    telemetry_interval_ms: u64,
+
+    /// `tt-smi` binary the `GET /telemetry` stream runs (as `<bin> -s`) to
+    /// collect each snapshot. Defaults to `tt-smi`, resolved on `$PATH`; set
+    /// this to an absolute path when `tt-smi` isn't on the agent's `$PATH`.
+    #[arg(long = "tt-smi-bin", default_value = "tt-smi")]
+    tt_smi_bin: String,
 }
 
 /// `docker` fallback-backend default serving image, used only when
@@ -437,6 +451,12 @@ async fn main() -> Result<()> {
             std::path::PathBuf::from(token_store),
         )
     };
+
+    // Configure the additive `GET /telemetry` stream (see src/telemetry.rs).
+    // Applied here, before any clone of `state` exists, for the same
+    // sole-owner reason `with_status_advertiser` is (both rely on
+    // `Arc::get_mut`). No-op for every existing route -- purely additive.
+    let state = state.with_telemetry_config(cli.tt_smi_bin.clone(), cli.telemetry_interval_ms);
 
     // Bind the control-plane socket FIRST, then advertise on the LAN, so
     // discovery never races ahead of the control-plane API actually being

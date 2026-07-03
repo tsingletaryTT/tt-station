@@ -5,7 +5,10 @@ edition = "2021"
 
 [dependencies]
 libttstation = { path = "../libttstation" }
-axum = { workspace = true }
+# `ws` on top of the workspace base so `GET /telemetry` can upgrade to a
+# WebSocket and stream `tt-smi -s` snapshots (see src/telemetry.rs). Additive:
+# every existing (plain HTTP) route is unaffected by enabling this feature.
+axum = { workspace = true, features = ["ws"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -41,3 +44,10 @@ test-hooks = []
 # target in this crate, so `tests/pairing.rs` can call `AppState::last_code`
 # without agentd ever exposing it in a real build.
 tt-station-agentd = { path = ".", features = ["test-hooks"] }
+# WebSocket client for the `GET /telemetry` integration test
+# (tests/telemetry.rs): connect to the streamed route and assert on the
+# frames it pushes. `futures-util` provides the `StreamExt`/`SinkExt` the
+# tokio-tungstenite stream is driven through. Dev-only -- the agent itself is
+# the WS *server* (via axum's `ws` feature) and never needs a WS client.
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
