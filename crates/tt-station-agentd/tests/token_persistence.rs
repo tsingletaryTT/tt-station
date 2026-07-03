@@ -264,3 +264,100 @@ async fn plain_new_never_touches_the_filesystem() {
     let token = pair(&client, &state, &base).await;
     assert!(!token.is_empty());
 }
+
+/// Two sequential token issues against the same persisting `AppState` must
+/// both end up in the file afterward -- the "ordering / last-wins" case the
+/// dedicated write-lock in `persist_tokens` (routes.rs) is meant to protect:
+/// each `/pair/complete` re-snapshots and rewrites the WHOLE token set, so
+/// the second write must never regress and lose the first token, and the
+/// file's final contents must reflect both, not just whichever request's
+/// write happened to land last with a stale, pre-second-insert snapshot.
+///
+/// True concurrent-write ordering is hard to force deterministically in a
+/// unit test (see the task notes); this sequential case is what
+/// `persist_tokens`'s write-lock + fresh-snapshot-under-the-lock design
+/// (rather than a snapshot captured before the lock, which could go stale)
+/// is meant to make safe even when calls do overlap.
+#[tokio::test]
+async fn two_sequential_token_issues_both_end_up_in_the_file() {
+    let path = fresh_token_store_path();
+    let state = AppState::new_persisting(
+        "qb2-lab".to_string(),
+        "4xBH".to_string(),
+        Arc::new(DstackBackend),
+        path.clone(),
+    );
+    let base = spawn_with(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let first_token = pair(&client, &state, &base).await;
+    let second_token = pair(&client, &state, &base).await;
+    assert_ne!(
+        first_token, second_token,
+        "each /pair/complete should mint a distinct token"
+    );
+
+    let contents = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("token store file {path:?} not written: {err}"));
+    let tokens: Vec<String> =
+        serde_json::from_str(&contents).expect("token store file was not a valid JSON array");
+
+    assert!(
+        tokens.contains(&first_token),
+        "expected persisted token set {tokens:?} to still contain the first token {first_token:?}"
+    );
+    assert!(
+        tokens.contains(&second_token),
+        "expected persisted token set {tokens:?} to contain the second token {second_token:?}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A token issued through `/pair/complete` must still authenticate after a
+/// simulated restart: build a second, independent `AppState` from the same
+/// `token_store` path (standing in for the agent process restarting) and
+/// confirm a bearer-guarded request with that token succeeds. Same
+/// "never reuse the first AppState's in-memory Inner" discipline as
+/// `a_token_written_to_the_store_is_accepted_by_a_freshly_constructed_state`
+/// above, but driven end-to-end through the real pairing flow rather than a
+/// hand-seeded file.
+#[tokio::test]
+async fn a_token_issued_before_restart_still_authenticates_after_restart() {
+    let path = fresh_token_store_path();
+    let client = reqwest::Client::new();
+
+    // "Before restart": issue a token against a persisting AppState.
+    let first_state = AppState::new_persisting(
+        "qb2-lab".to_string(),
+        "4xBH".to_string(),
+        Arc::new(DstackBackend),
+        path.clone(),
+    );
+    let first_base = spawn_with(first_state.clone()).await;
+    let token = pair(&client, &first_state, &first_base).await;
+
+    // "After restart": a brand new AppState built from the same file, never
+    // sharing the first one's in-memory Inner.
+    let second_state = AppState::new_persisting(
+        "qb2-lab".to_string(),
+        "4xBH".to_string(),
+        Arc::new(DstackBackend),
+        path.clone(),
+    );
+    let second_base = spawn_with(second_state).await;
+
+    let resp = client
+        .get(format!("{second_base}/endpoint"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("GET /endpoint failed");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::CONFLICT,
+        "a token issued before a simulated restart should still authenticate after it (409, since nothing is serving -- NOT 401)"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}

@@ -395,9 +395,18 @@ async fn cmd_stop(host: &str) -> Result<()> {
     authed_client(host)?.stop().await
 }
 
-/// `tt status --host <host:port>`.
+/// `tt status --host <host:port>`: UNAUTHED, like `cmd_models` -- the
+/// agent's `GET /status` has no `BearerAuth` extractor, so this calls
+/// `libttstation::agent_client::get_status` directly instead of going
+/// through `authed_client()`. This is what lets `tt status` (and the
+/// discovery UI it backs) show a live status dot for a discovered-but-
+/// unpaired box, instead of failing with "no token stored for <host>".
+/// `cmd_run`/`cmd_stop`/`cmd_endpoint` are unaffected -- `/run`, `/stop`,
+/// and `/endpoint` ARE bearer-gated on the agent side and still go through
+/// `authed_client()`.
 async fn cmd_status(host: &str) -> Result<ServingStatus> {
-    authed_client(host)?.status().await
+    let base = format!("http://{host}");
+    libttstation::agent_client::get_status(&base).await
 }
 
 /// `tt endpoint --host <host:port>`.

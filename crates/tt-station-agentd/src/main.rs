@@ -17,7 +17,7 @@ use libttstation::discovery::SERVICE_TYPE;
 use libttstation::model::{txt_encode, BoxRecord, ServingStatus};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
-use tt_station_agentd::routes::{app, AppState};
+use tt_station_agentd::routes::{app, AppState, StatusAdvertiser};
 use tt_station_agentd::serving::docker::DockerConfig;
 use tt_station_agentd::serving::make_backend;
 use tt_station_agentd::serving::runpy::RunPyConfig;
@@ -448,8 +448,14 @@ async fn main() -> Result<()> {
     // Advertise the box's current status (read from the same `AppState` that
     // backs `/status`) so the mDNS TXT record and the HTTP status endpoint
     // can never desync at boot -- there's exactly one source of truth.
-    let _mdns_guard =
+    // `advertise` hands back both the `MdnsGuard` (unregisters on drop, kept
+    // alive for the process lifetime below) and an `MdnsStatusAdvertiser`
+    // sharing the same underlying daemon, which gets attached to `state` so
+    // `/run`/`/stop` can re-publish `status` whenever it changes instead of
+    // it going stale after boot (see `StatusAdvertiser`'s doc comment).
+    let (_mdns_guard, status_advertiser) =
         advertise(&cli, state.status()).context("failed to start mDNS advertisement")?;
+    let state = state.with_status_advertiser(Arc::new(status_advertiser));
 
     println!(
         "tt-station-agentd: '{}' serving on port {} (backend={}, chips={})",
@@ -501,8 +507,13 @@ async fn shutdown_signal() {
 /// daemon on drop so the box cleanly disappears from discovery. `main`'s
 /// graceful-shutdown handling (see `shutdown_signal`) ensures this drop runs
 /// on a normal exit *and* on Ctrl-C/SIGTERM, not just process exit.
+///
+/// Holds an `Arc<ServiceDaemon>` shared with `MdnsStatusAdvertiser` (built
+/// alongside this in `advertise`) rather than its own daemon, so a status
+/// re-publish and the eventual shutdown-time unregister both talk to the
+/// exact same mDNS responder thread.
 struct MdnsGuard {
-    daemon: ServiceDaemon,
+    daemon: Arc<ServiceDaemon>,
     fullname: String,
 }
 
@@ -515,6 +526,81 @@ impl Drop for MdnsGuard {
     }
 }
 
+/// Real, mDNS-backed [`StatusAdvertiser`] impl: re-publishes this box's
+/// `status` TXT key by rebuilding the [`BoxRecord`]/TXT pairs with the new
+/// status and re-registering a [`ServiceInfo`] under the *same* fullname
+/// (instance name + service type + domain) on the daemon `advertise`
+/// already started at boot.
+///
+/// Re-registering the same fullname on a live `ServiceDaemon` UPDATES the
+/// existing advertisement (mdns-sd re-announces it) rather than erroring or
+/// creating a duplicate -- that's what makes `/run`/`/stop` re-publishing
+/// via this struct actually fix the staleness `docs/client-agent-integration-findings.md`
+/// #1 describes, instead of needing a separate unregister/re-register dance.
+///
+/// Holds everything `advertise`'s original `BoxRecord` needed except
+/// `status` itself (which changes per call and is instead the argument to
+/// `advertise_status`) -- name, host, ctrl_port, chips, apiver are all
+/// static for the process's lifetime.
+struct MdnsStatusAdvertiser {
+    daemon: Arc<ServiceDaemon>,
+    name: String,
+    host: String,
+    ctrl_port: u16,
+    chips: String,
+    apiver: u8,
+}
+
+impl StatusAdvertiser for MdnsStatusAdvertiser {
+    fn advertise_status(&self, status: &ServingStatus) {
+        let record = BoxRecord {
+            name: self.name.clone(),
+            host: self.host.clone(),
+            ctrl_port: self.ctrl_port,
+            chips: self.chips.clone(),
+            status: status.clone(),
+            apiver: self.apiver,
+        };
+
+        let txt_pairs = txt_encode(&record);
+        let txt_refs: Vec<(&str, &str)> = txt_pairs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        // Mirror the boot-time `ServiceInfo::new(..).enable_addr_auto()` call
+        // in `advertise` exactly, so the re-registered record is identical
+        // in every field except `status` -- including the fullname mdns-sd
+        // derives from `name`/`SERVICE_TYPE`/domain, which is what makes
+        // this an UPDATE rather than a second, duplicate service.
+        let service_info = match ServiceInfo::new(
+            SERVICE_TYPE,
+            &record.name,
+            &self.host,
+            "",
+            self.ctrl_port,
+            &txt_refs[..],
+        ) {
+            Ok(info) => info.enable_addr_auto(),
+            Err(err) => {
+                // Log and give up rather than panic: a failed re-publish
+                // shouldn't fail (or crash) the `/run`/`/stop` request that
+                // triggered it -- the control-plane state change already
+                // succeeded, and a subsequent `/status` re-publish (or the
+                // next `/run`/`/stop`) gets another chance.
+                eprintln!(
+                    "tt-station-agentd: failed to build mDNS ServiceInfo while re-publishing status: {err:#}"
+                );
+                return;
+            }
+        };
+
+        if let Err(err) = self.daemon.register(service_info) {
+            eprintln!("tt-station-agentd: failed to re-publish mDNS status: {err:#}");
+        }
+    }
+}
+
 /// Build a [`BoxRecord`] from CLI flags plus the box's current `status`,
 /// encode it into mDNS TXT records via `libttstation`'s `txt_encode` (the
 /// exact same helper `mock-box` uses, so the keys can't drift from what
@@ -524,7 +610,13 @@ impl Drop for MdnsGuard {
 /// `status` is passed in (rather than hardcoded) so the caller can source it
 /// straight from the same `AppState` that backs `/status` -- one source of
 /// truth for what the box's status is at boot.
-fn advertise(cli: &Cli, status: ServingStatus) -> Result<MdnsGuard> {
+///
+/// Returns both the [`MdnsGuard`] (unregister/shutdown on drop, same as
+/// before this function grew a second return value) and an
+/// [`MdnsStatusAdvertiser`] sharing the same `Arc<ServiceDaemon>`, so `main`
+/// can attach the latter to `AppState` and let `/run`/`/stop` keep the TXT
+/// record's `status` key truthful after boot.
+fn advertise(cli: &Cli, status: ServingStatus) -> Result<(MdnsGuard, MdnsStatusAdvertiser)> {
     let host = format!("{}.local.", cli.name);
     let record = BoxRecord {
         name: cli.name.clone(),
@@ -541,7 +633,7 @@ fn advertise(cli: &Cli, status: ServingStatus) -> Result<MdnsGuard> {
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    let daemon = ServiceDaemon::new().context("failed to start mDNS daemon")?;
+    let daemon = Arc::new(ServiceDaemon::new().context("failed to start mDNS daemon")?);
 
     // Empty address + enable_addr_auto() lets mdns-sd discover this host's
     // real LAN address(es) instead of us hardcoding one.
@@ -561,5 +653,18 @@ fn advertise(cli: &Cli, status: ServingStatus) -> Result<MdnsGuard> {
         .register(service_info)
         .context("failed to register mDNS service")?;
 
-    Ok(MdnsGuard { daemon, fullname })
+    let guard = MdnsGuard {
+        daemon: Arc::clone(&daemon),
+        fullname,
+    };
+    let status_advertiser = MdnsStatusAdvertiser {
+        daemon,
+        name: record.name,
+        host,
+        ctrl_port: cli.ctrl_port,
+        chips: cli.chips.clone(),
+        apiver: cli.apiver,
+    };
+
+    Ok((guard, status_advertiser))
 }
