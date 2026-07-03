@@ -24,7 +24,7 @@ use tt_station_agentd::serving::runpy::{RunPyBackend, RunPyConfig};
 use tt_station_agentd::serving::ServingBackend;
 
 mod support;
-use support::FakeRunner;
+use support::{FakeRunner, TempModelSpec};
 
 /// Build a `RunPyConfig` with production-shaped defaults, overriding only
 /// `host`/`service_port` -- the two fields most tests in this file vary.
@@ -958,40 +958,9 @@ fn runpy_stop_is_ok_when_nothing_running() {
 // `list_models`: enumerate model_spec.json's catalog.
 // ---------------------------------------------------------------------
 
-/// A scratch `model_spec.json` fixture, unique per test run and cleaned up
-/// on drop -- same pattern as `crates/tt/tests/e2e_mock.rs`'s
-/// `TempConfigDir`, kept local here since this is the only file that needs
-/// it.
-struct TempModelSpec(std::path::PathBuf);
-
-impl TempModelSpec {
-    fn write(contents: &str) -> Self {
-        // A process-unique monotonic counter -- `Instant::now().elapsed()` is
-        // ~0ns for a freshly-taken instant, so it does NOT make the filename
-        // unique and parallel tests would collide on the same path (one
-        // test's Drop deleting another's file mid-read). An atomic counter is
-        // genuinely unique per call.
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "tt-station-model-spec-{}-{}.json",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::write(&path, contents).expect("write temp model_spec.json fixture");
-        TempModelSpec(path)
-    }
-
-    fn path(&self) -> String {
-        self.0.to_string_lossy().into_owned()
-    }
-}
-
-impl Drop for TempModelSpec {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
+// `TempModelSpec` (a scratch `model_spec.json` fixture, unique per call and
+// cleaned up on drop) now lives in `tests/support/mod.rs`, shared with
+// `tests/models.rs` which needs the same fixture.
 
 const MODEL_SPEC_FIXTURE: &str = r#"{
     "release_version": "0.12.0",

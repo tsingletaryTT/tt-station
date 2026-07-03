@@ -11,34 +11,8 @@ use tt_station_agentd::serving::dstack::DstackBackend;
 use tt_station_agentd::serving::runpy::{RunPyBackend, RunPyConfig};
 use tt_station_agentd::serving::ServingBackend;
 
-/// A scratch `model_spec.json` fixture, unique per test and removed on
-/// drop -- same pattern as `tests/runpy.rs`'s `TempModelSpec`, duplicated
-/// locally since integration tests under `tests/*.rs` are separate
-/// compilation units that can't share a helper without a `tests/support`
-/// module (already used here for a different fake, see `tests/support/mod.rs`).
-struct TempModelSpec(std::path::PathBuf);
-
-impl TempModelSpec {
-    fn write(contents: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "tt-station-agentd-models-route-{}-{}.json",
-            std::process::id(),
-            std::time::Instant::now().elapsed().as_nanos()
-        ));
-        std::fs::write(&path, contents).expect("write temp model_spec.json fixture");
-        TempModelSpec(path)
-    }
-
-    fn path(&self) -> String {
-        self.0.to_string_lossy().into_owned()
-    }
-}
-
-impl Drop for TempModelSpec {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
+mod support;
+use support::TempModelSpec;
 
 /// `GET /models` with no `Authorization` header at all must still succeed
 /// (unauthed, like `/status`) and return the `RunPyBackend`'s

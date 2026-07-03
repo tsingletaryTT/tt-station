@@ -18,6 +18,44 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use tt_station_agentd::serving::docker::CommandRunner;
 
+/// A scratch `model_spec.json` fixture, unique per call and removed on drop.
+/// Was duplicated near-identically in `tests/models.rs` and `tests/runpy.rs`
+/// (both files' own doc comments admitted it); consolidated here now that
+/// both already pull in this `tests/support` module for other fakes.
+#[allow(dead_code)]
+pub struct TempModelSpec(std::path::PathBuf);
+
+impl TempModelSpec {
+    #[allow(dead_code)]
+    pub fn write(contents: &str) -> Self {
+        // A process-unique monotonic counter -- `Instant::now().elapsed()` is
+        // ~0ns for a freshly-taken instant, so it does NOT make the filename
+        // unique and parallel tests would collide on the same path (one
+        // test's Drop deleting another's file mid-read). An atomic counter is
+        // genuinely unique per call.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "tt-station-model-spec-{}-{}.json",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, contents).expect("write temp model_spec.json fixture");
+        TempModelSpec(path)
+    }
+
+    #[allow(dead_code)]
+    pub fn path(&self) -> String {
+        self.0.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for TempModelSpec {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// A fake `CommandRunner` that records every command it's asked to `run`
 /// (so tests can assert on the exact argv `DockerBackend` builds) and
 /// reports `health_ok` as healthy either immediately or after a configured
