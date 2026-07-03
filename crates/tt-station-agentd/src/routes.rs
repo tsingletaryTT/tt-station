@@ -613,13 +613,18 @@ fn save_tokens(path: &Path, tokens: &HashSet<String>) -> anyhow::Result<()> {
 fn write_tmp_and_rename(tmp_path: &Path, path: &Path, json: &str) -> anyhow::Result<()> {
     use std::io::Write;
 
+    // Remove any stale tmp first so we always create the file fresh. `.mode(0600)`
+    // below only applies when OpenOptions *creates* the file; a leftover tmp from a
+    // crash-between-write-and-rename would otherwise be reused/truncated while keeping
+    // its old (possibly looser) permissions. Ignore NotFound.
+    let _ = fs::remove_file(tmp_path);
+
     #[cfg(unix)]
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt;
         fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(tmp_path)?
     };
