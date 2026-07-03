@@ -303,7 +303,15 @@ class Panel(Gtk.ApplicationWindow):
 
 def main():
     app = Gtk.Application(application_id="com.tenstorrent.ttstation.panel")
-    app.connect("activate", lambda a: Panel(a).present())
+
+    def on_activate(a):
+        panel = Panel(a)
+        panel.present()
+        # TTS_AUTOSTART=1 → bring the agent up immediately (handy for kiosk/demo).
+        if os.environ.get("TTS_AUTOSTART") == "1":
+            panel.start_agent()
+
+    app.connect("activate", on_activate)
     app.run(None)
 
 
