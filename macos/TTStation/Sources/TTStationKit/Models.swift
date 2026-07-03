@@ -14,6 +14,11 @@ public struct BoxRecord: Codable, Equatable {
         case statusRaw = "status"
     }
 
+    public init(name: String, host: String, ctrlPort: Int, chips: String, statusRaw: String, apiver: Int) {
+        self.name = name; self.host = host; self.ctrlPort = ctrlPort
+        self.chips = chips; self.statusRaw = statusRaw; self.apiver = apiver
+    }
+
     /// `host:port` — the identity string every `tt` command keys off of.
     public var hostPort: String { "\(host):\(ctrlPort)" }
 
