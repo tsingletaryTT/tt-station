@@ -119,6 +119,18 @@ struct Inner {
     /// `AppState::new_persisting`, which also loads any tokens already at
     /// this path into `tokens` up front.
     token_store: Option<PathBuf>,
+    /// Dedicated lock serializing DISK writes of the token store, kept
+    /// separate from `tokens` itself. `persist_tokens` holds this (not
+    /// `tokens`) across the snapshot-capture + file-write: concurrent
+    /// `/pair/complete` calls each insert into `tokens` under its own brief
+    /// lock, then queue up here to write. Because the snapshot is retaken
+    /// fresh *after* acquiring this lock (not reused from whatever was
+    /// captured back when `insert_token` ran), and `tokens` only ever grows,
+    /// whichever write actually lands last on disk is guaranteed to reflect
+    /// the union of every insert that happened before it -- a stale snapshot
+    /// captured earlier can never clobber a fresher one that already made it
+    /// to disk. See `persist_tokens`.
+    write_lock: Mutex<()>,
     /// Optional hook for re-publishing this box's advertised `status`
     /// whenever `set_serving`/`set_idle` change it. `None` (what every
     /// constructor here builds by default) is a no-op -- exactly the
@@ -185,6 +197,7 @@ impl AppState {
                 pending_pairs: Mutex::new(HashMap::new()),
                 tokens: Mutex::new(tokens),
                 token_store,
+                write_lock: Mutex::new(()),
                 advertiser: None,
             }),
         }
@@ -389,26 +402,43 @@ impl AppState {
     ///
     /// If persistence is enabled (`token_store` is `Some`), the whole
     /// updated set is also written out to disk afterward -- see
-    /// `persist_tokens` for the lock-then-drop-then-write discipline that
-    /// keeps this from ever doing file I/O while holding the `tokens`
-    /// mutex.
+    /// `persist_tokens` for the write-lock + fresh-snapshot discipline that
+    /// keeps concurrent `/pair/complete` calls from writing stale snapshots
+    /// out of order, and from ever doing file I/O while holding the
+    /// `tokens` mutex.
     fn insert_token(&self, token: String) {
-        let snapshot = {
-            let mut tokens = self.inner.tokens.lock().expect("tokens mutex poisoned");
-            tokens.insert(token);
-            tokens.clone()
-        };
-        self.persist_tokens(&snapshot);
+        self.inner
+            .tokens
+            .lock()
+            .expect("tokens mutex poisoned")
+            .insert(token);
+        self.persist_tokens();
     }
 
-    /// Write `tokens` to `token_store`, if persistence is enabled; a no-op
-    /// when it isn't (`AppState::new`'s `None` path).
+    /// Write the CURRENT `tokens` set to `token_store`, if persistence is
+    /// enabled; a no-op when it isn't (`AppState::new`'s `None` path).
     ///
-    /// Takes an already-cloned snapshot rather than locking `self.inner.tokens`
-    /// itself, so callers can drop the `tokens` mutex guard *before* this
-    /// runs -- file I/O must never happen while that lock is held, since
-    /// every other `tokens` access (in particular `is_valid_token`, called
-    /// on every authed request) would otherwise block on disk.
+    /// Deliberately takes no snapshot argument -- unlike an earlier version
+    /// of this method, which took an already-cloned snapshot from the
+    /// caller. That let two concurrent `/pair/complete` calls each capture
+    /// their own snapshot *before* racing for the disk write, so whichever
+    /// one's (possibly older/stale) snapshot happened to write LAST would
+    /// silently clobber a newer one already on disk and lose a token that
+    /// really was inserted. Instead, this method:
+    ///
+    ///   1. Acquires `write_lock` (distinct from `tokens`) to serialize
+    ///      writes -- only one persist runs at a time.
+    ///   2. THEN takes a fresh snapshot of `tokens` (briefly locking and
+    ///      immediately dropping that lock -- file I/O never runs while
+    ///      `tokens` is held, since `is_valid_token` locks it on every
+    ///      authed request and must never block on disk).
+    ///   3. Writes that fresh snapshot to disk.
+    ///
+    /// Because the snapshot is retaken after acquiring `write_lock` rather
+    /// than reused from whenever the caller happened to insert, and
+    /// `tokens` only ever grows, the write that actually lands last on disk
+    /// is always a superset of every earlier one -- the last IN-MEMORY
+    /// state wins on disk, not just the last write to *start*.
     ///
     /// A failed write is logged to stderr rather than propagated: the
     /// in-memory set (what actually gates auth for the rest of this
@@ -416,11 +446,24 @@ impl AppState {
     /// persistence failure shouldn't fail the pairing request that
     /// triggered it -- it just means a subsequent restart won't remember
     /// this token.
-    fn persist_tokens(&self, tokens: &HashSet<String>) {
+    fn persist_tokens(&self) {
         let Some(path) = &self.inner.token_store else {
             return;
         };
-        if let Err(err) = save_tokens(path, tokens) {
+
+        let _write_guard = self
+            .inner
+            .write_lock
+            .lock()
+            .expect("token-store write lock poisoned");
+        let snapshot = self
+            .inner
+            .tokens
+            .lock()
+            .expect("tokens mutex poisoned")
+            .clone();
+
+        if let Err(err) = save_tokens(path, &snapshot) {
             eprintln!(
                 "tt-station-agentd: failed to persist token store at {}: {err:#}",
                 path.display()
@@ -540,15 +583,57 @@ fn save_tokens(path: &Path, tokens: &HashSet<String>) -> anyhow::Result<()> {
     // restart) always sees either the old complete contents or the new
     // complete contents, never a half-written file.
     let tmp_path = path.with_extension("tmp");
-    fs::write(&tmp_path, json)?;
+
+    let result = write_tmp_and_rename(&tmp_path, path, &json);
+    if result.is_err() {
+        // Best-effort cleanup: a failed write or rename shouldn't leave a
+        // stale `.tmp` file lying around for the next `save_tokens` call
+        // (or a curious operator) to trip over. Ignore the removal's own
+        // result -- if the file's already gone, or removing it also fails,
+        // that's not this function's problem to escalate; the original
+        // error from `write_tmp_and_rename` is what matters and is returned
+        // below regardless.
+        let _ = fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+/// Create `tmp_path` fresh and write `json` to it, then atomically rename it
+/// onto `path`.
+///
+/// On unix, `tmp_path` is created with `OpenOptions` specifying mode `0600`
+/// from the moment the file is created (`create(true)` + `.mode(0o600)`)
+/// rather than the previous `fs::write` (which creates the file with the
+/// process's default umask-derived mode, e.g. `0644`) followed by a
+/// separate `set_permissions` call -- that older sequence left a brief
+/// window where the file existed on disk World/group-readable before the
+/// chmod landed. Creating it restrictively from the start closes that
+/// window entirely: the bearer tokens in this file are never written to a
+/// less-than-owner-only-readable file, not even momentarily.
+fn write_tmp_and_rename(tmp_path: &Path, path: &Path, json: &str) -> anyhow::Result<()> {
+    use std::io::Write;
 
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
-    }
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(tmp_path)?
+    };
+    #[cfg(not(unix))]
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(tmp_path)?;
 
-    fs::rename(&tmp_path, path)?;
+    file.write_all(json.as_bytes())?;
+    drop(file);
+
+    fs::rename(tmp_path, path)?;
 
     Ok(())
 }
