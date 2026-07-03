@@ -14,6 +14,8 @@
 //! the outside world.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -87,6 +89,14 @@ struct Inner {
     /// control routes will check incoming requests against this set; for
     /// now `/pair/complete` is the only thing that populates it.
     tokens: Mutex<HashSet<String>>,
+    /// Optional path to persist the `tokens` set to on disk, so a paired
+    /// client survives an agent restart instead of every restart emptying
+    /// `tokens` and forcing a re-pair. `None` (the default, what
+    /// `AppState::new` builds) means in-memory only -- exactly the
+    /// pre-persistence behavior every existing test relies on. Set via
+    /// `AppState::new_persisting`, which also loads any tokens already at
+    /// this path into `tokens` up front.
+    token_store: Option<PathBuf>,
 }
 
 impl AppState {
@@ -97,6 +107,44 @@ impl AppState {
     /// wrapped in an `Arc`, since `AppState` never needs to construct a
     /// backend itself.
     pub fn new(name: String, chips: String, backend: Arc<dyn ServingBackend>) -> Self {
+        Self::new_inner(name, chips, backend, HashSet::new(), None)
+    }
+
+    /// Construct state whose bearer-token set is persisted to `token_store`
+    /// on disk, so a paired client survives an agent restart instead of
+    /// being forced to re-pair.
+    ///
+    /// Any tokens already at `token_store` are loaded into the in-memory set
+    /// up front (standing in for "the agent restarted, but the file from
+    /// its previous run is still there"). A missing file is treated as "no
+    /// tokens yet" -- the normal state for a box that's never persisted a
+    /// token before. An unreadable or corrupt file logs a warning to stderr
+    /// and also starts empty: a hand-corrupted or half-written token store
+    /// must never fail agent startup, let alone panic it.
+    ///
+    /// From this point on, every successful `/pair/complete` (via
+    /// `insert_token`) rewrites the whole token set back out to
+    /// `token_store` -- see `persist_tokens`.
+    pub fn new_persisting(
+        name: String,
+        chips: String,
+        backend: Arc<dyn ServingBackend>,
+        token_store: PathBuf,
+    ) -> Self {
+        let tokens = load_tokens(&token_store);
+        Self::new_inner(name, chips, backend, tokens, Some(token_store))
+    }
+
+    /// Shared construction path for `new`/`new_persisting`: only the
+    /// starting `tokens` set and whether persistence is enabled differ
+    /// between the two.
+    fn new_inner(
+        name: String,
+        chips: String,
+        backend: Arc<dyn ServingBackend>,
+        tokens: HashSet<String>,
+        token_store: Option<PathBuf>,
+    ) -> Self {
         AppState {
             inner: Arc::new(Inner {
                 name,
@@ -105,7 +153,8 @@ impl AppState {
                 endpoint: Mutex::new(None),
                 backend,
                 pending_pairs: Mutex::new(HashMap::new()),
-                tokens: Mutex::new(HashSet::new()),
+                tokens: Mutex::new(tokens),
+                token_store,
             }),
         }
     }
@@ -262,12 +311,46 @@ impl AppState {
 
     /// Add a newly-minted bearer token to the valid-token set. Task 10's
     /// control routes will read this set back to authenticate requests.
+    ///
+    /// If persistence is enabled (`token_store` is `Some`), the whole
+    /// updated set is also written out to disk afterward -- see
+    /// `persist_tokens` for the lock-then-drop-then-write discipline that
+    /// keeps this from ever doing file I/O while holding the `tokens`
+    /// mutex.
     fn insert_token(&self, token: String) {
-        self.inner
-            .tokens
-            .lock()
-            .expect("tokens mutex poisoned")
-            .insert(token);
+        let snapshot = {
+            let mut tokens = self.inner.tokens.lock().expect("tokens mutex poisoned");
+            tokens.insert(token);
+            tokens.clone()
+        };
+        self.persist_tokens(&snapshot);
+    }
+
+    /// Write `tokens` to `token_store`, if persistence is enabled; a no-op
+    /// when it isn't (`AppState::new`'s `None` path).
+    ///
+    /// Takes an already-cloned snapshot rather than locking `self.inner.tokens`
+    /// itself, so callers can drop the `tokens` mutex guard *before* this
+    /// runs -- file I/O must never happen while that lock is held, since
+    /// every other `tokens` access (in particular `is_valid_token`, called
+    /// on every authed request) would otherwise block on disk.
+    ///
+    /// A failed write is logged to stderr rather than propagated: the
+    /// in-memory set (what actually gates auth for the rest of this
+    /// process's life) was already updated by the time this is called, so a
+    /// persistence failure shouldn't fail the pairing request that
+    /// triggered it -- it just means a subsequent restart won't remember
+    /// this token.
+    fn persist_tokens(&self, tokens: &HashSet<String>) {
+        let Some(path) = &self.inner.token_store else {
+            return;
+        };
+        if let Err(err) = save_tokens(path, tokens) {
+            eprintln!(
+                "tt-station-agentd: failed to persist token store at {}: {err:#}",
+                path.display()
+            );
+        }
     }
 
     /// Test-only accessor: look up the code currently pending for
@@ -307,6 +390,92 @@ impl AppState {
             .expect("pending_pairs mutex poisoned")
             .insert(pair_id.to_string(), (code.to_string(), already_expired, 0));
     }
+}
+
+/// Load a persisted bearer-token set from `path` (a JSON array of
+/// strings). Never returns `Err` -- a missing file (the normal case for a
+/// box that's never persisted a token before) and an unreadable/corrupt one
+/// both resolve to an empty set, differing only in whether a warning gets
+/// printed to stderr. Startup must never fail, and never panic, just
+/// because the token store is absent or got hand-edited into garbage.
+fn load_tokens(path: &Path) -> HashSet<String> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return HashSet::new(),
+        Err(err) => {
+            eprintln!(
+                "tt-station-agentd: failed to read token store at {}: {err} -- starting with an empty token set",
+                path.display()
+            );
+            return HashSet::new();
+        }
+    };
+
+    match serde_json::from_str::<Vec<String>>(&contents) {
+        Ok(tokens) => tokens.into_iter().collect(),
+        Err(err) => {
+            eprintln!(
+                "tt-station-agentd: token store at {} is not valid JSON ({err}) -- starting with an empty token set",
+                path.display()
+            );
+            HashSet::new()
+        }
+    }
+}
+
+/// Persist `tokens` to `path` as a JSON array of strings.
+///
+/// Creates the parent directory if it doesn't exist yet (mode `0700` on
+/// unix), then writes to a temp file in that same directory and renames it
+/// into place -- so a concurrent reader (there shouldn't be one, but belt
+/// and suspenders) never observes a partially-written file -- and sets the
+/// final file to mode `0600` on unix. These are bearer secrets: anything
+/// less than owner-only permissions on both the directory and the file
+/// would let another local user on the box read them.
+///
+/// Sorts the tokens before serializing purely so the file's byte content is
+/// deterministic given the same set (easier to eyeball/diff by hand); the
+/// on-disk representation is otherwise just "the whole current set."
+fn save_tokens(path: &Path, tokens: &HashSet<String>) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        // Only create (and chmod) the parent when it doesn't already exist.
+        // The common case in practice is a pre-existing, already-shared
+        // directory (`/tmp` in tests; a config dir a previous run already
+        // created) -- unconditionally chmod-ing that out from under whatever
+        // it currently is would both fight the box's own conventions and,
+        // for something like `/tmp` that this process doesn't own, simply
+        // fail with EPERM.
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+            }
+        }
+    }
+
+    let mut sorted: Vec<&String> = tokens.iter().collect();
+    sorted.sort();
+    let json = serde_json::to_string(&sorted)?;
+
+    // Write-temp-then-rename rather than writing `path` directly: a rename
+    // on the same filesystem is atomic, so any reader of `path` (in
+    // practice, just this process's own next `load_tokens` call on a future
+    // restart) always sees either the old complete contents or the new
+    // complete contents, never a half-written file.
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, json)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    fs::rename(&tmp_path, path)?;
+
+    Ok(())
 }
 
 /// JSON body returned by `GET /status`.
