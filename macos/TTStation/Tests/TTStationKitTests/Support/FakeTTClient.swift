@@ -7,10 +7,16 @@ final class FakeTTClient: TTCommands {
     var pairShouldSucceed = true
     var runEndpoint = Endpoint(baseURL: "http://h:8000/v1", model: "Qwen3-8B", requiresKey: false)
     var runError: TTError?
+    var statusCalled = false
+    var statusCallCount = 0
 
     func discover(manualHosts: [String], noMdns: Bool) async throws -> [BoxRecord] { [] }
     func models(host: String) async throws -> [ModelInfo] { models_ }
-    func status(host: String) async throws -> ServingStatus { statusResult }
+    func status(host: String) async throws -> ServingStatus {
+        statusCalled = true
+        statusCallCount += 1
+        return statusResult
+    }
     func endpoint(host: String) async throws -> Endpoint { runEndpoint }
     func pair(host: String, code: String) async throws -> PairResult {
         if pairShouldSucceed { return PairResult(host: host, paired: true) }

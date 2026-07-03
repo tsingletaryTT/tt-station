@@ -28,12 +28,26 @@ public final class BoxViewModel: Identifiable {
         self.commands = commands
         self.registry = registry
         self.isPaired = registry.pairedHosts.contains(record.hostPort)
+        // Seed from the discover record so the status dot reflects reality
+        // immediately, before any network round-trip. Unpaired boxes never
+        // get an authed `status()` call (see refresh()), so without this
+        // seed they'd show no status at all until paired.
+        self.status = record.status
     }
 
     public func refresh() async {
+        // Unpaired boxes have no stored token, so `commands.status()` would
+        // always fail locally with "no token stored..." — which matches
+        // `isAuthError` and would spuriously flip errorText. Leave the
+        // discover-seeded `status` as-is instead of hitting the authed API.
+        guard isPaired else { return }
         do {
             status = try await commands.status(host: record.hostPort)
-            if isPaired { await loadModels() }
+            if case .serving = status {
+                endpoint = try await commands.endpoint(host: record.hostPort)
+            }
+            await loadModels()
+            errorText = nil
         } catch { record(error) }
     }
 
