@@ -8,6 +8,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 mdns-sd = { workspace = true }
+# `rustls-tls` on top of the workspace's `default-features = false` base
+# (which only turns on `json`) so this crate never pulls in openssl -- the
+# pairing client only ever talks to `http://` control-plane addresses today,
+# but a TLS backend costs little and keeps `https://` working later without
+# revisiting this dependency.
+reqwest = { workspace = true, features = ["rustls-tls"] }
 
 # Only ever built on macOS: the `KeychainStore` `SecretStore` impl in
 # secrets.rs is itself `#[cfg(target_os = "macos")]`-gated, so this crate
@@ -15,3 +21,7 @@ mdns-sd = { workspace = true }
 # compile on Linux/CI.
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2"
+
+[dev-dependencies]
+tokio = { workspace = true }
+wiremock = "0.6"
