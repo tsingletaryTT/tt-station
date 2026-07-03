@@ -1,6 +1,53 @@
-# tt-inference-server — real Docker invocation (reference)
+# tt-inference-server — real launch invocation (reference)
 
-*Researched 2026-07-03, blending the official repo, docs.tenstorrent.com, and internal Glean sources. Drives `crates/tt-station-agentd/src/serving/docker.rs`.*
+*Researched 2026-07-03, blending the official repo, docs.tenstorrent.com, internal Glean, AND the operator's own validated launch scripts in `~/code/tt-local-generator/bin/start_*.sh`. Drives `crates/tt-station-agentd/src/serving/`.*
+
+## ⭐ Ground truth: launch LLMs via `run.py`, not raw `docker run`
+
+The operator's proven LLM launcher (`start_artgen.sh`) does **not** call `docker run` directly — it invokes `tt-inference-server/run.py`, which builds the container (resolving the model against `model_spec.json`, wiring the device mesh, hugepages, cache binds, and auth). The canonical, validated LLM serve command:
+
+```bash
+cd <tt-inference-server repo>
+MODEL_SOURCE=huggingface python3 run.py \
+  --model <SPEC_NAME> \            # e.g. Qwen3-8B, Llama-3.1-8B-Instruct, Qwen3-32B (model_spec.json names, NOT raw HF ids)
+  --workflow server \
+  --tt-device <DEVICE> \           # p300x2 (this box, 4x p300c) | p300 (single card) | n300 | p150x4 (BH QuietBox)
+  --impl tt-transformers \
+  --engine vllm \
+  --docker-server \
+  --override-docker-image <IMAGE> \
+  --no-auth \                      # local dev; omit to require JWT (needs JWT_SECRET in .env)
+  --service-port <PORT> \          # host port the OpenAI /v1 server is published on
+  --host-hf-cache <HF_CACHE> \     # e.g. $HOME/.cache/huggingface (bind-mounted)
+  [--device-id 0,1]                # optional: pin to specific chips
+```
+Stop is by publish port: `docker ps --filter publish=<PORT> -q | xargs -r docker stop` (mirrors `start_artgen.sh --stop`).
+
+**Repo location** (operator convention): prefer `<checkout>/vendor/tt-inference-server`, else `$HOME/code/tt-inference-server`.
+
+### Device string is box- AND model-specific
+- **This box = `p300x2`** (P300X2 machine, 4× p300c). Single-card models (e.g. Qwen3-8B) use `p300`.
+- **`p150x4`** is the *other* Blackhole "BH QuietBox" variant — not this box.
+- Some models only have a `p300x2` spec; consult `model_spec.json`.
+
+### Real LLM image tags in use (vLLM path)
+`ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:`
+- `0.14.0-80180b9-7678b70` (preferred, compatible with run.py v0.15.0)
+- `0.11.1-bac8b34-7c6685a` (fallback)
+- `qb2_launch-555f240-22be241` (v0.10.0 — rejected by v0.15.0 run.py)
+- `0.12.0-5b5db8a-e771fff` (for Qwen2.5-7B on n300)
+
+`tt-media-inference-server:<tag>` is a **separate** server (images/video: FLUX, SDXL, Wan, Mochi, Motif) — NOT the LLM /v1 path.
+
+### Auth / health confirmed
+- `--no-auth` is what the operator uses for local dev (LLM). JWT_SECRET only needed for the media server / when auth is on.
+- Readiness: `GET /health`. Chat: `POST /v1/chat/completions`, models: `GET /v1/models`.
+
+---
+
+## Raw `docker run` (fallback backend only)
+
+*The `run.py` path above is preferred and default. The raw invocation below is a best-effort fallback that does NOT replicate run.py's full mesh/host setup — use only when run.py is unavailable.*
 
 ## Canonical `docker run` (direct, no `run.py`)
 
