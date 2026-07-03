@@ -9,3 +9,12 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 mdns-sd = { workspace = true }
 tokio = { workspace = true }
+# `serve` (Task 12) fakes the agent control API + a fake vLLM endpoint over
+# HTTP -- same axum/serde stack `tt-station-agentd` uses for the real thing,
+# so the JSON shapes on the wire stay recognizable between mock and real.
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Only for `pair/init`'s printed code -- cosmetic, since `pair/complete`
+# accepts any code for the mock (see routes.rs doc comment).
+rand = { workspace = true }

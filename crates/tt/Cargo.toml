@@ -5,3 +5,23 @@ edition = "2021"
 
 [dependencies]
 libttstation = { path = "../libttstation" }
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `blocking` on top of the workspace's `default-features = false` + `json`
+# base: `tt discover`'s manual-host probe runs from inside `ManualProvider`'s
+# sync `fetch` closure (no async runtime is entered for `discover` at all --
+# see main.rs), so it needs `reqwest::blocking` rather than the async client
+# `libttstation` uses for pairing/agent calls. Same pattern already used by
+# `tt-station-agentd`'s Docker backend.
+reqwest = { workspace = true, features = ["blocking"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+# Builds and locates the `mock-box` binary from a *different* workspace
+# crate for the e2e test -- `assert_cmd::Command::cargo_bin` only resolves
+# binaries within the crate under test (via Cargo's `CARGO_BIN_EXE_<name>`
+# env vars, which Cargo only sets for the package's own [[bin]] targets).
+escargot = "0.5"
