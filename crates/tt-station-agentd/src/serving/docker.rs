@@ -181,14 +181,18 @@ impl CommandRunner for RealCommandRunner {
     }
 
     fn health_ok(&self, url: &str) -> bool {
-        reqwest::blocking::get(url)
+        probe_client()
+            .and_then(|c| c.get(url).send())
             .map(|resp| resp.status().is_success())
             .unwrap_or(false)
     }
 
     fn http_get(&self, url: &str) -> Result<String> {
-        let resp =
-            reqwest::blocking::get(url).with_context(|| format!("GET {url} failed to send"))?;
+        let resp = probe_client()
+            .with_context(|| "building probe HTTP client")?
+            .get(url)
+            .send()
+            .with_context(|| format!("GET {url} failed to send"))?;
         if !resp.status().is_success() {
             return Err(anyhow::anyhow!(
                 "GET {url} returned non-success status {}",
@@ -198,6 +202,19 @@ impl CommandRunner for RealCommandRunner {
         resp.text()
             .with_context(|| format!("reading response body of GET {url}"))
     }
+}
+
+/// Blocking HTTP client for probes (`health_ok`, `/v1/models`) with BOUNDED
+/// timeouts. Without these, a container that accepts the TCP connection but
+/// never completes the HTTP response would hang the caller indefinitely -- a
+/// real risk for `GET /serving`, which probes unknown/external containers
+/// (e.g. tt-studio's) that this agent didn't launch. A slow/hung probe now
+/// fails fast and degrades to "skip that endpoint" rather than stalling.
+fn probe_client() -> reqwest::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
 }
 
 /// Shared plumbing for `RealCommandRunner::run`/`run_in_dir`: spawn `cmd`,
