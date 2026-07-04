@@ -47,4 +47,75 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(finalCount, 1, "only one discovery pass should have run in total")
         XCTAssertEqual(model.scanState, .idle)
     }
+
+    /// Regression test for the "window stops live-updating" bug: `scan()`
+    /// used to rebuild every `BoxViewModel` from scratch on each pass, which
+    /// swapped out the very instance a second surface (e.g. the detail
+    /// window) was observing. This proves a box whose `hostPort` is still
+    /// present across two scans keeps the *same* `BoxViewModel` instance.
+    func testScanReusesExistingBoxViewModelInstanceForUnchangedHost() async {
+        let discovery = FakeDiscoveryService()
+        let record = BoxRecord(name: "qb2", host: "qb2-lab.local", ctrlPort: 8765, chips: "p300x2", statusRaw: "idle", apiver: 1)
+        await discovery.setRecords([record])
+
+        let model = AppModel(
+            commands: FakeTTClient(),
+            discovery: discovery,
+            registry: HostRegistry(store: InMemoryStore())
+        )
+
+        await runScan(model, discovery: discovery)
+        XCTAssertEqual(model.boxes.count, 1)
+        let firstInstanceID = ObjectIdentifier(model.boxes[0])
+
+        await runScan(model, discovery: discovery)
+        XCTAssertEqual(model.boxes.count, 1)
+        XCTAssertEqual(
+            ObjectIdentifier(model.boxes[0]), firstInstanceID,
+            "the BoxViewModel for an unchanged host must be reused, not rebuilt"
+        )
+    }
+
+    /// Complements the reuse test above: a box that disappears from
+    /// discovery must be dropped, and a newly-discovered host must get a
+    /// brand-new `BoxViewModel` (there is nothing to reuse).
+    func testScanDropsGoneBoxAndCreatesFreshInstanceForNewHost() async {
+        let discovery = FakeDiscoveryService()
+        let recordA = BoxRecord(name: "qb2-a", host: "qb2-a.local", ctrlPort: 8765, chips: "p300x2", statusRaw: "idle", apiver: 1)
+        let recordB = BoxRecord(name: "qb2-b", host: "qb2-b.local", ctrlPort: 8765, chips: "p300x2", statusRaw: "idle", apiver: 1)
+        await discovery.setRecords([recordA])
+
+        let model = AppModel(
+            commands: FakeTTClient(),
+            discovery: discovery,
+            registry: HostRegistry(store: InMemoryStore())
+        )
+
+        await runScan(model, discovery: discovery)
+        XCTAssertEqual(model.boxes.map(\.id), [recordA.hostPort])
+        let instanceA = ObjectIdentifier(model.boxes[0])
+
+        // recordA drops off the network; recordB newly appears.
+        await discovery.setRecords([recordB])
+        await runScan(model, discovery: discovery)
+
+        XCTAssertEqual(model.boxes.map(\.id), [recordB.hostPort], "the gone box should be dropped")
+        XCTAssertNotEqual(
+            ObjectIdentifier(model.boxes[0]), instanceA,
+            "a newly-discovered host must get a fresh BoxViewModel, not a stale one"
+        )
+    }
+
+    /// Drives one `scan()` pass through the fake's suspend/resume
+    /// choreography: waits for `discovery.scan()` to actually be in flight,
+    /// resumes it, then waits for `scan()` to return.
+    private func runScan(_ model: AppModel, discovery: FakeDiscoveryService) async {
+        let countBefore = await discovery.scanCount
+        let task = Task { await model.scan() }
+        while await discovery.scanCount == countBefore {
+            await Task.yield()
+        }
+        await discovery.resume()
+        await task.value
+    }
 }

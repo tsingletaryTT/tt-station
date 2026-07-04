@@ -13,13 +13,23 @@ import Foundation
 actor FakeDiscoveryService: DiscoveryService {
     private(set) var scanCount = 0
     private var continuation: CheckedContinuation<Void, Never>?
+    /// Records handed back by the *next* `scan()` call. Lets reconciliation
+    /// tests simulate discovery returning a stable set of boxes (or a
+    /// changed set) across successive scans, while still exercising the
+    /// same suspend/resume choreography the re-entrancy test relies on.
+    private var recordsToReturn: [BoxRecord] = []
 
     func scan() async -> [BoxRecord] {
         scanCount += 1
         await withCheckedContinuation { continuation in
             self.continuation = continuation
         }
-        return []
+        return recordsToReturn
+    }
+
+    /// Sets the records the next `scan()` call will return once resumed.
+    func setRecords(_ records: [BoxRecord]) {
+        recordsToReturn = records
     }
 
     /// Lets a suspended `scan()` call return. No-op if nothing is waiting.

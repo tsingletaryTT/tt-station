@@ -27,7 +27,13 @@ public final class AppModel {
         guard scanState != .scanning else { return }
         scanState = .scanning
         let records = await discovery.scan()
-        boxes = records.map { BoxViewModel(record: $0, commands: commands, registry: registry) }
+        // Reconcile by hostPort: reuse the existing BoxViewModel for a box that's
+        // still present (so the window/popover keep observing a stable instance and
+        // its live state survives a rescan); make new ones only for new hosts.
+        let existing = Dictionary(boxes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        boxes = records.map { rec in
+            existing[rec.hostPort] ?? BoxViewModel(record: rec, commands: commands, registry: registry)
+        }
         if selectedHostPort == nil { selectedHostPort = boxes.first?.id }
         for box in boxes { await box.refresh() }
         scanState = .idle
