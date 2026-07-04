@@ -83,7 +83,8 @@ final class LaunchController {
             return
         }
         let t = sshTarget(host: host)
-        do { try Self.runOsascript(Self.terminalScript(TTToplikeLauncher.command(host: t.host, ctrlPort: ctrlPort))) }
+        let remoteHost = Self.resolveIPv4(t.host) ?? t.host
+        do { try Self.runOsascript(Self.terminalScript(TTToplikeLauncher.command(host: remoteHost, ctrlPort: ctrlPort))) }
         catch { toplikeError = error.localizedDescription }
     }
 
@@ -140,6 +141,34 @@ final class LaunchController {
     }
 
     // MARK: helpers
+
+    /// Resolve `host` to its first IPv4 address. macOS resolves `.local` mDNS
+    /// names IPv6-first, and tt-toplike's WS client connects to the first
+    /// address (a broken link-local IPv6) instead of the working IPv4 — so we
+    /// hand it an IPv4 explicitly. Returns nil (caller falls back to the name)
+    /// if resolution fails.
+    static func resolveIPv4(_ host: String) -> String? {
+        var hints = addrinfo()
+        hints.ai_family = AF_INET
+        hints.ai_socktype = SOCK_STREAM
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &res) == 0, let head = res else { return nil }
+        defer { freeaddrinfo(res) }
+        var node: UnsafeMutablePointer<addrinfo>? = head
+        while let n = node {
+            if let sa = n.pointee.ai_addr, n.pointee.ai_family == AF_INET {
+                var storage = sockaddr_in()
+                memcpy(&storage, sa, min(Int(n.pointee.ai_addrlen), MemoryLayout<sockaddr_in>.size))
+                var addr = storage.sin_addr
+                var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                if inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
+                    return String(cString: buf)
+                }
+            }
+            node = n.pointee.ai_next
+        }
+        return nil
+    }
 
     /// Resolve a homebrew-installed binary by absolute path. GUI apps don't
     /// inherit the shell PATH, so we can't rely on `command -v` from the app
