@@ -24,6 +24,32 @@ final class WorkbenchLaunchersTests: XCTestCase {
         XCTAssertEqual(TTToplikeLauncher.command(host: "qb.local", ctrlPort: 8765),
                        "tt-toplike-tui --remote 'qb.local:8765'")
     }
+    // NOTE: a naive `!cmd.contains("'; open")` check is unsound here — the
+    // *correctly* escaped output for this payload legitimately contains that
+    // substring (POSIX-escaping a quote emits `'\''`, whose trailing `''`
+    // butts up against the literal `"; open"` that follows). That would fail
+    // this test even on a correct implementation. Instead we pin down the
+    // exact expected escaped string, built independently of the production
+    // `shellSingleQuoted` helper, so the test actually proves correctness
+    // rather than being tautological or accidentally unsatisfiable.
+    func testTerminalSSHCommandNeutralizesSingleQuoteInjection() {
+        let maliciousHost = "x'; open -a Calculator; '"
+        let escapedQuote = "'\\''" // POSIX: close-quote, escaped quote, reopen-quote
+        let escapedHost = "x" + escapedQuote + "; open -a Calculator; " + escapedQuote
+        let expected = "ssh -o StrictHostKeyChecking=accept-new 'me@\(escapedHost)'"
+        let cmd = TerminalSSHLauncher.command(user: "me", host: maliciousHost)
+        XCTAssertEqual(cmd, expected)
+        XCTAssertTrue(cmd.contains(escapedQuote), "expected the embedded quote to be escaped")
+    }
+    func testTTToplikeCommandNeutralizesSingleQuoteInjection() {
+        let maliciousHost = "x'; open -a Calculator; '"
+        let escapedQuote = "'\\''"
+        let escapedCombined = "x" + escapedQuote + "; open -a Calculator; " + escapedQuote + ":8765"
+        let expected = "tt-toplike-tui --remote '\(escapedCombined)'"
+        let cmd = TTToplikeLauncher.command(host: maliciousHost, ctrlPort: 8765)
+        XCTAssertEqual(cmd, expected)
+        XCTAssertTrue(cmd.contains(escapedQuote), "expected the embedded quote to be escaped")
+    }
     func testVSCodeRemoteArgs() {
         XCTAssertEqual(VSCodeLauncher.remoteArgs(user: "me", host: "qb.local", path: "/home/me"),
                        ["--remote", "ssh-remote+me@qb.local", "/home/me"])

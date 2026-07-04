@@ -15,19 +15,26 @@ public struct SSHTarget: Equatable {
     }
 }
 
+/// POSIX-safe single-quoting for embedding a value in a `/bin/sh` command:
+/// wraps in single quotes and replaces each `'` with `'\''` so the value
+/// cannot break out of the quoting (host/user can come from untrusted mDNS).
+func shellSingleQuoted(_ s: String) -> String {
+    "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
 /// `ssh` into the box. `accept-new` lets a first connect to an unknown host key
 /// through (still prompts for a password if key auth isn't set up — fine, that
 /// happens in the Terminal the app opens).
 public enum TerminalSSHLauncher {
     public static func command(user: String, host: String) -> String {
-        "ssh -o StrictHostKeyChecking=accept-new '\(user)@\(host)'"
+        "ssh -o StrictHostKeyChecking=accept-new \(shellSingleQuoted("\(user)@\(host)"))"
     }
 }
 
 /// tt-toplike's remote telemetry view against the box's control port.
 public enum TTToplikeLauncher {
     public static func command(host: String, ctrlPort: Int) -> String {
-        "tt-toplike-tui --remote '\(host):\(ctrlPort)'"
+        "tt-toplike-tui --remote \(shellSingleQuoted("\(host):\(ctrlPort)"))"
     }
 }
 
