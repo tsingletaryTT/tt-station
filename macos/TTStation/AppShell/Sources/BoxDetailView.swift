@@ -31,25 +31,54 @@ struct BoxDetailView: View {
                     }
                 }
             } else {
-                Picker("Model", selection: Binding(
-                    get: { box.selectedModel ?? "" },
-                    set: { box.selectedModel = $0 }
-                )) {
-                    ForEach(box.models, id: \.name) { Text($0.name).tag($0.name) }
-                }
-                .task { if box.models.isEmpty { await box.loadModels() } }
+                // Searchable, family-grouped browser (sets box.selectedModel).
+                ModelPickerView(box: box)
+                    .task { if box.models.isEmpty { await box.loadModels() } }
 
-                HStack {
-                    Button("Run") { Task { await box.run() } }.disabled(box.inFlight)
-                    Button("Stop") { Task { await box.stop() } }.disabled(box.inFlight)
+                // Run is the primary action; Stop is a secondary, destructive
+                // one. Both gated by `inFlight`; Run additionally needs a model.
+                HStack(spacing: 8) {
+                    Button { Task { await box.run() } } label: {
+                        Label("Run", systemImage: "play.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(box.selectedModel == nil || box.inFlight)
+                    .help("Start serving the selected model on this box.")
+
+                    Button(role: .destructive) { Task { await box.stop() } } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(box.inFlight)
+                    .help("Stop the model currently serving on this box.")
+
                     if box.inFlight { ProgressView().scaleEffect(0.6) }
+                }
+                .controlSize(.small)
+
+                // Spin-up feedback: shown while `run()` is in flight, before
+                // the endpoint returns. First run pulls the model image, which
+                // can take minutes — say so, so the wait doesn't read as a hang.
+                if box.starting {
+                    HStack(spacing: 6) {
+                        ProgressView().scaleEffect(0.6)
+                        Text("Starting \(box.selectedModel ?? "model")… (first run can take a few minutes)")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
 
                 if let ep = box.endpoint {
+                    // Prominent "Serving <model>" line so the running state is
+                    // unmistakable at a glance.
+                    HStack(spacing: 4) {
+                        Image(systemName: "circle.fill").font(.system(size: 7)).foregroundStyle(.green)
+                        Text("Serving \(ep.model)").font(.caption.weight(.semibold))
+                    }
                     HStack {
                         Text(ep.baseURL).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
                         Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(ep.baseURL, forType: .string) }
                             label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
+                            .help("Copy endpoint URL")
                     }
 
                     // Connect a local front-end to the running model. Shown only
@@ -103,6 +132,7 @@ struct BoxDetailView: View {
                             Text(entry.baseURL).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
                             Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(entry.baseURL, forType: .string) }
                                 label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
+                                .help("Copy endpoint URL")
                         }
                     }
                 }

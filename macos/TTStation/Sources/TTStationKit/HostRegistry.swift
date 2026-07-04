@@ -17,6 +17,11 @@ public final class HostRegistry {
     private let store: KeyValueStore
     private let manualKey = "tt.manualHosts"
     private let pairedKey = "tt.pairedHosts"
+    /// Per-host last-run model is stored under `tt.lastModel.<host:port>` as a
+    /// single-element string array — reusing the existing `KeyValueStore`
+    /// string-array API rather than widening the protocol, so persistence
+    /// stays additive and non-breaking.
+    private let lastModelKeyPrefix = "tt.lastModel."
 
     public init(store: KeyValueStore) { self.store = store }
 
@@ -37,5 +42,18 @@ public final class HostRegistry {
     }
     public func markUnpaired(_ host: String) {
         store.setStringArray(Array(pairedHosts.subtracting([host])), pairedKey)
+    }
+
+    /// The model most recently run on `host` via this app, or `nil` if none
+    /// has been recorded. Feeds `ModelDefaults.pickDefaultModel` so a box
+    /// re-opens on the user's last choice.
+    public func lastModel(forHost host: String) -> String? {
+        store.stringArray(lastModelKeyPrefix + host).first
+    }
+
+    /// Remember `model` as the last one run on `host`. Mirrors `markPaired`'s
+    /// UserDefaults-via-`store` approach.
+    public func setLastModel(_ model: String, forHost host: String) {
+        store.setStringArray([model], lastModelKeyPrefix + host)
     }
 }

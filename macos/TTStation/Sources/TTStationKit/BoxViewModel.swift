@@ -23,6 +23,11 @@ public final class BoxViewModel: Identifiable {
     public var selectedModel: String?
     public var isPaired: Bool
     public var inFlight = false
+    /// True from the moment `run()` is invoked until its endpoint returns (or
+    /// it fails) — i.e. the model is spinning up but not yet serving. Drives
+    /// the amber "starting" status dot and the "Starting <model>…" message,
+    /// which are additive to (and never mutate) the existing `status` logic.
+    public var starting = false
     public var errorText: String?
     /// Non-nil once `startPairing()` has minted a pairing session and the
     /// box's console is showing a code, and cleared again once
@@ -97,7 +102,15 @@ public final class BoxViewModel: Identifiable {
     public func loadModels() async {
         do {
             models = try await commands.models(host: record.hostPort)
-            if selectedModel == nil { selectedModel = models.first?.name }
+            // Smart default: honour the user's last choice on this box, else
+            // pick the best-scoring model so a freshly-paired box "just works"
+            // without any interaction. Only seed when nothing is selected yet.
+            if selectedModel == nil {
+                selectedModel = ModelDefaults.pickDefaultModel(
+                    from: models,
+                    lastUsed: registry.lastModel(forHost: record.hostPort)
+                )
+            }
         } catch { record(error) }
     }
 
@@ -144,10 +157,15 @@ public final class BoxViewModel: Identifiable {
 
     public func run() async {
         guard let model = selectedModel else { errorText = "Pick a model first."; return }
-        inFlight = true; defer { inFlight = false }
+        // `starting` reflects the spin-up window (amber dot); `inFlight`
+        // continues to gate the buttons. Both clear together on completion.
+        inFlight = true; starting = true
+        defer { inFlight = false; starting = false }
         do {
             endpoint = try await commands.run(host: record.hostPort, model: model)
             status = .serving(model: model)
+            // Persist the choice so this box defaults to it next time.
+            registry.setLastModel(model, forHost: record.hostPort)
             errorText = nil
         } catch { record(error) }
     }

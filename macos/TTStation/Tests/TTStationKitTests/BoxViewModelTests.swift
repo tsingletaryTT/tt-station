@@ -150,6 +150,42 @@ final class BoxViewModelTests: XCTestCase {
         XCTAssertEqual(vm.status, .serving(model: "Foo"))
     }
 
+    func testLoadModelsSeedsSmartDefault() async {
+        let client = FakeTTClient()
+        client.models_ = [
+            ModelInfo(name: "meta-llama/Llama-3.3-70B-Instruct", devices: ["T3K"]),
+            ModelInfo(name: "Qwen/Qwen3-8B", devices: ["P300X2"]),
+            ModelInfo(name: "Qwen/Qwen2.5-7B-Instruct", devices: ["P300X2"]),
+        ]
+        let (vm, _) = makeVM(client: client)
+        await vm.loadModels()
+        // Best score: instruct + 7B sweet spot beats base-8B and huge-70B.
+        XCTAssertEqual(vm.selectedModel, "Qwen/Qwen2.5-7B-Instruct")
+    }
+
+    func testLoadModelsHonoursRememberedLastModel() async {
+        let client = FakeTTClient()
+        client.models_ = [
+            ModelInfo(name: "Qwen/Qwen3-8B", devices: ["P300X2"]),
+            ModelInfo(name: "Qwen/Qwen2.5-7B-Instruct", devices: ["P300X2"]),
+        ]
+        let reg = HostRegistry(store: InMemoryStore())
+        let rec = BoxRecord(name: "b", host: "h", ctrlPort: 8080, chips: "4xBH", statusRaw: "idle", apiver: 1)
+        reg.markPaired(rec.hostPort)
+        reg.setLastModel("Qwen/Qwen3-8B", forHost: rec.hostPort)
+        let vm = BoxViewModel(record: rec, commands: client, registry: reg)
+        await vm.loadModels()
+        XCTAssertEqual(vm.selectedModel, "Qwen/Qwen3-8B")
+    }
+
+    func testRunPersistsLastModelAndClearsStarting() async {
+        let (vm, reg) = makeVM()
+        vm.selectedModel = "Qwen3-8B"
+        await vm.run()
+        XCTAssertEqual(reg.lastModel(forHost: "h:8080"), "Qwen3-8B")
+        XCTAssertFalse(vm.starting)
+    }
+
     func testPairedServingRefreshFetchesEndpoint() async {
         let client = FakeTTClient()
         client.statusResult = .serving(model: "Foo")
