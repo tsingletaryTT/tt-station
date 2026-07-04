@@ -17,6 +17,12 @@ final class LaunchController {
     var isLaunchingOpenCode = false
     var webUIError: String?
     var openCodeError: String?
+    var isLaunchingTerminal = false
+    var isLaunchingToplike = false
+    var isLaunchingVSCode = false
+    var terminalError: String?
+    var toplikeError: String?
+    var vscodeError: String?
 
     // MARK: opencode
 
@@ -57,6 +63,41 @@ final class LaunchController {
         } catch {
             openCodeError = error.localizedDescription
         }
+    }
+
+    // MARK: Workbench (box-connected tools)
+
+    func openTerminalSSH(host: String) async {
+        isLaunchingTerminal = true; defer { isLaunchingTerminal = false }
+        terminalError = nil
+        let t = sshTarget(host: host)
+        do { try Self.runOsascript(Self.terminalScript(TerminalSSHLauncher.command(user: t.user, host: t.host))) }
+        catch { terminalError = error.localizedDescription }
+    }
+
+    func openTTToplike(host: String, ctrlPort: Int) async {
+        isLaunchingToplike = true; defer { isLaunchingToplike = false }
+        toplikeError = nil
+        guard Self.resolveBrewBinary("tt-toplike-tui") != nil else {
+            toplikeError = "tt-toplike not installed — build tt-toplike-tui from ~/code/tt-toplike (inference-server-monitoring branch)."
+            return
+        }
+        let t = sshTarget(host: host)
+        do { try Self.runOsascript(Self.terminalScript(TTToplikeLauncher.command(host: t.host, ctrlPort: ctrlPort))) }
+        catch { toplikeError = error.localizedDescription }
+    }
+
+    func openVSCode(host: String) async {
+        isLaunchingVSCode = true; defer { isLaunchingVSCode = false }
+        vscodeError = nil
+        guard let code = Self.resolveBrewBinary("code") else {
+            vscodeError = "VS Code `code` CLI not found — in VS Code run \"Shell Command: Install 'code' command in PATH\"."
+            return
+        }
+        let t = sshTarget(host: host)
+        let args = VSCodeLauncher.remoteArgs(user: t.user, host: t.host, path: VSCodeLauncher.defaultRemotePath(user: t.user))
+        do { try Self.runDetachedProcess(executable: code, args: args) }
+        catch { vscodeError = "failed to open VS Code: \(error.localizedDescription)" }
     }
 
     // MARK: Open WebUI
@@ -104,7 +145,8 @@ final class LaunchController {
     /// inherit the shell PATH, so we can't rely on `command -v` from the app
     /// process — probe the known install dirs directly.
     static func resolveBrewBinary(_ name: String) -> String? {
-        for p in ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)"] {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        for p in ["\(home)/.local/bin/\(name)", "/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)"] {
             if FileManager.default.isExecutableFile(atPath: p) { return p }
         }
         return nil
@@ -130,6 +172,39 @@ final class LaunchController {
         p.arguments = ["-e", script]
         try p.run()
         p.waitUntilExit()
+    }
+
+    /// Wrap a shell command in an AppleScript that opens/reuses Terminal.app and
+    /// runs it in a new window. Escapes for embedding in the AppleScript literal.
+    static func terminalScript(_ command: String) -> String {
+        let escaped = command
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return """
+        tell application "Terminal"
+            activate
+            do script "\(escaped)"
+        end tell
+        """
+    }
+
+    /// Launch a GUI helper (e.g. `code`) without blocking; it returns promptly
+    /// after signalling/launching its own window.
+    static func runDetachedProcess(executable: String, args: [String]) throws {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: executable)
+        p.arguments = args
+        try p.run()
+    }
+
+    /// SSH user/host for a box host string (override via UserDefaults `tt.sshUser`,
+    /// else the current login name).
+    private func sshTarget(host: String) -> SSHTarget {
+        SSHTarget.resolve(
+            host: host,
+            overrideUser: UserDefaults.standard.string(forKey: "tt.sshUser"),
+            currentUser: NSUserName()
+        )
     }
 
     /// Spawn a long-lived process detached from the app (`nohup … &`) so it
