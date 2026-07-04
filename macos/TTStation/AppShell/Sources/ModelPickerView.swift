@@ -14,6 +14,9 @@ import TTStationKit
 /// look on a Mac.
 struct ModelPickerView: View {
     @Bindable var box: BoxViewModel
+    /// Max height of the scrollable model list. `nil` = uncapped (used in the
+    /// resizable window); the default keeps the compact popover bounded.
+    var maxListHeight: CGFloat? = 260
     @State private var query = ""
 
     /// Case-insensitive name filter, then family grouping — both pure.
@@ -72,7 +75,7 @@ struct ModelPickerView: View {
                         }
                     }
                 }
-                .frame(maxHeight: 260)
+                .frame(maxHeight: maxListHeight)
             }
         }
     }
