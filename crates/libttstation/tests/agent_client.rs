@@ -12,7 +12,7 @@
 //! with the exact configured token -- that's the one behavior all four
 //! methods share and the brief calls out explicitly.
 
-use libttstation::agent_client::{get_status, list_models, reset, AgentClient};
+use libttstation::agent_client::{get_status, list_models, list_serving, reset, AgentClient};
 use libttstation::model::{Endpoint, ServingStatus};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
@@ -194,6 +194,49 @@ async fn list_models_parses_models_response_with_no_auth_header() {
     assert_eq!(resp.models.len(), 2);
     assert_eq!(resp.models[0].name, "Qwen/Qwen3-32B");
     assert_eq!(resp.models[0].devices, vec!["P300X2", "T3K"]);
+}
+
+/// `list_serving(base)` should GET `{base}/serving` -- UNAUTHED, like
+/// `list_models` -- and parse the `ServingList` body (every live
+/// `tt-inference-server` `/v1` endpoint the box reports).
+#[tokio::test]
+async fn list_serving_parses_serving_list_with_no_auth_header() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/serving"))
+        .and(NoAuthorizationHeader)
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "serving": [
+                {
+                    "model": "meta-llama/Llama-3.3-70B-Instruct",
+                    "base_url": "http://127.0.0.1:8000/v1",
+                    "host_port": 8000,
+                    "container": "tt-agent-llama",
+                    "source": "agent"
+                },
+                {
+                    "model": "Qwen/Qwen3-32B",
+                    "base_url": "http://127.0.0.1:8003/v1",
+                    "host_port": 8003,
+                    "container": "tt-studio-qwen",
+                    "source": "external"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let list = list_serving(&server.uri())
+        .await
+        .expect("list_serving() should succeed against a mocked 200 response");
+
+    assert_eq!(list.serving.len(), 2);
+    assert_eq!(list.serving[0].model, "meta-llama/Llama-3.3-70B-Instruct");
+    assert_eq!(list.serving[0].host_port, 8000);
+    assert_eq!(list.serving[0].source, "agent");
+    assert_eq!(list.serving[1].base_url, "http://127.0.0.1:8003/v1");
+    assert_eq!(list.serving[1].source, "external");
 }
 
 /// `get_status(base)` -- the free function `tt status` calls so it works

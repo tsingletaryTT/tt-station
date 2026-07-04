@@ -9,7 +9,7 @@
 //! `/status` isn't currently bearer-gated on the agent side, but sending the
 //! header anyway costs nothing and keeps all four calls uniform.
 
-use crate::model::{Endpoint, ModelsResponse, ServingStatus};
+use crate::model::{Endpoint, ModelsResponse, ServingList, ServingStatus};
 use crate::pairing::join;
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +25,28 @@ use serde::{Deserialize, Serialize};
 /// pairing), and the agent's `/models` route doesn't require one anyway.
 pub async fn list_models(base: &str) -> anyhow::Result<ModelsResponse> {
     let url = join(base, "models");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
+
+    Ok(resp.json().await?)
+}
+
+/// `GET /serving` (UNAUTHED, mirroring the agent's own route -- see
+/// `tt-station-agentd::routes::get_serving`): every live
+/// `tt-inference-server` `/v1` endpoint on the box, whoever launched it (the
+/// agent, tt-studio, or a manual `run.py`), as a [`ServingList`].
+///
+/// A FREE function rather than an `AgentClient` method, same reasoning as
+/// [`list_models`]/[`get_status`]: `/serving` is unauthed read-only
+/// discovery, so a caller that hasn't paired (no bearer token) can still see
+/// what's serving. `tt serving` calls this directly instead of going through
+/// `authed_client()`.
+pub async fn list_serving(base: &str) -> anyhow::Result<ServingList> {
+    let url = join(base, "serving");
     let resp = reqwest::Client::new()
         .get(&url)
         .send()

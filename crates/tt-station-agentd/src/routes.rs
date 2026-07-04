@@ -27,10 +27,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
+use libttstation::model::{Endpoint, ModelsResponse, ServingList, ServingStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::pairing;
+use crate::serving::discovery::discover_serving;
 use crate::serving::docker::{CommandRunner, RealCommandRunner};
 use crate::serving::ServingBackend;
 use crate::telemetry;
@@ -45,6 +46,15 @@ const DEFAULT_TELEMETRY_INTERVAL_MS: u64 = 1000;
 /// Default `tt-smi` binary name resolved on `$PATH`, when `AppState` isn't
 /// told otherwise. Mirrors `main.rs`'s `--tt-smi-bin` default.
 const DEFAULT_TT_SMI_BIN: &str = "tt-smi";
+
+/// Default serving host baked into `GET /serving` `base_url`s when `AppState`
+/// isn't told otherwise. Mirrors `main.rs`'s `--serving-host` default.
+const DEFAULT_SERVING_HOST: &str = "127.0.0.1";
+
+/// Default serving port `GET /serving` treats as the agent's own, when
+/// `AppState` isn't told otherwise. Mirrors `main.rs`'s `--serving-port`
+/// default.
+const DEFAULT_SERVING_PORT: u16 = 8000;
 
 /// How long a pairing code stays valid after `/pair/init` mints it. Short
 /// enough that a code seen once (e.g. shoulder-surfed, or left in shell
@@ -164,6 +174,18 @@ struct Inner {
     /// Defaults to `DEFAULT_TELEMETRY_INTERVAL_MS`; set via
     /// `with_telemetry_config` from `--telemetry-interval-ms`.
     telemetry_interval_ms: u64,
+    /// Host baked into the `base_url` of endpoints `GET /serving` reports --
+    /// the agent's configured serving host (`--serving-host`), same value
+    /// the serving backend uses for its own `Endpoint.base_url`. Defaults to
+    /// `DEFAULT_SERVING_HOST`; set via `with_serving_config`. Purely additive:
+    /// only the `/serving` route reads it.
+    serving_host: String,
+    /// The agent's OWN configured serving host port (`--serving-port`). Used
+    /// by `GET /serving` to classify a discovered endpoint as `"agent"` (its
+    /// port matches this AND the agent's in-memory status is serving that
+    /// model) vs `"external"`. Defaults to `DEFAULT_SERVING_PORT`; set via
+    /// `with_serving_config`.
+    serving_port: u16,
 }
 
 impl AppState {
@@ -226,6 +248,8 @@ impl AppState {
                 advertiser: None,
                 tt_smi_bin: DEFAULT_TT_SMI_BIN.to_string(),
                 telemetry_interval_ms: DEFAULT_TELEMETRY_INTERVAL_MS,
+                serving_host: DEFAULT_SERVING_HOST.to_string(),
+                serving_port: DEFAULT_SERVING_PORT,
             }),
         }
     }
@@ -273,6 +297,30 @@ impl AppState {
         self
     }
 
+    /// Configure the additive `GET /serving` route: the serving host baked
+    /// into discovered endpoints' `base_url`, and the agent's own serving
+    /// port used to classify `agent` vs `external`. Additive counterpart to
+    /// `with_telemetry_config`/`with_status_advertiser` -- same "call
+    /// immediately after construction, while this is still the sole owner of
+    /// its `Arc<Inner>`" contract (`Arc::get_mut` only succeeds then). Called
+    /// after a clone exists, it logs a warning and leaves the defaults in
+    /// place rather than panicking.
+    ///
+    /// Optional: an `AppState` never given this config still answers
+    /// `/serving`, using `DEFAULT_SERVING_HOST`/`DEFAULT_SERVING_PORT`.
+    pub fn with_serving_config(mut self, serving_host: String, serving_port: u16) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => {
+                inner.serving_host = serving_host;
+                inner.serving_port = serving_port;
+            }
+            None => eprintln!(
+                "tt-station-agentd: with_serving_config called on an already-shared AppState; serving config not applied"
+            ),
+        }
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.inner.name
     }
@@ -289,6 +337,17 @@ impl AppState {
     /// Interval (ms) between `/telemetry` snapshots (see `with_telemetry_config`).
     fn telemetry_interval_ms(&self) -> u64 {
         self.inner.telemetry_interval_ms
+    }
+
+    /// Serving host baked into `GET /serving` `base_url`s (see `with_serving_config`).
+    fn serving_host(&self) -> &str {
+        &self.inner.serving_host
+    }
+
+    /// The agent's own serving port, for `GET /serving`'s agent/external
+    /// classification (see `with_serving_config`).
+    fn serving_port(&self) -> u16 {
+        self.inner.serving_port
     }
 
     /// Cheap `Arc` clone of the serving backend, for a handler to move into
@@ -1117,12 +1176,51 @@ fn telemetry_error_frame(err: &anyhow::Error) -> String {
     serde_json::json!({ "error": err.to_string() }).to_string()
 }
 
+/// `GET /serving` (UNAUTHED, like `GET /status` and `GET /models`): list
+/// EVERY live `tt-inference-server` `/v1` endpoint on the box, whoever
+/// launched it (the agent's own `/run`, tt-studio's FastAPI, or a manual
+/// `run.py`). Read-only discovery, so unauthed for the same reason
+/// `/status`/`/models` are.
+///
+/// Additive to (not a replacement for) `/status`: `/status` still reports the
+/// agent's own last serving intent, while `/serving` reflects docker reality.
+/// A discovered endpoint is tagged `source: "agent"` when it's on the agent's
+/// own configured serving port and the agent's in-memory status is serving
+/// that model, else `"external"`.
+///
+/// The whole scan -- `docker ps` plus a `/v1/models` probe per candidate --
+/// is blocking I/O, so it runs on `tokio::task::spawn_blocking` with a
+/// `RealCommandRunner`, holding no mutex across it (the status snapshot is
+/// taken up front). A `docker`-missing / no-containers / probe-failure box
+/// yields `{"serving":[]}` -- never an error, never a panic. See
+/// `serving::discovery::discover_serving`.
+async fn get_serving(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Json<ServingList> {
+    let serving_host = state.serving_host().to_string();
+    let serving_port = state.serving_port();
+    let status = state.status();
+
+    let serving = tokio::task::spawn_blocking(move || {
+        let runner = RealCommandRunner;
+        discover_serving(&runner, &serving_host, serving_port, &status)
+    })
+    .await
+    // A join failure (the blocking task panicked) is reported as "nothing
+    // serving" rather than a 500 -- `/serving` is best-effort discovery and
+    // must never fail a clean box.
+    .unwrap_or_default();
+
+    Json(ServingList { serving })
+}
+
 /// Build the router for a given `AppState`. Side-effect-free: no sockets,
 /// no mDNS -- safe to call directly from tests.
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/status", get(get_status))
         .route("/models", get(get_models))
+        .route("/serving", get(get_serving))
         .route("/telemetry", get(telemetry_ws))
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))

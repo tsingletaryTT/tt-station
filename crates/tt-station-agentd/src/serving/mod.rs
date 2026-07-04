@@ -10,6 +10,7 @@
 //! one-line change at whatever call site constructs the backend, not a
 //! rewrite of everything that talks to it.
 
+pub mod discovery;
 pub mod docker;
 pub mod dstack;
 pub mod runpy;

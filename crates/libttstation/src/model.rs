@@ -56,6 +56,45 @@ pub struct Endpoint {
     pub requires_key: bool,
 }
 
+/// One live `tt-inference-server` `/v1` serving endpoint discovered on a box,
+/// regardless of who launched the container (the agent's own `/run`,
+/// tt-studio's FastAPI, or a manual operator run). Populated by
+/// `tt-station-agentd`'s `GET /serving` route (see
+/// `serving::discovery::discover_serving`) and consumed by
+/// `agent_client::list_serving` / `tt serving` / the macOS toolbar.
+///
+/// Shared here (rather than defined privately in the agent) so the agent, the
+/// `tt` CLI, and any future GUI all decode the exact same wire shape -- same
+/// reasoning as [`Endpoint`]/[`ModelInfo`] living in this crate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServingEntry {
+    /// The served model id, read from the endpoint's own `/v1/models`
+    /// `data[0].id` -- the authoritative id the OpenAI-compatible server
+    /// reports it is actually serving (e.g. `meta-llama/Llama-3.3-70B-Instruct`).
+    pub model: String,
+    /// OpenAI-compatible base URL a client should point at, built from the
+    /// agent's configured serving host and the container's published host
+    /// port, e.g. `http://127.0.0.1:8003/v1`.
+    pub base_url: String,
+    /// The host port the serving container publishes its `/v1` server on.
+    pub host_port: u16,
+    /// The Docker container name backing this endpoint (from `docker ps`).
+    pub container: String,
+    /// `"agent"` when this endpoint is the one the agent itself launched (its
+    /// configured serving port, and its in-memory status says it's serving
+    /// this model), otherwise `"external"` (e.g. launched by tt-studio or a
+    /// manual `run.py`).
+    pub source: String,
+}
+
+/// `GET /serving`'s response body: every live `tt-inference-server` `/v1`
+/// endpoint on the box (see [`ServingEntry`]), sorted by `host_port`. Empty
+/// `serving` on a clean box (no docker, or nothing serving) -- never an error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServingList {
+    pub serving: Vec<ServingEntry>,
+}
+
 /// One model a box's serving backend can run, per its `model_spec.json` --
 /// the model id (the top-level key under `model_specs`) plus the device
 /// meshes it supports (that entry's own keys, e.g. `GALAXY`, `T3K`,

@@ -458,6 +458,14 @@ async fn main() -> Result<()> {
     // `Arc::get_mut`). No-op for every existing route -- purely additive.
     let state = state.with_telemetry_config(cli.tt_smi_bin.clone(), cli.telemetry_interval_ms);
 
+    // Configure the additive `GET /serving` discovery route (see routes.rs):
+    // the serving host baked into discovered endpoints' `base_url`, and the
+    // agent's own serving port used to classify `agent` vs `external`. Applied
+    // here, before any clone of `state` exists, for the same sole-owner reason
+    // `with_telemetry_config`/`with_status_advertiser` are (all rely on
+    // `Arc::get_mut`). No-op for every existing route -- purely additive.
+    let state = state.with_serving_config(cli.serving_host.clone(), cli.serving_port);
+
     // Bind the control-plane socket FIRST, then advertise on the LAN, so
     // discovery never races ahead of the control-plane API actually being
     // reachable.

@@ -11,6 +11,7 @@
 //!   tt [--json] stop --host <host:port>
 //!   tt [--json] status --host <host:port>
 //!   tt [--json] endpoint --host <host:port>
+//!   tt [--json] serving --host <host:port>
 //!
 //! `--json` is global (accepted before or after the subcommand) and switches
 //! every command's stdout from human-readable text to machine-readable JSON.
@@ -47,7 +48,7 @@ use libttstation::agent_client::AgentClient;
 use libttstation::discovery::{
     aggregate, manual::ManualProvider, mdns::MdnsProvider, DiscoveryProvider,
 };
-use libttstation::model::{BoxRecord, Endpoint, ModelsResponse, ServingStatus};
+use libttstation::model::{BoxRecord, Endpoint, ModelsResponse, ServingList, ServingStatus};
 use libttstation::pairing::{pair_complete, pair_init};
 use libttstation::secrets::{default_store, FileStore, SecretStore};
 use serde::Deserialize;
@@ -168,6 +169,16 @@ enum Command {
         host: String,
     },
 
+    /// List EVERY live `tt-inference-server` `/v1` endpoint on a box --
+    /// whoever launched it (this agent's `tt run`, tt-studio, or a manual
+    /// `run.py`). UNAUTHED on the agent side (like `status`/`models`), so it
+    /// works even against a box `tt pair` was never run against.
+    Serving {
+        /// The box's control-plane address, as `host:port`.
+        #[arg(long)]
+        host: String,
+    },
+
     /// Reset to a fresh install: forget EVERY paired box on this machine
     /// (clear all locally stored tokens). With `--host`, first ask that box
     /// to reset itself (stop serving, clear its tokens, reset the board)
@@ -231,6 +242,10 @@ fn main() -> Result<()> {
         Command::Endpoint { host } => {
             let endpoint = run_async(cmd_endpoint(host))?;
             print_endpoint_export(&endpoint, cli.json);
+        }
+        Command::Serving { host } => {
+            let list = run_async(cmd_serving(host))?;
+            print_serving(&list, cli.json);
         }
         Command::Reset { host, yes } => {
             // Confirm BEFORE spinning up a runtime or clearing anything:
@@ -439,6 +454,15 @@ async fn cmd_status(host: &str) -> Result<ServingStatus> {
 /// `tt endpoint --host <host:port>`.
 async fn cmd_endpoint(host: &str) -> Result<Endpoint> {
     authed_client(host)?.endpoint().await
+}
+
+/// `tt serving --host <host:port>`: list every live `tt-inference-server`
+/// `/v1` endpoint on `host`. UNAUTHED on the agent side, so (like
+/// `cmd_models`/`cmd_status`) it needs no stored token and doesn't go through
+/// `authed_client`.
+async fn cmd_serving(host: &str) -> Result<ServingList> {
+    let base = format!("http://{host}");
+    libttstation::agent_client::list_serving(&base).await
 }
 
 /// Outcome of a `tt reset`, surfaced both to `--json` output and human text.
@@ -725,6 +749,24 @@ fn print_status(status: &ServingStatus, json: bool) {
         println!("{}", serde_json::json!({ "status": status.to_txt() }));
     } else {
         println!("{}", status.to_txt());
+    }
+}
+
+/// `tt serving`'s output: JSON prints the whole `ServingList` object; human
+/// mode prints one endpoint per line as `<model>\t<base_url>\t<source>`, so
+/// it's both `grep`-able and roughly aligned like `tt models`/`tt discover`.
+fn print_serving(list: &ServingList, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(list).expect("ServingList always serializes")
+        );
+    } else if list.serving.is_empty() {
+        println!("nothing serving");
+    } else {
+        for entry in &list.serving {
+            println!("{}\t{}\t{}", entry.model, entry.base_url, entry.source);
+        }
     }
 }
 
