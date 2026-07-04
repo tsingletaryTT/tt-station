@@ -140,6 +140,35 @@ struct BoxWorkspaceView: View {
                     }
                 }
             }
+            Divider()
+            Text("Workbench").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Button { Task { await launcher.openTerminalSSH(host: box.record.host) } } label: {
+                    Label("Terminal", systemImage: "terminal")
+                }
+                .disabled(launcher.isLaunchingTerminal)
+                .help("Open a Terminal SSH'd into this box.")
+
+                Button { Task { await launcher.openTTToplike(host: box.record.host, ctrlPort: box.record.ctrlPort) } } label: {
+                    Label("tt-toplike", systemImage: "waveform.path.ecg")
+                }
+                .disabled(launcher.isLaunchingToplike)
+                .help("Open tt-toplike showing this box's live telemetry.")
+
+                Button { Task { await launcher.openVSCode(host: box.record.host) } } label: {
+                    Label("VS Code", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+                .disabled(launcher.isLaunchingVSCode)
+                .help("Open a VS Code Remote-SSH window on this box.")
+
+                if launcher.isLaunchingTerminal || launcher.isLaunchingToplike || launcher.isLaunchingVSCode {
+                    ProgressView().scaleEffect(0.6)
+                }
+            }
+            .controlSize(.small)
+            if let e = launcher.terminalError ?? launcher.toplikeError ?? launcher.vscodeError {
+                Text(e).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
             if let err = box.errorText {
                 Text(err).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             }
