@@ -43,4 +43,26 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(ep.model, "Qwen3-8B")
         XCTAssertFalse(ep.requiresKey)
     }
+
+    func testDecodeServing() throws {
+        let list = try JSONDecoder().decode(ServingList.self, from: fixture("serving"))
+        XCTAssertEqual(list.serving.count, 2)
+
+        let agent = list.serving[0]
+        XCTAssertEqual(agent.model, "Qwen3-8B")
+        XCTAssertEqual(agent.baseURL, "http://192.168.5.119:8000/v1")
+        XCTAssertEqual(agent.hostPort, 8000)
+        XCTAssertEqual(agent.container, "tt-inference-qwen3-8b")
+        XCTAssertEqual(agent.source, "agent")
+
+        let external = list.serving[1]
+        XCTAssertEqual(external.model, "Llama-3.1-70B-Instruct")
+        XCTAssertEqual(external.hostPort, 8001)
+        XCTAssertEqual(external.source, "external")
+    }
+
+    func testDecodeServingEmpty() throws {
+        let list = try JSONDecoder().decode(ServingList.self, from: Data(#"{"serving":[]}"#.utf8))
+        XCTAssertTrue(list.serving.isEmpty)
+    }
 }

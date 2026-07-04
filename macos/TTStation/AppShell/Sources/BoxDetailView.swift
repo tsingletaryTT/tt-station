@@ -50,6 +50,33 @@ struct BoxDetailView: View {
                     }
                 }
             }
+            // Currently-serving endpoints from the unauthed `tt serving` read —
+            // shown regardless of pairing so externally-launched models (e.g.
+            // tt-studio) are visible too. Each row mirrors the endpoint copy
+            // affordance above; a small badge marks `source == "external"`.
+            if !box.serving.isEmpty {
+                Divider()
+                Text("Serving").font(.caption).foregroundStyle(.secondary)
+                ForEach(box.serving, id: \.hostPort) { entry in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 4) {
+                            Text(entry.model).font(.caption).lineLimit(1).truncationMode(.middle)
+                            if entry.source == "external" {
+                                Text("external")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .padding(.horizontal, 4).padding(.vertical, 1)
+                                    .background(Color.secondary.opacity(0.2))
+                                    .clipShape(Capsule())
+                            }
+                        }
+                        HStack {
+                            Text(entry.baseURL).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                            Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(entry.baseURL, forType: .string) }
+                                label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
+                        }
+                    }
+                }
+            }
             if let err = box.errorText {
                 Text(err).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             }

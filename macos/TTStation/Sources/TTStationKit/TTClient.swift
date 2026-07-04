@@ -6,6 +6,7 @@ public protocol TTCommands {
     func models(host: String) async throws -> [ModelInfo]
     func status(host: String) async throws -> ServingStatus
     func endpoint(host: String) async throws -> Endpoint
+    func serving(host: String) async throws -> [ServingEntry]
     func pair(host: String, code: String) async throws -> PairResult
     func pairInit(host: String) async throws -> PairInitResult
     func pairComplete(host: String, pairId: String, code: String) async throws -> PairResult
@@ -44,6 +45,13 @@ public final class TTClient {
 
     public func endpoint(host: String) async throws -> Endpoint {
         try await call(["--json", "endpoint", "--host", host], decode: Endpoint.self)
+    }
+
+    /// Every currently-serving `/v1` endpoint on the box — including containers
+    /// this box's agent did *not* launch (e.g. tt-studio), flagged
+    /// `source == "external"`. Unauthed, like `models`/`status`.
+    public func serving(host: String) async throws -> [ServingEntry] {
+        try await call(["--json", "serving", "--host", host], decode: ServingList.self).serving
     }
 
     // MARK: Helpers

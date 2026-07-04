@@ -1,0 +1,1 @@
+{"serving":[{"model":"Qwen3-8B","base_url":"http://192.168.5.119:8000/v1","host_port":8000,"container":"tt-inference-qwen3-8b","source":"agent"},{"model":"Llama-3.1-70B-Instruct","base_url":"http://192.168.5.119:8001/v1","host_port":8001,"container":"tt-studio-llama-70b","source":"external"}]}

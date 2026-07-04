@@ -3,6 +3,8 @@ import Foundation
 
 final class FakeTTClient: TTCommands {
     var models_ = [ModelInfo(name: "Qwen3-8B", devices: ["P300X2"])]
+    var serving_: [ServingEntry] = []
+    var servingError: TTError?
     var statusResult: ServingStatus = .idle
     var statusError: TTError?
     var pairShouldSucceed = true
@@ -26,6 +28,10 @@ final class FakeTTClient: TTCommands {
         return statusResult
     }
     func endpoint(host: String) async throws -> Endpoint { runEndpoint }
+    func serving(host: String) async throws -> [ServingEntry] {
+        if let servingError { throw servingError }
+        return serving_
+    }
     func pair(host: String, code: String) async throws -> PairResult {
         if pairShouldSucceed { return PairResult(host: host, paired: true) }
         throw TTError.commandFailed(command: [], exitCode: 1, stderr: "invalid code")

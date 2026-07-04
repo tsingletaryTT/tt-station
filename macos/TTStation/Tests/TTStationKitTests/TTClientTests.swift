@@ -31,6 +31,20 @@ final class TTClientTests: XCTestCase {
         XCTAssertEqual(models.map(\.name), ["Qwen3-8B"])
     }
 
+    func testServingBuildsArgsAndDecodes() async throws {
+        let fake = FakeProcessRunner()
+        fake.nextResult = ProcessResult(
+            stdout: Data(#"{"serving":[{"model":"Qwen3-8B","base_url":"http://h:8000/v1","host_port":8000,"container":"agent-c","source":"agent"},{"model":"Llama","base_url":"http://h:8001/v1","host_port":8001,"container":"tt-studio-c","source":"external"}]}"#.utf8),
+            stderr: "", exitCode: 0)
+        let client = TTClient(runner: fake)
+        let serving = try await client.serving(host: "h:8080")
+        XCTAssertEqual(fake.lastArgs, ["--json", "serving", "--host", "h:8080"])
+        XCTAssertEqual(serving.count, 2)
+        XCTAssertEqual(serving.map(\.model), ["Qwen3-8B", "Llama"])
+        XCTAssertEqual(serving.map(\.source), ["agent", "external"])
+        XCTAssertEqual(serving[1].hostPort, 8001)
+    }
+
     func testNonZeroExitThrowsWithStderr() async {
         let fake = FakeProcessRunner()
         fake.nextResult = ProcessResult(stdout: Data(), stderr: "no token stored for h:8080", exitCode: 1)

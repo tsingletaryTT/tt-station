@@ -79,6 +79,7 @@ The commands the app drives (all accept a global `--json`):
 | Stop the current model | `tt --json stop --host <host:port>` |
 | Current status | `tt --json status --host <host:port>` → `idle` / `serving:<model>` |
 | Get the live endpoint | `tt --json endpoint --host <host:port>` → `{ base_url, model, requires_key }` |
+| List all serving models | `tt --json serving --host <host:port>` (unauthed) → `{ serving: [ { model, base_url, host_port, container, source } ] }`; `source` is `agent` or `external` (e.g. tt-studio) |
 
 `base_url` is what you hand to any OpenAI client. Non-JSON `tt endpoint` prints
 `export OPENAI_BASE_URL=…` for shells; the app uses the `--json` form and offers "Copy endpoint."

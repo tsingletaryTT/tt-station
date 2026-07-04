@@ -58,6 +58,44 @@ public struct Endpoint: Codable, Equatable {
     }
 }
 
+/// One currently-serving `/v1` endpoint discovered by `tt --json serving`.
+///
+/// Unlike `Endpoint` (the single endpoint the agent itself last launched),
+/// a `ServingEntry` can describe a container this box's agent did *not*
+/// start — `source == "external"` marks those (e.g. one launched by
+/// tt-studio) so operators can tell agent-launched from externally-launched
+/// models. Mirrors `Endpoint`'s snake_case ↔ camelCase CodingKeys approach.
+public struct ServingEntry: Codable, Equatable {
+    public let model: String
+    public let baseURL: String
+    public let hostPort: Int
+    public let container: String
+    /// `"agent"` (launched by this box's agent) or `"external"` (e.g. tt-studio).
+    public let source: String
+
+    enum CodingKeys: String, CodingKey {
+        case model, container, source
+        case baseURL = "base_url"
+        case hostPort = "host_port"
+    }
+
+    // Explicit public init for the same reason `Endpoint` has one: the
+    // synthesized memberwise init is `internal`, so the test target's
+    // `FakeTTClient` couldn't construct one without this.
+    public init(model: String, baseURL: String, hostPort: Int, container: String, source: String) {
+        self.model = model; self.baseURL = baseURL; self.hostPort = hostPort
+        self.container = container; self.source = source
+    }
+}
+
+/// Response from `tt --json serving --host <host:port>` — the list of every
+/// currently-serving `/v1` endpoint on a box. Empty when nothing is serving.
+public struct ServingList: Codable, Equatable {
+    public let serving: [ServingEntry]
+
+    public init(serving: [ServingEntry]) { self.serving = serving }
+}
+
 public struct ModelInfo: Codable, Equatable {
     public let name: String
     public let devices: [String]

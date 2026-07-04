@@ -15,6 +15,11 @@ public final class BoxViewModel: Identifiable {
     public var status: ServingStatus?
     public var endpoint: Endpoint?
     public var models: [ModelInfo] = []
+    /// Every `/v1` endpoint currently serving on this box, from the unauthed
+    /// `tt serving` read — including containers this box's agent did not
+    /// launch (e.g. tt-studio), which carry `source == "external"`. Empty
+    /// when nothing is serving or the read fails (never fatal).
+    public var serving: [ServingEntry] = []
     public var selectedModel: String?
     public var isPaired: Bool
     public var inFlight = false
@@ -52,6 +57,11 @@ public final class BoxViewModel: Identifiable {
         // box fails locally with no network round-trip, so probing it on
         // every refresh is cheap.
         errorText = nil
+        // `serving` is an unauthed read that works regardless of pairing and
+        // surfaces models this agent didn't launch (e.g. tt-studio), so fetch
+        // it independently of the status/pairing flow below. Failure is never
+        // fatal — fall back to an empty list rather than surfacing an error.
+        serving = (try? await commands.serving(host: record.hostPort)) ?? []
         do {
             let s = try await commands.status(host: record.hostPort)
             isPaired = true

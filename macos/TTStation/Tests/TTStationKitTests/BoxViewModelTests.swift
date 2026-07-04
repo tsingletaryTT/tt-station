@@ -126,6 +126,30 @@ final class BoxViewModelTests: XCTestCase {
         XCTAssertTrue(reg.pairedHosts.contains("h:8080"))
     }
 
+    func testRefreshPopulatesServingList() async {
+        let client = FakeTTClient()
+        client.serving_ = [
+            ServingEntry(model: "Qwen3-8B", baseURL: "http://h:8000/v1", hostPort: 8000, container: "agent-c", source: "agent"),
+            ServingEntry(model: "Llama", baseURL: "http://h:8001/v1", hostPort: 8001, container: "tt-studio-c", source: "external"),
+        ]
+        let (vm, _) = makeVM(paired: true, client: client)
+        await vm.refresh()
+        XCTAssertEqual(vm.serving.map(\.model), ["Qwen3-8B", "Llama"])
+        XCTAssertEqual(vm.serving.map(\.source), ["agent", "external"])
+    }
+
+    func testRefreshServingFailureYieldsEmptyNotFatal() async {
+        let client = FakeTTClient()
+        client.statusResult = .serving(model: "Foo")
+        client.servingError = .commandFailed(command: [], exitCode: 1, stderr: "boom")
+        let (vm, _) = makeVM(paired: true, client: client)
+        await vm.refresh()
+        XCTAssertTrue(vm.serving.isEmpty)
+        // A serving-read failure must not surface an error or disturb status.
+        XCTAssertNil(vm.errorText)
+        XCTAssertEqual(vm.status, .serving(model: "Foo"))
+    }
+
     func testPairedServingRefreshFetchesEndpoint() async {
         let client = FakeTTClient()
         client.statusResult = .serving(model: "Foo")
