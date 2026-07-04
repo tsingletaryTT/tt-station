@@ -53,29 +53,41 @@ struct ModelPickerView: View {
                      : "No models match \u{201C}\(query)\u{201D}.")
                     .font(.caption).foregroundStyle(.secondary)
                     .padding(.vertical, 4)
+            } else if let cap = maxListHeight {
+                // Popover: bounded, scrollable list keeps it compact even
+                // with a long catalog.
+                ScrollView { modelList }
+                    .frame(maxHeight: cap)
             } else {
-                // Bounded, scrollable list keeps the popover compact even with
-                // a long catalog. Pinned section headers keep the family label
-                // visible while scrolling within a family.
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2, pinnedViews: [.sectionHeaders]) {
-                        ForEach(groups, id: \.family) { group in
-                            Section {
-                                ForEach(group.models, id: \.name) { model in
-                                    modelRow(model)
-                                }
-                            } header: {
-                                Text(group.family)
-                                    .font(.caption2.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.vertical, 2)
-                                    .background(.background)
-                            }
-                        }
+                // Window: no cap, so no inner ScrollView here — nesting a
+                // second vertical ScrollView inside WindowRootView's outer
+                // one collapses this list's height and defeats LazyVStack's
+                // laziness. The outer ScrollView provides the scrolling;
+                // this LazyVStack still renders lazily within it.
+                modelList
+            }
+        }
+    }
+
+    /// Family-grouped, pinned-header model list. Shared by both the capped
+    /// (popover, wrapped in its own `ScrollView`) and uncapped (window,
+    /// scrolled by the caller's outer `ScrollView`) presentations so the
+    /// group/section rendering isn't duplicated.
+    private var modelList: some View {
+        LazyVStack(alignment: .leading, spacing: 2, pinnedViews: [.sectionHeaders]) {
+            ForEach(groups, id: \.family) { group in
+                Section {
+                    ForEach(group.models, id: \.name) { model in
+                        modelRow(model)
                     }
+                } header: {
+                    Text(group.family)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 2)
+                        .background(.background)
                 }
-                .frame(maxHeight: maxListHeight)
             }
         }
     }

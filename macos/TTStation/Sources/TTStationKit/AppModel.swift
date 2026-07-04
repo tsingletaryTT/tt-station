@@ -24,6 +24,7 @@ public final class AppModel {
     }
 
     public func scan() async {
+        guard scanState != .scanning else { return }
         scanState = .scanning
         let records = await discovery.scan()
         boxes = records.map { BoxViewModel(record: $0, commands: commands, registry: registry) }
