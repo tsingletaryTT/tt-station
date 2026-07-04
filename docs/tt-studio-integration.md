@@ -170,6 +170,49 @@ not achievable from tt-station alone.
 
 ---
 
+### 2.2-bis — ⚠️ Correction (2026-07-04, closer read; supersedes the `HOST_HF_HOME` fix above)
+
+The analysis above traced tt-studio's **port-8001 FastAPI → `run.py`** path, whose
+`--host-hf-cache` defaults to `HOST_HF_HOME`/`HF_HOME`/`~/.cache/huggingface`. But
+tt-studio also deploys models through its **Django backend** (`app/backend`), which
+does NOT use that default at all. It computes the cache itself:
+
+- `model_config.py:76-78` sets the serving container's `HF_HOME =
+  model_container_cache_root/huggingface`, where `model_container_cache_root =
+  "/home/container_app_user/cache_root"` (`backend_config.py:38`) — a fixed
+  *in-container* path.
+- The host side is a **per-model** volume: `get_volume_mounts` binds a per-model
+  `host_path` (under `HOST_PERSISTENT_STORAGE_VOLUME`, `app/.env:6` =
+  `.../tt-studio/tt_studio_persistent_volume`) to that container cache_root, and
+  `mkdir(mode=0o777)`s it (`model_config.py` `get_volume_mounts`;
+  `backend_config.py:50`).
+
+So tt-studio's weights land in **per-model, isolated volume dirs** under its own
+persistent volume — a fundamentally different layout from the agent's single shared
+HF-hub cache (`~/.cache/huggingface`). Consequences:
+
+1. **`HOST_HF_HOME` alone does not share the cache** on the Django-backend deploy
+   path — that path never consults it; it uses the computed per-model mount.
+2. There is **no drop-in env var or agent-side `--host-hf-cache` value** that makes
+   the two share weights, because the *layouts* differ (per-model volumes vs. one
+   hub). Aligning them means **configuring tt-studio's storage** (i.e. modifying
+   tt-studio), which the "no-tt-studio-changes" goal rules out.
+3. **Which deploy path is actually live** (FastAPI-`run.py` vs. Django-backend)
+   could not be confirmed here — verifying it, or any sharing approach, requires
+   **tt-studio actually running** (it launches its model API under `sudo` and takes
+   minutes), which wasn't done.
+
+**Revised verdict for Q1/3a:** weights-cache sharing is **NOT cleanly achievable
+without modifying tt-studio's storage config**, contrary to §2.2's optimistic read.
+No launcher was shipped, because a `HOST_HF_HOME`-based one would not actually share
+anything on the backend deploy path. The reliable, already-shipped win remains
+**`/serving` visibility** (§3.3): start tt-studio however you like and its models
+appear in the toolbar — they just download their own weights. Genuine cache-sharing
+should be revisited in a session with tt-studio **live**, to (a) confirm the real
+deploy path and (b) verify a shared layout end-to-end before claiming it works.
+
+---
+
 ## 3. Serving discovery / adoption — the concrete fallback (Question 2b) ⭐
 
 **Goal:** the macOS toolbar lists tt-studio's served model(s) even though the
