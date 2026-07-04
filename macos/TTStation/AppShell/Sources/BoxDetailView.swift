@@ -4,6 +4,9 @@ import TTStationKit
 struct BoxDetailView: View {
     @Bindable var box: BoxViewModel
     @State private var code = ""
+    // Owns the one-click front-end launchers (Open Web UI / opencode). Only
+    // used in the serving branch, where `box.endpoint != nil`.
+    @State private var launcher = LaunchController()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -47,6 +50,33 @@ struct BoxDetailView: View {
                         Text(ep.baseURL).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
                         Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(ep.baseURL, forType: .string) }
                             label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
+                    }
+
+                    // Connect a local front-end to the running model. Shown only
+                    // while serving (this `if let ep` branch); each button spins
+                    // and disables independently and surfaces its own error.
+                    HStack(spacing: 8) {
+                        Text("Connect:").font(.caption).foregroundStyle(.secondary)
+                        Button {
+                            Task { await launcher.openWebUI(endpoint: ep) }
+                        } label: {
+                            Label("Open Web UI", systemImage: "globe")
+                        }
+                        .disabled(launcher.isLaunchingWebUI)
+                        .help("Launch Open WebUI locally (uvx) wired to this model and open it in your browser.")
+                        Button {
+                            Task { await launcher.openInOpenCode(endpoint: ep) }
+                        } label: {
+                            Label("Open in opencode", systemImage: "terminal")
+                        }
+                        .disabled(launcher.isLaunchingOpenCode)
+                        .help("Open a Terminal running opencode with this model preselected.")
+                        if launcher.isLaunchingWebUI || launcher.isLaunchingOpenCode {
+                            ProgressView().scaleEffect(0.6)
+                        }
+                    }
+                    if let e = launcher.webUIError ?? launcher.openCodeError {
+                        Text(e).font(.caption).foregroundStyle(.red).textSelection(.enabled)
                     }
                 }
             }
