@@ -346,21 +346,50 @@ fn default_token_store() -> String {
     format!("{home}/.config/tt-station/agentd-tokens.json")
 }
 
+/// How long `detect_startup_device_mesh` waits for `<tt_smi_bin> -s` before
+/// giving up and reporting `device_mesh: None`. `tt-smi` is "known to flake
+/// under serving load" (see `telemetry_stream`'s doc comment in routes.rs)
+/// and this codebase documents wedged mesh ethernet cores as a live
+/// possibility on this hardware -- a hang here must not become a hang of
+/// the whole daemon (see this fn's doc comment).
+const STARTUP_DEVICE_MESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Detect this box's device-mesh label by running `<tt_smi_bin> -s` once at
 /// startup, through the same `RealCommandRunner` argv-style command seam
 /// `GET /telemetry` uses (see `telemetry::snapshot`/`collect_snapshot` in
 /// routes.rs) -- reusing that seam rather than inventing a second subprocess
 /// call for `tt-smi`.
 ///
-/// Never fatal: a spawn failure, non-zero exit, or output
-/// `device::detect_device_mesh` can't map to a known mesh all degrade to
-/// `None` with an `eprintln!` note, so a box without `tt-smi` on `$PATH` (or
-/// mid-reset, or an unrecognized fleet) still boots normally -- `/status`
-/// just reports `"device_mesh": null`.
-fn detect_startup_device_mesh(tt_smi_bin: &str) -> Option<String> {
-    let runner = RealCommandRunner;
-    match runner.run(&[tt_smi_bin, "-s"]) {
-        Ok(stdout) => {
+/// Bounded, not just non-fatal: the blocking `RealCommandRunner::run` call
+/// runs on `tokio::task::spawn_blocking` (same off-the-runtime discipline as
+/// `collect_snapshot` in routes.rs) wrapped in `tokio::time::timeout(
+/// STARTUP_DEVICE_MESH_TIMEOUT, ..)`, so a hung `tt-smi` (a real possibility
+/// on this hardware -- wedged mesh ethernet cores, or the flakiness
+/// `telemetry_stream` also guards against) can delay agent startup by AT
+/// MOST ~10s, never indefinitely. The `main` call site awaits this before
+/// `TcpListener::bind`, so that ~10s ceiling is the absolute worst case added
+/// to boot time -- after which startup proceeds regardless.
+///
+/// Never fatal: a timeout, a `spawn_blocking` join failure (task panic), a
+/// spawn/non-zero-exit error, or output `device::detect_device_mesh` can't
+/// map to a known mesh all degrade to `None` with a distinguishing
+/// `eprintln!` note, so a box without `tt-smi` on `$PATH` (or mid-reset, or
+/// an unrecognized fleet, or a wedged `tt-smi`) still boots normally --
+/// `/status` just reports `"device_mesh": null`.
+async fn detect_startup_device_mesh(tt_smi_bin: &str) -> Option<String> {
+    let bin = tt_smi_bin.to_string();
+    let run_result = tokio::time::timeout(
+        STARTUP_DEVICE_MESH_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            let runner = RealCommandRunner;
+            runner.run(&[bin.as_str(), "-s"])
+        }),
+    )
+    .await;
+
+    match run_result {
+        // Ran to completion within the timeout, and the blocking task didn't panic.
+        Ok(Ok(Ok(stdout))) => {
             let mesh = detect_device_mesh(&stdout);
             if mesh.is_none() {
                 eprintln!(
@@ -369,9 +398,29 @@ fn detect_startup_device_mesh(tt_smi_bin: &str) -> Option<String> {
             }
             mesh
         }
-        Err(err) => {
+        // Ran to completion within the timeout, but `tt-smi` itself failed
+        // (missing binary, non-zero exit, etc).
+        Ok(Ok(Err(err))) => {
             eprintln!(
                 "tt-station-agentd: failed to run '{tt_smi_bin} -s' for device-mesh detection: {err:#}; device_mesh will report null"
+            );
+            None
+        }
+        // The `spawn_blocking` task panicked.
+        Ok(Err(join_err)) => {
+            eprintln!(
+                "tt-station-agentd: device-mesh detection task panicked: {join_err}; device_mesh will report null"
+            );
+            None
+        }
+        // Blew past STARTUP_DEVICE_MESH_TIMEOUT -- likely a hung/wedged
+        // `tt-smi`. The spawned blocking task keeps running in the
+        // background (there's no cooperative way to kill it), but we stop
+        // waiting on it so startup can proceed.
+        Err(_elapsed) => {
+            eprintln!(
+                "tt-station-agentd: '{tt_smi_bin} -s' timed out after {:?}; skipping device-mesh detection, device_mesh will report null",
+                STARTUP_DEVICE_MESH_TIMEOUT
             );
             None
         }
@@ -505,9 +554,13 @@ async fn main() -> Result<()> {
     // stdout through `device::detect_device_mesh`. Reported on `/status` so
     // a client (Task 3's `tt --json status`) can rank models by hardware fit
     // without its own `tt-smi` access. ANY failure here (binary missing,
-    // non-zero exit, unrecognized/mixed fleet) degrades to `None` -- this
-    // must never delay or fail agent startup.
-    let device_mesh = detect_startup_device_mesh(&cli.tt_smi_bin);
+    // non-zero exit, unrecognized/mixed fleet, OR a hang) degrades to `None`
+    // -- bounded to `STARTUP_DEVICE_MESH_TIMEOUT` (~10s) via
+    // `tokio::time::timeout` around a `spawn_blocking`'d call, so a hung/
+    // wedged `tt-smi` can delay the socket bind below by at most that
+    // ceiling, never indefinitely; startup then proceeds regardless of the
+    // outcome. See `detect_startup_device_mesh`'s doc comment.
+    let device_mesh = detect_startup_device_mesh(&cli.tt_smi_bin).await;
     let state = state.with_device_mesh(device_mesh);
 
     // Bind the control-plane socket FIRST, then advertise on the LAN, so
