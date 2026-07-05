@@ -14,45 +14,66 @@ pub struct ToolNames {
     pub service_name: String,
 }
 
+// Pulled out of `from_env` so the defaulting/override logic can be
+// unit-tested as a pure function — no `std::env` mutation, hence no races
+// with sibling tests under the default parallel `cargo test` harness.
+#[allow(dead_code)]
+fn resolve(tt_bin: Option<String>, agent_bin: Option<String>, service_name: Option<String>) -> ToolNames {
+    fn or_default(v: Option<String>, default: &str) -> String {
+        v.filter(|v| !v.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    }
+    ToolNames {
+        tt_bin: or_default(tt_bin, "tt"),
+        agent_bin: or_default(agent_bin, "tt-station-agentd"),
+        service_name: or_default(service_name, "tt-station-agentd.service"),
+    }
+}
+
 #[allow(dead_code)]
 impl ToolNames {
     pub fn from_env() -> Self {
-        fn env_or(key: &str, default: &str) -> String {
-            std::env::var(key)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| default.to_string())
-        }
-        ToolNames {
-            tt_bin: env_or("TTS_TT_BIN", "tt"),
-            agent_bin: env_or("TTS_AGENT_BIN", "tt-station-agentd"),
-            service_name: env_or("TTS_SERVICE_NAME", "tt-station-agentd.service"),
-        }
+        resolve(
+            std::env::var("TTS_TT_BIN").ok(),
+            std::env::var("TTS_AGENT_BIN").ok(),
+            std::env::var("TTS_SERVICE_NAME").ok(),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    // NB: env is process-global; set+remove within each test, don't run in parallel-hostile ways.
+
+    // These exercise the pure `resolve()` helper directly — no `std::env`
+    // mutation, so they're race-free under the default parallel test
+    // harness (unlike testing via `from_env()`, which reads process-global
+    // env vars that sibling tests could be mutating concurrently).
     #[test]
     fn defaults_when_unset() {
-        std::env::remove_var("TTS_TT_BIN");
-        std::env::remove_var("TTS_AGENT_BIN");
-        std::env::remove_var("TTS_SERVICE_NAME");
-        let n = ToolNames::from_env();
+        let n = resolve(None, None, None);
         assert_eq!(n.tt_bin, "tt");
         assert_eq!(n.agent_bin, "tt-station-agentd");
         assert_eq!(n.service_name, "tt-station-agentd.service");
     }
+
     #[test]
     fn env_overrides_win() {
-        std::env::set_var("TTS_TT_BIN", "tt-cli");
-        std::env::set_var("TTS_SERVICE_NAME", "quietbox-agent.service");
-        let n = ToolNames::from_env();
+        let n = resolve(
+            Some("tt-cli".to_string()),
+            None,
+            Some("quietbox-agent.service".to_string()),
+        );
         assert_eq!(n.tt_bin, "tt-cli");
+        assert_eq!(n.agent_bin, "tt-station-agentd");
         assert_eq!(n.service_name, "quietbox-agent.service");
-        std::env::remove_var("TTS_TT_BIN");
-        std::env::remove_var("TTS_SERVICE_NAME");
+    }
+
+    #[test]
+    fn empty_string_falls_back_to_default() {
+        let n = resolve(Some(String::new()), Some(String::new()), Some(String::new()));
+        assert_eq!(n.tt_bin, "tt");
+        assert_eq!(n.agent_bin, "tt-station-agentd");
+        assert_eq!(n.service_name, "tt-station-agentd.service");
     }
 }
