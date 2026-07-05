@@ -6,6 +6,7 @@ pub mod authkeys;
 pub mod config;
 pub mod device;
 pub mod pairing;
+pub mod procscan;
 pub mod routes;
 pub mod serving;
 pub mod telemetry;

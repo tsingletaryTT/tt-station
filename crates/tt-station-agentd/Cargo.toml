@@ -25,6 +25,9 @@ rand = { workspace = true }
 # module, it doesn't change how the async client behaves.
 reqwest = { workspace = true, features = ["blocking"] }
 toml = { workspace = true }
+# Box-side process listing/CPU%/mem for the `tt_toplike` telemetry
+# enrichment (src/procscan.rs).
+sysinfo = { workspace = true }
 
 [features]
 # Compiled in for `cargo test` (see the self-dependency below) so

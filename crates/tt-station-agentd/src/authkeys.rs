@@ -222,13 +222,10 @@ pub fn authorize(path: &Path, pubkey: &str, label: &str) -> anyhow::Result<Autho
 /// or a file with no matching line, is not an error -- revoking something
 /// that's already absent is the expected steady state, not a failure.
 pub fn revoke(path: &Path, which: &Revoke) -> anyhow::Result<()> {
-    let existing = match read_existing(path) {
-        Ok(s) => s,
-        // `read_existing` already maps "file not found" to an empty string
-        // (see below), so this arm is unreachable in practice, but staying
-        // defensive costs nothing.
-        Err(e) => return Err(e),
-    };
+    // `read_existing` already maps "file not found" to an empty string (see
+    // below), so the `?` here is unreachable in practice, but staying
+    // defensive costs nothing.
+    let existing = read_existing(path)?;
 
     if !path.exists() {
         // Nothing to revoke -- absent is success, not an error.

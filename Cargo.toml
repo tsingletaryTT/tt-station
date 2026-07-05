@@ -19,3 +19,6 @@ tempfile = "3"
 # within the same ecosystem of operator tools.
 ratatui = "0.30"
 crossterm = "0.29"
+# Box-side process sampling for the `tt_toplike` telemetry enrichment
+# (crates/tt-station-agentd/src/procscan.rs, Task 2 onward).
+sysinfo = "0.32"
