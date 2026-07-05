@@ -5,7 +5,7 @@
 //! an operator (or the Task 12 e2e test) actually runs:
 //!
 //!   tt [--json] discover [--host <h:p>]... [--no-mdns] [--timeout-ms <ms>]
-//!   tt [--json] pair <host:port> [--code <code>]
+//!   tt [--json] pair <host:port> [--code <code>] [--enable-ssh]
 //!   tt [--json] models --host <host:port>
 //!   tt [--json] run <model> --host <host:port>
 //!   tt [--json] stop --host <host:port>
@@ -104,6 +104,14 @@ enum Command {
         /// scripted use always pass this explicitly.
         #[arg(long)]
         code: Option<String>,
+
+        /// Also install this Mac's SSH public key on the box as part of
+        /// pairing (Task 6's `tt ssh-authorize` flow, run inline instead of
+        /// as a separate command). Opt-in: the app drives this in Task 9,
+        /// but a scripted/manual `tt pair` can ask for it directly. SSH
+        /// failure never fails pairing itself -- see `maybe_enable_ssh`.
+        #[arg(long = "enable-ssh")]
+        enable_ssh: bool,
     },
 
     /// Start pairing with a box: trigger it to mint a 6-digit code and print
@@ -130,6 +138,11 @@ enum Command {
         /// The 6-digit code shown on the box's console.
         #[arg(long)]
         code: String,
+
+        /// Also install this Mac's SSH public key on the box as part of
+        /// pairing -- see `Pair::enable_ssh`'s doc for the full rationale.
+        #[arg(long = "enable-ssh")]
+        enable_ssh: bool,
     },
 
     /// Enumerate the models a box can serve, per its `model_spec.json` --
@@ -251,9 +264,13 @@ fn main() -> Result<()> {
             let boxes = cmd_discover(hosts, *no_mdns, *timeout_ms)?;
             print_discover(&boxes, cli.json);
         }
-        Command::Pair { host, code } => {
-            let token = run_async(cmd_pair(host, code.clone()))?;
-            print_pair(host, &token, cli.json);
+        Command::Pair {
+            host,
+            code,
+            enable_ssh,
+        } => {
+            let (token, ssh) = run_async(cmd_pair(host, code.clone(), *enable_ssh))?;
+            print_pair(host, &token, ssh.as_ref(), cli.json);
         }
         Command::PairInit { host } => {
             let pair_id = run_async(cmd_pair_init(host))?;
@@ -263,9 +280,10 @@ fn main() -> Result<()> {
             host,
             pair_id,
             code,
+            enable_ssh,
         } => {
-            run_async(cmd_pair_complete(host, pair_id, code))?;
-            print_pair_complete(host, cli.json);
+            let ssh = run_async(cmd_pair_complete(host, pair_id, code, *enable_ssh))?;
+            print_pair_complete(host, ssh.as_ref(), cli.json);
         }
         Command::Models { host } => {
             let resp = run_async(cmd_models(host))?;
@@ -430,10 +448,19 @@ fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> Result<BoxRe
     })
 }
 
-/// `tt pair <host:port>`: run the pairing handshake and store the resulting
-/// token under `host` in the `SecretStore`. Returns the token so the caller
-/// can decide how much of it to print.
-async fn cmd_pair(host: &str, code: Option<String>) -> Result<String> {
+/// `tt pair <host:port> [--enable-ssh]`: run the pairing handshake and store
+/// the resulting token under `host` in the `SecretStore`. Returns the token
+/// (so the caller can decide how much of it to print) and, when
+/// `enable_ssh` was requested, the outcome of the inline SSH-authorize step
+/// -- see [`maybe_enable_ssh`] for why an SSH failure here never turns into
+/// an `Err` from this function: pairing has already succeeded and been
+/// persisted by the time SSH runs, so the two outcomes must never share a
+/// single `Result`.
+async fn cmd_pair(
+    host: &str,
+    code: Option<String>,
+    enable_ssh: bool,
+) -> Result<(String, Option<SshEnableOutcome>)> {
     let base = format!("http://{host}");
     let pair_id = pair_init(&base).await?;
 
@@ -444,7 +471,9 @@ async fn cmd_pair(host: &str, code: Option<String>) -> Result<String> {
 
     let token = pair_complete(&base, &pair_id, &code).await?;
     build_store()?.set(host, &token)?;
-    Ok(token)
+
+    let ssh = maybe_enable_ssh(host, &token, enable_ssh).await;
+    Ok((token, ssh))
 }
 
 /// `tt pair-init <host:port>`: one-shot first half of pairing. Triggers the
@@ -458,17 +487,73 @@ async fn cmd_pair_init(host: &str) -> Result<String> {
     pair_init(&base).await
 }
 
-/// `tt pair-complete <host:port> --pair-id <id> --code <code>`: one-shot
-/// second half of pairing. Exchanges the `pair_id` from a prior `tt
+/// `tt pair-complete <host:port> --pair-id <id> --code <code> [--enable-ssh]`:
+/// one-shot second half of pairing. Exchanges the `pair_id` from a prior `tt
 /// pair-init` and the code the box printed for a bearer token, and stores it
 /// under `host` exactly like `cmd_pair` does -- so `tt run`/`tt status`/etc.
 /// against the same `host` work identically regardless of which pairing path
-/// was used.
-async fn cmd_pair_complete(host: &str, pair_id: &str, code: &str) -> Result<()> {
+/// was used. Like `cmd_pair`, an `--enable-ssh` request runs AFTER the token
+/// is stored and its result is reported rather than propagated as an error
+/// (see [`maybe_enable_ssh`]).
+async fn cmd_pair_complete(
+    host: &str,
+    pair_id: &str,
+    code: &str,
+    enable_ssh: bool,
+) -> Result<Option<SshEnableOutcome>> {
     let base = format!("http://{host}");
     let token = pair_complete(&base, pair_id, code).await?;
     build_store()?.set(host, &token)?;
-    Ok(())
+    Ok(maybe_enable_ssh(host, &token, enable_ssh).await)
+}
+
+/// The outcome of `--enable-ssh`'s inline SSH-authorize step on `tt pair`/
+/// `tt pair-complete`. Deliberately NOT folded into `cmd_pair`/
+/// `cmd_pair_complete`'s `Result<_>` -- per the Task 7 brief, SSH failure
+/// must be non-fatal to pairing: by the time this type is produced, the
+/// pairing token has ALREADY been exchanged and persisted, so there is
+/// nothing left to roll back. This is purely "what do we tell the caller
+/// about the bonus SSH step," success or failure.
+enum SshEnableOutcome {
+    Ok {
+        authorized: bool,
+        ssh_user: String,
+        already_present: bool,
+    },
+    Err(String),
+}
+
+/// Run Task 6's shared [`ssh::authorize`] routine right after a successful
+/// pair, reusing the token that pairing just stored instead of re-reading it
+/// from the `SecretStore` (`token` is passed in rather than looked up so
+/// this never races a concurrent `tt pair` for the same host). Returns
+/// `None` when `--enable-ssh` wasn't passed at all -- as opposed to `Some`
+/// wrapping an `Err`, which means SSH was requested and failed. Any error
+/// from `ssh::authorize` (agent unreachable, `ssh-keygen` missing, `$HOME`
+/// unset, ...) is captured as `SshEnableOutcome::Err` and returned, NEVER
+/// propagated with `?` -- that's the whole non-fatal contract this task
+/// exists to implement.
+async fn maybe_enable_ssh(host: &str, token: &str, enable_ssh: bool) -> Option<SshEnableOutcome> {
+    if !enable_ssh {
+        return None;
+    }
+
+    let client = AgentClient::new(format!("http://{host}"), token.to_string());
+    let result: Result<ssh::AuthorizeOutcome> = async {
+        let home = home_dir()?;
+        let date = ssh::today_ymd();
+        ssh::authorize(&client, &home, host, &date).await
+    }
+    .await;
+
+    Some(match result {
+        Ok(outcome) => SshEnableOutcome::Ok {
+            authorized: outcome.authorized,
+            ssh_user: outcome.ssh_user,
+            already_present: outcome.already_present,
+        },
+        Err(e) => SshEnableOutcome::Err(e.to_string()),
+    })
 }
 
 /// Read a pairing code from stdin. Only reached when `--code` is omitted --
@@ -768,14 +853,17 @@ fn print_discover(boxes: &[BoxRecord], json: bool) {
     }
 }
 
-fn print_pair(host: &str, token: &str, json: bool) {
+/// `tt pair`'s output. `ssh` is `None` when `--enable-ssh` wasn't passed
+/// (JSON: `"ssh": null`; human: no extra line) -- see [`ssh_json`] and
+/// [`print_ssh_note`] for the two output shapes when it was.
+fn print_pair(host: &str, token: &str, ssh: Option<&SshEnableOutcome>, json: bool) {
     if json {
-        println!(
-            "{}",
-            serde_json::json!({ "host": host, "paired": true, "token": token })
-        );
+        let mut value = serde_json::json!({ "host": host, "paired": true, "token": token });
+        value["ssh"] = ssh_json(ssh);
+        println!("{value}");
     } else {
         println!("paired with {host}; token stored");
+        print_ssh_note(host, ssh);
     }
 }
 
@@ -800,12 +888,59 @@ fn print_pair_init(host: &str, pair_id: &str, json: bool) {
 /// `tt pair-complete`'s output. Deliberately doesn't echo the token back
 /// (unlike `print_pair`) -- the caller already has it via the stored
 /// `SecretStore` entry, and this command's whole point is to be driven by a
-/// non-interactive caller that just needs a success/failure signal.
-fn print_pair_complete(host: &str, json: bool) {
+/// non-interactive caller that just needs a success/failure signal. `ssh`
+/// behaves exactly like `print_pair`'s -- see its doc.
+fn print_pair_complete(host: &str, ssh: Option<&SshEnableOutcome>, json: bool) {
     if json {
-        println!("{}", serde_json::json!({ "host": host, "paired": true }));
+        let mut value = serde_json::json!({ "host": host, "paired": true });
+        value["ssh"] = ssh_json(ssh);
+        println!("{value}");
     } else {
         println!("paired with {host}; token stored");
+        print_ssh_note(host, ssh);
+    }
+}
+
+/// The `ssh` field `tt pair`/`tt pair-complete --json` add when
+/// `--enable-ssh` was passed: `null` when the flag was never set, `{error}`
+/// on a non-fatal SSH failure, or `{authorized, ssh_user, already_present}`
+/// mirroring `print_ssh_authorize`'s own shape on success (minus
+/// `public_key_path`, which `SshEnableOutcome` doesn't carry -- pairing's
+/// JSON is meant to answer "can I ssh in," not restate which file on disk
+/// holds the key). Split out from `print_pair`/`print_pair_complete` so
+/// this exact mapping is unit-testable without booting an agent.
+fn ssh_json(ssh: Option<&SshEnableOutcome>) -> serde_json::Value {
+    match ssh {
+        None => serde_json::Value::Null,
+        Some(SshEnableOutcome::Ok {
+            authorized,
+            ssh_user,
+            already_present,
+        }) => serde_json::json!({
+            "authorized": authorized,
+            "ssh_user": ssh_user,
+            "already_present": already_present,
+        }),
+        Some(SshEnableOutcome::Err(e)) => serde_json::json!({ "error": e }),
+    }
+}
+
+/// Human-mode line for `--enable-ssh`'s outcome on `tt pair`/`tt
+/// pair-complete`; a no-op when `ssh` is `None` (flag never passed).
+/// Wording matches the task 7 spec exactly: success reads like
+/// `print_ssh_authorize`'s own success line ("SSH enabled -- connect as
+/// ..."); failure is spelled out as "pairing ok; SSH setup failed: <msg>"
+/// so the non-fatal contract -- pairing succeeded regardless -- is visible
+/// in the output, not just swallowed.
+fn print_ssh_note(host: &str, ssh: Option<&SshEnableOutcome>) {
+    match ssh {
+        None => {}
+        Some(SshEnableOutcome::Ok { ssh_user, .. }) => {
+            println!("SSH enabled -- connect as {ssh_user}@{host}");
+        }
+        Some(SshEnableOutcome::Err(e)) => {
+            println!("pairing ok; SSH setup failed: {e}");
+        }
     }
 }
 
@@ -1095,6 +1230,66 @@ mod tests {
         assert_eq!(value["host"], "127.0.0.1:8899");
         assert_eq!(value["paired"], true);
         assert_eq!(value.as_object().unwrap().len(), 2);
+    }
+
+    /// Task 7: `tt pair`/`tt pair-complete --json` without `--enable-ssh`
+    /// must carry `"ssh": null`, not omit the key or fabricate a value --
+    /// `maybe_enable_ssh` returns `None` in exactly this case.
+    #[test]
+    fn ssh_json_is_null_when_ssh_was_not_requested() {
+        assert_eq!(ssh_json(None), serde_json::Value::Null);
+    }
+
+    /// A successful `--enable-ssh` step reports `authorized`, `ssh_user`,
+    /// and `already_present` -- nothing else (in particular, no
+    /// `public_key_path`; see `ssh_json`'s doc for why pairing's JSON
+    /// doesn't need it).
+    #[test]
+    fn ssh_json_ok_shape_has_authorized_user_and_already_present_only() {
+        let outcome = SshEnableOutcome::Ok {
+            authorized: true,
+            ssh_user: "ttuser".to_string(),
+            already_present: false,
+        };
+        let value = ssh_json(Some(&outcome));
+        assert_eq!(value["authorized"], true);
+        assert_eq!(value["ssh_user"], "ttuser");
+        assert_eq!(value["already_present"], false);
+        assert_eq!(value.as_object().unwrap().len(), 3);
+    }
+
+    /// A non-fatal SSH failure reports `{"error": "<msg>"}` and NOTHING
+    /// else -- no `authorized`/`ssh_user` fields a caller might mistake for
+    /// a partial success.
+    #[test]
+    fn ssh_json_err_shape_has_error_message_only() {
+        let outcome = SshEnableOutcome::Err("connection refused".to_string());
+        let value = ssh_json(Some(&outcome));
+        assert_eq!(value["error"], "connection refused");
+        assert_eq!(value.as_object().unwrap().len(), 1);
+    }
+
+    /// End-to-end shape check mirroring what `print_pair`/
+    /// `print_pair_complete` actually assemble: the full pair JSON object
+    /// with `ssh` spliced in, present (`--enable-ssh`) vs. `null` (flag
+    /// omitted) -- the exact assertion the Task 7 brief calls for.
+    #[test]
+    fn pair_json_assembly_includes_ssh_field_present_or_null() {
+        let mut without_ssh =
+            serde_json::json!({ "host": "127.0.0.1:8899", "paired": true, "token": "tok" });
+        without_ssh["ssh"] = ssh_json(None);
+        assert!(without_ssh["ssh"].is_null());
+
+        let outcome = SshEnableOutcome::Ok {
+            authorized: true,
+            ssh_user: "ttuser".to_string(),
+            already_present: false,
+        };
+        let mut with_ssh =
+            serde_json::json!({ "host": "127.0.0.1:8899", "paired": true, "token": "tok" });
+        with_ssh["ssh"] = ssh_json(Some(&outcome));
+        assert!(with_ssh["ssh"].is_object());
+        assert_eq!(with_ssh["ssh"]["ssh_user"], "ttuser");
     }
 
     /// A dead/unroutable manual host must fail within roughly
