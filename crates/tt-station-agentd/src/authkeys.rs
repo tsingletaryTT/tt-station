@@ -122,6 +122,27 @@ pub fn validate_public_key(s: &str) -> Result<&str, AuthKeyError> {
     Ok(trimmed)
 }
 
+/// Validate that `label` is safe to embed verbatim as the trailing
+/// `ttstation:<label>` marker on an `authorized_keys` line: it must be a
+/// single whitespace-free token with no ASCII control characters.
+///
+/// Without this check, a `label` containing `\n` (or `\r`) would let an
+/// attacker smuggle a second, fully-attacker-controlled `authorized_keys`
+/// line (a backdoor key) past `authorize`'s `pubkey`-only validation --
+/// `writeln!(file, "{validated} ttstation:{label}")` writes `label` as-is,
+/// so a newline in it terminates the intended line early and starts a new
+/// one. Rejecting whitespace as well as control characters keeps the
+/// marker a single well-formed token, which is also what `revoke`'s
+/// anchored last-token match in [`line_matches`] depends on.
+fn validate_label(label: &str) -> Result<(), AuthKeyError> {
+    if label.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(AuthKeyError(
+            "label must not contain whitespace or control characters".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// The base64 key-material field (the second whitespace-separated token) of
 /// a public key line. This -- not the trailing comment/marker, which is
 /// freely chosen and easy to vary -- is what identifies "the same key" for
@@ -144,28 +165,42 @@ pub fn key_blob(pubkey: &str) -> Option<&str> {
 /// - Dedupes on [`key_blob`]: if a line with the same blob already exists,
 ///   returns `AlreadyPresent` and does not write anything (no duplicate
 ///   line, no permission churn beyond the self-healing chmod below).
+/// - Validates `label` (see [`validate_label`]) before ever writing it --
+///   a `label` containing a newline could otherwise smuggle a second,
+///   attacker-controlled line into `authorized_keys`.
 /// - Creates the parent directory (`.ssh`) with `0700` and the file itself
-///   with `0600` permissions (unix only) -- and re-asserts both on every
-///   call that actually writes, so permissions drift self-heals rather than
-///   silently persisting.
+///   with `0600` permissions (unix only) -- and re-asserts both on *every*
+///   call, including the `AlreadyPresent` no-op path, so permissions drift
+///   (e.g. a stray `chmod`) self-heals rather than silently persisting.
 pub fn authorize(path: &Path, pubkey: &str, label: &str) -> anyhow::Result<AuthorizeOutcome> {
     let validated =
         validate_public_key(pubkey).map_err(|e| anyhow::anyhow!("invalid public key: {e}"))?;
+    // Validate the label BEFORE any write happens (and before the dedupe
+    // check below) so a malicious label is rejected outright rather than
+    // ever reaching `writeln!` -- see `validate_label`'s doc comment for the
+    // newline-injection this guards against.
+    validate_label(label).map_err(|e| anyhow::anyhow!("invalid label: {e}"))?;
     let new_blob = key_blob(validated)
         .ok_or_else(|| anyhow::anyhow!("validated key unexpectedly had no blob field"))?;
 
     let existing = read_existing(path)?;
-    for line in existing.lines() {
-        if key_blob(line) == Some(new_blob) {
-            return Ok(AuthorizeOutcome::AlreadyPresent);
-        }
-    }
+    let already_present = existing.lines().any(|line| key_blob(line) == Some(new_blob));
 
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
             set_dir_perms(parent)?;
         }
+    }
+
+    if already_present {
+        // No new line to write, but still re-assert the file's permissions
+        // so a drifted mode (e.g. a stray `chmod 644`) is repaired on this
+        // call too, not just on calls that actually append a line.
+        if path.exists() {
+            set_file_perms(path)?;
+        }
+        return Ok(AuthorizeOutcome::AlreadyPresent);
     }
 
     let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
@@ -211,12 +246,23 @@ pub fn revoke(path: &Path, which: &Revoke) -> anyhow::Result<()> {
 }
 
 /// Whether a stored `authorized_keys` line matches the given revoke target:
-/// either its key blob equals the target blob, or it ends with the exact
-/// `ttstation:<label>` marker token that [`authorize`] appends.
+/// either its key blob equals the target blob, or its LAST
+/// whitespace-separated token is *exactly* the `ttstation:<label>` marker
+/// that [`authorize`] appends.
+///
+/// This must be a full-token match, not a substring match: a naive
+/// `ends_with("ttstation:{label}")` would also match a line whose comment
+/// merely happens to end in that substring as part of a larger token (e.g.
+/// `user@host-myttstation:app` trailing-matches the substring
+/// `ttstation:app` without being the real marker), which would let an
+/// unrelated line get silently revoked.
 fn line_matches(line: &str, which: &Revoke) -> bool {
     match which {
         Revoke::Blob(blob) => key_blob(line) == Some(blob.as_str()),
-        Revoke::Label(label) => line.trim_end().ends_with(&format!("ttstation:{label}")),
+        Revoke::Label(label) => {
+            let marker = format!("ttstation:{label}");
+            line.split_whitespace().last() == Some(marker.as_str())
+        }
     }
 }
 
@@ -313,5 +359,107 @@ mod tests {
         assert!(!body.contains("AAAADROP"));
         // revoking absent is ok
         assert!(revoke(&p, &Revoke::Label("nope".into())).is_ok());
+    }
+
+    // --- Security-review fixes (commit b009fe5 findings) -----------------
+
+    /// CRITICAL: a label containing `\n` must not be able to split the
+    /// append into a second, attacker-controlled `authorized_keys` line.
+    #[test]
+    fn authorize_rejects_newline_injection_in_label() {
+        let p = tmp("label-injection-newline");
+        let key = "ssh-ed25519 AAAAVICTIM victim@mac";
+        let evil_label = "x\nssh-ed25519 AAAAEVIL attacker@evil";
+
+        let result = authorize(&p, key, evil_label);
+        assert!(result.is_err(), "newline in label must be rejected");
+
+        // Nothing attacker-controlled should have been written -- either the
+        // file doesn't exist at all, or (if it does) it has no second,
+        // attacker-controlled key line.
+        let body = fs::read_to_string(&p).unwrap_or_default();
+        assert!(
+            !body.contains("AAAAEVIL"),
+            "attacker-controlled key must never be written via label injection"
+        );
+        assert_eq!(
+            body.matches("ssh-ed25519").count(),
+            0,
+            "no key line at all should be written when the label is rejected"
+        );
+    }
+
+    /// Same injection, via `\r` instead of `\n`.
+    #[test]
+    fn authorize_rejects_carriage_return_in_label() {
+        let p = tmp("label-injection-cr");
+        let key = "ssh-ed25519 AAAAVICTIM2 victim@mac";
+        let evil_label = "x\rssh-ed25519 AAAAEVIL2 attacker@evil";
+
+        assert!(authorize(&p, key, evil_label).is_err());
+        let body = fs::read_to_string(&p).unwrap_or_default();
+        assert!(!body.contains("AAAAEVIL2"));
+    }
+
+    /// A label containing a plain space would break the "single
+    /// whitespace-free trailing token" invariant `revoke`'s marker match
+    /// relies on -- must also be rejected.
+    #[test]
+    fn authorize_rejects_whitespace_in_label() {
+        let p = tmp("label-whitespace");
+        let key = "ssh-ed25519 AAAAWS victim@mac";
+        assert!(authorize(&p, key, "has space").is_err());
+    }
+
+    /// MEDIUM: `revoke(Label(..))` must anchor on the marker as a standalone
+    /// trailing token, not merely a trailing *substring* of a larger token
+    /// (e.g. a comment that happens to end in `...ttstation:app`).
+    #[test]
+    fn revoke_label_does_not_match_unanchored_substring() {
+        let p = tmp("revoke-anchor");
+
+        // This line's last whitespace-separated token is
+        // `user@host-myttstation:app`, which merely *ends with* the marker
+        // substring "ttstation:app" -- it is not the real marker token and
+        // must NOT match.
+        fs::write(&p, "ssh-ed25519 AAAAKEEP user@host-myttstation:app\n").unwrap();
+        revoke(&p, &Revoke::Label("app".into())).unwrap();
+        let body = fs::read_to_string(&p).unwrap();
+        assert!(
+            body.contains("AAAAKEEP"),
+            "unanchored substring match must not remove this line"
+        );
+
+        // A real trailing marker token (written by `authorize`) DOES get
+        // removed.
+        authorize(&p, "ssh-ed25519 AAAADROP2 drop2@mac", "app").unwrap();
+        revoke(&p, &Revoke::Label("app".into())).unwrap();
+        let body2 = fs::read_to_string(&p).unwrap();
+        assert!(!body2.contains("AAAADROP2"), "real marker token must match and be removed");
+        assert!(body2.contains("AAAAKEEP"), "unrelated line must still be preserved");
+    }
+
+    /// LOW: perms must be re-asserted even on the `AlreadyPresent` (no-op
+    /// write) path, so drift (e.g. a stray `chmod`) self-heals regardless of
+    /// whether this particular call actually wrote anything.
+    #[cfg(unix)]
+    #[test]
+    fn authorize_restores_perms_on_already_present() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let p = tmp("perms-drift");
+        let key = "ssh-ed25519 AAAAPERMS perms@mac";
+        authorize(&p, key, "first").unwrap();
+
+        // Simulate perms drift (e.g. a stray chmod, or a restrictive umask
+        // leaving the file group/world-readable).
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o644);
+
+        // Same key blob again -> AlreadyPresent, but perms must still be
+        // repaired back to 0600.
+        let outcome = authorize(&p, key, "first").unwrap();
+        assert!(matches!(outcome, AuthorizeOutcome::AlreadyPresent));
+        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
