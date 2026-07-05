@@ -120,6 +120,26 @@ pub struct ModelsResponse {
     pub models: Vec<ModelInfo>,
 }
 
+/// `GET /config`'s response body (see `tt-station-agentd::routes::get_config`,
+/// Task 5): a REDACTED view of the agent's fully-resolved serving config
+/// (`tt-station-agentd::config::ResolvedConfig`, Task 1-3) -- just enough for
+/// the GTK panel, the `tt config` CLI (Task 6), and the Mac app to render
+/// "what am I actually about to serve with," without ever exposing secrets.
+/// There is deliberately no `hf_token` (or any token-store) field here: the
+/// struct's shape enforces the "secrets never leave the box" constraint by
+/// construction rather than by convention.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigSummary {
+    pub active_profile: Option<String>,
+    pub available_profiles: Vec<String>,
+    pub backend: String,
+    pub serving_host: String,
+    pub serving_port: u16,
+    pub serving_image: Option<String>,
+    pub tt_inference_repo: Option<String>,
+    pub tt_device: Option<String>, // None = auto-detected
+}
+
 impl ServingStatus {
     pub fn to_txt(&self) -> String {
         match self {
@@ -249,6 +269,28 @@ mod tests {
             json.contains(r#""status":"serving:llama3""#),
             "expected canonical txt-string status, got: {json}"
         );
+    }
+
+    /// `ConfigSummary` (the `GET /config` response body -- see Task 5) is a
+    /// REDACTED view of the agent's resolved serving config: it must
+    /// round-trip through serde_json byte-for-byte, and by construction can
+    /// never carry `hf_token` or any other secret (there's no field for one).
+    #[test]
+    fn config_summary_round_trips_and_omits_secrets() {
+        let s = ConfigSummary {
+            active_profile: Some("stable".into()),
+            available_profiles: vec!["stable".into(), "bleeding".into()],
+            backend: "runpy".into(),
+            serving_host: "qb2-lab.local".into(),
+            serving_port: 8003,
+            serving_image: Some("img:0.14.0".into()),
+            tt_inference_repo: Some("/home/x/code/tt-inference-server".into()),
+            tt_device: None,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("hf_token"), "summary must not carry secrets");
+        let back: ConfigSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
     }
 
     #[test]
