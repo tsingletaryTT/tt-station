@@ -4,11 +4,18 @@
 //! `tt-toplike-remote-quietbox/docs/REMOTE_QUIETBOX_DESIGN.md`): the box runs
 //! `tt-smi -s` on an interval and pushes each snapshot to connected clients.
 //!
-//! The single most load-bearing contract here: **a telemetry frame is the
-//! verbatim stdout of `tt-smi -s`** -- a JSON telemetry snapshot. The macOS
-//! client (tt-toplike's `JSONBackend`) already parses this exact shape, so the
-//! agent MUST NOT reshape it. One schema, zero mapping: run `tt-smi -s`, send
-//! its stdout. That's the whole job of [`snapshot`].
+//! The load-bearing contract: **the telemetry payload is the `tt-smi -s` JSON,
+//! unchanged in meaning** -- the macOS client (tt-toplike's `JSONBackend`)
+//! parses this exact shape, so the agent MUST NOT reshape the telemetry. Two
+//! functions split the job: [`snapshot`] returns `tt-smi -s`'s stdout
+//! byte-for-byte verbatim, and [`enrich_frame`] *additively* folds in the
+//! optional `tt_toplike` key (processes; see `procscan`). `enrich_frame`
+//! re-serializes through `serde_json::Value`, so the output is
+//! semantically-identical rather than byte-identical -- top-level keys may be
+//! reordered (alphabetized) and whitespace normalized. That's harmless: any
+//! JSON parser is order-insensitive, and tt-smi's telemetry values are quoted
+//! strings, so no numeric precision is lost. Existing consumers ignore the
+//! unknown `tt_toplike` key and keep parsing the telemetry unchanged.
 //!
 //! The command runner is injected as a plain `Fn` so this function is
 //! pure-ish and trivially unit-testable with canned `tt-smi -s` JSON, with no
