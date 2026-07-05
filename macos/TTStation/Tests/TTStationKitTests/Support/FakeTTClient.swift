@@ -21,6 +21,16 @@ final class FakeTTClient: TTCommands {
     var sshAuthorizeResult = SshAuthorizeInfo(authorized: true, sshUser: "ttuser", alreadyPresent: false)
     var sshAuthorizeError: TTError?
     var sshAuthorizeCalled = false
+    var configResult = BoxConfig(
+        activeProfile: "stable",
+        availableProfiles: ["stable", "bleeding"],
+        backend: "runpy",
+        servingHost: "127.0.0.1",
+        servingPort: 8000,
+        servingImage: nil,
+        ttInferenceRepo: nil,
+        ttDevice: "p300x2")
+    var configError: TTError?
 
     func discover(manualHosts: [String], noMdns: Bool) async throws -> [BoxRecord] { [] }
     func models(host: String) async throws -> [ModelInfo] { models_ }
@@ -34,6 +44,10 @@ final class FakeTTClient: TTCommands {
     func serving(host: String) async throws -> [ServingEntry] {
         if let servingError { throw servingError }
         return serving_
+    }
+    func config(host: String) async throws -> BoxConfig {
+        if let configError { throw configError }
+        return configResult
     }
     func pair(host: String, code: String) async throws -> PairResult {
         if pairShouldSucceed { return PairResult(host: host, paired: true) }

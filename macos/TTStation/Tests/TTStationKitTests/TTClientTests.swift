@@ -45,6 +45,22 @@ final class TTClientTests: XCTestCase {
         XCTAssertEqual(serving[1].hostPort, 8001)
     }
 
+    func testConfigBuildsArgsAndDecodes() async throws {
+        let fake = FakeProcessRunner()
+        fake.nextResult = ProcessResult(
+            stdout: Data(#"{"active_profile":"stable","available_profiles":["stable","bleeding"],"backend":"runpy","serving_host":"qb2-lab.local","serving_port":8003,"serving_image":"ghcr.io/x:0.14.0","tt_inference_repo":"/home/ttuser/code/tt-inference-server","tt_device":"p300x2"}"#.utf8),
+            stderr: "", exitCode: 0)
+        let client = TTClient(runner: fake)
+        let cfg = try await client.config(host: "h:8080")
+        XCTAssertEqual(fake.lastArgs, ["--json", "config", "--host", "h:8080"])
+        XCTAssertEqual(cfg.activeProfile, "stable")
+        XCTAssertEqual(cfg.availableProfiles, ["stable", "bleeding"])
+        XCTAssertEqual(cfg.backend, "runpy")
+        XCTAssertEqual(cfg.servingHost, "qb2-lab.local")
+        XCTAssertEqual(cfg.servingPort, 8003)
+        XCTAssertEqual(cfg.ttDevice, "p300x2")
+    }
+
     func testNonZeroExitThrowsWithStderr() async {
         let fake = FakeProcessRunner()
         fake.nextResult = ProcessResult(stdout: Data(), stderr: "no token stored for h:8080", exitCode: 1)

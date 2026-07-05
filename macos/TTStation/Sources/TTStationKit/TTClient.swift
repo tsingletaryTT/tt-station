@@ -7,6 +7,7 @@ public protocol TTCommands {
     func status(host: String) async throws -> ServingStatus
     func endpoint(host: String) async throws -> Endpoint
     func serving(host: String) async throws -> [ServingEntry]
+    func config(host: String) async throws -> BoxConfig
     func pair(host: String, code: String) async throws -> PairResult
     func pairInit(host: String) async throws -> PairInitResult
     func pairComplete(host: String, pairId: String, code: String) async throws -> PairResult
@@ -53,6 +54,12 @@ public final class TTClient {
     /// `source == "external"`. Unauthed, like `models`/`status`.
     public func serving(host: String) async throws -> [ServingEntry] {
         try await call(["--json", "serving", "--host", host], decode: ServingList.self).serving
+    }
+
+    /// The box's resolved serving configuration. Unauthed, like `models`/
+    /// `status`/`serving`, so it can be fetched regardless of pairing.
+    public func config(host: String) async throws -> BoxConfig {
+        try await call(["--json", "config", "--host", host], decode: BoxConfig.self)
     }
 
     // MARK: Helpers

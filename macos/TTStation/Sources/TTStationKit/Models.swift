@@ -147,6 +147,54 @@ public struct StatusResponse: Codable, Equatable {
     public let status: String
 }
 
+/// Response from `tt --json config --host <host:port>` — the box's resolved
+/// serving configuration (profile-derived where applicable). Unauthed, like
+/// `models`/`status`/`serving`, so it's safe to fetch regardless of pairing.
+public struct BoxConfig: Codable, Equatable {
+    public let activeProfile: String?
+    public let availableProfiles: [String]
+    public let backend: String
+    public let servingHost: String
+    public let servingPort: Int
+    public let servingImage: String?
+    public let ttInferenceRepo: String?
+    public let ttDevice: String?
+
+    enum CodingKeys: String, CodingKey {
+        case backend
+        case activeProfile = "active_profile"
+        case availableProfiles = "available_profiles"
+        case servingHost = "serving_host"
+        case servingPort = "serving_port"
+        case servingImage = "serving_image"
+        case ttInferenceRepo = "tt_inference_repo"
+        case ttDevice = "tt_device"
+    }
+
+    // Explicit public init for the same reason `Endpoint`/`ServingEntry` have
+    // one: the synthesized memberwise init is `internal`, so the test
+    // target's `FakeTTClient` couldn't construct one without this.
+    public init(
+        activeProfile: String?,
+        availableProfiles: [String],
+        backend: String,
+        servingHost: String,
+        servingPort: Int,
+        servingImage: String?,
+        ttInferenceRepo: String?,
+        ttDevice: String?
+    ) {
+        self.activeProfile = activeProfile
+        self.availableProfiles = availableProfiles
+        self.backend = backend
+        self.servingHost = servingHost
+        self.servingPort = servingPort
+        self.servingImage = servingImage
+        self.ttInferenceRepo = ttInferenceRepo
+        self.ttDevice = ttDevice
+    }
+}
+
 /// Response from `tt --json ssh-authorize --host <host:port>`. The CLI also
 /// emits `public_key_path`, but we only surface the fields the pair-flow UI
 /// needs — the extra key is simply ignored by `JSONDecoder`, same as

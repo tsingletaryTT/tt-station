@@ -20,6 +20,10 @@ public final class BoxViewModel: Identifiable {
     /// launch (e.g. tt-studio), which carry `source == "external"`. Empty
     /// when nothing is serving or the read fails (never fatal).
     public var serving: [ServingEntry] = []
+    /// The box's resolved serving configuration, from the unauthed `tt config`
+    /// read — works regardless of pairing. `nil` when the read fails (never
+    /// fatal) or hasn't completed yet.
+    public var config: BoxConfig?
     public var selectedModel: String?
     public var isPaired: Bool
     public var inFlight = false
@@ -78,6 +82,10 @@ public final class BoxViewModel: Identifiable {
         // it independently of the status/pairing flow below. Failure is never
         // fatal — fall back to an empty list rather than surfacing an error.
         serving = (try? await commands.serving(host: record.hostPort)) ?? []
+        // `config` is likewise an unauthed read that works regardless of
+        // pairing. Failure is never fatal — fall back to `nil` rather than
+        // surfacing an error.
+        config = try? await commands.config(host: record.hostPort)
         do {
             let s = try await commands.status(host: record.hostPort)
             isPaired = true

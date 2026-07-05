@@ -77,4 +77,52 @@ final class ModelsTests: XCTestCase {
         let list = try JSONDecoder().decode(ServingList.self, from: Data(#"{"serving":[]}"#.utf8))
         XCTAssertTrue(list.serving.isEmpty)
     }
+
+    func testDecodeBoxConfig() throws {
+        let json = #"""
+        {
+            "active_profile": "stable",
+            "available_profiles": ["stable", "bleeding"],
+            "backend": "runpy",
+            "serving_host": "qb2-lab.local",
+            "serving_port": 8003,
+            "serving_image": "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.14.0",
+            "tt_inference_repo": "/home/ttuser/code/tt-inference-server",
+            "tt_device": "p300x2"
+        }
+        """#
+        let cfg = try JSONDecoder().decode(BoxConfig.self, from: Data(json.utf8))
+        XCTAssertEqual(cfg.activeProfile, "stable")
+        XCTAssertEqual(cfg.availableProfiles, ["stable", "bleeding"])
+        XCTAssertEqual(cfg.backend, "runpy")
+        XCTAssertEqual(cfg.servingHost, "qb2-lab.local")
+        XCTAssertEqual(cfg.servingPort, 8003)
+        XCTAssertEqual(cfg.servingImage, "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.14.0")
+        XCTAssertEqual(cfg.ttInferenceRepo, "/home/ttuser/code/tt-inference-server")
+        XCTAssertEqual(cfg.ttDevice, "p300x2")
+    }
+
+    func testDecodeBoxConfigNullsBecomeNilOrEmpty() throws {
+        let json = #"""
+        {
+            "active_profile": null,
+            "available_profiles": [],
+            "backend": "runpy",
+            "serving_host": "127.0.0.1",
+            "serving_port": 8000,
+            "serving_image": null,
+            "tt_inference_repo": null,
+            "tt_device": null
+        }
+        """#
+        let cfg = try JSONDecoder().decode(BoxConfig.self, from: Data(json.utf8))
+        XCTAssertNil(cfg.activeProfile)
+        XCTAssertTrue(cfg.availableProfiles.isEmpty)
+        XCTAssertEqual(cfg.backend, "runpy")
+        XCTAssertEqual(cfg.servingHost, "127.0.0.1")
+        XCTAssertEqual(cfg.servingPort, 8000)
+        XCTAssertNil(cfg.servingImage)
+        XCTAssertNil(cfg.ttInferenceRepo)
+        XCTAssertNil(cfg.ttDevice)
+    }
 }

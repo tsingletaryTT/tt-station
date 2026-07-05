@@ -224,6 +224,22 @@ final class BoxViewModelTests: XCTestCase {
         XCTAssertFalse(vm.starting)
     }
 
+    func testRefreshPopulatesConfig() async {
+        let client = FakeTTClient()
+        let (vm, _) = makeVM(paired: false, client: client)
+        await vm.refresh()
+        XCTAssertEqual(vm.config, client.configResult)
+    }
+
+    func testRefreshConfigFailureYieldsNilNotFatal() async {
+        let client = FakeTTClient()
+        client.configError = .commandFailed(command: [], exitCode: 1, stderr: "boom")
+        let (vm, _) = makeVM(paired: true, client: client)
+        await vm.refresh()
+        XCTAssertNil(vm.config)
+        XCTAssertNil(vm.errorText)
+    }
+
     func testPairedServingRefreshFetchesEndpoint() async {
         let client = FakeTTClient()
         client.statusResult = .serving(model: "Foo")
