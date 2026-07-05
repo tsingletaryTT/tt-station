@@ -38,8 +38,8 @@ fn snapshot_prints_valid_json_with_reachable_false_when_agent_is_down() {
         .clone();
 
     let text = String::from_utf8(output).expect("stdout is valid UTF-8");
-    let snap: BoxLifecycleSnapshot =
-        serde_json::from_str(&text).expect("--snapshot output must deserialize as BoxLifecycleSnapshot");
+    let snap: BoxLifecycleSnapshot = serde_json::from_str(&text)
+        .expect("--snapshot output must deserialize as BoxLifecycleSnapshot");
 
     assert!(
         !snap.reachable,
