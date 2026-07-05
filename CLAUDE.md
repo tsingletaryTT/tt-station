@@ -105,15 +105,20 @@ kill the agent), and status/pairing/serving/profile all come from a single poll 
 console --snapshot` (the same `BoxLifecycleSnapshot` JSON the TUI renders) — one source of
 truth the panel and the TUI can never disagree about.
 
-**macOS app (`macos/TTStation`, v0.4.0 — native control room):** window-first veneer over
-`tt --json` with a fast MenuBarExtra popover for glance + quick actions. The resizable window
-is a card-based control room: **box header** with a detected **device-mesh badge** (`P300X2`);
-a **live device strip** (per-device temp/power/aiclk streamed from the agent's `/telemetry`
-WebSocket — the one read-only Swift I/O path); a **hardware-aware model browser** that ranks
-models that run on this box's mesh first ("Runs on this box" vs a dimmed "Needs other
-hardware"), with a compatible-first smart default; **fast Connect** (Open WebUI / opencode that
+**macOS app (`macos/TTStation`, v0.5.0 — native control room):** window-first veneer over
+`tt --json` with a fast MenuBarExtra popover for glance + quick actions (the menu-bar icon
+badges + rows highlight currently-serving models). The resizable window is a card-based
+control room: **box header** with a detected **device-mesh badge** (`P300X2`); a **live
+device strip** (per-device temp/power/aiclk streamed from the agent's `/telemetry` WebSocket
+— the one read-only Swift I/O path); a **read-only Config card** (active/available profiles,
+backend, serving endpoint — from `tt config`); a **3-tier hardware-aware model browser**
+(Runs on this box / Experimental / Needs other hardware) built from `tt catalog` — which
+merges the box's live `/models` with the public compatibility catalog (24h-cached in `tt`)
+classified for the box mesh; the Experimental/other tiers carry "bring these up with the
+tools" messaging that links to the workbench; **fast Connect** (Open WebUI / opencode that
 `brew install` missing deps as needed); and an elevated **workbench** (Terminal / tt-toplike /
 VS Code with the `Tenstorrent.tt-vscode-toolkit` extension). TT brand theme (teal `#4FD1C5`).
+Mesh detection covers **P150 x1–x4** + P300/N300/T3K/GALAXY.
 The device mesh is sourced from Rust: the agent detects it once at startup and reports it in
 `/status` + the mDNS TXT record (so `tt --json discover`/`status` carry `device_mesh`). See
 `macos/README.md`.
