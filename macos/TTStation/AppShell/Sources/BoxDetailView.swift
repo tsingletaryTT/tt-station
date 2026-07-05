@@ -56,9 +56,6 @@ struct BoxDetailView: View {
                     Toggle("Also enable Terminal / SSH access (installs this Mac's key as ttuser)", isOn: $box.enableSSH)
                         .toggleStyle(.checkbox)
                         .font(.caption)
-                    if let sshMessage = box.sshMessage {
-                        Text(sshMessage).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    }
                 }
             } else {
                 HStack(spacing: 8) {
@@ -136,6 +133,18 @@ struct BoxDetailView: View {
                 }
                 .controlSize(.small)
             }
+            // Shown at top level (not inside the `if !box.isPaired` block)
+            // because `authorizeSSH()` populates this *after*
+            // `completePairing` flips `isPaired = true` — if this lived
+            // inside the pairing branch, SwiftUI would unmount it (and this
+            // Text with it) the instant pairing succeeds, before the async
+            // SSH authorize call resolves. Rendering it here means it
+            // survives the pairing -> paired transition and the user
+            // actually sees the SSH result.
+            if let sshMessage = box.sshMessage {
+                Text(sshMessage).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+
             if let err = box.errorText {
                 Text(err).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             }

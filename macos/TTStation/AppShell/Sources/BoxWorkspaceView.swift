@@ -59,6 +59,17 @@ struct BoxWorkspaceView: View {
                 ServingCardView(entries: box.serving)
             }
 
+            // Shown at top level (not inside the pairing branch) because
+            // `authorizeSSH()` populates this *after* `completePairing` flips
+            // `isPaired = true` — if this lived inside `if !box.isPaired`,
+            // SwiftUI would unmount that branch (and this Text with it) the
+            // instant pairing succeeds, before the async SSH authorize call
+            // resolves. Rendering it here means it survives the pairing ->
+            // paired transition and the user actually sees the SSH result.
+            if let sshMessage = box.sshMessage {
+                Text(sshMessage).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+
             if let err = box.errorText {
                 Text(err).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             }
@@ -95,9 +106,6 @@ struct BoxWorkspaceView: View {
             Toggle("Also enable Terminal / SSH access (installs this Mac's key as ttuser)", isOn: $box.enableSSH)
                 .toggleStyle(.checkbox)
                 .font(.caption)
-            if let sshMessage = box.sshMessage {
-                Text(sshMessage).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            }
         }
     }
 
