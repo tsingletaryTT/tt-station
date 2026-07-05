@@ -126,7 +126,8 @@ mod tests {
         let j = r#"{"hardware":"p150","chip_set":"Blackhole","hardware_family":"Card","status":"Experimental","software":["tt-forge"]}"#;
         let hc: HardwareCompat = serde_json::from_str(j).unwrap();
         assert_eq!(hc.status, CompatStatus::Experimental);
-        let j2 = r#"{"hardware":"x","chip_set":"","hardware_family":"","status":"Weird","software":[]}"#;
+        let j2 =
+            r#"{"hardware":"x","chip_set":"","hardware_family":"","status":"Weird","software":[]}"#;
         let hc2: HardwareCompat = serde_json::from_str(j2).unwrap();
         assert_eq!(hc2.status, CompatStatus::Other("Weird".to_string()));
     }
