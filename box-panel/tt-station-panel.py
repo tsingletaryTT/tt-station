@@ -185,7 +185,7 @@ def derive_view(snap, profile_names, selected_profile, serving_host, serving_por
 
     Returns a dict of plain values the caller pokes into widgets:
       pill_text, pill_class, status_text, endpoint_text, profile_text,
-      code (str | None), ttl (int seconds).
+      serving_text, code (str | None), ttl (int seconds).
     """
     if not isinstance(snap, dict):
         return {
@@ -194,6 +194,7 @@ def derive_view(snap, profile_names, selected_profile, serving_host, serving_por
             "status_text": "unable to read box state (tt console --snapshot failed)",
             "endpoint_text": "",
             "profile_text": "",
+            "serving_text": "",  # offline: nothing to summarize, don't render
             "code": None,
             "ttl": 0,
         }
@@ -247,12 +248,45 @@ def derive_view(snap, profile_names, selected_profile, serving_host, serving_por
     code = pairing.get("code") if pairing else None
     ttl = (pairing.get("expires_in_secs") or 0) if pairing else 0
 
+    # Compact one-line summary of `GET /serving` (every live `/v1` endpoint
+    # on the box -- the agent's own PLUS anything external like tt-studio;
+    # see `libttstation::model::ServingEntry`/`ServingList`). This is
+    # deliberately NOT a per-endpoint dashboard -- one line, count +
+    # agent/external breakdown, with the external entry's host:port/model
+    # appended when there is one, since that's the case this panel couldn't
+    # show before (the agent only ever knew about its own process).
+    serving = snap.get("serving") or []
+    if serving:
+        agent_n = sum(1 for e in serving if e.get("source") == "agent")
+        external_entries = [e for e in serving if e.get("source") == "external"]
+        external_n = len(external_entries)
+        other_n = len(serving) - agent_n - external_n
+        parts = []
+        if agent_n:
+            parts.append(f"{agent_n} agent")
+        if external_n:
+            parts.append(f"{external_n} external")
+        if other_n:
+            parts.append(f"{other_n} other")
+        breakdown = " · ".join(parts)
+        serving_text = f"endpoints: {len(serving)} live"
+        if breakdown:
+            serving_text += f" ({breakdown})"
+        if external_entries:
+            ext = external_entries[0]
+            model = ext.get("model") or "?"
+            port = ext.get("host_port")
+            serving_text += f" — external: {model} (:{port})" if port else f" — external: {model}"
+    else:
+        serving_text = "endpoints: none"
+
     return {
         "pill_text": pill_text,
         "pill_class": pill_class,
         "status_text": status_text,
         "endpoint_text": endpoint_text,
         "profile_text": profile_text,
+        "serving_text": serving_text,
         "code": code,
         "ttl": ttl,
     }
@@ -337,6 +371,11 @@ class Panel(Gtk.ApplicationWindow):
         self.status_label.add_css_class("statusline"); root.append(self.status_label)
         self.endpoint_label = Gtk.Label(label="", xalign=0, selectable=True)
         self.endpoint_label.add_css_class("endpoint"); root.append(self.endpoint_label)
+        # compact one-line summary of `GET /serving` — every live `/v1` on
+        # the box, agent + external (e.g. tt-studio). Blank until the first
+        # snapshot lands / while offline, same treatment as endpoint_label.
+        self.serving_label = Gtk.Label(label="", xalign=0, selectable=True)
+        self.serving_label.add_css_class("subtle"); root.append(self.serving_label)
         # what's actually running, per the snapshot's own config summary —
         # separate from the dropdown above so a dropdown change that hasn't
         # been Applied yet doesn't look like it already took effect.
@@ -501,6 +540,7 @@ class Panel(Gtk.ApplicationWindow):
         self.pill.add_css_class(view["pill_class"])
         self.status_label.set_text(view["status_text"])
         self.endpoint_label.set_text(view["endpoint_text"])
+        self.serving_label.set_text(view["serving_text"])
         self.profile_status_label.set_text(view["profile_text"])
 
         if view["code"]:

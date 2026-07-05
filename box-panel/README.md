@@ -13,7 +13,8 @@ operator TUI) uses. The panel does **not** spawn or supervise a child process:
 - **Start · Stop · Restart** just shell `systemctl --user start|stop|restart
   <unit>`.
 - **All rendered state** — service state, pairing code + TTL, serving
-  status/endpoint, active profile — comes from a single poll (every 2s) of
+  status/endpoint, the `/serving` endpoint-list summary, active profile —
+  comes from a single poll (every 2s) of
   `tt console --snapshot`, which prints one `BoxLifecycleSnapshot` JSON. This
   is the exact same JSON `tt console`'s interactive TUI renders, so the panel
   and the TUI can never disagree about what state the box is in.
@@ -31,6 +32,11 @@ It shows:
   the snapshot's `pairing` field), with a TTL countdown
 - a **status pill** + line: stopped / failed / starting… / stopping… / idle /
   `serving:<model>`, chips, and the `/v1` endpoint when a model is up
+- a **compact `endpoints:` line** below that, summarizing the snapshot's
+  `serving` list — every live `/v1` on the box, not just the agent's own
+  (e.g. `endpoints: 2 live (1 agent · 1 external) — external: <model> (:<port>)`
+  when tt-studio or a manual run.py is also serving something; `endpoints:
+  none` when nothing is; hidden while offline)
 - **Start · Stop · Restart** the `tt-station-agentd.service` systemd unit
 - a **profile dropdown**, read from the box-local `agentd.toml` (the agent's
   named-profile config file — see the agentd config-profiles doc), populated
