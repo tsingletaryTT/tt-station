@@ -170,6 +170,59 @@ pub struct ConfigSummary {
     pub tt_device: Option<String>, // None = auto-detected
 }
 
+/// A box's operator-facing lifecycle unit state, roughly mirroring
+/// systemd's own unit-state vocabulary (the agent runs as a systemd-managed
+/// service on the box) -- `Active`/`Inactive`/`Activating`/`Deactivating`/
+/// `Failed`, plus `Unknown` for "couldn't determine" (e.g. the box is
+/// unreachable). `tt console`'s collector reads this from the box; the TUI,
+/// `tt console --snapshot` JSON, and the GTK panel all render off the same
+/// values. `#[serde(rename_all = "snake_case")]` so the wire/JSON form reads
+/// naturally (`"inactive"`, not `"Inactive"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceState {
+    Active,
+    Inactive,
+    Activating,
+    Deactivating,
+    Failed,
+    Unknown,
+}
+
+/// A live pairing code as currently shown on the box (GTK panel) or
+/// reported by the agent, plus its remaining TTL -- lets `tt console`
+/// surface "pair with this box" affordances without a separate round trip
+/// to fetch the code and its expiry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingState {
+    pub code: String,
+    pub expires_in_secs: u64,
+}
+
+/// The full operator-facing lifecycle snapshot for one box: is the agent
+/// service up, is the box reachable at all, and (when known) its identity,
+/// hardware, serving status, endpoint, live `/serving` entries, redacted
+/// config, and any active pairing code. This is the single shared JSON
+/// contract behind `tt console` (both the interactive TUI and its
+/// `--snapshot` JSON output) and the GTK box panel -- one definition here
+/// means all three always agree on the wire shape, rather than each
+/// hand-rolling their own view of "what state is this box in." Later tasks
+/// add the collector that assembles this from the various agent routes
+/// (`/status`, `/serving`, `/config`, `/pair/...`) and the parsers that
+/// consume it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoxLifecycleSnapshot {
+    pub service: ServiceState,
+    pub reachable: bool,
+    pub name: Option<String>,
+    pub chips: Option<String>,
+    pub status: Option<ServingStatus>,
+    pub endpoint: Option<Endpoint>,
+    pub serving: Vec<ServingEntry>,
+    pub config: Option<ConfigSummary>,
+    pub pairing: Option<PairingState>,
+}
+
 impl ServingStatus {
     pub fn to_txt(&self) -> String {
         match self {
@@ -408,5 +461,37 @@ mod tests {
         txt.insert("device_mesh".into(), "p300x2".into());
         let rec = txt_decode("qb2-lab", "qb2-lab.local", 8765, &txt).unwrap();
         assert_eq!(rec.device_mesh, Some("p300x2".to_string()));
+    }
+
+    /// `BoxLifecycleSnapshot` is the one shared JSON contract for a box's
+    /// operator-facing lifecycle state -- `tt console` (TUI + `--snapshot`
+    /// JSON) and the GTK box panel both decode/encode this exact shape
+    /// (Task 2). Round-trip through serde_json must be lossless, and
+    /// `ServiceState` (mirroring systemd-ish unit states) must serialize as
+    /// snake_case so it reads naturally in JSON output (`"inactive"`, not
+    /// `"Inactive"`).
+    #[test]
+    fn lifecycle_snapshot_round_trips() {
+        let s = BoxLifecycleSnapshot {
+            service: ServiceState::Active,
+            reachable: true,
+            name: Some("qb2-lab".into()),
+            chips: Some("4xBH".into()),
+            status: None,
+            endpoint: None,
+            serving: vec![],
+            config: None,
+            pairing: Some(PairingState {
+                code: "042817".into(),
+                expires_in_secs: 107,
+            }),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: BoxLifecycleSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+        // ServiceState serializes snake_case
+        assert!(serde_json::to_string(&ServiceState::Inactive)
+            .unwrap()
+            .contains("inactive"));
     }
 }
