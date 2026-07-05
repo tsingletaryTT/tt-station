@@ -51,6 +51,15 @@ public final class BoxViewModel: Identifiable {
     /// pairing attempt never lingers on screen.
     public var sshMessage: String?
 
+    /// The row-level "what's this box doing right now" summary, derived from
+    /// `serving`/`status`/`starting` — see `RunningState.runningState` for
+    /// the precedence rules. A computed property (not cached) so it always
+    /// reflects the latest of those three fields; the fields themselves are
+    /// tiny arrays/enums, so recomputing on read is cheap.
+    public var runningState: RunningState {
+        RunningState.runningState(serving: serving, status: status, starting: starting)
+    }
+
     private let commands: TTCommands
     private let registry: HostRegistry
 
