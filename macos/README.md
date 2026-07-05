@@ -80,6 +80,7 @@ The commands the app drives (all accept a global `--json`):
 | Current status | `tt --json status --host <host:port>` → `idle` / `serving:<model>` |
 | Get the live endpoint | `tt --json endpoint --host <host:port>` → `{ base_url, model, requires_key }` |
 | List all serving models | `tt --json serving --host <host:port>` (unauthed) → `{ serving: [ { model, base_url, host_port, container, source } ] }`; `source` is `agent` or `external` (e.g. tt-studio) |
+| Resolved serving config | `tt --json config --host <host:port>` (unauthed) → `ConfigSummary`: `{ active_profile, available_profiles, backend, serving_host, serving_port, serving_image, tt_inference_repo, tt_device }`. Mirrors the agent's `GET /config`; see `docs/reference/agentd-config.md`. No secrets (`hf_token` is never in this struct). |
 
 `base_url` is what you hand to any OpenAI client. Non-JSON `tt endpoint` prints
 `export OPENAI_BASE_URL=…` for shells; the app uses the `--json` form and offers "Copy endpoint."

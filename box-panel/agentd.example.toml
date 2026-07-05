@@ -1,0 +1,52 @@
+# Example agentd.toml — copy to $TT_CONFIG_DIR/agentd.toml (or
+# ~/.config/tt-station/agentd.toml if TT_CONFIG_DIR isn't set) and edit.
+#
+# Full reference: docs/reference/agentd-config.md
+#
+# Nothing here is required — an agent with no config file at all behaves
+# exactly as it always has (built-in defaults / whatever flags you pass).
+# This file exists to replace the long `tt-station-agentd --backend runpy
+# --tt-inference-repo ... --serving-image ...` flag line with something
+# human-editable, and to let you switch between named serving profiles
+# (e.g. a pinned "stable" checkout/image vs. a "bleeding" one you're
+# testing) with `--profile <name>` instead of re-typing every flag.
+
+# Which [profile.*] to use when --profile isn't passed on the CLI.
+# Comment this out (or omit it) if you only ever pass --profile explicitly.
+default_profile = "stable"
+
+[global]
+# Box identity — shared across every profile below.
+name = "qb2-lab"
+ctrl_port = 8765
+# Uncomment to override other [global] defaults (chips, apiver,
+# token_store, telemetry_interval_ms, tt_smi_bin all have built-in
+# defaults — see docs/reference/agentd-config.md).
+# chips = "4xBH"
+# token_store = "~/.config/tt-station/agentd-tokens.json"
+# telemetry_interval_ms = 1000
+# tt_smi_bin = "tt-smi"
+
+[profile.stable]
+# This box's confirmed, day-to-day serving config: run.py against the
+# 0.14.0 checkout/image pinned in CLAUDE.md's "Activate the live box".
+backend = "runpy"
+tt_inference_repo = "~/code/tt-inference-server"
+serving_image = "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.14.0-80180b9-7678b70"
+serving_host = "qb2-lab.local"
+serving_port = 8003
+# tt_device is left unset on purpose: run.py auto-detects it from tt-smi
+# on this board (resolves to p300x2, 4x p300c). Uncomment to pin it:
+# tt_device = "p300x2"
+
+# --- Example second profile (edit the repo/image/port before using) ---
+# A "bleeding" profile for testing a newer tt-inference-server checkout
+# without touching the stable one. Select it with:
+#   tt-station-agentd --config <this file> --profile bleeding
+#
+# [profile.bleeding]
+# backend = "runpy"
+# tt_inference_repo = "~/code/tt-inference-server-next"
+# serving_image = "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.17.0-<sha>"
+# serving_host = "qb2-lab.local"
+# serving_port = 8004
