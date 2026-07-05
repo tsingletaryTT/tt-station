@@ -125,8 +125,14 @@ struct BoxWorkspaceView: View {
     /// exactly the carve-out the brief calls out as acceptable.
     @ViewBuilder
     private var modelBody: some View {
-        ModelBrowserView(box: box, maxListHeight: nil)
-            .task { if box.models.isEmpty { await box.loadModels() } }
+        // "Set up in Workbench →" (catalog mode's Experimental header) opens
+        // the exact same VS Code launch the Workbench card's own button
+        // below invokes — one launcher, one behavior, wherever the CTA
+        // appears in the pane.
+        ModelBrowserView(box: box, maxListHeight: nil, onOpenWorkbench: {
+            Task { await launcher.openVSCode(host: box.record.host) }
+        })
+        .task { if box.models.isEmpty { await box.loadModels() } }
 
         // Run is the primary action; Stop is a secondary, destructive one.
         // Both gated by `inFlight`; Run additionally needs a model.
