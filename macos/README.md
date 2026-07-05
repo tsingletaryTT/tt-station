@@ -11,6 +11,10 @@ quick actions (status, Run/Stop, a live temp chip, "Open window"), backed by a r
 - **Hardware-aware model browser** — models that run on this box's mesh are ranked first
   ("Runs on this box" vs a dimmed "Needs other hardware", each labeled with the mesh it needs).
   The smart default is compatible-first.
+- **Config card** — a read-only summary of the box's resolved serving config (active
+  profile + other available ones, backend, `serving_host:port`, image, device), from the
+  unauthed `tt --json config` read. **Switching profiles happens on the box panel, not
+  here** — the Mac only ever displays the resolved result.
 - **Fast Connect** — Open WebUI / opencode, installing missing deps (`brew install …`) as needed.
 - **Workbench** — Terminal (SSH), tt-toplike (remote telemetry), and VS Code Remote-SSH with
   the `Tenstorrent.tt-vscode-toolkit` extension installed. All SSH as **`ttuser`** (the
@@ -22,8 +26,8 @@ quick actions (status, Run/Stop, a live temp chip, "Open window"), backed by a r
   key is tagged (`ttstation:<host>:<date>`) and revocable (`tt ssh-authorize --host <h>
   --revoke`). The SSH step is non-fatal — a pair that can't set up SSH still pairs.
 
-**Status:** v0.4.0 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
-(99 passing tests via `swift test`; ranking, mesh-match, telemetry decode, install-command
+**Status:** v0.4.1 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
+(104 passing tests via `swift test`; ranking, mesh-match, telemetry decode, install-command
 builders, and the `ttuser` SSH default are pure and unit-tested); the SwiftUI app target is
 generated with XcodeGen and builds clean. End-to-end verifiable against `mock-box` (no
 hardware — it reports `device_mesh`, streams a canned telemetry frame, and serves

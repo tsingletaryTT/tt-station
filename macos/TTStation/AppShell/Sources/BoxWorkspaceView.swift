@@ -5,8 +5,9 @@ import TTStationKit
 /// workspace, given the window's uncapped room. The popover (`BoxDetailView`)
 /// keeps only a trimmed subset of this for quick actions.
 ///
-/// **Card chrome:** `ConnectCardView`/`WorkbenchCardView`/`ServingCardView`
-/// already wrap themselves in `CardContainer` (Task 13). `BoxHeaderView`,
+/// **Card chrome:** `ConnectCardView`/`WorkbenchCardView`/`ServingCardView`/
+/// `ConfigCardView` already wrap themselves in `CardContainer` (Task 13 for
+/// the first three; `ConfigCardView` follows the same idiom). `BoxHeaderView`,
 /// `DeviceStripView`, and `ModelBrowserView` (+ the inline run/stop/endpoint
 /// block that goes with it) do not — Task 13 deliberately left them bare, so
 /// this view wraps those three in `CardContainer` itself. The result: every
@@ -44,6 +45,15 @@ struct BoxWorkspaceView: View {
             } else {
                 CardContainer(title: "Devices") {
                     DeviceStripView(box: box, launcher: launcher)
+                }
+
+                // Read-only "what will this box serve with" summary. Guarded
+                // on `box.config != nil` so an older agent (or a `/config`
+                // read that failed — never fatal, see
+                // `BoxViewModel.refresh()`) just omits the card instead of
+                // this view having to render an empty/broken state.
+                if let config = box.config {
+                    ConfigCardView(config: config)
                 }
 
                 CardContainer(title: "Model") {

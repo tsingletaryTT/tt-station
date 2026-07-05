@@ -37,6 +37,21 @@ struct BoxHeaderView: View {
                 Text(box.record.chips).font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
+            // Secondary chip: the box's active config profile, if the
+            // unauthed `/config` read (`box.config`, see `BoxViewModel`)
+            // returned one. Deliberately just a label — no picker — the box
+            // panel owns switching profiles, this app only ever shows the
+            // resolved result. Lower-contrast than the mesh badge below so
+            // the mesh (hardware identity) stays the visually primary chip.
+            if let profile = box.config?.activeProfile {
+                Text(profile)
+                    .font(.caption2)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Color.secondary.opacity(0.15))
+                    .foregroundStyle(.secondary)
+                    .clipShape(Capsule())
+                    .help("Active config profile (switch it from the box panel)")
+            }
             if let mesh = box.record.deviceMesh, !mesh.isEmpty {
                 Text(mesh.uppercased())
                     .font(TTTheme.mono)
