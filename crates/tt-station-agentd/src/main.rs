@@ -561,7 +561,7 @@ async fn main() -> Result<()> {
     // ceiling, never indefinitely; startup then proceeds regardless of the
     // outcome. See `detect_startup_device_mesh`'s doc comment.
     let device_mesh = detect_startup_device_mesh(&cli.tt_smi_bin).await;
-    let state = state.with_device_mesh(device_mesh);
+    let state = state.with_device_mesh(device_mesh.clone());
 
     // Bind the control-plane socket FIRST, then advertise on the LAN, so
     // discovery never races ahead of the control-plane API actually being
@@ -578,8 +578,8 @@ async fn main() -> Result<()> {
     // sharing the same underlying daemon, which gets attached to `state` so
     // `/run`/`/stop` can re-publish `status` whenever it changes instead of
     // it going stale after boot (see `StatusAdvertiser`'s doc comment).
-    let (_mdns_guard, status_advertiser) =
-        advertise(&cli, state.status()).context("failed to start mDNS advertisement")?;
+    let (_mdns_guard, status_advertiser) = advertise(&cli, state.status(), device_mesh)
+        .context("failed to start mDNS advertisement")?;
     let state = state.with_status_advertiser(Arc::new(status_advertiser));
 
     println!(
@@ -674,6 +674,11 @@ struct MdnsStatusAdvertiser {
     ctrl_port: u16,
     chips: String,
     apiver: u8,
+    /// This box's startup-detected device-mesh label (or `None` if detection
+    /// failed/didn't run), captured once at construction in `advertise` and
+    /// re-emitted on every status re-publish -- see the identically-named
+    /// field on [`BoxRecord`] (Task 3.5).
+    device_mesh: Option<String>,
 }
 
 impl StatusAdvertiser for MdnsStatusAdvertiser {
@@ -685,11 +690,10 @@ impl StatusAdvertiser for MdnsStatusAdvertiser {
             chips: self.chips.clone(),
             status: status.clone(),
             apiver: self.apiver,
-            // `txt_encode` (below) doesn't read `device_mesh` -- the mDNS
-            // TXT advertisement never carried this field, only the HTTP
-            // `/status` response does (Task 2) -- so this is a
-            // required-but-unused filler for this record.
-            device_mesh: None,
+            // Threaded through from the startup-detected mesh (Task 3.5) so
+            // the mDNS TXT record carries `device_mesh` just like `/status`
+            // does, keeping every discovery path hardware-aware.
+            device_mesh: self.device_mesh.clone(),
         };
 
         let txt_pairs = txt_encode(&record);
@@ -739,14 +743,21 @@ impl StatusAdvertiser for MdnsStatusAdvertiser {
 ///
 /// `status` is passed in (rather than hardcoded) so the caller can source it
 /// straight from the same `AppState` that backs `/status` -- one source of
-/// truth for what the box's status is at boot.
+/// truth for what the box's status is at boot. Likewise `device_mesh` is
+/// passed in from the same startup detection `main` feeds to
+/// `AppState::with_device_mesh`, so the mDNS TXT record and `/status` never
+/// disagree about this box's hardware (Task 3.5).
 ///
 /// Returns both the [`MdnsGuard`] (unregister/shutdown on drop, same as
 /// before this function grew a second return value) and an
 /// [`MdnsStatusAdvertiser`] sharing the same `Arc<ServiceDaemon>`, so `main`
 /// can attach the latter to `AppState` and let `/run`/`/stop` keep the TXT
 /// record's `status` key truthful after boot.
-fn advertise(cli: &Cli, status: ServingStatus) -> Result<(MdnsGuard, MdnsStatusAdvertiser)> {
+fn advertise(
+    cli: &Cli,
+    status: ServingStatus,
+    device_mesh: Option<String>,
+) -> Result<(MdnsGuard, MdnsStatusAdvertiser)> {
     let host = format!("{}.local.", cli.name);
     let record = BoxRecord {
         name: cli.name.clone(),
@@ -755,9 +766,7 @@ fn advertise(cli: &Cli, status: ServingStatus) -> Result<(MdnsGuard, MdnsStatusA
         chips: cli.chips.clone(),
         status,
         apiver: cli.apiver,
-        // Same rationale as `MdnsStatusAdvertiser::advertise_status` above:
-        // `txt_encode` doesn't read this field.
-        device_mesh: None,
+        device_mesh: device_mesh.clone(),
     };
 
     let txt_pairs = txt_encode(&record);
@@ -797,6 +806,7 @@ fn advertise(cli: &Cli, status: ServingStatus) -> Result<(MdnsGuard, MdnsStatusA
         ctrl_port: cli.ctrl_port,
         chips: cli.chips.clone(),
         apiver: cli.apiver,
+        device_mesh,
     };
 
     Ok((guard, status_advertiser))

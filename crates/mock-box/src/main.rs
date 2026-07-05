@@ -114,11 +114,11 @@ async fn advertise(name: String, ctrl_port: u16, chips: String, apiver: u8) -> R
         chips,
         status: ServingStatus::Idle,
         apiver,
-        // `txt_encode` doesn't read `device_mesh` (mDNS TXT records don't
-        // carry it -- see `libttstation::model::txt_decode`'s doc comment),
-        // so this is a required-but-unused filler for this advertise-only
-        // record.
-        device_mesh: None,
+        // Fixed dev-parity value (matches the `/status` mock in Task 4) so
+        // the no-hardware mDNS discovery path exercises the app's
+        // hardware-aware ranking exactly like the real QuietBox's detected
+        // mesh does via `tt-station-agentd` (Task 3.5).
+        device_mesh: Some("p300x2".to_string()),
     };
 
     // Reuse the shared encoder so the advertised TXT keys (name, apiver,

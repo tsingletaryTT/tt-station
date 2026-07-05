@@ -170,13 +170,20 @@ impl ServingStatus {
 }
 
 pub fn txt_encode(rec: &BoxRecord) -> Vec<(String, String)> {
-    vec![
+    let mut pairs = vec![
         ("name".to_string(), rec.name.clone()),
         ("apiver".to_string(), rec.apiver.to_string()),
         ("chips".to_string(), rec.chips.clone()),
         ("status".to_string(), rec.status.to_txt()),
         ("ctrl".to_string(), rec.ctrl_port.to_string()),
-    ]
+    ];
+    // Only emit `device_mesh` when known -- an mDNS TXT record has no
+    // concept of an explicit "empty" value, so absence of the key (not an
+    // empty `device_mesh=` pair) is how `None` round-trips (Task 3.5).
+    if let Some(mesh) = &rec.device_mesh {
+        pairs.push(("device_mesh".to_string(), mesh.clone()));
+    }
+    pairs
 }
 
 pub fn txt_decode(
@@ -218,13 +225,10 @@ pub fn txt_decode(
         chips,
         status,
         apiver,
-        // The mDNS TXT advertisement (see `txt_encode`) doesn't carry a
-        // `device_mesh` key -- Task 2 only added that field to the agent's
-        // `/status` HTTP response, not its mDNS record -- so an
-        // mDNS-discovered box always decodes to `None` here. A caller that
-        // wants the real value has to probe `/status` directly (as
-        // `manual_status_fetch` does for `ManualProvider`'s manual hosts).
-        device_mesh: None,
+        // `device_mesh` is optional in the TXT map (Task 3.5) -- older
+        // agents, or advertisers that never learned their mesh, simply omit
+        // the key, and that must decode to `None` rather than erroring.
+        device_mesh: txt.get("device_mesh").cloned(),
     })
 }
 
@@ -302,8 +306,65 @@ mod tests {
         assert_eq!(rec.chips, "4xBH");
         assert_eq!(rec.ctrl_port, 8765);
         assert_eq!(rec.status, ServingStatus::Idle);
-        // mDNS TXT records never carry `device_mesh` (see `txt_decode`'s doc
-        // comment) -- assert the decode doesn't invent a value.
+        // Back-compat: a TXT map WITHOUT a `device_mesh` key (older agents,
+        // or advertisers that never learned their mesh) must still decode
+        // cleanly to `None` rather than erroring or inventing a value.
         assert_eq!(rec.device_mesh, None);
+    }
+
+    /// `txt_encode` must emit a `device_mesh` pair when the record has one,
+    /// so mDNS-discovered boxes carry the same hardware-aware signal as a
+    /// direct `/status` probe (Task 3.5).
+    #[test]
+    fn txt_encode_includes_device_mesh_when_some() {
+        let rec = BoxRecord {
+            name: "qb2-lab".to_string(),
+            host: "qb2-lab.local".to_string(),
+            ctrl_port: 8765,
+            chips: "4xBH".to_string(),
+            status: ServingStatus::Idle,
+            apiver: 1,
+            device_mesh: Some("p300x2".to_string()),
+        };
+        let pairs = txt_encode(&rec);
+        assert!(
+            pairs.contains(&("device_mesh".to_string(), "p300x2".to_string())),
+            "expected a device_mesh pair, got: {pairs:?}"
+        );
+    }
+
+    /// `txt_encode` must NOT emit an empty `device_mesh` pair when the
+    /// record has none -- absence, not `device_mesh=`, is how "unknown"
+    /// round-trips through mDNS TXT.
+    #[test]
+    fn txt_encode_omits_device_mesh_when_none() {
+        let rec = BoxRecord {
+            name: "qb2-lab".to_string(),
+            host: "qb2-lab.local".to_string(),
+            ctrl_port: 8765,
+            chips: "4xBH".to_string(),
+            status: ServingStatus::Idle,
+            apiver: 1,
+            device_mesh: None,
+        };
+        let pairs = txt_encode(&rec);
+        assert!(
+            !pairs.iter().any(|(k, _)| k == "device_mesh"),
+            "expected no device_mesh pair, got: {pairs:?}"
+        );
+    }
+
+    /// `txt_decode` must read a present `device_mesh` key back into `Some`.
+    #[test]
+    fn txt_decode_reads_device_mesh_when_present() {
+        let mut txt = std::collections::HashMap::new();
+        txt.insert("name".into(), "qb2-lab".into());
+        txt.insert("apiver".into(), "1".into());
+        txt.insert("chips".into(), "4xBH".into());
+        txt.insert("status".into(), "idle".into());
+        txt.insert("ctrl".into(), "8765".into());
+        txt.insert("device_mesh".into(), "p300x2".into());
+        let rec = txt_decode("qb2-lab", "qb2-lab.local", 8765, &txt).unwrap();
+        assert_eq!(rec.device_mesh, Some("p300x2".to_string()));
     }
 }
