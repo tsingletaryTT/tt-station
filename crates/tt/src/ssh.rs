@@ -178,8 +178,7 @@ fn read_public_key(path: &Path) -> Result<String> {
 /// `authorized_keys` on the box later can tell whose key is whose --
 /// that comment is never read back or parsed by anything in this codebase.
 fn generate_ed25519_keypair(ssh_dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(ssh_dir)
-        .with_context(|| format!("creating {}", ssh_dir.display()))?;
+    std::fs::create_dir_all(ssh_dir).with_context(|| format!("creating {}", ssh_dir.display()))?;
 
     let key_path = ssh_dir.join("id_ed25519");
     let comment = format!("ttstation:{}", mac_hostname());

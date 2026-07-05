@@ -1,0 +1,9 @@
+# Pin the toolchain so every machine (this QuietBox, the Mac, CI) uses the
+# EXACT same rustc/rustfmt/clippy. Without this, `cargo fmt --check` drifts
+# between machines whose stable rustfmt versions differ (observed: files
+# formatted on one box show reflow diffs on another), and the fmt gate becomes
+# a cross-machine ping-pong. Bump this deliberately, in one commit, and let the
+# whole repo reformat under the new version at the same time.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

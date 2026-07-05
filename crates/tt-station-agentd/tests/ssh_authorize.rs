@@ -138,7 +138,8 @@ async fn authorize_with_valid_bearer_writes_key_and_reports_ssh_user() {
     assert_eq!(body["ssh_user"], "ttuser");
     assert_eq!(body["already_present"], false);
 
-    let contents = std::fs::read_to_string(&path).expect("authorized_keys should have been written");
+    let contents =
+        std::fs::read_to_string(&path).expect("authorized_keys should have been written");
     assert!(contents.contains("AAAAC3NzaC1lZDI1"));
     assert!(contents.contains("ttstation:mac:test"));
 }
@@ -162,7 +163,10 @@ async fn authorize_without_bearer_is_rejected_and_writes_nothing() {
         .await
         .expect("POST /ssh/authorize failed");
     assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
-    assert!(!path.exists(), "unauthenticated request must not write the key");
+    assert!(
+        !path.exists(),
+        "unauthenticated request must not write the key"
+    );
 }
 
 /// `POST /ssh/authorize` with private-key material in `public_key` must be
@@ -223,7 +227,8 @@ async fn revoke_with_label_returns_200_and_removes_line() {
     let body: serde_json::Value = resp.json().await.expect("response was not valid JSON");
     assert_eq!(body["revoked"], true);
 
-    let contents_after = std::fs::read_to_string(&path).expect("authorized_keys should still exist");
+    let contents_after =
+        std::fs::read_to_string(&path).expect("authorized_keys should still exist");
     assert!(!contents_after.contains("AAAADROPME"));
 }
 

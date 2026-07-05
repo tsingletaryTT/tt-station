@@ -1380,7 +1380,10 @@ async fn get_serving(
 /// failures on THIS box's side (a backend/I-O error after auth and
 /// validation both passed).
 fn bad_request(message: String) -> (StatusCode, Json<ErrorResponse>) {
-    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: message }))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse { error: message }),
+    )
 }
 
 /// JSON body accepted by `POST /ssh/authorize`.
@@ -1435,8 +1438,7 @@ async fn ssh_authorize(
     _auth: BearerAuth,
     Json(req): Json<SshAuthorizeRequest>,
 ) -> Result<Json<SshAuthorizeResponse>, (StatusCode, Json<ErrorResponse>)> {
-    authkeys::validate_public_key(&req.public_key)
-        .map_err(|err| bad_request(err.to_string()))?;
+    authkeys::validate_public_key(&req.public_key).map_err(|err| bad_request(err.to_string()))?;
 
     let outcome = authkeys::authorize(state.ssh_path(), &req.public_key, &req.label)
         .map_err(|err| bad_request(err.to_string()))?;

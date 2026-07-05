@@ -704,7 +704,9 @@ async fn cmd_ssh_revoke(host: &str) -> Result<PathBuf> {
         .trim()
         .to_string();
 
-    client.ssh_revoke(SshRevokeBy::PublicKey(public_key)).await?;
+    client
+        .ssh_revoke(SshRevokeBy::PublicKey(public_key))
+        .await?;
     Ok(key_path)
 }
 

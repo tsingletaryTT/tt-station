@@ -184,7 +184,9 @@ pub fn authorize(path: &Path, pubkey: &str, label: &str) -> anyhow::Result<Autho
         .ok_or_else(|| anyhow::anyhow!("validated key unexpectedly had no blob field"))?;
 
     let existing = read_existing(path)?;
-    let already_present = existing.lines().any(|line| key_blob(line) == Some(new_blob));
+    let already_present = existing
+        .lines()
+        .any(|line| key_blob(line) == Some(new_blob));
 
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -203,7 +205,10 @@ pub fn authorize(path: &Path, pubkey: &str, label: &str) -> anyhow::Result<Autho
         return Ok(AuthorizeOutcome::AlreadyPresent);
     }
 
-    let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     writeln!(file, "{validated} ttstation:{label}")?;
     drop(file);
 
@@ -334,9 +339,15 @@ mod tests {
     fn authorize_creates_and_is_idempotent() {
         let p = tmp("idem");
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1 alice@mac";
-        assert!(matches!(authorize(&p, key, "mac:2026-07-05").unwrap(), AuthorizeOutcome::Added));
+        assert!(matches!(
+            authorize(&p, key, "mac:2026-07-05").unwrap(),
+            AuthorizeOutcome::Added
+        ));
         // same key blob again -> AlreadyPresent, no duplicate line
-        assert!(matches!(authorize(&p, key, "mac:2026-07-05").unwrap(), AuthorizeOutcome::AlreadyPresent));
+        assert!(matches!(
+            authorize(&p, key, "mac:2026-07-05").unwrap(),
+            AuthorizeOutcome::AlreadyPresent
+        ));
         let body = fs::read_to_string(&p).unwrap();
         assert_eq!(body.matches("AAAAC3NzaC1lZDI1").count(), 1);
         assert!(body.contains("ttstation:mac:2026-07-05"));
@@ -344,7 +355,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
 
@@ -435,8 +449,14 @@ mod tests {
         authorize(&p, "ssh-ed25519 AAAADROP2 drop2@mac", "app").unwrap();
         revoke(&p, &Revoke::Label("app".into())).unwrap();
         let body2 = fs::read_to_string(&p).unwrap();
-        assert!(!body2.contains("AAAADROP2"), "real marker token must match and be removed");
-        assert!(body2.contains("AAAAKEEP"), "unrelated line must still be preserved");
+        assert!(
+            !body2.contains("AAAADROP2"),
+            "real marker token must match and be removed"
+        );
+        assert!(
+            body2.contains("AAAAKEEP"),
+            "unrelated line must still be preserved"
+        );
     }
 
     /// LOW: perms must be re-asserted even on the `AlreadyPresent` (no-op
@@ -454,12 +474,18 @@ mod tests {
         // Simulate perms drift (e.g. a stray chmod, or a restrictive umask
         // leaving the file group/world-readable).
         fs::set_permissions(&p, fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o644);
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
 
         // Same key blob again -> AlreadyPresent, but perms must still be
         // repaired back to 0600.
         let outcome = authorize(&p, key, "first").unwrap();
         assert!(matches!(outcome, AuthorizeOutcome::AlreadyPresent));
-        assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }
