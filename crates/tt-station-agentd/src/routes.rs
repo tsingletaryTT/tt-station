@@ -27,7 +27,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use libttstation::model::{Endpoint, ModelsResponse, ServingList, ServingStatus};
+use libttstation::model::{ConfigSummary, Endpoint, ModelsResponse, ServingList, ServingStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::pairing;
@@ -194,6 +194,17 @@ struct Inner {
     /// Purely additive: only `GET /status` reads it, so a client (Task 3's
     /// `tt --json status`) can rank models by hardware fit.
     device_mesh: Option<String>,
+    /// Redacted view of the agent's resolved serving config, served verbatim
+    /// by `GET /config` -- see `libttstation::model::ConfigSummary`'s doc
+    /// comment for why it deliberately carries no secrets. Defaults to an
+    /// empty-but-valid summary (no active profile, defaults for
+    /// backend/serving host/port) so an `AppState` never given
+    /// `with_config_summary` (every test other than the `/config` ones)
+    /// still answers the route instead of requiring every constructor to
+    /// know about config resolution. Real content is wired in by `main.rs`
+    /// via `with_config_summary`, built from the actually-resolved config
+    /// (Task 3 of the agentd-config-profiles plan).
+    config_summary: ConfigSummary,
 }
 
 impl AppState {
@@ -259,6 +270,16 @@ impl AppState {
                 serving_host: DEFAULT_SERVING_HOST.to_string(),
                 serving_port: DEFAULT_SERVING_PORT,
                 device_mesh: None,
+                config_summary: ConfigSummary {
+                    active_profile: None,
+                    available_profiles: vec![],
+                    backend: "runpy".to_string(),
+                    serving_host: "127.0.0.1".to_string(),
+                    serving_port: 8000,
+                    serving_image: None,
+                    tt_inference_repo: None,
+                    tt_device: None,
+                },
             }),
         }
     }
@@ -350,6 +371,26 @@ impl AppState {
         self
     }
 
+    /// Attach the redacted `ConfigSummary` `GET /config` serves. Additive
+    /// counterpart to `with_serving_config`/`with_telemetry_config` -- same
+    /// "call immediately after construction, while this is still the sole
+    /// owner of its `Arc<Inner>`" contract (`Arc::get_mut` only succeeds
+    /// then). Called after a clone exists, it logs a warning and leaves the
+    /// empty default summary in place rather than panicking.
+    ///
+    /// Optional: an `AppState` never given this config still answers
+    /// `/config`, with the empty-but-valid default `new_inner` builds
+    /// (no active profile, `runpy`/`127.0.0.1`/`8000` defaults).
+    pub fn with_config_summary(mut self, summary: ConfigSummary) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.config_summary = summary,
+            None => eprintln!(
+                "tt-station-agentd: with_config_summary called on an already-shared AppState; config summary not applied"
+            ),
+        }
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.inner.name
     }
@@ -383,6 +424,12 @@ impl AppState {
     /// classification (see `with_serving_config`).
     fn serving_port(&self) -> u16 {
         self.inner.serving_port
+    }
+
+    /// Snapshot the `ConfigSummary` `GET /config` serves (see
+    /// `with_config_summary`).
+    fn config_summary(&self) -> ConfigSummary {
+        self.inner.config_summary.clone()
     }
 
     /// Cheap `Arc` clone of the serving backend, for a handler to move into
@@ -867,6 +914,19 @@ async fn get_status(
     })
 }
 
+/// `GET /config` (UNAUTHED, like `GET /status`): the agent's redacted
+/// serving-config summary -- active/available profiles plus the resolved
+/// backend/serving-host/port/image/repo/device -- so the GTK panel, the `tt
+/// config` CLI, and the Mac app can render "what am I actually about to
+/// serve with" without pairing first. `ConfigSummary` carries no secrets by
+/// construction (no `hf_token` field exists on it), so there's nothing for
+/// this handler to redact -- it just serves the stored summary verbatim.
+async fn get_config(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Json<ConfigSummary> {
+    Json(state.config_summary())
+}
+
 /// `GET /models` (UNAUTHED, like `GET /status`): enumerate the models this
 /// box's backend can serve (see `ServingBackend::list_models`), so a client
 /// never has to guess or hardcode a model id before calling `/run`.
@@ -1261,6 +1321,7 @@ async fn get_serving(
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/status", get(get_status))
+        .route("/config", get(get_config))
         .route("/models", get(get_models))
         .route("/serving", get(get_serving))
         .route("/telemetry", get(telemetry_ws))

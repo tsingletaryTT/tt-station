@@ -9,7 +9,9 @@
 //! `/status` isn't currently bearer-gated on the agent side, but sending the
 //! header anyway costs nothing and keeps all four calls uniform.
 
-use crate::model::{Endpoint, ModelsResponse, ServingList, ServingStatus, StatusInfo};
+use crate::model::{
+    ConfigSummary, Endpoint, ModelsResponse, ServingList, ServingStatus, StatusInfo,
+};
 use crate::pairing::join;
 use serde::{Deserialize, Serialize};
 
@@ -97,6 +99,28 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
         status: ServingStatus::from_txt(&body.status)?,
         device_mesh: body.device_mesh,
     })
+}
+
+/// `GET /config` (UNAUTHED, mirroring the agent's own route -- see
+/// `tt-station-agentd::routes::get_config`, Task 5): the box's fully-resolved
+/// serving config, redacted to a [`ConfigSummary`] (no `hf_token`, no
+/// token-store contents -- see that type's docs).
+///
+/// A FREE function rather than an `AgentClient` method, same reasoning as
+/// [`list_models`]/[`get_status`]: `/config` is unauthed read-only discovery
+/// (the GTK panel and `tt config` want to show "what will this box actually
+/// serve with" before/without a pairing existing), so there's no bearer
+/// token to hang an `AgentClient` off of yet.
+pub async fn get_config(base: &str) -> anyhow::Result<ConfigSummary> {
+    let url = join(base, "config");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
+
+    Ok(resp.json().await?)
 }
 
 /// `POST /reset` (bearer-guarded): ask the agent at `base` to return the box

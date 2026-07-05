@@ -243,3 +243,37 @@ fn discover_pair_run_endpoint_completion_against_mock_box() {
     let status: serde_json::Value = serde_json::from_slice(&status_stdout).unwrap();
     assert_eq!(status["status"], "idle");
 }
+
+/// `tt --json config --host <mock>` round-trips a `ConfigSummary` from
+/// mock-box's fake `/config` route (Task 6). UNAUTHED, like `tt
+/// status`/`tt serving`/`tt models` -- no `tt pair` needed first, so this
+/// spins up its own mock-box instance and drives just this one command
+/// against it, using the exact same harness (`spawn_mock_box`,
+/// `wait_for_port`, `TempConfigDir`) as
+/// `discover_pair_run_endpoint_completion_against_mock_box` above.
+#[test]
+#[ignore] // hardware-free but network/process -- run with --ignored like the others
+fn tt_config_json_round_trips_from_mock_box() {
+    let port: u16 = 18900;
+    let host = format!("127.0.0.1:{port}");
+
+    let _mock_box = spawn_mock_box(port);
+    wait_for_port(port);
+
+    let config_dir = TempConfigDir::new();
+
+    let config_stdout = AssertCommand::cargo_bin("tt")
+        .unwrap()
+        .env("TT_CONFIG_DIR", &config_dir.0)
+        .args(["--json", "config", "--host", &host])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let summary: libttstation::model::ConfigSummary =
+        serde_json::from_slice(&config_stdout).expect("config output parses as ConfigSummary");
+
+    assert_eq!(summary.active_profile.as_deref(), Some("mock"));
+}

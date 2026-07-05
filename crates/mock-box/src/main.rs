@@ -6,8 +6,9 @@
 //!   advertisement (Task 3) so `MdnsProvider` (Task 4) can be exercised
 //!   without hardware.
 //! - `serve` (Task 12): a small HTTP server that fakes the *whole* agent
-//!   control API (`/status`, `/pair/*`, `/run`, `/stop`, `/endpoint`) plus a
-//!   fake vLLM-style OpenAI endpoint (`/v1/chat/completions`, `/v1/models`),
+//!   control API (`/status`, `/models`, `/config`, `/pair/*`, `/run`,
+//!   `/stop`, `/endpoint`) plus a fake vLLM-style OpenAI endpoint
+//!   (`/v1/chat/completions`, `/v1/models`),
 //!   so the `tt` CLI's discover -> pair -> run -> endpoint -> completion flow
 //!   can be end-to-end tested with no real agent or hardware involved.
 //!
@@ -27,7 +28,7 @@ use axum::{
 use clap::{Parser, Subcommand};
 use libttstation::discovery::SERVICE_TYPE;
 use libttstation::model::{
-    txt_encode, BoxRecord, Endpoint, ModelInfo, ModelsResponse, ServingStatus,
+    txt_encode, BoxRecord, ConfigSummary, Endpoint, ModelInfo, ModelsResponse, ServingStatus,
 };
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use rand::Rng;
@@ -343,6 +344,25 @@ async fn get_models() -> Json<ModelsResponse> {
     })
 }
 
+/// `GET /config`: a fixed, canned `ConfigSummary` -- doesn't consult
+/// `MockState` at all (there's no real config-file/profile resolution behind
+/// this mock, unlike `tt-station-agentd::routes::get_config`, Task 5), just
+/// enough shape for `tt config` (and its e2e test, Task 6) to exercise the
+/// unauthed discover -> config flow with no real agent/hardware. The
+/// `active_profile: "mock"` value is what that e2e test asserts on.
+async fn get_config() -> Json<ConfigSummary> {
+    Json(ConfigSummary {
+        active_profile: Some("mock".to_string()),
+        available_profiles: vec!["mock".to_string()],
+        backend: "runpy".to_string(),
+        serving_host: "127.0.0.1".to_string(),
+        serving_port: 8000,
+        serving_image: None,
+        tt_inference_repo: None,
+        tt_device: None,
+    })
+}
+
 /// `GET /endpoint`: the current `Endpoint`, or `409` if idle -- same
 /// contract as the real agent's `GET /endpoint` (Task 10), so `AgentClient`
 /// (Task 11) can be pointed at either without special-casing the mock.
@@ -445,6 +465,7 @@ fn app(state: MockState) -> Router {
     Router::new()
         .route("/status", get(get_status))
         .route("/models", get(get_models))
+        .route("/config", get(get_config))
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
         .route("/run", post(run_model))

@@ -62,16 +62,28 @@ session, NOT part of tt-station. Design: `~/code/tt-toplike/docs/REMOTE_QUIETBOX
 - Routes: `GET /status` (unauthed), `GET /models` (unauthed, **vLLM-servable only**),
   `POST /pair/init|complete`, `POST /run|stop`, `GET /endpoint`, `POST /reset` (authed),
   `GET /telemetry` (**WebSocket**, unauthed — streams `tt-smi -s` for remote tt-toplike),
-  `GET /serving` (unauthed — every running `tt-inference-server` `/v1`, `source: agent|external`).
+  `GET /serving` (unauthed — every running `tt-inference-server` `/v1`, `source: agent|external`),
+  `GET /config` (unauthed — redacted resolved config, no secrets).
 - mDNS `_tenstorrent._tcp` status re-published on run/stop; graceful shutdown unregisters.
+- **Config file + named profiles:** optionally reads `agentd.toml` (default
+  `$TT_CONFIG_DIR/agentd.toml` or `~/.config/tt-station/agentd.toml`, override with
+  `--config`) with named `[profile.*]` serving configs (e.g. `stable`/`bleeding`), selected via
+  `--profile` (else `default_profile`, else the sole profile, else today's flag-only behavior).
+  `--print-config` resolves and prints the redacted summary without binding the port. No config
+  file at all = unchanged pre-feature behavior. Full schema/precedence/errors:
+  `docs/reference/agentd-config.md`; copy-paste starter: `box-panel/agentd.example.toml`.
 
 **CLI (`crates/tt`):** `discover` (`--host`/`--no-mdns`), `pair`/`pair-init`/`pair-complete`,
-`run`, `stop`, `status` (unauthed), `endpoint`, `models`, `serving`, `reset`. Global `--json`.
+`run`, `stop`, `status` (unauthed), `endpoint`, `models`, `serving`, `reset`,
+`config` (unauthed — active/available profiles + resolved backend + serving host/port, mirrors
+`GET /config`; see `docs/reference/agentd-config.md`). Global `--json`.
 Tokens in macOS Keychain / file store. Respects `TT_CONFIG_DIR`.
 
 **Box panel (`box-panel/tt-station-panel.py`, GTK4):** the box's own screen — Start/Stop/
-Restart/Reset the agent, **live 6-digit pairing code** (with TTL), status/endpoint. Config
-via `TTS_*` env (repo path, serving host/port, `TTS_IMAGE`, `TTS_AUTOSTART`).
+Restart/Reset the agent, **live 6-digit pairing code** (with TTL), status/endpoint,
+**profile dropdown** (reads `agentd.toml`'s profile list, passes `--profile` on Start/Restart;
+hidden when no config file exists). Config via `TTS_*` env (repo path, serving host/port,
+`TTS_IMAGE`, `TTS_AUTOSTART`, `TTS_CONFIG` for the profile dropdown's TOML path).
 
 **macOS app (`macos/TTStation`, v0.2.0):** MenuBarExtra veneer over `tt --json` —
 discover/pair, **smart-default model** (remembers last-run per box; else prefers chat-tuned

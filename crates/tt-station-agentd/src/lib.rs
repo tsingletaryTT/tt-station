@@ -2,6 +2,7 @@
 //! integration tests (`tests/status.rs`) can build the real `Router` against
 //! an in-process `AppState` without booting mDNS or binding a real port.
 
+pub mod config;
 pub mod device;
 pub mod pairing;
 pub mod routes;
