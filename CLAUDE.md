@@ -61,7 +61,11 @@ session, NOT part of tt-station. Design: `~/code/tt-toplike/docs/REMOTE_QUIETBOX
   restarts. Two-step `pair-init`/`pair-complete` for the app.
 - Routes: `GET /status` (unauthed), `GET /models` (unauthed, **vLLM-servable only**),
   `POST /pair/init|complete`, `POST /run|stop`, `GET /endpoint`, `POST /reset` (authed),
-  `GET /telemetry` (**WebSocket**, unauthed — streams `tt-smi -s` for remote tt-toplike),
+  `GET /telemetry` (**WebSocket**, unauthed — streams `tt-smi -s` for remote tt-toplike;
+  frames now carry an OPTIONAL ADDITIVE `tt_toplike` key alongside the verbatim tt-smi JSON —
+  `{ schema: 1, processes: [{pid,name,cmd,uses_tt,cpu_pct,mem_bytes}] }`, `uses_tt` best-effort
+  (only processes the agent's uid can inspect); `inference` is DEFERRED (its absence means
+  tt-toplike falls back to local view for that panel) — see `TT_TOPLIKE_STREAM.md`),
   `GET /serving` (unauthed — every running `tt-inference-server` `/v1`, `source: agent|external`),
   `GET /config` (unauthed — redacted resolved config, no secrets).
 - mDNS `_tenstorrent._tcp` status re-published on run/stop; graceful shutdown unregisters.
