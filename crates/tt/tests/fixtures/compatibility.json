@@ -1,0 +1,68 @@
+{
+  "models": [
+    {
+      "id": "model-a",
+      "display_name": "Model A",
+      "family": "TestFamily",
+      "tasks": ["Text Generation"],
+      "model_size": "8B",
+      "compatibility": [
+        {
+          "hardware": "Quietbox 2",
+          "chip_set": "Blackhole",
+          "hardware_family": "Quietbox",
+          "status": "Supported",
+          "software": ["tt-inference-server"]
+        }
+      ]
+    },
+    {
+      "id": "model-b",
+      "display_name": "Model B",
+      "family": "TestFamily",
+      "tasks": ["Text Generation"],
+      "model_size": "13B",
+      "compatibility": [
+        {
+          "hardware": "Quietbox 2",
+          "chip_set": "Blackhole",
+          "hardware_family": "Quietbox",
+          "status": "Experimental",
+          "software": ["tt-forge"]
+        }
+      ]
+    },
+    {
+      "id": "model-c",
+      "display_name": "Model C",
+      "family": "TestFamily",
+      "tasks": ["Text Generation"],
+      "model_size": "70B",
+      "compatibility": [
+        {
+          "hardware": "Galaxy",
+          "chip_set": "Blackhole",
+          "hardware_family": "Galaxy",
+          "status": "Supported",
+          "software": ["tt-metal"]
+        }
+      ]
+    },
+    {
+      "id": "model-d",
+      "display_name": "Model D",
+      "family": "TestFamily",
+      "tasks": ["Text Generation"],
+      "model_size": "1B",
+      "compatibility": [
+        {
+          "hardware": "Quietbox 2",
+          "chip_set": "Blackhole",
+          "hardware_family": "Quietbox",
+          "status": "Not Supported",
+          "software": []
+        }
+      ]
+    }
+  ]
+}

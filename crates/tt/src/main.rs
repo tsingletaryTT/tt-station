@@ -13,6 +13,7 @@
 //!   tt [--json] config --host <host:port>
 //!   tt [--json] endpoint --host <host:port>
 //!   tt [--json] serving --host <host:port>
+//!   tt [--json] catalog --host <host:port> [--refresh] [--catalog-file <path>]
 //!   tt [--json] ssh-authorize --host <host:port> [--revoke] [--date <YYYY-MM-DD>]
 //!   tt console [--snapshot] [--install-service] [--ctrl-port <port>]
 //!
@@ -212,6 +213,33 @@ enum Command {
         host: String,
     },
 
+    /// Show the merged, box-aware model catalog: the public Tenstorrent
+    /// compatibility catalog (`compatibility.json`), classified against this
+    /// box's detected device mesh and its live `/models` list, into three
+    /// tiers -- runs here, experimental, needs other hardware (see
+    /// `libttstation::catalog::classify`). UNAUTHED on the agent side (like
+    /// `status`/`models`), so this works even against a box `tt pair` was
+    /// never run against; a down/unreachable agent still prints a useful
+    /// listing (just without `box_mesh`/live-model info -- see `cmd_catalog`).
+    Catalog {
+        /// The box's control-plane address, as `host:port`.
+        #[arg(long)]
+        host: String,
+
+        /// Force a fresh fetch of the public catalog instead of using the
+        /// on-disk 24h cache, even if that cache is still fresh. See
+        /// `catalog::load_catalog`.
+        #[arg(long)]
+        refresh: bool,
+
+        /// Read the compatibility catalog from this file instead of the
+        /// network/cache -- bypasses both entirely. Mainly for the no-
+        /// hardware e2e test (a fixture `compatibility.json`) and for an
+        /// operator who already has a local copy.
+        #[arg(long = "catalog-file")]
+        catalog_file: Option<PathBuf>,
+    },
+
     /// Authorize (or, with `--revoke`, remove) this Mac's SSH public key on
     /// a paired box, so an operator can `ssh <ssh_user>@<host>` straight
     /// into it -- e.g. for `tt-toplike`'s remote telemetry, or just a shell.
@@ -336,6 +364,14 @@ fn main() -> Result<()> {
         Command::Serving { host } => {
             let list = run_async(cmd_serving(host))?;
             print_serving(&list, cli.json);
+        }
+        Command::Catalog {
+            host,
+            refresh,
+            catalog_file,
+        } => {
+            let bc = run_async(cmd_catalog(host, *refresh, catalog_file.as_deref()));
+            print_catalog(&bc, cli.json);
         }
         Command::SshAuthorize { host, revoke, date } => {
             if *revoke {
@@ -660,6 +696,42 @@ async fn cmd_endpoint(host: &str) -> Result<Endpoint> {
 async fn cmd_serving(host: &str) -> Result<ServingList> {
     let base = format!("http://{host}");
     libttstation::agent_client::list_serving(&base).await
+}
+
+/// `tt catalog --host <host:port> [--refresh] [--catalog-file <path>]`:
+/// resolve the box's live mesh/models and merge them with the public
+/// compatibility catalog via `libttstation::catalog::classify`.
+///
+/// Deliberately returns a bare `BoxCatalog`, not a `Result<BoxCatalog>` --
+/// every input this depends on already degrades gracefully instead of
+/// erroring (see `catalog::load_catalog`'s degradation contract and
+/// `classify`'s `Option`-typed `catalog`/`box_mesh` parameters), so there is
+/// nothing left for this function itself to fail on:
+/// - `box_mesh`/`live_models` come from `/status`/`/models`, both UNAUTHED
+///   (like `cmd_status`/`cmd_models`) -- an unreachable/down agent just
+///   yields `None`/`[]` here rather than an error, so `tt catalog` still
+///   prints a useful other_hardware/experimental listing even against a box
+///   that's off or was never paired with.
+/// - a down/offline catalog fetch still leaves `live_models` (if any)
+///   showing up in `runs_here` (see `classify`'s live-model-always-wins
+///   rule) -- catalog and agent failures are independent, neither blocks
+///   the other's contribution to the merged view.
+async fn cmd_catalog(host: &str, refresh: bool, catalog_file: Option<&std::path::Path>) -> libttstation::catalog::BoxCatalog {
+    let base = format!("http://{host}");
+
+    let box_mesh = libttstation::agent_client::get_status(&base)
+        .await
+        .ok()
+        .and_then(|s| s.device_mesh);
+
+    let live_models = libttstation::agent_client::list_models(&base)
+        .await
+        .map(|r| r.models)
+        .unwrap_or_default();
+
+    let (compat, stale) = catalog::load_catalog(refresh, catalog_file);
+
+    libttstation::catalog::classify(compat.as_ref(), &live_models, box_mesh.as_deref(), stale)
 }
 
 /// `tt ssh-authorize --host <host:port>`: resolve (generating if needed)
@@ -1121,6 +1193,62 @@ fn print_serving(list: &ServingList, json: bool) {
     } else {
         for entry in &list.serving {
             println!("{}\t{}\t{}", entry.model, entry.base_url, entry.source);
+        }
+    }
+}
+
+/// `tt catalog`'s output: JSON prints the whole `BoxCatalog` object (the
+/// exact shape the macOS app's model picker decodes); human mode prints the
+/// three tiers as sections -- "Runs on this box" / "Experimental" / "Needs
+/// other hardware" -- each listing `display_name` (and, for the last
+/// section, the `needed_hardware` a model is missing here), plus a note line
+/// per degraded input (`catalog_available == false` and/or `catalog_stale`
+/// are independent conditions -- see `cmd_catalog`'s doc -- so both notes can
+/// print together, e.g. an offline catalog cache AND an unreachable agent).
+fn print_catalog(bc: &libttstation::catalog::BoxCatalog, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(bc).expect("BoxCatalog always serializes")
+        );
+        return;
+    }
+
+    if !bc.catalog_available {
+        println!("note: model catalog unavailable -- showing this box's live models");
+    }
+    if bc.catalog_stale {
+        println!("note: catalog cached / offline");
+    }
+
+    println!("Runs on this box:");
+    if bc.runs_here.is_empty() {
+        println!("  (none)");
+    } else {
+        for entry in &bc.runs_here {
+            println!("  {}", entry.display_name);
+        }
+    }
+
+    println!("Experimental:");
+    if bc.experimental.is_empty() {
+        println!("  (none)");
+    } else {
+        for entry in &bc.experimental {
+            println!("  {}", entry.display_name);
+        }
+    }
+
+    println!("Needs other hardware:");
+    if bc.other_hardware.is_empty() {
+        println!("  (none)");
+    } else {
+        for entry in &bc.other_hardware {
+            println!(
+                "  {} (needs: {})",
+                entry.display_name,
+                entry.needed_hardware.join(", ")
+            );
         }
     }
 }

@@ -30,13 +30,8 @@
 //! left behind by a previous crashed write, for instance, is treated the
 //! same as no cache file at all.
 
-// This module's only caller is the not-yet-written `tt catalog` command
-// (Task 4). Until that lands and wires `load_catalog`/`is_fresh` into
-// `main.rs`, every item here is legitimately dead code from `rustc`'s point
-// of view -- silence the warning at the module level rather than sprinkling
-// `#[allow(dead_code)]` over each function, and remove this once Task 4
-// adds the caller.
-#![allow(dead_code)]
+// This module's only caller is `tt catalog` (Task 4, `main.rs::cmd_catalog`),
+// which wires `load_catalog` in.
 
 use std::fs;
 use std::path::{Path, PathBuf};

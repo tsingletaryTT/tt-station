@@ -277,3 +277,106 @@ fn tt_config_json_round_trips_from_mock_box() {
 
     assert_eq!(summary.active_profile.as_deref(), Some("mock"));
 }
+
+/// `tt --json catalog --host <mock> --catalog-file <fixture>` (Task 4):
+/// classifies a trimmed fixture catalog (`tests/fixtures/compatibility.json`
+/// -- one Supported/one Experimental/one Galaxy-only/one Not-Supported model)
+/// against mock-box's canned `/status` (`device_mesh: "p300x2"`) and
+/// `/models` (`mock-model`, `mock-model-large`), entirely without hardware or
+/// network -- `--catalog-file` bypasses both the real CDN fetch and the
+/// on-disk cache (see `tt::catalog::load_catalog`'s `file_override` path),
+/// and mock-box stands in for a live agent, UNAUTHED just like `tt
+/// status`/`tt models`, so this needs no prior `tt pair`.
+#[test]
+#[ignore] // hardware-free but network/process -- run with --ignored like the others
+fn tt_catalog_json_classifies_fixture_against_mock_box() {
+    let port: u16 = 18901;
+    let host = format!("127.0.0.1:{port}");
+
+    let _mock_box = spawn_mock_box(port);
+    wait_for_port(port);
+
+    let config_dir = TempConfigDir::new();
+
+    // Absolute path built from CARGO_MANIFEST_DIR (this crate's own
+    // `crates/tt/`) rather than a path relative to the test binary's cwd --
+    // `cargo test` doesn't guarantee a stable cwd, but this env var is
+    // always set at compile time to the crate root.
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("compatibility.json");
+    assert!(
+        fixture_path.exists(),
+        "fixture must exist at {fixture_path:?}"
+    );
+
+    let catalog_stdout = AssertCommand::cargo_bin("tt")
+        .unwrap()
+        .env("TT_CONFIG_DIR", &config_dir.0)
+        .args([
+            "--json",
+            "catalog",
+            "--host",
+            &host,
+            "--catalog-file",
+            fixture_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let bc: libttstation::catalog::BoxCatalog =
+        serde_json::from_slice(&catalog_stdout).expect("catalog output parses as BoxCatalog");
+
+    // mock-box's `/status` reports `device_mesh: "p300x2"` (see
+    // `mock-box/src/main.rs`'s `get_status`).
+    assert_eq!(bc.box_mesh.as_deref(), Some("p300x2"));
+    assert!(bc.catalog_available, "the fixture file should parse");
+    assert!(!bc.catalog_stale, "a --catalog-file load is never stale");
+
+    // "Model A" (Supported on Quietbox 2 == p300x2) lands in runs_here,
+    // alongside mock-box's live "mock-model"/"mock-model-large" (no catalog
+    // match, so they're appended verbatim -- see `classify`'s doc).
+    assert!(
+        bc.runs_here.iter().any(|e| e.id == "model-a"),
+        "expected Model A in runs_here, got: {:?}",
+        bc.runs_here
+    );
+    assert!(
+        bc.runs_here
+            .iter()
+            .any(|e| e.display_name == "mock-model"),
+        "expected mock-box's live mock-model in runs_here, got: {:?}",
+        bc.runs_here
+    );
+
+    // "Model B" (Experimental on Quietbox 2) lands in experimental.
+    assert!(
+        bc.experimental.iter().any(|e| e.id == "model-b"),
+        "expected Model B in experimental, got: {:?}",
+        bc.experimental
+    );
+
+    // "Model C" (Supported only on Galaxy) needs other hardware, and is
+    // annotated with the mesh it needs (Galaxy -> T3K, see
+    // `libttstation::catalog::hw_to_mesh`).
+    let model_c = bc
+        .other_hardware
+        .iter()
+        .find(|e| e.id == "model-c")
+        .unwrap_or_else(|| panic!("expected Model C in other_hardware, got: {:?}", bc.other_hardware));
+    assert_eq!(model_c.needed_hardware, vec!["T3K".to_string()]);
+
+    // "Model D" (Not Supported everywhere) is omitted entirely.
+    assert!(
+        !bc.runs_here
+            .iter()
+            .chain(&bc.experimental)
+            .chain(&bc.other_hardware)
+            .any(|e| e.id == "model-d"),
+        "Model D should be omitted entirely, got: {bc:?}"
+    );
+}
