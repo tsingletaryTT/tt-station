@@ -24,6 +24,8 @@ any box:
   TTS_REPO          --tt-inference-repo                  (default: ~/code/tt-inference-server)
   TTS_IMAGE         --serving-image (optional override)  (default: unset → agent auto-picks/pins)
   TTS_HF_ENV        file to read HF_TOKEN from           (default: <repo>/.env)
+  TTS_CONFIG        agentd.toml path (profile dropdown)  (default: $TT_CONFIG_DIR/agentd.toml or
+                                                           ~/.config/tt-station/agentd.toml)
 """
 
 import os
@@ -31,6 +33,7 @@ import re
 import socket
 import subprocess
 import threading
+import tomllib
 import urllib.request
 from pathlib import Path
 
@@ -84,6 +87,30 @@ def read_hf_token() -> str:
     return os.environ.get("HF_TOKEN", "")
 
 
+def read_profiles() -> tuple[list[str], str | None]:
+    """Read named-profile info from the box-local agentd.toml, for the dropdown.
+
+    Mirrors the agent's own config-file resolution order: `TTS_CONFIG` env
+    var, else `$TT_CONFIG_DIR/agentd.toml`, else `~/.config/tt-station/agentd.toml`.
+
+    GRACEFUL DEGRADATION: any error at all (no file, unreadable, bad TOML, no
+    `[profile.*]` tables) returns `([], None)` — the panel must keep working
+    exactly as before with no config file, i.e. no `--profile` flag appended
+    and the dropdown hidden. This is deliberately broad (bare `except
+    Exception`) because a malformed box-local file should never stop the
+    panel from starting the agent.
+    """
+    path = os.environ.get("TTS_CONFIG") or os.path.join(
+        os.environ.get("TT_CONFIG_DIR", os.path.expanduser("~/.config/tt-station")),
+        "agentd.toml")
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        return sorted(data.get("profile", {}).keys()), data.get("default_profile")
+    except Exception:
+        return [], None
+
+
 class Panel(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="tt-station")
@@ -111,6 +138,26 @@ class Panel(Gtk.ApplicationWindow):
         sub = Gtk.Label(label=f"ctrl :{CTRL_PORT} · advertising _tenstorrent._tcp", xalign=0)
         sub.add_css_class("subtle"); root.append(sub)
 
+        # profile dropdown — populated from the box-local agentd.toml
+        # (read_profiles()). Hidden entirely when there's no config file, so
+        # a box with no agentd.toml behaves exactly as before this feature:
+        # Start launches the agent with no --profile flag.
+        self.profile_names, default_profile = read_profiles()
+        self.profile_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        profile_caption = Gtk.Label(label="profile:", xalign=0)
+        profile_caption.add_css_class("subtle")
+        self.profile_row.append(profile_caption)
+        self.profile_combo = Gtk.ComboBoxText()
+        for name in self.profile_names:
+            self.profile_combo.append_text(name)
+        if self.profile_names:
+            default_idx = (self.profile_names.index(default_profile)
+                           if default_profile in self.profile_names else 0)
+            self.profile_combo.set_active(default_idx)
+        self.profile_row.append(self.profile_combo)
+        self.profile_row.set_visible(bool(self.profile_names))
+        root.append(self.profile_row)
+
         # pairing code card (the star of the show)
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         card.add_css_class("codecard")
@@ -125,6 +172,11 @@ class Panel(Gtk.ApplicationWindow):
         self.status_label.add_css_class("statusline"); root.append(self.status_label)
         self.endpoint_label = Gtk.Label(label="", xalign=0, selectable=True)
         self.endpoint_label.add_css_class("endpoint"); root.append(self.endpoint_label)
+        # what's actually running, per the agent's own GET /config — separate
+        # from the dropdown above so a dropdown change mid-run doesn't look
+        # like it already took effect.
+        self.profile_status_label = Gtk.Label(label="", xalign=0)
+        self.profile_status_label.add_css_class("subtle"); root.append(self.profile_status_label)
 
         # buttons
         btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, homogeneous=True)
@@ -165,6 +217,11 @@ class Panel(Gtk.ApplicationWindow):
                "--serving-host", SERVING_HOST, "--serving-port", SERVING_PORT]
         if IMAGE:
             cmd += ["--serving-image", IMAGE]
+        # Only append --profile when a profile is actually selected — an
+        # empty dropdown (no agentd.toml) must launch exactly as before.
+        selected = self.profile_combo.get_active_text() if self.profile_names else None
+        if selected:
+            cmd += ["--profile", selected]
         return cmd  # device auto-detected; token-store default; HF via env
 
     def running(self) -> bool:
@@ -260,16 +317,25 @@ class Panel(Gtk.ApplicationWindow):
 
     def _fetch_status(self):
         if not self.running():
-            GLib.idle_add(self._render_status, None)
+            GLib.idle_add(self._render_status, None, None)
             return
+        import json
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{CTRL_PORT}/status", timeout=3) as r:
-                import json
-                GLib.idle_add(self._render_status, json.loads(r.read().decode()))
+                status = json.loads(r.read().decode())
         except Exception:
-            GLib.idle_add(self._render_status, {"_unreachable": True})
+            status = {"_unreachable": True}
+        # GET /config alongside /status — best-effort: an older agent or a
+        # transient hiccup here shouldn't blank out the status pill above.
+        config = None
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{CTRL_PORT}/config", timeout=3) as r:
+                config = json.loads(r.read().decode())
+        except Exception:
+            pass
+        GLib.idle_add(self._render_status, status, config)
 
-    def _render_status(self, data):
+    def _render_status(self, data, config=None):
         for c in ("pill-off", "pill-idle", "pill-serve"):
             self.pill.remove_css_class(c)
         if data is None:
@@ -291,6 +357,20 @@ class Panel(Gtk.ApplicationWindow):
                 self.pill.set_text("idle"); self.pill.add_css_class("pill-idle")
                 self.status_label.set_text(f"idle  ·  {data.get('chips','')}  ·  ready to run a model")
                 self.endpoint_label.set_text("")
+
+        # active-profile line, straight from the running agent's GET /config
+        # when we have it (the ground truth for what's actually serving);
+        # fall back to the dropdown's current pick when the agent isn't
+        # reachable yet, so the line isn't just blank while starting.
+        if config is not None:
+            active = config.get("active_profile")
+            self.profile_status_label.set_text(
+                f"active profile: {active}" if active else "active profile: (implicit default)")
+        elif self.profile_names:
+            selected = self.profile_combo.get_active_text()
+            self.profile_status_label.set_text(f"profile selected: {selected}" if selected else "")
+        else:
+            self.profile_status_label.set_text("")
         return False
 
     def _refresh_buttons(self):
