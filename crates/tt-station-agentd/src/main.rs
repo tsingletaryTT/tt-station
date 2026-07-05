@@ -17,8 +17,9 @@ use libttstation::discovery::SERVICE_TYPE;
 use libttstation::model::{txt_encode, BoxRecord, ServingStatus};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
+use tt_station_agentd::device::detect_device_mesh;
 use tt_station_agentd::routes::{app, AppState, StatusAdvertiser};
-use tt_station_agentd::serving::docker::DockerConfig;
+use tt_station_agentd::serving::docker::{CommandRunner, DockerConfig, RealCommandRunner};
 use tt_station_agentd::serving::make_backend;
 use tt_station_agentd::serving::runpy::RunPyConfig;
 
@@ -345,6 +346,38 @@ fn default_token_store() -> String {
     format!("{home}/.config/tt-station/agentd-tokens.json")
 }
 
+/// Detect this box's device-mesh label by running `<tt_smi_bin> -s` once at
+/// startup, through the same `RealCommandRunner` argv-style command seam
+/// `GET /telemetry` uses (see `telemetry::snapshot`/`collect_snapshot` in
+/// routes.rs) -- reusing that seam rather than inventing a second subprocess
+/// call for `tt-smi`.
+///
+/// Never fatal: a spawn failure, non-zero exit, or output
+/// `device::detect_device_mesh` can't map to a known mesh all degrade to
+/// `None` with an `eprintln!` note, so a box without `tt-smi` on `$PATH` (or
+/// mid-reset, or an unrecognized fleet) still boots normally -- `/status`
+/// just reports `"device_mesh": null`.
+fn detect_startup_device_mesh(tt_smi_bin: &str) -> Option<String> {
+    let runner = RealCommandRunner;
+    match runner.run(&[tt_smi_bin, "-s"]) {
+        Ok(stdout) => {
+            let mesh = detect_device_mesh(&stdout);
+            if mesh.is_none() {
+                eprintln!(
+                    "tt-station-agentd: '{tt_smi_bin} -s' output didn't map to a known device mesh; device_mesh will report null"
+                );
+            }
+            mesh
+        }
+        Err(err) => {
+            eprintln!(
+                "tt-station-agentd: failed to run '{tt_smi_bin} -s' for device-mesh detection: {err:#}; device_mesh will report null"
+            );
+            None
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -465,6 +498,17 @@ async fn main() -> Result<()> {
     // `with_telemetry_config`/`with_status_advertiser` are (all rely on
     // `Arc::get_mut`). No-op for every existing route -- purely additive.
     let state = state.with_serving_config(cli.serving_host.clone(), cli.serving_port);
+
+    // Detect this box's device mesh ONCE at startup (not per-request): run
+    // `tt-smi -s` through the exact same command seam `GET /telemetry` uses
+    // (`RealCommandRunner`, see `collect_snapshot` in routes.rs) and map its
+    // stdout through `device::detect_device_mesh`. Reported on `/status` so
+    // a client (Task 3's `tt --json status`) can rank models by hardware fit
+    // without its own `tt-smi` access. ANY failure here (binary missing,
+    // non-zero exit, unrecognized/mixed fleet) degrades to `None` -- this
+    // must never delay or fail agent startup.
+    let device_mesh = detect_startup_device_mesh(&cli.tt_smi_bin);
+    let state = state.with_device_mesh(device_mesh);
 
     // Bind the control-plane socket FIRST, then advertise on the LAN, so
     // discovery never races ahead of the control-plane API actually being

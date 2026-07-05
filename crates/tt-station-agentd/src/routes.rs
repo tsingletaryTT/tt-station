@@ -186,6 +186,14 @@ struct Inner {
     /// model) vs `"external"`. Defaults to `DEFAULT_SERVING_PORT`; set via
     /// `with_serving_config`.
     serving_port: u16,
+    /// This box's device-mesh label (`"p300x2"`, `"n300x4"`, ...), detected
+    /// ONCE at startup by running `tt-smi -s` and mapping its output through
+    /// `device::detect_device_mesh` (see `main.rs`). `None` when detection
+    /// failed or the fleet doesn't match a known mesh -- never fatal, just
+    /// an absent hint. Defaults to `None`; set via `with_device_mesh`.
+    /// Purely additive: only `GET /status` reads it, so a client (Task 3's
+    /// `tt --json status`) can rank models by hardware fit.
+    device_mesh: Option<String>,
 }
 
 impl AppState {
@@ -250,6 +258,7 @@ impl AppState {
                 telemetry_interval_ms: DEFAULT_TELEMETRY_INTERVAL_MS,
                 serving_host: DEFAULT_SERVING_HOST.to_string(),
                 serving_port: DEFAULT_SERVING_PORT,
+                device_mesh: None,
             }),
         }
     }
@@ -321,12 +330,38 @@ impl AppState {
         self
     }
 
+    /// Set this box's detected device-mesh label (see the `device_mesh`
+    /// field's doc comment). Additive counterpart to `with_serving_config`/
+    /// `with_telemetry_config`/`with_status_advertiser` -- same "call
+    /// immediately after construction, while this is still the sole owner of
+    /// its `Arc<Inner>`" contract (`Arc::get_mut` only succeeds then). Called
+    /// after a clone exists, it logs a warning and leaves the default (`None`)
+    /// in place rather than panicking.
+    ///
+    /// Optional: an `AppState` never given this config still answers
+    /// `/status` with `"device_mesh": null`.
+    pub fn with_device_mesh(mut self, device_mesh: Option<String>) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.device_mesh = device_mesh,
+            None => eprintln!(
+                "tt-station-agentd: with_device_mesh called on an already-shared AppState; device_mesh not applied"
+            ),
+        }
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.inner.name
     }
 
     pub fn chips(&self) -> &str {
         &self.inner.chips
+    }
+
+    /// This box's detected device-mesh label, or `None` if detection failed
+    /// or never ran (see `with_device_mesh`). Read by `GET /status`.
+    pub fn device_mesh(&self) -> Option<&str> {
+        self.inner.device_mesh.as_deref()
     }
 
     /// `tt-smi` binary the `/telemetry` stream runs (see `with_telemetry_config`).
@@ -813,6 +848,12 @@ struct StatusResponse {
     /// representation used on the wire for mDNS, so agent and CLI never
     /// have to reconcile two different status encodings.
     status: String,
+    /// This box's detected device-mesh label (`"p300x2"`, `"n300x4"`, ...),
+    /// or `null` when detection failed/didn't run -- see
+    /// `AppState::with_device_mesh`. Lets a client (Task 3's
+    /// `tt --json status`) rank models by hardware fit without its own
+    /// `tt-smi` access.
+    device_mesh: Option<String>,
 }
 
 async fn get_status(
@@ -822,6 +863,7 @@ async fn get_status(
         name: state.name().to_string(),
         chips: state.chips().to_string(),
         status: state.status().to_txt(),
+        device_mesh: state.device_mesh().map(str::to_string),
     })
 }
 
