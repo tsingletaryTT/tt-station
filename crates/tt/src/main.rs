@@ -42,6 +42,7 @@
 //! and "async" cleanly separated instead of fighting Tokio's single-blocking-
 //! call-per-runtime rules.
 
+mod catalog;
 mod ssh;
 
 use std::path::PathBuf;
