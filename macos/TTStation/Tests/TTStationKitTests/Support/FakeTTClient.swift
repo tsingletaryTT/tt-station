@@ -31,6 +31,29 @@ final class FakeTTClient: TTCommands {
         ttInferenceRepo: nil,
         ttDevice: "p300x2")
     var configError: TTError?
+    var catalogResult = BoxCatalog(
+        boxMesh: "p300x2",
+        catalogAvailable: true,
+        catalogStale: false,
+        runsHere: [
+            CatalogEntry(
+                id: "qwen3-8b", displayName: "Qwen3-8B", family: "Qwen3", size: "8B",
+                software: ["vllm"], meshes: ["p300x2"], neededHardware: [],
+                availableNow: true, statusHere: "supported")
+        ],
+        experimental: [
+            CatalogEntry(
+                id: "llama-3.1-70b", displayName: "Llama-3.1-70B", family: "Llama", size: "70B",
+                software: ["vllm"], meshes: ["t3k"], neededHardware: [],
+                availableNow: false, statusHere: "experimental")
+        ],
+        otherHardware: [
+            CatalogEntry(
+                id: "llama-3.1-405b", displayName: "Llama-3.1-405B", family: "Llama", size: "405B",
+                software: ["vllm"], meshes: ["t3k"], neededHardware: ["T3K"],
+                availableNow: false, statusHere: "needs_other_hardware")
+        ])
+    var catalogError: TTError?
 
     func discover(manualHosts: [String], noMdns: Bool) async throws -> [BoxRecord] { [] }
     func models(host: String) async throws -> [ModelInfo] { models_ }
@@ -48,6 +71,10 @@ final class FakeTTClient: TTCommands {
     func config(host: String) async throws -> BoxConfig {
         if let configError { throw configError }
         return configResult
+    }
+    func catalog(host: String) async throws -> BoxCatalog {
+        if let catalogError { throw catalogError }
+        return catalogResult
     }
     func pair(host: String, code: String) async throws -> PairResult {
         if pairShouldSucceed { return PairResult(host: host, paired: true) }

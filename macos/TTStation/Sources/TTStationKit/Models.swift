@@ -214,3 +214,98 @@ public struct SshAuthorizeInfo: Codable, Equatable {
         self.authorized = authorized; self.sshUser = sshUser; self.alreadyPresent = alreadyPresent
     }
 }
+
+/// One model in the box's catalog — a curated entry describing whether/how a
+/// model runs on *this* box, independent of whether it's currently serving.
+/// Part of `BoxCatalog`; see that type's doc comment for the three tiers this
+/// entry can appear in.
+public struct CatalogEntry: Codable, Equatable {
+    public let id: String
+    public let displayName: String
+    public let family: String
+    public let size: String?
+    public let software: [String]
+    public let meshes: [String]
+    public let neededHardware: [String]
+    public let availableNow: Bool
+    public let statusHere: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, family, size, software, meshes
+        case displayName = "display_name"
+        case neededHardware = "needed_hardware"
+        case availableNow = "available_now"
+        case statusHere = "status_here"
+    }
+
+    // Explicit public init for the same reason `Endpoint`/`ServingEntry`/
+    // `BoxConfig` have one: the synthesized memberwise init is `internal`, so
+    // the test target's `FakeTTClient` couldn't construct one without this.
+    public init(
+        id: String,
+        displayName: String,
+        family: String,
+        size: String?,
+        software: [String],
+        meshes: [String],
+        neededHardware: [String],
+        availableNow: Bool,
+        statusHere: String
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.family = family
+        self.size = size
+        self.software = software
+        self.meshes = meshes
+        self.neededHardware = neededHardware
+        self.availableNow = availableNow
+        self.statusHere = statusHere
+    }
+}
+
+/// Response from `tt --json catalog --host <host:port>` — the box's curated
+/// model catalog, split into three tiers for the model browser:
+///   - `runsHere`: models that run on this box's actual mesh right now.
+///   - `experimental`: models that might run here but aren't fully verified.
+///   - `otherHardware`: models that need hardware this box doesn't have
+///     (see each entry's `neededHardware`).
+/// Unauthed, like `models`/`status`/`serving`/`config`, so it's safe to fetch
+/// regardless of pairing. `catalogAvailable`/`catalogStale` let the UI signal
+/// when the curated catalog itself is missing or out of date on the box.
+public struct BoxCatalog: Codable, Equatable {
+    public let boxMesh: String?
+    public let catalogAvailable: Bool
+    public let catalogStale: Bool
+    public let runsHere: [CatalogEntry]
+    public let experimental: [CatalogEntry]
+    public let otherHardware: [CatalogEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case experimental
+        case boxMesh = "box_mesh"
+        case catalogAvailable = "catalog_available"
+        case catalogStale = "catalog_stale"
+        case runsHere = "runs_here"
+        case otherHardware = "other_hardware"
+    }
+
+    // Explicit public init for the same reason `Endpoint`/`ServingEntry`/
+    // `BoxConfig` have one: the synthesized memberwise init is `internal`, so
+    // the test target's `FakeTTClient` couldn't construct one without this.
+    public init(
+        boxMesh: String?,
+        catalogAvailable: Bool,
+        catalogStale: Bool,
+        runsHere: [CatalogEntry],
+        experimental: [CatalogEntry],
+        otherHardware: [CatalogEntry]
+    ) {
+        self.boxMesh = boxMesh
+        self.catalogAvailable = catalogAvailable
+        self.catalogStale = catalogStale
+        self.runsHere = runsHere
+        self.experimental = experimental
+        self.otherHardware = otherHardware
+    }
+}

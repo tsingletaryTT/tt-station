@@ -248,4 +248,20 @@ final class BoxViewModelTests: XCTestCase {
         XCTAssertNotNil(vm.endpoint)
         XCTAssertEqual(vm.endpoint?.baseURL, client.runEndpoint.baseURL)
     }
+
+    func testRefreshPopulatesCatalog() async {
+        let client = FakeTTClient()
+        let (vm, _) = makeVM(paired: false, client: client)
+        await vm.refresh()
+        XCTAssertEqual(vm.catalog, client.catalogResult)
+    }
+
+    func testRefreshCatalogFailureYieldsNilNotFatal() async {
+        let client = FakeTTClient()
+        client.catalogError = .commandFailed(command: [], exitCode: 1, stderr: "boom")
+        let (vm, _) = makeVM(paired: true, client: client)
+        await vm.refresh()
+        XCTAssertNil(vm.catalog)
+        XCTAssertNil(vm.errorText)
+    }
 }

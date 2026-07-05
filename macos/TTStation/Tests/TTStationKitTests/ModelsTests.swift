@@ -125,4 +125,96 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(cfg.ttInferenceRepo)
         XCTAssertNil(cfg.ttDevice)
     }
+
+    func testDecodeBoxCatalog() throws {
+        let json = #"""
+        {
+            "box_mesh": "p300x2",
+            "catalog_available": true,
+            "catalog_stale": false,
+            "runs_here": [
+                {
+                    "id": "qwen3-8b",
+                    "display_name": "Qwen3-8B",
+                    "family": "Qwen3",
+                    "size": "8B",
+                    "software": ["vllm"],
+                    "meshes": ["p300x2"],
+                    "needed_hardware": [],
+                    "available_now": true,
+                    "status_here": "supported"
+                }
+            ],
+            "experimental": [
+                {
+                    "id": "llama-3.1-70b",
+                    "display_name": "Llama-3.1-70B",
+                    "family": "Llama",
+                    "size": "70B",
+                    "software": ["vllm"],
+                    "meshes": ["t3k"],
+                    "needed_hardware": [],
+                    "available_now": false,
+                    "status_here": "experimental"
+                }
+            ],
+            "other_hardware": [
+                {
+                    "id": "llama-3.1-405b",
+                    "display_name": "Llama-3.1-405B",
+                    "family": "Llama",
+                    "size": "405B",
+                    "software": ["vllm"],
+                    "meshes": ["t3k"],
+                    "needed_hardware": ["T3K"],
+                    "available_now": false,
+                    "status_here": "needs_other_hardware"
+                }
+            ]
+        }
+        """#
+        let catalog = try JSONDecoder().decode(BoxCatalog.self, from: Data(json.utf8))
+        XCTAssertEqual(catalog.boxMesh, "p300x2")
+        XCTAssertTrue(catalog.catalogAvailable)
+        XCTAssertFalse(catalog.catalogStale)
+
+        XCTAssertEqual(catalog.runsHere.count, 1)
+        let runsHere = catalog.runsHere[0]
+        XCTAssertEqual(runsHere.id, "qwen3-8b")
+        XCTAssertEqual(runsHere.displayName, "Qwen3-8B")
+        XCTAssertEqual(runsHere.family, "Qwen3")
+        XCTAssertEqual(runsHere.size, "8B")
+        XCTAssertEqual(runsHere.software, ["vllm"])
+        XCTAssertEqual(runsHere.meshes, ["p300x2"])
+        XCTAssertEqual(runsHere.neededHardware, [])
+        XCTAssertTrue(runsHere.availableNow)
+        XCTAssertEqual(runsHere.statusHere, "supported")
+
+        XCTAssertEqual(catalog.experimental.count, 1)
+        XCTAssertEqual(catalog.experimental[0].id, "llama-3.1-70b")
+        XCTAssertFalse(catalog.experimental[0].availableNow)
+
+        XCTAssertEqual(catalog.otherHardware.count, 1)
+        XCTAssertEqual(catalog.otherHardware[0].neededHardware, ["T3K"])
+    }
+
+    func testDecodeBoxCatalogNullBoxMesh() throws {
+        let json = #"""
+        {
+            "box_mesh": null,
+            "catalog_available": false,
+            "catalog_stale": true,
+            "runs_here": [],
+            "experimental": [],
+            "other_hardware": []
+        }
+        """#
+        let catalog = try JSONDecoder().decode(BoxCatalog.self, from: Data(json.utf8))
+        XCTAssertNil(catalog.boxMesh)
+        XCTAssertFalse(catalog.catalogAvailable)
+        XCTAssertTrue(catalog.catalogStale)
+        XCTAssertTrue(catalog.runsHere.isEmpty)
+        XCTAssertTrue(catalog.experimental.isEmpty)
+        XCTAssertTrue(catalog.otherHardware.isEmpty)
+    }
 }

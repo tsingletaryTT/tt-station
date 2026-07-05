@@ -8,6 +8,7 @@ public protocol TTCommands {
     func endpoint(host: String) async throws -> Endpoint
     func serving(host: String) async throws -> [ServingEntry]
     func config(host: String) async throws -> BoxConfig
+    func catalog(host: String) async throws -> BoxCatalog
     func pair(host: String, code: String) async throws -> PairResult
     func pairInit(host: String) async throws -> PairInitResult
     func pairComplete(host: String, pairId: String, code: String) async throws -> PairResult
@@ -60,6 +61,13 @@ public final class TTClient {
     /// `status`/`serving`, so it can be fetched regardless of pairing.
     public func config(host: String) async throws -> BoxConfig {
         try await call(["--json", "config", "--host", host], decode: BoxConfig.self)
+    }
+
+    /// The box's curated model catalog (runs-here / experimental /
+    /// other-hardware tiers). Unauthed, like `models`/`status`/`serving`/
+    /// `config`, so it can be fetched regardless of pairing.
+    public func catalog(host: String) async throws -> BoxCatalog {
+        try await call(["--json", "catalog", "--host", host], decode: BoxCatalog.self)
     }
 
     // MARK: Helpers
