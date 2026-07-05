@@ -5,6 +5,11 @@ Wants=network-online.target
 
 [Service]
 ExecStart={{AGENT_BIN}}
+# systemd --user services get a minimal PATH that omits ~/.local/bin and any
+# virtualenv, so the agent couldn't find tt-smi (device-mesh detection) or the
+# python3 that runs tt-inference-server's run.py. `tt console --install-service`
+# bakes the operator's own PATH in here at install time so the service can serve.
+Environment=PATH={{PATH_ENV}}
 Restart=on-failure
 RestartSec=2
 

@@ -31,13 +31,16 @@ use std::path::PathBuf;
 /// `src/`, `tt/`, `crates/` to the repo root, where `deploy/` lives.
 const UNIT_TEMPLATE: &str = include_str!("../../../../deploy/tt-station-agentd.service");
 
-/// Fill the `{{AGENT_BIN}}` placeholder in [`UNIT_TEMPLATE`] with the
-/// absolute path to the installed `tt-station-agentd` binary. Callers should
-/// treat a leftover `{{AGENT_BIN}}` in the result as a template bug -- see
-/// the `unit_template_fills_agent_bin` test, which asserts the placeholder
-/// is gone.
-pub fn render_unit(agent_bin_path: &str) -> String {
-    UNIT_TEMPLATE.replace("{{AGENT_BIN}}", agent_bin_path)
+/// Fill the [`UNIT_TEMPLATE`] placeholders: `{{AGENT_BIN}}` with the absolute
+/// path to the installed `tt-station-agentd` binary, and `{{PATH_ENV}}` with
+/// the PATH the service should run with (systemd --user's default PATH omits
+/// ~/.local/bin and any venv). Callers should treat a leftover `{{...}}` in the
+/// result as a template bug -- see the `unit_template_fills_agent_bin_and_path`
+/// test, which asserts both placeholders are gone.
+pub fn render_unit(agent_bin_path: &str, path_env: &str) -> String {
+    UNIT_TEMPLATE
+        .replace("{{AGENT_BIN}}", agent_bin_path)
+        .replace("{{PATH_ENV}}", path_env)
 }
 
 /// Render a systemd drop-in that pins the agent to a specific `--profile`.
@@ -181,7 +184,11 @@ impl<'a> LifecycleActions<'a> {
     pub fn install_service(&self, agent_bin_path: &str) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.config_dir)?;
         let path = self.config_dir.join(&self.names.service_name);
-        let content = render_unit(agent_bin_path);
+        // Capture the operator's own PATH at install time and bake it into the
+        // unit, so the service (which otherwise runs with systemd's minimal
+        // PATH) can find tt-smi, docker, and the venv python3 it needs to serve.
+        let path_env = std::env::var("PATH").unwrap_or_default();
+        let content = render_unit(agent_bin_path, &path_env);
         let needs_write = !path.exists()
             || std::fs::read_to_string(&path)
                 .map(|existing| existing != content)
@@ -278,10 +285,15 @@ mod tests {
     }
 
     #[test]
-    fn unit_template_fills_agent_bin() {
-        let unit = render_unit("/home/x/.local/bin/tt-station-agentd");
+    fn unit_template_fills_agent_bin_and_path() {
+        let unit = render_unit(
+            "/home/x/.local/bin/tt-station-agentd",
+            "/home/x/.local/bin:/usr/bin:/bin",
+        );
         assert!(unit.contains("ExecStart=/home/x/.local/bin/tt-station-agentd"));
+        assert!(unit.contains("Environment=PATH=/home/x/.local/bin:/usr/bin:/bin"));
         assert!(!unit.contains("{{AGENT_BIN}}"));
+        assert!(!unit.contains("{{PATH_ENV}}"));
     }
 
     #[test]
@@ -345,7 +357,9 @@ mod tests {
         let unit_path = tmp.path().join("svc.service");
         let content = std::fs::read_to_string(&unit_path).unwrap();
         assert!(content.contains("ExecStart=/opt/tt/tt-station-agentd"));
+        assert!(content.contains("Environment=PATH="));
         assert!(!content.contains("{{AGENT_BIN}}"));
+        assert!(!content.contains("{{PATH_ENV}}"));
 
         assert_eq!(
             env.calls.borrow()[0],
