@@ -18,6 +18,9 @@ final class FakeTTClient: TTCommands {
     var pairCompleteSucceeds = true
     var pairCompleteError: TTError?
     var pairCompleteCalled = false
+    var sshAuthorizeResult = SshAuthorizeInfo(authorized: true, sshUser: "ttuser", alreadyPresent: false)
+    var sshAuthorizeError: TTError?
+    var sshAuthorizeCalled = false
 
     func discover(manualHosts: [String], noMdns: Bool) async throws -> [BoxRecord] { [] }
     func models(host: String) async throws -> [ModelInfo] { models_ }
@@ -52,6 +55,11 @@ final class FakeTTClient: TTCommands {
         return runEndpoint
     }
     func stop(host: String) async throws {}
+    func sshAuthorize(host: String) async throws -> SshAuthorizeInfo {
+        sshAuthorizeCalled = true
+        if let sshAuthorizeError { throw sshAuthorizeError }
+        return sshAuthorizeResult
+    }
     func isAuthError(_ error: TTError) -> Bool {
         if case let .commandFailed(_, _, s) = error { return s.lowercased().contains("no token") }
         return false

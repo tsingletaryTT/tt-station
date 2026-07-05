@@ -53,6 +53,12 @@ struct BoxDetailView: View {
                             .disabled(box.inFlight)
                         if box.inFlight { ProgressView().scaleEffect(0.6) }
                     }
+                    Toggle("Also enable Terminal / SSH access (installs this Mac's key as ttuser)", isOn: $box.enableSSH)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                    if let sshMessage = box.sshMessage {
+                        Text(sshMessage).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
                 }
             } else {
                 HStack(spacing: 8) {

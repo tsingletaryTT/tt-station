@@ -146,3 +146,23 @@ public struct PairInitResult: Codable, Equatable {
 public struct StatusResponse: Codable, Equatable {
     public let status: String
 }
+
+/// Response from `tt --json ssh-authorize --host <host:port>`. The CLI also
+/// emits `public_key_path`, but we only surface the fields the pair-flow UI
+/// needs — the extra key is simply ignored by `JSONDecoder`, same as
+/// `PairInitResult` ignoring an echoed `host`.
+public struct SshAuthorizeInfo: Codable, Equatable {
+    public let authorized: Bool
+    public let sshUser: String
+    public let alreadyPresent: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case authorized
+        case sshUser = "ssh_user"
+        case alreadyPresent = "already_present"
+    }
+
+    public init(authorized: Bool, sshUser: String, alreadyPresent: Bool) {
+        self.authorized = authorized; self.sshUser = sshUser; self.alreadyPresent = alreadyPresent
+    }
+}

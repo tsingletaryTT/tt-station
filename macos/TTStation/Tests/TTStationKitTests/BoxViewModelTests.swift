@@ -52,6 +52,44 @@ final class BoxViewModelTests: XCTestCase {
         XCTAssertNil(vm.pairId)
     }
 
+    func testCompletePairingWithSSHEnabledCallsAuthorizeAndSetsMessage() async {
+        let client = FakeTTClient()
+        client.sshAuthorizeResult = SshAuthorizeInfo(authorized: true, sshUser: "ttuser", alreadyPresent: false)
+        let (vm, _) = makeVM(paired: false, client: client)
+        vm.enableSSH = true
+        await vm.startPairing()
+        await vm.completePairing(code: "123456")
+        XCTAssertTrue(vm.isPaired)
+        XCTAssertTrue(client.sshAuthorizeCalled)
+        XCTAssertEqual(vm.sshMessage, "SSH enabled — connect as ttuser.")
+    }
+
+    func testCompletePairingWithSSHDisabledSkipsAuthorize() async {
+        let client = FakeTTClient()
+        let (vm, _) = makeVM(paired: false, client: client)
+        vm.enableSSH = false
+        await vm.startPairing()
+        await vm.completePairing(code: "123456")
+        XCTAssertTrue(vm.isPaired)
+        XCTAssertFalse(client.sshAuthorizeCalled)
+        XCTAssertNil(vm.sshMessage)
+    }
+
+    func testCompletePairingSSHFailureIsNonFatalToPairing() async {
+        let client = FakeTTClient()
+        client.sshAuthorizeError = .commandFailed(command: [], exitCode: 1, stderr: "no local SSH key found")
+        let (vm, _) = makeVM(paired: false, client: client)
+        vm.enableSSH = true
+        await vm.startPairing()
+        await vm.completePairing(code: "123456")
+        // Pairing itself must still succeed — the SSH step failing doesn't
+        // undo it.
+        XCTAssertTrue(vm.isPaired)
+        XCTAssertNil(vm.pairId)
+        XCTAssertNil(vm.errorText)
+        XCTAssertEqual(vm.sshMessage, "SSH setup failed: no local SSH key found")
+    }
+
     func testRunSetsEndpoint() async {
         let (vm, _) = makeVM()
         vm.selectedModel = "Qwen3-8B"

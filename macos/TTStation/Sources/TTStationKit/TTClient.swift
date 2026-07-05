@@ -12,6 +12,7 @@ public protocol TTCommands {
     func pairComplete(host: String, pairId: String, code: String) async throws -> PairResult
     func run(host: String, model: String) async throws -> Endpoint
     func stop(host: String) async throws
+    func sshAuthorize(host: String) async throws -> SshAuthorizeInfo
     func isAuthError(_ error: TTError) -> Bool
 }
 
@@ -97,6 +98,14 @@ extension TTClient {
         guard result.exitCode == 0 else {
             throw TTError.commandFailed(command: args, exitCode: result.exitCode, stderr: result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         }
+    }
+
+    /// Installs this Mac's SSH public key on the box as `ttuser`, so
+    /// Terminal/tt-toplike/VS Code work keylessly right after pairing. Called
+    /// as an opt-in, non-fatal follow-up to a successful pair — see
+    /// `BoxViewModel.completePairing`.
+    public func sshAuthorize(host: String) async throws -> SshAuthorizeInfo {
+        try await call(["--json", "ssh-authorize", "--host", host], decode: SshAuthorizeInfo.self)
     }
 
     public func isAuthError(_ error: TTError) -> Bool {

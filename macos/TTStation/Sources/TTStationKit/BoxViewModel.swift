@@ -35,6 +35,17 @@ public final class BoxViewModel: Identifiable {
     /// what the view uses to decide between the "Start pairing" button and
     /// the code-entry form.
     public var pairId: String?
+    /// Opt-in toggle shown at the code-entry step of the pair flow: when on
+    /// (the default), a successful `completePairing` follows up with
+    /// `tt ssh-authorize` to install this Mac's key on the box as `ttuser`,
+    /// so Terminal/tt-toplike/VS Code work keylessly right after pairing.
+    public var enableSSH: Bool = true
+    /// Result of the post-pair SSH-authorize step, success or non-fatal
+    /// failure — surfaced as a one-line note in the pair UI. `nil` until a
+    /// pairing (with `enableSSH` on) has actually run it. Cleared at the
+    /// start of every `completePairing` call so a stale note from a previous
+    /// pairing attempt never lingers on screen.
+    public var sshMessage: String?
 
     private let commands: TTCommands
     private let registry: HostRegistry
@@ -130,6 +141,7 @@ public final class BoxViewModel: Identifiable {
     public func completePairing(code: String) async {
         guard let id = pairId else { return }
         inFlight = true; defer { inFlight = false }
+        sshMessage = nil
         do {
             _ = try await commands.pairComplete(host: record.hostPort, pairId: id, code: code)
             isPaired = true
@@ -137,6 +149,10 @@ public final class BoxViewModel: Identifiable {
             pairId = nil
             errorText = nil
             await loadModels()
+            // Opt-in follow-up, never allowed to undo the pairing above: a
+            // failed `ssh-authorize` call surfaces as a note, not an error,
+            // and does not touch `isPaired`/`errorText`.
+            if enableSSH { await authorizeSSH() }
         } catch {
             // Clear pairId on failure rather than letting the user retry the
             // same session: the agent expires pairing sessions and caps
@@ -145,6 +161,34 @@ public final class BoxViewModel: Identifiable {
             // fresh code instead.
             record(error)
             pairId = nil
+        }
+    }
+
+    /// Installs this Mac's SSH public key on the box as `ttuser` via
+    /// `tt ssh-authorize`. Only ever called right after a successful pair
+    /// (see `completePairing`) and deliberately non-fatal to it: any failure
+    /// here is captured as a one-line note in `sshMessage`, not thrown, so a
+    /// box that paired fine but couldn't set up SSH (e.g. no local key, box
+    /// unreachable for the extra round-trip) still ends the flow paired.
+    private func authorizeSSH() async {
+        do {
+            let info = try await commands.sshAuthorize(host: record.hostPort)
+            if info.alreadyPresent {
+                sshMessage = "SSH already enabled — connect as \(info.sshUser)."
+            } else {
+                sshMessage = "SSH enabled — connect as \(info.sshUser)."
+            }
+        } catch let e as TTError {
+            switch e {
+            case let .commandFailed(_, _, stderr):
+                sshMessage = "SSH setup failed: \(stderr.isEmpty ? "command failed." : stderr)"
+            case let .timedOut(_, seconds):
+                sshMessage = "SSH setup timed out after \(Int(seconds))s."
+            default:
+                sshMessage = "SSH setup failed: \(String(describing: e))"
+            }
+        } catch {
+            sshMessage = "SSH setup failed: \(error.localizedDescription)"
         }
     }
 
