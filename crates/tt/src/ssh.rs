@@ -33,14 +33,24 @@ pub fn select_public_key_path(ssh_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The `ttstation:<host>:<date>` marker `tt ssh-authorize` tags onto every
-/// key it installs -- lets a later look at `authorized_keys` (or a
+/// The `ttstation:<identity>:<date>` marker `tt ssh-authorize` tags onto
+/// every key it installs -- lets a later look at `authorized_keys` (or a
 /// `--revoke` by label, though this CLI prefers revoking by key material --
-/// see `cmd_ssh_revoke` in `main.rs`) tell which box/day authorized which
-/// key. Pure (the date is a parameter, not computed in here) so it's
-/// unit-testable without mocking the system clock.
-pub fn ssh_label(host: &str, date: &str) -> String {
-    format!("ttstation:{host}:{date}")
+/// see `cmd_ssh_revoke` in `main.rs`) tell which Mac/day authorized which
+/// key.
+///
+/// `identity` MUST be the installing Mac's own identity (its hostname --
+/// the same value [`mac_hostname`] returns, and the same value already
+/// baked into the key's `-C` comment by [`generate_ed25519_keypair`]), NOT
+/// the target box's `host:port`. Two different Macs pairing with the same
+/// box on the same day must NOT produce the same label, or a label-based
+/// revoke on one Mac could delete the other Mac's key; keying the label off
+/// the box host (as an earlier version of this function did) collapses
+/// exactly that distinction. Pure (both the identity and the date are
+/// parameters, nothing is looked up in here) so it's unit-testable without
+/// mocking the system clock or `hostname`.
+pub fn ssh_label(identity: &str, date: &str) -> String {
+    format!("ttstation:{identity}:{date}")
 }
 
 /// Today's date as `YYYY-MM-DD`, derived from the system clock.
@@ -97,22 +107,26 @@ pub struct AuthorizeOutcome {
 }
 
 /// Resolve (generating if necessary) the operator's SSH public key under
-/// `home/.ssh`, then hand it to `client` tagged with `ssh_label(host,
-/// date)`. This is the ENTIRE "make sure my Mac's key is on this box"
-/// routine -- `tt ssh-authorize` (`main.rs::cmd_ssh_authorize`) is a thin
-/// wrapper that just resolves `client`/`home`/`date` and prints the result,
-/// specifically so Task 7's `tt pair --enable-ssh` can call this directly
-/// with the `AgentClient` it already built for pairing, instead of shelling
-/// out to `tt ssh-authorize` as a subprocess.
+/// `home/.ssh`, then hand it to `client` tagged with `ssh_label(<this
+/// Mac's hostname>, date)`. This is the ENTIRE "make sure my Mac's key is
+/// on this box" routine -- `tt ssh-authorize` (`main.rs::cmd_ssh_authorize`)
+/// is a thin wrapper that just resolves `client`/`home`/`date` and prints
+/// the result, specifically so Task 7's `tt pair --enable-ssh` can call
+/// this directly with the `AgentClient` it already built for pairing,
+/// instead of shelling out to `tt ssh-authorize` as a subprocess.
+///
+/// Deliberately takes no `host` parameter: the label identifies the
+/// INSTALLING MAC, not the target box, so it's derived here via
+/// [`mac_hostname`] (the same helper [`generate_ed25519_keypair`] already
+/// uses for the key's `-C` comment) instead of being threaded in from a
+/// caller who only has the box's `host:port` handy. Callers still supply
+/// `client` (already pointed at the box) and use the box `host` themselves
+/// for building that `client`/looking up its token -- this routine just no
+/// longer conflates that with the label's identity.
 ///
 /// NEVER reads the private key -- only `<key>.pub`'s contents are read and
 /// sent.
-pub async fn authorize(
-    client: &AgentClient,
-    home: &Path,
-    host: &str,
-    date: &str,
-) -> Result<AuthorizeOutcome> {
+pub async fn authorize(client: &AgentClient, home: &Path, date: &str) -> Result<AuthorizeOutcome> {
     let ssh_dir = home.join(".ssh");
 
     let key_path = match select_public_key_path(&ssh_dir) {
@@ -129,7 +143,7 @@ pub async fn authorize(
     };
 
     let public_key = read_public_key(&key_path)?;
-    let label = ssh_label(host, date);
+    let label = ssh_label(&mac_hostname(), date);
 
     let result: SshAuthorizeResult = client.ssh_authorize(&public_key, &label).await?;
 
@@ -188,14 +202,16 @@ fn generate_ed25519_keypair(ssh_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The Mac's hostname, used only as the freshly generated key's `-C`
-/// comment (cosmetic). This workspace has no `hostname`/`gethostname`
-/// dependency, so this shells out to the `hostname` command -- the same
-/// external-process pattern [`generate_ed25519_keypair`] already uses for
-/// `ssh-keygen` -- rather than adding a new crate for one comment string.
-/// Falls back to a fixed placeholder on any failure (missing binary,
-/// non-UTF8 output, sandboxed CI) instead of failing the whole authorize
-/// flow over a comment.
+/// The Mac's hostname: identifies THIS machine, used both as the freshly
+/// generated key's `-C` comment (cosmetic) and, more importantly, as
+/// [`authorize`]'s [`ssh_label`] identity -- the value that lets a later
+/// `--revoke`/audit tell which Mac installed a given key. This workspace
+/// has no `hostname`/`gethostname` dependency, so this shells out to the
+/// `hostname` command -- the same external-process pattern
+/// [`generate_ed25519_keypair`] already uses for `ssh-keygen` -- rather
+/// than adding a new crate for one string. Falls back to a fixed
+/// placeholder on any failure (missing binary, non-UTF8 output, sandboxed
+/// CI) instead of failing the whole authorize flow over it.
 fn mac_hostname() -> String {
     Command::new("hostname")
         .output()
@@ -261,6 +277,20 @@ mod tests {
 
     #[test]
     fn ssh_label_format() {
+        assert_eq!(
+            ssh_label("mymac", "2026-07-05"),
+            "ttstation:mymac:2026-07-05"
+        );
+    }
+
+    /// The identity is the Mac's *hostname*, not the box's `host:port` --
+    /// this is exactly the shape the label must NOT collapse into a
+    /// box-keyed marker. A hostname containing a colon-ish edge (e.g. an
+    /// mDNS `.local` name someone typed with a trailing port by mistake)
+    /// still formats unambiguously since `ssh_label` never parses its
+    /// input, only formats it.
+    #[test]
+    fn ssh_label_identity_is_not_a_host_port() {
         assert_eq!(
             ssh_label("qb2-lab.local:8765", "2026-07-05"),
             "ttstation:qb2-lab.local:8765:2026-07-05"

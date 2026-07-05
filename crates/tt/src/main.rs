@@ -542,7 +542,7 @@ async fn maybe_enable_ssh(host: &str, token: &str, enable_ssh: bool) -> Option<S
     let result: Result<ssh::AuthorizeOutcome> = async {
         let home = home_dir()?;
         let date = ssh::today_ymd();
-        ssh::authorize(&client, &home, host, &date).await
+        ssh::authorize(&client, &home, &date).await
     }
     .await;
 
@@ -633,14 +633,16 @@ async fn cmd_serving(host: &str) -> Result<ServingList> {
 
 /// `tt ssh-authorize --host <host:port>`: resolve (generating if needed)
 /// this Mac's SSH public key and install it on `host`, tagged with
-/// `ssh_label(host, date)`. Thin wrapper around [`ssh::authorize`] --
-/// exists so Task 7's `tt pair --enable-ssh` can call `ssh::authorize`
-/// directly with an `AgentClient` it already built for pairing, instead of
-/// going through this CLI-argument-shaped entry point.
+/// `ssh_label(<this Mac's hostname>, date)` -- NOT `host`; the label
+/// identifies the installing Mac, not the box it's installing to (see
+/// [`ssh::authorize`]'s doc comment). Thin wrapper around
+/// [`ssh::authorize`] -- exists so Task 7's `tt pair --enable-ssh` can call
+/// `ssh::authorize` directly with an `AgentClient` it already built for
+/// pairing, instead of going through this CLI-argument-shaped entry point.
 async fn cmd_ssh_authorize(host: &str, date: &str) -> Result<ssh::AuthorizeOutcome> {
     let client = authed_client(host)?;
     let home = home_dir()?;
-    ssh::authorize(&client, &home, host, date).await
+    ssh::authorize(&client, &home, date).await
 }
 
 /// `tt ssh-authorize --host <host:port> --revoke`: remove this Mac's key
