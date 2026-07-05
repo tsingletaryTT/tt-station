@@ -33,6 +33,9 @@ pub fn detect_device_mesh(tt_smi_json: &str) -> Option<String> {
     let mesh = match (board_types[0].as_str(), count) {
         ("p300c", 4) => "p300x2",
         ("p300c", 2) => "p300",
+        ("p150" | "p150c", 1) => "p150",
+        ("p150" | "p150c", 2) => "p150x2",
+        ("p150" | "p150c", 3) => "p150x3",
         ("p150" | "p150c", 4) => "p150x4",
         ("n300", 4) => "n300x4",
         ("n300", 1) => "n300",
@@ -80,5 +83,18 @@ mod tests {
     #[test]
     fn garbage_json_is_none() {
         assert_eq!(detect_device_mesh("not json"), None);
+    }
+
+    #[test]
+    fn maps_p150_counts() {
+        let f = |n: usize| {
+            let entry = r#"{"board_info":{"board_type":"p150"}}"#;
+            let arr = std::iter::repeat(entry).take(n).collect::<Vec<_>>().join(",");
+            format!(r#"{{"device_info":[{arr}]}}"#)
+        };
+        assert_eq!(detect_device_mesh(&f(1)).as_deref(), Some("p150"));
+        assert_eq!(detect_device_mesh(&f(2)).as_deref(), Some("p150x2"));
+        assert_eq!(detect_device_mesh(&f(3)).as_deref(), Some("p150x3"));
+        assert_eq!(detect_device_mesh(&f(4)).as_deref(), Some("p150x4"));
     }
 }
