@@ -10,6 +10,7 @@
 //!   tt [--json] run <model> --host <host:port>
 //!   tt [--json] stop --host <host:port>
 //!   tt [--json] status --host <host:port>
+//!   tt [--json] config --host <host:port>
 //!   tt [--json] endpoint --host <host:port>
 //!   tt [--json] serving --host <host:port>
 //!
@@ -48,7 +49,9 @@ use libttstation::agent_client::AgentClient;
 use libttstation::discovery::{
     aggregate, manual::ManualProvider, mdns::MdnsProvider, DiscoveryProvider,
 };
-use libttstation::model::{BoxRecord, Endpoint, ModelsResponse, ServingList, ServingStatus};
+use libttstation::model::{
+    BoxRecord, ConfigSummary, Endpoint, ModelsResponse, ServingList, ServingStatus,
+};
 use libttstation::pairing::{pair_complete, pair_init};
 use libttstation::secrets::{default_store, FileStore, SecretStore};
 use serde::Deserialize;
@@ -162,6 +165,16 @@ enum Command {
         host: String,
     },
 
+    /// Show the box's resolved serving config (active/available profiles,
+    /// backend, endpoint). UNAUTHED on the agent side (like `status`/
+    /// `models`/`serving`), so this works even against a box `tt pair` was
+    /// never run against.
+    Config {
+        /// The box's control-plane address, as `host:port`.
+        #[arg(long)]
+        host: String,
+    },
+
     /// Show the endpoint of whatever a paired box is currently serving.
     Endpoint {
         /// The box's control-plane address, as `host:port`.
@@ -238,6 +251,10 @@ fn main() -> Result<()> {
         Command::Status { host } => {
             let status = run_async(cmd_status(host))?;
             print_status(&status, cli.json);
+        }
+        Command::Config { host } => {
+            let summary = run_async(cmd_config(host))?;
+            print_config(&summary, cli.json);
         }
         Command::Endpoint { host } => {
             let endpoint = run_async(cmd_endpoint(host))?;
@@ -449,6 +466,17 @@ async fn cmd_stop(host: &str) -> Result<()> {
 async fn cmd_status(host: &str) -> Result<ServingStatus> {
     let base = format!("http://{host}");
     libttstation::agent_client::get_status(&base).await
+}
+
+/// `tt config --host <host:port>`: UNAUTHED, like `cmd_status`/`cmd_models`/
+/// `cmd_serving` -- the agent's `GET /config` has no `BearerAuth` extractor
+/// (Task 5), so this calls `libttstation::agent_client::get_config` directly
+/// instead of going through `authed_client()`. Lets an operator (or the GTK
+/// panel/Mac app) see "what will this box actually serve with" even against
+/// a box `tt pair` was never run against.
+async fn cmd_config(host: &str) -> Result<ConfigSummary> {
+    let base = format!("http://{host}");
+    libttstation::agent_client::get_config(&base).await
 }
 
 /// `tt endpoint --host <host:port>`.
@@ -749,6 +777,42 @@ fn print_status(status: &ServingStatus, json: bool) {
         println!("{}", serde_json::json!({ "status": status.to_txt() }));
     } else {
         println!("{}", status.to_txt());
+    }
+}
+
+/// `tt config`'s output: JSON prints the whole `ConfigSummary` object
+/// (pretty-printed per the task spec, unlike this module's other `--json`
+/// output -- `tt config` is meant to be read by a human debugging "what will
+/// this box actually serve with," not just piped machine-to-machine); human
+/// mode prints active profile, available profiles, backend, and
+/// `host:port`.
+fn print_config(summary: &ConfigSummary, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(summary).expect("ConfigSummary always serializes")
+        );
+    } else {
+        println!(
+            "active profile: {}",
+            summary
+                .active_profile
+                .as_deref()
+                .unwrap_or("(implicit default)")
+        );
+        println!(
+            "available:      {}",
+            if summary.available_profiles.is_empty() {
+                "(none)".to_string()
+            } else {
+                summary.available_profiles.join(", ")
+            }
+        );
+        println!("backend:        {}", summary.backend);
+        println!(
+            "serving:        {}:{}",
+            summary.serving_host, summary.serving_port
+        );
     }
 }
 
