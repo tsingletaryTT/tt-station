@@ -17,11 +17,13 @@ struct TTStationApp: App {
         MenuBarExtra("TTStation", image: "MenuBarIcon") {
             MenuContentView(model: model)
                 .frame(width: 340)
+                .tint(TTTheme.teal)
         }
         .menuBarExtraStyle(.window)
 
         Window("TTStation", id: "main") {
             WindowRootView(model: model)
+                .tint(TTTheme.teal)
         }
         .windowResizability(.contentMinSize)
     }

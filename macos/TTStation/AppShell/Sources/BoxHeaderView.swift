@@ -15,10 +15,11 @@ struct BoxHeaderView: View {
     let box: BoxViewModel
 
     private var statusColor: Color {
-        if box.errorText != nil { return .red }
-        if box.starting { return .orange }
-        if box.status?.isServing == true { return .green }
-        return .gray
+        TTTheme.statusColor(
+            isServing: box.status?.isServing == true,
+            isStarting: box.starting,
+            hasError: box.errorText != nil
+        )
     }
 
     private var statusHelp: String {

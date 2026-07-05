@@ -1,176 +1,154 @@
 import SwiftUI
 import TTStationKit
 
-/// The window's detail pane: the full box workspace with the model browser
-/// given room (uncapped). Identical in behavior to the pre-window
-/// `BoxDetailView`; the popover keeps only a trimmed version (see BoxDetailView).
+/// The window's detail pane: composes the Task 13 cards into the full box
+/// workspace, given the window's uncapped room. The popover (`BoxDetailView`)
+/// keeps only a trimmed subset of this for quick actions.
+///
+/// **Card chrome:** `ConnectCardView`/`WorkbenchCardView`/`ServingCardView`
+/// already wrap themselves in `CardContainer` (Task 13). `BoxHeaderView`,
+/// `DeviceStripView`, and `ModelBrowserView` (+ the inline run/stop/endpoint
+/// block that goes with it) do not — Task 13 deliberately left them bare, so
+/// this view wraps those three in `CardContainer` itself. The result: every
+/// section in the pane reads as one consistent stack of titled cards, with
+/// no section double-wrapped and none left bare.
+///
+/// **Box-switch state reset:** `@Bindable var box` changes identity when the
+/// sidebar selection changes, but without an explicit `.id`, SwiftUI treats
+/// this as the *same* view at the same tree position and keeps this view's
+/// (and its subviews', notably `DeviceStripView`'s own `@State
+/// TelemetryService`) `@State` alive across the switch — so the new box's UI
+/// would render on top of the previous box's live telemetry socket/model
+/// search text. `.id(box.id)` on the root `VStack` forces SwiftUI to treat
+/// each box as a distinct view identity, tearing down and rebuilding all
+/// `@State` in this subtree (including `DeviceStripView`'s socket, per its
+/// own doc comment) whenever the selected box changes.
 struct BoxWorkspaceView: View {
     @Bindable var box: BoxViewModel
     @State private var code = ""
-    // Owns the one-click front-end launchers (Open Web UI / opencode). Only
-    // used in the serving branch, where `box.endpoint != nil`.
+    // Owns the one-click front-end (Connect) + workbench launchers shared by
+    // every card below that shells out (Connect, Workbench, and DeviceStrip's
+    // "Open tt-toplike ↗" button).
     @State private var launcher = LaunchController()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
+            CardContainer(title: box.record.name) {
+                BoxHeaderView(box: box)
+            }
+
             if !box.isPaired {
-                if box.pairId == nil {
-                    Text("Pair to control this box.").font(.caption)
-                    HStack {
-                        Button("Start pairing") { Task { await box.startPairing() } }
-                            .disabled(box.inFlight)
-                        if box.inFlight { ProgressView().scaleEffect(0.6) }
-                    }
-                } else {
-                    Text("Enter the 6-digit code shown on the box:").font(.caption)
-                    HStack {
-                        TextField("000000", text: $code)
-                            .textFieldStyle(.roundedBorder).frame(width: 100)
-                        Button("Pair") { Task { await box.completePairing(code: code) } }
-                            .disabled(code.count != 6 || box.inFlight)
-                        Button("Start over") { box.cancelPairing() }
-                            .disabled(box.inFlight)
-                        if box.inFlight { ProgressView().scaleEffect(0.6) }
-                    }
+                CardContainer(title: "Pairing") {
+                    pairingBody
                 }
             } else {
-                // Searchable, family-grouped browser (sets box.selectedModel).
-                ModelPickerView(box: box, maxListHeight: nil)
-                    .task { if box.models.isEmpty { await box.loadModels() } }
-
-                // Run is the primary action; Stop is a secondary, destructive
-                // one. Both gated by `inFlight`; Run additionally needs a model.
-                HStack(spacing: 8) {
-                    Button { Task { await box.run() } } label: {
-                        Label("Run", systemImage: "play.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(box.selectedModel == nil || box.inFlight)
-                    .help("Start serving the selected model on this box.")
-
-                    Button(role: .destructive) { Task { await box.stop() } } label: {
-                        Label("Stop", systemImage: "stop.fill")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(box.inFlight)
-                    .help("Stop the model currently serving on this box.")
-
-                    if box.inFlight { ProgressView().scaleEffect(0.6) }
+                CardContainer(title: "Devices") {
+                    DeviceStripView(box: box, launcher: launcher)
                 }
-                .controlSize(.small)
 
-                // Spin-up feedback: shown while `run()` is in flight, before
-                // the endpoint returns. First run pulls the model image, which
-                // can take minutes — say so, so the wait doesn't read as a hang.
-                if box.starting {
-                    HStack(spacing: 6) {
-                        ProgressView().scaleEffect(0.6)
-                        Text("Starting \(box.selectedModel ?? "model")… (first run can take a few minutes)")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                CardContainer(title: "Model") {
+                    modelBody
                 }
 
                 if let ep = box.endpoint {
-                    // Prominent "Serving <model>" line so the running state is
-                    // unmistakable at a glance.
-                    HStack(spacing: 4) {
-                        Image(systemName: "circle.fill").font(.system(size: 7)).foregroundStyle(.green)
-                        Text("Serving \(ep.model)").font(.caption.weight(.semibold))
-                    }
-                    HStack {
-                        Text(ep.baseURL).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
-                        Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(ep.baseURL, forType: .string) }
-                            label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
-                            .help("Copy endpoint URL")
-                    }
+                    ConnectCardView(endpoint: ep, launcher: launcher)
+                }
 
-                    // Connect a local front-end to the running model. Shown only
-                    // while serving (this `if let ep` branch); each button spins
-                    // and disables independently and surfaces its own error.
-                    HStack(spacing: 8) {
-                        Text("Connect:").font(.caption).foregroundStyle(.secondary)
-                        Button {
-                            Task { await launcher.openWebUI(endpoint: ep) }
-                        } label: {
-                            Label("Open Web UI", systemImage: "globe")
-                        }
-                        .disabled(launcher.isLaunchingWebUI)
-                        .help("Launch Open WebUI locally (uvx) wired to this model and open it in your browser.")
-                        Button {
-                            Task { await launcher.openInOpenCode(endpoint: ep) }
-                        } label: {
-                            Label("Open in opencode", systemImage: "terminal")
-                        }
-                        .disabled(launcher.isLaunchingOpenCode)
-                        .help("Open a Terminal running opencode with this model preselected.")
-                        if launcher.isLaunchingWebUI || launcher.isLaunchingOpenCode {
-                            ProgressView().scaleEffect(0.6)
-                        }
-                    }
-                    if let e = launcher.webUIError ?? launcher.openCodeError {
-                        Text(e).font(.caption).foregroundStyle(.red).textSelection(.enabled)
-                    }
-                }
-            }
-            // Currently-serving endpoints from the unauthed `tt serving` read —
-            // shown regardless of pairing so externally-launched models (e.g.
-            // tt-studio) are visible too. Each row mirrors the endpoint copy
-            // affordance above; a small badge marks `source == "external"`.
-            if !box.serving.isEmpty {
-                Divider()
-                Text("Serving").font(.caption).foregroundStyle(.secondary)
-                ForEach(box.serving, id: \.hostPort) { entry in
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 4) {
-                            Text(entry.model).font(.caption).lineLimit(1).truncationMode(.middle)
-                            if entry.source == "external" {
-                                Text("external")
-                                    .font(.system(size: 9, weight: .semibold))
-                                    .padding(.horizontal, 4).padding(.vertical, 1)
-                                    .background(Color.secondary.opacity(0.2))
-                                    .clipShape(Capsule())
-                            }
-                        }
-                        HStack {
-                            Text(entry.baseURL).font(.system(.caption, design: .monospaced)).lineLimit(1).truncationMode(.middle)
-                            Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(entry.baseURL, forType: .string) }
-                                label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
-                                .help("Copy endpoint URL")
-                        }
-                    }
-                }
-            }
-            Divider()
-            Text("Workbench").font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                Button { Task { await launcher.openTerminalSSH(host: box.record.host) } } label: {
-                    Label("Terminal", systemImage: "terminal")
-                }
-                .disabled(launcher.isLaunchingTerminal)
-                .help("Open a Terminal SSH'd into this box.")
+                WorkbenchCardView(box: box, launcher: launcher)
 
-                Button { Task { await launcher.openTTToplike(host: box.record.host, ctrlPort: box.record.ctrlPort) } } label: {
-                    Label("tt-toplike", systemImage: "waveform.path.ecg")
-                }
-                .disabled(launcher.isLaunchingToplike)
-                .help("Open tt-toplike showing this box's live telemetry.")
-
-                Button { Task { await launcher.openVSCode(host: box.record.host) } } label: {
-                    Label("VS Code", systemImage: "chevron.left.forwardslash.chevron.right")
-                }
-                .disabled(launcher.isLaunchingVSCode)
-                .help("Open a VS Code Remote-SSH window on this box.")
-
-                if launcher.isLaunchingTerminal || launcher.isLaunchingToplike || launcher.isLaunchingVSCode {
-                    ProgressView().scaleEffect(0.6)
-                }
+                ServingCardView(entries: box.serving)
             }
-            .controlSize(.small)
-            if let e = launcher.terminalError ?? launcher.toplikeError ?? launcher.vscodeError {
-                Text(e).font(.caption).foregroundStyle(.red).textSelection(.enabled)
-            }
+
             if let err = box.errorText {
                 Text(err).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
+        }
+        // See the box-switch note above: this is what actually resets
+        // per-box @State (including DeviceStripView's telemetry socket) when
+        // the sidebar selection changes.
+        .id(box.id)
+    }
+
+    /// Pairing UI, unchanged in behavior from the pre-composition monolith:
+    /// "Start pairing" while no code has been requested yet, then a 6-digit
+    /// code entry once one has.
+    @ViewBuilder
+    private var pairingBody: some View {
+        if box.pairId == nil {
+            Text("Pair to control this box.").font(.caption)
+            HStack {
+                Button("Start pairing") { Task { await box.startPairing() } }
+                    .disabled(box.inFlight)
+                if box.inFlight { ProgressView().scaleEffect(0.6) }
+            }
+        } else {
+            Text("Enter the 6-digit code shown on the box:").font(.caption)
+            HStack {
+                TextField("000000", text: $code)
+                    .textFieldStyle(.roundedBorder).frame(width: 100)
+                Button("Pair") { Task { await box.completePairing(code: code) } }
+                    .disabled(code.count != 6 || box.inFlight)
+                Button("Start over") { box.cancelPairing() }
+                    .disabled(box.inFlight)
+                if box.inFlight { ProgressView().scaleEffect(0.6) }
+            }
+        }
+    }
+
+    /// Searchable model browser + Run/Stop + spin-up/serving feedback.
+    /// Kept inline here (rather than folded into `ModelBrowserView`) because
+    /// it reaches directly into `box.run()`/`box.stop()`/`box.endpoint` —
+    /// exactly the carve-out the brief calls out as acceptable.
+    @ViewBuilder
+    private var modelBody: some View {
+        ModelBrowserView(box: box, maxListHeight: nil)
+            .task { if box.models.isEmpty { await box.loadModels() } }
+
+        // Run is the primary action; Stop is a secondary, destructive one.
+        // Both gated by `inFlight`; Run additionally needs a model.
+        HStack(spacing: 8) {
+            Button { Task { await box.run() } } label: {
+                Label("Run", systemImage: "play.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(box.selectedModel == nil || box.inFlight)
+            .help("Start serving the selected model on this box.")
+
+            Button(role: .destructive) { Task { await box.stop() } } label: {
+                Label("Stop", systemImage: "stop.fill")
+            }
+            .buttonStyle(.bordered)
+            .disabled(box.inFlight)
+            .help("Stop the model currently serving on this box.")
+
+            if box.inFlight { ProgressView().scaleEffect(0.6) }
+        }
+        .controlSize(.small)
+
+        // Spin-up feedback: shown while `run()` is in flight, before the
+        // endpoint returns. First run pulls the model image, which can take
+        // minutes — say so, so the wait doesn't read as a hang.
+        if box.starting {
+            HStack(spacing: 6) {
+                ProgressView().scaleEffect(0.6)
+                Text("Starting \(box.selectedModel ?? "model")… (first run can take a few minutes)")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+
+        if let ep = box.endpoint {
+            // Prominent "Serving <model>" line so the running state is
+            // unmistakable at a glance. Connecting a front-end to it lives
+            // in the separate Connect card below.
+            HStack(spacing: 4) {
+                Image(systemName: "circle.fill").font(.system(size: 7)).foregroundStyle(TTTheme.statusServing)
+                Text("Serving \(ep.model)").font(.caption.weight(.semibold))
+            }
+            HStack {
+                Text(ep.baseURL).font(TTTheme.mono).lineLimit(1).truncationMode(.middle)
+                Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(ep.baseURL, forType: .string) }
+                    label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
+                    .help("Copy endpoint URL")
             }
         }
     }

@@ -18,7 +18,10 @@ struct BoxSidebarView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "circle.fill")
                             .font(.system(size: 7))
-                            .foregroundStyle((box.status?.isServing ?? false) ? Color.green : Color.secondary)
+                            .foregroundStyle(TTTheme.statusColor(
+                                isServing: box.status?.isServing ?? false,
+                                isStarting: box.starting
+                            ))
                         VStack(alignment: .leading, spacing: 1) {
                             Text(box.record.name)
                             Text(box.record.chips).font(.caption2).foregroundStyle(.secondary)

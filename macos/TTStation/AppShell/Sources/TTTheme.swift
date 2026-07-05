@@ -58,6 +58,29 @@ enum TTTheme {
         return interpolate(warm, hot, t)
     }
 
+    // MARK: - Status-dot colors
+
+    /// Serving (green), starting (amber), idle (gray), error (red) — the four
+    /// states a box's status dot can show, shared by `BoxHeaderView`,
+    /// `BoxRowView`, `BoxSidebarView`, and the popover so the same state
+    /// always reads as the same color everywhere in the app. Plain semaphore
+    /// colors rather than the teal/ground editor accent above: these signal
+    /// live device state, not brand identity, and system green/orange/gray/red
+    /// already carry the right meaning in both light and dark mode.
+    static let statusServing = Color.green
+    static let statusStarting = Color.orange
+    static let statusIdle = Color.gray
+    static let statusError = Color.red
+
+    /// Priority-ordered status-dot color: `hasError` > `isStarting` >
+    /// `isServing` > idle. Centralizes the precedence every call site
+    /// (header/row/sidebar/popover) was otherwise duplicating ad hoc.
+    static func statusColor(isServing: Bool, isStarting: Bool, hasError: Bool = false) -> Color {
+        if hasError { return statusError }
+        if isStarting { return statusStarting }
+        return isServing ? statusServing : statusIdle
+    }
+
     /// Linear RGB interpolation between two colors via `NSColor`'s sRGB components.
     /// Alpha is left at the destination's (both anchors are opaque, so this is 1.0
     /// throughout the ramp).

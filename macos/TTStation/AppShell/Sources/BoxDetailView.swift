@@ -5,11 +5,32 @@ import TTStationKit
 /// an "Open window" affordance. Model browsing and the full `/serving` list
 /// moved to the resizable window (`BoxWorkspaceView`); this view Runs the
 /// current/smart-default `selectedModel`.
+///
+/// **Temp chip:** owns a lightweight `TelemetryService` of its own (same
+/// ownership pattern `DeviceStripView` uses, and for the same reason — the
+/// popover should not have to reach into the window's telemetry state to
+/// show one number) but only surfaces the single hottest device reading
+/// beside the "Serving" line, not the full per-device strip — that stays a
+/// window-only feature so the popover stays fast and small.
+///
+/// **Box-switch reset:** like `BoxWorkspaceView`, this view's `@State`
+/// (including the telemetry socket) would otherwise survive a box switch
+/// because `MenuContentView` re-renders it at the same tree position for a
+/// new `box` instance. `.id(box.id)` on the root forces a fresh identity —
+/// and thus a fresh socket — per box.
 struct BoxDetailView: View {
     @Bindable var box: BoxViewModel
     @State private var code = ""
     @State private var launcher = LaunchController()
+    @State private var telemetry = TelemetryService()
     @Environment(\.openWindow) private var openWindow
+
+    /// Hottest device reading in the latest snapshot, or `nil` before the
+    /// first frame / on a failed socket — the chip simply doesn't render
+    /// rather than showing a stale or placeholder value.
+    private var maxTempC: Double? {
+        telemetry.snapshot?.devices.compactMap(\.tempC).max()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -66,12 +87,18 @@ struct BoxDetailView: View {
 
                 if let ep = box.endpoint {
                     HStack(spacing: 4) {
-                        Image(systemName: "circle.fill").font(.system(size: 7)).foregroundStyle(.green)
+                        Image(systemName: "circle.fill").font(.system(size: 7)).foregroundStyle(TTTheme.statusServing)
                         Text("Serving \(ep.model)").font(.caption.weight(.semibold))
                             .lineLimit(1).truncationMode(.middle)
+                        if let temp = maxTempC {
+                            Text(String(format: "%.0f°C", temp))
+                                .font(TTTheme.mono)
+                                .foregroundStyle(TTTheme.tempColor(temp))
+                                .help("Hottest device on this box, live.")
+                        }
                     }
                     HStack {
-                        Text(ep.baseURL).font(.system(.caption, design: .monospaced))
+                        Text(ep.baseURL).font(TTTheme.mono)
                             .lineLimit(1).truncationMode(.middle)
                         Button {
                             NSPasteboard.general.clearContents()
@@ -107,5 +134,20 @@ struct BoxDetailView: View {
                 Text(err).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             }
         }
+        // Telemetry tracks the serving state, not pairing: connect only once
+        // something is serving (so the chip has something to show and the
+        // popover isn't holding an idle socket open the whole time it's
+        // pinned open), and reconnect/disconnect whenever that flips.
+        // `.task(id:)` restarts automatically on every id change, including
+        // the nil <-> non-nil transitions `box.endpoint` goes through.
+        .task(id: box.endpoint?.baseURL) {
+            if box.endpoint != nil {
+                telemetry.start(host: box.record.host, ctrlPort: box.record.ctrlPort)
+            } else {
+                telemetry.stop()
+            }
+        }
+        .onDisappear { telemetry.stop() }
+        .id(box.id)
     }
 }

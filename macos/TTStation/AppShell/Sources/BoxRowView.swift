@@ -11,8 +11,7 @@ struct BoxRowView: View {
     /// green once serving, grey when idle. `starting` takes precedence so the
     /// transient spin-up state is visible even before `status` flips.
     private var statusColor: Color {
-        if box.starting { return .orange }
-        return isServing ? .green : .gray
+        TTTheme.statusColor(isServing: isServing, isStarting: box.starting)
     }
 
     private var statusHelp: String {
