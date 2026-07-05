@@ -46,6 +46,17 @@ pub fn render_unit(agent_bin_path: &str) -> String {
 /// without it, a drop-in's `ExecStart=` would be appended as an ADDITIONAL
 /// command to run, not a replacement (systemd unit directives that support
 /// multiple values accumulate across drop-ins by default).
+///
+/// `agent_bin` MUST be an absolute path, exactly like [`render_unit`]'s
+/// `agent_bin_path` -- systemd `--user` resolves a non-absolute `ExecStart=`
+/// against a fixed compiled-in search path that does NOT include
+/// `~/.local/bin` or a repo's `./target/release`, so a drop-in built from a
+/// bare binary name can silently fail to start the unit even though the base
+/// unit (installed via [`render_unit`]) starts fine. Callers MUST resolve the
+/// path the same way the base unit does (`super::which_agent`) before
+/// calling this -- see [`LifecycleActions::set_profile`], which takes the
+/// resolved path as a parameter rather than reading `self.names.agent_bin`
+/// for exactly this reason.
 pub fn render_profile_dropin(agent_bin: &str, profile: &str) -> String {
     format!("[Service]\nExecStart=\nExecStart={agent_bin} --profile {profile}\n")
 }
@@ -140,14 +151,24 @@ impl<'a> LifecycleActions<'a> {
     /// `<config_dir>/<unit>.d/profile.conf`, reloading the systemd user
     /// manager so it picks up the new drop-in, then restarting the unit so
     /// the new `ExecStart=` actually takes effect.
-    pub fn set_profile(&self, profile: &str) -> anyhow::Result<()> {
+    ///
+    /// `agent_bin_path` MUST be the same absolute path used to install the
+    /// base unit (see [`Self::install_service`] and `super::which_agent`) --
+    /// this used to default to `self.names.agent_bin` (a bare binary name),
+    /// which systemd `--user` cannot resolve on `ExecStart=` (it does not
+    /// consult `$PATH`, `~/.local/bin`, or a repo's `./target/release`), so
+    /// applying a profile could write a drop-in that made the unit fail to
+    /// start. Callers resolve the path once (`super::which_agent(&names.
+    /// agent_bin)`) and pass it in here, exactly like `install_service`
+    /// already requires.
+    pub fn set_profile(&self, profile: &str, agent_bin_path: &str) -> anyhow::Result<()> {
         let dir = self
             .config_dir
             .join(format!("{}.d", self.names.service_name));
         std::fs::create_dir_all(&dir)?;
         std::fs::write(
             dir.join("profile.conf"),
-            render_profile_dropin(&self.names.agent_bin, profile),
+            render_profile_dropin(agent_bin_path, profile),
         )?;
         self.env.run(&["systemctl", "--user", "daemon-reload"])?;
         self.restart()
@@ -245,10 +266,15 @@ mod tests {
 
     #[test]
     fn drop_in_content_pins_profile() {
-        let content = render_profile_dropin("tt-station-agentd", "bleeding");
+        // C1 regression: the drop-in's `ExecStart=` must carry the same
+        // ABSOLUTE path the base unit uses -- a bare binary name here is a
+        // unit that can fail to start (see the function doc).
+        let content = render_profile_dropin("/home/x/.local/bin/tt-station-agentd", "bleeding");
         assert!(content.contains("[Service]"));
         assert!(content.contains("ExecStart=\n")); // reset then re-set
-        assert!(content.contains("--profile bleeding"));
+        assert!(
+            content.contains("ExecStart=/home/x/.local/bin/tt-station-agentd --profile bleeding")
+        );
     }
 
     #[test]
@@ -285,14 +311,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let env = rec_env();
         let n = names();
+        // Deliberately NOT `n.agent_bin` (a bare name) -- the whole point of
+        // the C1 fix is that `set_profile` bakes in whatever absolute path
+        // the caller resolved, not a bare binary name it can't itself derive.
+        let agent_path = "/opt/tt/tt-station-agentd";
         LifecycleActions::with_config_dir(&env, &n, tmp.path().to_path_buf())
-            .set_profile("bleeding")
+            .set_profile("bleeding", agent_path)
             .unwrap();
 
         let dropin_path = tmp.path().join("svc.service.d").join("profile.conf");
         let content = std::fs::read_to_string(&dropin_path).unwrap();
         assert!(content.contains("--profile bleeding"));
-        assert!(content.contains(&n.agent_bin));
+        assert!(content.contains(agent_path));
+        assert!(content.contains(&format!("ExecStart={agent_path} --profile bleeding")));
 
         let calls = env.calls.borrow();
         assert_eq!(calls[0], vec!["systemctl", "--user", "daemon-reload"]);

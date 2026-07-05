@@ -39,7 +39,7 @@
 use crate::console::actions::LifecycleActions;
 use crate::console::env::{collect_snapshot, LifecycleEnv};
 use crate::console::names::ToolNames;
-use crate::console::state::{derive_state, LifecycleState};
+use crate::console::state::{derive_state, parse_pairing, LifecycleState};
 
 use libttstation::model::{BoxLifecycleSnapshot, ServiceState};
 
@@ -106,6 +106,14 @@ fn service_label(s: &ServiceState) -> &'static str {
 /// Pairing card: the box's current pairing code (spaced for readability, but
 /// keeping the raw 6 digits contiguous so on-screen search/copy still finds
 /// the exact code) and its remaining TTL, or a "nothing pending" hint.
+///
+/// Either way, 'p' works: [`run_pair`] mints its OWN fresh pairing attempt
+/// the moment it's pressed rather than reusing whatever code is displayed
+/// here (a displayed code from an unrelated pairing attempt -- e.g. one a
+/// client on the LAN just started -- would already be claimed by that
+/// attempt's `pair_id`, not this box's self-pair). So the `None` branch no
+/// longer tells the operator to go start a pairing first -- pressing 'p'
+/// does that itself.
 pub fn pairing_lines(s: &BoxLifecycleSnapshot) -> Vec<String> {
     match &s.pairing {
         Some(p) => vec![
@@ -117,7 +125,7 @@ pub fn pairing_lines(s: &BoxLifecycleSnapshot) -> Vec<String> {
         ],
         None => vec![
             "no active pairing code".to_string(),
-            "start a pairing on the box (or the GTK panel), then press 'p'".to_string(),
+            "press 'p' to pair this box at 127.0.0.1".to_string(),
         ],
     }
 }
@@ -413,11 +421,12 @@ where
                                 mode = Mode::ConfirmReset;
                             }
                             KeyCode::Char('p') => {
-                                message = Some(run_pair(env, &names.tt_bin, &host, &snap));
+                                message = Some(run_pair(env, names, &host));
                                 snap = collect_snapshot(env, names);
                             }
                             KeyCode::Char('c') => {
-                                message = run_profile_cycle(&actions, &snap);
+                                let agent_path = super::which_agent(&names.agent_bin);
+                                message = run_profile_cycle(&actions, &snap, &agent_path);
                                 snap = collect_snapshot(env, names);
                             }
                             KeyCode::Char('i') => {
@@ -458,40 +467,130 @@ fn run_action(result: anyhow::Result<()>, verb: &str) -> String {
 /// HTTP call `cmd_reset` (in `main.rs`) already makes. This keeps the one
 /// auth touchpoint (bearer token lookup/clearing) centralized in the CLI
 /// that already owns it -- see the module doc and the task report for the
-/// full rationale. A missing/invalid token surfaces here as a shelled
-/// command failure; the message hints at pairing since that's the fix.
+/// full rationale.
+///
+/// I3 fix: `cmd_reset` (`main.rs`) treats "no token stored for this host" as
+/// a WARNING, not an error -- it still clears local state and returns `Ok`
+/// (reset is also "forget every box on this machine," which should succeed
+/// even when a specific `--host` was never paired). Shelling out to `tt
+/// reset` therefore can't distinguish "the box was actually reset" from "no
+/// token, nothing happened on the box" by exit code alone -- both look like
+/// success. So this checks the SAME `SecretStore` `cmd_reset`/`build_store`
+/// (`main.rs`) read from, BEFORE shelling out, and reports the honest
+/// "nothing happened" case instead of a misleading "reset: ok".
 fn run_reset(env: &dyn LifecycleEnv, tt_bin: &str, host: &str) -> String {
+    match localhost_token_exists(host) {
+        Ok(true) => {}
+        Ok(false) => {
+            return format!(
+                "reset skipped: no token paired for {host} -- pair this box first (press 'p')"
+            )
+        }
+        Err(e) => return format!("reset failed: could not check pairing state: {e}"),
+    }
     match env.run(&[tt_bin, "reset", "--host", host, "--yes"]) {
         Ok(()) => "reset: ok".to_string(),
         Err(e) => format!("reset failed: {e} (no token for this box? press 'p' to pair)"),
     }
 }
 
-/// `p`air-localhost, using the code the collector already found in the
-/// journal (`snap.pairing`). Also shells out to `tt pair` for the same
-/// reason as [`run_reset`] -- one auth touchpoint, not a second HTTP client.
-fn run_pair(
-    env: &dyn LifecycleEnv,
-    tt_bin: &str,
-    host: &str,
-    snap: &BoxLifecycleSnapshot,
-) -> String {
-    match &snap.pairing {
-        Some(p) => match env.run(&[tt_bin, "pair", host, "--code", &p.code]) {
-            Ok(()) => "pair: ok".to_string(),
-            Err(e) => format!("pair failed: {e}"),
-        },
-        None => "no pairing code available -- start a pairing on the box first".to_string(),
+/// Whether a bearer token is already stored for `host` in the exact same
+/// `SecretStore` `main.rs`'s `build_store`/`cmd_reset`/`authed_client` use
+/// (`crate::build_store` is private to the crate root, but visible here as a
+/// descendant module -- see the module doc's note on why pairing/reset reuse
+/// `main.rs`'s own functions instead of a second implementation).
+fn localhost_token_exists(host: &str) -> anyhow::Result<bool> {
+    Ok(crate::build_store()?.get(host)?.is_some())
+}
+
+/// `p`air-localhost: run a COMPLETE, correct self-pair against the agent at
+/// `host` (`127.0.0.1:<ctrl-port>`), by calling the exact same functions
+/// `tt pair-init`/`tt pair-complete` call (`main.rs`'s `cmd_pair_init`/
+/// `cmd_pair_complete`) in-process -- not a second HTTP client, and not a
+/// shelled-out `tt pair` subprocess.
+///
+/// I2 fix: the previous implementation shelled `tt pair <host> --code
+/// <snap.pairing.code>`, but `cmd_pair` (what `tt pair` runs) ALWAYS calls
+/// `pair_init` first, which mints a brand-new `pair_id` + code -- so
+/// `snap.pairing.code` (whatever the collector last saw in the journal,
+/// possibly from an unrelated pairing attempt, e.g. one a LAN client just
+/// started) was never the code that new `pair_init` call actually minted.
+/// `pair_complete` therefore always saw a code mismatch and 'p' could never
+/// succeed. The fix mints the pairing attempt THIS keypress will complete:
+///
+///   1. `cmd_pair_init(host)` mints a fresh `pair_id` and tells the agent to
+///      mint+log a fresh code -- the code itself is intentionally NEVER
+///      returned over HTTP (see `routes::pair_init`'s doc): it's only ever
+///      "displayed on the box's screen," which for this project means the
+///      agent's own journal.
+///   2. Re-tail the journal (the exact same source `collect_snapshot` reads
+///      `snap.pairing` from) to read that fresh code back -- see
+///      [`find_fresh_pairing_code`] for why a short retry loop, not a single
+///      read, covers the (small) race between the agent's `println!` landing
+///      in journald and this read.
+///   3. `cmd_pair_complete(host, pair_id, code, enable_ssh: false)` exchanges
+///      them for a bearer token and persists it via the SAME `SecretStore`
+///      `tt pair`/`tt reset` use -- so `R`eset (and every other authed
+///      command run against `host` afterward) sees it immediately.
+fn run_pair(env: &dyn LifecycleEnv, names: &ToolNames, host: &str) -> String {
+    let pair_id = match crate::run_async(crate::cmd_pair_init(host)) {
+        Ok(id) => id,
+        Err(e) => return format!("pair failed: could not start pairing: {e}"),
+    };
+
+    let code = match find_fresh_pairing_code(env, &names.service_name) {
+        Some(c) => c,
+        None => {
+            return "pair failed: pairing code not found in journal after pair-init".to_string()
+        }
+    };
+
+    match crate::run_async(crate::cmd_pair_complete(host, &pair_id, &code, false)) {
+        Ok(_ssh) => "pair: ok".to_string(),
+        Err(e) => format!("pair failed: {e}"),
     }
+}
+
+/// Re-tail `unit`'s journal looking for the pairing code a `pair_init` call
+/// we JUST made should have logged, retrying a handful of times with a short
+/// sleep between attempts.
+///
+/// The agent's `println!` (see `routes::pair_init`) happens, and is flushed
+/// to the pipe journald reads from, before it even finishes building the
+/// HTTP response our `pair_init` call is waiting on -- so by the time that
+/// call returns, journald has almost certainly already ingested the line.
+/// The retry loop exists purely to absorb scheduling jitter (a busy box, a
+/// slow journald flush) without turning an already-rare race into a hard
+/// failure; it adds at most a few hundred milliseconds to a single keypress,
+/// which is imperceptible for an interactive action like this.
+fn find_fresh_pairing_code(env: &dyn LifecycleEnv, unit: &str) -> Option<String> {
+    const ATTEMPTS: u32 = 5;
+    const RETRY_DELAY: Duration = Duration::from_millis(50);
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(RETRY_DELAY);
+        }
+        let journal = env.journal_tail(unit, 40).unwrap_or_default();
+        if let Some(p) = parse_pairing(&journal, env.now_unix()) {
+            return Some(p.code);
+        }
+    }
+    None
 }
 
 /// `c`ycle to the next profile in `config.available_profiles` (wrapping
 /// around) and apply it via [`LifecycleActions::set_profile`]. Returns
 /// `None` (no message, no-op) when there are no profiles to cycle through --
 /// distinct from an action failure, which does produce a message.
+///
+/// `agent_bin_path` is the caller's already-resolved ABSOLUTE agent path
+/// (`super::which_agent`, the same resolution `install_service` uses) -- see
+/// [`LifecycleActions::set_profile`]'s doc for why a bare binary name here
+/// was the C1 bug (a profile drop-in systemd couldn't start).
 fn run_profile_cycle(
     actions: &LifecycleActions<'_>,
     snap: &BoxLifecycleSnapshot,
+    agent_bin_path: &str,
 ) -> Option<String> {
     let cfg = snap.config.as_ref()?;
     if cfg.available_profiles.is_empty() {
@@ -499,7 +598,7 @@ fn run_profile_cycle(
     }
     let next = next_profile(cfg.active_profile.as_deref(), &cfg.available_profiles);
     Some(run_action(
-        actions.set_profile(&next),
+        actions.set_profile(&next, agent_bin_path),
         &format!("profile -> {next}"),
     ))
 }
@@ -534,6 +633,55 @@ mod tests {
             config: None,
             pairing: None,
         }
+    }
+
+    /// Minimal [`LifecycleEnv`] fake for [`find_fresh_pairing_code`]'s tests:
+    /// `journal_tail` always returns the same fixed lines regardless of
+    /// which attempt asked -- enough to exercise the "found immediately" and
+    /// "never found" paths without needing a fake that changes its answer
+    /// across retries.
+    struct FixedJournalEnv {
+        journal: Vec<String>,
+    }
+    impl LifecycleEnv for FixedJournalEnv {
+        fn systemctl_show(&self, _unit: &str) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn journal_tail(&self, _unit: &str, _lines: u32) -> anyhow::Result<Vec<String>> {
+            Ok(self.journal.clone())
+        }
+        fn http_get(&self, _path: &str) -> anyhow::Result<String> {
+            anyhow::bail!("n/a")
+        }
+        fn run(&self, _argv: &[&str]) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn now_unix(&self) -> u64 {
+            0
+        }
+    }
+
+    #[test]
+    fn find_fresh_pairing_code_reads_it_off_the_journal() {
+        let env = FixedJournalEnv {
+            journal: vec!["tt-station-agentd: pairing code: 042817".to_string()],
+        };
+        assert_eq!(
+            find_fresh_pairing_code(&env, "svc.service"),
+            Some("042817".to_string())
+        );
+    }
+
+    /// The retry loop must give up (not hang/loop forever) when the journal
+    /// never gets a code -- e.g. `pair-init` never actually reached the
+    /// agent. This exercises all `ATTEMPTS` retries (a few hundred ms of
+    /// real sleeping), which is acceptable for a test that only runs once.
+    #[test]
+    fn find_fresh_pairing_code_gives_up_when_journal_never_has_one() {
+        let env = FixedJournalEnv {
+            journal: vec!["agent started".to_string()],
+        };
+        assert_eq!(find_fresh_pairing_code(&env, "svc.service"), None);
     }
 
     #[test]

@@ -51,10 +51,7 @@ pub fn run_console(
     _json: bool,
 ) -> anyhow::Result<()> {
     let names = ToolNames::from_env();
-    let env = RealLifecycleEnv {
-        names: names.clone(),
-        ctrl_port,
-    };
+    let env = RealLifecycleEnv { ctrl_port };
 
     if install_service {
         let agent_path = which_agent(&names.agent_bin);

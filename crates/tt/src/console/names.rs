@@ -2,11 +2,6 @@
 //! future rename (`tt` → `tt-cli`, etc.) is a one-place change. Every
 //! systemctl/journalctl/unit-template reference resolves names from here.
 
-// `tt` is a bin crate, so clippy's dead-code lint fires on pub items that
-// aren't yet called from `main.rs` — expected for this task, which only
-// establishes the source of truth. Later tasks (lifecycle state machine,
-// actions, TUI) wire this in; drop this allow once something calls it.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolNames {
     pub tt_bin: String,
@@ -17,8 +12,11 @@ pub struct ToolNames {
 // Pulled out of `from_env` so the defaulting/override logic can be
 // unit-tested as a pure function — no `std::env` mutation, hence no races
 // with sibling tests under the default parallel `cargo test` harness.
-#[allow(dead_code)]
-fn resolve(tt_bin: Option<String>, agent_bin: Option<String>, service_name: Option<String>) -> ToolNames {
+fn resolve(
+    tt_bin: Option<String>,
+    agent_bin: Option<String>,
+    service_name: Option<String>,
+) -> ToolNames {
     fn or_default(v: Option<String>, default: &str) -> String {
         v.filter(|v| !v.is_empty())
             .unwrap_or_else(|| default.to_string())
@@ -30,7 +28,6 @@ fn resolve(tt_bin: Option<String>, agent_bin: Option<String>, service_name: Opti
     }
 }
 
-#[allow(dead_code)]
 impl ToolNames {
     pub fn from_env() -> Self {
         resolve(
@@ -71,7 +68,11 @@ mod tests {
 
     #[test]
     fn empty_string_falls_back_to_default() {
-        let n = resolve(Some(String::new()), Some(String::new()), Some(String::new()));
+        let n = resolve(
+            Some(String::new()),
+            Some(String::new()),
+            Some(String::new()),
+        );
         assert_eq!(n.tt_bin, "tt");
         assert_eq!(n.agent_bin, "tt-station-agentd");
         assert_eq!(n.service_name, "tt-station-agentd.service");

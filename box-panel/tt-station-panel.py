@@ -25,11 +25,17 @@ Config is via env vars (sensible box defaults below) so the same file works on
 any box:
 
   TTS_SERVICE_NAME  systemd --user unit to control        (default: tt-station-agentd.service)
-  TTS_AGENT_BIN     agent binary name/path baked into a    (default: tt-station-agentd)
-                     profile drop-in's ExecStart= line —
-                     mirrors the Rust side's
-                     `console::names::ToolNames::agent_bin`
-                     default; NOT used to spawn a process
+  TTS_AGENT_BIN     agent binary NAME — mirrors the Rust     (default: tt-station-agentd)
+                     side's `console::names::ToolNames::
+                     agent_bin` default; NOT used to spawn a
+                     process. Resolved to an ABSOLUTE path via
+                     this file's `which_agent` (mirroring the
+                     Rust side's `console::which_agent`)
+                     before being baked into a profile
+                     drop-in's ExecStart= line — systemd
+                     --user can't resolve a bare name there
+                     (see C1 in the final-review report), so a
+                     bare TTS_AGENT_BIN alone is not enough.
   TTS_TT_BIN        path to tt (for --snapshot and Reset)  (default: ./target/release/tt)
   TTS_NAME          box name, shown in the window title    (default: qb2-lab)
   TTS_CTRL_PORT     --ctrl-port passed to `tt console`     (default: 8765)
@@ -60,11 +66,12 @@ from gi.repository import GLib, Gtk, Gdk  # noqa: E402
 # ── Config ──────────────────────────────────────────────────────────────────
 REPO = Path(os.environ.get("TTS_REPO", str(Path.home() / "code/tt-inference-server")))
 HOSTNAME = socket.gethostname()
-# The binary NAME/path baked into a profile drop-in's `ExecStart=` line (see
-# `apply_profile`/`render_profile_dropin` below) — it is NOT used to launch a
-# child process anymore. Default matches the Rust side's
-# `console::names::ToolNames::agent_bin` default exactly, so a box with no
-# override agrees with `tt console` about what the unit actually execs.
+# The binary NAME baked into a profile drop-in's `ExecStart=` line, resolved
+# to an ABSOLUTE path by `which_agent()` (below) before it's ever written --
+# it is NOT used to launch a child process directly. Default matches the Rust
+# side's `console::names::ToolNames::agent_bin` default exactly, so a box
+# with no override agrees with `tt console` about what the unit actually
+# execs.
 AGENT_BIN = os.environ.get("TTS_AGENT_BIN", "tt-station-agentd")
 # The systemd --user unit this panel controls and polls. Default matches the
 # Rust side's `console::names::ToolNames::service_name` default exactly.
@@ -150,6 +157,44 @@ def _systemctl(verb: str) -> None:
     subprocess.run(["systemctl", "--user", verb, SERVICE_NAME], check=False)
 
 
+def which_agent(agent_bin: str) -> str:
+    """Resolve `agent_bin` to an ABSOLUTE path, exactly mirroring the Rust
+    side's `console::which_agent`/`scan_path_for`
+    (`crates/tt/src/console/mod.rs`) so a profile drop-in this panel writes
+    and one `tt console` writes bake in byte-identical `ExecStart=` lines.
+
+    C1 (final-review): systemd `--user` resolves a non-absolute
+    `ExecStart=` against a fixed compiled-in search path that does NOT
+    include `~/.local/bin` or a repo's `./target/release` — so baking in a
+    bare `TTS_AGENT_BIN` (e.g. the default `tt-station-agentd`) can produce a
+    drop-in the unit fails to start from. Resolution order (same as Rust):
+
+      1. A `$PATH` scan: the first `<dir>/<agent_bin>` that exists as a file.
+      2. `~/.local/bin/<agent_bin>`, if that file exists (this project's
+         documented install location).
+      3. The bare name, unresolved — lets the panel still write SOMETHING
+         rather than refuse outright; a systemd unit with a bare
+         `ExecStart=` simply fails to start until the operator fixes it,
+         a clearer failure mode than not writing the drop-in at all.
+
+    If `agent_bin` is already absolute, `Path(directory) / agent_bin`
+    resolves to `agent_bin` itself for every `directory` (pathlib replaces
+    the whole path when joined with an absolute one, same as Rust's
+    `PathBuf::join`), so this degrades to a cheap absolute-path existence
+    check -- no special-casing needed.
+    """
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        candidate = Path(directory) / agent_bin
+        if candidate.is_file():
+            return str(candidate)
+    candidate = Path.home() / ".local" / "bin" / agent_bin
+    if candidate.is_file():
+        return str(candidate)
+    return agent_bin
+
+
 def render_profile_dropin(agent_bin: str, profile: str) -> str:
     """Systemd drop-in content that pins the service to `--profile <profile>`.
 
@@ -158,6 +203,11 @@ def render_profile_dropin(agent_bin: str, profile: str) -> str:
     `ExecStart=` line first clears the unit's original `ExecStart=` before
     the real one is set (systemd accumulates multiple `ExecStart=` values
     across drop-ins otherwise), then the real one pins the profile.
+
+    `agent_bin` MUST already be an absolute path (see `which_agent` above) --
+    this function does no resolution itself, exactly mirroring the Rust
+    side's `render_profile_dropin`, which also just formats whatever it's
+    given.
     """
     return f"[Service]\nExecStart=\nExecStart={agent_bin} --profile {profile}\n"
 
@@ -457,6 +507,12 @@ class Panel(Gtk.ApplicationWindow):
         a drop-in overriding `ExecStart=` (exactly mirroring the Rust side's
         `LifecycleActions::set_profile`), reloads the systemd user manager,
         and restarts the unit so the new `ExecStart=` actually takes effect.
+
+        Bakes in `which_agent(AGENT_BIN)` -- an ABSOLUTE path -- rather than
+        the bare `AGENT_BIN` name (see C1 in the final-review report): a bare
+        name in `ExecStart=` is not resolved against `$PATH` by systemd
+        `--user`, so a drop-in built from one can leave the unit unable to
+        start after a profile switch.
         """
         if not self.profile_names:
             return
@@ -466,7 +522,7 @@ class Panel(Gtk.ApplicationWindow):
         try:
             path = profile_dropin_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(render_profile_dropin(AGENT_BIN, selected))
+            path.write_text(render_profile_dropin(which_agent(AGENT_BIN), selected))
         except OSError as e:
             self._log(f"profile drop-in write failed: {e}")
             return

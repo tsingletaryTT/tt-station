@@ -9,12 +9,10 @@
 //! degrade-on-agent-down contract that makes "the agent isn't running" a
 //! normal, representable state rather than an error.
 //!
-//! `tt` is a bin crate; nothing in `main.rs` constructs a [`RealLifecycleEnv`]
-//! yet (that's a later task wiring `tt console` itself). Until then rustc's
-//! dead-code lint would flag the whole real impl as unused -- same situation
-//! as `console::names`/`console::state`, and the same fix: allow it here and
-//! drop the allow once something calls it.
-#![allow(dead_code)]
+//! `run_console` (`console::mod`) constructs the real [`RealLifecycleEnv`]
+//! and every method here is reachable from `main()` through it, so this
+//! module carries no blanket `#![allow(dead_code)]` -- see the M5 cleanup
+//! note in the final-review report for why one used to be here.
 
 use crate::console::names::ToolNames;
 use crate::console::state::{parse_pairing, parse_service_state};
@@ -67,22 +65,29 @@ pub trait LifecycleEnv {
 /// `tt console` runs on the box itself, so `127.0.0.1` is always correct,
 /// unlike the CLI's `discover`/`pair` flows which target a remote host).
 ///
-/// `names` isn't read by any method here today (callers pass the unit name
-/// explicitly per call, and [`collect_snapshot`] is the one that resolves it
-/// from a [`ToolNames`]) -- it's carried on the struct so a later task's
-/// operator actions (which DO need `names.tt_bin`/`agent_bin` to build argv
-/// for [`LifecycleEnv::run`]) don't have to thread a second parameter
-/// through every call site.
+/// No `names: ToolNames` field here (there used to be one) -- every method
+/// below takes the unit name/argv it needs explicitly per call, and the
+/// callers that DO need a [`ToolNames`] (`console::mod`'s `run_console`,
+/// `collect_snapshot`, `LifecycleActions`, the TUI's key handlers) already
+/// hold their own, resolved once via `ToolNames::from_env()`. A `names`
+/// field here was dead weight: nothing in this file ever read `self.names`.
 #[derive(Debug, Clone)]
 pub struct RealLifecycleEnv {
-    pub names: ToolNames,
     pub ctrl_port: u16,
 }
 
 impl LifecycleEnv for RealLifecycleEnv {
     fn systemctl_show(&self, unit: &str) -> Result<String> {
         let out = std::process::Command::new("systemctl")
-            .args(["--user", "show", unit, "-p", "ActiveState", "-p", "SubState"])
+            .args([
+                "--user",
+                "show",
+                unit,
+                "-p",
+                "ActiveState",
+                "-p",
+                "SubState",
+            ])
             .output()?;
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
@@ -118,7 +123,9 @@ impl LifecycleEnv for RealLifecycleEnv {
     }
 
     fn run(&self, argv: &[&str]) -> Result<()> {
-        let status = std::process::Command::new(argv[0]).args(&argv[1..]).status()?;
+        let status = std::process::Command::new(argv[0])
+            .args(&argv[1..])
+            .status()?;
         if status.success() {
             Ok(())
         } else {
@@ -183,8 +190,9 @@ pub fn collect_snapshot(env: &dyn LifecycleEnv, names: &ToolNames) -> BoxLifecyc
     let status_body = env.http_get("/status").ok();
     let reachable = status_body.is_some();
 
-    let status_wire: Option<StatusWire> =
-        status_body.as_deref().and_then(|s| serde_json::from_str(s).ok());
+    let status_wire: Option<StatusWire> = status_body
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
     let name = status_wire.as_ref().map(|w| w.name.clone());
     let chips = status_wire.as_ref().map(|w| w.chips.clone());
     // A status string the agent sent that doesn't round-trip through
@@ -210,7 +218,9 @@ pub fn collect_snapshot(env: &dyn LifecycleEnv, names: &ToolNames) -> BoxLifecyc
 
     // Pairing comes from the journal, not HTTP -- an unreachable agent can
     // still have a readable journal (e.g. it crashed after logging a code).
-    let journal = env.journal_tail(&names.service_name, 40).unwrap_or_default();
+    let journal = env
+        .journal_tail(&names.service_name, 40)
+        .unwrap_or_default();
     let pairing = parse_pairing(&journal, env.now_unix());
 
     BoxLifecycleSnapshot {

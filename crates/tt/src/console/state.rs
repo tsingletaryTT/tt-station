@@ -9,12 +9,6 @@
 //! the logic pure makes it exhaustively unit-testable without mocking a
 //! shell or a systemd instance.
 
-// `tt` is a bin crate; clippy's dead-code lint fires on pub items nothing
-// calls yet from `main.rs`. This task only establishes the pure logic core --
-// the collector/actions/TUI (later tasks) wire it in. Drop this allow once
-// something calls it.
-#![allow(dead_code)]
-
 use libttstation::model::{BoxLifecycleSnapshot, PairingState, ServiceState, ServingStatus};
 
 /// How long a freshly-issued pairing code stays valid, in seconds.
