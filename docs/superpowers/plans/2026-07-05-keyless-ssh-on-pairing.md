@@ -166,6 +166,13 @@ mod tests {
 
 ## Task 5: tt CLI — default SSH user `ttuser`
 
+> **SKIPPED (intentional, during execution).** The `tt` CLI never opens an SSH
+> connection itself — `tt ssh-authorize` talks HTTP to the agent, which installs the key
+> into its own run-user's `authorized_keys` and reports the `ssh_user` back. So a CLI-side
+> `DEFAULT_SSH_USER` constant has no consumer. The `ttuser` default lives where SSH is
+> actually initiated: the Swift launchers (`SSHTarget.defaultUser`, Task 8) and the agent's
+> run-user (Task 2). No functional gap — the `ttuser` literals across the codebase agree.
+
 **Files:**
 - Modify: `crates/tt/src/main.rs` (or wherever SSH-user is resolved)
 
