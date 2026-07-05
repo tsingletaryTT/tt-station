@@ -7,16 +7,22 @@ public struct BoxRecord: Codable, Equatable {
     public let chips: String
     public let statusRaw: String
     public let apiver: Int
+    /// Device mesh topology reported by the box (e.g. `"p300x2"`), used to
+    /// rank models by hardware fit. `nil` for older agents that predate this
+    /// field or for boxes discovered without it (e.g. some mDNS TXT records).
+    public let deviceMesh: String?
 
     enum CodingKeys: String, CodingKey {
         case name, host, chips, apiver
         case ctrlPort = "ctrl_port"
         case statusRaw = "status"
+        case deviceMesh = "device_mesh"
     }
 
-    public init(name: String, host: String, ctrlPort: Int, chips: String, statusRaw: String, apiver: Int) {
+    public init(name: String, host: String, ctrlPort: Int, chips: String, statusRaw: String, apiver: Int, deviceMesh: String? = nil) {
         self.name = name; self.host = host; self.ctrlPort = ctrlPort
         self.chips = chips; self.statusRaw = statusRaw; self.apiver = apiver
+        self.deviceMesh = deviceMesh
     }
 
     /// `host:port` — the identity string every `tt` command keys off of.

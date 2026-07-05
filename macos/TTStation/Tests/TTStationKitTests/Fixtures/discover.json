@@ -1,1 +1,1 @@
-[{"name":"quietbox2","host":"192.168.5.119","ctrl_port":8080,"chips":"4xBH","status":"serving:Qwen3-8B","apiver":1}]
+[{"name":"quietbox2","host":"192.168.5.119","ctrl_port":8080,"chips":"4xBH","status":"serving:Qwen3-8B","apiver":1,"device_mesh":"p300x2"}]

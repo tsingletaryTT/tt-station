@@ -29,6 +29,18 @@ final class ModelsTests: XCTestCase {
         XCTAssertTrue(resp.models.isEmpty)
     }
 
+    func testBoxRecordDecodesDeviceMesh() throws {
+        let json = #"{"name":"qb2","host":"qb2-lab.local","ctrl_port":8765,"chips":"4xBH","status":"idle","apiver":1,"device_mesh":"p300x2"}"#
+        let rec = try JSONDecoder().decode(BoxRecord.self, from: Data(json.utf8))
+        XCTAssertEqual(rec.deviceMesh, "p300x2")
+    }
+
+    func testBoxRecordDeviceMeshDefaultsNilWhenAbsent() throws {
+        let json = #"{"name":"qb2","host":"qb2-lab.local","ctrl_port":8765,"chips":"4xBH","status":"idle","apiver":1}"#
+        let rec = try JSONDecoder().decode(BoxRecord.self, from: Data(json.utf8))
+        XCTAssertNil(rec.deviceMesh)
+    }
+
     func testHostPortStripsTrailingDot() {
         let dotted = BoxRecord(name: "b", host: "qb2-lab.local.", ctrlPort: 8765, chips: "x", statusRaw: "idle", apiver: 1)
         XCTAssertEqual(dotted.hostPort, "qb2-lab.local:8765")
