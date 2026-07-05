@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>tt-station — Your Tenstorrent QuietBox, as your Mac sees it</title>
-  <meta name="description" content="Discover a Tenstorrent QuietBox on your LAN like an AirPlay device, pair once, run a model, and point any OpenAI client at one /v1 endpoint. The thin glue that makes local Tenstorrent inference feel plug-and-play from a Mac.">
+  <meta name="description" content="Discover a Tenstorrent QuietBox on your LAN like an AirPlay device, pair once, run a model, and point any OpenAI client at one /v1 endpoint. A box-side agent plus a native macOS app — the thin glue that makes local Tenstorrent inference feel plug-and-play.">
   <meta property="og:title" content="tt-station — plug-and-play Tenstorrent from your Mac">
-  <meta property="og:description" content="Discover → pair → run → one OpenAI-compatible /v1 endpoint. No llama.cpp required.">
+  <meta property="og:description" content="Discover → pair → run → one OpenAI-compatible /v1 endpoint. A native macOS control room on one side, a Rust agent on the other. No llama.cpp required.">
   <style>
     /* ── Reset & base ─────────────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -237,6 +237,28 @@
     .feature-desc { font-size: 0.875rem; color: var(--muted); line-height: 1.65; }
     .feature-desc code { font-size: 0.82em; }
 
+    /* ── Two sides (box vs. macOS) ────────────────────────────────────────── */
+    .sides-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.5rem; }
+    @media (max-width: 900px) { .sides-grid { grid-template-columns: 1fr; } }
+    .side-card {
+      background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
+      padding: 1.85rem 1.9rem;
+    }
+    .side-head { display: flex; align-items: center; gap: 0.9rem; margin-bottom: 1.35rem; padding-bottom: 1.15rem; border-bottom: 1px solid var(--border); }
+    .side-icon {
+      flex-shrink: 0; width: 2.5rem; height: 2.5rem; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(79,209,197,0.1); border: 1px solid var(--border-hi);
+      color: var(--teal); font-size: 1.2rem;
+    }
+    .side-title { font-size: 1.15rem; font-weight: 600; color: var(--text); }
+    .side-sub { font-family: var(--mono); font-size: 0.76rem; color: var(--muted); margin-top: 0.15rem; }
+    .side-sub code { padding: 0; border: none; background: none; }
+    .side-list { list-style: none; display: flex; flex-direction: column; gap: 0.9rem; }
+    .side-list li { font-size: 0.9rem; color: var(--muted); line-height: 1.65; padding-left: 1.1rem; position: relative; }
+    .side-list li::before { content: '›'; color: var(--teal-dim); position: absolute; left: 0; }
+    .side-list strong { color: var(--text); font-weight: 600; }
+
     /* ── Flow / architecture diagram ──────────────────────────────────────── */
     .flow {
       display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 0.6rem; align-items: stretch;
@@ -346,6 +368,7 @@
   <ul class="topnav-links">
     <li><a href="#why">Why</a></li>
     <li><a href="#how">How it works</a></li>
+    <li><a href="#sides">Box &amp; Mac</a></li>
     <li><a href="#endpoint">One endpoint</a></li>
     <li><a href="#setup">Setup</a></li>
     <li><a href="https://github.com/tsingletaryTT/tt-station" target="_blank" rel="noopener">GitHub</a></li>
@@ -362,12 +385,14 @@
         Discover a Tenstorrent QuietBox on your LAN like an AirPlay device.
         Pair once. Run a model. Point <em>any</em> OpenAI client at one
         <code>/v1</code> endpoint — no drivers, no SSH gymnastics, no llama.cpp.
+        A native <strong>macOS control room</strong> rides on top for the days
+        you'd rather click than type.
       </p>
       <div class="hero-cta">
         <a class="btn-primary" href="#setup">Get started →</a>
         <a class="btn-secondary" href="https://github.com/tsingletaryTT/tt-station" target="_blank" rel="noopener">View on GitHub</a>
       </div>
-      <p class="hero-meta">Rust CLI &amp; box agent · <span>mDNS discovery</span> · <span>6-digit pairing</span> · <span>OpenAI-compatible</span></p>
+      <p class="hero-meta">Rust CLI &amp; box agent · <span>mDNS discovery</span> · <span>6-digit pairing</span> · <span>keyless SSH</span> · <span>native macOS app</span></p>
     </div>
 
     <div class="window" aria-label="Terminal showing the tt-station happy path">
@@ -428,14 +453,14 @@
       </div>
       <div class="macmenu">
         <div class="macmenu-head">Boxes on your network</div>
-        <div class="macrow sel"><span class="dot on"></span><span class="grow">qb2-lab</span><span class="meta">serving · Qwen3-8B</span></div>
+        <div class="macrow sel"><span class="dot on"></span><span class="grow">qb2-lab <span class="meta">P300X2 · 61°C</span></span><span class="meta">serving · Qwen3-8B</span></div>
         <div class="macrow"><span class="dot idle"></span><span class="grow">loudbox-2</span><span class="meta">idle</span></div>
         <div class="macsep"></div>
-        <div class="macrow"><span class="lead">▸ Run a model…</span></div>
+        <div class="macrow"><span class="lead">⤢ Open control room</span></div>
         <div class="macrow"><span class="lead">⧉ Copy endpoint</span><span class="grow"></span><span class="meta">:8002/v1</span></div>
-        <div class="macrow"><span class="lead">◍ Open Cloud Console</span></div>
+        <div class="macrow"><span class="lead">▸ Connect: Open WebUI / opencode</span></div>
       </div>
-      <p style="text-align:center; font-family:var(--mono); font-size:0.68rem; color:var(--yellow); margin-top:0.7rem;">▲ menu-bar app — the vision, coming next</p>
+      <p style="text-align:center; font-family:var(--mono); font-size:0.68rem; color:var(--muted2); margin-top:0.7rem;">▲ TTStation.app v0.4.0 — menu bar + control room window, shipped</p>
     </div>
   </div>
 </section>
@@ -445,29 +470,30 @@
   <p class="section-label">How it works</p>
   <h2 class="section-heading">One endpoint, three moving parts</h2>
   <p class="section-sub">
-    tt-station adds a small box-side agent and a Mac-side CLI on top of the serving stack you
-    already run. Discovery and pairing happen over the LAN; serving is delegated to
-    <code>tt-inference-server</code> behind a swappable backend, so the same flow can later target
-    Tenstorrent Cloud without the Mac noticing.
+    tt-station adds a small box-side agent and a Mac-side CLI (plus a native app built on it) on
+    top of the serving stack you already run. Discovery, pairing, and an optional SSH handshake
+    happen over the LAN; serving is delegated to <code>tt-inference-server</code> behind a
+    swappable backend, so the same flow can later target Tenstorrent Cloud without the Mac
+    noticing.
   </p>
   <div class="flow">
     <div class="node mac">
       <span class="node-eyebrow">Your Mac</span>
-      <span class="node-title">tt CLI &amp; menu-bar</span>
+      <span class="node-title">tt CLI &amp; TTStation.app</span>
       <ul>
-        <li>Browse &amp; pick a box</li>
+        <li>Browse, rank &amp; pick a box/model</li>
         <li>Token in Keychain</li>
         <li>Exports <code>OPENAI_BASE_URL</code></li>
       </ul>
     </div>
-    <div class="arrow"><span class="lab">mDNS · pair · HTTP</span><span class="line">→</span></div>
+    <div class="arrow"><span class="lab">mDNS · pair · SSH · HTTP</span><span class="line">→</span></div>
     <div class="node box">
       <span class="node-eyebrow">QuietBox (LAN)</span>
       <span class="node-title">tt-station-agentd</span>
       <ul>
-        <li>Advertises <code>_tenstorrent._tcp</code></li>
-        <li>6-digit pairing → token</li>
-        <li>Serving backend trait</li>
+        <li>Advertises <code>_tenstorrent._tcp</code> + device mesh</li>
+        <li>6-digit pairing → token, keyless SSH</li>
+        <li>Named profiles (<code>stable</code>/<code>bleeding</code>)</li>
       </ul>
     </div>
     <div class="arrow"><span class="lab">run.py · vLLM</span><span class="line">→</span></div>
@@ -478,6 +504,51 @@
         <li>Loads the model on-chip</li>
         <li>OpenAI-compatible <code>/v1</code></li>
         <li>Cloud burst (later)</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ── Two sides ─────────────────────────────────────────────────────────── -->
+<section class="section edge" id="sides">
+  <p class="section-label">Two sides, one workflow</p>
+  <h2 class="section-heading">A box that behaves, and a Mac that watches</h2>
+  <p class="section-sub">
+    The two halves of tt-station ship independently but are designed as one product: everything
+    the agent learns about the box — its device mesh, its temperatures, what's serving — surfaces
+    natively in the Mac app, and everything the app does is just <code>tt --json</code> underneath.
+  </p>
+  <div class="sides-grid">
+    <div class="side-card">
+      <div class="side-head">
+        <span class="side-icon">▣</span>
+        <div>
+          <div class="side-title">The box side</div>
+          <div class="side-sub">Rust · <code>crates/tt-station-agentd</code> · Linux, on the QuietBox</div>
+        </div>
+      </div>
+      <ul class="side-list">
+        <li><strong>Device-mesh aware.</strong> Detects the chip layout from <code>tt-smi</code> (e.g. <code>p300x2</code>) at startup and advertises it over mDNS — no manual device flags.</li>
+        <li><strong>Named serving profiles.</strong> An optional <code>agentd.toml</code> defines profiles like <code>stable</code>/<code>bleeding</code> — different repo checkouts or images, picked with <code>tt config</code> / <code>--profile</code>.</li>
+        <li><strong>Keyless SSH on pairing.</strong> The same 6-digit handshake can install your Mac's public key on the box (<code>/ssh/authorize</code>, <code>tt ssh-authorize</code>) — no password prompts for the workbench.</li>
+        <li><strong>Readiness that means something.</strong> Resets the board, pins a compatible serving image, and only reports "serving" once <code>/v1/models</code> actually lists the model.</li>
+        <li><strong>Operable two ways.</strong> A GTK <strong>box panel</strong> on the QuietBox's own screen (start/stop/reset, live pairing code, profile picker), or headless as a systemd-style daemon driven entirely by the CLI/app.</li>
+      </ul>
+    </div>
+    <div class="side-card">
+      <div class="side-head">
+        <span class="side-icon">⌘</span>
+        <div>
+          <div class="side-title">The macOS side</div>
+          <div class="side-sub">Swift · <code>macos/TTStation</code> · v0.4.0, native app</div>
+        </div>
+      </div>
+      <ul class="side-list">
+        <li><strong>Menu bar + control room.</strong> A fast <code>MenuBarExtra</code> popover for glance and quick actions, backed by a resizable window with a boxes sidebar and a card-based detail pane.</li>
+        <li><strong>Hardware-aware model browser.</strong> Models that run on this box's mesh rank first ("Runs on this box" vs. a dimmed "Needs other hardware"); the smart default is compatible-first.</li>
+        <li><strong>Live device telemetry.</strong> Per-device temp/power/aiclk streamed straight from the agent's <code>/telemetry</code> WebSocket, color-ramped, with a jump to the deeper <code>tt-toplike</code> view.</li>
+        <li><strong>Fast Connect + Workbench.</strong> One-click Open WebUI / opencode (installing missing deps via Homebrew), plus Terminal/SSH, remote <code>tt-toplike</code>, and VS Code Remote-SSH launchers.</li>
+        <li><strong>A veneer, not a brain.</strong> No discovery, pairing, or HTTP logic lives in Swift — the app shells out to <code>tt --json</code> and renders the result, so the CLI's behavior is always the truth.</li>
       </ul>
     </div>
   </div>
@@ -495,8 +566,8 @@
     </div>
     <div class="feature-card">
       <div class="feature-icon">🔑</div>
-      <div class="feature-title">Pair once</div>
-      <div class="feature-desc">A 6-digit code on the box exchanges for a bearer token, stored in the macOS Keychain. Expiring codes and a wrong-guess lockout keep it honest.</div>
+      <div class="feature-title">Pair once, keylessly SSH too</div>
+      <div class="feature-desc">A 6-digit code on the box exchanges for a bearer token, stored in the macOS Keychain. Opt in during pairing and it also installs your Mac's public key on the box — no password prompts for the workbench.</div>
     </div>
     <div class="feature-card">
       <div class="feature-icon">🔌</div>
@@ -504,9 +575,9 @@
       <div class="feature-desc">Serving speaks the OpenAI API. <code>tt endpoint</code> hands you a working <code>OPENAI_BASE_URL</code> — point curl, Cursor, or the <code>openai</code> SDK straight at it.</div>
     </div>
     <div class="feature-card">
-      <div class="feature-icon">🔁</div>
-      <div class="feature-title">Swappable serving</div>
-      <div class="feature-desc">A <code>ServingBackend</code> trait drives <code>run.py</code>/vLLM today; the same interface can target dstack or Tenstorrent Cloud tomorrow. The Mac side never changes.</div>
+      <div class="feature-icon">🗂️</div>
+      <div class="feature-title">Named serving profiles</div>
+      <div class="feature-desc">An optional <code>agentd.toml</code> defines profiles like <code>stable</code>/<code>bleeding</code> — different repo checkouts or images. Switch with <code>tt config</code> / <code>--profile</code>; no file at all means unchanged flag-only behavior.</div>
     </div>
     <div class="feature-card">
       <div class="feature-icon">🚫</div>
@@ -514,14 +585,14 @@
       <div class="feature-desc">Usability rides entirely on the vLLM <code>/v1</code> your box already serves. Nothing to port, nothing to recompile — the endpoint <em>is</em> the product.</div>
     </div>
     <div class="feature-card">
-      <div class="feature-icon">🦀</div>
-      <div class="feature-title">One small Rust binary</div>
-      <div class="feature-desc">The CLI and the box agent are a single Rust workspace — a static binary on the Mac, a systemd-friendly daemon on the box. A SwiftUI menu-bar veneer wraps it next.</div>
+      <div class="feature-icon">🧭</div>
+      <div class="feature-title">Hardware-aware, not hopeful</div>
+      <div class="feature-desc">The macOS app ranks models by whether they actually run on this box's detected device mesh, defaulting to a compatible model instead of one that'll fail to load.</div>
     </div>
     <div class="feature-card">
       <div class="feature-icon">📊</div>
-      <div class="feature-title">Watch it live, remotely</div>
-      <div class="feature-desc">The agent also publishes a telemetry WebSocket, so <code>tt-toplike --remote &lt;box&gt;</code> renders the box's live hardware view — Tensix, DRAM, temps, power — on your Mac, over the LAN. Experimental.</div>
+      <div class="feature-title">Watch it live</div>
+      <div class="feature-desc">The agent's telemetry WebSocket drives the Mac app's live temp/power/aiclk strip, and feeds <code>tt-toplike --remote &lt;box&gt;</code> for the deep hardware view — Tensix, DRAM, temps — from your Mac. Experimental.</div>
     </div>
   </div>
 </section>
@@ -578,29 +649,31 @@ c.chat.completions.<span class="f">create</span>(
       <span class="install-num">1</span>
       <div class="install-body">
         <p class="where">On the QuietBox</p>
-        <p>Build and start the box agent. It advertises itself over mDNS and drives serving through <code>run.py</code>/vLLM.</p>
+        <p>Build and start the box agent. It advertises itself over mDNS, auto-detects the device mesh from <code>tt-smi</code>, and drives serving through <code>run.py</code>/vLLM.</p>
         <div class="cmd-wrap">
           <code class="cmd" id="cmd1">cargo build --release -p tt-station-agentd
 ./target/release/tt-station-agentd \
   --name qb2-lab --ctrl-port 8765 \
   --backend runpy \
   --tt-inference-repo ~/code/tt-inference-server \
-  --tt-device p300x2 --service-port 8002</code>
+  --serving-image ghcr.io/tenstorrent/tt-inference-server/...</code>
           <button class="cmd-copy" data-target="cmd1">Copy</button>
         </div>
+        <p style="margin-top:0.85rem;">Prefer a config file? Define <code>stable</code>/<code>bleeding</code> profiles once in <code>agentd.toml</code> and start with <code>--profile stable</code> instead of repeating flags — see <a href="https://github.com/tsingletaryTT/tt-station/blob/main/docs/reference/agentd-config.md" target="_blank" rel="noopener"><code>docs/reference/agentd-config.md</code></a>.</p>
       </div>
     </div>
     <div class="install-row">
       <span class="install-num">2</span>
       <div class="install-body">
         <p class="where">On your Mac</p>
-        <p>Build the CLI, then discover the box and pair with the 6-digit code it prints.</p>
+        <p>Build the CLI, then discover the box and pair with the 6-digit code it prints. Add <code>--enable-ssh</code> to also install your Mac's key for keyless access.</p>
         <div class="cmd-wrap">
           <code class="cmd" id="cmd2">cargo build --release -p tt
 tt discover
-tt pair qb2-lab.local:8765        # enter the code shown on the box</code>
+tt pair qb2-lab.local:8765 --enable-ssh   # enter the code shown on the box</code>
           <button class="cmd-copy" data-target="cmd2">Copy</button>
         </div>
+        <p style="margin-top:0.85rem;">Or install <code>TTStation.app</code> — it drives this same CLI from a menu bar popover and control-room window; see <a href="https://github.com/tsingletaryTT/tt-station/blob/main/macos/README.md" target="_blank" rel="noopener"><code>macos/README.md</code></a>.</p>
       </div>
     </div>
     <div class="install-row">
@@ -679,14 +752,21 @@ echo "$OPENAI_BASE_URL"           # → http://qb2-lab.local:8002/v1</code>
         <span class="lineage-era">This repo</span>
         <div>
           <div class="lineage-name">tt-station agent + CLI</div>
-          <div class="lineage-desc"><span class="real">● real</span> — discovery, pairing, serving control, one <code>/v1</code> handoff. Tested end-to-end.</div>
+          <div class="lineage-desc"><span class="real">● real</span> — discovery, pairing, keyless SSH, named serving profiles, one <code>/v1</code> handoff. Tested end-to-end.</div>
+        </div>
+      </li>
+      <li class="lineage-item">
+        <span class="lineage-era">This repo</span>
+        <div>
+          <div class="lineage-name">TTStation.app (v0.4.0)</div>
+          <div class="lineage-desc"><span class="real">● real</span> — the native menu-bar + control-room veneer, hardware-aware model ranking, and Connect/Workbench launchers. Built and unit-tested (99 tests); GUI flows are owner-verified against a live box.</div>
         </div>
       </li>
       <li class="lineage-item">
         <span class="lineage-era">Next</span>
         <div>
-          <div class="lineage-name">SwiftUI menu-bar · cloud burst</div>
-          <div class="lineage-desc"><span class="soon">◐ coming</span> — the native veneer over the CLI, and local-first burst to Tenstorrent Cloud.</div>
+          <div class="lineage-name">tt-toplike remote monitoring · cloud burst</div>
+          <div class="lineage-desc"><span class="soon">◐ experimental</span> — a separate, owner-managed repo renders the box's live telemetry stream on your Mac today; local-first burst to Tenstorrent Cloud is still ahead.</div>
         </div>
       </li>
     </ul>
@@ -707,6 +787,7 @@ echo "$OPENAI_BASE_URL"           # → http://qb2-lab.local:8002/v1</code>
   <ul class="footer-links">
     <li><a href="https://github.com/tsingletaryTT/tt-station" target="_blank" rel="noopener">GitHub</a></li>
     <li><a href="https://github.com/tsingletaryTT/tt-station#readme" target="_blank" rel="noopener">README</a></li>
+    <li><a href="https://github.com/tsingletaryTT/tt-station/blob/main/macos/README.md" target="_blank" rel="noopener">macOS app</a></li>
     <li><a href="https://docs.tenstorrent.com" target="_blank" rel="noopener">Tenstorrent Docs</a></li>
     <li><a href="https://tenstorrent.com" target="_blank" rel="noopener">Tenstorrent</a></li>
   </ul>
