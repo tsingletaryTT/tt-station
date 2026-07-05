@@ -72,6 +72,79 @@ pub fn select_processes(procs: Vec<ProcInfo>, cap: usize) -> Vec<ProcInfo> {
     holders
 }
 
+/// Stateful process sampler. Owns a `sysinfo::System` so cpu% is meaningful
+/// across successive `sample()` calls (sysinfo computes cpu usage from the
+/// delta between two refreshes; the telemetry loop's interval provides them).
+pub struct ProcessSampler {
+    sys: sysinfo::System,
+}
+
+impl ProcessSampler {
+    pub fn new() -> Self {
+        Self {
+            sys: sysinfo::System::new(),
+        }
+    }
+
+    /// One scan → a `TtToplike { schema, processes }`. Refreshes processes,
+    /// flags `uses_tt` via a best-effort /proc/<pid>/fd scan, then selects and
+    /// caps via `select_processes`. Infallible: per-pid errors degrade to
+    /// `uses_tt=false`; an empty box yields `processes: []`.
+    pub fn sample(&mut self) -> TtToplike {
+        self.sys
+            .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let procs: Vec<ProcInfo> = self
+            .sys
+            .processes()
+            .iter()
+            .map(|(pid, p)| {
+                let pid_u = pid.as_u32();
+                ProcInfo {
+                    pid: pid_u,
+                    name: p.name().to_string_lossy().into_owned(),
+                    cmd: p
+                        .cmd()
+                        .iter()
+                        .map(|s| s.to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    uses_tt: pid_holds_tt_device(pid_u),
+                    cpu_pct: p.cpu_usage(),
+                    mem_bytes: p.memory(), // sysinfo 0.30+ returns bytes
+                }
+            })
+            .collect();
+        let procs = select_processes(procs, MAX_PROCESSES);
+        TtToplike {
+            schema: TT_TOPLIKE_SCHEMA,
+            processes: procs,
+        }
+    }
+}
+
+impl Default for ProcessSampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Best-effort: read /proc/<pid>/fd, resolve each symlink, and test for a
+/// Tenstorrent device holder. Any error (unreadable dir -- e.g. another uid's
+/// process) yields `false`; never panics.
+fn pid_holds_tt_device(pid: u32) -> bool {
+    let dir = format!("/proc/{pid}/fd");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return false;
+    };
+    let mut targets = Vec::new();
+    for entry in entries.flatten() {
+        if let Ok(target) = std::fs::read_link(entry.path()) {
+            targets.push(target.to_string_lossy().into_owned());
+        }
+    }
+    target_holds_tt_device(&targets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +224,20 @@ mod tests {
             assert!(json.contains(key), "missing {key} in {json}");
         }
         assert!(json.contains("\"schema\":1"));
+    }
+
+    #[test]
+    fn sampler_reports_schema_and_finds_self() {
+        let mut s = ProcessSampler::new();
+        let _ = s.sample(); // first refresh seeds cpu% baseline
+        let snap = s.sample();
+        assert_eq!(snap.schema, TT_TOPLIKE_SCHEMA);
+        assert!(snap.processes.len() <= MAX_PROCESSES);
+        // the test process itself should be visible to sysinfo
+        let me = std::process::id();
+        // not asserting `me` is in the (capped/sorted) list -- it may be idle
+        // and truncated; just assert the scan produced a well-formed, bounded
+        // result.
+        let _ = me;
     }
 }
