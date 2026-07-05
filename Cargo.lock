@@ -959,6 +959,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tt-station-agentd",
 ]
 
 [[package]]

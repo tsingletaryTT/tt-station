@@ -33,8 +33,14 @@ use libttstation::model::{
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+// Reuse the REAL agent's pure `authkeys` core (validate/authorize/revoke) so
+// this mock's `/ssh/authorize` wire behavior (dedupe, label-injection
+// rejection, permission hardening) can never drift from Task 2's -- the only
+// thing mocked here is WHERE it writes (a temp file, never `~/.ssh`).
+use tt_station_agentd::authkeys;
 
 #[derive(Parser)]
 #[command(
@@ -458,6 +464,123 @@ async fn telemetry_stream(mut socket: WebSocket) {
     }
 }
 
+// ---------------------------------------------------------------------
+// `/ssh/authorize` / `/ssh/authorize` (DELETE): fake the SSH-key-install
+// flow (Task 2's real route) against a throwaway temp file instead of a
+// real `authorized_keys`, so `tt`'s SSH-authorize command (Task 6) and the
+// app's flow (Task 9) can be exercised end-to-end with no hardware and,
+// just as importantly, without ever touching THIS dev machine's real
+// `~/.ssh` -- mock-box runs directly on a developer's Mac, unlike the real
+// agent which only ever runs on a QuietBox.
+// ---------------------------------------------------------------------
+
+/// Where this mock writes/reads its fake `authorized_keys`: a fixed path
+/// under a dedicated `mock-box-ssh/` subdirectory of `std::env::temp_dir()`,
+/// NEVER `~/.ssh`. Fixed (not per-PID) so a manual smoke-test session (start
+/// mock-box, curl POST, curl POST again, curl DELETE) sees consistent
+/// already_present/revoked behavior across calls -- same tradeoff the real
+/// agent's `ssh_authorized_keys_path` makes by being a single fixed path per
+/// `AppState`.
+///
+/// Deliberately a subdirectory, not a bare file directly under
+/// `temp_dir()`: `authkeys::authorize`/`revoke` `chmod 0700` the file's
+/// PARENT directory on every call (see `authkeys.rs`'s doc comment) to keep
+/// `authorized_keys`'s permissions self-healing. If the parent were the
+/// system temp dir itself, that chmod would try to lock down `/tmp` (or
+/// `$TMPDIR`) for every other process on the machine -- which macOS
+/// correctly refuses ("Operation not permitted") since it isn't owned by
+/// this process, but even if it succeeded it would be a serious footgun.
+/// Scoping to our own subdirectory keeps the chmod confined to a directory
+/// this mock owns outright.
+fn mock_ssh_authorized_keys_path() -> PathBuf {
+    std::env::temp_dir()
+        .join("mock-box-ssh")
+        .join("authorized_keys")
+}
+
+/// The account name reported back as `ssh_user` -- fixed to `"ttuser"` to
+/// match the real agent's QuietBox-2 default (`with_ssh_target`'s doc
+/// comment in `tt-station-agentd/src/routes.rs`), so client code (the `tt`
+/// CLI, the app) exercises the exact same value against mock and real.
+const MOCK_SSH_USER: &str = "ttuser";
+
+/// JSON body accepted by `POST /ssh/authorize`. Same field names as the real
+/// agent's `SshAuthorizeRequest` so the same client code/JSON serializer
+/// works against either.
+#[derive(Deserialize)]
+struct SshAuthorizeRequest {
+    public_key: String,
+    label: String,
+}
+
+/// JSON body returned by `POST /ssh/authorize` on success. Same shape as the
+/// real agent's `SshAuthorizeResponse`.
+#[derive(Serialize)]
+struct SshAuthorizeResponse {
+    authorized: bool,
+    ssh_user: String,
+    already_present: bool,
+}
+
+/// `POST /ssh/authorize { "public_key": "...", "label": "..." }`: install
+/// `public_key` into the mock's temp-dir `authorized_keys` (see
+/// [`mock_ssh_authorized_keys_path`]), reusing the real agent's
+/// `authkeys::authorize` so validation/dedupe/permission behavior matches
+/// exactly. No auth check here -- mock-box accepts any bearer (see the
+/// module doc), matching every other authed-in-reality route on this mock
+/// (`/run`, `/stop`, `/pair/complete`, ...).
+async fn ssh_authorize_mock(
+    Json(req): Json<SshAuthorizeRequest>,
+) -> Result<Json<SshAuthorizeResponse>, StatusCode> {
+    let path = mock_ssh_authorized_keys_path();
+    let outcome = authkeys::authorize(&path, &req.public_key, &req.label)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    Ok(Json(SshAuthorizeResponse {
+        authorized: true,
+        ssh_user: MOCK_SSH_USER.to_string(),
+        already_present: matches!(outcome, authkeys::AuthorizeOutcome::AlreadyPresent),
+    }))
+}
+
+/// JSON body accepted by `DELETE /ssh/authorize`. Same shape as the real
+/// agent's `SshRevokeRequest`: exactly one of `label`/`public_key` expected,
+/// `label` taking priority if both are given.
+#[derive(Deserialize)]
+struct SshRevokeRequest {
+    label: Option<String>,
+    public_key: Option<String>,
+}
+
+/// JSON body returned by `DELETE /ssh/authorize` on success.
+#[derive(Serialize)]
+struct SshRevokeResponse {
+    revoked: bool,
+}
+
+/// `DELETE /ssh/authorize { "label": "..." }` or `{ "public_key": "..." }`:
+/// remove a previously-installed key from the mock's temp-dir
+/// `authorized_keys`, reusing the real agent's `authkeys::revoke`.
+async fn ssh_revoke_mock(
+    Json(req): Json<SshRevokeRequest>,
+) -> Result<Json<SshRevokeResponse>, StatusCode> {
+    let which = if let Some(label) = req.label {
+        authkeys::Revoke::Label(label)
+    } else if let Some(public_key) = req.public_key {
+        let blob = authkeys::key_blob(&public_key)
+            .ok_or(StatusCode::BAD_REQUEST)?
+            .to_string();
+        authkeys::Revoke::Blob(blob)
+    } else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+
+    let path = mock_ssh_authorized_keys_path();
+    authkeys::revoke(&path, &which).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(SshRevokeResponse { revoked: true }))
+}
+
 /// Build the router for a given `MockState`. Side-effect-free (no socket
 /// binding) so it mirrors `tt-station-agentd::routes::app` and could be unit
 /// tested the same way if this mock ever grows its own tests.
@@ -471,6 +594,10 @@ fn app(state: MockState) -> Router {
         .route("/run", post(run_model))
         .route("/stop", post(stop_model))
         .route("/endpoint", get(get_endpoint))
+        .route(
+            "/ssh/authorize",
+            post(ssh_authorize_mock).delete(ssh_revoke_mock),
+        )
         .route("/telemetry", get(telemetry_ws))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/models", get(list_models))

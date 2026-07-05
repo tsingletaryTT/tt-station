@@ -22,3 +22,8 @@ serde_json = { workspace = true }
 # Only for `pair/init`'s printed code -- cosmetic, since `pair/complete`
 # accepts any code for the mock (see routes.rs doc comment).
 rand = { workspace = true }
+# `/ssh/authorize` (Task 4) reuses the REAL agent's pure, unit-tested
+# validate/authorize/revoke core (`authkeys.rs`) instead of reimplementing
+# key parsing/dedupe/permission-hardening here -- this mock only supplies a
+# throwaway temp-dir path, never `~/.ssh` (see `serve`'s authorized-keys path).
+tt-station-agentd = { path = "../tt-station-agentd" }
