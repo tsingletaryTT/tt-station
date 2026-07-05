@@ -17,6 +17,13 @@ final class LaunchController {
     var isLaunchingOpenCode = false
     var webUIError: String?
     var openCodeError: String?
+    /// Progress note for the current opencode launch stage (e.g.
+    /// "Installing opencode…"), so the Connect card can show it while the
+    /// spinner is up. Cleared on completion/failure.
+    var openCodePhase: String?
+    /// Progress note for the current Open WebUI launch stage. Cleared on
+    /// completion/failure.
+    var webUIPhase: String?
     var isLaunchingTerminal = false
     var isLaunchingToplike = false
     var isLaunchingVSCode = false
@@ -32,15 +39,23 @@ final class LaunchController {
     /// terminal that just prints "command not found".
     func openInOpenCode(endpoint: Endpoint) async {
         isLaunchingOpenCode = true
-        defer { isLaunchingOpenCode = false }
+        defer { isLaunchingOpenCode = false; openCodePhase = nil }
         openCodeError = nil
 
         // Precheck: opencode present? Probe the usual homebrew locations. (We
         // still run it *inside* Terminal's login shell, but this catches the
-        // "not installed" case up front with a fixable message.)
-        guard Self.resolveBrewBinary("opencode") != nil else {
-            openCodeError = "opencode not installed — run: brew install sst/tap/opencode"
-            return
+        // "not installed" case up front.) If it's missing, install it now via
+        // brew instead of erroring — Connect actions should come up fast, not
+        // send the user off to a terminal to install a dependency by hand.
+        if Self.resolveBrewBinary("opencode") == nil {
+            openCodePhase = "Installing opencode…"
+            let installed = await Self.runBrewInstall(formula: Provisioning.opencodeFormula)
+            guard installed, Self.resolveBrewBinary("opencode") != nil else {
+                openCodeError = Self.resolveBrewBinary("brew") == nil
+                    ? "Homebrew not found — install it from https://brew.sh, then retry."
+                    : "opencode install failed — run `brew install \(Provisioning.opencodeFormula)` manually to see why."
+                return
+            }
         }
         do {
             let dir = try Self.scratchDir(for: endpoint)
@@ -88,6 +103,13 @@ final class LaunchController {
         catch { toplikeError = error.localizedDescription }
     }
 
+    /// Opens a Remote-SSH window on the box and, in the same `code` launch,
+    /// asks it to install Tenstorrent's tt-vscode-toolkit extension
+    /// (marketplace ID — it's on the VS Marketplace and Open VSX, so this
+    /// resolves without a `.vsix`). The toolkit install is best-effort and
+    /// non-fatal: if that combined launch fails to even start, we fall back
+    /// to a plain Remote-SSH window (no `--install-extension`) so the user
+    /// still gets a working window, with a soft note instead of a hard error.
     func openVSCode(host: String) async {
         isLaunchingVSCode = true; defer { isLaunchingVSCode = false }
         vscodeError = nil
@@ -96,9 +118,21 @@ final class LaunchController {
             return
         }
         let t = sshTarget(host: host)
-        let args = VSCodeLauncher.remoteArgs(user: t.user, host: t.host, path: VSCodeLauncher.defaultRemotePath(user: t.user))
-        do { try Self.runDetachedProcess(executable: code, args: args) }
-        catch { vscodeError = "failed to open VS Code: \(error.localizedDescription)" }
+        let path = VSCodeLauncher.defaultRemotePath(user: t.user)
+        let argsWithToolkit = VSCodeLauncher.remoteArgs(user: t.user, host: t.host, path: path, installToolkit: true)
+        do {
+            try Self.runDetachedProcess(executable: code, args: argsWithToolkit)
+        } catch {
+            // Fall back to a plain Remote-SSH window; the extension install is
+            // a nice-to-have, not a reason to fail the whole action.
+            let plainArgs = VSCodeLauncher.remoteArgs(user: t.user, host: t.host, path: path, installToolkit: false)
+            do {
+                try Self.runDetachedProcess(executable: code, args: plainArgs)
+                vscodeError = "opened VS Code, but couldn't auto-install the tt-vscode-toolkit extension — install it manually from the Extensions view."
+            } catch {
+                vscodeError = "failed to open VS Code: \(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: Open WebUI
@@ -109,22 +143,37 @@ final class LaunchController {
     /// the first run may still be resolving deps).
     func openWebUI(endpoint: Endpoint) async {
         isLaunchingWebUI = true
-        defer { isLaunchingWebUI = false }
+        defer { isLaunchingWebUI = false; webUIPhase = nil }
         webUIError = nil
 
         // Already up? Just open the browser (reattach — don't double-spawn).
+        // This fast path stays first and skips provisioning entirely.
         if await Self.isHealthy() {
             NSWorkspace.shared.open(OpenWebUILauncher.url)
             return
         }
-        // Precheck: uvx present?
-        guard let uvx = Self.resolveBrewBinary("uvx") else {
-            webUIError = "uv not installed — run: brew install uv"
+
+        // Precheck: uvx present? uv ships uvx, so install `uv` via brew when
+        // it's missing instead of erroring — Connect actions should come up
+        // fast, not send the user off to a terminal.
+        var uvx = Self.resolveBrewBinary("uvx")
+        if uvx == nil {
+            webUIPhase = "Installing uv…"
+            if await Self.runBrewInstall(formula: Provisioning.uvFormula) {
+                uvx = Self.resolveBrewBinary("uvx")
+            }
+        }
+        guard let uvxPath = uvx else {
+            webUIError = Self.resolveBrewBinary("brew") == nil
+                ? "Homebrew not found — install it from https://brew.sh, then retry."
+                : "uv install failed — run `brew install \(Provisioning.uvFormula)` manually to see why."
             return
         }
+
+        webUIPhase = "Starting Open WebUI…"
         let inv = OpenWebUILauncher.invocation(for: endpoint)
         do {
-            try Self.spawnDetached(executable: uvx, args: inv.args, env: inv.env)
+            try Self.spawnDetached(executable: uvxPath, args: inv.args, env: inv.env)
         } catch {
             webUIError = "failed to start Open WebUI: \(error.localizedDescription)"
             return
@@ -179,6 +228,34 @@ final class LaunchController {
             if FileManager.default.isExecutableFile(atPath: p) { return p }
         }
         return nil
+    }
+
+    /// Runs `brew install <formula>` (args from `Provisioning.brewInstallArgs`)
+    /// and waits for it to finish. Homebrew itself is the one dependency we
+    /// never auto-install (callers surface a brew.sh pointer when it's
+    /// missing); everything downstream of it (opencode, uv, …) is fair game
+    /// to install on demand so Connect actions come up without a detour to a
+    /// terminal.
+    ///
+    /// Uses a `terminationHandler` + continuation rather than
+    /// `waitUntilExit()` so the (potentially tens-of-seconds-long) install
+    /// doesn't block this actor's synchronous execution — `await` here is a
+    /// real suspension point, not a busy-wait.
+    static func runBrewInstall(formula: String) async -> Bool {
+        guard let brew = resolveBrewBinary("brew") else { return false }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: brew)
+        p.arguments = Provisioning.brewInstallArgs(formula: formula)
+        return await withCheckedContinuation { continuation in
+            p.terminationHandler = { proc in
+                continuation.resume(returning: proc.terminationStatus == 0)
+            }
+            do {
+                try p.run()
+            } catch {
+                continuation.resume(returning: false)
+            }
+        }
     }
 
     /// A dedicated per-box scratch dir under Application Support, keyed by a
