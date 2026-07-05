@@ -51,11 +51,9 @@ public struct TelemetrySnapshot: Equatable {
             let telemetry = entry["telemetry"] as? [String: Any]
             let tempC = Self.parseDouble(telemetry?["asic_temperature"])
 
-            // Utilization field naming varies (and is absent from the canonical
-            // frame this task was built against), so we don't guess a key —
-            // leave it nil unless a clearly-named field is present. No such key
-            // is known yet, so this always resolves to nil for now.
-            let utilization = Self.parseDouble(telemetry?["utilization"])
+            // No known utilization key in the tt-smi -s frame yet; leave nil until a
+            // real /telemetry capture (Task 10) reveals the field name.
+            let utilization: Double? = nil
 
             return DeviceReading(index: index, boardType: boardType, tempC: tempC, utilization: utilization)
         }
