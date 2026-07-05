@@ -5,18 +5,29 @@ struct BoxRowView: View {
     let box: BoxViewModel
     let isSelected: Bool
 
-    private var isServing: Bool { box.status?.isServing ?? false }
-
     /// Status dot colour: amber while a model is spinning up (`starting`),
-    /// green once serving, grey when idle. `starting` takes precedence so the
-    /// transient spin-up state is visible even before `status` flips.
+    /// green once serving, grey when idle. Derived from `box.runningState` —
+    /// the same broad signal (agent + external `/serving` entries) that
+    /// drives the waveform glyph and model line below — so the dot can never
+    /// disagree with the rest of the row (e.g. a box serving only an
+    /// external/tt-studio model must still show green, not grey).
     private var statusColor: Color {
-        TTTheme.statusColor(isServing: isServing, isStarting: box.starting)
+        switch box.runningState {
+        case .idle:
+            return TTTheme.statusColor(isServing: false, isStarting: false)
+        case .starting:
+            return TTTheme.statusColor(isServing: false, isStarting: true)
+        case .serving:
+            return TTTheme.statusColor(isServing: true, isStarting: false)
+        }
     }
 
     private var statusHelp: String {
-        if box.starting { return "Starting a model…" }
-        return isServing ? "Serving a model" : "Idle"
+        switch box.runningState {
+        case .idle: return "Idle"
+        case .starting: return "Starting a model…"
+        case .serving: return "Serving a model"
+        }
     }
 
     var body: some View {
