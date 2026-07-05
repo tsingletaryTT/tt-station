@@ -17,6 +17,7 @@ use libttstation::discovery::SERVICE_TYPE;
 use libttstation::model::{txt_encode, BoxRecord, ServingStatus};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
+use tt_station_agentd::config;
 use tt_station_agentd::routes::{app, AppState, StatusAdvertiser};
 use tt_station_agentd::serving::docker::DockerConfig;
 use tt_station_agentd::serving::make_backend;
@@ -54,40 +55,61 @@ impl std::fmt::Display for Backend {
 )]
 struct Cli {
     /// Box name; used as both the mDNS instance name and the `name` TXT/JSON key.
+    ///
+    /// `Option` because it can also come from `[global].name` in the config
+    /// file -- `resolve` enforces that ONE of the two is present, so this
+    /// remains effectively required for an operator not using a config file.
     #[arg(long)]
-    name: String,
+    name: Option<String>,
 
     /// Control-plane HTTP port to listen on and advertise in the `ctrl` TXT key.
+    ///
+    /// `Option` for the same reason as `--name` -- see its doc comment.
     #[arg(long = "ctrl-port")]
-    ctrl_port: u16,
+    ctrl_port: Option<u16>,
 
     /// Which serving backend to use. `serving::make_backend` turns this
     /// into the real `ServingBackend` trait object `/run`/`/stop` delegate
     /// to. Defaults to `runpy` -- see `Backend`'s doc comment.
-    #[arg(long, value_enum, default_value_t = Backend::Runpy)]
-    backend: Backend,
+    ///
+    /// No clap default: `resolve` supplies `"runpy"` when this, the active
+    /// profile, and `[global]` are all absent.
+    #[arg(long, value_enum)]
+    backend: Option<Backend>,
 
     /// Chip inventory string advertised in the `chips` TXT key and returned
     /// from `/status`.
-    #[arg(long, default_value = "4xBH")]
-    chips: String,
+    ///
+    /// No clap default: `resolve` supplies `"4xBH"` when this and
+    /// `[global].chips` are both absent.
+    #[arg(long)]
+    chips: Option<String>,
 
     /// API version advertised in the `apiver` TXT key.
-    #[arg(long, default_value_t = 1)]
-    apiver: u8,
+    ///
+    /// No clap default: `resolve` supplies `1` when this and
+    /// `[global].apiver` are both absent.
+    #[arg(long)]
+    apiver: Option<u8>,
 
     /// Host the serving container/VM is reachable on, baked into the
     /// `base_url` of any `Endpoint` `/run` returns. Only meaningful for the
     /// Docker backend today. Defaults to loopback since the PoC's client and
     /// agent are expected to run on the same box; a real deployment would
     /// pass the box's LAN address.
-    #[arg(long = "serving-host", default_value = "127.0.0.1")]
-    serving_host: String,
+    ///
+    /// No clap default: `resolve` supplies `"127.0.0.1"` when this and the
+    /// active profile's `serving_host` are both absent.
+    #[arg(long = "serving-host")]
+    serving_host: Option<String>,
 
     /// Host port the serving container/VM's HTTP port is mapped to. Only
     /// meaningful for the Docker backend today.
-    #[arg(long = "serving-port", default_value_t = 8000)]
-    serving_port: u16,
+    ///
+    /// No clap default: `resolve` supplies `8000` when this and the active
+    /// profile's `serving_port` are both absent.
+    #[arg(long = "serving-port")]
+    serving_port: Option<u16>,
 
     /// Container image to run the resolved model in
     /// (`run.py --override-docker-image`, or `docker run <image>` for the
@@ -155,8 +177,10 @@ struct Cli {
     /// `/home/container_app_user/cache_root` inside the serving container,
     /// used to persist downloaded model weights/HF cache across container
     /// restarts. Only meaningful for the Docker backend today.
-    #[arg(long = "cache-volume", default_value = "tt-station-cache")]
-    cache_volume: String,
+    ///
+    /// No clap default: `resolve` supplies `"tt-station-cache"` when unset.
+    #[arg(long = "cache-volume")]
+    cache_volume: Option<String>,
 
     /// Require JWT bearer auth on the serving container instead of running
     /// it with `--no-auth`. Only meaningful for the Docker backend today.
@@ -170,14 +194,18 @@ struct Cli {
     /// Host path passed to `docker run --device` so the container can reach
     /// the Tenstorrent accelerator. Only meaningful for the Docker backend
     /// today.
-    #[arg(long = "device-path", default_value = "/dev/tenstorrent")]
-    device_path: String,
+    ///
+    /// No clap default: `resolve` supplies `"/dev/tenstorrent"` when unset.
+    #[arg(long = "device-path")]
+    device_path: Option<String>,
 
     /// Host path bind-mounted onto itself inside the container (`--mount
     /// type=bind,src=...,dst=...`) for tt-metal's 1G-hugepages DMA
     /// requirement. Only meaningful for the Docker backend today.
-    #[arg(long = "hugepages-src", default_value = "/dev/hugepages-1G")]
-    hugepages_src: String,
+    ///
+    /// No clap default: `resolve` supplies `"/dev/hugepages-1G"` when unset.
+    #[arg(long = "hugepages-src")]
+    hugepages_src: Option<String>,
 
     /// Local checkout of `tt-inference-server`, whose `run.py` is the
     /// ground-truth way to launch LLM serving (see
@@ -229,8 +257,10 @@ struct Cli {
 
     /// `run.py`'s `MODEL_SOURCE` environment variable, e.g. `huggingface`.
     /// Only meaningful for the `runpy` backend.
-    #[arg(long = "model-source", default_value = "huggingface")]
-    model_source: String,
+    ///
+    /// No clap default: `resolve` supplies `"huggingface"` when unset.
+    #[arg(long = "model-source")]
+    model_source: Option<String>,
 
     /// Path to `model_spec.json` -- the ground-truth model/device-mesh
     /// catalog `run.py` validates `--model`/`--tt-device` against, and that
@@ -283,14 +313,37 @@ struct Cli {
     /// "remote QuietBox" feature -- see src/telemetry.rs). Each connected
     /// client receives one frame per interval. Defaults to `1000` (1s), a
     /// live-but-not-hammering cadence for a chip-telemetry dashboard.
-    #[arg(long = "telemetry-interval-ms", default_value_t = 1000, value_parser = clap::value_parser!(u64).range(1..))]
-    telemetry_interval_ms: u64,
+    ///
+    /// No clap default: `resolve` supplies `1000` when this and
+    /// `[global].telemetry_interval_ms` are both absent. The range validator
+    /// still applies to whatever value IS passed on the command line.
+    #[arg(long = "telemetry-interval-ms", value_parser = clap::value_parser!(u64).range(1..))]
+    telemetry_interval_ms: Option<u64>,
 
     /// `tt-smi` binary the `GET /telemetry` stream runs (as `<bin> -s`) to
     /// collect each snapshot. Defaults to `tt-smi`, resolved on `$PATH`; set
     /// this to an absolute path when `tt-smi` isn't on the agent's `$PATH`.
-    #[arg(long = "tt-smi-bin", default_value = "tt-smi")]
-    tt_smi_bin: String,
+    ///
+    /// No clap default: `resolve` supplies `"tt-smi"` when this and
+    /// `[global].tt_smi_bin` are both absent.
+    #[arg(long = "tt-smi-bin")]
+    tt_smi_bin: Option<String>,
+
+    /// Path to agentd.toml. Defaults to `$TT_CONFIG_DIR/agentd.toml` if
+    /// `TT_CONFIG_DIR` is set, else `$HOME/.config/tt-station/agentd.toml`.
+    /// An explicit path that is missing/unreadable is a hard error.
+    #[arg(long)]
+    config: Option<String>,
+
+    /// Name of the `[profile.<name>]` in the config file to activate.
+    /// Overrides `default_profile`. Errors if the named profile is absent.
+    #[arg(long)]
+    profile: Option<String>,
+
+    /// Resolve the config, print it (secrets redacted) as JSON, and exit
+    /// without binding the control port. For verifying precedence/profiles.
+    #[arg(long = "print-config", action = clap::ArgAction::SetTrue)]
+    print_config: bool,
 }
 
 /// `docker` fallback-backend default serving image, used only when
@@ -312,54 +365,87 @@ const DEFAULT_DOCKER_SERVING_IMAGE: &str =
 /// the device mesh itself; see `--tt-device`'s doc comment.
 const DEFAULT_DOCKER_TT_DEVICE: &str = "p300x2";
 
-/// Resolve the default `tt-inference-server` checkout to use when
-/// `--tt-inference-repo` isn't given: prefer a vendored copy at
-/// `./vendor/tt-inference-server` (relative to the current working
-/// directory the agent was launched from) if one exists on disk, else fall
-/// back to `$HOME/code/tt-inference-server` -- the operator's convention
-/// for standalone checkouts elsewhere on this box.
-fn default_tt_inference_repo() -> String {
-    let vendored = std::path::Path::new("./vendor/tt-inference-server");
-    if vendored.exists() {
-        return vendored.to_string_lossy().into_owned();
+/// Build the redacted `ConfigSummary` (Task 4 type) from a `ResolvedConfig`.
+/// NEVER includes `hf_token` or token-store contents.
+fn config_summary(rc: &config::ResolvedConfig) -> libttstation::model::ConfigSummary {
+    libttstation::model::ConfigSummary {
+        active_profile: rc.active_profile.clone(),
+        available_profiles: rc.available_profiles.clone(),
+        backend: rc.backend.clone(),
+        serving_host: rc.serving_host.clone(),
+        serving_port: rc.serving_port,
+        serving_image: rc.serving_image.clone(),
+        tt_inference_repo: Some(rc.tt_inference_repo.clone()),
+        tt_device: rc.tt_device.clone(),
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    format!("{home}/code/tt-inference-server")
-}
-
-/// Resolve the default Hugging Face cache path used when `--host-hf-cache`
-/// isn't given: `$HOME/.cache/huggingface`, matching the operator's real
-/// `HF_HOME`/`huggingface-cli` default rather than a hardcoded absolute
-/// path baked in at build time.
-fn default_host_hf_cache() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    format!("{home}/.cache/huggingface")
-}
-
-/// Resolve the default bearer-token store path used when `--token-store`
-/// isn't given: `$HOME/.config/tt-station/agentd-tokens.json`, following
-/// the same "resolve a real path at startup rather than hardcoding one"
-/// pattern as `default_host_hf_cache`/`default_tt_inference_repo` above.
-fn default_token_store() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    format!("{home}/.config/tt-station/agentd-tokens.json")
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // `--hf-token` wins if given explicitly; otherwise fall back to the
-    // `HF_TOKEN` environment variable so operators can keep the token out of
-    // shell history / process listings. Either way, only pass through a
-    // non-empty value -- `DockerBackend` already guards on this too, but
-    // resolving it here keeps `main`'s CLI-to-config mapping honest about
-    // where the value actually comes from.
-    let hf_token = cli
-        .hf_token
-        .clone()
-        .or_else(|| std::env::var("HF_TOKEN").ok())
-        .filter(|token| !token.is_empty());
+    // Config file path: explicit --config wins; else $TT_CONFIG_DIR/agentd.toml
+    // if set; else $HOME/.config/tt-station/agentd.toml.
+    let explicit = cli.config.is_some();
+    let config_path = cli.config.clone().map(std::path::PathBuf::from).unwrap_or_else(|| {
+        let dir = std::env::var("TT_CONFIG_DIR").unwrap_or_else(|_| {
+            format!("{}/.config/tt-station", std::env::var("HOME").unwrap_or_default())
+        });
+        std::path::PathBuf::from(dir).join("agentd.toml")
+    });
+    let file = config::load_config(&config_path, explicit).context("failed to load config file")?;
+
+    // `--hf-token` wins if given explicitly; otherwise `resolve` falls back
+    // to the `HF_TOKEN` environment variable so operators can keep the token
+    // out of shell history / process listings -- see `config::resolve`'s
+    // precedence (flag > env > profile > global > default).
+    let env_hf_token = std::env::var("HF_TOKEN").ok();
+
+    // Every overridable flag, `None` where the operator didn't pass it, so
+    // `resolve` can layer env/profile/global/built-in defaults underneath.
+    // This is the ONLY place CLI flags are read directly in `main` from here
+    // on -- everything past `resolve` reads from `rc: ResolvedConfig`.
+    let overrides = config::CliOverrides {
+        name: cli.name.clone(),
+        ctrl_port: cli.ctrl_port,
+        chips: cli.chips.clone(),
+        apiver: cli.apiver,
+        token_store: cli.token_store.clone(),
+        no_token_persistence: cli.no_token_persistence,
+        telemetry_interval_ms: cli.telemetry_interval_ms,
+        tt_smi_bin: cli.tt_smi_bin.clone(),
+        backend: cli.backend.map(|b| b.to_string()),
+        tt_inference_repo: cli.tt_inference_repo.clone(),
+        serving_image: cli.serving_image.clone(),
+        auto_image: cli.auto_image,
+        tt_device: cli.tt_device.clone(),
+        serving_host: cli.serving_host.clone(),
+        serving_port: cli.serving_port,
+        host_hf_cache: cli.host_hf_cache.clone(),
+        hf_token: cli.hf_token.clone(),
+        no_device_reset: cli.no_device_reset,
+        cache_volume: cli.cache_volume.clone(),
+        require_auth: cli.require_auth,
+        device_path: cli.device_path.clone(),
+        hugepages_src: cli.hugepages_src.clone(),
+        engine: cli.engine.clone(),
+        impl_name: cli.impl_name.clone(),
+        device_id: cli.device_id.clone(),
+        model_source: cli.model_source.clone(),
+        model_spec: cli.model_spec.clone(),
+    };
+    let rc = config::resolve(overrides, env_hf_token, file, cli.profile.as_deref())
+        .context("failed to resolve configuration")?;
+
+    // `--print-config` is purely diagnostic: resolve, print the redacted
+    // summary, exit -- WITHOUT binding the control port or touching mDNS.
+    // Lets an operator verify precedence/profile selection without actually
+    // starting the daemon.
+    if cli.print_config {
+        let summary = config_summary(&rc);
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
 
     // `DockerBackend` (the manual escape hatch -- see `Backend`'s doc
     // comment) has no auto-resolution of its own the way `run.py` does, so
@@ -369,94 +455,84 @@ async fn main() -> Result<()> {
     // deliberately does NOT do this: it passes the raw `Option`s straight
     // through so `run.py` can auto-resolve them itself.
     let docker_config = DockerConfig {
-        image: cli
+        image: rc
             .serving_image
             .clone()
             .unwrap_or_else(|| DEFAULT_DOCKER_SERVING_IMAGE.to_string()),
-        host: cli.serving_host.clone(),
-        host_port: cli.serving_port,
-        tt_device: cli
+        host: rc.serving_host.clone(),
+        host_port: rc.serving_port,
+        tt_device: rc
             .tt_device
             .clone()
             .unwrap_or_else(|| DEFAULT_DOCKER_TT_DEVICE.to_string()),
-        hf_token,
-        cache_volume: cli.cache_volume.clone(),
-        no_auth: !cli.require_auth,
-        device_path: cli.device_path.clone(),
-        hugepages_src: cli.hugepages_src.clone(),
+        hf_token: rc.hf_token.clone(),
+        cache_volume: rc.cache_volume.clone(),
+        no_auth: !rc.require_auth,
+        device_path: rc.device_path.clone(),
+        hugepages_src: rc.hugepages_src.clone(),
     };
 
     let runpy_config = RunPyConfig {
-        repo_dir: cli
-            .tt_inference_repo
-            .clone()
-            .unwrap_or_else(default_tt_inference_repo),
-        host: cli.serving_host.clone(),
-        service_port: cli.serving_port,
-        no_auth: !cli.require_auth,
-        model_source: cli.model_source.clone(),
+        repo_dir: rc.tt_inference_repo.clone(),
+        host: rc.serving_host.clone(),
+        service_port: rc.serving_port,
+        no_auth: !rc.require_auth,
+        model_source: rc.model_source.clone(),
         // `--host-hf-cache` isn't part of run.py's device/image/impl/engine
         // auto-resolution (see the module doc in serving/runpy.rs) -- it's
         // just a real host path this codebase always wants bind-mounted, so
         // (unlike tt_device/image/impl/engine below) this always resolves
         // to `Some`, never passed through as a bare, possibly-absent
-        // `Option`.
-        host_hf_cache: Some(
-            cli.host_hf_cache
-                .clone()
-                .unwrap_or_else(default_host_hf_cache),
-        ),
-        // Passed straight through as `Option`s -- `None` here (the DEFAULT
-        // for a fresh CLI invocation) means "auto-resolve it," which
-        // `RunPyBackend::start` does itself via `resolve_tt_device`/
-        // `resolve_image` (see each flag's own doc comment above, and the
-        // module doc in serving/runpy.rs). Do NOT apply a fallback the way
-        // `docker_config` above does -- that would bypass auto-resolution.
-        tt_device: cli.tt_device.clone(),
-        image: cli.serving_image.clone(),
+        // `Option`. `resolve` already applied `default_host_hf_cache`/tilde
+        // expansion, so this is always a concrete path by the time we get here.
+        host_hf_cache: Some(rc.host_hf_cache.clone()),
+        // Passed straight through as `Option`s -- `None` here means "auto-
+        // resolve it," which `RunPyBackend::start` does itself via
+        // `resolve_tt_device`/`resolve_image` (see each flag's own doc
+        // comment above, and the module doc in serving/runpy.rs). Do NOT
+        // apply a fallback the way `docker_config` above does -- that would
+        // bypass auto-resolution.
+        tt_device: rc.tt_device.clone(),
+        image: rc.serving_image.clone(),
         // Opt-in only -- see `--auto-image`'s doc comment and
         // `RunPyConfig::auto_image`/`RunPyBackend::resolve_image` for why
         // this defaults to `false` (image<->run.py compatibility is a
         // curated matrix, not something "newest locally-present" can
         // safely stand in for).
-        auto_image: cli.auto_image,
-        engine: cli.engine.clone(),
-        impl_name: cli.impl_name.clone(),
-        device_id: cli.device_id.clone(),
-        model_spec_path: cli.model_spec.clone(),
+        auto_image: rc.auto_image,
+        engine: rc.engine.clone(),
+        impl_name: rc.impl_name.clone(),
+        device_id: rc.device_id.clone(),
+        model_spec_path: rc.model_spec.clone(),
         // `--no-device-reset` is an opt-OUT flag (default `false`), so the
         // real default here is `reset_before_serve: true` -- see
         // `RunPyConfig::reset_before_serve`'s doc comment for why resetting
         // before every serve is the robust default.
-        reset_before_serve: !cli.no_device_reset,
+        reset_before_serve: !rc.no_device_reset,
         reset_cmd: vec!["tt-smi".to_string(), "-r".to_string()],
     };
 
-    let backend = make_backend(&cli.backend.to_string(), docker_config, runpy_config)
+    let backend = make_backend(&rc.backend, docker_config, runpy_config)
         .context("failed to construct serving backend")?;
 
     // Persist issued bearer tokens across restarts by default (see
-    // `--token-store`'s doc comment) -- `--no-token-persistence` opts back
-    // out to the pre-persistence in-memory-only behavior.
+    // `--token-store`'s doc comment) -- `--no-token-persistence` (folded into
+    // `rc.token_store` being `None` by `resolve`) opts back out to the
+    // pre-persistence in-memory-only behavior.
     let backend: Arc<dyn tt_station_agentd::serving::ServingBackend> = Arc::from(backend);
-    let state = if cli.no_token_persistence {
-        AppState::new(cli.name.clone(), cli.chips.clone(), backend)
-    } else {
-        let token_store = cli.token_store.clone().unwrap_or_else(default_token_store);
-        println!("tt-station-agentd: persisting bearer tokens to {token_store}");
-        AppState::new_persisting(
-            cli.name.clone(),
-            cli.chips.clone(),
-            backend,
-            std::path::PathBuf::from(token_store),
-        )
+    let state = match &rc.token_store {
+        None => AppState::new(rc.name.clone(), rc.chips.clone(), backend),
+        Some(path) => {
+            println!("tt-station-agentd: persisting bearer tokens to {}", path.display());
+            AppState::new_persisting(rc.name.clone(), rc.chips.clone(), backend, path.clone())
+        }
     };
 
     // Configure the additive `GET /telemetry` stream (see src/telemetry.rs).
     // Applied here, before any clone of `state` exists, for the same
     // sole-owner reason `with_status_advertiser` is (both rely on
     // `Arc::get_mut`). No-op for every existing route -- purely additive.
-    let state = state.with_telemetry_config(cli.tt_smi_bin.clone(), cli.telemetry_interval_ms);
+    let state = state.with_telemetry_config(rc.tt_smi_bin.clone(), rc.telemetry_interval_ms);
 
     // Configure the additive `GET /serving` discovery route (see routes.rs):
     // the serving host baked into discovered endpoints' `base_url`, and the
@@ -464,14 +540,21 @@ async fn main() -> Result<()> {
     // here, before any clone of `state` exists, for the same sole-owner reason
     // `with_telemetry_config`/`with_status_advertiser` are (all rely on
     // `Arc::get_mut`). No-op for every existing route -- purely additive.
-    let state = state.with_serving_config(cli.serving_host.clone(), cli.serving_port);
+    let state = state.with_serving_config(rc.serving_host.clone(), rc.serving_port);
+
+    // Configure the additive `GET /config` route (see routes.rs): a redacted
+    // snapshot of the fully-resolved config, built once here from `rc` so it
+    // can never drift from what the backend/state above were actually built
+    // from. Applied here, before any clone of `state` exists, for the same
+    // sole-owner reason the other `with_*` builders above are.
+    let state = state.with_config_summary(config_summary(&rc));
 
     // Bind the control-plane socket FIRST, then advertise on the LAN, so
     // discovery never races ahead of the control-plane API actually being
     // reachable.
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", cli.ctrl_port))
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", rc.ctrl_port))
         .await
-        .with_context(|| format!("failed to bind control port {}", cli.ctrl_port))?;
+        .with_context(|| format!("failed to bind control port {}", rc.ctrl_port))?;
 
     // Advertise the box's current status (read from the same `AppState` that
     // backs `/status`) so the mDNS TXT record and the HTTP status endpoint
@@ -482,12 +565,12 @@ async fn main() -> Result<()> {
     // `/run`/`/stop` can re-publish `status` whenever it changes instead of
     // it going stale after boot (see `StatusAdvertiser`'s doc comment).
     let (_mdns_guard, status_advertiser) =
-        advertise(&cli, state.status()).context("failed to start mDNS advertisement")?;
+        advertise(&rc, state.status()).context("failed to start mDNS advertisement")?;
     let state = state.with_status_advertiser(Arc::new(status_advertiser));
 
     println!(
         "tt-station-agentd: '{}' serving on port {} (backend={}, chips={})",
-        cli.name, cli.ctrl_port, cli.backend, cli.chips
+        rc.name, rc.ctrl_port, rc.backend, rc.chips
     );
 
     // Serve until a shutdown signal arrives, then return normally so
@@ -644,15 +727,18 @@ impl StatusAdvertiser for MdnsStatusAdvertiser {
 /// [`MdnsStatusAdvertiser`] sharing the same `Arc<ServiceDaemon>`, so `main`
 /// can attach the latter to `AppState` and let `/run`/`/stop` keep the TXT
 /// record's `status` key truthful after boot.
-fn advertise(cli: &Cli, status: ServingStatus) -> Result<(MdnsGuard, MdnsStatusAdvertiser)> {
-    let host = format!("{}.local.", cli.name);
+fn advertise(
+    rc: &config::ResolvedConfig,
+    status: ServingStatus,
+) -> Result<(MdnsGuard, MdnsStatusAdvertiser)> {
+    let host = format!("{}.local.", rc.name);
     let record = BoxRecord {
-        name: cli.name.clone(),
+        name: rc.name.clone(),
         host: host.clone(),
-        ctrl_port: cli.ctrl_port,
-        chips: cli.chips.clone(),
+        ctrl_port: rc.ctrl_port,
+        chips: rc.chips.clone(),
         status,
-        apiver: cli.apiver,
+        apiver: rc.apiver,
     };
 
     let txt_pairs = txt_encode(&record);
@@ -670,7 +756,7 @@ fn advertise(cli: &Cli, status: ServingStatus) -> Result<(MdnsGuard, MdnsStatusA
         &record.name,
         &host,
         "",
-        cli.ctrl_port,
+        rc.ctrl_port,
         &txt_refs[..],
     )
     .context("failed to build mDNS ServiceInfo")?
@@ -689,9 +775,9 @@ fn advertise(cli: &Cli, status: ServingStatus) -> Result<(MdnsGuard, MdnsStatusA
         daemon,
         name: record.name,
         host,
-        ctrl_port: cli.ctrl_port,
-        chips: cli.chips.clone(),
-        apiver: cli.apiver,
+        ctrl_port: rc.ctrl_port,
+        chips: rc.chips.clone(),
+        apiver: rc.apiver,
     };
 
     Ok((guard, status_advertiser))
