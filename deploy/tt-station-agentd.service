@@ -1,0 +1,12 @@
+[Unit]
+Description=tt-station box agent (QuietBox control plane)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart={{AGENT_BIN}}
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
