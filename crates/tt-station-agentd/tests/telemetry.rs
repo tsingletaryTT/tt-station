@@ -4,9 +4,11 @@
 //! It starts the real axum `Router` (via `app()`) on an ephemeral port, with
 //! `AppState` pointed at a tiny stub `tt-smi` script (via
 //! `with_telemetry_config`) that echoes canned `tt-smi -s` JSON. A real
-//! WebSocket client then connects and asserts it receives a text frame that is
-//! the **verbatim** stub stdout -- proving the contract: a frame is exactly
-//! `tt-smi -s`'s stdout, unreshaped.
+//! WebSocket client then connects and asserts it receives a text frame whose
+//! original `tt-smi` telemetry is intact byte-for-content (same
+//! `device_info`) -- proving the base contract: the agent never reshapes
+//! `tt-smi -s`'s stdout, only additively folds in a sibling `tt_toplike` key
+//! (Task 4's process-list enrichment, see `procscan`/`telemetry::enrich_frame`).
 //!
 //! Bounded by design: a short interval, read exactly one frame, then drop the
 //! connection so the server-side loop exits on the client disconnect.
@@ -97,8 +99,22 @@ async fn telemetry_stream_pushes_verbatim_tt_smi_snapshot() {
         .expect("frame was an error");
 
     let text = msg.into_text().expect("telemetry frame was not text");
-    // The frame is the verbatim stdout of `tt-smi -s` -- zero reshaping.
-    assert_eq!(text.as_str(), CANNED_TT_SMI_JSON);
+
+    // The original `tt-smi -s` telemetry is preserved exactly -- the agent
+    // never reshapes it, only additively merges in `tt_toplike` alongside it
+    // (Task 4). Compare parsed `device_info` (not raw bytes) since the
+    // enriched frame is a superset of the canned JSON.
+    let canned: serde_json::Value = serde_json::from_str(CANNED_TT_SMI_JSON).unwrap();
+    let got: serde_json::Value =
+        serde_json::from_str(&text).expect("telemetry frame was not valid JSON");
+    assert_eq!(
+        got["device_info"], canned["device_info"],
+        "tt-smi telemetry should be passed through unreshaped"
+    );
+
+    // And the process-list enrichment rode along on this tick.
+    assert_eq!(got["tt_toplike"]["schema"], 1);
+    assert!(got["tt_toplike"]["processes"].is_array());
 
     // Dropping `ws` closes the connection, so the server loop exits.
     drop(ws);

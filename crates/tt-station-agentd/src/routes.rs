@@ -1279,6 +1279,12 @@ async fn telemetry_stream(mut socket: WebSocket, state: AppState) {
         tokio::time::interval(Duration::from_millis(state.telemetry_interval_ms().max(1)));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // Owned once per connection (not per tick): `ProcessSampler` wraps a
+    // `sysinfo::System`, and cpu% is only meaningful as a delta between two
+    // refreshes, so it needs to persist across ticks for the life of this
+    // stream.
+    let mut sampler = crate::procscan::ProcessSampler::new();
+
     loop {
         tokio::select! {
             // Time to push another snapshot. `interval`'s first tick fires
@@ -1286,7 +1292,18 @@ async fn telemetry_stream(mut socket: WebSocket, state: AppState) {
             // away rather than waiting a full interval.
             _ = ticker.tick() => {
                 let frame = match collect_snapshot(tt_smi_bin.clone()).await {
-                    Ok(json) => json,
+                    Ok(json) => {
+                        // Additive: fold the box's process list into the
+                        // frame. The scan is a fast local /proc read (unlike
+                        // tt-smi's shell-out), so it runs inline; a hiccup
+                        // yields the frame verbatim, never an error. This
+                        // only touches the success path -- the error/skip
+                        // frame below is untouched, so a `tt-smi` failure
+                        // still yields exactly the small JSON error shape
+                        // clients already know how to detect.
+                        let toplike = sampler.sample();
+                        crate::telemetry::enrich_frame(&json, Some(&toplike))
+                    }
                     Err(err) => {
                         // Log and send an error frame rather than dropping the
                         // connection -- a transient `tt-smi` failure shouldn't
