@@ -347,54 +347,19 @@ impl RunPyBackend {
         }
 
         let output = self.runner.run(&["tt-smi", "-s"]).ok()?;
-        let value: serde_json::Value = serde_json::from_str(&output).ok()?;
 
-        // Verified `tt-smi -s` schema: top-level `device_info` is a list,
-        // one entry per board, each with a `board_info.board_type` string
-        // (e.g. `"p300c"`). Lower-cased for a case-insensitive match, per
-        // the board-combination map below.
-        let board_types: Vec<String> = value
-            .get("device_info")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|device| {
-                device
-                    .get("board_info")?
-                    .get("board_type")?
-                    .as_str()
-                    .map(str::to_lowercase)
-            })
-            .collect();
+        // The `(board_type, count) -> mesh` mapping is the single shared
+        // table in `crate::device::detect_device_mesh` -- both this
+        // `--tt-device` resolution and the `/status` route's mesh report
+        // read from it, so it lives in exactly one place.
+        let resolved = crate::device::detect_device_mesh(&output);
 
-        let count = board_types.len();
-        let all_same_type = board_types.windows(2).all(|pair| pair[0] == pair[1]);
-        let board_type = if count > 0 && all_same_type {
-            board_types[0].as_str()
-        } else {
-            // Empty `device_info`, or a mixed fleet -- neither is a
-            // combination this map has a confirmed answer for.
-            ""
-        };
-
-        // Board-type/count -> `--tt-device` map. Covers only what run.py's
-        // own auto-detect gets wrong (see this method's doc comment above),
-        // not a general-purpose device catalog.
-        let resolved = match (board_type, count) {
-            ("p300c", 4) => Some("p300x2"),
-            ("p300c", 2) => Some("p300"),
-            ("p150" | "p150c", 4) => Some("p150x4"),
-            ("n300", 4) => Some("n300x4"),
-            ("n300", 1) => Some("n300"),
-            _ => None,
-        };
-
-        match resolved {
-            Some(device) => eprintln!("auto-detected tt-device: {device} ({count}x {board_type})"),
+        match &resolved {
+            Some(device) => eprintln!("auto-detected tt-device: {device}"),
             None => eprintln!("could not auto-detect tt-device; letting run.py try"),
         }
 
-        resolved.map(str::to_string)
+        resolved
     }
 
     /// Resolve the `--override-docker-image` value: `config.image` if the
