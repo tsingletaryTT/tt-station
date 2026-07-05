@@ -211,6 +211,46 @@ git commit -m "feat(cli): surface device_mesh in status/discover --json"
 
 ---
 
+## Task 3.5: Advertise `device_mesh` in mDNS TXT (inserted post-Task-3)
+
+**Why (discovered during Task 3):** Task 2 added `device_mesh` only to the HTTP `/status` body, so `tt --json discover` populates it *only* for manually-probed hosts. mDNS-discovered boxes (the live QB2, the common case) get `device_mesh: null`, which blunts the app's hardware-aware ranking for the primary use case. Fix: make `device_mesh` a uniform property of a discovered box by carrying it in the mDNS TXT record, exactly like `chips`.
+
+**Files:**
+- Modify: `crates/libttstation/src/model.rs` (`txt_encode` ~line 172, `txt_decode` ~line 182, tests)
+- Modify: `crates/tt-station-agentd/src/main.rs` (`advertise` ~749 + `MdnsStatusAdvertiser` ~668-695 thread the detected mesh in)
+- Modify: `crates/mock-box/src/main.rs` (`advertise` ~108 emits a fixed `Some("p300x2")` for dev parity)
+
+**Interfaces:**
+- Consumes: agent startup `device_mesh` (Task 2), CLI decode (Task 3).
+- Produces: `txt_encode` emits a `device_mesh` TXT pair when `rec.device_mesh` is `Some`; `txt_decode` parses the optional `device_mesh` key back into `BoxRecord.device_mesh`.
+
+- [ ] **Step 1: TDD `txt_encode`/`txt_decode` round-trip.** Add a test asserting a `BoxRecord` with `device_mesh: Some("p300x2")` encodes a `("device_mesh","p300x2")` TXT pair, and `txt_decode` of a TXT map containing `device_mesh=p300x2` yields `device_mesh: Some("p300x2")`; and that a TXT map WITHOUT the key still yields `None` (back-compat). Update the existing `txt_decode_builds_boxrecord` test's `assert_eq!(rec.device_mesh, None)` to a separate map that omits the key (keep a no-key case).
+
+- [ ] **Step 2: Implement.** In `txt_encode`, after the `status` pair, conditionally push `("device_mesh".to_string(), mesh.clone())` when `rec.device_mesh` is `Some`. In `txt_decode`, read `map.get("device_mesh").cloned()` into `device_mesh` (replacing the hardcoded `None`). Update the now-stale doc comments that say TXT never carries the field.
+
+- [ ] **Step 3: Run codec tests, expect PASS.**
+
+Run: `cargo test -p libttstation`
+Expected: PASS.
+
+- [ ] **Step 4: Thread the mesh into the agent advertisers.** In `crates/tt-station-agentd/src/main.rs`: `advertise(cli, status)` is called at startup where the detected `device_mesh` is in scope — pass it in (add a `device_mesh: Option<String>` parameter to `advertise`) and set it on the `BoxRecord` instead of `None`. `MdnsStatusAdvertiser` (re-publishes on run/stop) must hold the `device_mesh` so its `advertise_status` sets it too — add a `device_mesh: Option<String>` field to the advertiser struct, populated at construction from the detected mesh. Remove the "txt_encode doesn't read device_mesh" comments.
+
+- [ ] **Step 5: mock-box dev parity.** In `crates/mock-box/src/main.rs` `advertise`, set the advertised `BoxRecord.device_mesh` to `Some("p300x2".to_string())` (matching what Task 4 puts in its `/status`) so the no-hardware mDNS discovery path shows a ranked model list. Update the comment.
+
+- [ ] **Step 6: Build all three crates + full test, expect PASS.**
+
+Run: `cargo test -p libttstation -p tt-station-agentd && cargo build -p tt-station-agentd -p mock-box -p tt`
+Expected: PASS + clean build.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/libttstation/src/model.rs crates/tt-station-agentd/src/main.rs crates/mock-box/src/main.rs
+git commit -m "feat(mdns): advertise device_mesh in TXT so discover carries it"
+```
+
+---
+
 ## Task 4: mock-box emits `device_mesh` + a telemetry frame
 
 **Files:**
