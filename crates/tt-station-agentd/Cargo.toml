@@ -24,6 +24,7 @@ rand = { workspace = true }
 # coexist fine in the same dependency -- `blocking` just adds the extra
 # module, it doesn't change how the async client behaves.
 reqwest = { workspace = true, features = ["blocking"] }
+toml = { workspace = true }
 
 [features]
 # Compiled in for `cargo test` (see the self-dependency below) so
@@ -51,3 +52,4 @@ tt-station-agentd = { path = ".", features = ["test-hooks"] }
 # the WS *server* (via axum's `ws` feature) and never needs a WS client.
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+tempfile = { workspace = true }

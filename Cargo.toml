@@ -12,3 +12,5 @@ mdns-sd = "0.20"
 axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 rand = "0.9"
+toml = "0.8"
+tempfile = "3"
