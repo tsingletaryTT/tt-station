@@ -35,9 +35,68 @@ pub fn snapshot(tt_smi_bin: &str, run: &dyn Fn(&[&str]) -> Result<String>) -> Re
     run(&[tt_smi_bin, "-s"])
 }
 
+/// Insert the optional `tt_toplike` object into a `tt-smi -s` JSON frame and
+/// re-serialize. Returns `frame` **unchanged** when `toplike` is `None`, when
+/// `frame` isn't a JSON object, or on any serialize error — so the telemetry
+/// contract is preserved and a process-scan hiccup can never corrupt the frame.
+pub fn enrich_frame(frame: &str, toplike: Option<&crate::procscan::TtToplike>) -> String {
+    let Some(toplike) = toplike else {
+        return frame.to_string();
+    };
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(frame)
+    else {
+        return frame.to_string();
+    };
+    let Ok(value) = serde_json::to_value(toplike) else {
+        return frame.to_string();
+    };
+    map.insert("tt_toplike".to_string(), value);
+    serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| frame.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::procscan::{ProcInfo, TtToplike, TT_TOPLIKE_SCHEMA};
+
+    fn sample_toplike() -> TtToplike {
+        TtToplike {
+            schema: TT_TOPLIKE_SCHEMA,
+            processes: vec![ProcInfo {
+                pid: 7,
+                name: "python3".into(),
+                cmd: "run.py".into(),
+                uses_tt: true,
+                cpu_pct: 3.5,
+                mem_bytes: 100,
+            }],
+        }
+    }
+
+    #[test]
+    fn enrich_inserts_key_and_keeps_tt_smi_valid() {
+        let frame = r#"{"device_info":[{"board_info":{"board_type":"p150a"}}]}"#;
+        let out = enrich_frame(frame, Some(&sample_toplike()));
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("device_info").is_some()); // telemetry intact
+        assert_eq!(v["tt_toplike"]["schema"], 1);
+        assert_eq!(v["tt_toplike"]["processes"][0]["pid"], 7);
+    }
+
+    #[test]
+    fn enrich_none_returns_frame_verbatim() {
+        let frame = r#"{"device_info":[]}"#;
+        assert_eq!(enrich_frame(frame, None), frame);
+    }
+
+    #[test]
+    fn enrich_non_object_frame_returned_verbatim() {
+        // not a JSON object → can't insert a key → return unchanged (graceful)
+        let frame = "[1,2,3]";
+        assert_eq!(enrich_frame(frame, Some(&sample_toplike())), frame);
+        let garbage = "not json at all";
+        assert_eq!(enrich_frame(garbage, Some(&sample_toplike())), garbage);
+    }
 
     /// A canned `tt-smi -s` snapshot stands in for the real binary's stdout.
     /// The exact JSON shape doesn't matter to `snapshot` (it passes stdout
