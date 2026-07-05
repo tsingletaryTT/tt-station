@@ -345,6 +345,20 @@ struct Cli {
     /// without binding the control port. For verifying precedence/profiles.
     #[arg(long = "print-config", action = clap::ArgAction::SetTrue)]
     print_config: bool,
+
+    /// Override the SSH account `POST`/`DELETE /ssh/authorize` (Task 2)
+    /// installs/removes keys for. Defaults to the agent's own run-user
+    /// (`$USER`, falling back to `whoami`, falling back to `"ttuser"`),
+    /// with `authorized_keys` resolved under that user's own `$HOME`.
+    ///
+    /// When given explicitly, the target home is resolved as
+    /// `/home/<name>/.ssh/authorized_keys` instead of `$HOME` -- e.g. an
+    /// agent running as one user but installing keys for `ttuser`, the
+    /// account a paired client actually wants to SSH in as (the common case
+    /// on QuietBox 2, where `ttuser` is the run-user this whole agent
+    /// assumes elsewhere -- see the module-level `CLAUDE.md`).
+    #[arg(long = "ssh-user")]
+    ssh_user: Option<String>,
 }
 
 /// `docker` fallback-backend default serving image, used only when
@@ -460,6 +474,59 @@ async fn detect_startup_device_mesh(tt_smi_bin: &str) -> Option<String> {
             None
         }
     }
+}
+
+/// Resolve the `(ssh_user, authorized_keys_path)` target for `POST`/`DELETE
+/// /ssh/authorize` (Task 2).
+///
+/// - `ssh_user_override` (`--ssh-user`) given: the user is that name
+///   verbatim, and the path is resolved against `/home/<name>` (NOT this
+///   process's own `$HOME`) -- the whole point of the override is targeting
+///   an account other than whoever the agent process happens to run as
+///   (e.g. root installing a key for `ttuser`).
+/// - Not given: the user is resolved from `$USER`, falling back to running
+///   `whoami` (covers a `$USER`-less service-manager environment), falling
+///   back to the literal `"ttuser"` (QuietBox 2's run-user -- see the
+///   module-level `CLAUDE.md`) if even that fails; the path is
+///   `$HOME/.ssh/authorized_keys`.
+///
+/// Never fails, never panics: an unresolved `$HOME` (no override given)
+/// degrades to an EMPTY `PathBuf` with a warning printed to stderr, rather
+/// than aborting agent startup over a feature most boots won't even use --
+/// `authkeys::authorize`/`revoke` will then surface a clear I/O error the
+/// first time a client actually calls `/ssh/authorize`, instead of this
+/// function guessing a wrong path silently.
+fn resolve_ssh_target(ssh_user_override: Option<String>) -> (String, std::path::PathBuf) {
+    if let Some(user) = ssh_user_override {
+        let path = std::path::PathBuf::from(format!("/home/{user}")).join(".ssh/authorized_keys");
+        return (user, path);
+    }
+
+    let user = std::env::var("USER")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::process::Command::new("whoami")
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .and_then(|out| String::from_utf8(out.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "ttuser".to_string());
+
+    let path = match std::env::var("HOME").ok().filter(|s| !s.is_empty()) {
+        Some(home) => std::path::PathBuf::from(home).join(".ssh/authorized_keys"),
+        None => {
+            eprintln!(
+                "tt-station-agentd: $HOME unresolved and --ssh-user not given; /ssh/authorize will fail on first use until one is set"
+            );
+            std::path::PathBuf::new()
+        }
+    };
+
+    (user, path)
 }
 
 #[tokio::main]
@@ -640,6 +707,15 @@ async fn main() -> Result<()> {
     // from. Applied here, before any clone of `state` exists, for the same
     // sole-owner reason the other `with_*` builders above are.
     let state = state.with_config_summary(config_summary(&rc));
+
+    // Configure the additive `POST`/`DELETE /ssh/authorize` routes (Task 2,
+    // see routes.rs): which account's `authorized_keys` a paired client's
+    // key lands in. Applied here, before any clone of `state` exists, for
+    // the same sole-owner reason the other `with_*` builders above are.
+    // `--ssh-user` overrides the account; unset, it defaults to this
+    // process's own run-user and `$HOME` -- see `resolve_ssh_target`.
+    let (ssh_user, ssh_authorized_keys_path) = resolve_ssh_target(cli.ssh_user.clone());
+    let state = state.with_ssh_target(ssh_authorized_keys_path, ssh_user);
 
     // Detect this box's device mesh ONCE at startup (not per-request): run
     // `tt-smi -s` through the exact same command seam `GET /telemetry` uses

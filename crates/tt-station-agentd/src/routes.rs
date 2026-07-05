@@ -30,6 +30,7 @@ use axum::{
 use libttstation::model::{ConfigSummary, Endpoint, ModelsResponse, ServingList, ServingStatus};
 use serde::{Deserialize, Serialize};
 
+use crate::authkeys;
 use crate::pairing;
 use crate::serving::discovery::discover_serving;
 use crate::serving::docker::{CommandRunner, RealCommandRunner};
@@ -205,6 +206,21 @@ struct Inner {
     /// via `with_config_summary`, built from the actually-resolved config
     /// (Task 3 of the agentd-config-profiles plan).
     config_summary: ConfigSummary,
+    /// Where `POST /ssh/authorize`/`DELETE /ssh/authorize` read and write the
+    /// target account's `authorized_keys` file. Defaults to an empty
+    /// `PathBuf` (see `new_inner`) -- not a guess at a real path, so a
+    /// caller who forgets `with_ssh_target` (or a box where `$HOME` never
+    /// resolved -- see `main.rs`'s `resolve_ssh_target`) gets an obvious
+    /// I/O error from `authkeys::authorize`/`revoke` rather than silently
+    /// writing to the wrong file. Set via `with_ssh_target`; `main.rs`
+    /// resolves the real value from `$HOME`/`--ssh-user`.
+    ssh_authorized_keys_path: PathBuf,
+    /// The account name reported back to a client as `ssh_user` in
+    /// `POST /ssh/authorize`'s response, so it knows which account to `ssh`
+    /// in as after its key lands in `ssh_authorized_keys_path`. Defaults to
+    /// `"ttuser"` -- the run-user on QuietBox 2, this codebase's reference
+    /// box (see the module-level `CLAUDE.md`). Set via `with_ssh_target`.
+    ssh_user: String,
 }
 
 impl AppState {
@@ -280,6 +296,8 @@ impl AppState {
                     tt_inference_repo: None,
                     tt_device: None,
                 },
+                ssh_authorized_keys_path: PathBuf::new(),
+                ssh_user: "ttuser".to_string(),
             }),
         }
     }
@@ -391,6 +409,33 @@ impl AppState {
         self
     }
 
+    /// Configure the target `authorized_keys` file and account name for
+    /// `POST`/`DELETE /ssh/authorize` (Task 2). Additive counterpart to
+    /// `with_config_summary`/`with_device_mesh`/etc -- same "call
+    /// immediately after construction, while this is still the sole owner
+    /// of its `Arc<Inner>`" contract (`Arc::get_mut` only succeeds then).
+    /// Called after a clone exists, it logs a warning and leaves the
+    /// defaults (empty path, `"ttuser"`) in place rather than panicking.
+    ///
+    /// Optional: an `AppState` never given this config still answers
+    /// `/ssh/authorize`, but against an empty path -- `authkeys::authorize`/
+    /// `revoke` will surface an I/O error rather than silently touching a
+    /// real `~/.ssh` no one configured. `main.rs` always calls this with a
+    /// resolved `$HOME`/`--ssh-user` target (see `resolve_ssh_target`);
+    /// tests call it with a temp path.
+    pub fn with_ssh_target(mut self, path: PathBuf, user: String) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => {
+                inner.ssh_authorized_keys_path = path;
+                inner.ssh_user = user;
+            }
+            None => eprintln!(
+                "tt-station-agentd: with_ssh_target called on an already-shared AppState; ssh target not applied"
+            ),
+        }
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.inner.name
     }
@@ -430,6 +475,18 @@ impl AppState {
     /// `with_config_summary`).
     fn config_summary(&self) -> ConfigSummary {
         self.inner.config_summary.clone()
+    }
+
+    /// The `authorized_keys` path `/ssh/authorize` reads and writes (see
+    /// `with_ssh_target`).
+    fn ssh_path(&self) -> &Path {
+        &self.inner.ssh_authorized_keys_path
+    }
+
+    /// The account name `POST /ssh/authorize` reports back as `ssh_user`
+    /// (see `with_ssh_target`).
+    fn ssh_user(&self) -> &str {
+        &self.inner.ssh_user
     }
 
     /// Cheap `Arc` clone of the serving backend, for a handler to move into
@@ -1316,6 +1373,130 @@ async fn get_serving(
     Json(ServingList { serving })
 }
 
+/// Build the small `{ "error": "<message>" }` response for a `400 Bad
+/// Request` -- a validation failure the CALLER can fix (a bad/private key,
+/// a malformed label, a revoke request naming neither `label` nor
+/// `public_key`), as opposed to `backend_error`'s `500`, which is for
+/// failures on THIS box's side (a backend/I-O error after auth and
+/// validation both passed).
+fn bad_request(message: String) -> (StatusCode, Json<ErrorResponse>) {
+    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: message }))
+}
+
+/// JSON body accepted by `POST /ssh/authorize`.
+#[derive(Deserialize)]
+struct SshAuthorizeRequest {
+    public_key: String,
+    label: String,
+}
+
+/// JSON body returned by `POST /ssh/authorize` on success.
+#[derive(Serialize)]
+struct SshAuthorizeResponse {
+    authorized: bool,
+    /// The account the newly-installed key can `ssh` in as -- the agent's
+    /// RUN-USER (`ttuser` on QuietBox 2), not necessarily whoever the
+    /// client happens to be paired as. Read straight off `AppState`
+    /// (`with_ssh_target`) so it can never drift from where the key was
+    /// actually written.
+    ssh_user: String,
+    /// Whether this exact key (by base64 blob, see `authkeys::key_blob`)
+    /// was already present -- lets a client tell "freshly installed" apart
+    /// from "already there, no-op" without needing a separate `GET`.
+    already_present: bool,
+}
+
+/// `POST /ssh/authorize { "public_key": "...", "label": "..." }`
+/// (bearer-guarded, same `BearerAuth` gate as `/run`/`/stop`/`/reset`):
+/// install a paired client's SSH public key into the agent RUN-USER's
+/// `authorized_keys` file (`state.ssh_path()`), so the client can `ssh` into
+/// the box directly instead of only reaching it through this control API.
+///
+/// Two layers of validation before anything touches disk:
+///   1. `BearerAuth` (an unauthenticated/mis-authenticated request is
+///      rejected before this handler body even runs -- see the extractor's
+///      doc comment).
+///   2. `authkeys::validate_public_key`, called here explicitly so a bad key
+///      (private-key material, multi-line input, an unrecognized key type)
+///      gets a clear `400` -- `authkeys::authorize` re-validates internally
+///      too (belt and suspenders, per its own doc comment), but by the time
+///      its `anyhow::Error` reaches this handler it's already wrapped with
+///      an "invalid public key: " prefix, so failing fast here keeps the
+///      error message this handler returns simpler and keeps the intent
+///      (client-input error, not a server error) explicit at the call site.
+///
+/// Any remaining failure from `authkeys::authorize` (most likely an invalid
+/// `label` -- see `authkeys::validate_label` -- since a valid, already-
+/// checked key rarely fails to write) is ALSO reported as `400`: both
+/// failure modes are the caller's request being malformed, not this box
+/// having a problem, so neither should read as a `500`.
+async fn ssh_authorize(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(req): Json<SshAuthorizeRequest>,
+) -> Result<Json<SshAuthorizeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    authkeys::validate_public_key(&req.public_key)
+        .map_err(|err| bad_request(err.to_string()))?;
+
+    let outcome = authkeys::authorize(state.ssh_path(), &req.public_key, &req.label)
+        .map_err(|err| bad_request(err.to_string()))?;
+
+    Ok(Json(SshAuthorizeResponse {
+        authorized: true,
+        ssh_user: state.ssh_user().to_string(),
+        already_present: matches!(outcome, authkeys::AuthorizeOutcome::AlreadyPresent),
+    }))
+}
+
+/// JSON body accepted by `DELETE /ssh/authorize`. Exactly one of `label`/
+/// `public_key` is expected -- `label` takes priority if both are somehow
+/// given (matches `authorize`'s own append-by-label convention).
+#[derive(Deserialize)]
+struct SshRevokeRequest {
+    label: Option<String>,
+    public_key: Option<String>,
+}
+
+/// JSON body returned by `DELETE /ssh/authorize` on success.
+#[derive(Serialize)]
+struct SshRevokeResponse {
+    revoked: bool,
+}
+
+/// `DELETE /ssh/authorize { "label": "..." }` or `{ "public_key": "..." }`
+/// (bearer-guarded, same gate as the `POST`): remove a previously-installed
+/// key from `state.ssh_path()`, identified either by the `ttstation:<label>`
+/// marker `authorize` tagged it with, or by the key blob itself.
+///
+/// Neither `label` nor `public_key` given is a `400` -- there's nothing to
+/// revoke, and (unlike `authkeys::revoke` itself, which treats "nothing
+/// matched" as success) that's the caller's request being malformed, not a
+/// legitimate no-op. Matching but not FINDING anything, by contrast, is
+/// still success (`revoked: true`) -- same idempotency `authkeys::revoke`
+/// documents for its own no-match case.
+async fn ssh_revoke(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(req): Json<SshRevokeRequest>,
+) -> Result<Json<SshRevokeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let which = if let Some(label) = req.label {
+        authkeys::Revoke::Label(label)
+    } else if let Some(public_key) = req.public_key {
+        let blob = authkeys::key_blob(&public_key)
+            .ok_or_else(|| bad_request("public_key missing key material".to_string()))?
+            .to_string();
+        authkeys::Revoke::Blob(blob)
+    } else {
+        return Err(bad_request(
+            "request must include either \"label\" or \"public_key\"".to_string(),
+        ));
+    };
+
+    authkeys::revoke(state.ssh_path(), &which).map_err(backend_error)?;
+
+    Ok(Json(SshRevokeResponse { revoked: true }))
+}
+
 /// Build the router for a given `AppState`. Side-effect-free: no sockets,
 /// no mDNS -- safe to call directly from tests.
 pub fn app(state: AppState) -> Router {
@@ -1331,5 +1512,6 @@ pub fn app(state: AppState) -> Router {
         .route("/stop", post(stop_model))
         .route("/reset", post(reset))
         .route("/endpoint", get(get_endpoint))
+        .route("/ssh/authorize", post(ssh_authorize).delete(ssh_revoke))
         .with_state(state)
 }
