@@ -22,5 +22,5 @@ targets:
         SWIFT_VERSION: "5.0"
         INFOPLIST_FILE: Info.plist
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "0.4.1"
+        MARKETING_VERSION: "0.4.2"
         CURRENT_PROJECT_VERSION: "1"

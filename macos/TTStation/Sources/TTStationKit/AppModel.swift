@@ -23,6 +23,33 @@ public final class AppModel {
         boxes.first { $0.id == selectedHostPort }
     }
 
+    /// Count of boxes currently `.serving` a model — drives the menu-bar
+    /// icon's badge (Task 2 of "highlight running models in the toolbar").
+    /// `.starting` deliberately does not count: a box mid-spin-up isn't
+    /// "serving" yet, so the badge only lights once a model is actually up.
+    /// Maps `boxes` to their `runningState` and delegates to the pure static
+    /// helper below so the counting logic itself is unit-testable without
+    /// constructing a full `BoxViewModel` (which needs a `TTCommands` and a
+    /// `HostRegistry`).
+    public var servingCount: Int {
+        Self.servingCount(boxes.map(\.runningState))
+    }
+
+    /// True if any box is `.serving` — a thin convenience over `servingCount`
+    /// for call sites that only care about presence, not the exact number.
+    public var anyServing: Bool {
+        servingCount > 0
+    }
+
+    /// Pure helper: counts how many of the given `RunningState`s are
+    /// `.serving`. No I/O, no dependency on `BoxViewModel` — exercised
+    /// directly by `AppModelTests` with a plain array of states.
+    public static func servingCount(_ states: [RunningState]) -> Int {
+        states.reduce(into: 0) { count, state in
+            if case .serving = state { count += 1 }
+        }
+    }
+
     public func scan() async {
         guard scanState != .scanning else { return }
         scanState = .scanning

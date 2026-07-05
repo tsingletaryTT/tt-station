@@ -106,6 +106,29 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    /// `AppModel.servingCount` delegates to the pure static helper — this
+    /// exercises that helper directly with a mix of idle/starting/serving
+    /// states, with no need to construct real `BoxViewModel`s.
+    func testServingCountCountsOnlyServingStates() {
+        let states: [RunningState] = [
+            .idle,
+            .starting,
+            .serving(primary: "Qwen3-8B", others: 0),
+            .idle,
+            .serving(primary: "Llama-3-70B", others: 1),
+        ]
+        XCTAssertEqual(AppModel.servingCount(states), 2)
+    }
+
+    func testServingCountIsZeroWhenNothingIsServing() {
+        let states: [RunningState] = [.idle, .starting, .idle]
+        XCTAssertEqual(AppModel.servingCount(states), 0)
+    }
+
+    func testServingCountEmptyIsZero() {
+        XCTAssertEqual(AppModel.servingCount([]), 0)
+    }
+
     /// Drives one `scan()` pass through the fake's suspend/resume
     /// choreography: waits for `discovery.scan()` to actually be in flight,
     /// resumes it, then waits for `scan()` to return.

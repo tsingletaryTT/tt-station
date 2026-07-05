@@ -14,10 +14,12 @@ struct TTStationApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra("TTStation", image: "MenuBarIcon") {
+        MenuBarExtra {
             MenuContentView(model: model)
                 .frame(width: 340)
                 .tint(TTTheme.teal)
+        } label: {
+            MenuBarLabel(model: model)
         }
         .menuBarExtraStyle(.window)
 
@@ -26,6 +28,46 @@ struct TTStationApp: App {
                 .tint(TTTheme.teal)
         }
         .windowResizability(.contentMinSize)
+    }
+}
+
+/// The `MenuBarExtra` label: the app's tray icon, with a small colored dot
+/// badge overlaid in the top-trailing corner whenever any discovered box is
+/// actively `.serving` a model — so activity at a glance doesn't require
+/// opening the popover ("highlight running models in the toolbar", Task 2).
+///
+/// `@Bindable` (not a plain `let`) so this view's own `body` is what reads
+/// `model.servingCount` — that's what makes SwiftUI's Observation machinery
+/// register the dependency and re-evaluate the label as boxes start/stop
+/// serving. `MenuBarExtra`'s label closure itself is not a tracked View
+/// context, so reading the count directly in `TTStationApp.body` (rather
+/// than delegating to a real child `View`) would not have re-rendered on
+/// change — this indirection is required, not just tidiness.
+///
+/// The icon stays the existing template image (see
+/// `MenuBarIcon.imageset/Contents.json`'s `template-rendering-intent`) so it
+/// keeps tinting correctly for light/dark menu bars; the badge is a small
+/// opaque `Circle` layered on top and is deliberately *not* part of the
+/// template, so it always renders in its serving color regardless of menu
+/// bar appearance. `servingCount` (not `.starting`) gates it — a box mid
+/// spin-up isn't "serving" yet, so the badge only lights once a model is
+/// actually up.
+struct MenuBarLabel: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        Image("MenuBarIcon")
+            .overlay(alignment: .topTrailing) {
+                if model.servingCount > 0 {
+                    Circle()
+                        .fill(TTTheme.statusServing)
+                        .frame(width: 6, height: 6)
+                        // Nudge slightly past the icon's own bounds so the
+                        // badge reads as a corner overlay, not a bite taken
+                        // out of the icon.
+                        .offset(x: 2, y: -2)
+                }
+            }
     }
 }
 
