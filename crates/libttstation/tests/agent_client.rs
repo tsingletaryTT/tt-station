@@ -12,7 +12,9 @@
 //! with the exact configured token -- that's the one behavior all four
 //! methods share and the brief calls out explicitly.
 
-use libttstation::agent_client::{get_status, list_models, list_serving, reset, AgentClient};
+use libttstation::agent_client::{
+    get_status, list_models, list_serving, reset, AgentClient, SshRevokeBy,
+};
 use libttstation::model::{Endpoint, ServingStatus};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
@@ -346,4 +348,94 @@ async fn get_status_parses_null_device_mesh_as_none() {
         .expect("get_status() should succeed");
 
     assert_eq!(info.device_mesh, None);
+}
+
+/// (Task 3) `ssh_authorize(public_key, label)` should POST
+/// `{"public_key": "...", "label": "..."}` to `{base}/ssh/authorize` with
+/// the bearer header, and decode the agent's `{authorized, ssh_user,
+/// already_present}` response body -- mirroring `run`'s
+/// authed-POST-with-body-decode shape exactly (see
+/// `tt-station-agentd::routes::ssh_authorize`/`SshAuthorizeResponse`, Task 2).
+#[tokio::test]
+async fn ssh_authorize_posts_body_and_decodes_response() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/ssh/authorize"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .and(wiremock::matchers::body_json(serde_json::json!({
+            "public_key": "ssh-ed25519 AAAA... test",
+            "label": "taylors-mac"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "authorized": true,
+            "ssh_user": "ttuser",
+            "already_present": false
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AgentClient::new(server.uri(), TOKEN);
+    let result = client
+        .ssh_authorize("ssh-ed25519 AAAA... test", "taylors-mac")
+        .await
+        .expect("ssh_authorize() should succeed against a mocked 200 response");
+
+    assert!(result.authorized);
+    assert_eq!(result.ssh_user, "ttuser");
+    assert!(!result.already_present);
+}
+
+/// (Task 3) `ssh_revoke(SshRevokeBy::Label(...))` should DELETE
+/// `{base}/ssh/authorize` with the bearer header and a `{"label": "..."}`
+/// body, succeeding on the agent's `{"revoked": true}` response -- mirroring
+/// `tt-station-agentd::routes::ssh_revoke`'s label-identified path.
+#[tokio::test]
+async fn ssh_revoke_by_label_sends_delete_with_label_body() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/ssh/authorize"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .and(wiremock::matchers::body_json(serde_json::json!({
+            "label": "taylors-mac"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "revoked": true
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AgentClient::new(server.uri(), TOKEN);
+    client
+        .ssh_revoke(SshRevokeBy::Label("taylors-mac".to_string()))
+        .await
+        .expect("ssh_revoke() should succeed against a mocked 200 response");
+}
+
+/// (Task 3) `ssh_revoke(SshRevokeBy::PublicKey(...))` should send the same
+/// DELETE, but with a `{"public_key": "..."}` body instead of `label`.
+#[tokio::test]
+async fn ssh_revoke_by_public_key_sends_delete_with_public_key_body() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/ssh/authorize"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .and(wiremock::matchers::body_json(serde_json::json!({
+            "public_key": "ssh-ed25519 AAAA... test"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "revoked": true
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AgentClient::new(server.uri(), TOKEN);
+    client
+        .ssh_revoke(SshRevokeBy::PublicKey(
+            "ssh-ed25519 AAAA... test".to_string(),
+        ))
+        .await
+        .expect("ssh_revoke() should succeed against a mocked 200 response");
 }

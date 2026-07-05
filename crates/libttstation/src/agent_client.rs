@@ -149,6 +149,40 @@ pub async fn reset(base: &str, token: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `POST /ssh/authorize`'s response body, as decoded by
+/// [`AgentClient::ssh_authorize`] -- see
+/// `tt-station-agentd::routes::SshAuthorizeResponse` (Task 2) for the wire
+/// shape this mirrors field-for-field.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SshAuthorizeResult {
+    /// Always `true` on a `200` response (the agent errors out rather than
+    /// returning `authorized: false`) -- kept as a field rather than
+    /// collapsed away so the struct matches the agent's wire shape exactly.
+    pub authorized: bool,
+    /// The account the newly-installed key can `ssh` in as (the agent's
+    /// RUN-USER, e.g. `ttuser` -- not necessarily whoever the client is
+    /// paired as).
+    pub ssh_user: String,
+    /// Whether this exact key was already present before this call (a
+    /// no-op) as opposed to freshly installed.
+    pub already_present: bool,
+}
+
+/// Which existing key [`AgentClient::ssh_revoke`] should remove, mirroring
+/// `tt-station-agentd::routes::SshRevokeRequest`'s `label`/`public_key`
+/// pair -- but as an enum here rather than two `Option` fields, since a
+/// caller always knows which one it means to send and an enum makes
+/// "exactly one of these" a compile-time guarantee instead of a runtime
+/// convention.
+pub enum SshRevokeBy {
+    /// Revoke by the `ttstation:<label>` marker `authorize` tagged the key
+    /// with.
+    Label(String),
+    /// Revoke by the key material itself (the same public key string that
+    /// was passed to `ssh_authorize`).
+    PublicKey(String),
+}
+
 /// A handle to one paired agent: its control-plane base URL plus the bearer
 /// token minted for it by [`crate::pairing::pair_complete`].
 pub struct AgentClient {
@@ -227,6 +261,68 @@ impl AgentClient {
             .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
 
         Ok(resp.json().await?)
+    }
+
+    /// `POST /ssh/authorize { "public_key": "...", "label": "..." }`
+    /// (bearer-guarded, same gate as `run`/`stop`): install `public_key`
+    /// into the agent's `authorized_keys` under `label`, returning the
+    /// decoded [`SshAuthorizeResult`] -- see
+    /// `tt-station-agentd::routes::ssh_authorize` (Task 2) for the
+    /// server-side counterpart this drives.
+    pub async fn ssh_authorize(
+        &self,
+        public_key: &str,
+        label: &str,
+    ) -> anyhow::Result<SshAuthorizeResult> {
+        #[derive(Serialize)]
+        struct SshAuthorizeRequest<'a> {
+            public_key: &'a str,
+            label: &'a str,
+        }
+
+        let url = join(&self.base, "ssh/authorize");
+        let resp = self
+            .send(
+                reqwest::Client::new()
+                    .post(&url)
+                    .json(&SshAuthorizeRequest { public_key, label }),
+                &url,
+            )
+            .await?;
+
+        Ok(resp.json().await?)
+    }
+
+    /// `DELETE /ssh/authorize { "label": "..." }` or `{ "public_key": "..." }`
+    /// (bearer-guarded, same gate as `run`/`stop`): remove a previously
+    /// -installed key identified by `by`, either its `label` or the key
+    /// material itself -- see `tt-station-agentd::routes::ssh_revoke`
+    /// (Task 2). The agent's response is just `{"revoked": true}` on
+    /// success -- nothing to parse out of it, same as [`AgentClient::stop`].
+    pub async fn ssh_revoke(&self, by: SshRevokeBy) -> anyhow::Result<()> {
+        #[derive(Serialize)]
+        struct SshRevokeRequest {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            label: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            public_key: Option<String>,
+        }
+
+        let body = match by {
+            SshRevokeBy::Label(label) => SshRevokeRequest {
+                label: Some(label),
+                public_key: None,
+            },
+            SshRevokeBy::PublicKey(public_key) => SshRevokeRequest {
+                label: None,
+                public_key: Some(public_key),
+            },
+        };
+
+        let url = join(&self.base, "ssh/authorize");
+        self.send(reqwest::Client::new().delete(&url).json(&body), &url)
+            .await?;
+        Ok(())
     }
 
     /// Shared request-sending helper for every method above: attach the
