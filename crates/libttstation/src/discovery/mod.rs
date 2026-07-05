@@ -68,6 +68,7 @@ mod tests {
             chips: "4xBH".into(),
             status: ServingStatus::Idle,
             apiver: 1,
+            device_mesh: Some("p300x2".into()),
         };
         let providers: Vec<Box<dyn DiscoveryProvider>> = vec![
             Box::new(Fake(vec![r.clone()])),

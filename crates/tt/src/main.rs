@@ -48,7 +48,9 @@ use libttstation::agent_client::AgentClient;
 use libttstation::discovery::{
     aggregate, manual::ManualProvider, mdns::MdnsProvider, DiscoveryProvider,
 };
-use libttstation::model::{BoxRecord, Endpoint, ModelsResponse, ServingList, ServingStatus};
+use libttstation::model::{
+    BoxRecord, Endpoint, ModelsResponse, ServingList, ServingStatus, StatusInfo,
+};
 use libttstation::pairing::{pair_complete, pair_init};
 use libttstation::secrets::{default_store, FileStore, SecretStore};
 use serde::Deserialize;
@@ -335,6 +337,13 @@ fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> Result<BoxRe
         name: String,
         chips: String,
         status: String,
+        /// (Task 3) The box's detected device-mesh label -- see
+        /// `tt-station-agentd::routes::StatusResponse::device_mesh`. Missing
+        /// or `null` on the wire both deserialize to `None` here (serde
+        /// treats an absent `Option<T>` field as `None`, same as an explicit
+        /// `null`), so this stays compatible with any `/status` responder
+        /// that predates Task 2 (e.g. `mock-box`).
+        device_mesh: Option<String>,
     }
 
     let url = format!("http://{host}:{port}/status");
@@ -357,6 +366,11 @@ fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> Result<BoxRe
         // `/status` doesn't report an API version; manual hosts are assumed
         // to speak the same API version this CLI does.
         apiver: 1,
+        // This IS the "per-box status probe" `discover` already runs for
+        // manual hosts (mDNS-discovered boxes have no such probe -- see
+        // `libttstation::model::txt_decode`), so it's the one discover path
+        // that can populate `device_mesh` from real data instead of `None`.
+        device_mesh: resp.device_mesh,
     })
 }
 
@@ -446,7 +460,7 @@ async fn cmd_stop(host: &str) -> Result<()> {
 /// `cmd_run`/`cmd_stop`/`cmd_endpoint` are unaffected -- `/run`, `/stop`,
 /// and `/endpoint` ARE bearer-gated on the agent side and still go through
 /// `authed_client()`.
-async fn cmd_status(host: &str) -> Result<ServingStatus> {
+async fn cmd_status(host: &str) -> Result<StatusInfo> {
     let base = format!("http://{host}");
     libttstation::agent_client::get_status(&base).await
 }
@@ -744,11 +758,22 @@ fn print_reset_aborted(json: bool) {
     }
 }
 
-fn print_status(status: &ServingStatus, json: bool) {
+/// `tt status`'s output. JSON mode adds (Task 3) `device_mesh` alongside the
+/// existing `status` key so a caller (the macOS app, eventually) can read
+/// both from one call; human mode is unchanged -- still just the bare
+/// `idle`/`serving:<model>` txt line, since device-mesh isn't something an
+/// operator glancing at a terminal needs.
+fn print_status(info: &StatusInfo, json: bool) {
     if json {
-        println!("{}", serde_json::json!({ "status": status.to_txt() }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": info.status.to_txt(),
+                "device_mesh": info.device_mesh,
+            })
+        );
     } else {
-        println!("{}", status.to_txt());
+        println!("{}", info.status.to_txt());
     }
 }
 
@@ -815,6 +840,7 @@ mod tests {
             chips: "4xBH".into(),
             status: ServingStatus::Serving("llama3".into()),
             apiver: 1,
+            device_mesh: Some("p300x2".into()),
         };
         let line = format_boxrecord_line(&rec);
         assert!(line.contains("qb2-lab"));

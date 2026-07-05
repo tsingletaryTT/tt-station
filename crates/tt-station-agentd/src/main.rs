@@ -685,6 +685,11 @@ impl StatusAdvertiser for MdnsStatusAdvertiser {
             chips: self.chips.clone(),
             status: status.clone(),
             apiver: self.apiver,
+            // `txt_encode` (below) doesn't read `device_mesh` -- the mDNS
+            // TXT advertisement never carried this field, only the HTTP
+            // `/status` response does (Task 2) -- so this is a
+            // required-but-unused filler for this record.
+            device_mesh: None,
         };
 
         let txt_pairs = txt_encode(&record);
@@ -750,6 +755,9 @@ fn advertise(cli: &Cli, status: ServingStatus) -> Result<(MdnsGuard, MdnsStatusA
         chips: cli.chips.clone(),
         status,
         apiver: cli.apiver,
+        // Same rationale as `MdnsStatusAdvertiser::advertise_status` above:
+        // `txt_encode` doesn't read this field.
+        device_mesh: None,
     };
 
     let txt_pairs = txt_encode(&record);

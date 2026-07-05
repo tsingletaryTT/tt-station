@@ -114,6 +114,11 @@ async fn advertise(name: String, ctrl_port: u16, chips: String, apiver: u8) -> R
         chips,
         status: ServingStatus::Idle,
         apiver,
+        // `txt_encode` doesn't read `device_mesh` (mDNS TXT records don't
+        // carry it -- see `libttstation::model::txt_decode`'s doc comment),
+        // so this is a required-but-unused filler for this advertise-only
+        // record.
+        device_mesh: None,
     };
 
     // Reuse the shared encoder so the advertised TXT keys (name, apiver,

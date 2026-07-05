@@ -47,6 +47,16 @@ pub struct BoxRecord {
     pub chips: String,
     pub status: ServingStatus,
     pub apiver: u8,
+    /// This box's detected device-mesh label (`"p300x2"`, `"n300x4"`, ...),
+    /// passed through from the agent's `/status` `device_mesh` field (Task 2
+    /// -- see `tt-station-agentd::routes::StatusResponse`). Only populated
+    /// when the record actually came from a live `/status` probe (today,
+    /// `ManualProvider`'s manual-host path via `manual_status_fetch` in the
+    /// `tt` CLI); mDNS-discovered records (`txt_decode`, below) are always
+    /// `None` here because the mDNS TXT advertisement doesn't carry this key
+    /// -- see `txt_decode`'s doc comment. Task 3's `tt --json discover`
+    /// output surfaces whatever this field ends up holding either way.
+    pub device_mesh: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -120,6 +130,26 @@ pub struct ModelsResponse {
     pub models: Vec<ModelInfo>,
 }
 
+/// `GET /status`'s response body, as decoded by
+/// [`crate::agent_client::get_status`] and printed by `tt --json status`
+/// (Task 3). `status` is the already-parsed [`ServingStatus`] (via
+/// [`ServingStatus::from_txt`]) rather than the raw `idle`/`serving:<model>`
+/// string the agent sends over the wire -- `get_status` does that parsing so
+/// every caller gets a `ServingStatus` for free. Because `ServingStatus` has
+/// its own hand-written `Serialize` impl (the canonical txt-string form, not
+/// serde's derived enum shape), this struct's derived `Serialize` still
+/// round-trips correctly when a caller re-serializes it for `--json` output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatusInfo {
+    pub status: ServingStatus,
+    /// This box's detected device-mesh label, or `None` when the agent's own
+    /// detection failed/didn't run -- passed through verbatim from the
+    /// agent's `/status` `device_mesh` field (Task 2). See the identically-
+    /// named field on [`BoxRecord`] for the same concept surfaced via
+    /// discovery instead of a direct status probe.
+    pub device_mesh: Option<String>,
+}
+
 impl ServingStatus {
     pub fn to_txt(&self) -> String {
         match self {
@@ -188,6 +218,13 @@ pub fn txt_decode(
         chips,
         status,
         apiver,
+        // The mDNS TXT advertisement (see `txt_encode`) doesn't carry a
+        // `device_mesh` key -- Task 2 only added that field to the agent's
+        // `/status` HTTP response, not its mDNS record -- so an
+        // mDNS-discovered box always decodes to `None` here. A caller that
+        // wants the real value has to probe `/status` directly (as
+        // `manual_status_fetch` does for `ManualProvider`'s manual hosts).
+        device_mesh: None,
     })
 }
 
@@ -243,6 +280,7 @@ mod tests {
             chips: "4xBH".to_string(),
             status: ServingStatus::Serving("llama3".to_string()),
             apiver: 1,
+            device_mesh: Some("p300x2".to_string()),
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(
@@ -264,5 +302,8 @@ mod tests {
         assert_eq!(rec.chips, "4xBH");
         assert_eq!(rec.ctrl_port, 8765);
         assert_eq!(rec.status, ServingStatus::Idle);
+        // mDNS TXT records never carry `device_mesh` (see `txt_decode`'s doc
+        // comment) -- assert the decode doesn't invent a value.
+        assert_eq!(rec.device_mesh, None);
     }
 }

@@ -71,6 +71,7 @@ mod tests {
                 chips: "4xBH".into(),
                 status: ServingStatus::Idle,
                 apiver: 1,
+                device_mesh: Some("p300x2".into()),
             })
         });
 
@@ -99,6 +100,7 @@ mod tests {
                         chips: "1xBH".into(),
                         status: ServingStatus::Idle,
                         apiver: 1,
+                        device_mesh: None,
                     })
                 }
             },

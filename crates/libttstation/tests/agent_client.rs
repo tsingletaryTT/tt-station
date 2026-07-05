@@ -258,14 +258,18 @@ async fn get_status_parses_serving_status_with_no_auth_header() {
         .mount(&server)
         .await;
 
-    let status = get_status(&server.uri())
+    let info = get_status(&server.uri())
         .await
         .expect("get_status() should succeed against a mocked 200 response");
 
     assert_eq!(
-        status,
+        info.status,
         ServingStatus::Serving("meta-llama/Llama-3.3-70B-Instruct".to_string())
     );
+    // The mocked response above omits `device_mesh` entirely (it predates
+    // Task 2) -- confirm the missing key deserializes to `None` rather than
+    // erroring.
+    assert_eq!(info.device_mesh, None);
 }
 
 /// `get_status(base)` should also parse the `idle` case correctly, still
@@ -285,9 +289,61 @@ async fn get_status_parses_idle_with_no_auth_header() {
         .mount(&server)
         .await;
 
-    let status = get_status(&server.uri())
+    let info = get_status(&server.uri())
         .await
         .expect("get_status() should succeed");
 
-    assert_eq!(status, ServingStatus::Idle);
+    assert_eq!(info.status, ServingStatus::Idle);
+}
+
+/// (Task 3) `get_status(base)` should decode a present `device_mesh` string
+/// straight through from the agent's `/status` payload, unmodified.
+#[tokio::test]
+async fn get_status_parses_device_mesh_when_present() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/status"))
+        .and(NoAuthorizationHeader)
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "qb2-lab",
+            "chips": "4xBH",
+            "status": "idle",
+            "device_mesh": "p300x2"
+        })))
+        .mount(&server)
+        .await;
+
+    let info = get_status(&server.uri())
+        .await
+        .expect("get_status() should succeed");
+
+    assert_eq!(info.device_mesh, Some("p300x2".to_string()));
+}
+
+/// (Task 3) An explicit JSON `null` for `device_mesh` (what the agent sends
+/// when its own detection failed/didn't run -- see
+/// `tt-station-agentd::routes::StatusResponse`) must decode to `None`, same
+/// as an omitted key.
+#[tokio::test]
+async fn get_status_parses_null_device_mesh_as_none() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/status"))
+        .and(NoAuthorizationHeader)
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "qb2-lab",
+            "chips": "4xBH",
+            "status": "idle",
+            "device_mesh": null
+        })))
+        .mount(&server)
+        .await;
+
+    let info = get_status(&server.uri())
+        .await
+        .expect("get_status() should succeed");
+
+    assert_eq!(info.device_mesh, None);
 }

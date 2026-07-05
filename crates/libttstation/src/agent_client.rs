@@ -9,7 +9,7 @@
 //! `/status` isn't currently bearer-gated on the agent side, but sending the
 //! header anyway costs nothing and keeps all four calls uniform.
 
-use crate::model::{Endpoint, ModelsResponse, ServingList, ServingStatus};
+use crate::model::{Endpoint, ModelsResponse, ServingList, ServingStatus, StatusInfo};
 use crate::pairing::join;
 use serde::{Deserialize, Serialize};
 
@@ -59,8 +59,9 @@ pub async fn list_serving(base: &str) -> anyhow::Result<ServingList> {
 
 /// `GET /status` (UNAUTHED, mirroring the agent's own route -- see
 /// `tt-station-agentd::routes::get_status`, which has no `BearerAuth`
-/// extractor): the agent's current serving status, parsed via
-/// [`ServingStatus::from_txt`].
+/// extractor): the agent's current serving status (parsed via
+/// [`ServingStatus::from_txt`]) plus (Task 3) its detected `device_mesh`
+/// hint, bundled as a [`StatusInfo`].
 ///
 /// A FREE function rather than an `AgentClient` method, same reasoning as
 /// [`list_models`] and [`crate::pairing::pair_init`]: a client that hasn't
@@ -70,10 +71,17 @@ pub async fn list_serving(base: &str) -> anyhow::Result<ServingList> {
 /// (`crates/tt/src/main.rs::cmd_status`) calls this directly instead of
 /// going through `authed_client()`, so a `tt status` on an unpaired box
 /// works instead of failing with "no token stored".
-pub async fn get_status(base: &str) -> anyhow::Result<ServingStatus> {
+///
+/// `device_mesh` deserializes to `None` when the agent's JSON omits the key
+/// entirely (serde's derive treats a missing `Option<T>` field as `None`
+/// rather than an error) -- lets this keep working unmodified against
+/// `mock-box`, whose `/status` fixture predates Task 2 and doesn't send the
+/// key at all.
+pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
     #[derive(Deserialize)]
     struct StatusResponse {
         status: String,
+        device_mesh: Option<String>,
     }
 
     let url = join(base, "status");
@@ -85,7 +93,10 @@ pub async fn get_status(base: &str) -> anyhow::Result<ServingStatus> {
         .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
 
     let body: StatusResponse = resp.json().await?;
-    ServingStatus::from_txt(&body.status)
+    Ok(StatusInfo {
+        status: ServingStatus::from_txt(&body.status)?,
+        device_mesh: body.device_mesh,
+    })
 }
 
 /// `POST /reset` (bearer-guarded): ask the agent at `base` to return the box
