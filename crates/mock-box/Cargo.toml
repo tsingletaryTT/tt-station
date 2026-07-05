@@ -12,7 +12,11 @@ tokio = { workspace = true }
 # `serve` (Task 12) fakes the agent control API + a fake vLLM endpoint over
 # HTTP -- same axum/serde stack `tt-station-agentd` uses for the real thing,
 # so the JSON shapes on the wire stay recognizable between mock and real.
-axum = { workspace = true }
+# `ws` (Task 4) additionally lets `GET /telemetry` upgrade to a WebSocket and
+# stream a canned `tt-smi -s` frame, mirroring `tt-station-agentd`'s real
+# telemetry route so the macOS app's live device strip can be exercised with
+# no hardware.
+axum = { workspace = true, features = ["ws"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Only for `pair/init`'s printed code -- cosmetic, since `pair/complete`

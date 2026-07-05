@@ -17,8 +17,10 @@
 
 use anyhow::{Context, Result};
 use axum::{
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
     http::StatusCode,
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
@@ -31,6 +33,7 @@ use mdns_sd::{ServiceDaemon, ServiceInfo};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(
@@ -225,6 +228,13 @@ struct StatusResponse {
     name: String,
     chips: String,
     status: String,
+    /// Fixed dev-parity value matching the real agent's `/status` field
+    /// (Task 2: `AppState::device_mesh`, detected from `tt-smi -s` on a real
+    /// box). Mock-box has no hardware to detect, so this is hardcoded to the
+    /// same 4-board mesh the mDNS `advertise` subcommand already fakes
+    /// (Task 3.5) -- keeps the two mock surfaces consistent with each other
+    /// and with the canned `/telemetry` frame below (also 4 boards).
+    device_mesh: Option<String>,
 }
 
 async fn get_status(State(state): State<MockState>) -> Json<StatusResponse> {
@@ -233,6 +243,7 @@ async fn get_status(State(state): State<MockState>) -> Json<StatusResponse> {
         name: inner.name.clone(),
         chips: inner.chips.clone(),
         status: inner.status.to_txt(),
+        device_mesh: Some("p300x2".to_string()),
     })
 }
 
@@ -371,6 +382,62 @@ async fn list_models(State(state): State<MockState>) -> Json<serde_json::Value> 
     }))
 }
 
+/// Interval between pushed `/telemetry` frames. Matches the real agent's
+/// default (`DEFAULT_TELEMETRY_INTERVAL_MS` in
+/// `tt-station-agentd/src/routes.rs`) closely enough for dev/e2e purposes --
+/// this mock has no `--telemetry-interval-ms` flag to configure it.
+const TELEMETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+/// A single canned `tt-smi -s`-shaped snapshot: 4 `p300c` boards, matching
+/// the `p300x2` mesh this mock reports everywhere else (`/status`'s
+/// `device_mesh`, `advertise`'s mDNS TXT record). Real `tt-smi -s` output has
+/// far more fields; this is deliberately just enough shape for the app's
+/// live device strip (per-board type + temperature) to render against, not a
+/// faithful `tt-smi` simulator. Sent verbatim as a `Message::Text` frame --
+/// no `serde_json` round-trip -- so the bytes on the wire never drift from
+/// what's reviewed here.
+const TELEMETRY_FRAME: &str = r#"{"device_info":[{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"61.4"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"58.0"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"60.2"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"55.7"}}]}"#;
+
+/// `GET /telemetry`: upgrade to a WebSocket and hand it to
+/// [`telemetry_stream`]. Mirrors the real agent's `telemetry_ws` handler
+/// shape (`tt-station-agentd/src/routes.rs`) so a client (the app, or the
+/// `tokio-tungstenite`-based smoke check used to verify this) can be pointed
+/// at either with no special-casing.
+async fn telemetry_ws(ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(telemetry_stream)
+}
+
+/// Push the fixed [`TELEMETRY_FRAME`] on a `TELEMETRY_INTERVAL` ticker until
+/// the client disconnects (send fails) or hangs up (recv sees a close/error/
+/// EOF). No real `tt-smi` process, no per-tick variation -- unlike the real
+/// agent's loop this never needs an error frame, since there's no subprocess
+/// that can fail.
+async fn telemetry_stream(mut socket: WebSocket) {
+    let mut ticker = tokio::time::interval(TELEMETRY_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            // `interval`'s first tick fires immediately, so a freshly
+            // connected client gets a frame right away.
+            _ = ticker.tick() => {
+                if socket.send(Message::Text(TELEMETRY_FRAME.into())).await.is_err() {
+                    break;
+                }
+            }
+            // Notice a client disconnect promptly rather than only on the
+            // next failed send. This is a one-way push -- inbound payloads
+            // are ignored.
+            msg = socket.recv() => {
+                match msg {
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+        }
+    }
+}
+
 /// Build the router for a given `MockState`. Side-effect-free (no socket
 /// binding) so it mirrors `tt-station-agentd::routes::app` and could be unit
 /// tested the same way if this mock ever grows its own tests.
@@ -383,6 +450,7 @@ fn app(state: MockState) -> Router {
         .route("/run", post(run_model))
         .route("/stop", post(stop_model))
         .route("/endpoint", get(get_endpoint))
+        .route("/telemetry", get(telemetry_ws))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/models", get(list_models))
         .with_state(state)
