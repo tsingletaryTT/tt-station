@@ -1,7 +1,9 @@
 //! TOML config schema for `agentd.toml`, the loader that turns a path on
 //! disk into a parsed [`AgentConfigFile`], and the pure precedence resolver
-//! (CLI overrides > env > profile > global > built-in defaults) that turns
-//! all of that into a flat [`ResolvedConfig`].
+//! (explicit CLI flag > active profile / `[global]` > built-in defaults) that
+//! turns all of that into a flat [`ResolvedConfig`]. `HF_TOKEN` is the sole
+//! environment variable consulted, and for `hf_token` it is the lowest layer
+//! (flag > profile > env).
 //!
 //! See `docs/superpowers/plans/2026-07-05-agentd-config-profiles.md` for the
 //! full design (Task 1 added the parsed-file schema + `load_config`; Task 2
@@ -184,7 +186,10 @@ pub fn default_token_store() -> String {
 }
 
 /// Resolve the effective config by layering, highest-precedence first:
-/// CLI flag > env > active profile > [global] > built-in default.
+/// explicit CLI flag > active profile (serving-scoped) or `[global]`
+/// (global-scoped) > built-in default. `HF_TOKEN` is the sole environment
+/// variable consulted, and for `hf_token` it is the lowest layer
+/// (flag > profile > env).
 ///
 /// `requested_profile` is `--profile`; when `None` the active profile is
 /// `default_profile`, else the sole profile if exactly one is defined, else
