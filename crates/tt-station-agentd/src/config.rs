@@ -253,10 +253,10 @@ pub fn resolve(
     let apiver = pick([&cli.apiver, &g.apiver, &None]).unwrap_or(1);
     let telemetry_interval_ms =
         pick([&cli.telemetry_interval_ms, &g.telemetry_interval_ms, &None]).unwrap_or(1000);
-    let tt_smi_bin = pick([&cli.tt_smi_bin, &g.tt_smi_bin, &None]).unwrap_or_else(|| "tt-smi".into());
+    let tt_smi_bin =
+        pick([&cli.tt_smi_bin, &g.tt_smi_bin, &None]).unwrap_or_else(|| "tt-smi".into());
 
-    let no_token_persistence =
-        cli.no_token_persistence || g.no_token_persistence.unwrap_or(false);
+    let no_token_persistence = cli.no_token_persistence || g.no_token_persistence.unwrap_or(false);
     let token_store = if no_token_persistence {
         None
     } else {
@@ -281,8 +281,7 @@ pub fn resolve(
         &pick([&cli.host_hf_cache, &prof.host_hf_cache, &None])
             .unwrap_or_else(default_host_hf_cache),
     );
-    let hf_token = pick([&cli.hf_token, &prof.hf_token, &env_hf_token])
-        .filter(|t| !t.is_empty());
+    let hf_token = pick([&cli.hf_token, &prof.hf_token, &env_hf_token]).filter(|t| !t.is_empty());
     let no_device_reset = cli.no_device_reset || prof.no_device_reset.unwrap_or(false);
 
     // --- runpy extras (flag/default only; not part of profiles) ---
@@ -296,21 +295,50 @@ pub fn resolve(
         pick([&cli.model_source, &None, &None]).unwrap_or_else(|| "huggingface".into());
 
     Ok(ResolvedConfig {
-        name, ctrl_port, chips, apiver, token_store, telemetry_interval_ms, tt_smi_bin,
-        active_profile, available_profiles, backend, serving_host, serving_port,
-        serving_image, auto_image, tt_device, tt_inference_repo, host_hf_cache, hf_token,
-        no_device_reset, cache_volume, require_auth: cli.require_auth, device_path,
-        hugepages_src, engine: cli.engine, impl_name: cli.impl_name, device_id: cli.device_id,
-        model_source, model_spec: cli.model_spec,
+        name,
+        ctrl_port,
+        chips,
+        apiver,
+        token_store,
+        telemetry_interval_ms,
+        tt_smi_bin,
+        active_profile,
+        available_profiles,
+        backend,
+        serving_host,
+        serving_port,
+        serving_image,
+        auto_image,
+        tt_device,
+        tt_inference_repo,
+        host_hf_cache,
+        hf_token,
+        no_device_reset,
+        cache_volume,
+        require_auth: cli.require_auth,
+        device_path,
+        hugepages_src,
+        engine: cli.engine,
+        impl_name: cli.impl_name,
+        device_id: cli.device_id,
+        model_source,
+        model_spec: cli.model_spec,
     })
 }
 
 /// Shared empty profile for the implicit-default-profile case, so `resolve`
 /// can borrow a `&ProfileSection` without an owned temporary.
 static EMPTY_PROFILE: ProfileSection = ProfileSection {
-    backend: None, tt_inference_repo: None, serving_image: None, auto_image: None,
-    tt_device: None, serving_host: None, serving_port: None, host_hf_cache: None,
-    hf_token: None, no_device_reset: None,
+    backend: None,
+    tt_inference_repo: None,
+    serving_image: None,
+    auto_image: None,
+    tt_device: None,
+    serving_host: None,
+    serving_port: None,
+    host_hf_cache: None,
+    hf_token: None,
+    no_device_reset: None,
 };
 
 #[cfg(test)]
@@ -368,7 +396,10 @@ mod parse_tests {
     #[test]
     fn rejects_unknown_profile_key() {
         let err = parse("[profile.x]\nbogus = 1\n").unwrap_err().to_string();
-        assert!(err.contains("bogus") || err.contains("unknown"), "got: {err}");
+        assert!(
+            err.contains("bogus") || err.contains("unknown"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -399,7 +430,11 @@ mod resolve_tests {
 
     fn base_cli() -> CliOverrides {
         // Minimum for a successful resolve: name + ctrl_port present.
-        CliOverrides { name: Some("box".into()), ctrl_port: Some(8765), ..Default::default() }
+        CliOverrides {
+            name: Some("box".into()),
+            ctrl_port: Some(8765),
+            ..Default::default()
+        }
     }
 
     fn file_with(body: &str) -> AgentConfigFile {
@@ -465,8 +500,13 @@ mod resolve_tests {
     #[test]
     fn unknown_requested_profile_errors_listing_available() {
         let f = file_with("[profile.a]\n[profile.b]\n");
-        let err = resolve(base_cli(), None, Some(f), Some("nope")).unwrap_err().to_string();
-        assert!(err.contains("nope") && err.contains("a") && err.contains("b"), "got: {err}");
+        let err = resolve(base_cli(), None, Some(f), Some("nope"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("nope") && err.contains("a") && err.contains("b"),
+            "got: {err}"
+        );
     }
 
     #[test]

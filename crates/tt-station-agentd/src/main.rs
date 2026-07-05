@@ -387,12 +387,19 @@ async fn main() -> Result<()> {
     // Config file path: explicit --config wins; else $TT_CONFIG_DIR/agentd.toml
     // if set; else $HOME/.config/tt-station/agentd.toml.
     let explicit = cli.config.is_some();
-    let config_path = cli.config.clone().map(std::path::PathBuf::from).unwrap_or_else(|| {
-        let dir = std::env::var("TT_CONFIG_DIR").unwrap_or_else(|_| {
-            format!("{}/.config/tt-station", std::env::var("HOME").unwrap_or_default())
+    let config_path = cli
+        .config
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let dir = std::env::var("TT_CONFIG_DIR").unwrap_or_else(|_| {
+                format!(
+                    "{}/.config/tt-station",
+                    std::env::var("HOME").unwrap_or_default()
+                )
+            });
+            std::path::PathBuf::from(dir).join("agentd.toml")
         });
-        std::path::PathBuf::from(dir).join("agentd.toml")
-    });
     let file = config::load_config(&config_path, explicit).context("failed to load config file")?;
 
     // `--hf-token` wins if given explicitly; otherwise `resolve` falls back
@@ -523,7 +530,10 @@ async fn main() -> Result<()> {
     let state = match &rc.token_store {
         None => AppState::new(rc.name.clone(), rc.chips.clone(), backend),
         Some(path) => {
-            println!("tt-station-agentd: persisting bearer tokens to {}", path.display());
+            println!(
+                "tt-station-agentd: persisting bearer tokens to {}",
+                path.display()
+            );
             AppState::new_persisting(rc.name.clone(), rc.chips.clone(), backend, path.clone())
         }
     };
