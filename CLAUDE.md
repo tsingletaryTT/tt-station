@@ -85,7 +85,7 @@ Restart/Reset the agent, **live 6-digit pairing code** (with TTL), status/endpoi
 hidden when no config file exists). Config via `TTS_*` env (repo path, serving host/port,
 `TTS_IMAGE`, `TTS_AUTOSTART`, `TTS_CONFIG` for the profile dropdown's TOML path).
 
-**macOS app (`macos/TTStation`, v0.3.0 — native control room):** window-first veneer over
+**macOS app (`macos/TTStation`, v0.4.0 — native control room):** window-first veneer over
 `tt --json` with a fast MenuBarExtra popover for glance + quick actions. The resizable window
 is a card-based control room: **box header** with a detected **device-mesh badge** (`P300X2`);
 a **live device strip** (per-device temp/power/aiclk streamed from the agent's `/telemetry`
@@ -97,6 +97,16 @@ VS Code with the `Tenstorrent.tt-vscode-toolkit` extension). TT brand theme (tea
 The device mesh is sourced from Rust: the agent detects it once at startup and reports it in
 `/status` + the mDNS TXT record (so `tt --json discover`/`status` carry `device_mesh`). See
 `macos/README.md`.
+
+**Keyless SSH on pairing (v0.4.0):** the workbench launchers SSH as **`ttuser`** (QuietBox 2
+default, override via the `tt.sshUser` UserDefault / agent `--ssh-user`). The pair flow has an
+opt-in toggle (default on) that, on a successful pair, installs this Mac's SSH **public** key on
+the box as `ttuser` — the PIN handshake is the trust anchor. Flow: `tt ssh-authorize` (reads or
+generates `~/.ssh/id_ed25519`, never transmits the private key) → authed `POST /ssh/authorize`
+on the agent → appended to the run-user's `~/.ssh/authorized_keys` (validated public-key-only,
+idempotent, tagged `ttstation:<host>:<date>`; `DELETE`/`tt ssh-authorize --revoke` removes it).
+The SSH step is non-fatal to pairing. The `authkeys` module hardened against label
+newline-injection + unanchored-revoke; mock-box serves `/ssh/authorize` against a temp file.
 
 **mock-box (`crates/mock-box`):** dev fixture — mDNS advertise + `serve` faking the control
 API + `/v1` (used by the CLI e2e, no hardware).

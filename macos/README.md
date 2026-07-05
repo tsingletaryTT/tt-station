@@ -13,14 +13,25 @@ quick actions (status, Run/Stop, a live temp chip, "Open window"), backed by a r
   The smart default is compatible-first.
 - **Fast Connect** — Open WebUI / opencode, installing missing deps (`brew install …`) as needed.
 - **Workbench** — Terminal (SSH), tt-toplike (remote telemetry), and VS Code Remote-SSH with
-  the `Tenstorrent.tt-vscode-toolkit` extension installed.
+  the `Tenstorrent.tt-vscode-toolkit` extension installed. All SSH as **`ttuser`** (the
+  QuietBox 2 default login) unless overridden via the `tt.sshUser` UserDefault.
+- **Keyless SSH on pair** — the pair flow has an opt-in "Also enable Terminal / SSH access"
+  toggle (default on). On a successful pair it installs this Mac's SSH **public** key on the
+  box (as `ttuser`) via `tt ssh-authorize`, so the workbench launchers work with no password.
+  The PIN handshake is the trust anchor; only the public key leaves the Mac; the installed
+  key is tagged (`ttstation:<host>:<date>`) and revocable (`tt ssh-authorize --host <h>
+  --revoke`). The SSH step is non-fatal — a pair that can't set up SSH still pairs.
 
-**Status:** v0.3.0 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
-(94 passing tests via `swift test`; ranking, mesh-match, telemetry decode, and install-command
-builders are pure and unit-tested); the SwiftUI app target is generated with XcodeGen and
-builds clean. End-to-end verifiable against `mock-box` (no hardware — it now reports
-`device_mesh` and streams a canned telemetry frame). The box's device mesh is sourced from
-Rust: the agent detects it at startup and reports it in `/status` and the mDNS TXT record.
+**Status:** v0.4.0 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
+(99 passing tests via `swift test`; ranking, mesh-match, telemetry decode, install-command
+builders, and the `ttuser` SSH default are pure and unit-tested); the SwiftUI app target is
+generated with XcodeGen and builds clean. End-to-end verifiable against `mock-box` (no
+hardware — it reports `device_mesh`, streams a canned telemetry frame, and serves
+`/ssh/authorize` against a temp file). The box's device mesh is sourced from Rust: the agent
+detects it at startup and reports it in `/status` and the mDNS TXT record. Keyless SSH is
+sourced from Rust too: `tt ssh-authorize` reads/generates the Mac keypair and posts the public
+key to the agent's authed `POST /ssh/authorize`, which appends it to `ttuser`'s
+`~/.ssh/authorized_keys` (idempotent, tagged; `DELETE` to revoke).
 
 ## Build & run
 
