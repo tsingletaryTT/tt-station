@@ -75,8 +75,8 @@ session, NOT part of tt-station. Design: `~/code/tt-toplike/docs/REMOTE_QUIETBOX
 
 **CLI (`crates/tt`):** `discover` (`--host`/`--no-mdns`), `pair`/`pair-init`/`pair-complete`,
 `run`, `stop`, `status` (unauthed), `endpoint`, `models`, `serving`, `reset`,
-`config` (unauthed — active/available profiles + resolved backend/endpoint, mirrors `GET
-/config`; see `docs/reference/agentd-config.md`). Global `--json`.
+`config` (unauthed — active/available profiles + resolved backend + serving host/port, mirrors
+`GET /config`; see `docs/reference/agentd-config.md`). Global `--json`.
 Tokens in macOS Keychain / file store. Respects `TT_CONFIG_DIR`.
 
 **Box panel (`box-panel/tt-station-panel.py`, GTK4):** the box's own screen — Start/Stop/

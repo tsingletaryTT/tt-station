@@ -72,17 +72,17 @@ complete, independently-selectable serving configuration.
 | `hf_token` | string (secret) | Hugging Face token for gated model repos. Falls back to the `HF_TOKEN` env var if unset here and on the CLI. **Never** exposed via `--print-config` or `GET /config`. |
 | `no_device_reset` | bool | `runpy` only: skip the `tt-smi -r` board reset before serving. Default `false` (reset runs by default). |
 
-Fields **not** part of a profile — always flag/env/built-in-default driven,
-not configurable per profile (see `CliOverrides`' "runpy-only extras" in
-`config.rs`): `--cache-volume`, `--require-auth`, `--device-path`,
-`--hugepages-src`, `--engine`, `--impl`, `--device-id`, `--model-source`,
-`--model-spec`.
+Fields **not** part of a profile — always flag/built-in-default driven (no
+env layer, no profile/`[global]` layer), not configurable per profile (see
+`CliOverrides`' "runpy-only extras" in `config.rs`): `--cache-volume`,
+`--require-auth`, `--device-path`, `--hugepages-src`, `--engine`, `--impl`,
+`--device-id`, `--model-source`, `--model-spec`.
 
 A serving-scoped key placed under `[global]` (or a global-scoped key placed
 under `[profile.*]`) is an **unknown key** there and is rejected at parse
 time — see "Errors" below.
 
-### Example (mirrors `box-panel/agentd.example.toml`)
+### Example (similar to `box-panel/agentd.example.toml`, which is more minimal)
 
 ```toml
 default_profile = "stable"
@@ -124,24 +124,40 @@ absolute or `$HOME`-relative path if you need something else.
 For every setting, highest wins:
 
 ```
-explicit CLI flag  >  environment variable  >  active profile  >  [global]  >  built-in default
+explicit CLI flag  >  active profile (serving-scoped) or [global] (global-scoped)  >  built-in default
 ```
 
 - Every overridable CLI flag is `Option<T>` with **no clap default** — clap
   reports `None` when the operator didn't pass it, so "not passed" can be
   told apart from "passed the same value as the default." The hardcoded
   defaults (`"4xBH"`, `8000`, `"runpy"`, etc.) live in the resolver
-  (`config::resolve`), applied only after flag/env/profile/global all miss.
-- The only environment variables in the chain are the ones that already
-  existed: `HF_TOKEN` (for `hf_token`) and `TT_CONFIG_DIR` (for locating the
-  config file itself, not a per-setting override). No new per-setting env
-  vars were added — the config file is the mechanism for anything beyond
-  one-off flags now.
+  (`config::resolve`), applied only after flag/profile/global all miss.
 - `name` and `ctrl_port` have **no built-in default** — one of `--name`/
   `[global].name` and `--ctrl-port`/`[global].ctrl_port` must resolve to a
   value or the agent hard-errors at startup.
 - `[global]` only supplies global-scoped settings; the active profile only
   supplies serving-scoped settings — there is no cross-scope fallback.
+
+**Exception — `HF_TOKEN` is the only environment variable `resolve` ever
+consults.** Every other setting in this doc resolves purely from
+`flag > profile-or-[global] > built-in default`, with no env layer at all
+(`TT_CONFIG_DIR` only affects *where* the config file is loaded from — see
+"File location" — it isn't itself a resolved setting). For `hf_token`
+specifically, the order is:
+
+```
+--hf-token flag  >  [profile.<active>].hf_token  >  $HF_TOKEN env var
+```
+
+i.e. an `hf_token` set in the active profile **beats** `HF_TOKEN` from the
+environment — env is the lowest-priority layer, not the second-highest. This
+is intentional: a profile is explicit, deliberately-chosen configuration, so
+it should win over an ambient env var; `HF_TOKEN` exists as a fallback for
+when no profile (or CLI flag) sets one. Practically, that means **don't
+commit a real `hf_token` into a shared/checked-in profile** — a secret in
+`agentd.toml` is a secret at rest on disk (and shadows `HF_TOKEN` for anyone
+running that profile). Prefer setting `HF_TOKEN` in the environment and
+leaving `hf_token` unset in profiles.
 
 ## Active profile selection
 
