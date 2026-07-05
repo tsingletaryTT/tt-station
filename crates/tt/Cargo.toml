@@ -17,6 +17,10 @@ serde_json = { workspace = true }
 # `libttstation` uses for pairing/agent calls. Same pattern already used by
 # `tt-station-agentd`'s Docker backend.
 reqwest = { workspace = true, features = ["blocking"] }
+# `tt console`'s interactive TUI (Task 7): terminal backend + raw-mode/
+# alternate-screen + key-event handling.
+ratatui = { workspace = true }
+crossterm = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2"

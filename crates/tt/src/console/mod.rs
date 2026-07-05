@@ -18,7 +18,7 @@ pub mod actions;
 pub mod env;
 pub mod names;
 pub mod state;
-mod ui;
+pub mod ui;
 
 use env::RealLifecycleEnv;
 use names::ToolNames;

@@ -14,3 +14,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json"] }
 rand = "0.9"
 toml = "0.8"
 tempfile = "3"
+# `tt console`'s ratatui TUI (Task 7). Pinned to match `tt-toplike`'s own
+# ratatui/crossterm versions (see its `Cargo.toml`) to avoid version drift
+# within the same ecosystem of operator tools.
+ratatui = "0.30"
+crossterm = "0.29"
