@@ -2,21 +2,23 @@ import Foundation
 
 /// One device's readings from a single `tt-smi -s` telemetry frame.
 ///
-/// `tempC` and `utilization` are optional because the upstream `tt-smi -s`
-/// JSON shape is not strictly guaranteed across firmware/tool versions —
-/// a missing `telemetry` object, or a missing/renamed key inside it, must
-/// decode to `nil` rather than crash or drop the device entirely.
+/// `tempC`, `powerW`, and `aiclkMHz` are optional because the upstream
+/// `tt-smi -s` JSON shape is not strictly guaranteed across firmware/tool
+/// versions — a missing `telemetry` object, or a missing/renamed key inside
+/// it, must decode to `nil` rather than crash or drop the device entirely.
 public struct DeviceReading: Equatable {
     public let index: Int
     public let boardType: String
     public let tempC: Double?
-    public let utilization: Double?
+    public let powerW: Double?
+    public let aiclkMHz: Double?
 
-    public init(index: Int, boardType: String, tempC: Double?, utilization: Double?) {
+    public init(index: Int, boardType: String, tempC: Double?, powerW: Double?, aiclkMHz: Double?) {
         self.index = index
         self.boardType = boardType
         self.tempC = tempC
-        self.utilization = utilization
+        self.powerW = powerW
+        self.aiclkMHz = aiclkMHz
     }
 }
 
@@ -50,12 +52,12 @@ public struct TelemetrySnapshot: Equatable {
 
             let telemetry = entry["telemetry"] as? [String: Any]
             let tempC = Self.parseDouble(telemetry?["asic_temperature"])
+            // Real tt-smi -s activity signals confirmed on-box: `power` (watts) and
+            // `aiclk` (AI clock, MHz). There is no `utilization` key.
+            let powerW = Self.parseDouble(telemetry?["power"])
+            let aiclkMHz = Self.parseDouble(telemetry?["aiclk"])
 
-            // No known utilization key in the tt-smi -s frame yet; leave nil until a
-            // real /telemetry capture (Task 10) reveals the field name.
-            let utilization: Double? = nil
-
-            return DeviceReading(index: index, boardType: boardType, tempC: tempC, utilization: utilization)
+            return DeviceReading(index: index, boardType: boardType, tempC: tempC, powerW: powerW, aiclkMHz: aiclkMHz)
         }
 
         return TelemetrySnapshot(devices: devices)

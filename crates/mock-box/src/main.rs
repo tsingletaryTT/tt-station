@@ -396,7 +396,7 @@ const TELEMETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// faithful `tt-smi` simulator. Sent verbatim as a `Message::Text` frame --
 /// no `serde_json` round-trip -- so the bytes on the wire never drift from
 /// what's reviewed here.
-const TELEMETRY_FRAME: &str = r#"{"device_info":[{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"61.4"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"58.0"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"60.2"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"55.7"}}]}"#;
+const TELEMETRY_FRAME: &str = r#"{"device_info":[{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"61.4","power":"85.2","aiclk":"1000"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"58.0","power":"72.6","aiclk":"950"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"60.2","power":"79.8","aiclk":"900"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"55.7","power":"58.3","aiclk":"850"}}]}"#;
 
 /// `GET /telemetry`: upgrade to a WebSocket and hand it to
 /// [`telemetry_stream`]. Mirrors the real agent's `telemetry_ws` handler
