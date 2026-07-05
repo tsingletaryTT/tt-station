@@ -1,12 +1,26 @@
-# tt-station — macOS menu-bar app (`TTStation`)
+# tt-station — macOS app (`TTStation`)
 
-A native SwiftUI **`MenuBarExtra`** veneer over the `tt` CLI. This is the "as your Mac
-sees it" surface from the microsite: pick a box, run/stop a model, copy the endpoint — all
-from the menu bar.
+A native SwiftUI veneer over the `tt` CLI. A fast **`MenuBarExtra`** popover for glance +
+quick actions (status, Run/Stop, a live temp chip, "Open window"), backed by a resizable
+**control-room window**: a boxes sidebar plus a card-based detail pane —
 
-**Status:** v1 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
-(32 passing tests via `swift test`); the SwiftUI app target is generated with XcodeGen and
-builds clean. End-to-end verified against `mock-box` (no hardware) — see below.
+- **Header** — box name, chips, and a detected **device-mesh badge** (`P300X2`).
+- **Live device strip** — per-device temperature / power / aiclk, streamed from the agent's
+  `/telemetry` WebSocket (the single read-only I/O path in Swift; all *control* still goes
+  through `tt --json`). Temp is color-ramped; `Open tt-toplike ↗` for the deep view.
+- **Hardware-aware model browser** — models that run on this box's mesh are ranked first
+  ("Runs on this box" vs a dimmed "Needs other hardware", each labeled with the mesh it needs).
+  The smart default is compatible-first.
+- **Fast Connect** — Open WebUI / opencode, installing missing deps (`brew install …`) as needed.
+- **Workbench** — Terminal (SSH), tt-toplike (remote telemetry), and VS Code Remote-SSH with
+  the `Tenstorrent.tt-vscode-toolkit` extension installed.
+
+**Status:** v0.3.0 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
+(94 passing tests via `swift test`; ranking, mesh-match, telemetry decode, and install-command
+builders are pure and unit-tested); the SwiftUI app target is generated with XcodeGen and
+builds clean. End-to-end verifiable against `mock-box` (no hardware — it now reports
+`device_mesh` and streams a canned telemetry frame). The box's device mesh is sourced from
+Rust: the agent detects it at startup and reports it in `/status` and the mDNS TXT record.
 
 ## Build & run
 

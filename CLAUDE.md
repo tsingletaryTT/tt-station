@@ -85,11 +85,18 @@ Restart/Reset the agent, **live 6-digit pairing code** (with TTL), status/endpoi
 hidden when no config file exists). Config via `TTS_*` env (repo path, serving host/port,
 `TTS_IMAGE`, `TTS_AUTOSTART`, `TTS_CONFIG` for the profile dropdown's TOML path).
 
-**macOS app (`macos/TTStation`, v0.2.0):** MenuBarExtra veneer over `tt --json` —
-discover/pair, **smart-default model** (remembers last-run per box; else prefers chat-tuned
-~7–9B), **searchable family-grouped model browser**, **HIG run/serving states**, endpoint
-copy, **`/serving` list** (agent + external/tt-studio badge), **Connect launchers** (one-click
-Open WebUI via `uvx` + opencode in Terminal). See `macos/README.md`.
+**macOS app (`macos/TTStation`, v0.3.0 — native control room):** window-first veneer over
+`tt --json` with a fast MenuBarExtra popover for glance + quick actions. The resizable window
+is a card-based control room: **box header** with a detected **device-mesh badge** (`P300X2`);
+a **live device strip** (per-device temp/power/aiclk streamed from the agent's `/telemetry`
+WebSocket — the one read-only Swift I/O path); a **hardware-aware model browser** that ranks
+models that run on this box's mesh first ("Runs on this box" vs a dimmed "Needs other
+hardware"), with a compatible-first smart default; **fast Connect** (Open WebUI / opencode that
+`brew install` missing deps as needed); and an elevated **workbench** (Terminal / tt-toplike /
+VS Code with the `Tenstorrent.tt-vscode-toolkit` extension). TT brand theme (teal `#4FD1C5`).
+The device mesh is sourced from Rust: the agent detects it once at startup and reports it in
+`/status` + the mDNS TXT record (so `tt --json discover`/`status` carry `device_mesh`). See
+`macos/README.md`.
 
 **mock-box (`crates/mock-box`):** dev fixture — mDNS advertise + `serve` faking the control
 API + `/v1` (used by the CLI e2e, no hardware).
