@@ -108,7 +108,8 @@ public final class BoxViewModel: Identifiable {
             if selectedModel == nil {
                 selectedModel = ModelDefaults.pickDefaultModel(
                     from: models,
-                    lastUsed: registry.lastModel(forHost: record.hostPort)
+                    lastUsed: registry.lastModel(forHost: record.hostPort),
+                    boxMesh: record.deviceMesh
                 )
             }
         } catch { record(error) }

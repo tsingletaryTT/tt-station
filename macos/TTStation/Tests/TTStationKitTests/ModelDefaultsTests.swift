@@ -76,6 +76,31 @@ final class ModelDefaultsTests: XCTestCase {
         XCTAssertNil(ModelDefaults.paramCountB("some/mystery-model"))
     }
 
+    func testPickDefaultPrefersCompatibleModel() {
+        let models = [
+            ModelInfo(name: "Llama-3.1-8B-Instruct", devices: ["T3K"]),   // higher score, wrong hw
+            ModelInfo(name: "Qwen3-7B-Instruct", devices: ["P300X2"]),    // compatible
+        ]
+        let pick = ModelDefaults.pickDefaultModel(from: models, lastUsed: nil, boxMesh: "p300x2")
+        XCTAssertEqual(pick, "Qwen3-7B-Instruct")
+    }
+
+    func testPickDefaultLastUsedWinsOnlyIfCompatible() {
+        let models = [
+            ModelInfo(name: "Qwen3-7B-Instruct", devices: ["P300X2"]),
+            ModelInfo(name: "Old-Pick", devices: ["T3K"]),
+        ]
+        // Last-used is incompatible → fall back to best compatible.
+        let pick = ModelDefaults.pickDefaultModel(from: models, lastUsed: "Old-Pick", boxMesh: "p300x2")
+        XCTAssertEqual(pick, "Qwen3-7B-Instruct")
+    }
+
+    func testPickDefaultFallsBackToGlobalWhenNoneCompatible() {
+        let models = [ModelInfo(name: "Llama-3.1-8B-Instruct", devices: ["T3K"])]
+        let pick = ModelDefaults.pickDefaultModel(from: models, lastUsed: nil, boxMesh: "p300x2")
+        XCTAssertEqual(pick, "Llama-3.1-8B-Instruct")
+    }
+
     // MARK: groupModelsByFamily
 
     func testFamilyName() {

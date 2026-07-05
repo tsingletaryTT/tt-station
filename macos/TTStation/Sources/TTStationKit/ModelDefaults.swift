@@ -16,18 +16,42 @@ public enum ModelDefaults {
 
     /// Pick the model a paired box should default to.
     ///
-    /// - If `lastUsed` names a model still present in `models`, honour it —
-    ///   the user's explicit last choice always wins over any heuristic.
-    /// - Otherwise score every candidate by name (chat-tuned + a mid-small
-    ///   parameter count score best) and return the top one, breaking ties
-    ///   deterministically by name so the result is stable across runs.
+    /// Hardware-compatible-first: a pre-selected model that can't actually
+    /// run on this box's mesh is worse than useless, so compatibility gates
+    /// the choice before the name-based score ever gets a vote.
+    ///
+    /// - If `lastUsed` names a model still present in `models` *and* that
+    ///   model is compatible with `boxMesh` (or `boxMesh` is `nil`, i.e.
+    ///   unknown — nothing to gate on), honour it: the user's explicit last
+    ///   choice wins over any heuristic. A last-used model that no longer
+    ///   fits this box's mesh is treated the same as an absent one.
+    /// - Otherwise, among the models compatible with `boxMesh`
+    ///   (`ModelRanking.meshMatches`), score every candidate by name
+    ///   (chat-tuned + a mid-small parameter count score best) and return
+    ///   the top one, breaking ties deterministically by name so the result
+    ///   is stable across runs.
+    /// - If none are compatible (or `boxMesh` is `nil`), fall back to the
+    ///   same scoring over *all* models, unfiltered — a best guess beats no
+    ///   default at all.
     /// - Returns `nil` only when `models` is empty.
-    public static func pickDefaultModel(from models: [ModelInfo], lastUsed: String?) -> String? {
-        if let lastUsed, models.contains(where: { $0.name == lastUsed }) {
+    public static func pickDefaultModel(
+        from models: [ModelInfo], lastUsed: String?, boxMesh: String? = nil
+    ) -> String? {
+        if let lastUsed,
+           let match = models.first(where: { $0.name == lastUsed }),
+           boxMesh == nil || ModelRanking.meshMatches(match.devices, boxMesh: boxMesh) {
             return lastUsed
         }
         guard !models.isEmpty else { return nil }
-        return models
+        let compatible = models.filter { ModelRanking.meshMatches($0.devices, boxMesh: boxMesh) }
+        return bestByScore(compatible.isEmpty ? models : compatible)
+    }
+
+    /// The top-scoring model by name, breaking ties deterministically by
+    /// name (alphabetically-earliest wins) so the result is stable across
+    /// runs. `nil` only when `candidates` is empty.
+    private static func bestByScore(_ candidates: [ModelInfo]) -> String? {
+        candidates
             .max { lhs, rhs in
                 let ls = score(lhs.name), rs = score(rhs.name)
                 if ls != rs { return ls < rs }
