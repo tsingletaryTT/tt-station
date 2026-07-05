@@ -76,14 +76,30 @@ session, NOT part of tt-station. Design: `~/code/tt-toplike/docs/REMOTE_QUIETBOX
 **CLI (`crates/tt`):** `discover` (`--host`/`--no-mdns`), `pair`/`pair-init`/`pair-complete`,
 `run`, `stop`, `status` (unauthed), `endpoint`, `models`, `serving`, `reset`,
 `config` (unauthed — active/available profiles + resolved backend + serving host/port, mirrors
-`GET /config`; see `docs/reference/agentd-config.md`). Global `--json`.
+`GET /config`; see `docs/reference/agentd-config.md`), **`console`** (ratatui SSH operator TUI
+for THIS box's agent — start/stop/restart/reset/pair-localhost/profile-cycle/install-service;
+`--snapshot` prints one `BoxLifecycleSnapshot` JSON and exits, `--install-service` installs the
+systemd unit and exits; see `docs/reference/tt-console.md`). Global `--json`.
 Tokens in macOS Keychain / file store. Respects `TT_CONFIG_DIR`.
+
+**Agent as a `systemctl --user` service:** the agent can run under the user's systemd
+instance instead of ad-hoc `Popen` supervision — unit template at
+`deploy/tt-station-agentd.service` (`ExecStart={{AGENT_BIN}}`, `Restart=on-failure`),
+installed via `tt console --install-service` into `~/.config/systemd/user/`. Survives SSH
+disconnect; survives reboot too once `loginctl enable-linger` is run for the user. Start/
+Stop/Restart under this model are just `systemctl --user start|stop|restart
+tt-station-agentd.service`.
 
 **Box panel (`box-panel/tt-station-panel.py`, GTK4):** the box's own screen — Start/Stop/
 Restart/Reset the agent, **live 6-digit pairing code** (with TTL), status/endpoint,
 **profile dropdown** (reads `agentd.toml`'s profile list, passes `--profile` on Start/Restart;
 hidden when no config file exists). Config via `TTS_*` env (repo path, serving host/port,
 `TTS_IMAGE`, `TTS_AUTOSTART`, `TTS_CONFIG` for the profile dropdown's TOML path).
+**Shares `tt console`'s lifecycle state machine**: Start/Stop/Restart shell out to
+`systemctl --user <verb>` (no more child-process supervision — closing the panel doesn't
+kill the agent), and status/pairing/serving/profile all come from a single poll of `tt
+console --snapshot` (the same `BoxLifecycleSnapshot` JSON the TUI renders) — one source of
+truth the panel and the TUI can never disagree about.
 
 **macOS app (`macos/TTStation`, v0.4.0 — native control room):** window-first veneer over
 `tt --json` with a fast MenuBarExtra popover for glance + quick actions. The resizable window
@@ -112,6 +128,8 @@ newline-injection + unanchored-revoke; mock-box serves `/ssh/authorize` against 
 API + `/v1` (used by the CLI e2e, no hardware).
 
 **Docs:** `docs/reference/tt-inference-server-docker.md` (the real run.py launch),
+`docs/reference/tt-console.md` (the `tt console` operator TUI: systemd unit model,
+keybindings, `--snapshot` JSON contract, configurable tool names, reset/pair-localhost),
 `docs/tt-studio-integration.md` (verdict: **no clean cache-share without modifying tt-studio**;
 `/serving` makes tt-studio's models visible), `docs/superpowers/{specs,plans}` (PoC, macOS
 menubar, connect launchers), `docs/superpowers/cleanup-analysis.md`.
