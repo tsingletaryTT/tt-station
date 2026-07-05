@@ -13,6 +13,7 @@
 //!   tt [--json] config --host <host:port>
 //!   tt [--json] endpoint --host <host:port>
 //!   tt [--json] serving --host <host:port>
+//!   tt [--json] ssh-authorize --host <host:port> [--revoke] [--date <YYYY-MM-DD>]
 //!
 //! `--json` is global (accepted before or after the subcommand) and switches
 //! every command's stdout from human-readable text to machine-readable JSON.
@@ -40,12 +41,14 @@
 //! and "async" cleanly separated instead of fighting Tokio's single-blocking-
 //! call-per-runtime rules.
 
+mod ssh;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use libttstation::agent_client::AgentClient;
+use libttstation::agent_client::{AgentClient, SshRevokeBy};
 use libttstation::discovery::{
     aggregate, manual::ManualProvider, mdns::MdnsProvider, DiscoveryProvider,
 };
@@ -192,6 +195,34 @@ enum Command {
         host: String,
     },
 
+    /// Authorize (or, with `--revoke`, remove) this Mac's SSH public key on
+    /// a paired box, so an operator can `ssh <ssh_user>@<host>` straight
+    /// into it -- e.g. for `tt-toplike`'s remote telemetry, or just a shell.
+    /// This command NEVER opens an SSH connection itself: it only ever
+    /// reads/sends the PUBLIC half of a keypair to the agent (see
+    /// `crates/tt/src/ssh.rs`), which installs it and reports back which
+    /// account (`ssh_user`, e.g. `ttuser`) to connect as.
+    SshAuthorize {
+        /// The box's control-plane address, as `host:port`. Must already be
+        /// paired (see `tt pair`) -- `/ssh/authorize` is bearer-guarded.
+        #[arg(long)]
+        host: String,
+
+        /// Remove this Mac's key from the box instead of installing it.
+        /// Revokes by the key MATERIAL (not by the dated label an authorize
+        /// call would have used), so it works regardless of which day the
+        /// key was originally authorized on.
+        #[arg(long)]
+        revoke: bool,
+
+        /// Override the `YYYY-MM-DD` used in the install label
+        /// (`ttstation:<host>:<date>`) -- mainly for scripted/deterministic
+        /// use. Omit to use today's date. Ignored with `--revoke` (revoking
+        /// matches by key material, not by label -- see `--revoke`'s doc).
+        #[arg(long)]
+        date: Option<String>,
+    },
+
     /// Reset to a fresh install: forget EVERY paired box on this machine
     /// (clear all locally stored tokens). With `--host`, first ask that box
     /// to reset itself (stop serving, clear its tokens, reset the board)
@@ -263,6 +294,16 @@ fn main() -> Result<()> {
         Command::Serving { host } => {
             let list = run_async(cmd_serving(host))?;
             print_serving(&list, cli.json);
+        }
+        Command::SshAuthorize { host, revoke, date } => {
+            if *revoke {
+                let key_path = run_async(cmd_ssh_revoke(host))?;
+                print_ssh_revoke(&key_path, cli.json);
+            } else {
+                let date = date.clone().unwrap_or_else(ssh::today_ymd);
+                let outcome = run_async(cmd_ssh_authorize(host, &date))?;
+                print_ssh_authorize(host, &outcome, cli.json);
+            }
         }
         Command::Reset { host, yes } => {
             // Confirm BEFORE spinning up a runtime or clearing anything:
@@ -505,6 +546,51 @@ async fn cmd_serving(host: &str) -> Result<ServingList> {
     libttstation::agent_client::list_serving(&base).await
 }
 
+/// `tt ssh-authorize --host <host:port>`: resolve (generating if needed)
+/// this Mac's SSH public key and install it on `host`, tagged with
+/// `ssh_label(host, date)`. Thin wrapper around [`ssh::authorize`] --
+/// exists so Task 7's `tt pair --enable-ssh` can call `ssh::authorize`
+/// directly with an `AgentClient` it already built for pairing, instead of
+/// going through this CLI-argument-shaped entry point.
+async fn cmd_ssh_authorize(host: &str, date: &str) -> Result<ssh::AuthorizeOutcome> {
+    let client = authed_client(host)?;
+    let home = home_dir()?;
+    ssh::authorize(&client, &home, host, date).await
+}
+
+/// `tt ssh-authorize --host <host:port> --revoke`: remove this Mac's key
+/// from `host`. Revokes by the key MATERIAL itself
+/// (`SshRevokeBy::PublicKey`) rather than by label -- an authorize call's
+/// label embeds the date it ran on, so revoking by label would require the
+/// operator to remember (or this command to re-derive) that exact date;
+/// revoking by the public key bytes is date-independent and matches
+/// whatever's currently in `~/.ssh` on this Mac. Returns the `.pub` path
+/// used, so the caller can report it (mirroring `cmd_ssh_authorize`'s
+/// `AuthorizeOutcome::public_key_path`).
+///
+/// Unlike `cmd_ssh_authorize`, this never generates a key -- there's
+/// nothing sensible to revoke on the agent for a key this Mac doesn't even
+/// have, so a missing `~/.ssh/id_{ed25519,rsa}.pub` is a hard error here.
+async fn cmd_ssh_revoke(host: &str) -> Result<PathBuf> {
+    let client = authed_client(host)?;
+    let home = home_dir()?;
+    let ssh_dir = home.join(".ssh");
+
+    let key_path = ssh::select_public_key_path(&ssh_dir).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no SSH public key found in {}; nothing to revoke",
+            ssh_dir.display()
+        )
+    })?;
+    let public_key = std::fs::read_to_string(&key_path)
+        .with_context(|| format!("reading {}", key_path.display()))?
+        .trim()
+        .to_string();
+
+    client.ssh_revoke(SshRevokeBy::PublicKey(public_key)).await?;
+    Ok(key_path)
+}
+
 /// Outcome of a `tt reset`, surfaced both to `--json` output and human text.
 /// `local_cleared` is effectively always `true` on success (clearing local
 /// state is the one thing `reset` always does); `box_reset` is `true` only
@@ -593,6 +679,18 @@ fn authed_client(host: &str) -> Result<AgentClient> {
         .get(host)?
         .ok_or_else(|| anyhow::anyhow!("no token stored for {host}; run `tt pair {host}` first"))?;
     Ok(AgentClient::new(format!("http://{host}"), token))
+}
+
+/// The Mac operator's home directory, as `ssh::authorize`/`cmd_ssh_revoke`
+/// resolve `~/.ssh` from. Reads `$HOME` directly (rather than a `dirs`-style
+/// crate this workspace doesn't otherwise depend on) -- set on every
+/// interactive macOS/Linux shell, and the one existing test-isolation knob
+/// this CLI uses elsewhere (`TT_CONFIG_DIR`, see `build_store`) is a
+/// separate concern from the SSH key location.
+fn home_dir() -> Result<PathBuf> {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .context("$HOME is not set; cannot locate ~/.ssh")
 }
 
 /// Build the `SecretStore` this CLI uses: a `FileStore` rooted at
@@ -868,6 +966,47 @@ fn print_endpoint_export(ep: &Endpoint, json: bool) {
         );
     } else {
         println!("{}", endpoint_export_line(ep));
+    }
+}
+
+/// `tt ssh-authorize`'s success output (the non-`--revoke` path). `--json`
+/// emits exactly the shape the task spec calls for: `{authorized, ssh_user,
+/// already_present, public_key_path}`. Human mode leads with the one line
+/// an operator actually needs to act on -- what account to `ssh` in as --
+/// and calls out `already_present` as a no-op note rather than an error.
+fn print_ssh_authorize(host: &str, outcome: &ssh::AuthorizeOutcome, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "authorized": outcome.authorized,
+                "ssh_user": outcome.ssh_user,
+                "already_present": outcome.already_present,
+                "public_key_path": outcome.public_key_path.display().to_string(),
+            })
+        );
+    } else {
+        println!("SSH enabled -- connect as {}@{host}", outcome.ssh_user);
+        if outcome.already_present {
+            println!("(this key was already authorized on {host})");
+        }
+    }
+}
+
+/// `tt ssh-authorize --revoke`'s success output. Includes `public_key_path`
+/// in `--json` mode too, mirroring `print_ssh_authorize`, so a caller can
+/// always tell which of this Mac's keys the command acted on.
+fn print_ssh_revoke(key_path: &std::path::Path, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "revoked": true,
+                "public_key_path": key_path.display().to_string(),
+            })
+        );
+    } else {
+        println!("SSH key revoked ({})", key_path.display());
     }
 }
 

@@ -25,3 +25,7 @@ assert_cmd = "2"
 # binaries within the crate under test (via Cargo's `CARGO_BIN_EXE_<name>`
 # env vars, which Cargo only sets for the package's own [[bin]] targets).
 escargot = "0.5"
+# Fixture temp dirs for `ssh::select_public_key_path`'s unit tests -- never
+# touch the operator's real `~/.ssh`. Already a workspace dependency (used
+# by `tt-station-agentd`).
+tempfile = { workspace = true }
