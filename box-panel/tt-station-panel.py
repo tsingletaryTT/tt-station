@@ -51,6 +51,14 @@ NAME = os.environ.get("TTS_NAME", "qb2-lab")
 CTRL_PORT = os.environ.get("TTS_CTRL_PORT", "8765")
 SERVING_HOST = os.environ.get("TTS_SERVING_HOST", f"{NAME}.local")
 SERVING_PORT = os.environ.get("TTS_SERVING_PORT", "8003")
+
+# Branding assets. The Tenstorrent mark (shared with the macOS app, recolored to
+# the panel's teal) shows in the window header and — via the .desktop install
+# below — in the dock/taskbar. One day this gets replaced with something more
+# tt-station-specific; until then it's the same logo used everywhere else.
+APP_ID = "com.tenstorrent.ttstation.panel"
+ASSETS = Path(__file__).resolve().parent / "assets"
+LOGO = ASSETS / "tt-logo.png"
 IMAGE = os.environ.get("TTS_IMAGE", "")  # empty → let the agent resolve/pin
 HF_ENV = Path(os.environ.get("TTS_HF_ENV", str(REPO / ".env")))
 PAIR_TTL_SECS = 120  # matches the agent's pairing-code TTL
@@ -125,8 +133,12 @@ class Panel(Gtk.ApplicationWindow):
         root.set_margin_start(18); root.set_margin_end(18)
         self.set_child(root)
 
-        # header: title + status pill
+        # header: logo + title + status pill
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        if LOGO.exists():
+            logo = Gtk.Image.new_from_file(str(LOGO))
+            logo.set_pixel_size(28)  # crisp: source is 256px, shown at 28
+            header.append(logo)
         title = Gtk.Label(label=f"tt-station · {NAME}", xalign=0)
         title.add_css_class("title"); title.set_hexpand(True)
         header.append(title)
@@ -180,13 +192,30 @@ class Panel(Gtk.ApplicationWindow):
 
         # buttons
         btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, homogeneous=True)
+        # Tooltips spell out exactly what each button does — "Reset" in
+        # particular is vague on its own, and it's the destructive one.
         self.btn_start = Gtk.Button(label="Start"); self.btn_start.add_css_class("suggested")
+        self.btn_start.set_tooltip_text(
+            "Launch the agent daemon on this box using the selected profile. "
+            "Advertises on the LAN (mDNS) so clients can discover, pair, and run models.")
         self.btn_start.connect("clicked", lambda _b: self.start_agent())
         self.btn_stop = Gtk.Button(label="Stop")
+        self.btn_stop.set_tooltip_text(
+            "Shut down the agent daemon — the control API and LAN advertisement go "
+            "offline. A model already serving in its container keeps running; use "
+            "Reset to stop that too.")
         self.btn_stop.connect("clicked", lambda _b: self.stop_agent())
         self.btn_restart = Gtk.Button(label="Restart")
+        self.btn_restart.set_tooltip_text(
+            "Stop and relaunch the agent — picks up config/profile changes and a "
+            "rebuilt binary. A model already serving is left running.")
         self.btn_restart.connect("clicked", lambda _b: self.restart_agent())
         self.btn_reset = Gtk.Button(label="Reset")
+        self.btn_reset.set_tooltip_text(
+            "Return the box to a fresh state (tt reset): stop the serving model, "
+            "clear ALL client pairings (every client must pair again), and reset the "
+            "Blackhole board (tt-smi -r). Use when the board is wedged or before "
+            "handing the box off.")
         self.btn_reset.connect("clicked", lambda _b: self.reset_fresh())
         for b in (self.btn_start, self.btn_stop, self.btn_restart, self.btn_reset):
             btns.append(b)
@@ -381,10 +410,77 @@ class Panel(Gtk.ApplicationWindow):
         self.btn_reset.set_sensitive(on)
 
 
+def install_desktop_icon():
+    """Best-effort: make the dock/taskbar show the Tenstorrent icon for this app.
+
+    GTK4 has no API to set a toplevel window's icon directly. On Wayland the
+    compositor finds it by matching the window's app_id (our `APP_ID`, set on
+    the Gtk.Application below) to a `.desktop` file whose `Icon=` resolves in a
+    standard icon-theme dir. So we copy our hicolor PNGs into the user's icon
+    theme and drop a matching `.desktop`. Idempotent, and wrapped so any
+    failure here can never stop the panel from opening.
+    """
+    import shutil
+
+    try:
+        data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+        # 1. icons into the hicolor theme the compositor actually searches
+        for size in ("48x48", "128x128", "256x256"):
+            src = ASSETS / "icons" / "hicolor" / size / "apps" / f"{APP_ID}.png"
+            if not src.exists():
+                continue
+            dst = data / "icons" / "hicolor" / size / "apps" / f"{APP_ID}.png"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if not dst.exists() or dst.read_bytes() != src.read_bytes():
+                shutil.copyfile(src, dst)
+        # 2. a .desktop keyed to APP_ID so the compositor associates the icon
+        apps = data / "applications"
+        apps.mkdir(parents=True, exist_ok=True)
+        script = Path(__file__).resolve()
+        repo_root = script.parent.parent  # <repo>/box-panel/.. → repo root (for ./target paths)
+        desktop = apps / f"{APP_ID}.desktop"
+        content = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=tt-station panel\n"
+            "Comment=Tenstorrent QuietBox agent control panel\n"
+            f"Exec=python3 {script}\n"
+            f"Path={repo_root}\n"
+            f"Icon={APP_ID}\n"
+            f"StartupWMClass={APP_ID}\n"
+            "Terminal=false\n"
+            "Categories=Development;\n"
+        )
+        if not desktop.exists() or desktop.read_text() != content:
+            desktop.write_text(content)
+        # 3. refresh caches so the desktop shell notices the new .desktop/icon.
+        # KDE Plasma reads its own "sycoca" cache (kbuildsycoca), NOT
+        # update-desktop-database, so a new .desktop is invisible to the
+        # taskbar until that runs — hence both are attempted. All best-effort:
+        # whichever tools exist run; the rest OSError and are ignored.
+        for cmd in (
+            ["gtk-update-icon-cache", "-f", "-t", str(data / "icons" / "hicolor")],
+            ["update-desktop-database", str(apps)],
+            ["kbuildsycoca6"],
+            ["kbuildsycoca5"],
+        ):
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            except OSError:
+                pass
+    except Exception as e:  # noqa: BLE001 — never let branding break startup
+        print(f"tt-station-panel: icon install skipped ({e})")
+
+
 def main():
-    app = Gtk.Application(application_id="com.tenstorrent.ttstation.panel")
+    install_desktop_icon()
+    app = Gtk.Application(application_id=APP_ID)
 
     def on_activate(a):
+        # Also let GTK resolve our icon by name for in-window use (display now exists).
+        disp = Gdk.Display.get_default()
+        if disp is not None:
+            Gtk.IconTheme.get_for_display(disp).add_search_path(str(ASSETS / "icons"))
         panel = Panel(a)
         panel.present()
         # TTS_AUTOSTART=1 → bring the agent up immediately (handy for kiosk/demo).

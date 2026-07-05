@@ -2,3 +2,7 @@ target/
 .superpowers/
 macos/TTStation/AppShell/TTStation.xcodeproj/
 macos/TTStation/.build/
+
+# Python bytecode cache (box-panel)
+__pycache__/
+*.pyc
