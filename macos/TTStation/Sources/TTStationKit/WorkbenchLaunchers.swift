@@ -44,19 +44,24 @@ public enum VSCodeLauncher {
     /// `--install-extension` resolves it directly — no `.vsix` needed.
     public static let toolkitExtensionID = "Tenstorrent.tt-vscode-toolkit"
 
-    /// Builds `code` CLI args for a Remote-SSH window on the box. When
-    /// `installToolkit` is true, prepends `--install-extension <id>` so the
-    /// toolkit gets installed into the remote host before the window opens.
+    /// Builds `code` CLI args to OPEN a Remote-SSH window on the box.
     ///
-    /// Single method with a defaulted param (rather than a separate 3-arg
-    /// overload) — a defaulted param *and* an explicit 3-arg overload would
-    /// both match a 3-arg call and be ambiguous. One declaration keeps the
-    /// existing `testVSCodeRemoteArgs` (which calls the 3-arg form) resolving
-    /// unambiguously to this same method.
-    public static func remoteArgs(user: String, host: String, path: String, installToolkit: Bool = false) -> [String] {
-        let remoteFlags = ["--remote", "ssh-remote+\(user)@\(host)", path]
-        guard installToolkit else { return remoteFlags }
-        return ["--install-extension", toolkitExtensionID] + remoteFlags
+    /// Deliberately carries NO `--install-extension`: the `code` CLI treats
+    /// `--install-extension` as a management command — it installs, prints to
+    /// stdout, exits 0, and does NOT open a window, even when a `--remote
+    /// <folder>` is also given. Combining the two (an earlier version did) is
+    /// exactly why the window "did nothing." The toolkit install is a separate
+    /// `code` invocation (`installExtensionArgs`), run before this one.
+    public static func remoteArgs(user: String, host: String, path: String) -> [String] {
+        ["--remote", "ssh-remote+\(user)@\(host)", path]
     }
+
+    /// Builds `code` CLI args to install the tt-vscode-toolkit extension. Run
+    /// as its OWN `code` invocation (it runs headless and exits) — never merged
+    /// with `remoteArgs`, or the window won't open (see `remoteArgs`' comment).
+    public static func installExtensionArgs() -> [String] {
+        ["--install-extension", toolkitExtensionID]
+    }
+
     public static func defaultRemotePath(user: String) -> String { "/home/\(user)" }
 }

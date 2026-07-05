@@ -119,19 +119,23 @@ final class LaunchController {
         }
         let t = sshTarget(host: host)
         let path = VSCodeLauncher.defaultRemotePath(user: t.user)
-        let argsWithToolkit = VSCodeLauncher.remoteArgs(user: t.user, host: t.host, path: path, installToolkit: true)
+
+        // Toolkit install is a SEPARATE, best-effort `code` invocation run
+        // first: `--install-extension` makes the CLI run headless and exit
+        // WITHOUT opening a window, so it can never share an invocation with
+        // the window-open below (that was the "does nothing" bug). Its failure
+        // is a nice-to-have miss, not a reason to skip the window.
+        try? Self.runDetachedProcess(executable: code, args: VSCodeLauncher.installExtensionArgs())
+
+        // The window-open is the primary action — surface an error only if THIS
+        // fails (a failed extension install must not block or error the window).
         do {
-            try Self.runDetachedProcess(executable: code, args: argsWithToolkit)
+            try Self.runDetachedProcess(
+                executable: code,
+                args: VSCodeLauncher.remoteArgs(user: t.user, host: t.host, path: path)
+            )
         } catch {
-            // Fall back to a plain Remote-SSH window; the extension install is
-            // a nice-to-have, not a reason to fail the whole action.
-            let plainArgs = VSCodeLauncher.remoteArgs(user: t.user, host: t.host, path: path, installToolkit: false)
-            do {
-                try Self.runDetachedProcess(executable: code, args: plainArgs)
-                vscodeError = "opened VS Code, but couldn't auto-install the tt-vscode-toolkit extension — install it manually from the Extensions view."
-            } catch {
-                vscodeError = "failed to open VS Code: \(error.localizedDescription)"
-            }
+            vscodeError = "failed to open VS Code: \(error.localizedDescription)"
         }
     }
 

@@ -55,13 +55,18 @@ final class WorkbenchLaunchersTests: XCTestCase {
                        ["--remote", "ssh-remote+me@qb.local", "/home/me"])
         XCTAssertEqual(VSCodeLauncher.defaultRemotePath(user: "me"), "/home/me")
     }
-    func testVSCodeRemoteArgsWithToolkit() {
-        let args = VSCodeLauncher.remoteArgs(user: "u", host: "h", path: "/home/u", installToolkit: true)
-        XCTAssertEqual(args, ["--install-extension", "Tenstorrent.tt-vscode-toolkit",
-                              "--remote", "ssh-remote+u@h", "/home/u"])
-    }
-    func testVSCodeRemoteArgsWithoutToolkit() {
-        let args = VSCodeLauncher.remoteArgs(user: "u", host: "h", path: "/home/u", installToolkit: false)
+    // Regression: the window-open args must NEVER carry `--install-extension`.
+    // Combining install + `--remote <folder>` in one `code` invocation makes the
+    // CLI run headless (install then exit 0) and never open a window — the toolkit
+    // install has to be a SEPARATE `code` call (see `installExtensionArgs`).
+    func testVSCodeRemoteArgsHasNoInstallFlag() {
+        let args = VSCodeLauncher.remoteArgs(user: "u", host: "h", path: "/home/u")
         XCTAssertEqual(args, ["--remote", "ssh-remote+u@h", "/home/u"])
+        XCTAssertFalse(args.contains("--install-extension"),
+                       "remoteArgs must not combine install with window-open")
+    }
+    func testVSCodeInstallExtensionArgs() {
+        XCTAssertEqual(VSCodeLauncher.installExtensionArgs(),
+                       ["--install-extension", "Tenstorrent.tt-vscode-toolkit"])
     }
 }
