@@ -59,6 +59,8 @@ use libttstation::pairing::{pair_complete, pair_init};
 use libttstation::secrets::{default_store, FileStore, SecretStore};
 use serde::Deserialize;
 
+mod console;
+
 #[derive(Parser)]
 #[command(name = "tt", about = "Operator CLI for tt-station")]
 struct Cli {
