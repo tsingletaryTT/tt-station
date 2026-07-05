@@ -14,7 +14,9 @@
 //! `CompatStatus::Other(..)` instead of a hard parse error, and optional/new
 //! fields default rather than requiring every entry to be fully populated.
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::model::ModelInfo;
 
 /// Top-level shape of `compatibility.json`: a flat list of models.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -106,6 +108,306 @@ pub fn hw_to_mesh(hardware: &str) -> String {
     }
 }
 
+/// A single row in the merged, box-aware model catalog (see [`BoxCatalog`]).
+/// This is the WIRE contract for `tt catalog`'s JSON output and what the
+/// macOS app's model picker decodes -- it is deliberately flatter than
+/// [`CompatModel`]/[`HardwareCompat`] (no per-hardware software split, no
+/// `Other` status variant) because by the time a [`CatalogEntry`] exists,
+/// [`classify`] has already resolved "does/doesn't this run on *this* box"
+/// down to a handful of plain fields a UI can render without re-deriving
+/// any catalog logic itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CatalogEntry {
+    pub id: String,
+    pub display_name: String,
+    pub family: String,
+    pub size: Option<String>,
+    pub software: Vec<String>,
+    pub meshes: Vec<String>,
+    pub needed_hardware: Vec<String>,
+    pub available_now: bool,
+    pub status_here: String,
+}
+
+/// `classify`'s full output: the compatibility catalog and a box's live
+/// `/models` merged into three tiers relative to that box's detected mesh
+/// (see [`classify`] for the merge rules). This is what `tt catalog`
+/// prints and what the macOS app's model picker renders directly -- one
+/// shared shape so both agree on what "runs here" / "experimental" /
+/// "needs other hardware" mean.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoxCatalog {
+    pub box_mesh: Option<String>,
+    pub catalog_available: bool,
+    pub catalog_stale: bool,
+    pub runs_here: Vec<CatalogEntry>,
+    pub experimental: Vec<CatalogEntry>,
+    pub other_hardware: Vec<CatalogEntry>,
+}
+
+/// Normalize a model identifier (a catalog `id`/`display_name`, or a live
+/// `ModelInfo::name`) into a comparison key so `classify` can match "the
+/// same model" across the catalog and a box's live `/models` list even
+/// though the two sources spell it differently -- e.g. the catalog's
+/// `display_name: "Qwen3-8B"` vs. a live HF-style repo id
+/// `"Qwen/Qwen3-8B"`. Steps: lowercase, keep only the substring after the
+/// last `/` (drop any org/namespace prefix), fold `.`/`_`/` ` to `-`, then
+/// collapse runs of `-` down to one (so `"bge_large en.v1.5"` and a
+/// hypothetical `"bge-large--en.v1.5"` both key the same).
+pub fn normalize_key(s: &str) -> String {
+    let lower = s.to_lowercase();
+    let after_slash = lower.rsplit('/').next().unwrap_or(&lower);
+    let folded: String = after_slash
+        .chars()
+        .map(|c| match c {
+            '.' | '_' | ' ' => '-',
+            other => other,
+        })
+        .collect();
+    let mut collapsed = String::with_capacity(folded.len());
+    let mut prev_dash = false;
+    for c in folded.chars() {
+        if c == '-' {
+            if !prev_dash {
+                collapsed.push(c);
+            }
+            prev_dash = true;
+        } else {
+            collapsed.push(c);
+            prev_dash = false;
+        }
+    }
+    collapsed
+}
+
+/// Build a [`CatalogEntry`] for a live-only model (no catalog match) --
+/// used both when there is no catalog at all and when a live `/models`
+/// entry doesn't match any catalog model by [`normalize_key`]. A live
+/// model is, by definition, something the box can run right now, so it
+/// always lands in `runs_here` with `available_now: true`.
+///
+/// `family` has no catalog data to draw on here, so it's just the model's
+/// own name -- there's a fancier family-name split
+/// (`ModelDefaults.familyName`) on the macOS/Swift side, but that lives in
+/// a different (Swift) codebase entirely, and duplicating a heuristic
+/// across a language boundary for a cosmetic-only field isn't worth the
+/// coupling. Callers that want the nicer split already have `id` to
+/// re-derive it themselves.
+fn live_only_entry(m: &ModelInfo) -> CatalogEntry {
+    CatalogEntry {
+        id: m.name.clone(),
+        display_name: m.name.clone(),
+        family: m.name.clone(),
+        size: None,
+        software: Vec::new(),
+        meshes: Vec::new(),
+        needed_hardware: Vec::new(),
+        available_now: true,
+        status_here: "supported".to_string(),
+    }
+}
+
+/// Merge the public compatibility catalog with a box's live `/models` into
+/// the three tiers the `tt catalog` command and the macOS model picker
+/// render (see [`BoxCatalog`]):
+///
+/// - `runs_here`: models the box's `box_mesh` (or, absent a catalog, a
+///   live model) can serve right now.
+/// - `experimental`: models flagged `Experimental` on `box_mesh` (and not
+///   already `Supported` there).
+/// - `other_hardware`: models `Supported`/`Experimental` on *some* mesh,
+///   but not `box_mesh` -- `needed_hardware` lists which mesh(es).
+///
+/// Models that are `Not Supported` (or unlisted) everywhere are omitted
+/// entirely rather than surfaced as a dead end.
+///
+/// `catalog == None` (the catalog fetch failed/hasn't happened yet) is a
+/// degenerate case: there is no compatibility data to classify against, so
+/// every live model is trivially "runs here" and the other tiers are
+/// empty. `catalog_available` tells the caller (the CLI/app) whether it's
+/// looking at a real classification or this fallback.
+///
+/// `box_mesh == None` (the box's mesh couldn't be detected) similarly has
+/// no "here" to test membership against, so this collapses to a flat
+/// list: every catalog model with any `Supported`/`Experimental` entry
+/// counts as `runs_here`, with no experimental/other-hardware split.
+///
+/// Regardless of the catalog shape, a live model always wins: if a catalog
+/// model's `id`/`display_name` normalizes (see [`normalize_key`]) to the
+/// same key as a live model's `name`, that model is `available_now: true`
+/// and appears exactly once, in `runs_here` -- never duplicated into
+/// `experimental`/`other_hardware` even if the catalog would otherwise
+/// place it there (a live model is definitionally already running, so
+/// "experimental"/"needs other hardware" no longer applies). Live models
+/// with no catalog match at all are appended to `runs_here` verbatim (see
+/// [`live_only_entry`]).
+///
+/// Ordering is deterministic: catalog order within each tier, then
+/// unmatched live models appended (in their input order) to `runs_here` --
+/// no sorting/scoring, so callers (and this module's own tests) can assert
+/// on exact `Vec` contents.
+pub fn classify(
+    catalog: Option<&CompatCatalog>,
+    live_models: &[ModelInfo],
+    box_mesh: Option<&str>,
+    catalog_stale: bool,
+) -> BoxCatalog {
+    // Degenerate case: no catalog data at all -- every live model is
+    // trivially available, nothing to classify against.
+    let Some(catalog) = catalog else {
+        return BoxCatalog {
+            box_mesh: box_mesh.map(str::to_string),
+            catalog_available: false,
+            catalog_stale,
+            runs_here: live_models.iter().map(live_only_entry).collect(),
+            experimental: Vec::new(),
+            other_hardware: Vec::new(),
+        };
+    };
+
+    // Live models, keyed by normalized name, so catalog models can look
+    // themselves up in O(1) and we can track which live models were
+    // "claimed" by a catalog match (the rest get appended verbatim).
+    let mut live_by_key: std::collections::HashMap<String, &ModelInfo> =
+        std::collections::HashMap::new();
+    for m in live_models {
+        live_by_key.insert(normalize_key(&m.name), m);
+    }
+    let mut claimed_live_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let box_mesh_lower = box_mesh.map(str::to_lowercase);
+
+    let mut runs_here = Vec::new();
+    let mut experimental = Vec::new();
+    let mut other_hardware = Vec::new();
+
+    for model in &catalog.models {
+        // Distinct mapped meshes this model has a Supported/Experimental
+        // entry for, in catalog order, paired with the strongest status
+        // seen for that mesh (Supported beats Experimental if a mesh
+        // somehow appears twice with different statuses).
+        let mut mesh_status: Vec<(String, CompatStatus)> = Vec::new();
+        for hc in &model.compatibility {
+            if !matches!(hc.status, CompatStatus::Supported | CompatStatus::Experimental) {
+                continue;
+            }
+            let mesh = hw_to_mesh(&hc.hardware);
+            if let Some(existing) = mesh_status.iter_mut().find(|(m, _)| *m == mesh) {
+                if matches!(hc.status, CompatStatus::Supported) {
+                    existing.1 = CompatStatus::Supported;
+                }
+            } else {
+                mesh_status.push((mesh, hc.status.clone()));
+            }
+        }
+
+        let key = normalize_key(if !model.id.is_empty() {
+            &model.id
+        } else {
+            &model.display_name
+        });
+        let available_now = live_by_key.contains_key(&key);
+        if available_now {
+            claimed_live_keys.insert(key.clone());
+        }
+
+        let all_meshes: Vec<String> = mesh_status.iter().map(|(m, _)| m.clone()).collect();
+
+        let make_entry = |status_here: &str, needed_hardware: Vec<String>| CatalogEntry {
+            id: model.id.clone(),
+            display_name: model.display_name.clone(),
+            family: model.family.clone(),
+            size: model.model_size.clone(),
+            software: model
+                .compatibility
+                .iter()
+                .flat_map(|hc| hc.software.clone())
+                .fold(Vec::new(), |mut acc, s| {
+                    if !acc.contains(&s) {
+                        acc.push(s);
+                    }
+                    acc
+                }),
+            meshes: all_meshes.clone(),
+            needed_hardware,
+            available_now,
+            // A live-model match always wins: the model is running right
+            // now regardless of what the catalog would otherwise say.
+            status_here: if available_now {
+                "supported".to_string()
+            } else {
+                status_here.to_string()
+            },
+        };
+
+        if box_mesh_lower.is_none() {
+            // No box mesh to test membership against -- flat list of
+            // anything with any Supported/Experimental entry.
+            if !mesh_status.is_empty() {
+                runs_here.push(make_entry("supported", Vec::new()));
+            }
+            continue;
+        }
+        let box_mesh_lower = box_mesh_lower.as_deref().unwrap();
+
+        let status_on_box = mesh_status
+            .iter()
+            .find(|(m, _)| m.to_lowercase() == box_mesh_lower)
+            .map(|(_, s)| s.clone());
+
+        match status_on_box {
+            Some(CompatStatus::Supported) => {
+                runs_here.push(make_entry("supported", Vec::new()));
+            }
+            Some(CompatStatus::Experimental) => {
+                if available_now {
+                    // Live match trumps the catalog's "experimental" label
+                    // -- it's demonstrably already running here.
+                    runs_here.push(make_entry("experimental", Vec::new()));
+                } else {
+                    experimental.push(make_entry("experimental", Vec::new()));
+                }
+            }
+            _ => {
+                if !mesh_status.is_empty() {
+                    // Supported/Experimental somewhere else -> needs other
+                    // hardware; excludes box_mesh (it has no entry here by
+                    // construction of this branch).
+                    let needed: Vec<String> = mesh_status
+                        .iter()
+                        .map(|(m, _)| m.clone())
+                        .filter(|m| m.to_lowercase() != box_mesh_lower)
+                        .collect();
+                    if available_now {
+                        runs_here.push(make_entry("supported", Vec::new()));
+                    } else {
+                        other_hardware.push(make_entry("unavailable", needed));
+                    }
+                }
+                // else: Not Supported everywhere -> omit entirely.
+            }
+        }
+    }
+
+    // Any live model not claimed by a catalog match is appended verbatim,
+    // in its original input order, so it's still surfaced as runnable.
+    for m in live_models {
+        let key = normalize_key(&m.name);
+        if !claimed_live_keys.contains(&key) {
+            runs_here.push(live_only_entry(m));
+        }
+    }
+
+    BoxCatalog {
+        box_mesh: box_mesh.map(str::to_string),
+        catalog_available: true,
+        catalog_stale,
+        runs_here,
+        experimental,
+        other_hardware,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +441,67 @@ mod tests {
         assert_eq!(c.models.len(), 1);
         assert_eq!(c.models[0].display_name, "Qwen3-8B");
         assert_eq!(c.models[0].compatibility[0].status, CompatStatus::Supported);
+    }
+
+    #[test]
+    fn normalize_key_forms() {
+        assert_eq!(normalize_key("Qwen/Qwen3-8B"), "qwen3-8b");
+        assert_eq!(normalize_key("Qwen3-8B"), "qwen3-8b");
+        assert_eq!(normalize_key("bge_large en.v1.5"), "bge-large-en-v1-5");
+    }
+
+    #[test]
+    fn classify_tiers_by_box_mesh() {
+        let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
+          {"id":"a","display_name":"A","family":"F","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Supported","software":["tt-inference-server"]}]},
+          {"id":"b","display_name":"B","family":"F","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Experimental","software":["tt-forge"]}]},
+          {"id":"c","display_name":"C","family":"F","tasks":[],"compatibility":[{"hardware":"Galaxy","chip_set":"","hardware_family":"","status":"Supported","software":["tt-metal"]}]},
+          {"id":"d","display_name":"D","family":"F","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Not Supported","software":[]}]}
+        ]}"#).unwrap();
+        let live = vec![]; // no live models
+        let bc = classify(Some(&cat), &live, Some("p300x2"), false);
+        assert_eq!(bc.runs_here.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(bc.experimental.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["b"]);
+        assert_eq!(bc.other_hardware.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["c"]);
+        // d is Not Supported everywhere -> omitted
+        assert!(!bc.runs_here.iter().chain(&bc.experimental).chain(&bc.other_hardware).any(|e| e.id == "d"));
+        // c is annotated with the mesh it needs
+        assert_eq!(bc.other_hardware[0].needed_hardware, vec!["T3K"]);
+        assert!(bc.catalog_available);
+    }
+
+    #[test]
+    fn classify_live_model_always_runs_here_and_marks_available() {
+        use crate::model::ModelInfo;
+        let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
+          {"id":"qwen3-8b","display_name":"Qwen3-8B","family":"Qwen","tasks":[],"compatibility":[{"hardware":"Galaxy","chip_set":"","hardware_family":"","status":"Supported","software":[]}]}
+        ]}"#).unwrap();
+        let live = vec![ModelInfo { name: "Qwen/Qwen3-8B".into(), devices: vec!["P300X2".into()] }];
+        let bc = classify(Some(&cat), &live, Some("p300x2"), false);
+        // live model wins -> runs_here, available_now, deduped with the catalog entry (matched by normalize_key)
+        assert_eq!(bc.runs_here.len(), 1);
+        assert!(bc.runs_here[0].available_now);
+        assert!(bc.other_hardware.is_empty()); // not double-listed
+    }
+
+    #[test]
+    fn classify_unavailable_catalog_returns_live_only() {
+        use crate::model::ModelInfo;
+        let live = vec![ModelInfo { name: "X/Y".into(), devices: vec![] }];
+        let bc = classify(None, &live, Some("p300x2"), false);
+        assert!(!bc.catalog_available);
+        assert_eq!(bc.runs_here.len(), 1);
+        assert!(bc.experimental.is_empty() && bc.other_hardware.is_empty());
+    }
+
+    #[test]
+    fn classify_unknown_mesh_no_split() {
+        let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
+          {"id":"a","display_name":"A","family":"F","tasks":[],"compatibility":[{"hardware":"Galaxy","chip_set":"","hardware_family":"","status":"Supported","software":[]}]}
+        ]}"#).unwrap();
+        let bc = classify(Some(&cat), &[], None, false);
+        // no box mesh -> nothing goes to experimental/other; catalog models land in runs_here as a flat list
+        assert!(bc.experimental.is_empty() && bc.other_hardware.is_empty());
+        assert_eq!(bc.runs_here.len(), 1);
     }
 }
