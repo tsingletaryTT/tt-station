@@ -370,7 +370,19 @@ fn main() -> Result<()> {
             refresh,
             catalog_file,
         } => {
-            let bc = run_async(cmd_catalog(host, *refresh, catalog_file.as_deref()));
+            // `catalog::load_catalog` builds its own `reqwest::blocking`
+            // client internally (see that module's doc) -- doing that from
+            // INSIDE an already-running Tokio runtime panics ("Cannot drop a
+            // runtime in a context where blocking is not allowed" / nested-
+            // runtime), because `run_async` below builds exactly such a
+            // runtime and blocks on it. So this call must happen out here,
+            // before any runtime exists, exactly like `discover`'s manual-
+            // host probe stays outside a runtime for the same reason (see
+            // this module's top doc). Only the async agent calls
+            // (`get_status`/`list_models`, now inside `cmd_catalog`) run
+            // under `run_async`'s runtime.
+            let (catalog, stale) = catalog::load_catalog(*refresh, catalog_file.as_deref());
+            let bc = run_async(cmd_catalog(host, catalog.as_ref(), stale));
             print_catalog(&bc, cli.json);
         }
         Command::SshAuthorize { host, revoke, date } => {
@@ -702,6 +714,14 @@ async fn cmd_serving(host: &str) -> Result<ServingList> {
 /// resolve the box's live mesh/models and merge them with the public
 /// compatibility catalog via `libttstation::catalog::classify`.
 ///
+/// Takes the already-loaded `(catalog, stale)` pair rather than calling
+/// `catalog::load_catalog` itself -- that call is BLOCKING (it builds its own
+/// `reqwest::blocking` client; see that module's doc) and must run before any
+/// Tokio runtime exists, so `main`'s `Catalog` dispatch arm loads it first and
+/// only enters `run_async` (which drives this function) for the async agent
+/// calls below. See `run_async`'s call site in `main` for the full rationale
+/// -- it mirrors this module's `discover`-stays-runtime-free pattern.
+///
 /// Deliberately returns a bare `BoxCatalog`, not a `Result<BoxCatalog>` --
 /// every input this depends on already degrades gracefully instead of
 /// erroring (see `catalog::load_catalog`'s degradation contract and
@@ -716,7 +736,11 @@ async fn cmd_serving(host: &str) -> Result<ServingList> {
 ///   showing up in `runs_here` (see `classify`'s live-model-always-wins
 ///   rule) -- catalog and agent failures are independent, neither blocks
 ///   the other's contribution to the merged view.
-async fn cmd_catalog(host: &str, refresh: bool, catalog_file: Option<&std::path::Path>) -> libttstation::catalog::BoxCatalog {
+async fn cmd_catalog(
+    host: &str,
+    catalog: Option<&libttstation::catalog::CompatCatalog>,
+    stale: bool,
+) -> libttstation::catalog::BoxCatalog {
     let base = format!("http://{host}");
 
     let box_mesh = libttstation::agent_client::get_status(&base)
@@ -729,9 +753,7 @@ async fn cmd_catalog(host: &str, refresh: bool, catalog_file: Option<&std::path:
         .map(|r| r.models)
         .unwrap_or_default();
 
-    let (compat, stale) = catalog::load_catalog(refresh, catalog_file);
-
-    libttstation::catalog::classify(compat.as_ref(), &live_models, box_mesh.as_deref(), stale)
+    libttstation::catalog::classify(catalog, &live_models, box_mesh.as_deref(), stale)
 }
 
 /// `tt ssh-authorize --host <host:port>`: resolve (generating if needed)

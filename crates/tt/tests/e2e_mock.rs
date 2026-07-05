@@ -380,3 +380,60 @@ fn tt_catalog_json_classifies_fixture_against_mock_box() {
         "Model D should be omitted entirely, got: {bc:?}"
     );
 }
+
+/// Regression test for the nested-runtime panic in `tt catalog`'s primary
+/// usage path -- `tt catalog --host <h>` WITHOUT `--catalog-file`.
+///
+/// `cmd_catalog` used to call `catalog::load_catalog` (which builds a
+/// `reqwest::blocking::Client` in `fetch_remote`) from INSIDE the Tokio
+/// runtime `run_async` already has blocked on -- building a blocking client
+/// while an async runtime is active panics in debug builds ("Cannot drop a
+/// runtime in a context where blocking is not allowed" / nested-runtime).
+/// Every other e2e test above always passes `--catalog-file`, which
+/// early-returns in `load_catalog` before ever reaching `fetch_remote`, so
+/// none of them exercised this path. This test deliberately omits
+/// `--catalog-file` AND points `TT_CONFIG_DIR` at a fresh, empty temp dir
+/// (via `TempConfigDir`, same as every other test here) so
+/// `catalog::cache_path()` -- which honors `TT_CONFIG_DIR` exactly like
+/// `secrets.json` does, see `catalog.rs`'s doc -- finds no cache file and is
+/// forced down the `fetch_remote()` branch that used to panic.
+///
+/// The assertion is deliberately network-outcome-agnostic: whether this test
+/// runner has internet access or not, `tt catalog` must exit 0 and print
+/// parseable `BoxCatalog` JSON with a `runs_here` array -- offline, the fetch
+/// fails and `load_catalog` degrades to `(None, false)` (still a valid,
+/// classifiable catalog per its degradation contract); online, the real
+/// fetch succeeds. Either way, the process must not panic. This is exactly
+/// the pre-fix panic: a debug build of `tt catalog --host <mock> --json`
+/// (no `--catalog-file`) crashed instead of exiting 0.
+#[test]
+#[ignore] // hardware-free but network/process -- run with --ignored like the others
+fn tt_catalog_without_catalog_file_does_not_panic_in_nested_runtime() {
+    let port: u16 = 18902;
+    let host = format!("127.0.0.1:{port}");
+
+    let _mock_box = spawn_mock_box(port);
+    wait_for_port(port);
+
+    // Fresh, empty `TT_CONFIG_DIR` -- no `compatibility.json` cache present,
+    // so `catalog::load_catalog` is forced past the fresh-cache fast path
+    // and into `fetch_remote()`, the branch that used to panic.
+    let config_dir = TempConfigDir::new();
+
+    let output = AssertCommand::cargo_bin("tt")
+        .unwrap()
+        .env("TT_CONFIG_DIR", &config_dir.0)
+        .args(["--json", "catalog", "--host", &host])
+        .assert()
+        .success() // must exit 0, not panic (pre-fix: panics before this)
+        .get_output()
+        .stdout
+        .clone();
+
+    let bc: serde_json::Value =
+        serde_json::from_slice(&output).expect("catalog output is valid JSON");
+    assert!(
+        bc["runs_here"].is_array(),
+        "expected a runs_here array in BoxCatalog JSON, got: {bc}"
+    );
+}
