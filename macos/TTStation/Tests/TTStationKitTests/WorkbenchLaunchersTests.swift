@@ -55,4 +55,13 @@ final class WorkbenchLaunchersTests: XCTestCase {
                        ["--remote", "ssh-remote+me@qb.local", "/home/me"])
         XCTAssertEqual(VSCodeLauncher.defaultRemotePath(user: "me"), "/home/me")
     }
+    func testVSCodeRemoteArgsWithToolkit() {
+        let args = VSCodeLauncher.remoteArgs(user: "u", host: "h", path: "/home/u", installToolkit: true)
+        XCTAssertEqual(args, ["--install-extension", "Tenstorrent.tt-vscode-toolkit",
+                              "--remote", "ssh-remote+u@h", "/home/u"])
+    }
+    func testVSCodeRemoteArgsWithoutToolkit() {
+        let args = VSCodeLauncher.remoteArgs(user: "u", host: "h", path: "/home/u", installToolkit: false)
+        XCTAssertEqual(args, ["--remote", "ssh-remote+u@h", "/home/u"])
+    }
 }

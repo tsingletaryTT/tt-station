@@ -40,8 +40,23 @@ public enum TTToplikeLauncher {
 
 /// A VS Code Remote-SSH window on the box (integrated terminal runs on the box).
 public enum VSCodeLauncher {
-    public static func remoteArgs(user: String, host: String, path: String) -> [String] {
-        ["--remote", "ssh-remote+\(user)@\(host)", path]
+    /// Marketplace ID of Tenstorrent's own extension (also on Open VSX), so
+    /// `--install-extension` resolves it directly — no `.vsix` needed.
+    public static let toolkitExtensionID = "Tenstorrent.tt-vscode-toolkit"
+
+    /// Builds `code` CLI args for a Remote-SSH window on the box. When
+    /// `installToolkit` is true, prepends `--install-extension <id>` so the
+    /// toolkit gets installed into the remote host before the window opens.
+    ///
+    /// Single method with a defaulted param (rather than a separate 3-arg
+    /// overload) — a defaulted param *and* an explicit 3-arg overload would
+    /// both match a 3-arg call and be ambiguous. One declaration keeps the
+    /// existing `testVSCodeRemoteArgs` (which calls the 3-arg form) resolving
+    /// unambiguously to this same method.
+    public static func remoteArgs(user: String, host: String, path: String, installToolkit: Bool = false) -> [String] {
+        let remoteFlags = ["--remote", "ssh-remote+\(user)@\(host)", path]
+        guard installToolkit else { return remoteFlags }
+        return ["--install-extension", toolkitExtensionID] + remoteFlags
     }
     public static func defaultRemotePath(user: String) -> String { "/home/\(user)" }
 }
