@@ -307,9 +307,6 @@ pub fn classify(
             &model.display_name
         });
         let available_now = live_by_key.contains_key(&key);
-        if available_now {
-            claimed_live_keys.insert(key.clone());
-        }
 
         let all_meshes: Vec<String> = mesh_status.iter().map(|(m, _)| m.clone()).collect();
 
@@ -340,6 +337,24 @@ pub fn classify(
             },
         };
 
+        // A live match is a runs-here-forcing signal, full stop: the model
+        // is demonstrably servable right now, so it belongs in `runs_here`
+        // no matter what the catalog says about it -- including the "Not
+        // Supported everywhere" case that would otherwise omit the entry
+        // entirely. Handle this *before* any of the omit/experimental/other
+        // branches below, and only mark the key "claimed" here, at the
+        // point the entry is actually pushed -- never earlier. Otherwise a
+        // catalog entry that goes on to be omitted (e.g. empty mesh_status)
+        // would still have "claimed" the live key, and the live model would
+        // vanish from every tier: neither emitted here nor picked up by the
+        // trailing unmatched-live-models append below. See
+        // classify_live_model_matching_unsupported_catalog_still_runs_here.
+        if available_now {
+            runs_here.push(make_entry("supported", Vec::new()));
+            claimed_live_keys.insert(key.clone());
+            continue;
+        }
+
         if box_mesh_lower.is_none() {
             // No box mesh to test membership against -- flat list of
             // anything with any Supported/Experimental entry.
@@ -355,18 +370,15 @@ pub fn classify(
             .find(|(m, _)| m.to_lowercase() == box_mesh_lower)
             .map(|(_, s)| s.clone());
 
+        // `available_now` is unconditionally `false` from here on (the
+        // live-match case above already `continue`d), so these branches
+        // never need to special-case it.
         match status_on_box {
             Some(CompatStatus::Supported) => {
                 runs_here.push(make_entry("supported", Vec::new()));
             }
             Some(CompatStatus::Experimental) => {
-                if available_now {
-                    // Live match trumps the catalog's "experimental" label
-                    // -- it's demonstrably already running here.
-                    runs_here.push(make_entry("experimental", Vec::new()));
-                } else {
-                    experimental.push(make_entry("experimental", Vec::new()));
-                }
+                experimental.push(make_entry("experimental", Vec::new()));
             }
             _ => {
                 if !mesh_status.is_empty() {
@@ -378,11 +390,7 @@ pub fn classify(
                         .map(|(m, _)| m.clone())
                         .filter(|m| m.to_lowercase() != box_mesh_lower)
                         .collect();
-                    if available_now {
-                        runs_here.push(make_entry("supported", Vec::new()));
-                    } else {
-                        other_hardware.push(make_entry("unavailable", needed));
-                    }
+                    other_hardware.push(make_entry("unavailable", needed));
                 }
                 // else: Not Supported everywhere -> omit entirely.
             }
@@ -482,6 +490,36 @@ mod tests {
         assert_eq!(bc.runs_here.len(), 1);
         assert!(bc.runs_here[0].available_now);
         assert!(bc.other_hardware.is_empty()); // not double-listed
+    }
+
+    #[test]
+    fn classify_live_model_matching_unsupported_catalog_still_runs_here() {
+        use crate::model::ModelInfo;
+        // Catalog says "d" is Not Supported on every hardware row (its only
+        // row here is Quietbox 2 / Not Supported) -- normally that means
+        // "omit entirely" (see classify_tiers_by_box_mesh's `d`). But a live
+        // box is *actually serving* "d" right now via /models, so it must
+        // still show up in runs_here: live status always wins over a stale
+        // catalog. Regression for the data-loss bug where an all-unsupported
+        // catalog match would both omit the entry AND "claim" the live
+        // model's key, dropping it from every tier.
+        let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
+          {"id":"d","display_name":"D","family":"F","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Not Supported","software":[]}]}
+        ]}"#).unwrap();
+        let live = vec![ModelInfo { name: "d".into(), devices: vec![] }];
+        let bc = classify(Some(&cat), &live, Some("p300x2"), false);
+
+        let in_runs_here = bc
+            .runs_here
+            .iter()
+            .find(|e| e.id == "d" || e.display_name == "D");
+        assert!(
+            in_runs_here.is_some(),
+            "live model 'd' must be in runs_here, got: {bc:?}"
+        );
+        assert!(in_runs_here.unwrap().available_now);
+        assert!(!bc.experimental.iter().any(|e| e.id == "d"));
+        assert!(!bc.other_hardware.iter().any(|e| e.id == "d"));
     }
 
     #[test]
