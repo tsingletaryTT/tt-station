@@ -272,7 +272,16 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen)?;
+        // Setup must be atomic: if entering the alternate screen fails after
+        // raw mode is already on, we must not return `Err` without first
+        // undoing raw mode -- otherwise no `TerminalGuard` is ever
+        // constructed, its `Drop` never runs, and the operator's terminal is
+        // left wedged in raw mode with no cleanup path (the exact hazard
+        // this guard exists to prevent; see the module doc).
+        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(e);
+        }
         Ok(Self)
     }
 }
@@ -366,6 +375,14 @@ where
                 // (and Repeat) events; only act on Press to avoid
                 // double-firing an action per physical key press.
                 if key.kind == KeyEventKind::Press {
+                    // Clear any action-result message from a *previous*
+                    // keypress before handling this one -- otherwise it sits
+                    // over the footer for the rest of the session (the
+                    // overlay in the `terminal.draw` closure above only ever
+                    // sets `message`, never blanks it). Handlers below that
+                    // want to show a fresh message just set `message` again
+                    // right after this.
+                    message = None;
                     match mode {
                         Mode::ConfirmReset => match key.code {
                             KeyCode::Char('y') | KeyCode::Char('Y') => {
