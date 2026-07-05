@@ -14,6 +14,7 @@
 //!   tt [--json] endpoint --host <host:port>
 //!   tt [--json] serving --host <host:port>
 //!   tt [--json] ssh-authorize --host <host:port> [--revoke] [--date <YYYY-MM-DD>]
+//!   tt console [--snapshot] [--install-service] [--ctrl-port <port>]
 //!
 //! `--json` is global (accepted before or after the subcommand) and switches
 //! every command's stdout from human-readable text to machine-readable JSON.
@@ -252,6 +253,26 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+
+    /// Operator TUI for managing THIS box's agent as a systemd `--user`
+    /// service. Run ON the box itself (e.g. over SSH) -- unlike every other
+    /// subcommand above, there's no `--host`: it talks to `127.0.0.1
+    /// :<ctrl-port>` and to the local systemd/journald, never a remote box.
+    Console {
+        /// Print one `BoxLifecycleSnapshot` as JSON and exit, instead of
+        /// launching the TUI. This is what the GTK box panel polls.
+        #[arg(long)]
+        snapshot: bool,
+
+        /// Install (or refresh) the systemd `--user` unit file and exit,
+        /// instead of launching the TUI.
+        #[arg(long = "install-service")]
+        install_service: bool,
+
+        /// Agent control port to talk to on `127.0.0.1`.
+        #[arg(long = "ctrl-port", default_value_t = 8765)]
+        ctrl_port: u16,
+    },
 }
 
 fn main() -> Result<()> {
@@ -336,6 +357,13 @@ fn main() -> Result<()> {
             }
             let summary = run_async(cmd_reset(host.as_deref()))?;
             print_reset(&summary, cli.json);
+        }
+        Command::Console {
+            snapshot,
+            install_service,
+            ctrl_port,
+        } => {
+            console::run_console(*ctrl_port, *snapshot, *install_service, cli.json)?;
         }
     }
 
