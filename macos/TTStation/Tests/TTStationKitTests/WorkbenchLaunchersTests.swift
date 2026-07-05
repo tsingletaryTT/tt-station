@@ -5,16 +5,26 @@ final class WorkbenchLaunchersTests: XCTestCase {
     func testSSHTargetStripsTrailingDotAndDefaultsUser() {
         let t = SSHTarget.resolve(host: "qb.local.", overrideUser: nil, currentUser: "me")
         XCTAssertEqual(t.host, "qb.local")
-        XCTAssertEqual(t.user, "me")
+        XCTAssertEqual(t.user, "ttuser")
     }
     func testSSHTargetHonorsOverrideUserAndKeepsBareHost() {
         let t = SSHTarget.resolve(host: "qb.local", overrideUser: "boxuser", currentUser: "me")
         XCTAssertEqual(t.host, "qb.local")
         XCTAssertEqual(t.user, "boxuser")
     }
-    func testSSHTargetEmptyOverrideFallsBackToCurrent() {
+    func testSSHTargetEmptyOverrideFallsBackToDefault() {
         let t = SSHTarget.resolve(host: "qb.local", overrideUser: "", currentUser: "me")
-        XCTAssertEqual(t.user, "me")
+        XCTAssertEqual(t.user, "ttuser")
+    }
+    // Task 8: the QuietBox 2 login is `ttuser`, not the Mac login name — the
+    // default MUST be `ttuser` regardless of who's logged into the Mac.
+    func testSSHTargetDefaultsToTtuser() {
+        let t = SSHTarget.resolve(host: "qb2-lab.local", overrideUser: nil, currentUser: "tsingletary")
+        XCTAssertEqual(t.user, "ttuser")   // NOT the Mac login
+    }
+    func testSSHTargetOverrideWins() {
+        let t = SSHTarget.resolve(host: "qb2-lab.local", overrideUser: "someone", currentUser: "tsingletary")
+        XCTAssertEqual(t.user, "someone")
     }
     func testTerminalSSHCommand() {
         XCTAssertEqual(TerminalSSHLauncher.command(user: "me", host: "qb.local"),

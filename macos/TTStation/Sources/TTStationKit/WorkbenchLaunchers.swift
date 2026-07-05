@@ -1,16 +1,27 @@
 import Foundation
 
 /// An SSH target: which user on which host. `resolve` canonicalizes the host
-/// (mDNS names arrive as FQDNs with a trailing dot) and picks the user
-/// (an explicit override, else the current login name).
+/// (mDNS names arrive as FQDNs with a trailing dot) and picks the user: an
+/// explicit override (`tt.sshUser` in the app), else `defaultUser` (`ttuser`)
+/// — the QuietBox 2's default login. The Mac login name is deliberately NOT
+/// the default: it's almost never the same account as the box's, which is
+/// exactly why VS Code Remote-SSH couldn't authenticate before this changed.
 public struct SSHTarget: Equatable {
+    /// The QuietBox 2 default login — where the keyless-SSH flow installs
+    /// the Mac's public key, so this is the account that actually works.
+    public static let defaultUser = "ttuser"
+
     public let user: String
     public let host: String
     public init(user: String, host: String) { self.user = user; self.host = host }
 
+    /// `currentUser` (the Mac login, typically `NSUserName()`) is kept in the
+    /// signature for source-compatibility with existing call sites, but it is
+    /// NOT used to pick the default user anymore — only a non-empty
+    /// `overrideUser` (the `tt.sshUser` preference) beats `defaultUser`.
     public static func resolve(host: String, overrideUser: String?, currentUser: String) -> SSHTarget {
         let canonicalHost = host.hasSuffix(".") ? String(host.dropLast()) : host
-        let user = (overrideUser.map { $0.isEmpty ? currentUser : $0 }) ?? currentUser
+        let user = (overrideUser.flatMap { $0.isEmpty ? nil : $0 }) ?? defaultUser
         return SSHTarget(user: user, host: canonicalHost)
     }
 }
