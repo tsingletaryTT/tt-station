@@ -108,6 +108,35 @@ pub fn hw_to_mesh(hardware: &str) -> String {
     }
 }
 
+/// True if a box whose detected mesh is `box_mesh` can run a model whose
+/// catalog hardware maps to `catalog_mesh` (both already `hw_to_mesh`-mapped
+/// labels, e.g. `"p300x2"` / `"P150"`). Case-insensitive.
+///
+/// An exact match is always compatible. Beyond that, a multi-card box mesh
+/// (e.g. `"p150x2"`, detected by the agent for a 2-card P150 box) is also
+/// compatible with its single-card family (`"P150"`) -- a model that runs on
+/// one card of a family runs on a box that has several of that family. This
+/// does NOT upgrade the other direction: a bare single-card mesh (`"p150"`)
+/// is NOT compatible with a multi-card, box-level catalog requirement like
+/// `"P150X4"` -- one card can't satisfy a four-card requirement.
+pub fn mesh_compatible(box_mesh: &str, catalog_mesh: &str) -> bool {
+    let box_mesh = box_mesh.to_lowercase();
+    let catalog_mesh = catalog_mesh.to_lowercase();
+    if box_mesh == catalog_mesh {
+        return true;
+    }
+    // Strip a trailing "x<digits>" card-count suffix (e.g. "p150x2" ->
+    // "p150") to get the box's single-card family base. A mesh with no such
+    // suffix (e.g. a bare "p150") is already its own base.
+    let box_base = match box_mesh.rfind('x') {
+        Some(idx) if box_mesh[idx + 1..].chars().all(|c| c.is_ascii_digit()) && idx + 1 < box_mesh.len() => {
+            &box_mesh[..idx]
+        }
+        _ => box_mesh.as_str(),
+    };
+    catalog_mesh == box_base
+}
+
 /// A single row in the merged, box-aware model catalog (see [`BoxCatalog`]).
 /// This is the WIRE contract for `tt catalog`'s JSON output and what the
 /// macOS app's model picker decodes -- it is deliberately flatter than
@@ -365,10 +394,25 @@ pub fn classify(
         }
         let box_mesh_lower = box_mesh_lower.as_deref().unwrap();
 
-        let status_on_box = mesh_status
+        // Compatible (not just exact-match) meshes for this box, via
+        // `mesh_compatible` -- e.g. a "p150x2" box is compatible with a
+        // catalog row mapped to "P150" (its single-card family), not just
+        // an exact "P150X2" row. If more than one compatible mesh is
+        // present, Supported beats Experimental (mirrors the aggregation
+        // above when the same mesh appears twice).
+        let status_on_box = if mesh_status
             .iter()
-            .find(|(m, _)| m.to_lowercase() == box_mesh_lower)
-            .map(|(_, s)| s.clone());
+            .any(|(m, s)| mesh_compatible(box_mesh_lower, m) && matches!(s, CompatStatus::Supported))
+        {
+            Some(CompatStatus::Supported)
+        } else if mesh_status
+            .iter()
+            .any(|(m, s)| mesh_compatible(box_mesh_lower, m) && matches!(s, CompatStatus::Experimental))
+        {
+            Some(CompatStatus::Experimental)
+        } else {
+            None
+        };
 
         // `available_now` is unconditionally `false` from here on (the
         // live-match case above already `continue`d), so these branches
@@ -383,12 +427,16 @@ pub fn classify(
             _ => {
                 if !mesh_status.is_empty() {
                     // Supported/Experimental somewhere else -> needs other
-                    // hardware; excludes box_mesh (it has no entry here by
-                    // construction of this branch).
+                    // hardware; excludes any mesh the box is already
+                    // `mesh_compatible` with (nothing the box can actually
+                    // run should appear as "needed" -- by construction of
+                    // this branch that's everything, since a compatible
+                    // mesh would have taken the Supported/Experimental
+                    // branch above instead).
                     let needed: Vec<String> = mesh_status
                         .iter()
                         .map(|(m, _)| m.clone())
-                        .filter(|m| m.to_lowercase() != box_mesh_lower)
+                        .filter(|m| !mesh_compatible(box_mesh_lower, m))
                         .collect();
                     other_hardware.push(make_entry("unavailable", needed));
                 }
@@ -530,6 +578,61 @@ mod tests {
         assert!(!bc.catalog_available);
         assert_eq!(bc.runs_here.len(), 1);
         assert!(bc.experimental.is_empty() && bc.other_hardware.is_empty());
+    }
+
+    #[test]
+    fn mesh_compatible_exact_match_case_insensitive() {
+        assert!(mesh_compatible("p300x2", "P300X2"));
+        assert!(mesh_compatible("P300X2", "p300x2"));
+    }
+
+    #[test]
+    fn mesh_compatible_multi_card_box_runs_single_card_family() {
+        assert!(mesh_compatible("p150x2", "P150"));
+        assert!(mesh_compatible("p150x3", "P150"));
+        assert!(mesh_compatible("p150x4", "P150"));
+        assert!(mesh_compatible("p300x2", "P300"));
+        assert!(mesh_compatible("n300x4", "N300"));
+    }
+
+    #[test]
+    fn mesh_compatible_does_not_upgrade_single_card_to_box_level() {
+        // A bare single "p150" card is NOT compatible with a "P150X4"
+        // box-level requirement -- compatibility only flows the other way.
+        assert!(!mesh_compatible("p150", "P150X4"));
+    }
+
+    #[test]
+    fn mesh_compatible_unrelated_meshes_are_incompatible() {
+        assert!(!mesh_compatible("p300x2", "T3K"));
+    }
+
+    #[test]
+    fn classify_p150x2_box_runs_single_card_p150_model() {
+        // A p150x2 box (agent-detected 2-card P150 mesh) should be able to
+        // run a model the catalog lists as Supported on single-card "P150"
+        // -- not fall into other_hardware with a nonsensical
+        // needed_hardware:["P150"] on a box that literally has P150 cards.
+        let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
+          {"id":"a","display_name":"A","family":"F","tasks":[],"compatibility":[{"hardware":"p150","chip_set":"","hardware_family":"","status":"Supported","software":[]}]}
+        ]}"#).unwrap();
+        let bc = classify(Some(&cat), &[], Some("p150x2"), false);
+        assert_eq!(bc.runs_here.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["a"]);
+        assert!(bc.other_hardware.is_empty());
+    }
+
+    #[test]
+    fn classify_p300x2_box_needed_hardware_excludes_compatible_meshes() {
+        // A p300x2 box has a model Supported only on single-card "p150" --
+        // that's genuinely other hardware, so it lands in other_hardware.
+        // But needed_hardware must not list anything the box can already
+        // run (nothing box-compatible should appear as "needed").
+        let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
+          {"id":"b","display_name":"B","family":"F","tasks":[],"compatibility":[{"hardware":"p150","chip_set":"","hardware_family":"","status":"Supported","software":[]}]}
+        ]}"#).unwrap();
+        let bc = classify(Some(&cat), &[], Some("p300x2"), false);
+        assert_eq!(bc.other_hardware.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["b"]);
+        assert_eq!(bc.other_hardware[0].needed_hardware, vec!["P150"]);
     }
 
     #[test]
