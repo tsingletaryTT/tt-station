@@ -81,6 +81,15 @@ NAME = os.environ.get("TTS_NAME", "qb2-lab")
 CTRL_PORT = os.environ.get("TTS_CTRL_PORT", "8765")
 SERVING_HOST = os.environ.get("TTS_SERVING_HOST", f"{NAME}.local")
 SERVING_PORT = os.environ.get("TTS_SERVING_PORT", "8003")
+TT_SMI_BIN = os.environ.get("TTS_TT_SMI_BIN", "tt-smi")
+# The agent's bearer-token store — its "who is paired" state. A box-operator
+# "Reset to fresh" (see reset_fresh) deletes this directly: the authed HTTP
+# /reset can't be used from the box's own screen (it needs a client token the
+# operator doesn't have), so the association is cleared locally instead.
+# Default matches the agent's own `default_token_store`; override with
+# TTS_TOKEN_STORE if the unit passes a custom --token-store.
+AGENTD_TOKEN_STORE = Path(os.environ.get(
+    "TTS_TOKEN_STORE", str(Path.home() / ".config/tt-station/agentd-tokens.json")))
 
 # Branding assets. The Tenstorrent mark (shared with the macOS app, recolored to
 # the panel's teal) shows in the window header and — via the .desktop install
@@ -457,10 +466,10 @@ class Panel(Gtk.ApplicationWindow):
         self.btn_restart.connect("clicked", lambda _b: self.restart_agent())
         self.btn_reset = Gtk.Button(label="Reset")
         self.btn_reset.set_tooltip_text(
-            "Return the box to a fresh state (tt reset): stop the serving model, "
-            "clear ALL client pairings (every client must pair again), and reset the "
-            "Blackhole board (tt-smi -r). Use when the board is wedged or before "
-            "handing the box off.")
+            "Return the box to a fresh state (done locally): stop the agent, stop the "
+            "serving model, forget ALL pairings (every client must pair again), reset the "
+            "Blackhole board (tt-smi -r), and restart the agent. Use when the board is "
+            "wedged or before handing the box off.")
         self.btn_reset.connect("clicked", lambda _b: self.reset_fresh())
         for b in (self.btn_start, self.btn_stop, self.btn_restart, self.btn_reset):
             btns.append(b)
@@ -531,15 +540,50 @@ class Panel(Gtk.ApplicationWindow):
         self._log(f"profile pinned to {selected!r} (drop-in written, service restarting)")
 
     def reset_fresh(self):
-        """Reset the box to a fresh state via `tt reset` (stops model, clears tokens)."""
-        base = f"127.0.0.1:{CTRL_PORT}"
-        try:
-            subprocess.Popen([TT_BIN, "reset", "--host", base, "--yes"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self._log("reset-to-fresh requested (model stopped, pairings cleared)")
-        except OSError as e:
-            self._log(f"reset failed: {e}")
+        """Hard local reset to a fresh state — box-operator privileged, no token.
+
+        We deliberately do NOT use the agent's authed HTTP `/reset` here: it
+        requires a client bearer token the box operator doesn't have (nobody
+        pairs the box to itself), so `tt reset --host 127.0.0.1` silently
+        SKIPPED the box-side reset ("no token stored ... clearing local state
+        anyway") and the existing association survived. A reset from the box's
+        OWN screen is inherently privileged, so we do it locally: stop the
+        agent, stop any serving container (free the board), forget ALL pairings
+        (delete the agent token store), reset the board (tt-smi -r), then bring
+        the agent back up fresh (idle, zero pairings). Runs in a thread so the
+        few seconds of subprocess work don't freeze the UI.
+        """
+        def worker():
+            subprocess.run(["systemctl", "--user", "stop", SERVICE_NAME], check=False)
+            # Free the board so `tt-smi -r` isn't fighting a live model for the
+            # chips: stop any serving container published on the serving port.
+            try:
+                cids = subprocess.run(
+                    ["docker", "ps", "--filter", f"publish={SERVING_PORT}", "-q"],
+                    capture_output=True, text=True, check=False).stdout.split()
+                if cids:
+                    subprocess.run(["docker", "stop", *cids], check=False)
+            except OSError:
+                pass
+            # Forget every pairing — the association the operator wants gone.
+            # (Agent is stopped first, so it can't rewrite the file underneath us.)
+            try:
+                AGENTD_TOKEN_STORE.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            # Reset the board (best-effort; clears wedged mesh ethernet cores).
+            subprocess.run([TT_SMI_BIN, "-r"], check=False)
+            # Bring the agent back up — fresh: idle, no tokens loaded.
+            subprocess.run(["systemctl", "--user", "start", SERVICE_NAME], check=False)
+            GLib.idle_add(
+                self._log,
+                "hard reset complete — pairings cleared, board reset, agent restarted")
+
+        self._log("hard reset: stopping agent, clearing pairings, resetting board…")
         self._clear_code()
+        threading.Thread(target=worker, daemon=True).start()
 
     # ── pairing code display + TTL ──
     def _set_code(self, code: str, ttl_secs: int):
