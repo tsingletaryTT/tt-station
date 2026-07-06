@@ -1195,7 +1195,12 @@ async fn stop_model(
 ///      via `spawn_blocking` since it shells out (`docker`, `tt-smi`), same
 ///      rule `/run` and `/stop` follow for the backend's sync methods.
 ///   2. Clear ALL issued bearer tokens (in-memory set + persisted store).
-///   3. Flip `status` back to `Idle`, drop the stored `Endpoint`, and
+///   3. Best-effort revoke every `ttstation:<label>`-tagged SSH key the pair
+///      flow ever installed (`authkeys::revoke_all_ttstation`) -- a reset
+///      should also demo losing the keyless-SSH access pairing granted, not
+///      just the bearer token. Non-fatal: an unwritable/missing SSH file
+///      must never fail the route.
+///   4. Flip `status` back to `Idle`, drop the stored `Endpoint`, and
 ///      re-advertise `Idle` (all via `set_idle`).
 ///
 /// Clearing the tokens invalidates the caller's OWN bearer token -- that's
@@ -1216,6 +1221,16 @@ async fn reset(
 
     // Forget every issued token (invalidates the caller's own -- expected).
     state.clear_tokens();
+
+    // Best-effort: also revoke every keyless-SSH key the pair flow ever
+    // installed (see `authkeys::revoke_all_ttstation`), so a reset actually
+    // demos losing SSH access, not just losing the bearer token. Never fail
+    // the route over this -- a reset must still succeed even if the SSH
+    // file is missing/unwritable (e.g. permissions, or the feature was
+    // never used on this box).
+    if let Err(err) = authkeys::revoke_all_ttstation(state.ssh_path()) {
+        eprintln!("reset: failed to revoke ttstation SSH keys (non-fatal): {err}");
+    }
 
     // Back to idle: status Idle, endpoint cleared, Idle re-advertised.
     state.set_idle();

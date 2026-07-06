@@ -467,9 +467,9 @@ class Panel(Gtk.ApplicationWindow):
         self.btn_reset = Gtk.Button(label="Reset")
         self.btn_reset.set_tooltip_text(
             "Return the box to a fresh state (done locally): stop the agent, stop the "
-            "serving model, forget ALL pairings (every client must pair again), reset the "
-            "Blackhole board (tt-smi -r), and restart the agent. Use when the board is "
-            "wedged or before handing the box off.")
+            "serving model, forget ALL pairings (every client must pair again), revoke any "
+            "keyless SSH access a pair flow installed, reset the Blackhole board (tt-smi -r), "
+            "and restart the agent. Use when the board is wedged or before handing the box off.")
         self.btn_reset.connect("clicked", lambda _b: self.reset_fresh())
         for b in (self.btn_start, self.btn_stop, self.btn_restart, self.btn_reset):
             btns.append(b)
@@ -551,7 +551,11 @@ class Panel(Gtk.ApplicationWindow):
         agent, stop any serving container (free the board), forget ALL pairings
         (delete the agent token store), reset the board (tt-smi -r), then bring
         the agent back up fresh (idle, zero pairings). Runs in a thread so the
-        few seconds of subprocess work don't freeze the UI.
+        few seconds of subprocess work don't freeze the UI. Also strips any
+        `ttstation:<label>`-tagged lines from this run-user's
+        `~/.ssh/authorized_keys` — the counterpart to the Rust agent's
+        `authkeys::revoke_all_ttstation` (wired into `POST /reset`), done
+        locally here since the agent is down for the rest of this reset.
         """
         def worker():
             subprocess.run(["systemctl", "--user", "stop", SERVICE_NAME], check=False)
@@ -571,6 +575,23 @@ class Panel(Gtk.ApplicationWindow):
                 AGENTD_TOKEN_STORE.unlink()
             except FileNotFoundError:
                 pass
+            except OSError:
+                pass
+            # Also revoke keyless-SSH access the pair flow ever installed:
+            # strip every authorized_keys line whose last whitespace-token
+            # starts with `ttstation:` (same anchoring rule the Rust
+            # `authkeys::revoke_all_ttstation` uses), leaving any other
+            # app's/manually-added keys untouched. Best-effort — a reset
+            # must never fail because the SSH file is missing/unwritable.
+            try:
+                ak_path = Path.home() / ".ssh" / "authorized_keys"
+                lines = ak_path.read_text().splitlines()
+                kept = [ln for ln in lines if not (ln.split() and ln.split()[-1].startswith("ttstation:"))]
+                removed = len(lines) - len(kept)
+                if removed:
+                    ak_path.write_text("".join(f"{ln}\n" for ln in kept))
+                    ak_path.chmod(0o600)
+                print(f"reset_fresh: revoked {removed} tt-station SSH key(s)")
             except OSError:
                 pass
             # Reset the board (best-effort; clears wedged mesh ethernet cores).

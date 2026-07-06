@@ -30,6 +30,17 @@ fn fresh_state_with(runner: FakeRunner) -> AppState {
     AppState::new("qb2-lab".to_string(), "4xBH".to_string(), backend)
 }
 
+/// A fresh, process-unique temp `authorized_keys` PATH (parent dir created,
+/// file itself absent until something writes it) -- mirrors
+/// `tests/ssh_authorize.rs`'s `temp_authorized_keys` helper so this test
+/// never touches a real `~/.ssh`.
+fn temp_authorized_keys(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("tt-station-reset-ssh-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir for authorized_keys fixture");
+    dir.join("authorized_keys")
+}
+
 /// Bind `state`'s router to an ephemeral port and serve it in the background,
 /// handing back the base URL. Mirrors `tests/control.rs`'s `serve`.
 async fn serve(state: AppState) -> String {
@@ -144,6 +155,67 @@ async fn reset_with_valid_bearer_stops_serving_resets_board_and_invalidates_toke
         .await
         .expect("status response was not valid JSON");
     assert_eq!(status_resp["status"], "idle");
+}
+
+/// `POST /reset` must also revoke every `ttstation:<label>`-tagged SSH key
+/// the pair flow ever installed (see `authkeys::revoke_all_ttstation`) --
+/// the whole point of the demo is that a reset costs the Mac its keyless
+/// SSH access, not just its bearer token. An unrelated, non-`ttstation`
+/// line (another app's key) must survive the reset untouched.
+#[tokio::test]
+async fn reset_revokes_all_ttstation_ssh_keys_but_keeps_unrelated_ones() {
+    let client = reqwest::Client::new();
+
+    let ssh_path = temp_authorized_keys("revokes-keys");
+    let runner = FakeRunner::new(0);
+    let state = fresh_state_with(runner).with_ssh_target(ssh_path.clone(), "ttuser".to_string());
+    let base = serve(state.clone()).await;
+    let token = pair(&client, &state, &base).await;
+
+    // Install a ttstation-tagged key (as the pair flow's SSH-authorize step
+    // would) and a manually-added, unrelated key with no ttstation marker.
+    let authorize_resp = client
+        .post(format!("{base}/ssh/authorize"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "public_key": "ssh-ed25519 AAAAMACKEY mac@laptop",
+            "label": "mac:2026-07-05"
+        }))
+        .send()
+        .await
+        .expect("POST /ssh/authorize failed");
+    assert_eq!(authorize_resp.status(), reqwest::StatusCode::OK);
+
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&ssh_path)
+            .expect("append unrelated key");
+        writeln!(f, "ssh-ed25519 AAAAOTHERAPP other-app@elsewhere").unwrap();
+    }
+
+    let body_before = std::fs::read_to_string(&ssh_path).expect("read authorized_keys");
+    assert!(body_before.contains("AAAAMACKEY"));
+    assert!(body_before.contains("AAAAOTHERAPP"));
+
+    let reset_resp = client
+        .post(format!("{base}/reset"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("POST /reset failed");
+    assert_eq!(reset_resp.status(), reqwest::StatusCode::OK);
+
+    let body_after = std::fs::read_to_string(&ssh_path).expect("read authorized_keys");
+    assert!(
+        !body_after.contains("AAAAMACKEY"),
+        "reset should revoke the ttstation-tagged key: {body_after:?}"
+    );
+    assert!(
+        body_after.contains("AAAAOTHERAPP"),
+        "reset must not touch unrelated, non-ttstation keys: {body_after:?}"
+    );
 }
 
 /// `POST /reset` without a bearer token must be rejected with 401 and must

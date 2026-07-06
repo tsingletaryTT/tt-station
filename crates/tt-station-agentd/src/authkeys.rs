@@ -268,6 +268,65 @@ fn line_matches(line: &str, which: &Revoke) -> bool {
     }
 }
 
+/// Remove every line in the `authorized_keys` file at `path` whose LAST
+/// whitespace-separated token *starts with* the `ttstation:` marker prefix
+/// (i.e. is a `ttstation:<label>` marker installed by [`authorize`],
+/// regardless of the label) -- used by `POST /reset` to revoke ALL
+/// keyless-SSH access this feature ever granted, not just one label.
+///
+/// Returns the number of lines removed. A missing file is not an error --
+/// nothing to revoke is the expected steady state -- and returns `Ok(0)`
+/// without creating anything. Any non-`ttstation:`-tagged line (another
+/// app's key, or a key a human added by hand) is preserved verbatim, in its
+/// original order.
+///
+/// Anchored the same way [`line_matches`]'s `Label` arm is anchored: on the
+/// LAST token, not a substring search over the whole line -- a comment that
+/// merely *contains* "ttstation:" somewhere without it being the line's own
+/// trailing marker token (e.g. `user@host-myttstation:app`) must not be
+/// treated as installed-by-us and removed.
+pub fn revoke_all_ttstation(path: &Path) -> anyhow::Result<usize> {
+    if !path.exists() {
+        // Nothing to revoke -- mirrors `revoke`'s "absent is success" rule.
+        return Ok(0);
+    }
+
+    let existing = read_existing(path)?;
+
+    let mut removed = 0usize;
+    let kept: Vec<&str> = existing
+        .lines()
+        .filter(|line| {
+            let is_ttstation_marker = line
+                .split_whitespace()
+                .last()
+                .map(|tok| tok.starts_with("ttstation:"))
+                .unwrap_or(false);
+            if is_ttstation_marker {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    if removed == 0 {
+        // Nothing changed -- avoid an unnecessary rewrite (and the perms
+        // churn that would come with it) when there was nothing to do.
+        return Ok(0);
+    }
+
+    let mut body = kept.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    fs::write(path, body)?;
+    set_file_perms(path)?;
+
+    Ok(removed)
+}
+
 /// Read `path`'s contents, treating "file does not exist" as an empty file
 /// (the natural starting state for `authorize`/`revoke` on a box that has
 /// never had this feature used) rather than an error.
@@ -453,6 +512,92 @@ mod tests {
         assert!(
             body2.contains("AAAAKEEP"),
             "unrelated line must still be preserved"
+        );
+    }
+
+    // --- revoke_all_ttstation ---------------------------------------------
+
+    /// Removes every `ttstation:<label>`-tagged line, keeps unrelated (other
+    /// apps'/manually-added) keys verbatim, and returns the count removed.
+    #[test]
+    fn revoke_all_ttstation_removes_only_tagged_lines_and_counts_them() {
+        let p = tmp("revoke-all-basic");
+        authorize(&p, "ssh-ed25519 AAAAONE one@mac", "mac:2026-01-01").unwrap();
+        authorize(&p, "ssh-ed25519 AAAATWO two@mac", "mac:2026-02-02").unwrap();
+        // An unrelated, manually-added line with no ttstation marker at all.
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&p).unwrap();
+            writeln!(f, "ssh-ed25519 AAAAOTHER other-app@elsewhere").unwrap();
+        }
+
+        let removed = revoke_all_ttstation(&p).unwrap();
+        assert_eq!(removed, 2);
+
+        let body = fs::read_to_string(&p).unwrap();
+        assert!(!body.contains("AAAAONE"));
+        assert!(!body.contains("AAAATWO"));
+        assert!(body.contains("AAAAOTHER"));
+    }
+
+    /// A file with no ttstation-tagged lines is left completely unchanged
+    /// and reports zero removed.
+    #[test]
+    fn revoke_all_ttstation_no_tagged_lines_is_noop() {
+        let p = tmp("revoke-all-noop");
+        fs::write(&p, "ssh-ed25519 AAAAOTHER other-app@elsewhere\n").unwrap();
+
+        let removed = revoke_all_ttstation(&p).unwrap();
+        assert_eq!(removed, 0);
+
+        let body = fs::read_to_string(&p).unwrap();
+        assert_eq!(body, "ssh-ed25519 AAAAOTHER other-app@elsewhere\n");
+    }
+
+    /// A missing file is not an error -- nothing to revoke is the expected
+    /// steady state on a box that never had this feature used.
+    #[test]
+    fn revoke_all_ttstation_missing_file_is_ok_zero() {
+        let p = tmp("revoke-all-missing");
+        assert!(!p.exists());
+        assert_eq!(revoke_all_ttstation(&p).unwrap(), 0);
+    }
+
+    /// Anchoring rule: a line whose comment merely *contains* the substring
+    /// "ttstation:" somewhere in the middle of its last token (not as the
+    /// token's own prefix forming a standalone marker) must NOT be removed.
+    /// Mirrors the anchoring `line_matches`' `Label` arm relies on, but here
+    /// the rule is "last token STARTS WITH ttstation:" rather than "last
+    /// token EQUALS ttstation:<one specific label>" since `revoke_all` has
+    /// no single label to match -- any well-formed marker qualifies.
+    #[test]
+    fn revoke_all_ttstation_does_not_match_unanchored_substring() {
+        let p = tmp("revoke-all-anchor");
+        // Last whitespace token is `user@host-myttstation:app` -- it merely
+        // *contains* "ttstation:" mid-token, it does not *start with* it.
+        fs::write(&p, "ssh-ed25519 AAAAKEEP user@host-myttstation:app\n").unwrap();
+
+        let removed = revoke_all_ttstation(&p).unwrap();
+        assert_eq!(removed, 0);
+
+        let body = fs::read_to_string(&p).unwrap();
+        assert!(body.contains("AAAAKEEP"));
+    }
+
+    /// Perms are still 0600 after a rewrite.
+    #[cfg(unix)]
+    #[test]
+    fn revoke_all_ttstation_keeps_perms_0600_after_rewrite() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let p = tmp("revoke-all-perms");
+        authorize(&p, "ssh-ed25519 AAAAPERM perm@mac", "mac:tag").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let removed = revoke_all_ttstation(&p).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 
