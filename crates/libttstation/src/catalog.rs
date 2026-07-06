@@ -249,6 +249,81 @@ fn live_only_entry(m: &ModelInfo) -> CatalogEntry {
     }
 }
 
+/// True if a catalog entry is the "clean" representation of a model: a real
+/// family (not the catch-all `"Other"`) and no `org/` prefix in its `id`. The
+/// upstream catalog ships two rows per model — a clean one
+/// (`id: "gpt-oss-120b"`, `family: "GPT-OSS"`) and an org-prefixed twin
+/// (`id: "openai/gpt-oss-120b"`, `family: "Other"`) — and when we collapse the
+/// twins we keep the clean one's display metadata.
+fn is_clean_entry(m: &CompatModel) -> bool {
+    !m.id.contains('/') && !m.family.is_empty() && !m.family.eq_ignore_ascii_case("other")
+}
+
+/// Collapse catalog entries that [`normalize_key`]-match into one entry each,
+/// so a model that ships as two upstream rows (a clean row + an org-prefixed
+/// `"Other"` twin — see [`is_clean_entry`]) is not classified and rendered
+/// twice. Without this, both twins match the same live model, both get
+/// `available_now`, and both land in `runs_here` (the duplicate "70B" rows the
+/// user reported, plus a spurious `"Other"` family group).
+///
+/// For each key group, in first-appearance order (so output ordering stays
+/// deterministic): pick the display metadata (`id`/`display_name`/`family`)
+/// from the clean twin if there is one, else the twin whose `id` has no `/`,
+/// else the first; take `model_size` from whichever twin carries it; and keep
+/// the UNION of every twin's `compatibility` rows (deduped) so no per-hardware
+/// coverage is lost when the two rows differ.
+fn dedupe_catalog_models(models: &[CompatModel]) -> Vec<CompatModel> {
+    use std::collections::HashMap;
+    let key_of = |m: &CompatModel| {
+        normalize_key(if !m.id.is_empty() {
+            &m.id
+        } else {
+            &m.display_name
+        })
+    };
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<&CompatModel>> = HashMap::new();
+    for m in models {
+        let key = key_of(m);
+        groups.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            Vec::new()
+        });
+        groups.get_mut(&key).unwrap().push(m);
+    }
+
+    let mut out = Vec::with_capacity(order.len());
+    for key in &order {
+        let members = &groups[key];
+        // Prefer the clean twin's metadata, then a no-slash id, then the first.
+        let base = members
+            .iter()
+            .copied()
+            .find(|m| is_clean_entry(m))
+            .or_else(|| members.iter().copied().find(|m| !m.id.contains('/')))
+            .unwrap_or(members[0]);
+
+        let mut merged = base.clone();
+        // Union all twins' compatibility rows (base's already present), deduped.
+        for m in members {
+            if std::ptr::eq(*m, base) {
+                continue;
+            }
+            for hc in &m.compatibility {
+                if !merged.compatibility.contains(hc) {
+                    merged.compatibility.push(hc.clone());
+                }
+            }
+        }
+        // Fill a missing size from any twin that has one.
+        if merged.model_size.is_none() {
+            merged.model_size = members.iter().find_map(|m| m.model_size.clone());
+        }
+        out.push(merged);
+    }
+    out
+}
+
 /// Merge the public compatibility catalog with a box's live `/models` into
 /// the three tiers the `tt catalog` command and the macOS model picker
 /// render (see [`BoxCatalog`]):
@@ -326,7 +401,10 @@ pub fn classify(
     let mut experimental = Vec::new();
     let mut other_hardware = Vec::new();
 
-    for model in &catalog.models {
+    // Collapse the catalog's twin rows (clean + org-prefixed "Other") so each
+    // model is classified once — see `dedupe_catalog_models`.
+    let deduped = dedupe_catalog_models(&catalog.models);
+    for model in &deduped {
         // Distinct mapped meshes this model has a Supported/Experimental
         // entry for, in catalog order, paired with the strongest status
         // seen for that mesh (Supported beats Experimental if a mesh
@@ -538,6 +616,50 @@ mod tests {
         assert_eq!(normalize_key("Qwen/Qwen3-8B"), "qwen3-8b");
         assert_eq!(normalize_key("Qwen3-8B"), "qwen3-8b");
         assert_eq!(normalize_key("bge_large en.v1.5"), "bge-large-en-v1-5");
+    }
+
+    #[test]
+    fn classify_dedupes_catalog_entries_with_same_normalized_key() {
+        // The upstream catalog ships two rows per model: a clean one
+        // (id "llama-3-3-70b-instruct", family "Llama") and an org-prefixed
+        // twin (id "meta-llama/llama-3-3-70b-instruct", family "Other") that
+        // normalize_key-collapse to the same key. Both are Supported+TIS on
+        // this box, so without dedupe BOTH land in runs_here — the duplicate
+        // "70B" rows (and the bogus "Other" family group) the user saw.
+        let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
+          {"id":"llama-3-3-70b-instruct","display_name":"Llama-3.3-70B-Instruct","family":"Llama","tasks":[],"model_size":"70B","compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Supported","software":["tt-inference-server"]}]},
+          {"id":"meta-llama/llama-3-3-70b-instruct","display_name":"meta llama/Llama 3.3 70B Instruct","family":"Other","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Supported","software":["tt-inference-server"]}]}
+        ]}"#).unwrap();
+        let bc = classify(Some(&cat), &[], Some("p300x2"), false);
+        // Exactly one runs_here entry, and it's the CLEAN one (real family,
+        // no org/ prefix in the id), not the "Other" twin.
+        assert_eq!(bc.runs_here.len(), 1, "duplicate not collapsed: {bc:?}");
+        assert_eq!(bc.runs_here[0].id, "llama-3-3-70b-instruct");
+        assert_eq!(bc.runs_here[0].family, "Llama");
+        assert_eq!(bc.runs_here[0].display_name, "Llama-3.3-70B-Instruct");
+        // Size is preserved from whichever twin carried it.
+        assert_eq!(bc.runs_here[0].size.as_deref(), Some("70B"));
+        assert!(bc.experimental.is_empty() && bc.other_hardware.is_empty());
+    }
+
+    #[test]
+    fn classify_dedupe_unions_compatibility_across_twins() {
+        // When collapsing twins, keep BOTH twins' compatibility rows so no
+        // hardware coverage is lost: the clean twin is Supported+TIS only on
+        // Galaxy (other hardware for a p300x2 box), while the "Other" twin
+        // adds the Quietbox 2 Experimental row. The merged entry must reflect
+        // the union — here that makes it Experimental on THIS box.
+        let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
+          {"id":"m","display_name":"M","family":"Fam","tasks":[],"compatibility":[{"hardware":"Galaxy","chip_set":"","hardware_family":"","status":"Supported","software":["tt-inference-server"]}]},
+          {"id":"org/m","display_name":"org/M","family":"Other","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Experimental","software":["tt-inference-server"]}]}
+        ]}"#).unwrap();
+        let bc = classify(Some(&cat), &[], Some("p300x2"), false);
+        assert!(bc.runs_here.is_empty());
+        assert_eq!(bc.experimental.len(), 1, "twins not merged: {bc:?}");
+        assert_eq!(bc.experimental[0].id, "m");
+        // Union of meshes across twins: Galaxy→T3K and Quietbox 2→P300X2.
+        assert!(bc.experimental[0].meshes.contains(&"T3K".to_string()));
+        assert!(bc.experimental[0].meshes.contains(&"P300X2".to_string()));
     }
 
     #[test]
