@@ -7,19 +7,26 @@ import TTStationKit
 /// "Serving" block in the pre-card `BoxWorkspaceView`.
 ///
 /// Takes the entries directly (not the box) so it stays a pure display
-/// card: the composing view decides when to show it (Task 14 will likely
-/// gate on `!box.serving.isEmpty`, matching the extracted block's own
-/// `if !box.serving.isEmpty` guard) and this view doesn't have to duplicate
-/// that policy.
+/// card: the composing view decides when to show it.
+///
+/// **Empty-guard (window redesign Task 5):** `BoxWorkspaceView` now passes
+/// `box.serving` filtered to exclude whatever endpoint the pinned
+/// `RunStopBar` already shows, so this card only ever adds entries the bar
+/// doesn't cover (an external tt-studio container, etc). Once that agent
+/// endpoint is filtered out, an idle/solo-agent box would otherwise show an
+/// empty "Nothing is currently serving..." card directly under a bar that's
+/// already saying exactly that — pure noise. So this view now renders
+/// nothing at all when `entries` is empty, instead of an empty-state
+/// message; the call site no longer needs its own `if !entries.isEmpty`
+/// wrapper because `EmptyView` costs nothing to lay out.
 struct ServingCardView: View {
     let entries: [ServingEntry]
 
     var body: some View {
-        CardContainer(title: "Serving") {
-            if entries.isEmpty {
-                Text("Nothing is currently serving on this box.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } else {
+        if entries.isEmpty {
+            EmptyView()
+        } else {
+            CardContainer(title: "Serving") {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(entries, id: \.hostPort) { entry in
                         VStack(alignment: .leading, spacing: 2) {

@@ -70,7 +70,19 @@ struct BoxWorkspaceView: View {
 
                 WorkbenchCardView(box: box, launcher: launcher)
 
-                ServingCardView(entries: box.serving)
+                // De-dup against the pinned RunStopBar above, which already
+                // shows this box's agent-served model + endpoint. Filtering
+                // by `baseURL` (not just source) means the card only ever
+                // adds entries the bar doesn't already cover — e.g. an
+                // external tt-studio container, or (in theory) a second
+                // agent-served endpoint on a different port. `box.endpoint`
+                // is nil while idle; `.map { ... } ?? true` makes the filter
+                // a no-op in that case (every `/serving` entry still shows)
+                // instead of a `String` vs `String?` comparison that
+                // wouldn't compile directly.
+                ServingCardView(entries: box.serving.filter { entry in
+                    box.endpoint.map { entry.baseURL != $0.baseURL } ?? true
+                })
             }
 
             // Shown at top level (not inside the pairing branch) because

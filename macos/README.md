@@ -8,13 +8,21 @@ quick actions (status, Run/Stop, a live temp chip, "Open window"), backed by a r
 - **Live device strip** — per-device temperature / power / aiclk, streamed from the agent's
   `/telemetry` WebSocket (the single read-only I/O path in Swift; all *control* still goes
   through `tt --json`). Temp is color-ramped; `Open tt-toplike ↗` for the deep view.
-- **Hardware-aware model browser (3 tiers)** — merges the box's live `/models` with the
-  public Tenstorrent compatibility catalog (`compatibility.json`, fetched + 24h-cached by
-  `tt`), classified for this box's mesh into **Runs on this box** (runnable), **Experimental**
-  (supported-with-more-setup — "bring these up with the tools", links to the Workbench), and
-  **Needs other hardware** (labeled with the mesh each needs). Only runnable models are
-  Run-enabled; the smart default is compatible-first. Degrades to just the box's live models
-  when the catalog is offline. Meshes include **P150 x1–x4** and P300/N300/T3K/GALAXY.
+- **Persistent Run/Stop action bar** — pinned below the scroll (`RunStopBar`), always
+  visible regardless of scroll position. It's the single owner of the "what's this box
+  serving right now, and at what endpoint" display — model picker, **Run / Stop**, and the
+  live endpoint once serving. (Used to live inline with the model browser; the window
+  redesign pulled it out so it never scrolls out of view.)
+- **Hardware-aware, tt-inference-server-focused model browser (3 tiers)** — merges the
+  box's live `/models` with the public Tenstorrent compatibility catalog
+  (`compatibility.json`, fetched + 24h-cached by `tt`), classified for this box's mesh. The
+  primary **Models** tier is what the box can actually serve today via `run.py` (vLLM,
+  runnable now); tt-forge/tt-metal-supported-but-not-run.py-servable models surface under
+  **Experimental** (bring these up with the tools — links to the Workbench) alongside other
+  supported-with-more-setup entries; **Needs other hardware** is labeled with the mesh each
+  needs. Only runnable models are Run-enabled; the smart default is compatible-first.
+  Degrades to just the box's live models when the catalog is offline. Meshes include
+  **P150 x1–x4** and P300/N300/T3K/GALAXY.
 - **Config card** — a read-only summary of the box's resolved serving config (active
   profile + other available ones, backend, `serving_host:port`, image, device), from the
   unauthed `tt --json config` read. **Switching profiles happens on the box panel, not
@@ -30,8 +38,8 @@ quick actions (status, Run/Stop, a live temp chip, "Open window"), backed by a r
   key is tagged (`ttstation:<host>:<date>`) and revocable (`tt ssh-authorize --host <h>
   --revoke`). The SSH step is non-fatal — a pair that can't set up SSH still pairs.
 
-**Status:** v0.5.0 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
-(104 passing tests via `swift test`; ranking, mesh-match, telemetry decode, install-command
+**Status:** v0.6.0 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
+(130 passing tests via `swift test`; ranking, mesh-match, telemetry decode, install-command
 builders, and the `ttuser` SSH default are pure and unit-tested); the SwiftUI app target is
 generated with XcodeGen and builds clean. End-to-end verifiable against `mock-box` (no
 hardware — it reports `device_mesh`, streams a canned telemetry frame, and serves
