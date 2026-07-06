@@ -140,7 +140,7 @@ struct ModelBrowserView: View {
     ) -> some View {
         LazyVStack(alignment: .leading, spacing: 2, pinnedViews: [.sectionHeaders]) {
             if !runsHere.isEmpty {
-                tierHeader("Runs on this box")
+                primaryTierHeader
                 ForEach(groupEntriesByFamily(runsHere), id: \.family) { group in
                     Section {
                         ForEach(group.entries, id: \.id) { runsHereRow($0) }
@@ -173,6 +173,25 @@ struct ModelBrowserView: View {
                     }
                 }
             }
+        }
+    }
+
+    /// Catalog-mode header for the primary (runsHere) tier. Labeled "Models"
+    /// rather than "Runs on this box" — Task 1 narrowed `runsHere` to
+    /// tt-inference-server-servable entries only (tt-forge/tt-metal
+    /// "supported on this mesh" models now live in Experimental), so this is
+    /// the box's actual tt-inference-server model list, not a general
+    /// "compatible with this hardware" claim. The caption underneath names
+    /// that engine explicitly so the demo reads "these are the models this
+    /// box serves [via tt-inference-server]" at a glance. The fallback
+    /// (no-catalog) tier keeps the old "Runs on this box" wording — see
+    /// `fallbackListBody` — because without a catalog there's no TIS/mesh
+    /// split to claim.
+    private var primaryTierHeader: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            tierHeader("Models")
+            Text("tt-inference-server")
+                .font(.caption2).foregroundStyle(.secondary)
         }
     }
 
@@ -248,33 +267,51 @@ struct ModelBrowserView: View {
         return Button {
             box.selectedModel = runnableId
         } label: {
-            HStack(alignment: .top, spacing: 6) {
+            HStack(alignment: .center, spacing: 6) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.caption)
                     .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(spacing: 4) {
-                        Text(entry.displayName).font(.caption)
-                        if entry.availableNow {
-                            // Subtle "ready" mark, not a loud badge: a small
-                            // dot in the same green the app already uses for
-                            // "serving" elsewhere (TTTheme.statusServing), so
-                            // it reads as "known-good" without competing with
-                            // the checkmark that shows actual selection.
-                            Circle()
-                                .fill(TTTheme.statusServing)
-                                .frame(width: 5, height: 5)
-                                .help("Ready to run now")
-                        }
-                    }
-                    if let size = entry.size {
-                        Text(size).font(.caption2).foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text(entry.displayName).font(.callout.weight(.medium))
+                    if entry.availableNow {
+                        // Subtle "ready" mark, not a loud badge: a small dot
+                        // in the same green the app already uses for
+                        // "serving" elsewhere (TTTheme.statusServing), so it
+                        // reads as "known-good" without competing with the
+                        // checkmark that shows actual selection.
+                        Circle()
+                            .fill(TTTheme.statusServing)
+                            .frame(width: 5, height: 5)
+                            .help("Ready to run now")
                     }
                 }
-                Spacer(minLength: 0)
+                if let size = entry.size {
+                    Spacer(minLength: 8)
+                    // Compact size chip (e.g. "8B") — monospaced for the
+                    // number/unit shape, a subtle capsule so it reads as
+                    // metadata rather than another label competing with the
+                    // model name. `TTTheme.mono` itself is pinned to
+                    // `.caption` size (see its doc comment), so a caption2
+                    // chip needs its own `.system(.caption2, design:
+                    // .monospaced)` rather than layering a second `.font()`
+                    // on top of `TTTheme.mono` — the second call would just
+                    // overwrite the first and silently drop the monospaced
+                    // design.
+                    Text(size)
+                        .font(.system(.caption2, design: .monospaced))
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.15))
+                        .clipShape(Capsule())
+                } else {
+                    Spacer(minLength: 0)
+                }
             }
+            .padding(.vertical, 4).padding(.horizontal, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+            )
             .contentShape(Rectangle())
-            .padding(.vertical, 2).padding(.horizontal, 4)
         }
         .buttonStyle(.plain)
         .help("Select \(entry.displayName)")
