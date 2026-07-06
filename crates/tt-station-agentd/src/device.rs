@@ -89,7 +89,7 @@ mod tests {
     fn maps_p150_counts() {
         let f = |n: usize| {
             let entry = r#"{"board_info":{"board_type":"p150"}}"#;
-            let arr = std::iter::repeat(entry).take(n).collect::<Vec<_>>().join(",");
+            let arr = std::iter::repeat_n(entry, n).collect::<Vec<_>>().join(",");
             format!(r#"{{"device_info":[{arr}]}}"#)
         };
         assert_eq!(detect_device_mesh(&f(1)).as_deref(), Some("p150"));
