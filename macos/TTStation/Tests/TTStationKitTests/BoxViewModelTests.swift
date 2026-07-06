@@ -332,14 +332,22 @@ final class BoxViewModelTests: XCTestCase {
     }
 
     // MARK: - Cancel-a-load
+    //
+    // Cancel must return the UI to a usable idle state INSTANTLY -- it must
+    // NEVER block on the in-flight `run()`, which wraps `tt run` (up to a
+    // 600s timeout gated on the agent's health-poll, which does not abort
+    // promptly just because the container died). The fix is a run-generation
+    // guard: `cancelStart()` bumps `runGeneration`, snaps the VM back to idle
+    // right away, and fires the agent-side `stop()` in the background
+    // (fire-and-forget). `run()`'s own completion checks its captured
+    // generation against the current one and is a no-op if it's been
+    // superseded by a cancel (or a newer `run()`) -- so a stale run's late
+    // success/failure can never clobber the state cancel already landed.
 
-    /// The only real way to abort an in-progress `run()` is to tell the agent
-    /// to `stop` -- that makes the container spin-up fail fast. This test
-    /// drives a genuinely in-flight `run()` (gated by `FakeTTClient.gateRun`),
-    /// calls `cancelStart()` while it's still awaiting, and confirms: (a) it
-    /// calls through to `stop`, (b) the load, once released with an
-    /// agent-abort-shaped error, unwinds into a clean idle state rather than
-    /// surfacing the abort as a user-facing error.
+    /// Calling `cancelStart()` while a load is genuinely in flight (gated via
+    /// `FakeTTClient.gateRun`) must return the VM to idle IMMEDIATELY --
+    /// asserted WITHOUT releasing the gated run, so this can only pass if
+    /// cancel doesn't wait on it -- and fire `stop()` in the background.
     func testCancelStartAbortsLoadViaStopAndLandsIdle() async {
         let client = FakeTTClient()
         client.gateRun = true
@@ -357,35 +365,37 @@ final class BoxViewModelTests: XCTestCase {
         XCTAssertTrue(vm.canStopOrCancel)
 
         await vm.cancelStart()
-        XCTAssertTrue(client.stopCalled)
-        XCTAssertTrue(vm.cancelling)
-        XCTAssertEqual(vm.status, .idle)
-        // While a cancel is genuinely in progress, the primary control must
-        // be disabled -- no double-firing stop/cancel on top of it.
-        XCTAssertFalse(vm.canStopOrCancel)
 
-        // Simulate the agent aborting the spin-up: the in-flight `run()`
-        // fails fast with a command-failure once `stop` has killed the
-        // container being spun up.
-        client.runError = .commandFailed(command: ["run"], exitCode: 1, stderr: "aborted")
-        client.releaseRun()
-        await runTask.value
-
-        XCTAssertEqual(vm.status, .idle)
-        XCTAssertNil(vm.endpoint)
-        XCTAssertNil(vm.errorText)
-        XCTAssertFalse(vm.cancelling)
+        // Instant idle -- the gated run is still suspended at this point, so
+        // these can only be true if cancel doesn't wait for it to unwind.
         XCTAssertFalse(vm.starting)
         XCTAssertFalse(vm.inFlight)
+        XCTAssertFalse(vm.cancelling)
+        XCTAssertEqual(vm.status, .idle)
+        XCTAssertNil(vm.endpoint)
+        XCTAssertNotNil(vm.selectedModel) // Run is immediately usable again.
+
+        // `stop()` fires in a detached Task, so it may land a beat after
+        // `cancelStart()` returns -- poll (bounded) instead of a synchronous
+        // assertion, which would be racy.
+        var stopSeen = false
+        for _ in 0..<50 {
+            if client.stopCalled { stopSeen = true; break }
+            await Task.yield()
+        }
+        XCTAssertTrue(stopSeen)
+
+        // Let the abandoned run actually finish so the Task doesn't leak
+        // past this test; its outcome is asserted in the next test.
+        client.releaseRun()
+        await runTask.value
     }
 
-    /// Race between a user-initiated cancel and the load actually succeeding:
-    /// `cancelStart()` fires `stop()` while `run()` is still in flight, but
-    /// the fake's `run()` resolves with a SUCCESSFUL endpoint (not an error)
-    /// once released. `run()`'s success branch must still honor `cancelling`
-    /// -- landing on clean idle -- rather than unconditionally reporting
-    /// `.serving`, which would silently override the user's cancel while
-    /// `stop()` is tearing the container down underneath it.
+    /// The abandoned run's eventual completion -- even a SUCCESSFUL endpoint
+    /// -- must never clobber the idle state cancel already landed. This is
+    /// exactly what the run-generation guard exists to prevent: without it, a
+    /// superseded `run()` finishing after cancel would silently flip the VM
+    /// back to "serving".
     func testCancelHonoredWhenRunSucceedsDuringCancel() async {
         let client = FakeTTClient()
         client.gateRun = true
@@ -393,26 +403,22 @@ final class BoxViewModelTests: XCTestCase {
         vm.selectedModel = "Qwen3-8B"
 
         let runTask = Task { await vm.run() }
-
         while !client.runIsWaiting {
             await Task.yield()
         }
         XCTAssertTrue(vm.starting)
 
         await vm.cancelStart()
-        XCTAssertTrue(client.stopCalled)
-        XCTAssertTrue(vm.cancelling)
-
-        // Cancel is genuinely in progress: the primary control must be
-        // disabled so the user can't double-fire stop/cancel.
-        XCTAssertFalse(vm.canStopOrCancel)
+        XCTAssertEqual(vm.status, .idle)
+        XCTAssertFalse(vm.starting)
 
         // Release the gated run with a SUCCESS outcome (no runError) -- the
         // load actually completed just as/after cancel fired.
         client.releaseRun()
         await runTask.value
 
-        // Cancel must win: idle, not serving, no leftover endpoint/error.
+        // Cancel must win: idle, not serving, no leftover endpoint/error --
+        // the superseded run's success was ignored via the generation guard.
         XCTAssertEqual(vm.status, .idle)
         XCTAssertNil(vm.endpoint)
         XCTAssertNil(vm.errorText)
@@ -435,6 +441,10 @@ final class BoxViewModelTests: XCTestCase {
         let (vm, _) = makeVM()
         XCTAssertFalse(vm.canStopOrCancel)
         vm.status = .serving(model: "m")
+        XCTAssertTrue(vm.canStopOrCancel)
+        vm.status = .idle
+        XCTAssertFalse(vm.canStopOrCancel)
+        vm.starting = true
         XCTAssertTrue(vm.canStopOrCancel)
     }
 

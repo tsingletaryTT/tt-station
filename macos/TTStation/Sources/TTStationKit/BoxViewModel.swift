@@ -37,14 +37,12 @@ public final class BoxViewModel: Identifiable {
     /// the amber "starting" status dot and the "Starting <model>…" message,
     /// which are additive to (and never mutate) the existing `status` logic.
     public var starting = false
-    /// True from the moment `cancelStart()` decides to abort an in-progress
-    /// load until the in-flight `run()` actually unwinds. Distinguishes a
-    /// user-initiated cancel from a plain load failure so `run()`'s `catch`
-    /// can land on a clean idle state instead of surfacing the agent's
-    /// abort-induced error, and so the UI can show "Canceling…" instead of
-    /// "Starting…". Cleared by `run()`'s own `defer`, not reset here — the
-    /// flag must still be visible inside `run()`'s `catch` block for the
-    /// unwind to take the cancel branch.
+    /// Historically tracked an in-progress cancel while the UI waited for the
+    /// abandoned `run()` to unwind. Cancel is now instant (see
+    /// `cancelStart()`), so this is only ever transiently set — it stays
+    /// around because `RunStopBar`/`BoxDetailView` still reference it for the
+    /// (now effectively unreachable) "Canceling…" line, and dropping it would
+    /// be a bigger view diff than this fix calls for.
     public var cancelling = false
     public var errorText: String?
     /// Non-nil once `startPairing()` has minted a pairing session and the
@@ -90,6 +88,13 @@ public final class BoxViewModel: Identifiable {
 
     private let commands: TTCommands
     private let registry: HostRegistry
+    /// Bumped by every `run()` call and by `cancelStart()`. `run()` captures
+    /// its own value at the start and checks it again after `commands.run`
+    /// returns/throws — a mismatch means a cancel (or a newer `run()`)
+    /// superseded this call while it was in flight, so its completion must
+    /// be a no-op rather than clobbering state a cancel (or the newer run)
+    /// already landed. See `run()` and `cancelStart()`.
+    private var runGeneration = 0
 
     public init(record: BoxRecord, commands: TTCommands, registry: HostRegistry) {
         self.record = record
@@ -288,40 +293,34 @@ public final class BoxViewModel: Identifiable {
 
     public func run() async {
         guard let model = selectedModel else { errorText = "Pick a model first."; return }
-        // `starting` reflects the spin-up window (amber dot); `inFlight`
-        // continues to gate the buttons. Both clear together on completion,
-        // and so does `cancelling` -- it's cleared here (not at the top of
-        // `run()`) so a cancel set *during* the in-flight await below is
-        // still visible to the `catch` branch that unwinds it.
-        inFlight = true; starting = true
-        defer { inFlight = false; starting = false; cancelling = false }
-        do {
-            let ep = try await commands.run(host: record.hostPort, model: model)
-            if cancelling {
-                // Cancel landed during/just before the load actually
-                // succeeding: `cancelStart()` already told the agent to
-                // `stop`, which is tearing the container down concurrently.
-                // Reporting `.serving` here would silently override the
-                // user's cancel until the next refresh -- land on the same
-                // clean idle state the abort-failure branch below produces.
-                status = .idle; endpoint = nil; errorText = nil
-            } else {
-                endpoint = ep
-                status = .serving(model: model)
-                // Persist the choice so this box defaults to it next time.
-                registry.setLastModel(model, forHost: record.hostPort)
-                errorText = nil
-            }
-        } catch {
-            if cancelling {
-                // User-initiated abort via cancelStart(): the agent's `stop`
-                // made this in-flight run fail fast. That's success from the
-                // user's point of view, not an error -- land on a clean idle
-                // state instead of surfacing the abort as a failure.
-                status = .idle; endpoint = nil; errorText = nil
-            } else {
-                record(error)
-            }
+        // Claim a new generation for this call. `cancelStart()` (or a newer
+        // `run()`) bumping `runGeneration` past `myGen` is how a stale call
+        // gets abandoned -- see the guard below.
+        runGeneration += 1
+        let myGen = runGeneration
+        inFlight = true; starting = true; cancelling = false
+        // Deliberately NO `defer` here: `commands.run` wraps `tt run`, which
+        // can block for up to its 600s timeout (the agent's `/run` health-
+        // poll does not abort promptly just because `stop` killed the
+        // container underneath it). A `defer` would unconditionally clobber
+        // `inFlight`/`starting`/`status` whenever this call eventually
+        // returns -- including long after a cancel (or a newer `run()`) has
+        // already moved the VM on. The generation guard below makes that
+        // stale completion a no-op instead.
+        let result: Result<Endpoint, Error>
+        do { result = .success(try await commands.run(host: record.hostPort, model: model)) }
+        catch { result = .failure(error) }
+        guard myGen == runGeneration else { return } // superseded — ignore.
+        inFlight = false; starting = false; cancelling = false
+        switch result {
+        case .success(let ep):
+            endpoint = ep
+            status = .serving(model: model)
+            // Persist the choice so this box defaults to it next time.
+            registry.setLastModel(model, forHost: record.hostPort)
+            errorText = nil
+        case .failure(let error):
+            record(error)
         }
     }
 
@@ -335,16 +334,23 @@ public final class BoxViewModel: Identifiable {
         } catch { record(error) }
     }
 
-    /// Cancel an in-progress model load: tell the agent to abort the spin-up
-    /// (`stop`), which makes the in-flight `run()` fail fast and unwind into
-    /// its `cancelling` branch above → clean idle. No-op unless a load is
-    /// actually starting (there's nothing to cancel otherwise), and no-op if
-    /// a cancel is already under way (don't double-fire `stop`).
+    /// Cancel an in-progress model load. Returns the UI to a usable idle
+    /// state IMMEDIATELY — it does NOT wait for the (un-cancellable, up-to-
+    /// 600s) `tt run` to return. Bumping `runGeneration` abandons that
+    /// in-flight `run()` so its late completion is ignored (see `run()`'s
+    /// guard). The agent-side `stop` (which actually tears the load down) is
+    /// fired best-effort in the background so the UI is never coupled to it
+    /// -- `tt stop` can itself block behind the agent's in-flight `/run`.
+    /// No-op unless a load is actually starting (there's nothing to cancel
+    /// otherwise).
     public func cancelStart() async {
-        guard starting, !cancelling else { return }
-        cancelling = true
-        status = .idle // dot stops amber immediately; run()'s defer clears starting/inFlight when it returns.
-        try? await commands.stop(host: record.hostPort)
+        guard starting else { return }
+        runGeneration += 1 // abandon the in-flight run()
+        inFlight = false; starting = false; cancelling = false
+        status = .idle; endpoint = nil; errorText = nil
+        let commands = self.commands
+        let host = record.hostPort
+        Task { try? await commands.stop(host: host) } // best-effort, backgrounded
     }
 
     /// The primary stop/cancel control is available while a load is starting
