@@ -139,6 +139,24 @@ The commands the app drives (all accept a global `--json`):
 Tokens are stored in the macOS **Keychain** by the CLI (service `tt-station`), so the app
 does not handle secrets directly.
 
+### Opt out of the Keychain (stop the "tt wants to use tt-station" prompt)
+
+The Keychain prompt recurs when `tt` is rebuilt: an **ad-hoc-signed** binary's code identity
+(`CDHash`) changes every build, and macOS binds a "Always Allow" grant to that identity — so
+each rebuild invalidates it. To skip the Keychain entirely, opt into the file-backed token
+store (a `0600` JSON at `~/.config/tt-station/secrets.json`, the same store `tt` uses on
+Linux/CI):
+
+    printf 'file' > ~/.config/tt-station/secret_store   # or set TT_SECRET_STORE=file
+
+Use a **marker file** (not just the env var) so the Finder-launched app's `tt` subprocess
+agrees with terminal `tt` — Finder doesn't inherit shell env, so an env-only opt-in would
+split the two into different stores. The default is unchanged (Keychain on macOS) unless you
+opt in. Switching stores means **re-pairing each box once** (the old Keychain token isn't
+read from the file store). Revert with `printf 'keychain' > ~/.config/tt-station/secret_store`
+or deleting the marker. (The real fix for keeping the Keychain across rebuilds is to sign
+`tt` with a stable self-signed identity instead of ad-hoc — not done yet.)
+
 ## What the menu should show (Task 14 scope)
 
 - Discovered boxes, each with a **status dot** (green = serving, grey = idle) and its chips.
