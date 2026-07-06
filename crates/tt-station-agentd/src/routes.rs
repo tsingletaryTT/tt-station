@@ -1253,12 +1253,15 @@ async fn telemetry_ws(
     axum::extract::State(state): axum::extract::State<AppState>,
     RawQuery(query): RawQuery,
 ) -> Response {
-    // `?view=lite` opts a client (the remote-QuietBox tt-toplike view, per
-    // `TT_TOPLIKE_STREAM.md`) into the trimmed dashboard-only frame -- no
-    // process scan, no vLLM scrape. A bare string-split rather than a typed
-    // `Query<T>` extractor: this is one boolean flag, not worth a serde
-    // struct. Any malformed/missing query just means `lite == false`, i.e.
-    // today's full frame -- the safe default.
+    // `?view=lite` opts a client into the trimmed dashboard-only frame -- no
+    // process scan, no vLLM scrape (see `telemetry::lite_frame`). The macOS
+    // app's device strip / temp chip request this. tt-toplike does the
+    // OPPOSITE: it wants the full frame WITH the `tt_toplike` process/inference
+    // enrichment (see `TT_TOPLIKE_STREAM.md`), so it connects to plain
+    // `/telemetry` (no query) and must NOT pass `?view=lite`. A bare
+    // string-split rather than a typed `Query<T>` extractor: this is one
+    // boolean flag, not worth a serde struct. Any malformed/missing query just
+    // means `lite == false`, i.e. today's full frame -- the safe default.
     let lite = query
         .as_deref()
         .map(|q| q.split('&').any(|kv| kv == "view=lite"))

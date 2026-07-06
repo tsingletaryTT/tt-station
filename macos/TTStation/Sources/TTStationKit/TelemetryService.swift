@@ -58,7 +58,10 @@ public final class TelemetryService {
     /// with the exact arguments passed in, before any URL-building or
     /// connection work happens. `nil` in production — exists purely so
     /// `BoxViewModelTests` can observe ref-counted subscribe/unsubscribe
-    /// behavior (start-once, stop-at-zero) without opening a real socket.
+    /// behavior (start-once, stop-at-zero). Note the real `start`/`stop` logic
+    /// still runs after the hook, so a test that drives subscribe/unsubscribe
+    /// does spawn (and then cancel) a real `URLSessionWebSocketTask` — harmless
+    /// against an unresolvable test host, but it is not a mock/no-op socket.
     /// Never assigned outside tests; leaving it nil is a no-op.
     public var onStart: ((String, Int, Bool) -> Void)?
 
