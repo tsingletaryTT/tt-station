@@ -8,6 +8,18 @@ quick actions (status, Run/Stop, a live temp chip, "Open window"), backed by a r
 - **Live device strip** — per-device temperature / power / aiclk, streamed from the agent's
   `/telemetry` WebSocket (the single read-only I/O path in Swift; all *control* still goes
   through `tt --json`). Temp is color-ramped; `Open tt-toplike ↗` for the deep view.
+  The dashboard requests `GET /telemetry?view=lite` — a trimmed per-device
+  temp/power/aiclk frame; the box skips its process scan and vLLM scrape for lite
+  clients. **tt-toplike** instead opens the full `GET /telemetry` (no query), which
+  carries the `tt_toplike` process/inference enrichment on top. The lite frame is a
+  strict subset of the full tt-smi-ish shape, so an older agent that doesn't know
+  `?view=lite` yet just sends the full frame — the app decodes it the same way either
+  way, so nothing breaks pre-redeploy; the box load reduction only kicks in once the
+  agent understands the query. The app opens **one shared telemetry socket per box**
+  (ref-counted on `BoxViewModel`) so the window's device strip and the popover chip
+  both ride the same connection instead of doubling it. `mock-box` honors
+  `?view=lite` too (a trimmed canned frame, no `tt_toplike`), so this path is
+  exercisable with no hardware.
 - **Persistent Run/Stop action bar** — pinned below the scroll (`RunStopBar`), always
   visible regardless of scroll position. It's the single owner of the "what's this box
   serving right now, and at what endpoint" display — model picker, **Run / Stop**, and the
@@ -38,7 +50,7 @@ quick actions (status, Run/Stop, a live temp chip, "Open window"), backed by a r
   key is tagged (`ttstation:<host>:<date>`) and revocable (`tt ssh-authorize --host <h>
   --revoke`). The SSH step is non-fatal — a pair that can't set up SSH still pairs.
 
-**Status:** v0.6.0 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
+**Status:** v0.6.2 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
 (130 passing tests via `swift test`; ranking, mesh-match, telemetry decode, install-command
 builders, and the `ttuser` SSH default are pure and unit-tested); the SwiftUI app target is
 generated with XcodeGen and builds clean. End-to-end verifiable against `mock-box` (no

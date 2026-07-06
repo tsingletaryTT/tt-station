@@ -19,7 +19,7 @@
 use anyhow::{Context, Result};
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::State,
+    extract::{RawQuery, State},
     http::StatusCode,
     response::Response,
     routing::{get, post},
@@ -424,30 +424,53 @@ const TELEMETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// what's reviewed here.
 const TELEMETRY_FRAME: &str = r#"{"device_info":[{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"61.4","power":"85.2","aiclk":"1000"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"58.0","power":"72.6","aiclk":"950"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"60.2","power":"79.8","aiclk":"900"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"55.7","power":"58.3","aiclk":"850"}}]}"#;
 
+/// The trimmed counterpart to [`TELEMETRY_FRAME`], sent when a client asks
+/// for `GET /telemetry?view=lite` -- mirrors the real agent's
+/// `lite_frame` (`tt-station-agentd/src/telemetry.rs`): each board keeps only
+/// `board_info.board_type` and `telemetry.{asic_temperature,power,aiclk}`, no
+/// `tt_toplike` process/inference enrichment. This mock's full frame is
+/// already that minimal, so today the two consts happen to carry the same
+/// bytes -- but keeping a distinct, explicitly-documented lite const (rather
+/// than just reusing `TELEMETRY_FRAME`) means this fixture won't silently
+/// drift out of sync if `TELEMETRY_FRAME` ever grows richer canned fields.
+const TELEMETRY_FRAME_LITE: &str = r#"{"device_info":[{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"61.4","power":"85.2","aiclk":"1000"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"58.0","power":"72.6","aiclk":"950"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"60.2","power":"79.8","aiclk":"900"}},{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":"55.7","power":"58.3","aiclk":"850"}}]}"#;
+
 /// `GET /telemetry`: upgrade to a WebSocket and hand it to
 /// [`telemetry_stream`]. Mirrors the real agent's `telemetry_ws` handler
 /// shape (`tt-station-agentd/src/routes.rs`) so a client (the app, or the
 /// `tokio-tungstenite`-based smoke check used to verify this) can be pointed
-/// at either with no special-casing.
-async fn telemetry_ws(ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(telemetry_stream)
+/// at either with no special-casing -- including the `?view=lite` query flag
+/// (read the same way: `RawQuery`, `q.split('&').any(|kv| kv == "view=lite")`)
+/// so the app's shared lite subscription is exercisable against this
+/// no-hardware fixture too.
+async fn telemetry_ws(ws: WebSocketUpgrade, RawQuery(query): RawQuery) -> Response {
+    let lite = query
+        .as_deref()
+        .map(|q| q.split('&').any(|kv| kv == "view=lite"))
+        .unwrap_or(false);
+    ws.on_upgrade(move |socket| telemetry_stream(socket, lite))
 }
 
-/// Push the fixed [`TELEMETRY_FRAME`] on a `TELEMETRY_INTERVAL` ticker until
-/// the client disconnects (send fails) or hangs up (recv sees a close/error/
-/// EOF). No real `tt-smi` process, no per-tick variation -- unlike the real
-/// agent's loop this never needs an error frame, since there's no subprocess
-/// that can fail.
-async fn telemetry_stream(mut socket: WebSocket) {
+/// Push the fixed [`TELEMETRY_FRAME`] (or, when `lite`, [`TELEMETRY_FRAME_LITE`])
+/// on a `TELEMETRY_INTERVAL` ticker until the client disconnects (send fails)
+/// or hangs up (recv sees a close/error/EOF). No real `tt-smi` process, no
+/// per-tick variation -- unlike the real agent's loop this never needs an
+/// error frame, since there's no subprocess that can fail.
+async fn telemetry_stream(mut socket: WebSocket, lite: bool) {
     let mut ticker = tokio::time::interval(TELEMETRY_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let frame = if lite {
+        TELEMETRY_FRAME_LITE
+    } else {
+        TELEMETRY_FRAME
+    };
 
     loop {
         tokio::select! {
             // `interval`'s first tick fires immediately, so a freshly
             // connected client gets a frame right away.
             _ = ticker.tick() => {
-                if socket.send(Message::Text(TELEMETRY_FRAME.into())).await.is_err() {
+                if socket.send(Message::Text(frame.into())).await.is_err() {
                     break;
                 }
             }
