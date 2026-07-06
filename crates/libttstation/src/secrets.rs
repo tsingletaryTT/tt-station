@@ -230,16 +230,100 @@ fn config_dir() -> PathBuf {
     PathBuf::from(home).join(".config").join("tt-station")
 }
 
-/// The `SecretStore` `tt` should use by default: the macOS Keychain on
-/// macOS, and a [`FileStore`] under the user's config dir everywhere else.
-pub fn default_store() -> Box<dyn SecretStore> {
-    #[cfg(target_os = "macos")]
-    {
-        Box::new(KeychainStore)
+/// Which token store to use. Chosen by [`resolve_store_kind`] from an env
+/// override, a persisted marker, and the per-OS default -- see that
+/// function's docs for the precedence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreKind {
+    Keychain,
+    File,
+}
+
+/// Parse a raw env/marker value ("file" / "keychain", case-insensitive,
+/// surrounding whitespace ignored) into a [`StoreKind`]. Anything else --
+/// including empty/missing -- doesn't match, so the caller falls through to
+/// the next-lower-priority source.
+fn parse_store_kind(raw: &str) -> Option<StoreKind> {
+    match raw.trim().to_lowercase().as_str() {
+        "file" => Some(StoreKind::File),
+        "keychain" => Some(StoreKind::Keychain),
+        _ => None,
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Box::new(FileStore::new(config_dir().join("secrets.json")))
+}
+
+/// Pure store-kind resolution -- no env/filesystem reads happen here; the
+/// caller ([`default_store`]) reads `TT_SECRET_STORE` and the marker file
+/// and passes the results in, which is what makes this fully unit-testable.
+///
+/// Precedence, highest first:
+/// 1. `env` (the value of `TT_SECRET_STORE`, if set): `"file"` -> `File`,
+///    `"keychain"` -> `Keychain` (case-insensitive, trimmed). Wins over
+///    everything else.
+/// 2. else `marker` (the contents of the persisted marker file, if any):
+///    same `"file"`/`"keychain"` mapping. Wins over the default.
+/// 3. else the per-OS default: `Keychain` if `default_is_keychain`, else
+///    `File`.
+///
+/// An unrecognized or empty `env` or `marker` value is *ignored* (falls
+/// through to the next source), not treated as an error.
+pub fn resolve_store_kind(
+    env: Option<&str>,
+    marker: Option<&str>,
+    default_is_keychain: bool,
+) -> StoreKind {
+    if let Some(kind) = env.and_then(parse_store_kind) {
+        return kind;
+    }
+    if let Some(kind) = marker.and_then(parse_store_kind) {
+        return kind;
+    }
+    if default_is_keychain {
+        StoreKind::Keychain
+    } else {
+        StoreKind::File
+    }
+}
+
+/// Path to the persisted "which store to use" marker: a one-line file
+/// (contents `file` or `keychain`) under the config dir. Lives alongside
+/// `secrets.json` so both the terminal `tt` and the macOS app's
+/// subprocess-launched `tt` (which doesn't inherit the launching shell's
+/// env vars, but does share `$HOME` via launchd) resolve to the same file
+/// and therefore agree on the same store.
+fn marker_path() -> PathBuf {
+    config_dir().join("secret_store")
+}
+
+/// Read and trim the marker file's contents, or `None` if it's absent or
+/// unreadable (e.g. permissions) -- either way, [`default_store`] just
+/// falls through to the next-lower-priority source.
+fn marker_contents() -> Option<String> {
+    fs::read_to_string(marker_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// The `SecretStore` `tt` should use by default: the macOS Keychain on
+/// macOS, and a [`FileStore`] under the user's config dir everywhere else --
+/// unless overridden by the `TT_SECRET_STORE` env var or a persisted marker
+/// file (see [`resolve_store_kind`]), which lets macOS opt into the file
+/// store to sidestep repeated Keychain "Always Allow" prompts caused by an
+/// ad-hoc-signed binary's code identity changing on every rebuild.
+pub fn default_store() -> Box<dyn SecretStore> {
+    let default_is_keychain = cfg!(target_os = "macos");
+    let env = std::env::var("TT_SECRET_STORE").ok();
+    let marker = marker_contents();
+    match resolve_store_kind(env.as_deref(), marker.as_deref(), default_is_keychain) {
+        StoreKind::File => Box::new(FileStore::new(config_dir().join("secrets.json"))),
+        #[cfg(target_os = "macos")]
+        StoreKind::Keychain => Box::new(KeychainStore),
+        // KeychainStore doesn't compile off-macOS; falling back to FileStore
+        // here is a no-op in practice, since `default_is_keychain` is only
+        // ever true on macOS, so `resolve_store_kind` can only return
+        // `Keychain` on non-macOS if an explicit env/marker override asked
+        // for it -- honor the intent as closely as this platform allows.
+        #[cfg(not(target_os = "macos"))]
+        StoreKind::Keychain => Box::new(FileStore::new(config_dir().join("secrets.json"))),
     }
 }
 
@@ -381,5 +465,89 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    // -- resolve_store_kind: pure selector, no I/O -----------------------
+
+    #[test]
+    fn env_file_selects_file() {
+        assert_eq!(
+            resolve_store_kind(Some("file"), None, true),
+            StoreKind::File
+        );
+    }
+
+    #[test]
+    fn env_file_is_case_and_whitespace_insensitive() {
+        assert_eq!(
+            resolve_store_kind(Some("FILE "), None, true),
+            StoreKind::File
+        );
+        assert_eq!(
+            resolve_store_kind(Some(" file"), None, true),
+            StoreKind::File
+        );
+    }
+
+    #[test]
+    fn env_keychain_selects_keychain() {
+        assert_eq!(
+            resolve_store_kind(Some("keychain"), None, false),
+            StoreKind::Keychain
+        );
+    }
+
+    #[test]
+    fn env_wins_over_conflicting_marker() {
+        assert_eq!(
+            resolve_store_kind(Some("keychain"), Some("file"), false),
+            StoreKind::Keychain
+        );
+    }
+
+    #[test]
+    fn no_env_marker_file_selects_file() {
+        assert_eq!(
+            resolve_store_kind(None, Some("file"), true),
+            StoreKind::File
+        );
+    }
+
+    #[test]
+    fn no_env_marker_keychain_selects_keychain() {
+        assert_eq!(
+            resolve_store_kind(None, Some("keychain"), false),
+            StoreKind::Keychain
+        );
+    }
+
+    #[test]
+    fn neither_env_nor_marker_falls_back_to_default_keychain() {
+        assert_eq!(resolve_store_kind(None, None, true), StoreKind::Keychain);
+    }
+
+    #[test]
+    fn neither_env_nor_marker_falls_back_to_default_file() {
+        assert_eq!(resolve_store_kind(None, None, false), StoreKind::File);
+    }
+
+    #[test]
+    fn unrecognized_env_is_ignored_falls_through_to_marker() {
+        assert_eq!(
+            resolve_store_kind(Some("bogus"), Some("file"), true),
+            StoreKind::File
+        );
+    }
+
+    #[test]
+    fn unrecognized_env_and_marker_falls_through_to_default() {
+        assert_eq!(
+            resolve_store_kind(Some("bogus"), Some("also-bogus"), true),
+            StoreKind::Keychain
+        );
+        assert_eq!(
+            resolve_store_kind(Some("bogus"), Some("also-bogus"), false),
+            StoreKind::File
+        );
     }
 }
