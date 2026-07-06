@@ -6,30 +6,37 @@ import TTStationKit
 /// moved to the resizable window (`BoxWorkspaceView`); this view Runs the
 /// current/smart-default `selectedModel`.
 ///
-/// **Temp chip:** owns a lightweight `TelemetryService` of its own (same
-/// ownership pattern `DeviceStripView` uses, and for the same reason — the
-/// popover should not have to reach into the window's telemetry state to
-/// show one number) but only surfaces the single hottest device reading
-/// beside the "Serving" line, not the full per-device strip — that stays a
-/// window-only feature so the popover stays fast and small.
+/// **Temp chip:** reads `box.telemetry` — the same ref-counted shared
+/// subscription `DeviceStripView` uses (Task 3/4) — and only surfaces the
+/// single hottest device reading beside the "Serving" line, not the full
+/// per-device strip — that stays a window-only feature so the popover stays
+/// fast and small. Subscribing here doesn't open a second socket: it just
+/// bumps the same box's shared ref-count, so the window and the popover
+/// share one live connection to the agent.
 ///
 /// **Box-switch reset:** like `BoxWorkspaceView`, this view's `@State`
-/// (including the telemetry socket) would otherwise survive a box switch
-/// because `MenuContentView` re-renders it at the same tree position for a
-/// new `box` instance. `.id(box.id)` on the root forces a fresh identity —
-/// and thus a fresh socket — per box.
+/// would otherwise survive a box switch because `MenuContentView`
+/// re-renders it at the same tree position for a new `box` instance.
+/// `.id(box.id)` on the root forces a fresh identity per box, which also
+/// resets `popoverSubscribed` back to `false` so the new box's subscription
+/// starts from a clean slate.
 struct BoxDetailView: View {
     @Bindable var box: BoxViewModel
     @State private var code = ""
     @State private var launcher = LaunchController()
-    @State private var telemetry = TelemetryService()
+    /// Tracks whether *this view* currently holds a net +1 on
+    /// `box.telemetry`'s subscriber count, so the `.task(id:)` below (which
+    /// re-runs on every `box.endpoint?.baseURL` change, including nil<->
+    /// non-nil) and `.onDisappear` can each subscribe/unsubscribe exactly
+    /// once per transition — keeping the shared ref-count from drifting.
+    @State private var popoverSubscribed = false
     @Environment(\.openWindow) private var openWindow
 
     /// Hottest device reading in the latest snapshot, or `nil` before the
     /// first frame / on a failed socket — the chip simply doesn't render
     /// rather than showing a stale or placeholder value.
     private var maxTempC: Double? {
-        telemetry.snapshot?.devices.compactMap(\.tempC).max()
+        box.telemetry.snapshot?.devices.compactMap(\.tempC).max()
     }
 
     var body: some View {
@@ -174,13 +181,21 @@ struct BoxDetailView: View {
         // `.task(id:)` restarts automatically on every id change, including
         // the nil <-> non-nil transitions `box.endpoint` goes through.
         .task(id: box.endpoint?.baseURL) {
-            if box.endpoint != nil {
-                telemetry.start(host: box.record.host, ctrlPort: box.record.ctrlPort)
-            } else {
-                telemetry.stop()
+            let want = box.endpoint != nil
+            if want && !popoverSubscribed {
+                popoverSubscribed = true
+                box.subscribeTelemetry()
+            } else if !want && popoverSubscribed {
+                popoverSubscribed = false
+                box.unsubscribeTelemetry()
             }
         }
-        .onDisappear { telemetry.stop() }
+        .onDisappear {
+            if popoverSubscribed {
+                popoverSubscribed = false
+                box.unsubscribeTelemetry()
+            }
+        }
         .id(box.id)
     }
 }

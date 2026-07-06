@@ -4,26 +4,16 @@ import TTStationKit
 /// Per-device telemetry tiles (temp / power / aiclk) for the box currently
 /// shown in the workspace, backed by the agent's live `/telemetry` WebSocket.
 ///
-/// **Ownership:** this view owns its own `@State private var telemetry =
-/// TelemetryService()` rather than taking one from the composing view. That
-/// keeps the connect/disconnect lifecycle entirely local — Task 14 just
-/// places `DeviceStripView(box: box, launcher: launcher)` and never has to
-/// think about sockets. The tradeoff: SwiftUI only gives a fresh `@State`
-/// instance when the view identity changes, so if Task 14 keeps one
-/// `DeviceStripView` alive across a box switch (rather than recreating it),
-/// it must give this view `.id(box.id)` so the state (and thus the socket)
-/// resets to the newly-selected box instead of continuing to show the
-/// previous box's telemetry.
-///
-/// Starts against the mDNS **hostname** (`box.record.host`), never a
-/// resolved IP — `TelemetryService.start` already strips the mDNS trailing
-/// dot, and resolving to an address ourselves here would risk repeating the
-/// IPv6-literal URL bug `LaunchController.resolveIPv4` had to work around
-/// for tt-toplike.
+/// **Ownership:** reads from the box's own `box.telemetry` (a ref-counted
+/// subscription on `BoxViewModel`, added in Task 3) rather than owning a
+/// `TelemetryService` locally. `subscribeTelemetry()`/`unsubscribeTelemetry()`
+/// increment/decrement a shared counter that starts exactly one lite socket
+/// per box regardless of how many views (this strip + the popover's temp
+/// chip) are observing it — so the window and the popover no longer open two
+/// separate sockets to the same agent.
 struct DeviceStripView: View {
     let box: BoxViewModel
     var launcher: LaunchController
-    @State private var telemetry = TelemetryService()
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -38,8 +28,8 @@ struct DeviceStripView: View {
             .disabled(launcher.isLaunchingToplike)
             .help("Open tt-toplike showing this box's live telemetry.")
         }
-        .task { telemetry.start(host: box.record.host, ctrlPort: box.record.ctrlPort) }
-        .onDisappear { telemetry.stop() }
+        .onAppear { box.subscribeTelemetry() }
+        .onDisappear { box.unsubscribeTelemetry() }
     }
 
     /// Device tiles when a live snapshot has readings, else a quiet
@@ -48,7 +38,7 @@ struct DeviceStripView: View {
     /// since there's nothing more specific to say to the user in either case.
     @ViewBuilder
     private var content: some View {
-        if let devices = telemetry.snapshot?.devices, !devices.isEmpty {
+        if let devices = box.telemetry.snapshot?.devices, !devices.isEmpty {
             HStack(spacing: 8) {
                 ForEach(devices, id: \.index) { deviceTile($0) }
             }
