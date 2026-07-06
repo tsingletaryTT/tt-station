@@ -137,6 +137,16 @@ pub fn mesh_compatible(box_mesh: &str, catalog_mesh: &str) -> bool {
     catalog_mesh == box_base
 }
 
+/// True if any entry in `software` names tt-inference-server (the engine
+/// the box actually serves via run.py). Tolerant: lowercased, `_`→`-`,
+/// matches "tt-inference-server" or any value containing "inference-server".
+pub fn software_is_tis(software: &[String]) -> bool {
+    software.iter().any(|s| {
+        let f = s.to_lowercase().replace('_', "-");
+        f == "tt-inference-server" || f.contains("inference-server")
+    })
+}
+
 /// A single row in the merged, box-aware model catalog (see [`BoxCatalog`]).
 /// This is the WIRE contract for `tt catalog`'s JSON output and what the
 /// macOS app's model picker decodes -- it is deliberately flatter than
@@ -419,7 +429,24 @@ pub fn classify(
         // never need to special-case it.
         match status_on_box {
             Some(CompatStatus::Supported) => {
-                runs_here.push(make_entry("supported", Vec::new()));
+                // The box serves models via run.py = tt-inference-server, so
+                // "Supported" on-mesh isn't enough on its own: only a
+                // Supported, on-mesh entry whose software actually names
+                // tt-inference-server is run-now. A model that's Supported
+                // on this mesh but only via tt-forge/tt-metal/no listed
+                // software is "supported with the tools," not run-now here
+                // -- demote to experimental rather than falsely promising
+                // runs_here.
+                let tis_on_box = model.compatibility.iter().any(|hc| {
+                    matches!(hc.status, CompatStatus::Supported)
+                        && mesh_compatible(box_mesh_lower, &hw_to_mesh(&hc.hardware))
+                        && software_is_tis(&hc.software)
+                });
+                if tis_on_box {
+                    runs_here.push(make_entry("supported", Vec::new()));
+                } else {
+                    experimental.push(make_entry("experimental", Vec::new()));
+                }
             }
             Some(CompatStatus::Experimental) => {
                 experimental.push(make_entry("experimental", Vec::new()));
@@ -613,11 +640,21 @@ mod tests {
         // run a model the catalog lists as Supported on single-card "P150"
         // -- not fall into other_hardware with a nonsensical
         // needed_hardware:["P150"] on a box that literally has P150 cards.
+        //
+        // NOTE (task 1, TIS-focus): this fixture's only compatibility entry
+        // has `software: []` (no tt-inference-server), so under the new
+        // runs_here rule it no longer qualifies for runs_here -- it demotes
+        // to experimental ("supported with the tools," not run-now). The
+        // mesh-compatibility behavior this test actually guards (a
+        // p150x2 box's on-mesh Supported model must NOT be misclassified
+        // into other_hardware with a nonsensical needed_hardware:["P150"])
+        // still holds and is asserted below via `other_hardware.is_empty()`.
         let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
           {"id":"a","display_name":"A","family":"F","tasks":[],"compatibility":[{"hardware":"p150","chip_set":"","hardware_family":"","status":"Supported","software":[]}]}
         ]}"#).unwrap();
         let bc = classify(Some(&cat), &[], Some("p150x2"), false);
-        assert_eq!(bc.runs_here.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(bc.experimental.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["a"]);
+        assert!(bc.runs_here.is_empty());
         assert!(bc.other_hardware.is_empty());
     }
 
@@ -644,5 +681,48 @@ mod tests {
         // no box mesh -> nothing goes to experimental/other; catalog models land in runs_here as a flat list
         assert!(bc.experimental.is_empty() && bc.other_hardware.is_empty());
         assert_eq!(bc.runs_here.len(), 1);
+    }
+
+    #[test]
+    fn classify_runs_here_requires_tt_inference_server() {
+        let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
+          {"id":"tis","display_name":"TIS","family":"F","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Supported","software":["tt-inference-server"]}]},
+          {"id":"forgeonly","display_name":"ForgeOnly","family":"F","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Supported","software":["tt-forge"]}]},
+          {"id":"metalonly","display_name":"MetalOnly","family":"F","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Supported","software":["tt-metal"]}]},
+          {"id":"nosoftware","display_name":"NoSoftware","family":"F","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Supported","software":[]}]}
+        ]}"#).unwrap();
+        let bc = classify(Some(&cat), &[], Some("p300x2"), false);
+        // Only the tt-inference-server model runs here.
+        assert_eq!(bc.runs_here.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["tis"]);
+        // Supported-on-mesh-but-not-TIS demote to experimental.
+        let exp: Vec<String> = bc.experimental.iter().map(|e| e.id.clone()).collect();
+        assert!(exp.contains(&"forgeonly".to_string()));
+        assert!(exp.contains(&"metalonly".to_string()));
+        assert!(exp.contains(&"nosoftware".to_string()));
+        // None of them wrongly landed in other_hardware.
+        assert!(bc.other_hardware.is_empty());
+    }
+
+    #[test]
+    fn classify_live_model_still_runs_here_regardless_of_software() {
+        use crate::model::ModelInfo;
+        let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
+          {"id":"forgeonly","display_name":"ForgeOnly","family":"F","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Supported","software":["tt-forge"]}]}
+        ]}"#).unwrap();
+        // The box's live /models reports it → it IS tt-inference-server-servable now.
+        let live = vec![ModelInfo { name: "forgeonly".into(), devices: vec!["P300X2".into()] }];
+        let bc = classify(Some(&cat), &live, Some("p300x2"), false);
+        assert_eq!(bc.runs_here.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["forgeonly"]);
+        assert!(bc.experimental.is_empty());
+    }
+
+    #[test]
+    fn software_is_tt_inference_server_matches_tolerantly() {
+        assert!(software_is_tis(&["tt-inference-server".into()]));
+        assert!(software_is_tis(&["TT-Inference-Server".into()]));
+        assert!(software_is_tis(&["tt_inference_server".into()]));
+        assert!(software_is_tis(&["tt-forge".into(), "inference-server".into()]));
+        assert!(!software_is_tis(&["tt-forge".into()]));
+        assert!(!software_is_tis(&[]));
     }
 }
