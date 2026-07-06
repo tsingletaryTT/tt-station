@@ -20,6 +20,31 @@ if [[ "${1:-}" == "--system" ]]; then
 fi
 dest="$dest_dir/TTStation.app"
 
+# Seed the tt-vscode-toolkit .vsix into the app's local cache so the Workbench's
+# VS Code launcher installs the extension from a file (gallery-independent) instead
+# of the marketplace ID — the ID silently no-ops when VS Code isn't pointed at a
+# marketplace that carries it. Best-effort: skip on any failure (offline, no gh)
+# so the build always proceeds; the app falls back to the marketplace ID.
+vsix_cache="$HOME/Library/Application Support/TTStation/vsix"
+seed_vsix() {
+  local repo="tenstorrent/tt-vscode-toolkit"
+  command -v gh >/dev/null 2>&1 || { echo "   (skip vsix: gh not found)"; return 0; }
+  local tag
+  tag="$(gh release view --repo "$repo" --json tagName --jq .tagName 2>/dev/null)" || {
+    echo "   (skip vsix: couldn't reach GitHub releases)"; return 0; }
+  # Already have this release's vsix? Don't re-download ~80 MB.
+  if ls "$vsix_cache/"*"$tag"*.vsix >/dev/null 2>&1; then
+    echo "   vsix $tag already cached"; return 0
+  fi
+  mkdir -p "$vsix_cache"
+  rm -f "$vsix_cache"/*.vsix 2>/dev/null || true   # keep only the latest
+  echo "   downloading tt-vscode-toolkit $tag .vsix → $vsix_cache"
+  gh release download "$tag" --repo "$repo" --pattern '*.vsix' --dir "$vsix_cache" --clobber 2>/dev/null \
+    || echo "   (skip vsix: download failed)"
+}
+echo "==> Seeding tt-vscode-toolkit .vsix (best-effort)"
+seed_vsix
+
 echo "==> Generating project + building Release"
 ( cd "$proj" && xcodegen generate >/dev/null )
 xcodebuild -project "$proj/TTStation.xcodeproj" -scheme TTStation \

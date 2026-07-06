@@ -67,11 +67,25 @@ public enum VSCodeLauncher {
         ["--remote", "ssh-remote+\(user)@\(host)", path]
     }
 
-    /// Builds `code` CLI args to install the tt-vscode-toolkit extension. Run
-    /// as its OWN `code` invocation (it runs headless and exits) — never merged
-    /// with `remoteArgs`, or the window won't open (see `remoteArgs`' comment).
+    /// Builds `code` CLI args to install the tt-vscode-toolkit extension from
+    /// the marketplace by ID. Run as its OWN `code` invocation (it runs headless
+    /// and exits) — never merged with `remoteArgs`, or the window won't open
+    /// (see `remoteArgs`' comment). Used only as a FALLBACK when no local
+    /// `.vsix` is cached (see `installVsixArgs`).
     public static func installExtensionArgs() -> [String] {
         ["--install-extension", toolkitExtensionID]
+    }
+
+    /// Builds `code` CLI args to install the toolkit from a LOCAL `.vsix` file.
+    /// Preferred over `installExtensionArgs` because it is gallery-independent:
+    /// `--install-extension <id>` only works if the user's VS Code build is
+    /// pointed at a marketplace that carries the extension (the default MS
+    /// gallery, Open VSX, etc.), and forks/corporate builds often aren't — so
+    /// the ID silently no-ops. A `.vsix` path always installs. `--force` lets a
+    /// re-launch upgrade/reinstall without prompting. Like the ID variant, this
+    /// is its own headless `code` call, never merged with `remoteArgs`.
+    public static func installVsixArgs(vsixPath: String) -> [String] {
+        ["--install-extension", vsixPath, "--force"]
     }
 
     public static func defaultRemotePath(user: String) -> String { "/home/\(user)" }

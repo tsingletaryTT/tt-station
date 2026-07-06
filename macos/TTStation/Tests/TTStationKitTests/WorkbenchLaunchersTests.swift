@@ -79,4 +79,12 @@ final class WorkbenchLaunchersTests: XCTestCase {
         XCTAssertEqual(VSCodeLauncher.installExtensionArgs(),
                        ["--install-extension", "Tenstorrent.tt-vscode-toolkit"])
     }
+
+    // Installing from a local .vsix path is gallery-independent — it works even
+    // when the user's VS Code isn't pointed at the default marketplace.
+    func testVSCodeInstallVsixArgs() {
+        XCTAssertEqual(
+            VSCodeLauncher.installVsixArgs(vsixPath: "/tmp/tt-vscode-toolkit-0.0.518.vsix"),
+            ["--install-extension", "/tmp/tt-vscode-toolkit-0.0.518.vsix", "--force"])
+    }
 }

@@ -103,13 +103,14 @@ final class LaunchController {
         catch { toplikeError = error.localizedDescription }
     }
 
-    /// Opens a Remote-SSH window on the box and, in the same `code` launch,
-    /// asks it to install Tenstorrent's tt-vscode-toolkit extension
-    /// (marketplace ID — it's on the VS Marketplace and Open VSX, so this
-    /// resolves without a `.vsix`). The toolkit install is best-effort and
-    /// non-fatal: if that combined launch fails to even start, we fall back
-    /// to a plain Remote-SSH window (no `--install-extension`) so the user
-    /// still gets a working window, with a soft note instead of a hard error.
+    /// Opens a Remote-SSH window on the box and, as a separate best-effort
+    /// `code` call, installs Tenstorrent's tt-vscode-toolkit extension —
+    /// preferring a locally-cached `.vsix` (seeded by install.sh from the
+    /// latest GitHub release) so it installs regardless of which marketplace
+    /// the user's VS Code is pointed at, falling back to the marketplace ID
+    /// only when no `.vsix` is cached. The toolkit install is non-fatal: if it
+    /// fails, the Remote-SSH window still opens; only a failure to open the
+    /// window itself surfaces an error.
     func openVSCode(host: String) async {
         isLaunchingVSCode = true; defer { isLaunchingVSCode = false }
         vscodeError = nil
@@ -125,7 +126,14 @@ final class LaunchController {
         // WITHOUT opening a window, so it can never share an invocation with
         // the window-open below (that was the "does nothing" bug). Its failure
         // is a nice-to-have miss, not a reason to skip the window.
-        try? Self.runDetachedProcess(executable: code, args: VSCodeLauncher.installExtensionArgs())
+        //
+        // Prefer a locally-cached `.vsix` (seeded by install.sh from the latest
+        // GitHub release) — that install is gallery-independent, so it works
+        // even when the user's VS Code isn't pointed at the default marketplace.
+        // Only fall back to the marketplace ID when no `.vsix` is cached.
+        let installArgs = Self.cachedToolkitVsix().map { VSCodeLauncher.installVsixArgs(vsixPath: $0.path) }
+            ?? VSCodeLauncher.installExtensionArgs()
+        try? Self.runDetachedProcess(executable: code, args: installArgs)
 
         // The window-open is the primary action — surface an error only if THIS
         // fails (a failed extension install must not block or error the window).
@@ -293,6 +301,29 @@ final class LaunchController {
             .appendingPathComponent("TTStation/openwebui", isDirectory: true)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
+    }
+
+    /// The local cache dir where install.sh drops the tt-vscode-toolkit
+    /// `.vsix` downloaded from the latest GitHub release.
+    static func vsixCacheDir() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("TTStation/vsix", isDirectory: true)
+    }
+
+    /// The newest cached toolkit `.vsix`, or nil if none is present. Picks the
+    /// most recently modified `*.vsix` so a re-download (newer release) wins.
+    static func cachedToolkitVsix() -> URL? {
+        let dir = vsixCacheDir()
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey])
+        else { return nil }
+        return files
+            .filter { $0.pathExtension == "vsix" }
+            .max { a, b in
+                let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                return da < db
+            }
     }
 
     static func runOsascript(_ script: String) throws {
