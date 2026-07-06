@@ -256,11 +256,22 @@ public final class BoxViewModel: Identifiable {
         inFlight = true; starting = true
         defer { inFlight = false; starting = false; cancelling = false }
         do {
-            endpoint = try await commands.run(host: record.hostPort, model: model)
-            status = .serving(model: model)
-            // Persist the choice so this box defaults to it next time.
-            registry.setLastModel(model, forHost: record.hostPort)
-            errorText = nil
+            let ep = try await commands.run(host: record.hostPort, model: model)
+            if cancelling {
+                // Cancel landed during/just before the load actually
+                // succeeding: `cancelStart()` already told the agent to
+                // `stop`, which is tearing the container down concurrently.
+                // Reporting `.serving` here would silently override the
+                // user's cancel until the next refresh -- land on the same
+                // clean idle state the abort-failure branch below produces.
+                status = .idle; endpoint = nil; errorText = nil
+            } else {
+                endpoint = ep
+                status = .serving(model: model)
+                // Persist the choice so this box defaults to it next time.
+                registry.setLastModel(model, forHost: record.hostPort)
+                errorText = nil
+            }
         } catch {
             if cancelling {
                 // User-initiated abort via cancelStart(): the agent's `stop`

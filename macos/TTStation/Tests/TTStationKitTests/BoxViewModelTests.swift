@@ -360,6 +360,9 @@ final class BoxViewModelTests: XCTestCase {
         XCTAssertTrue(client.stopCalled)
         XCTAssertTrue(vm.cancelling)
         XCTAssertEqual(vm.status, .idle)
+        // While a cancel is genuinely in progress, the primary control must
+        // be disabled -- no double-firing stop/cancel on top of it.
+        XCTAssertFalse(vm.canStopOrCancel)
 
         // Simulate the agent aborting the spin-up: the in-flight `run()`
         // fails fast with a command-failure once `stop` has killed the
@@ -368,6 +371,48 @@ final class BoxViewModelTests: XCTestCase {
         client.releaseRun()
         await runTask.value
 
+        XCTAssertEqual(vm.status, .idle)
+        XCTAssertNil(vm.endpoint)
+        XCTAssertNil(vm.errorText)
+        XCTAssertFalse(vm.cancelling)
+        XCTAssertFalse(vm.starting)
+        XCTAssertFalse(vm.inFlight)
+    }
+
+    /// Race between a user-initiated cancel and the load actually succeeding:
+    /// `cancelStart()` fires `stop()` while `run()` is still in flight, but
+    /// the fake's `run()` resolves with a SUCCESSFUL endpoint (not an error)
+    /// once released. `run()`'s success branch must still honor `cancelling`
+    /// -- landing on clean idle -- rather than unconditionally reporting
+    /// `.serving`, which would silently override the user's cancel while
+    /// `stop()` is tearing the container down underneath it.
+    func testCancelHonoredWhenRunSucceedsDuringCancel() async {
+        let client = FakeTTClient()
+        client.gateRun = true
+        let (vm, _) = makeVM(client: client)
+        vm.selectedModel = "Qwen3-8B"
+
+        let runTask = Task { await vm.run() }
+
+        while !client.runIsWaiting {
+            await Task.yield()
+        }
+        XCTAssertTrue(vm.starting)
+
+        await vm.cancelStart()
+        XCTAssertTrue(client.stopCalled)
+        XCTAssertTrue(vm.cancelling)
+
+        // Cancel is genuinely in progress: the primary control must be
+        // disabled so the user can't double-fire stop/cancel.
+        XCTAssertFalse(vm.canStopOrCancel)
+
+        // Release the gated run with a SUCCESS outcome (no runError) -- the
+        // load actually completed just as/after cancel fired.
+        client.releaseRun()
+        await runTask.value
+
+        // Cancel must win: idle, not serving, no leftover endpoint/error.
         XCTAssertEqual(vm.status, .idle)
         XCTAssertNil(vm.endpoint)
         XCTAssertNil(vm.errorText)
