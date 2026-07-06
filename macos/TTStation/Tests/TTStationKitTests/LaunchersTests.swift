@@ -50,12 +50,22 @@ final class LaunchersTests: XCTestCase {
 
     func testOpenWebUIInvocation() throws {
         let ep = try endpoint()
-        let inv = OpenWebUILauncher.invocation(for: ep)
+        let inv = OpenWebUILauncher.invocation(for: ep, dataDir: "/tmp/ttstation-owui")
         XCTAssertEqual(inv.executable, "uvx")
-        XCTAssertEqual(inv.args, ["open-webui", "serve", "--port", "8080"])
+        // `--python 3.11` is pinned BEFORE the tool name so uv runs open-webui
+        // on 3.11 (its supported version), which has prebuilt wheels for every
+        // heavy dep (pyarrow/Arrow, chromadb). Without the pin, uv picks the
+        // newest Python (e.g. 3.14) that lacks those wheels → source builds
+        // (cmake + Apache Arrow) → the install stops being "fast".
+        XCTAssertEqual(inv.args, ["--python", "3.11", "open-webui", "serve", "--port", "8080"])
         XCTAssertEqual(inv.env["OPENAI_API_BASE_URL"], ep.baseURL)
         XCTAssertEqual(inv.env["OPENAI_API_KEY"], "sk-none")
         XCTAssertEqual(inv.env["WEBUI_AUTH"], "false")
+        // App-owned DATA_DIR + a matching sqlite DATABASE_URL so an ambient
+        // DATABASE_URL in the user's shell can't be read as Open WebUI's DB
+        // (which crashes startup with "Could not parse SQLAlchemy URL").
+        XCTAssertEqual(inv.env["DATA_DIR"], "/tmp/ttstation-owui")
+        XCTAssertEqual(inv.env["DATABASE_URL"], "sqlite:////tmp/ttstation-owui/webui.db")
     }
 
     func testOpenWebUIURLs() {

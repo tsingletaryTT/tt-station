@@ -6,3 +6,6 @@ macos/TTStation/.build/
 # Python bytecode cache (box-panel)
 __pycache__/
 *.pyc
+
+# Open WebUI drops a secret key if run from the repo root
+.webui_secret_key

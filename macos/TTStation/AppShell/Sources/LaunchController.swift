@@ -175,7 +175,16 @@ final class LaunchController {
         }
 
         webUIPhase = "Starting Open WebUI…"
-        let inv = OpenWebUILauncher.invocation(for: endpoint)
+        // App-owned state/DB dir so Open WebUI ignores any ambient DATABASE_URL
+        // in the user's shell (which would otherwise crash startup).
+        let dataDir: String
+        do {
+            dataDir = try Self.webUIDataDir().path
+        } catch {
+            webUIError = "couldn't create Open WebUI data dir: \(error.localizedDescription)"
+            return
+        }
+        let inv = OpenWebUILauncher.invocation(for: endpoint, dataDir: dataDir)
         do {
             try Self.spawnDetached(executable: uvxPath, args: inv.args, env: inv.env)
         } catch {
@@ -272,6 +281,16 @@ final class LaunchController {
             .replacingOccurrences(of: ":", with: "_")
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TTStation/opencode/\(safe)", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+
+    /// App-owned Open WebUI state directory under Application Support. Holds its
+    /// sqlite DB + uploads so a single shared instance persists across launches
+    /// (and so its `DATABASE_URL` is ours, not the shell's). Created if needed.
+    static func webUIDataDir() throws -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("TTStation/openwebui", isDirectory: true)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
     }
