@@ -273,17 +273,7 @@ struct ModelBrowserView: View {
                     .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                 HStack(spacing: 4) {
                     Text(entry.displayName).font(.callout.weight(.medium))
-                    if entry.availableNow {
-                        // Subtle "ready" mark, not a loud badge: a small dot
-                        // in the same green the app already uses for
-                        // "serving" elsewhere (TTTheme.statusServing), so it
-                        // reads as "known-good" without competing with the
-                        // checkmark that shows actual selection.
-                        Circle()
-                            .fill(TTTheme.statusServing)
-                            .frame(width: 5, height: 5)
-                            .help("Ready to run now")
-                    }
+                    downloadIndicator(entry)
                 }
                 if let size = entry.size {
                     Spacer(minLength: 8)
@@ -315,6 +305,29 @@ struct ModelBrowserView: View {
         }
         .buttonStyle(.plain)
         .help("Select \(entry.displayName)")
+    }
+
+    /// Download-state indicator for a runs-here row. Distinguishes:
+    /// - **downloaded** → a small solid dot in the app's "serving" green, i.e.
+    ///   "weights are on the box, this starts fast."
+    /// - **available but not downloaded** → a hollow cloud+download glyph, i.e.
+    ///   "the box can serve this, but it downloads on first run" (which for a
+    ///   70B is a large, slow pull — worth flagging before you hit Run).
+    /// A non-`availableNow` entry (catalog-only, box can't serve it now) shows
+    /// nothing here — it's not a "run it" candidate in the first place.
+    @ViewBuilder
+    private func downloadIndicator(_ entry: CatalogEntry) -> some View {
+        if entry.downloaded {
+            Circle()
+                .fill(TTTheme.statusServing)
+                .frame(width: 5, height: 5)
+                .help("Downloaded on this box — starts fast")
+        } else if entry.availableNow {
+            Image(systemName: "arrow.down.circle")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .help("Not downloaded yet — downloads on first run (can be a large pull)")
+        }
     }
 
     /// An Experimental/Needs-other-hardware row: informational only, not a

@@ -105,8 +105,24 @@ public struct ServingList: Codable, Equatable {
 public struct ModelInfo: Codable, Equatable {
     public let name: String
     public let devices: [String]
+    /// Whether the model's weights are already downloaded on the box (so a
+    /// serve starts fast instead of triggering a large first-run download).
+    /// Decoded defensively — an older agent that omits the field reads as
+    /// `false` (matches the Rust `#[serde(default)]`).
+    public let downloaded: Bool
 
-    public init(name: String, devices: [String]) { self.name = name; self.devices = devices }
+    public init(name: String, devices: [String], downloaded: Bool = false) {
+        self.name = name; self.devices = devices; self.downloaded = downloaded
+    }
+
+    enum CodingKeys: String, CodingKey { case name, devices, downloaded }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        devices = try c.decode([String].self, forKey: .devices)
+        downloaded = try c.decodeIfPresent(Bool.self, forKey: .downloaded) ?? false
+    }
 }
 
 public struct ModelsResponse: Codable, Equatable {
@@ -228,10 +244,16 @@ public struct CatalogEntry: Codable, Equatable {
     public let meshes: [String]
     public let neededHardware: [String]
     public let availableNow: Bool
+    /// Whether the model's weights are already downloaded on the box. While
+    /// `availableNow` means "the box can serve this" (it's in the live
+    /// registry), `downloaded` means "the weights are already on disk, so it
+    /// starts fast rather than triggering a large first-run download."
+    /// Decoded defensively (missing → `false`).
+    public let downloaded: Bool
     public let statusHere: String
 
     enum CodingKeys: String, CodingKey {
-        case id, family, size, software, meshes
+        case id, family, size, software, meshes, downloaded
         case displayName = "display_name"
         case neededHardware = "needed_hardware"
         case availableNow = "available_now"
@@ -250,6 +272,7 @@ public struct CatalogEntry: Codable, Equatable {
         meshes: [String],
         neededHardware: [String],
         availableNow: Bool,
+        downloaded: Bool = false,
         statusHere: String
     ) {
         self.id = id
@@ -260,7 +283,25 @@ public struct CatalogEntry: Codable, Equatable {
         self.meshes = meshes
         self.neededHardware = neededHardware
         self.availableNow = availableNow
+        self.downloaded = downloaded
         self.statusHere = statusHere
+    }
+
+    // Custom decode so an older `tt catalog` payload without `downloaded`
+    // still decodes (defaulting to `false`), matching the Rust
+    // `#[serde(default)]` on the wire type.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        family = try c.decode(String.self, forKey: .family)
+        size = try c.decodeIfPresent(String.self, forKey: .size)
+        software = try c.decode([String].self, forKey: .software)
+        meshes = try c.decode([String].self, forKey: .meshes)
+        neededHardware = try c.decode([String].self, forKey: .neededHardware)
+        availableNow = try c.decode(Bool.self, forKey: .availableNow)
+        downloaded = try c.decodeIfPresent(Bool.self, forKey: .downloaded) ?? false
+        statusHere = try c.decode(String.self, forKey: .statusHere)
     }
 }
 
