@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::FromRequestParts,
+    extract::{FromRequestParts, RawQuery},
     http::{request::Parts, StatusCode},
     response::Response,
     routing::{get, post},
@@ -1251,8 +1251,19 @@ async fn get_endpoint(
 async fn telemetry_ws(
     ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<AppState>,
+    RawQuery(query): RawQuery,
 ) -> Response {
-    ws.on_upgrade(move |socket| telemetry_stream(socket, state))
+    // `?view=lite` opts a client (the remote-QuietBox tt-toplike view, per
+    // `TT_TOPLIKE_STREAM.md`) into the trimmed dashboard-only frame -- no
+    // process scan, no vLLM scrape. A bare string-split rather than a typed
+    // `Query<T>` extractor: this is one boolean flag, not worth a serde
+    // struct. Any malformed/missing query just means `lite == false`, i.e.
+    // today's full frame -- the safe default.
+    let lite = query
+        .as_deref()
+        .map(|q| q.split('&').any(|kv| kv == "view=lite"))
+        .unwrap_or(false);
+    ws.on_upgrade(move |socket| telemetry_stream(socket, state, lite))
 }
 
 /// The per-connection telemetry loop behind `GET /telemetry`.
@@ -1268,7 +1279,7 @@ async fn telemetry_ws(
 /// [`collect_snapshot`]) rather than directly on the async runtime -- the same
 /// off-the-runtime discipline every `ServingBackend` call in this crate
 /// follows.
-async fn telemetry_stream(mut socket: WebSocket, state: AppState) {
+async fn telemetry_stream(mut socket: WebSocket, state: AppState, lite: bool) {
     let tt_smi_bin = state.tt_smi_bin().to_string();
     // Clamp to >=1ms: `tokio::time::interval` panics on a zero duration, and this
     // runs in a per-connection task, so `--telemetry-interval-ms 0` would panic
@@ -1282,13 +1293,17 @@ async fn telemetry_stream(mut socket: WebSocket, state: AppState) {
     // Owned once per connection (not per tick): `ProcessSampler` wraps a
     // `sysinfo::System`, and cpu% is only meaningful as a delta between two
     // refreshes, so it needs to persist across ticks for the life of this
-    // stream.
-    let mut sampler = crate::procscan::ProcessSampler::new();
+    // stream. Skipped entirely in `lite` mode -- constructing (and never
+    // sampling) it would just be wasted setup, and leaving it `None` means
+    // there's no way for a future edit to accidentally call `.sample()` on
+    // the lite path.
+    let mut sampler = (!lite).then(crate::procscan::ProcessSampler::new);
     // Same "persist across ticks" reasoning as `sampler` above: vLLM's
     // counters are cumulative, so generation/prompt tps and the completed/
     // errored/preemption deltas can only be computed against the PREVIOUS
-    // tick's scrape -- see `inference::InferenceSampler`.
-    let mut inference_sampler = crate::inference::InferenceSampler::new();
+    // tick's scrape -- see `inference::InferenceSampler`. Also skipped in
+    // `lite` mode.
+    let mut inference_sampler = (!lite).then(crate::inference::InferenceSampler::new);
 
     loop {
         tokio::select! {
@@ -1298,31 +1313,48 @@ async fn telemetry_stream(mut socket: WebSocket, state: AppState) {
             _ = ticker.tick() => {
                 let frame = match collect_snapshot(tt_smi_bin.clone()).await {
                     Ok(json) => {
-                        // Additive: fold the box's process list into the
-                        // frame. The scan is a fast local /proc read (unlike
-                        // tt-smi's shell-out), so it runs inline; a hiccup
-                        // yields the frame verbatim, never an error. This
-                        // only touches the success path -- the error/skip
-                        // frame below is untouched, so a `tt-smi` failure
-                        // still yields exactly the small JSON error shape
-                        // clients already know how to detect.
-                        let mut toplike = sampler.sample();
+                        if lite {
+                            // `?view=lite`: skip the process scan and the
+                            // vLLM scrape entirely -- just trim the raw
+                            // `tt-smi` frame down to the dashboard fields.
+                            // `sampler`/`inference_sampler` are `None` on
+                            // this path (see construction above), so there's
+                            // nothing here to call `.sample()`/`.tick()` on.
+                            crate::telemetry::lite_frame(&json)
+                        } else {
+                            // Additive: fold the box's process list into the
+                            // frame. The scan is a fast local /proc read
+                            // (unlike tt-smi's shell-out), so it runs inline;
+                            // a hiccup yields the frame verbatim, never an
+                            // error. This only touches the success path --
+                            // the error/skip frame below is untouched, so a
+                            // `tt-smi` failure still yields exactly the small
+                            // JSON error shape clients already know how to
+                            // detect.
+                            let mut toplike = sampler
+                                .as_mut()
+                                .expect("sampler is Some whenever !lite")
+                                .sample();
 
-                        // Additive: fold the box's inference workload in too.
-                        // Scrape whatever port is actually serving (falling
-                        // back to the agent's configured serving port when
-                        // nothing is), off the async runtime -- see
-                        // `scrape_vllm_metrics`. `state.status()` is read
-                        // fresh each tick so a `/run`/`/stop` that lands
-                        // mid-stream is reflected on the very next frame.
-                        let status = state.status();
-                        let port = resolve_metrics_port(&state);
-                        let scrape_body = scrape_vllm_metrics(port).await;
-                        toplike.inference = inference_sampler
-                            .tick(&status, scrape_body.as_deref())
-                            .map(|entry| vec![entry]);
+                            // Additive: fold the box's inference workload in
+                            // too. Scrape whatever port is actually serving
+                            // (falling back to the agent's configured
+                            // serving port when nothing is), off the async
+                            // runtime -- see `scrape_vllm_metrics`.
+                            // `state.status()` is read fresh each tick so a
+                            // `/run`/`/stop` that lands mid-stream is
+                            // reflected on the very next frame.
+                            let status = state.status();
+                            let port = resolve_metrics_port(&state);
+                            let scrape_body = scrape_vllm_metrics(port).await;
+                            toplike.inference = inference_sampler
+                                .as_mut()
+                                .expect("inference_sampler is Some whenever !lite")
+                                .tick(&status, scrape_body.as_deref())
+                                .map(|entry| vec![entry]);
 
-                        crate::telemetry::enrich_frame(&json, Some(&toplike))
+                            crate::telemetry::enrich_frame(&json, Some(&toplike))
+                        }
                     }
                     Err(err) => {
                         // Log and send an error frame rather than dropping the
