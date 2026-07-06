@@ -61,6 +61,74 @@ pub fn enrich_frame(frame: &str, toplike: Option<&crate::procscan::TtToplike>) -
     serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| frame.to_string())
 }
 
+/// Trim a `tt-smi -s` JSON snapshot down to just the fields the macOS
+/// dashboard renders: per-device `board_info.board_type` and
+/// `telemetry.{asic_temperature,power,aiclk}`. This is the mirror image of
+/// [`enrich_frame`]: instead of *adding* an optional key, it *drops*
+/// everything the dashboard doesn't need (smbus_telem, firmwares, limits,
+/// and any other telemetry field) so the lite frame is cheap to send on a
+/// slow/metered link.
+///
+/// The result is a structural *subset* of the same tt-smi shape the app
+/// already decodes -- so it's a drop-in for the dashboard, and an old agent
+/// (which only ever emits the full frame) still just works from the app's
+/// point of view, since full is a superset of lite.
+///
+/// Values are cloned **verbatim** (string or number, whichever the source
+/// used) -- never reformatted -- and a key/sub-object is omitted entirely
+/// when absent from the source rather than emitted as `null`. Never emits
+/// `tt_toplike`. Malformed JSON, or a `device_info` that isn't an array,
+/// yields `{"device_info":[]}`. Never panics.
+pub fn lite_frame(tt_smi_json: &str) -> String {
+    const EMPTY: &str = r#"{"device_info":[]}"#;
+
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(tt_smi_json) else {
+        return EMPTY.to_string();
+    };
+
+    let Some(devices) = value.get("device_info").and_then(|d| d.as_array()) else {
+        return EMPTY.to_string();
+    };
+
+    let trimmed: Vec<serde_json::Value> = devices
+        .iter()
+        .map(|dev| {
+            let mut out = serde_json::Map::new();
+
+            if let Some(board_type) = dev.get("board_info").and_then(|b| b.get("board_type")) {
+                let mut board_info = serde_json::Map::new();
+                board_info.insert("board_type".to_string(), board_type.clone());
+                out.insert(
+                    "board_info".to_string(),
+                    serde_json::Value::Object(board_info),
+                );
+            }
+
+            if let Some(telemetry) = dev.get("telemetry").and_then(|t| t.as_object()) {
+                let mut lite_telemetry = serde_json::Map::new();
+                for key in ["asic_temperature", "power", "aiclk"] {
+                    if let Some(v) = telemetry.get(key) {
+                        lite_telemetry.insert(key.to_string(), v.clone());
+                    }
+                }
+                out.insert(
+                    "telemetry".to_string(),
+                    serde_json::Value::Object(lite_telemetry),
+                );
+            }
+
+            serde_json::Value::Object(out)
+        })
+        .collect();
+
+    let mut root = serde_json::Map::new();
+    root.insert(
+        "device_info".to_string(),
+        serde_json::Value::Array(trimmed),
+    );
+    serde_json::to_string(&serde_json::Value::Object(root)).unwrap_or_else(|_| EMPTY.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +285,51 @@ mod tests {
 
         let err = snapshot("tt-smi", &run).expect_err("snapshot should propagate the error");
         assert!(err.to_string().contains("tt-smi not found"));
+    }
+
+    #[test]
+    fn lite_frame_trims_to_dashboard_fields() {
+        let full = r#"{"device_info":[{"smbus_telem":{"x":1},"board_info":{"board_type":"p300c","other":"drop"},"telemetry":{"asic_temperature":"61.4","power":"85.2","aiclk":"1000","voltage":"0.8","fan_speed":"30"},"firmwares":{"a":"b"},"limits":{"c":"d"}}]}"#;
+        let out = lite_frame(full);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let dev = &v["device_info"][0];
+        assert_eq!(dev["board_info"]["board_type"], "p300c");
+        assert_eq!(dev["telemetry"]["asic_temperature"], "61.4");
+        assert_eq!(dev["telemetry"]["power"], "85.2");
+        assert_eq!(dev["telemetry"]["aiclk"], "1000");
+        // Trimmed: dropped fields + keys are gone.
+        assert!(dev["telemetry"].get("voltage").is_none());
+        assert!(dev["telemetry"].get("fan_speed").is_none());
+        assert!(dev["board_info"].get("other").is_none());
+        assert!(dev.get("smbus_telem").is_none());
+        assert!(dev.get("firmwares").is_none());
+        assert!(dev.get("limits").is_none());
+        assert!(v.get("tt_toplike").is_none());
+    }
+
+    #[test]
+    fn lite_frame_preserves_numeric_values_verbatim() {
+        let full = r#"{"device_info":[{"board_info":{"board_type":"p300c"},"telemetry":{"asic_temperature":60,"power":85,"aiclk":1000}}]}"#;
+        let v: serde_json::Value = serde_json::from_str(&lite_frame(full)).unwrap();
+        assert_eq!(v["device_info"][0]["telemetry"]["asic_temperature"], 60);
+    }
+
+    #[test]
+    fn lite_frame_omits_missing_fields() {
+        let full = r#"{"device_info":[{"board_info":{"board_type":"p300c"}}]}"#; // no telemetry
+        let v: serde_json::Value = serde_json::from_str(&lite_frame(full)).unwrap();
+        assert_eq!(v["device_info"][0]["board_info"]["board_type"], "p300c");
+        // telemetry object present but empty (or absent) — assert no crash + no stray fields
+        let dev = &v["device_info"][0];
+        assert!(dev["telemetry"].get("power").is_none());
+    }
+
+    #[test]
+    fn lite_frame_garbage_yields_empty_device_info() {
+        let v: serde_json::Value = serde_json::from_str(&lite_frame("not json")).unwrap();
+        assert_eq!(v["device_info"].as_array().unwrap().len(), 0);
+        let v2: serde_json::Value =
+            serde_json::from_str(&lite_frame(r#"{"device_info":"nope"}"#)).unwrap();
+        assert_eq!(v2["device_info"].as_array().unwrap().len(), 0);
     }
 }
