@@ -95,7 +95,12 @@ pub fn parse_vllm_metrics(text: &str) -> Option<VllmCounters> {
         } else if is_metric(line, "vllm:num_requests_waiting") {
             c.requests_waiting = v.max(0.0) as u32;
         } else if is_metric(line, "vllm:kv_cache_usage_perc") {
-            c.kv_cache_usage = (v as f32).clamp(0.0, 1.0);
+            // `v.max(0.0)` first (like every sibling field): it floors at 0 AND
+            // sanitizes NaN to 0.0 (f64::max returns the non-NaN operand) —
+            // vLLM can emit NaN here (0/0 before any KV blocks). Then cap at 1.0.
+            // Without the max(0.0), a NaN survives (f32::clamp passes NaN
+            // through) and serializes to JSON `null` on this non-Option field.
+            c.kv_cache_usage = (v.max(0.0) as f32).min(1.0);
         } else if is_metric(line, "vllm:time_to_first_token_seconds_sum") {
             c.ttft_sum = v.max(0.0);
         } else if is_metric(line, "vllm:time_to_first_token_seconds_count") {
@@ -465,6 +470,20 @@ vllm:prefix_cache_queries_total{engine=\"0\",model_name=\"M\"} 200.0
 vllm:prefix_cache_hits_total{engine=\"0\",model_name=\"M\"} 150.0
 vllm:num_preemptions_total{engine=\"0\",model_name=\"M\"} 3.0
 ";
+
+    // vLLM can legitimately emit `NaN` for kv_cache_usage_perc (e.g. 0/0
+    // before any KV blocks are allocated). Every other numeric field is
+    // sanitized via `v.max(0.0)` (which returns 0.0 for NaN); kv_cache_usage
+    // must be too, or a NaN reaches the wire as JSON `null` on a non-Option
+    // f32 field and breaks the consumer's decode. Assert it's sanitized to a
+    // finite value in [0,1], never NaN.
+    #[test]
+    fn kv_cache_usage_nan_is_sanitized() {
+        let sample = "vllm:kv_cache_usage_perc{engine=\"0\",model_name=\"M\"} NaN\n";
+        let c = parse_vllm_metrics(sample).expect("has vllm metrics");
+        assert!(c.kv_cache_usage.is_finite(), "kv_cache_usage must not be NaN");
+        assert!((0.0..=1.0).contains(&c.kv_cache_usage));
+    }
 
     // (a) parse canned vLLM /metrics text -> expected counters.
     #[test]
