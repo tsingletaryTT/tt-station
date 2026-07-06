@@ -41,9 +41,18 @@ sourced from Rust too: `tt ssh-authorize` reads/generates the Mac keypair and po
 key to the agent's authed `POST /ssh/authorize`, which appends it to `ttuser`'s
 `~/.ssh/authorized_keys` (idempotent, tagged; `DELETE` to revoke).
 
-## Build & run
+## Install (recommended)
 
-    cd macos/TTStation && swift test                     # unit tests (32 tests, layers 1–10)
+    macos/install.sh            # build Release → ~/Applications/TTStation.app, then launch
+    macos/install.sh --system   # → /Applications/TTStation.app (sudo)
+
+It's a menu-bar app (`LSUIElement`) — after install look for the icon in the menu bar,
+not the Dock. The version comes from `AppShell/project.yml`'s `MARKETING_VERSION` (flowed
+into `Info.plist` via `$(MARKETING_VERSION)` — bump it there for each release).
+
+## Build & run (dev)
+
+    cd macos/TTStation && swift test                     # unit tests (pure logic)
     cd macos/TTStation/AppShell && xcodegen generate \
       && xcodebuild -project TTStation.xcodeproj -scheme TTStation \
            -destination 'platform=macOS' build
