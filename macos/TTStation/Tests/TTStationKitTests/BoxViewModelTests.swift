@@ -115,13 +115,14 @@ final class BoxViewModelTests: XCTestCase {
     }
 
     func testUnpairedRefreshDoesNotCallStatusAndKeepsSeededStatus() async {
-        // Renamed in spirit (fix #7): refresh now ALWAYS probes status and
-        // derives paired-state from the result — a "no token" failure is the
-        // normal unpaired signal, not an error. Kept the seeded-status
-        // assertion; dropped the "does not call status" assertion since that
-        // behavior is intentionally reversed.
+        // Renamed in spirit twice over now: `status()` is unauthed (never a
+        // pairing signal, see the pairing-fix at the top of this file) but
+        // is still always probed for display and falls back to the
+        // discovery-seeded status on failure. Paired-state instead comes
+        // from the authed `endpoint()` probe below returning a 401.
         let client = FakeTTClient()
         client.statusError = .commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080")
+        client.endpointError = .commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080")
         let (vm, _) = makeVM(paired: false, client: client, statusRaw: "serving:Foo")
         await vm.refresh()
         XCTAssertTrue(client.statusCalled)
@@ -145,6 +146,7 @@ final class BoxViewModelTests: XCTestCase {
     func testUnpairedRefreshSurfacesNoError() async {
         let client = FakeTTClient()
         client.statusError = .commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080")
+        client.endpointError = .commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080")
         let (vm, reg) = makeVM(paired: true, client: client, statusRaw: "serving:Foo")
         await vm.refresh()
         XCTAssertFalse(vm.isPaired)
@@ -154,8 +156,12 @@ final class BoxViewModelTests: XCTestCase {
     }
 
     func testRefreshTimeoutShowsErrorNotUnpaired() async {
+        // `status()` is display-only and no longer feeds `errorText` on
+        // failure (see the pairing fix); the pairing probe (`endpoint()`)
+        // timing out is what should surface an error without flipping
+        // `isPaired`.
         let client = FakeTTClient()
-        client.statusError = .timedOut(command: [], seconds: 20)
+        client.endpointError = .timedOut(command: [], seconds: 20)
         let (vm, reg) = makeVM(paired: true, client: client)
         let wasPaired = vm.isPaired
         await vm.refresh()
@@ -247,6 +253,66 @@ final class BoxViewModelTests: XCTestCase {
         await vm.refresh()
         XCTAssertNotNil(vm.endpoint)
         XCTAssertEqual(vm.endpoint?.baseURL, client.runEndpoint.baseURL)
+    }
+
+    // MARK: - Pairing derives from the authed endpoint() probe, not status()
+
+    /// `GET /status` is unauthed and answers 200 for any reachable box
+    /// regardless of pairing, so it can never signal "unpaired" -- that's the
+    /// bug this fix addresses. `endpoint()` IS bearer-guarded, so a 401
+    /// (surfaced here as an `isAuthError`-matching `.commandFailed`) is the
+    /// real "this Mac holds no valid token" signal.
+    func testRefreshUnpairedWhenEndpointAuthError() async {
+        let client = FakeTTClient()
+        client.endpointError = .commandFailed(
+            command: ["endpoint"], exitCode: 1,
+            stderr: "error: request to ... failed: HTTP status 401 Unauthorized")
+        let (vm, reg) = makeVM(paired: true, client: client)
+        await vm.refresh()
+        XCTAssertFalse(vm.isPaired)
+        XCTAssertFalse(reg.pairedHosts.contains("h:8080"))
+    }
+
+    /// A 409 from `endpoint()` means "authed fine, nothing is serving right
+    /// now" -- it must NOT be misread as an auth failure, or an idle-but-
+    /// paired box would incorrectly flip to unpaired on every refresh.
+    func testRefreshPairedWhenEndpointIdleConflict() async {
+        let client = FakeTTClient()
+        client.endpointError = .commandFailed(
+            command: ["endpoint"], exitCode: 1,
+            stderr: "no model is currently serving on this agent (409)")
+        let (vm, reg) = makeVM(paired: true, client: client)
+        await vm.refresh()
+        XCTAssertTrue(vm.isPaired)
+        XCTAssertTrue(reg.pairedHosts.contains("h:8080"))
+        XCTAssertNil(vm.endpoint)
+    }
+
+    /// The common case: authed, and something is actually serving -- 200
+    /// carries the `Endpoint` straight through.
+    func testRefreshPairedAndServingWhenEndpointReturns() async {
+        let client = FakeTTClient()
+        let (vm, reg) = makeVM(paired: true, client: client)
+        await vm.refresh()
+        XCTAssertTrue(vm.isPaired)
+        XCTAssertTrue(reg.pairedHosts.contains("h:8080"))
+        XCTAssertNotNil(vm.endpoint)
+        XCTAssertEqual(vm.endpoint?.baseURL, client.runEndpoint.baseURL)
+    }
+
+    /// A network hang/timeout on the `endpoint()` probe is not an auth
+    /// signal -- a slow or wedged box must not get bounced to "unpaired"
+    /// just because it's slow right now.
+    func testRefreshTimeoutLeavesIsPairedUntouched() async {
+        let client = FakeTTClient()
+        client.endpointError = .timedOut(command: ["endpoint"], seconds: 5)
+        let (vm, reg) = makeVM(paired: true, client: client)
+        let wasPaired = vm.isPaired
+        await vm.refresh()
+        XCTAssertEqual(vm.isPaired, wasPaired)
+        XCTAssertTrue(vm.isPaired)
+        XCTAssertTrue(reg.pairedHosts.contains("h:8080"))
+        XCTAssertNotNil(vm.errorText)
     }
 
     func testRefreshPopulatesCatalog() async {

@@ -10,6 +10,11 @@ final class FakeTTClient: TTCommands {
     var pairShouldSucceed = true
     var runEndpoint = Endpoint(baseURL: "http://h:8000/v1", model: "Qwen3-8B", requiresKey: false)
     var runError: TTError?
+    /// Set to make `endpoint(host:)` throw instead of returning `runEndpoint`
+    /// -- the hook `BoxViewModelTests` uses to drive the authed pairing probe
+    /// in `refresh()` through its 401 (unpaired) / 409 (idle) / success
+    /// branches.
+    var endpointError: TTError?
     var statusCalled = false
     var statusCallCount = 0
     var pairInitResult = "mock-pair-id"
@@ -63,7 +68,10 @@ final class FakeTTClient: TTCommands {
         if let statusError { throw statusError }
         return statusResult
     }
-    func endpoint(host: String) async throws -> Endpoint { runEndpoint }
+    func endpoint(host: String) async throws -> Endpoint {
+        if let endpointError { throw endpointError }
+        return runEndpoint
+    }
     func serving(host: String) async throws -> [ServingEntry] {
         if let servingError { throw servingError }
         return serving_
@@ -102,7 +110,21 @@ final class FakeTTClient: TTCommands {
         return sshAuthorizeResult
     }
     func isAuthError(_ error: TTError) -> Bool {
-        if case let .commandFailed(_, _, s) = error { return s.lowercased().contains("no token") }
+        // Mirrors `TTClient.isAuthError` exactly (widened from the original
+        // "no token"-only check) so fake-driven tests exercise the same
+        // matching the real client uses in production.
+        if case let .commandFailed(_, _, s) = error {
+            let low = s.lowercased()
+            return low.contains("no token") || low.contains("unauthorized") || low.contains("401")
+        }
+        return false
+    }
+    func isIdleConflict(_ error: TTError) -> Bool {
+        // Mirrors `TTClient.isIdleConflict`.
+        if case let .commandFailed(_, _, s) = error {
+            let low = s.lowercased()
+            return low.contains("409") || low.contains("no model is currently serving")
+        }
         return false
     }
 }

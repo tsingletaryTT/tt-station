@@ -107,4 +107,16 @@ extension TTClientTests {
         XCTAssertTrue(client.isAuthError(.commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080; run `tt pair`")))
         XCTAssertFalse(client.isAuthError(.commandFailed(command: [], exitCode: 1, stderr: "connection refused")))
     }
+
+    /// `isIdleConflict` distinguishes the agent's `409` ("authed, but nothing
+    /// is serving") from an actual auth failure -- two independent signals so
+    /// it's robust to either the stable "(409)" marker or the human-readable
+    /// wording changing on its own (see `libttstation::agent_client::endpoint`).
+    func testIsIdleConflict() {
+        let client = TTClient(runner: FakeProcessRunner())
+        XCTAssertTrue(client.isIdleConflict(.commandFailed(command: [], exitCode: 1, stderr: "no model is currently serving on this agent (409)")))
+        XCTAssertTrue(client.isIdleConflict(.commandFailed(command: [], exitCode: 1, stderr: "request failed: 409 Conflict")))
+        XCTAssertFalse(client.isIdleConflict(.commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080")))
+        XCTAssertFalse(client.isIdleConflict(.commandFailed(command: [], exitCode: 1, stderr: "connection refused")))
+    }
 }

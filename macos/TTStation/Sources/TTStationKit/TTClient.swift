@@ -16,6 +16,7 @@ public protocol TTCommands {
     func stop(host: String) async throws
     func sshAuthorize(host: String) async throws -> SshAuthorizeInfo
     func isAuthError(_ error: TTError) -> Bool
+    func isIdleConflict(_ error: TTError) -> Bool
 }
 
 /// Typed façade over `tt --json`. One method per subcommand; the only place
@@ -127,6 +128,20 @@ extension TTClient {
         if case let .commandFailed(_, _, stderr) = error {
             let s = stderr.lowercased()
             return s.contains("no token") || s.contains("unauthorized") || s.contains("401")
+        }
+        return false
+    }
+
+    /// True when `error` is the agent's `409` ("authed fine, nothing is
+    /// currently serving") rather than an auth failure -- see
+    /// `libttstation::agent_client::endpoint`'s idle-bail message, which
+    /// carries a stable `"(409)"` marker for exactly this purpose. Matches on
+    /// two independent signals (the numeric code and the human-readable
+    /// phrase) so a rewording of either one alone can't silently break this.
+    public func isIdleConflict(_ error: TTError) -> Bool {
+        if case let .commandFailed(_, _, stderr) = error {
+            let s = stderr.lowercased()
+            return s.contains("409") || s.contains("no model is currently serving")
         }
         return false
     }

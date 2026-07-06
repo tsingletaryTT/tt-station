@@ -81,54 +81,65 @@ public final class BoxViewModel: Identifiable {
     }
 
     public func refresh() async {
-        // Always probe `status()`, regardless of our locally-remembered
-        // `isPaired` flag. UserDefaults-backed pairing state can go stale —
-        // e.g. a pairing done via the CLI directly never touches this app's
-        // registry — so it isn't a source of truth. The CLI's own token
-        // store is: a successful authed `status` call means the CLI holds a
-        // valid bearer token for this box (paired), and a "no token"/auth
-        // failure means it doesn't (unpaired). `tt status` for an unpaired
-        // box fails locally with no network round-trip, so probing it on
-        // every refresh is cheap.
+        // `GET /status`, `/serving`, `/config`, `/catalog` are all UNAUTHED
+        // on the agent — every one of them answers 200 for any reachable box
+        // regardless of pairing, by design (so `tt status`/discovery work
+        // pre-pair). That means a successful call to any of them proves
+        // *nothing* about whether this Mac holds a valid bearer token for
+        // this box — they're display-only reads, fetched below with `try?`
+        // and never treated as a pairing signal.
+        //
+        // `isPaired` is instead derived from the one bearer-guarded read this
+        // view-model touches: `GET /endpoint`. Its outcomes map cleanly:
+        //   - `401` (auth error)      → UNPAIRED — no valid token for this box.
+        //   - `409` (Conflict, idle)  → PAIRED, nothing currently serving.
+        //   - `200`                   → PAIRED, serving — carries the Endpoint.
+        // A network/timeout/other failure is none of the above, so it leaves
+        // `isPaired`/the registry untouched rather than bouncing a genuinely
+        // paired (but slow or momentarily wedged) box to "unpaired".
         errorText = nil
-        // `serving` is an unauthed read that works regardless of pairing and
-        // surfaces models this agent didn't launch (e.g. tt-studio), so fetch
-        // it independently of the status/pairing flow below. Failure is never
-        // fatal — fall back to an empty list rather than surfacing an error.
+        // `serving` surfaces models this agent didn't launch (e.g.
+        // tt-studio), so fetch it independently of the pairing probe below.
+        // Failure is never fatal — fall back to an empty list.
         serving = (try? await commands.serving(host: record.hostPort)) ?? []
-        // `config` is likewise an unauthed read that works regardless of
-        // pairing. Failure is never fatal — fall back to `nil` rather than
-        // surfacing an error.
+        // `config` and `catalog` are likewise unauthed, display-only, and
+        // never fatal — fall back to `nil` on failure.
         config = try? await commands.config(host: record.hostPort)
-        // `catalog` is likewise an unauthed read that works regardless of
-        // pairing. Failure is never fatal — fall back to `nil` rather than
-        // surfacing an error.
         catalog = try? await commands.catalog(host: record.hostPort)
+        // `status` is unauthed too — purely a display read. Fall back to the
+        // discovery-seeded status on failure; this is not a pairing signal.
+        status = (try? await commands.status(host: record.hostPort)) ?? record.status
+
         do {
-            let s = try await commands.status(host: record.hostPort)
+            let ep = try await commands.endpoint(host: record.hostPort)
             isPaired = true
             registry.markPaired(record.hostPort)
-            status = s
-            if s.isServing { endpoint = try? await commands.endpoint(host: record.hostPort) }
+            endpoint = ep
             await loadModels()
         } catch let e as TTError where commands.isAuthError(e) {
-            // Normal unpaired signal, not an error to surface — keep
-            // whatever status the discovery record seeded us with.
+            // 401: no valid token for this box — the normal unpaired signal,
+            // not an error to surface.
             isPaired = false
             registry.markUnpaired(record.hostPort)
-            status = record.status
-        } catch {
-            if let tt = error as? TTError, case let .commandFailed(_, _, stderr) = tt {
-                errorText = stderr.isEmpty ? "Command failed." : stderr
-            } else if let tt = error as? TTError, case let .timedOut(_, seconds) = tt {
-                // A hang (e.g. the box's serving backend is down) is not an
-                // auth signal — leave `isPaired`/`registry` untouched so a
-                // genuinely paired box doesn't get bounced to "unpaired" just
-                // because it's slow or wedged right now.
+            endpoint = nil
+        } catch let e as TTError where commands.isIdleConflict(e) {
+            // 409: authed fine, just nothing serving right now.
+            isPaired = true
+            registry.markPaired(record.hostPort)
+            endpoint = nil
+            await loadModels()
+        } catch let e as TTError {
+            // Network/timeout/other — not an auth signal. Leave
+            // `isPaired`/the registry untouched.
+            if case let .timedOut(_, seconds) = e {
                 errorText = Self.timeoutMessage(seconds: seconds)
+            } else if case let .commandFailed(_, _, stderr) = e {
+                errorText = stderr.isEmpty ? "Command failed." : stderr
             } else {
-                errorText = error.localizedDescription
+                errorText = String(describing: e)
             }
+        } catch {
+            errorText = error.localizedDescription
         }
     }
 
