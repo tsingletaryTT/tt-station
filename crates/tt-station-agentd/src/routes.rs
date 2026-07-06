@@ -1284,6 +1284,11 @@ async fn telemetry_stream(mut socket: WebSocket, state: AppState) {
     // refreshes, so it needs to persist across ticks for the life of this
     // stream.
     let mut sampler = crate::procscan::ProcessSampler::new();
+    // Same "persist across ticks" reasoning as `sampler` above: vLLM's
+    // counters are cumulative, so generation/prompt tps and the completed/
+    // errored/preemption deltas can only be computed against the PREVIOUS
+    // tick's scrape -- see `inference::InferenceSampler`.
+    let mut inference_sampler = crate::inference::InferenceSampler::new();
 
     loop {
         tokio::select! {
@@ -1301,7 +1306,22 @@ async fn telemetry_stream(mut socket: WebSocket, state: AppState) {
                         // frame below is untouched, so a `tt-smi` failure
                         // still yields exactly the small JSON error shape
                         // clients already know how to detect.
-                        let toplike = sampler.sample();
+                        let mut toplike = sampler.sample();
+
+                        // Additive: fold the box's inference workload in too.
+                        // Scrape whatever port is actually serving (falling
+                        // back to the agent's configured serving port when
+                        // nothing is), off the async runtime -- see
+                        // `scrape_vllm_metrics`. `state.status()` is read
+                        // fresh each tick so a `/run`/`/stop` that lands
+                        // mid-stream is reflected on the very next frame.
+                        let status = state.status();
+                        let port = resolve_metrics_port(&state);
+                        let scrape_body = scrape_vllm_metrics(port).await;
+                        toplike.inference = inference_sampler
+                            .tick(&status, scrape_body.as_deref())
+                            .map(|entry| vec![entry]);
+
                         crate::telemetry::enrich_frame(&json, Some(&toplike))
                     }
                     Err(err) => {
@@ -1329,6 +1349,71 @@ async fn telemetry_stream(mut socket: WebSocket, state: AppState) {
             }
         }
     }
+}
+
+/// Resolve the port `GET /telemetry` scrapes for `/metrics`: prefer the port
+/// baked into the agent's own last-successful `/run` `Endpoint.base_url`
+/// (e.g. `"http://host:8003/v1"` -> `8003`) -- the actual port a model is
+/// being served on, which can differ from the agent's configured default
+/// (e.g. a config profile override) -- falling back to the agent's own
+/// configured serving port (`--serving-port`, `DEFAULT_SERVING_PORT`) when
+/// nothing is currently serving (or, in the should-never-happen case, the
+/// stored `base_url` doesn't parse).
+fn resolve_metrics_port(state: &AppState) -> u16 {
+    state
+        .endpoint()
+        .and_then(|e| port_from_base_url(&e.base_url))
+        .unwrap_or_else(|| state.serving_port())
+}
+
+/// Parse the port out of a base URL shaped like `"http://host:8003/v1"`.
+/// `None` on any shape that doesn't parse (no `://`, no port after the last
+/// `:`, or a non-numeric port) -- callers treat that identically to "nothing
+/// is serving," since a malformed `base_url` can't be scraped either way.
+fn port_from_base_url(base_url: &str) -> Option<u16> {
+    let after_scheme = base_url.split_once("://")?.1;
+    let host_port = after_scheme.split('/').next()?;
+    host_port.rsplit(':').next()?.parse().ok()
+}
+
+/// Blocking HTTP client for the `/metrics` scrape, with a SHORT (2s
+/// connect + 2s total) timeout -- deliberately its own client rather than
+/// reusing `serving::docker`'s `probe_client` (2s connect / 5s total),
+/// because this one runs on every telemetry tick (as often as every 1s by
+/// default): a hung vLLM process must not stall a tick for as long as
+/// `probe_client`'s 5s bound, which is fine for the occasional `/serving` or
+/// `/v1/models` call but too slow to run in this hot a loop.
+fn metrics_client() -> reqwest::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(2))
+        .build()
+}
+
+/// Scrape `http://127.0.0.1:<port>/metrics` off the async runtime (a
+/// blocking `reqwest` GET, same off-the-runtime discipline as
+/// `collect_snapshot`'s `tt-smi` shell-out). Returns `None` on ANY failure --
+/// connection refused (nothing listening / still starting), a non-200
+/// status, a body read error, or a `spawn_blocking` join panic. Every one of
+/// those collapses to the same "scrape failed" signal `InferenceSampler::tick`
+/// consumes (see `inference::build_inference`'s phase table) -- there's no
+/// caller here that needs to distinguish *why* the scrape failed.
+async fn scrape_vllm_metrics(port: u16) -> Option<String> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+        let resp = metrics_client()?
+            .get(format!("http://127.0.0.1:{port}/metrics"))
+            .send()?;
+        if !resp.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "metrics scrape returned status {}",
+                resp.status()
+            ));
+        }
+        Ok(resp.text()?)
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
 }
 
 /// Run `tt-smi -s` off the async runtime and return its stdout (the telemetry
@@ -1533,4 +1618,43 @@ pub fn app(state: AppState) -> Router {
         .route("/endpoint", get(get_endpoint))
         .route("/ssh/authorize", post(ssh_authorize).delete(ssh_revoke))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod telemetry_inference_tests {
+    use super::*;
+
+    #[test]
+    fn port_from_base_url_parses_the_common_shapes() {
+        assert_eq!(port_from_base_url("http://host:8003/v1"), Some(8003));
+        assert_eq!(port_from_base_url("http://127.0.0.1:8000/v1"), Some(8000));
+        // No port at all.
+        assert_eq!(port_from_base_url("http://host/v1"), None);
+        // No scheme separator.
+        assert_eq!(port_from_base_url("host:8003/v1"), None);
+        // Non-numeric "port".
+        assert_eq!(port_from_base_url("http://host:abc/v1"), None);
+    }
+
+    #[test]
+    fn resolve_metrics_port_prefers_stored_endpoint_over_configured_default() {
+        // No endpoint stored (idle box) -> falls back to the configured
+        // serving port.
+        let state = AppState::new(
+            "qb2-lab".to_string(),
+            "4xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_serving_config("127.0.0.1".to_string(), 9000);
+        assert_eq!(resolve_metrics_port(&state), 9000);
+
+        // Once something is (recorded as) serving, its endpoint's own port
+        // wins over the agent's configured default.
+        state.set_serving(Endpoint {
+            base_url: "http://127.0.0.1:8003/v1".to_string(),
+            model: "meta-llama/Llama-3.1-8B-Instruct".to_string(),
+            requires_key: false,
+        });
+        assert_eq!(resolve_metrics_port(&state), 8003);
+    }
 }

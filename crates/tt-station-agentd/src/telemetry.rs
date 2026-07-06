@@ -77,6 +77,39 @@ mod tests {
                 cpu_pct: 3.5,
                 mem_bytes: 100,
             }],
+            inference: None,
+        }
+    }
+
+    /// Same as `sample_toplike`, but with an `inference` entry set -- for
+    /// (d) below: the frame must round-trip `inference[0].phase` and its
+    /// `serving.generation_tps`.
+    fn sample_toplike_with_inference() -> TtToplike {
+        use crate::inference::{InferenceInfo, Phase, ServingInfo};
+        TtToplike {
+            inference: Some(vec![InferenceInfo {
+                key: "meta-llama/Llama-3.1-8B-Instruct".into(),
+                label: "Llama-3.1-8B-Instruct".into(),
+                phase: Phase::Ready,
+                progress: None,
+                serving: Some(ServingInfo {
+                    generation_tps: 842.0,
+                    prompt_tps: 120.0,
+                    requests_running: 6,
+                    requests_waiting: 2,
+                    kv_cache_usage: 0.42,
+                    ttft_avg_s: 0.11,
+                    queue_avg_s: 0.02,
+                    prefill_avg_s: 0.05,
+                    decode_avg_s: 0.03,
+                    tpot_avg_s: 0.01,
+                    completed_delta: 4,
+                    errored_delta: 0,
+                    prefix_hit_rate: 0.0,
+                    preemptions_delta: 0,
+                }),
+            }]),
+            ..sample_toplike()
         }
     }
 
@@ -88,6 +121,39 @@ mod tests {
         assert!(v.get("device_info").is_some()); // telemetry intact
         assert_eq!(v["tt_toplike"]["schema"], 1);
         assert_eq!(v["tt_toplike"]["processes"][0]["pid"], 7);
+    }
+
+    /// (d) `enrich_frame` folds a populated `inference` entry into the wire
+    /// frame with the exact field names/values the brief specifies, and a
+    /// `TtToplike` with `inference: None` omits the key entirely (rather
+    /// than emitting `"inference":null`) -- the None-vs-empty contract.
+    #[test]
+    fn enrich_frame_carries_inference_when_present_and_omits_key_when_none() {
+        let frame = r#"{"device_info":[{"board_info":{"board_type":"p150a"}}]}"#;
+
+        let with_inference = enrich_frame(frame, Some(&sample_toplike_with_inference()));
+        let v: serde_json::Value = serde_json::from_str(&with_inference).unwrap();
+        assert_eq!(v["tt_toplike"]["inference"][0]["phase"], "ready");
+        assert_eq!(
+            v["tt_toplike"]["inference"][0]["key"],
+            "meta-llama/Llama-3.1-8B-Instruct"
+        );
+        assert_eq!(
+            v["tt_toplike"]["inference"][0]["label"],
+            "Llama-3.1-8B-Instruct"
+        );
+        assert!(v["tt_toplike"]["inference"][0]["serving"]["generation_tps"].is_number());
+        assert_eq!(
+            v["tt_toplike"]["inference"][0]["serving"]["generation_tps"],
+            842.0
+        );
+        assert!(v["tt_toplike"]["inference"][0]["progress"].is_null());
+
+        // `inference: None` (the plain `sample_toplike()` helper) -> no
+        // `inference` key at all on `tt_toplike`, not `"inference":null`.
+        let without_inference = enrich_frame(frame, Some(&sample_toplike()));
+        let v2: serde_json::Value = serde_json::from_str(&without_inference).unwrap();
+        assert!(v2["tt_toplike"].get("inference").is_none());
     }
 
     #[test]

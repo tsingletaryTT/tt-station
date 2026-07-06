@@ -29,11 +29,21 @@ pub const TT_TOPLIKE_SCHEMA: u32 = 1;
 pub const MAX_PROCESSES: usize = 12;
 
 /// The `tt_toplike` telemetry payload: a schema-versioned list of
-/// processes running on the box.
+/// processes running on the box, plus an optional view of the box's model
+/// workload.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TtToplike {
     pub schema: u32,
     pub processes: Vec<ProcInfo>,
+    /// The box's model-serving workload, or `None` when agentd has no
+    /// authoritative opinion this tick (the consumer then falls back to its
+    /// own local probe -- see `inference::build_inference`'s doc comment for
+    /// the exact phase table). `skip_serializing_if` (not just `default` on
+    /// deserialize, which this struct never does) is what actually omits the
+    /// key on the wire when `None`; `default` alone lets old callers that
+    /// construct a `TtToplike` without setting this field still compile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference: Option<Vec<crate::inference::InferenceInfo>>,
 }
 
 /// A single process entry in the `tt_toplike` payload.
@@ -118,6 +128,11 @@ impl ProcessSampler {
         TtToplike {
             schema: TT_TOPLIKE_SCHEMA,
             processes: procs,
+            // `ProcessSampler` only ever produces the process list -- the
+            // inference view is folded in separately by `telemetry_stream`
+            // (see `routes.rs`), which owns the `InferenceSampler` and sets
+            // this field on the `TtToplike` before `enrich_frame` runs.
+            inference: None,
         }
     }
 }
@@ -209,6 +224,7 @@ mod tests {
         let t = TtToplike {
             schema: TT_TOPLIKE_SCHEMA,
             processes: vec![proc(7, 3.5, true)],
+            inference: None,
         };
         let json = serde_json::to_string(&t).unwrap();
         for key in [
