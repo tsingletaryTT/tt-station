@@ -129,7 +129,10 @@ pub fn mesh_compatible(box_mesh: &str, catalog_mesh: &str) -> bool {
     // "p150") to get the box's single-card family base. A mesh with no such
     // suffix (e.g. a bare "p150") is already its own base.
     let box_base = match box_mesh.rfind('x') {
-        Some(idx) if box_mesh[idx + 1..].chars().all(|c| c.is_ascii_digit()) && idx + 1 < box_mesh.len() => {
+        Some(idx)
+            if box_mesh[idx + 1..].chars().all(|c| c.is_ascii_digit())
+                && idx + 1 < box_mesh.len() =>
+        {
             &box_mesh[..idx]
         }
         _ => box_mesh.as_str(),
@@ -330,7 +333,10 @@ pub fn classify(
         // somehow appears twice with different statuses).
         let mut mesh_status: Vec<(String, CompatStatus)> = Vec::new();
         for hc in &model.compatibility {
-            if !matches!(hc.status, CompatStatus::Supported | CompatStatus::Experimental) {
+            if !matches!(
+                hc.status,
+                CompatStatus::Supported | CompatStatus::Experimental
+            ) {
                 continue;
             }
             let mesh = hw_to_mesh(&hc.hardware);
@@ -413,15 +419,13 @@ pub fn classify(
         // an exact "P150X2" row. If more than one compatible mesh is
         // present, Supported beats Experimental (mirrors the aggregation
         // above when the same mesh appears twice).
-        let status_on_box = if mesh_status
-            .iter()
-            .any(|(m, s)| mesh_compatible(box_mesh_lower, m) && matches!(s, CompatStatus::Supported))
-        {
+        let status_on_box = if mesh_status.iter().any(|(m, s)| {
+            mesh_compatible(box_mesh_lower, m) && matches!(s, CompatStatus::Supported)
+        }) {
             Some(CompatStatus::Supported)
-        } else if mesh_status
-            .iter()
-            .any(|(m, s)| mesh_compatible(box_mesh_lower, m) && matches!(s, CompatStatus::Experimental))
-        {
+        } else if mesh_status.iter().any(|(m, s)| {
+            mesh_compatible(box_mesh_lower, m) && matches!(s, CompatStatus::Experimental)
+        }) {
             Some(CompatStatus::Experimental)
         } else {
             None
@@ -546,11 +550,34 @@ mod tests {
         ]}"#).unwrap();
         let live = vec![]; // no live models
         let bc = classify(Some(&cat), &live, Some("p300x2"), false);
-        assert_eq!(bc.runs_here.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["a"]);
-        assert_eq!(bc.experimental.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["b"]);
-        assert_eq!(bc.other_hardware.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["c"]);
+        assert_eq!(
+            bc.runs_here
+                .iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        assert_eq!(
+            bc.experimental
+                .iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["b"]
+        );
+        assert_eq!(
+            bc.other_hardware
+                .iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
         // d is Not Supported everywhere -> omitted
-        assert!(!bc.runs_here.iter().chain(&bc.experimental).chain(&bc.other_hardware).any(|e| e.id == "d"));
+        assert!(!bc
+            .runs_here
+            .iter()
+            .chain(&bc.experimental)
+            .chain(&bc.other_hardware)
+            .any(|e| e.id == "d"));
         // c is annotated with the mesh it needs
         assert_eq!(bc.other_hardware[0].needed_hardware, vec!["T3K"]);
         assert!(bc.catalog_available);
@@ -562,7 +589,10 @@ mod tests {
         let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
           {"id":"qwen3-8b","display_name":"Qwen3-8B","family":"Qwen","tasks":[],"compatibility":[{"hardware":"Galaxy","chip_set":"","hardware_family":"","status":"Supported","software":[]}]}
         ]}"#).unwrap();
-        let live = vec![ModelInfo { name: "Qwen/Qwen3-8B".into(), devices: vec!["P300X2".into()] }];
+        let live = vec![ModelInfo {
+            name: "Qwen/Qwen3-8B".into(),
+            devices: vec!["P300X2".into()],
+        }];
         let bc = classify(Some(&cat), &live, Some("p300x2"), false);
         // live model wins -> runs_here, available_now, deduped with the catalog entry (matched by normalize_key)
         assert_eq!(bc.runs_here.len(), 1);
@@ -584,7 +614,10 @@ mod tests {
         let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
           {"id":"d","display_name":"D","family":"F","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Not Supported","software":[]}]}
         ]}"#).unwrap();
-        let live = vec![ModelInfo { name: "d".into(), devices: vec![] }];
+        let live = vec![ModelInfo {
+            name: "d".into(),
+            devices: vec![],
+        }];
         let bc = classify(Some(&cat), &live, Some("p300x2"), false);
 
         let in_runs_here = bc
@@ -603,7 +636,10 @@ mod tests {
     #[test]
     fn classify_unavailable_catalog_returns_live_only() {
         use crate::model::ModelInfo;
-        let live = vec![ModelInfo { name: "X/Y".into(), devices: vec![] }];
+        let live = vec![ModelInfo {
+            name: "X/Y".into(),
+            devices: vec![],
+        }];
         let bc = classify(None, &live, Some("p300x2"), false);
         assert!(!bc.catalog_available);
         assert_eq!(bc.runs_here.len(), 1);
@@ -656,7 +692,13 @@ mod tests {
           {"id":"a","display_name":"A","family":"F","tasks":[],"compatibility":[{"hardware":"p150","chip_set":"","hardware_family":"","status":"Supported","software":[]}]}
         ]}"#).unwrap();
         let bc = classify(Some(&cat), &[], Some("p150x2"), false);
-        assert_eq!(bc.experimental.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["a"]);
+        assert_eq!(
+            bc.experimental
+                .iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
         assert!(bc.runs_here.is_empty());
         assert!(bc.other_hardware.is_empty());
     }
@@ -671,7 +713,13 @@ mod tests {
           {"id":"b","display_name":"B","family":"F","tasks":[],"compatibility":[{"hardware":"p150","chip_set":"","hardware_family":"","status":"Supported","software":[]}]}
         ]}"#).unwrap();
         let bc = classify(Some(&cat), &[], Some("p300x2"), false);
-        assert_eq!(bc.other_hardware.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["b"]);
+        assert_eq!(
+            bc.other_hardware
+                .iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["b"]
+        );
         assert_eq!(bc.other_hardware[0].needed_hardware, vec!["P150"]);
     }
 
@@ -696,7 +744,13 @@ mod tests {
         ]}"#).unwrap();
         let bc = classify(Some(&cat), &[], Some("p300x2"), false);
         // Only the tt-inference-server model runs here.
-        assert_eq!(bc.runs_here.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["tis"]);
+        assert_eq!(
+            bc.runs_here
+                .iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["tis"]
+        );
         // Supported-on-mesh-but-not-TIS demote to experimental.
         let exp: Vec<String> = bc.experimental.iter().map(|e| e.id.clone()).collect();
         assert!(exp.contains(&"forgeonly".to_string()));
@@ -713,9 +767,18 @@ mod tests {
           {"id":"forgeonly","display_name":"ForgeOnly","family":"F","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Supported","software":["tt-forge"]}]}
         ]}"#).unwrap();
         // The box's live /models reports it → it IS tt-inference-server-servable now.
-        let live = vec![ModelInfo { name: "forgeonly".into(), devices: vec!["P300X2".into()] }];
+        let live = vec![ModelInfo {
+            name: "forgeonly".into(),
+            devices: vec!["P300X2".into()],
+        }];
         let bc = classify(Some(&cat), &live, Some("p300x2"), false);
-        assert_eq!(bc.runs_here.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), vec!["forgeonly"]);
+        assert_eq!(
+            bc.runs_here
+                .iter()
+                .map(|e| e.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["forgeonly"]
+        );
         assert!(bc.experimental.is_empty());
     }
 
@@ -724,7 +787,10 @@ mod tests {
         assert!(software_is_tis(&["tt-inference-server".into()]));
         assert!(software_is_tis(&["TT-Inference-Server".into()]));
         assert!(software_is_tis(&["tt_inference_server".into()]));
-        assert!(software_is_tis(&["tt-forge".into(), "inference-server".into()]));
+        assert!(software_is_tis(&[
+            "tt-forge".into(),
+            "inference-server".into()
+        ]));
         assert!(!software_is_tis(&["tt-forge".into()]));
         assert!(!software_is_tis(&[]));
     }

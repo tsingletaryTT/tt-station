@@ -346,9 +346,7 @@ fn tt_catalog_json_classifies_fixture_against_mock_box() {
         bc.runs_here
     );
     assert!(
-        bc.runs_here
-            .iter()
-            .any(|e| e.display_name == "mock-model"),
+        bc.runs_here.iter().any(|e| e.display_name == "mock-model"),
         "expected mock-box's live mock-model in runs_here, got: {:?}",
         bc.runs_here
     );
@@ -367,7 +365,12 @@ fn tt_catalog_json_classifies_fixture_against_mock_box() {
         .other_hardware
         .iter()
         .find(|e| e.id == "model-c")
-        .unwrap_or_else(|| panic!("expected Model C in other_hardware, got: {:?}", bc.other_hardware));
+        .unwrap_or_else(|| {
+            panic!(
+                "expected Model C in other_hardware, got: {:?}",
+                bc.other_hardware
+            )
+        });
     assert_eq!(model_c.needed_hardware, vec!["T3K".to_string()]);
 
     // "Model D" (Not Supported everywhere) is omitted entirely.

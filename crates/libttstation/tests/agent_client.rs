@@ -171,7 +171,9 @@ async fn endpoint_maps_409_to_no_model_serving_error() {
         "expected the error to contain a stable '409' marker, got: {message}"
     );
     assert!(
-        message.contains("no model") || message.contains("not serving") || message.contains("serving"),
+        message.contains("no model")
+            || message.contains("not serving")
+            || message.contains("serving"),
         "expected the error to also mention no model/serving, got: {message}"
     );
 }

@@ -186,10 +186,7 @@ fn write_cache(path: &Path, body: &str) {
 ///   fetched body that fails to parse), fall back to whatever's cached on
 ///   disk -- even if stale -- and return it with `stale = true`. If there's
 ///   no cache to fall back to either, `(None, false)`.
-pub fn load_catalog(
-    refresh: bool,
-    file_override: Option<&Path>,
-) -> (Option<CompatCatalog>, bool) {
+pub fn load_catalog(refresh: bool, file_override: Option<&Path>) -> (Option<CompatCatalog>, bool) {
     if let Some(path) = file_override {
         return (parse_catalog_file(path), false);
     }
