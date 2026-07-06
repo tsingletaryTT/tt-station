@@ -69,18 +69,23 @@ pub fn target_holds_tt_device(fd_link_targets: &[String]) -> bool {
         .any(|t| t.starts_with("/dev/tenstorrent"))
 }
 
-/// Select which processes to report: every `uses_tt` holder (kept even if
-/// idle), then the busiest remaining processes by `cpu_pct`, capped at `cap`.
-pub fn select_processes(procs: Vec<ProcInfo>, cap: usize) -> Vec<ProcInfo> {
-    let (mut holders, mut others): (Vec<_>, Vec<_>) = procs.into_iter().partition(|p| p.uses_tt);
-    others.sort_by(|a, b| {
+/// Select which processes to report: the busiest `cap` by `cpu_pct`.
+///
+/// `uses_tt` is intentionally NOT consulted here. `ProcessSampler::scan` builds
+/// every `ProcInfo` with `uses_tt: false` and only does the (expensive)
+/// `/proc/<pid>/fd` walk AFTER selection, on the chosen few -- so a genuinely
+/// idle `/dev/tenstorrent` holder that doesn't rank into the top `cap` by cpu
+/// won't be surfaced. That's the documented trade-off that keeps the scan cheap
+/// (an earlier version partitioned holders first, but with the post-selection
+/// fd walk that branch never fired -- see BOX_TELEMETRY_VALIDATION.md).
+pub fn select_processes(mut procs: Vec<ProcInfo>, cap: usize) -> Vec<ProcInfo> {
+    procs.sort_by(|a, b| {
         b.cpu_pct
             .partial_cmp(&a.cpu_pct)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    holders.extend(others);
-    holders.truncate(cap);
-    holders
+    procs.truncate(cap);
+    procs
 }
 
 /// How often the process scan actually recomputes. The telemetry stream ticks
@@ -110,6 +115,10 @@ pub struct ProcessSampler {
     sys: sysinfo::System,
     cache: TtToplike,
     last_scan: Option<Instant>,
+    /// Count of actual (non-throttled) scans, used by tests to assert the
+    /// throttle actually skips the `/proc` walk within `SCAN_INTERVAL`.
+    #[cfg(test)]
+    scan_count: u32,
 }
 
 impl ProcessSampler {
@@ -122,6 +131,8 @@ impl ProcessSampler {
                 inference: None,
             },
             last_scan: None,
+            #[cfg(test)]
+            scan_count: 0,
         }
     }
 
@@ -144,6 +155,10 @@ impl ProcessSampler {
     /// cost. Trade-off: a genuinely idle `/dev/tenstorrent` holder that doesn't
     /// rank into the top `MAX_PROCESSES` by cpu won't be surfaced.
     fn scan(&mut self) -> TtToplike {
+        #[cfg(test)]
+        {
+            self.scan_count += 1;
+        }
         self.sys
             .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
         let procs: Vec<ProcInfo> = self
@@ -257,33 +272,31 @@ mod tests {
     }
 
     #[test]
-    fn select_puts_tt_holders_first_and_caps() {
+    fn select_is_top_n_by_cpu_ignoring_uses_tt() {
+        // Selection is purely top-N by cpu; `uses_tt` is NOT consulted (the
+        // sampler flags it only AFTER selection). A busy non-holder beats an
+        // idle holder, and an idle holder is capped out like any other.
         let procs = vec![
             proc(1, 90.0, false),
-            proc(2, 5.0, true),
+            proc(2, 5.0, true), // holder, but nearly idle
             proc(3, 50.0, false),
-            proc(4, 1.0, true),
+            proc(4, 1.0, true), // holder, but idle
         ];
-        let out = select_processes(procs, 3);
-        assert_eq!(out.len(), 3);
-        // both tt-holders survive the cap even though pid 4 is nearly idle
-        assert!(out.iter().any(|p| p.pid == 2));
-        assert!(out.iter().any(|p| p.pid == 4));
-        // the remaining slot is the busiest non-holder (pid 1, cpu 90)
-        assert!(out.iter().any(|p| p.pid == 1));
-        assert!(!out.iter().any(|p| p.pid == 3));
+        let out = select_processes(procs, 2);
+        let pids: Vec<u32> = out.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![1, 3]); // top 2 by cpu; idle holders 2 & 4 dropped
     }
 
     #[test]
-    fn select_orders_non_holders_by_cpu_desc() {
+    fn select_orders_by_cpu_desc() {
         let procs = vec![
             proc(1, 10.0, false),
             proc(2, 80.0, false),
             proc(3, 40.0, false),
         ];
         let out = select_processes(procs, 10);
-        let non_holder_pids: Vec<u32> = out.iter().map(|p| p.pid).collect();
-        assert_eq!(non_holder_pids, vec![2, 3, 1]);
+        let pids: Vec<u32> = out.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![2, 3, 1]);
     }
 
     #[test]
@@ -307,6 +320,17 @@ mod tests {
             assert!(json.contains(key), "missing {key} in {json}");
         }
         assert!(json.contains("\"schema\":1"));
+    }
+
+    #[test]
+    fn sample_throttles_rescans_within_interval() {
+        let mut s = ProcessSampler::new();
+        let _ = s.sample(); // never scanned before → one real scan
+        let _ = s.sample(); // immediate second call → within SCAN_INTERVAL → cached
+        assert_eq!(
+            s.scan_count, 1,
+            "a second sample() within SCAN_INTERVAL must reuse the cache, not rescan /proc"
+        );
     }
 
     #[test]
