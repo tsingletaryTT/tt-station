@@ -270,7 +270,7 @@
     }
     .node.mac { border-color: rgba(99,179,237,0.35); }
     .node.box { border-color: rgba(79,209,197,0.4); }
-    .node.cloud { border-color: rgba(183,148,244,0.35); border-style: dashed; }
+    .node.cloud { border-color: rgba(183,148,244,0.35); }
     .node-eyebrow { font-family: var(--mono); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--teal-dim); }
     .node-title { font-size: 1rem; font-weight: 600; color: var(--text); }
     .node ul { list-style: none; margin-top: 0.35rem; display: flex; flex-direction: column; gap: 0.3rem; }
@@ -435,11 +435,11 @@
         containers, and copy-pasting ports.
       </p>
       <p>
-        <strong>tt-station is the thin glue that closes that gap.</strong> Roughly 80% of the stack
-        already ships — <code>dstack</code>, <code>tt-inference-server</code>'s vLLM
-        <code>/v1</code>, the Tenstorrent Cloud console, and macOS Bonjour. What was missing was a
-        small discovery/pairing layer and a friendly CLI (and, soon, a menu-bar app) to tie them
-        together.
+        <strong>tt-station is the thin glue that closes that gap.</strong> The serving half already
+        existed — <code>tt-inference-server</code>'s vLLM <code>/v1</code> on the box, and macOS
+        Bonjour for zero-config <code>.local</code> discovery. What was missing was a small
+        discovery/pairing layer, a friendly CLI, and a native menu-bar app to tie them together.
+        tt-station is exactly that glue.
       </p>
       <p>
         The result feels less like operating a server and more like <strong>casting to a
@@ -472,9 +472,9 @@
   <p class="section-sub">
     tt-station adds a small box-side agent and a Mac-side CLI (plus a native app built on it) on
     top of the serving stack you already run. Discovery, pairing, and an optional SSH handshake
-    happen over the LAN; serving is delegated to <code>tt-inference-server</code> behind a
-    swappable backend, so the same flow can later target Tenstorrent Cloud without the Mac
-    noticing.
+    happen over the LAN; serving is delegated to <code>tt-inference-server</code>'s
+    <code>run.py</code>/vLLM on the box, behind a backend seam that keeps the serving details off
+    the Mac.
   </p>
   <div class="flow">
     <div class="node mac">
@@ -501,9 +501,9 @@
       <span class="node-eyebrow">Serving</span>
       <span class="node-title">tt-inference-server</span>
       <ul>
-        <li>Loads the model on-chip</li>
+        <li>Loads the model onto the box's 4 Blackhole chips</li>
+        <li>Readiness-gated on <code>/v1/models</code></li>
         <li>OpenAI-compatible <code>/v1</code></li>
-        <li>Cloud burst (later)</li>
       </ul>
     </div>
   </div>
@@ -723,14 +723,14 @@ echo "$OPENAI_BASE_URL"           # → http://qb2-lab.local:8002/v1</code>
     <div class="copy">
       <p>
         tt-station deliberately builds <em>little</em>. The heavy lifting — compiling models to
-        Tensix cores, serving vLLM, the cloud console — already exists and is battle-tested. The new
-        code is a discovery/pairing daemon, a typed HTTP client, a secret store, and a CLI, all in
-        one small Rust workspace.
+        Tensix cores and serving vLLM — already exists and is battle-tested. The new code is a
+        discovery/pairing daemon, a typed HTTP client, a secret store, and a CLI, all in one small
+        Rust workspace.
       </p>
       <p>
         Every serving path hides behind a <strong><code>ServingBackend</code> trait</strong>, so the
-        proven <code>run.py</code>/vLLM launch used today can be swapped for dstack or a cloud burst
-        later without touching a line of Mac-side code.
+        proven <code>run.py</code>/vLLM launch used today stays cleanly separated from the Mac-side
+        code — the client only ever sees one <code>/v1</code>.
       </p>
     </div>
     <ul class="lineage-list">
@@ -765,8 +765,8 @@ echo "$OPENAI_BASE_URL"           # → http://qb2-lab.local:8002/v1</code>
       <li class="lineage-item">
         <span class="lineage-era">Next</span>
         <div>
-          <div class="lineage-name">tt-toplike remote monitoring · cloud burst</div>
-          <div class="lineage-desc"><span class="soon">◐ experimental</span> — a separate, owner-managed repo renders the box's live telemetry stream on your Mac today; local-first burst to Tenstorrent Cloud is still ahead.</div>
+          <div class="lineage-name">tt-toplike remote monitoring</div>
+          <div class="lineage-desc"><span class="soon">◐ experimental</span> — a separate, owner-managed repo renders the box's live telemetry stream on your Mac.</div>
         </div>
       </li>
     </ul>
