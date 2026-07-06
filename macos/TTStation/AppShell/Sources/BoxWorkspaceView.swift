@@ -21,13 +21,14 @@ import TTStationKit
 /// **Box-switch state reset:** `@Bindable var box` changes identity when the
 /// sidebar selection changes, but without an explicit `.id`, SwiftUI treats
 /// this as the *same* view at the same tree position and keeps this view's
-/// (and its subviews', notably `DeviceStripView`'s own `@State
-/// TelemetryService`) `@State` alive across the switch — so the new box's UI
-/// would render on top of the previous box's live telemetry socket/model
-/// search text. `.id(box.id)` on the root `VStack` forces SwiftUI to treat
-/// each box as a distinct view identity, tearing down and rebuilding all
-/// `@State` in this subtree (including `DeviceStripView`'s socket, per its
-/// own doc comment) whenever the selected box changes.
+/// (and its subviews') `@State` (e.g. the model-search text) alive across the
+/// switch. `.id(box.id)` on the root `VStack` forces SwiftUI to treat each box
+/// as a distinct view identity, tearing down and rebuilding all `@State` in
+/// this subtree whenever the selected box changes — which also fires
+/// `DeviceStripView`'s `.onDisappear`, so its `box.unsubscribeTelemetry()`
+/// runs and the old box's shared telemetry socket is released. (The telemetry
+/// socket now lives on `BoxViewModel` as one ref-counted subscription shared
+/// by the device strip and the popover chip — not per-view `@State` anymore.)
 struct BoxWorkspaceView: View {
     @Bindable var box: BoxViewModel
     @State private var code = ""
