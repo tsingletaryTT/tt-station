@@ -325,6 +325,12 @@ public final class BoxViewModel: Identifiable {
     }
 
     public func stop() async {
+        // Bump the generation so an in-flight `run()` (if `stop` is ever
+        // invoked mid-load) is abandoned and its late completion can't clobber
+        // the idle state we set here — same guard `cancelStart()` relies on.
+        // (Today the UI gates Stop and Cancel into mutually exclusive branches,
+        // so this is belt-and-suspenders against a future call site.)
+        runGeneration += 1
         inFlight = true; defer { inFlight = false }
         do {
             try await commands.stop(host: record.hostPort)
