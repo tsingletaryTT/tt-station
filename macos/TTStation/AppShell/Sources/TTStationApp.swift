@@ -84,7 +84,14 @@ struct WindowRootView: View {
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } detail: {
             if let box = model.selectedBox {
-                ScrollView { BoxWorkspaceView(box: box).padding() }
+                VStack(spacing: 0) {
+                    ScrollView { BoxWorkspaceView(box: box).padding() }
+                    if box.isPaired {
+                        // RunStopBar owns its own top Divider()/material (see
+                        // RunStopBar.swift), so no extra divider here.
+                        RunStopBar(box: box).id(box.id)
+                    }
+                }
             } else {
                 ContentUnavailableView("Select a box", systemImage: "cpu")
             }

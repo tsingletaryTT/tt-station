@@ -8,11 +8,15 @@ import TTStationKit
 /// **Card chrome:** `ConnectCardView`/`WorkbenchCardView`/`ServingCardView`/
 /// `ConfigCardView` already wrap themselves in `CardContainer` (Task 13 for
 /// the first three; `ConfigCardView` follows the same idiom). `BoxHeaderView`,
-/// `DeviceStripView`, and `ModelBrowserView` (+ the inline run/stop/endpoint
-/// block that goes with it) do not — Task 13 deliberately left them bare, so
-/// this view wraps those three in `CardContainer` itself. The result: every
-/// section in the pane reads as one consistent stack of titled cards, with
-/// no section double-wrapped and none left bare.
+/// `DeviceStripView`, and `ModelBrowserView` do not — Task 13 deliberately
+/// left them bare, so this view wraps those three in `CardContainer` itself.
+/// The result: every section in the pane reads as one consistent stack of
+/// titled cards, with no section double-wrapped and none left bare.
+///
+/// **Run/Stop/serving:** used to live inline in `modelBody` alongside the
+/// browser; Task 3 of the window redesign pulled it out into `RunStopBar`,
+/// pinned below the scroll in `WindowRootView` so it's always visible
+/// regardless of scroll position — `modelBody` here is now just the browser.
 ///
 /// **Box-switch state reset:** `@Bindable var box` changes identity when the
 /// sidebar selection changes, but without an explicit `.id`, SwiftUI treats
@@ -119,10 +123,9 @@ struct BoxWorkspaceView: View {
         }
     }
 
-    /// Searchable model browser + Run/Stop + spin-up/serving feedback.
-    /// Kept inline here (rather than folded into `ModelBrowserView`) because
-    /// it reaches directly into `box.run()`/`box.stop()`/`box.endpoint` —
-    /// exactly the carve-out the brief calls out as acceptable.
+    /// Searchable model browser. Run/Stop/Cancel + the serving/endpoint line
+    /// that used to live here have moved to `RunStopBar`, pinned below the
+    /// scroll in `WindowRootView` — this card is now just the browser.
     @ViewBuilder
     private var modelBody: some View {
         // "Set up in Workbench →" (catalog mode's Experimental header) opens
@@ -133,71 +136,5 @@ struct BoxWorkspaceView: View {
             Task { await launcher.openVSCode(host: box.record.host) }
         })
         .task { if box.models.isEmpty { await box.loadModels() } }
-
-        // Run is the primary action; Stop/Cancel is a secondary, destructive
-        // one. Run is gated by `inFlight` (stays disabled through a load);
-        // Stop/Cancel is gated by `canStopOrCancel` so it stays live during a
-        // load (to cancel it) — the only real way to abort a load is to tell
-        // the agent to `stop`, which makes the in-flight `run()` fail fast.
-        HStack(spacing: 8) {
-            Button { Task { await box.run() } } label: {
-                Label("Run", systemImage: "play.fill")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(box.selectedModel == nil || box.inFlight)
-            .help("Start serving the selected model on this box.")
-
-            if box.starting {
-                Button(role: .destructive) { Task { await box.cancelStart() } } label: {
-                    Label("Cancel", systemImage: "xmark.circle.fill")
-                }
-                .buttonStyle(.bordered)
-                .disabled(!box.canStopOrCancel)
-                .help("Cancel the in-progress model load.")
-            } else {
-                Button(role: .destructive) { Task { await box.stop() } } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
-                .buttonStyle(.bordered)
-                .disabled(!box.canStopOrCancel)
-                .help("Stop the model currently serving on this box.")
-            }
-
-            if box.inFlight { ProgressView().scaleEffect(0.6) }
-        }
-        .controlSize(.small)
-
-        // Spin-up feedback: shown while `run()` is in flight, before the
-        // endpoint returns. First run pulls the model image, which can take
-        // minutes — say so, so the wait doesn't read as a hang. While a
-        // cancel is unwinding that load, say so instead ("Canceling…").
-        if box.cancelling {
-            HStack(spacing: 6) {
-                ProgressView().scaleEffect(0.6)
-                Text("Canceling…").font(.caption).foregroundStyle(.secondary)
-            }
-        } else if box.starting {
-            HStack(spacing: 6) {
-                ProgressView().scaleEffect(0.6)
-                Text("Starting \(box.selectedModel ?? "model")… (first run can take a few minutes)")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        }
-
-        if let ep = box.endpoint {
-            // Prominent "Serving <model>" line so the running state is
-            // unmistakable at a glance. Connecting a front-end to it lives
-            // in the separate Connect card below.
-            HStack(spacing: 4) {
-                Image(systemName: "circle.fill").font(.system(size: 7)).foregroundStyle(TTTheme.statusServing)
-                Text("Serving \(ep.model)").font(.caption.weight(.semibold))
-            }
-            HStack {
-                Text(ep.baseURL).font(TTTheme.mono).lineLimit(1).truncationMode(.middle)
-                Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(ep.baseURL, forType: .string) }
-                    label: { Image(systemName: "doc.on.doc") }.buttonStyle(.borderless)
-                    .help("Copy endpoint URL")
-            }
-        }
     }
 }
