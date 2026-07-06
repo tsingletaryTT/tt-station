@@ -60,7 +60,14 @@ final class FakeTTClient: TTCommands {
         ])
     var catalogError: TTError?
 
-    func discover(manualHosts: [String], noMdns: Bool) async throws -> [BoxRecord] { [] }
+    /// Settable discovery result + captured `manualHosts` so tests can verify
+    /// both what `scan()` seeds discovery with and how it copes with a miss.
+    var discoverResult: [BoxRecord] = []
+    private(set) var discoverManualHostsSeen: [String] = []
+    func discover(manualHosts: [String], noMdns: Bool) async throws -> [BoxRecord] {
+        discoverManualHostsSeen = manualHosts
+        return discoverResult
+    }
     func models(host: String) async throws -> [ModelInfo] { models_ }
     func status(host: String) async throws -> ServingStatus {
         statusCalled = true

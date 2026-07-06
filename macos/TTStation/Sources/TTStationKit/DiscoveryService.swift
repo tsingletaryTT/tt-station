@@ -5,16 +5,25 @@ public protocol DiscoveryService {
 }
 
 public final class MDNSDiscoveryService: DiscoveryService {
-    private let client: TTClient
+    // `TTCommands` (not the concrete `TTClient`) so tests can substitute
+    // `FakeTTClient` and assert what `scan()` seeds discovery with.
+    private let client: TTCommands
     private let registry: HostRegistry
-    public init(client: TTClient, registry: HostRegistry) {
+    public init(client: TTCommands, registry: HostRegistry) {
         self.client = client; self.registry = registry
     }
 
     public func scan() async -> [BoxRecord] {
-        let manual = registry.manualHosts
-        let discovered = (try? await client.discover(manualHosts: manual, noMdns: false)) ?? []
-        return Self.merge(discovered: discovered, manualHosts: manual)
+        // Known hosts = manually-added AND previously-paired. Passing paired hosts
+        // as manual `--host` seeds makes the CLI probe them DIRECTLY (HTTP /status,
+        // mDNS-independent), so a box you've paired with shows up deterministically
+        // even when the racy mDNS browse misses it (e.g. right after the pairing
+        // handshake, when the agent re-publishes its mDNS record). merge() then
+        // synthesizes a placeholder for any known host discovery still didn't return,
+        // so a paired box never vanishes from the list on a transient miss.
+        let known = Array(Set(registry.manualHosts).union(registry.pairedHosts)).sorted()
+        let discovered = (try? await client.discover(manualHosts: known, noMdns: false)) ?? []
+        return Self.merge(discovered: discovered, manualHosts: known)
     }
 
     /// Dedupe by `host:port`; append a synthetic idle record for any manual
