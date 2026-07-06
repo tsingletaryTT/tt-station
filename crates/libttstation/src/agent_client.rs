@@ -253,7 +253,11 @@ impl AgentClient {
             .await?;
 
         if resp.status() == reqwest::StatusCode::CONFLICT {
-            anyhow::bail!("no model is currently serving on this agent");
+            // The "(409)" suffix is a stable marker consumers can match on
+            // (e.g. the Mac app's `isIdleConflict`) to distinguish "authed
+            // but idle" from an auth failure, without depending on the exact
+            // human-readable wording around it.
+            anyhow::bail!("no model is currently serving on this agent (409)");
         }
 
         let resp = resp

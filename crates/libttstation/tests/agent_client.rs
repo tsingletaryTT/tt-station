@@ -161,12 +161,18 @@ async fn endpoint_maps_409_to_no_model_serving_error() {
         .await
         .expect_err("endpoint() should fail on 409");
 
+    // The Mac app (`isIdleConflict` in TTStationKit) keys off a stable "(409)"
+    // marker in this message to distinguish "authed but idle" from an auth
+    // failure -- assert on that exact marker, not just generic wording, so a
+    // future rewording can't silently break that contract.
     let message = err.to_string().to_lowercase();
     assert!(
-        message.contains("no model")
-            || message.contains("not serving")
-            || message.contains("serving"),
-        "expected the error to mention no model/serving, got: {message}"
+        message.contains("409"),
+        "expected the error to contain a stable '409' marker, got: {message}"
+    );
+    assert!(
+        message.contains("no model") || message.contains("not serving") || message.contains("serving"),
+        "expected the error to also mention no model/serving, got: {message}"
     );
 }
 
