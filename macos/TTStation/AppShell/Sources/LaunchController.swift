@@ -147,67 +147,61 @@ final class LaunchController {
         }
     }
 
-    // MARK: Open WebUI
+    // MARK: Open WebUI (box-hosted)
 
-    /// Ensure a local Open WebUI is up on :8080 wired to `endpoint`, then open
-    /// the browser. Reuses an already-running instance (health 200), otherwise
-    /// spawns `uvx open-webui serve …` detached and polls health (~90s, since
-    /// the first run may still be resolving deps).
+    /// Ensure Open WebUI is up **on the box** wired to the box's local vLLM,
+    /// then open a browser tab to it. Open WebUI runs as a docker container on
+    /// the QuietBox (not on the Mac) — this removes every Mac-side install
+    /// failure mode; the Mac only SSHes the launch and opens the browser.
+    ///
+    /// Flow: derive the box host + serving port from `endpoint.baseURL`;
+    /// reuse the container if it's already healthy (open browser, done);
+    /// otherwise SSH the idempotent `docker run` to the box and poll the box's
+    /// health endpoint (up to ~180s — the first run pulls the image and
+    /// initializes) before opening the browser.
     func openWebUI(endpoint: Endpoint) async {
         isLaunchingWebUI = true
         defer { isLaunchingWebUI = false; webUIPhase = nil }
         webUIError = nil
 
-        // Already up? Just open the browser (reattach — don't double-spawn).
-        // This fast path stays first and skips provisioning entirely.
-        if await Self.isHealthy() {
-            NSWorkspace.shared.open(OpenWebUILauncher.url)
+        guard let comps = URLComponents(string: endpoint.baseURL),
+            let rawHost = comps.host,
+            let servingPort = comps.port
+        else {
+            webUIError = "couldn't parse the box endpoint: \(endpoint.baseURL)"
+            return
+        }
+        let host = rawHost.hasSuffix(".") ? String(rawHost.dropLast()) : rawHost
+        let webURL = OpenWebUILauncher.url(host: host)
+        let healthURL = OpenWebUILauncher.healthURL(host: host)
+
+        // Already up on the box? Just open the browser (reuse — don't relaunch).
+        if await Self.isHealthy(healthURL) {
+            NSWorkspace.shared.open(webURL)
             return
         }
 
-        // Precheck: uvx present? uv ships uvx, so install `uv` via brew when
-        // it's missing instead of erroring — Connect actions should come up
-        // fast, not send the user off to a terminal.
-        var uvx = Self.resolveBrewBinary("uvx")
-        if uvx == nil {
-            webUIPhase = "Installing uv…"
-            if await Self.runBrewInstall(formula: Provisioning.uvFormula) {
-                uvx = Self.resolveBrewBinary("uvx")
-            }
-        }
-        guard let uvxPath = uvx else {
-            webUIError = Self.resolveBrewBinary("brew") == nil
-                ? "Homebrew not found — install it from https://brew.sh, then retry."
-                : "uv install failed — run `brew install \(Provisioning.uvFormula)` manually to see why."
+        webUIPhase = "Starting Open WebUI on the box…"
+        let target = sshTarget(host: host)
+        let ok = await Self.runSSHCommand(
+            user: target.user, host: target.host,
+            command: OpenWebUILauncher.dockerCommand(servingPort: servingPort))
+        guard ok else {
+            webUIError =
+                "couldn't start Open WebUI on the box over SSH — check that `ttuser` SSH and docker are set up (pair installs the key)."
             return
         }
 
-        webUIPhase = "Starting Open WebUI…"
-        // App-owned state/DB dir so Open WebUI ignores any ambient DATABASE_URL
-        // in the user's shell (which would otherwise crash startup).
-        let dataDir: String
-        do {
-            dataDir = try Self.webUIDataDir().path
-        } catch {
-            webUIError = "couldn't create Open WebUI data dir: \(error.localizedDescription)"
-            return
-        }
-        let inv = OpenWebUILauncher.invocation(for: endpoint, dataDir: dataDir)
-        do {
-            try Self.spawnDetached(executable: uvxPath, args: inv.args, env: inv.env)
-        } catch {
-            webUIError = "failed to start Open WebUI: \(error.localizedDescription)"
-            return
-        }
-        // Poll health up to ~90s (first run may still be resolving deps).
-        for _ in 0..<90 {
-            if await Self.isHealthy() {
-                NSWorkspace.shared.open(OpenWebUILauncher.url)
+        // Poll the box health endpoint (~180s: first run pulls the image).
+        for _ in 0..<180 {
+            if await Self.isHealthy(healthURL) {
+                NSWorkspace.shared.open(webURL)
                 return
             }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
-        webUIError = "Open WebUI didn't come up on :8080 — check the terminal/logs."
+        webUIError =
+            "Open WebUI didn't come up on \(host):\(OpenWebUILauncher.hostPort) — first-run image pull may still be going; retry shortly."
     }
 
     // MARK: helpers
@@ -293,14 +287,30 @@ final class LaunchController {
         return base
     }
 
-    /// App-owned Open WebUI state directory under Application Support. Holds its
-    /// sqlite DB + uploads so a single shared instance persists across launches
-    /// (and so its `DATABASE_URL` is ours, not the shell's). Created if needed.
-    static func webUIDataDir() throws -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("TTStation/openwebui", isDirectory: true)
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        return base
+    /// Run a command on the box over SSH and wait for it to finish, returning
+    /// whether it exited 0. Used to launch the box-hosted Open WebUI container
+    /// (`docker run` includes a first-run image pull, so this can take a
+    /// while — hence the async continuation rather than a blocking
+    /// `waitUntilExit`, mirroring `runBrewInstall`). `accept-new` lets a
+    /// first connection to an unknown host key through.
+    static func runSSHCommand(user: String, host: String, command: String) async -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        p.arguments = [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=10",
+            "\(user)@\(host)", command,
+        ]
+        return await withCheckedContinuation { continuation in
+            p.terminationHandler = { proc in
+                continuation.resume(returning: proc.terminationStatus == 0)
+            }
+            do {
+                try p.run()
+            } catch {
+                continuation.resume(returning: false)
+            }
+        }
     }
 
     /// The local cache dir where install.sh drops the tt-vscode-toolkit
@@ -367,26 +377,10 @@ final class LaunchController {
         )
     }
 
-    /// Spawn a long-lived process detached from the app (`nohup … &`) so it
-    /// survives the app quitting and keeps serving. Merge a homebrew PATH so
-    /// `uvx` can resolve its own subtools.
-    static func spawnDetached(executable: String, args: [String], env: [String: String]) throws {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-        for (k, v) in env { environment[k] = v }
-        p.environment = environment
-        let quoted = ([executable] + args).map { "'\($0)'" }.joined(separator: " ")
-        p.arguments = ["-c", "nohup \(quoted) >/tmp/ttstation-openwebui.log 2>&1 &"]
-        try p.run()
-        p.waitUntilExit()
-    }
-
-    /// True when Open WebUI's health endpoint returns 200. Short timeout so the
-    /// reuse-check and each poll tick stay snappy.
-    static func isHealthy() async -> Bool {
-        var req = URLRequest(url: OpenWebUILauncher.healthURL)
+    /// True when `healthURL` returns 200. Short timeout so the reuse-check and
+    /// each poll tick stay snappy.
+    static func isHealthy(_ healthURL: URL) async -> Bool {
+        var req = URLRequest(url: healthURL)
         req.timeoutInterval = 2
         guard let (_, resp) = try? await URLSession.shared.data(for: req),
               let http = resp as? HTTPURLResponse else { return false }

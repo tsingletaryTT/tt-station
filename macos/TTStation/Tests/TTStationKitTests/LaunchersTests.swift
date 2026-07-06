@@ -48,28 +48,36 @@ final class LaunchersTests: XCTestCase {
 
     // MARK: OpenWebUILauncher
 
-    func testOpenWebUIInvocation() throws {
-        let ep = try endpoint()
-        let inv = OpenWebUILauncher.invocation(for: ep, dataDir: "/tmp/ttstation-owui")
-        XCTAssertEqual(inv.executable, "uvx")
-        // `--python 3.11` is pinned BEFORE the tool name so uv runs open-webui
-        // on 3.11 (its supported version), which has prebuilt wheels for every
-        // heavy dep (pyarrow/Arrow, chromadb). Without the pin, uv picks the
-        // newest Python (e.g. 3.14) that lacks those wheels → source builds
-        // (cmake + Apache Arrow) → the install stops being "fast".
-        XCTAssertEqual(inv.args, ["--python", "3.11", "open-webui", "serve", "--port", "8080"])
-        XCTAssertEqual(inv.env["OPENAI_API_BASE_URL"], ep.baseURL)
-        XCTAssertEqual(inv.env["OPENAI_API_KEY"], "sk-none")
-        XCTAssertEqual(inv.env["WEBUI_AUTH"], "false")
-        // App-owned DATA_DIR + a matching sqlite DATABASE_URL so an ambient
-        // DATABASE_URL in the user's shell can't be read as Open WebUI's DB
-        // (which crashes startup with "Could not parse SQLAlchemy URL").
-        XCTAssertEqual(inv.env["DATA_DIR"], "/tmp/ttstation-owui")
-        XCTAssertEqual(inv.env["DATABASE_URL"], "sqlite:////tmp/ttstation-owui/webui.db")
+    func testOpenWebUIDockerCommand() {
+        // Open WebUI runs ON THE BOX as a docker container wired to the box's
+        // local vLLM on the given serving port. The command must be idempotent
+        // (reuse a running container), publish the host port, reach the host
+        // vLLM via host.docker.internal, and persist a named data volume.
+        let cmd = OpenWebUILauncher.dockerCommand(servingPort: 8003)
+        XCTAssertTrue(cmd.contains("docker run -d --name ttstation-openwebui"), cmd)
+        // Idempotent reuse: bail if the container is already running.
+        XCTAssertTrue(cmd.contains("docker inspect -f '{{.State.Running}}' ttstation-openwebui"), cmd)
+        // Publish host :3000 → container :8080.
+        XCTAssertTrue(cmd.contains("-p 3000:8080"), cmd)
+        // Reach the box's vLLM from inside the container.
+        XCTAssertTrue(cmd.contains("--add-host=host.docker.internal:host-gateway"), cmd)
+        XCTAssertTrue(cmd.contains("OPENAI_API_BASE_URL=http://host.docker.internal:8003/v1"), cmd)
+        XCTAssertTrue(cmd.contains("WEBUI_AUTH=false"), cmd)
+        XCTAssertTrue(cmd.contains("-v ttstation-openwebui:/app/backend/data"), cmd)
+        XCTAssertTrue(cmd.contains("ghcr.io/open-webui/open-webui:main"), cmd)
+        // First-run pull is retried (ghcr.io over IPv6 was observed flaky), and
+        // only when the image isn't already local.
+        XCTAssertTrue(cmd.contains("docker image inspect"), cmd)
+        XCTAssertTrue(cmd.contains("docker pull ghcr.io/open-webui/open-webui:main"), cmd)
     }
 
     func testOpenWebUIURLs() {
-        XCTAssertEqual(OpenWebUILauncher.url.absoluteString, "http://localhost:8080")
-        XCTAssertEqual(OpenWebUILauncher.healthURL.absoluteString, "http://localhost:8080/health")
+        // URLs are keyed to the box host and the published host port (3000).
+        XCTAssertEqual(
+            OpenWebUILauncher.url(host: "qb2-lab.local").absoluteString,
+            "http://qb2-lab.local:3000")
+        XCTAssertEqual(
+            OpenWebUILauncher.healthURL(host: "qb2-lab.local").absoluteString,
+            "http://qb2-lab.local:3000/health")
     }
 }
