@@ -1184,6 +1184,75 @@ fn runpy_list_models_includes_only_vllm_servable_models() {
     assert_eq!(resp.release_version.as_deref(), Some("0.14.0"));
 }
 
+/// `list_models` must mark a model `downloaded: true` when its weights are in
+/// the box's HF cache (`<host_hf_cache>/hub/models--<org>--<name>`), and
+/// `false` otherwise -- best-effort detection driving the UI's "starts fast"
+/// vs "needs a download" hint.
+#[test]
+fn runpy_list_models_marks_downloaded_from_hf_cache() {
+    let fixture = TempModelSpec::write(
+        r#"{
+            "release_version": "0.14.0",
+            "model_specs": {
+                "meta-llama/Llama-3.3-70B-Instruct": { "P300X2": {"vLLM": {}} },
+                "Qwen/Qwen3-8B": { "P300X2": {"vLLM": {}} }
+            }
+        }"#,
+    );
+
+    // A scratch HF cache with ONLY the Llama repo present.
+    let hub = std::env::temp_dir().join(format!(
+        "tt-station-hfcache-{}-{}/hub",
+        std::process::id(),
+        std::time::Instant::now().elapsed().as_nanos()
+    ));
+    std::fs::create_dir_all(hub.join("models--meta-llama--Llama-3.3-70B-Instruct"))
+        .expect("create fake downloaded repo dir");
+    // A noise dir that isn't a servable model must not confuse the scan.
+    std::fs::create_dir_all(hub.join("models--BAAI--bge-large-en-v1.5")).unwrap();
+    let cache_root = hub.parent().unwrap().to_string_lossy().into_owned();
+
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.model_spec_path = Some(fixture.path());
+    cfg.host_hf_cache = Some(cache_root.clone());
+    let backend = RunPyBackend::new(cfg, Box::new(FakeRunner::new(0)));
+
+    let resp = backend.list_models().expect("list_models should succeed");
+    let llama = resp
+        .models
+        .iter()
+        .find(|m| m.name == "meta-llama/Llama-3.3-70B-Instruct")
+        .expect("llama present");
+    let qwen = resp
+        .models
+        .iter()
+        .find(|m| m.name == "Qwen/Qwen3-8B")
+        .expect("qwen present");
+    assert!(llama.downloaded, "Llama has a cache dir → downloaded:true");
+    assert!(!qwen.downloaded, "Qwen has no cache dir → downloaded:false");
+
+    let _ = std::fs::remove_dir_all(hub.parent().unwrap());
+}
+
+/// A missing/unset HF cache must not error -- every model just reads as
+/// not-downloaded (the detection is a hint, never a gate).
+#[test]
+fn runpy_list_models_downloaded_false_when_no_hf_cache() {
+    let fixture = TempModelSpec::write(
+        r#"{"release_version":"0.14.0","model_specs":{"Qwen/Qwen3-8B":{"P300X2":{"vLLM":{}}}}}"#,
+    );
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.model_spec_path = Some(fixture.path());
+    cfg.host_hf_cache = None;
+    let backend = RunPyBackend::new(cfg, Box::new(FakeRunner::new(0)));
+
+    let resp = backend.list_models().expect("list_models should succeed");
+    assert!(
+        resp.models.iter().all(|m| !m.downloaded),
+        "no HF cache configured → nothing marked downloaded"
+    );
+}
+
 /// `model_spec_path` defaults to `<repo_dir>/model_spec.json` when
 /// unconfigured -- proven by pointing `repo_dir` at a scratch directory
 /// containing exactly that filename with no explicit `model_spec_path` set.

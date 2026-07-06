@@ -117,6 +117,14 @@ pub struct ServingList {
 pub struct ModelInfo {
     pub name: String,
     pub devices: Vec<String>,
+    /// Whether this model's weights are already downloaded on the box (so a
+    /// serve starts fast rather than triggering a large first-run download).
+    /// Best-effort, detected box-side by scanning the HF cache -- see
+    /// `RunPyBackend::list_models`. `#[serde(default)]` keeps the wire
+    /// backward-compatible: an older agent that doesn't report this field
+    /// decodes as `false` (unknown → treat as not-downloaded).
+    #[serde(default)]
+    pub downloaded: bool,
 }
 
 /// `GET /models`'s response body: every model a box can serve (see

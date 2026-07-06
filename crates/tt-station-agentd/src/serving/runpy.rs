@@ -931,14 +931,61 @@ impl ServingBackend for RunPyBackend {
                 Some(libttstation::model::ModelInfo {
                     name: name.clone(),
                     devices,
+                    // Filled in below by the HF-cache scan.
+                    downloaded: false,
                 })
             })
             .collect();
         models.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Best-effort: mark which models already have weights in the box's HF
+        // cache, so the UI can show "starts fast" vs "needs a download."
+        let downloaded = scan_downloaded_keys(self.config.host_hf_cache.as_deref());
+        for m in &mut models {
+            m.downloaded = downloaded.contains(&libttstation::catalog::normalize_key(&m.name));
+        }
 
         Ok(ModelsResponse {
             release_version,
             models,
         })
     }
+}
+
+/// Scan the box's HuggingFace cache for downloaded model weights and return
+/// the set of [`normalize_key`](libttstation::catalog::normalize_key)'d model
+/// identifiers found there.
+///
+/// The HF hub stores each downloaded repo as
+/// `<host_hf_cache>/hub/models--<org>--<name>` (a repo id's `/` becomes `--`).
+/// We reconstruct `<org>/<name>` and normalize it the same way `classify`
+/// keys live models, so `ModelInfo::name` (`meta-llama/Llama-3.3-70B-Instruct`)
+/// matches its cache dir (`models--meta-llama--Llama-3.3-70B-Instruct`).
+///
+/// Best-effort by design: a missing/unreadable cache (or `None` path) yields
+/// an empty set (everything reads as not-downloaded) rather than an error --
+/// this is a UI hint, never a gate. NOTE: presence of the cache dir is a
+/// proxy for "downloaded," not a guarantee the snapshot is 100% complete;
+/// that's an acceptable trade for a fast, dependency-free check.
+fn scan_downloaded_keys(host_hf_cache: Option<&str>) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+    let Some(cache) = host_hf_cache else {
+        return keys;
+    };
+    let hub = std::path::Path::new(cache).join("hub");
+    let Ok(entries) = std::fs::read_dir(&hub) else {
+        return keys;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(repo) = name.strip_prefix("models--") else {
+            continue;
+        };
+        // `models--org--name` → `org/name`; normalize_key drops the org and
+        // canonicalizes the rest, matching how live models are keyed.
+        let repo_id = repo.replace("--", "/");
+        keys.insert(libttstation::catalog::normalize_key(&repo_id));
+    }
+    keys
 }

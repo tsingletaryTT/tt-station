@@ -168,6 +168,15 @@ pub struct CatalogEntry {
     pub meshes: Vec<String>,
     pub needed_hardware: Vec<String>,
     pub available_now: bool,
+    /// Whether the model's weights are already downloaded on the box (from the
+    /// matched live [`ModelInfo::downloaded`]). `available_now` means "the box
+    /// can serve this" (it's in the live `/models` registry); `downloaded`
+    /// further means "its weights are already on disk, so it starts fast
+    /// rather than triggering a large first-run download." A catalog entry with
+    /// no live match is never `downloaded`. `#[serde(default)]` keeps older
+    /// `tt catalog` output decodable.
+    #[serde(default)]
+    pub downloaded: bool,
     pub status_here: String,
 }
 
@@ -245,6 +254,7 @@ fn live_only_entry(m: &ModelInfo) -> CatalogEntry {
         meshes: Vec::new(),
         needed_hardware: Vec::new(),
         available_now: true,
+        downloaded: m.downloaded,
         status_here: "supported".to_string(),
     }
 }
@@ -432,7 +442,12 @@ pub fn classify(
         } else {
             &model.display_name
         });
-        let available_now = live_by_key.contains_key(&key);
+        // A catalog model is `available_now` if a live model matches its key;
+        // `downloaded` piggybacks on that same live match (a model with no
+        // live match can't be known-downloaded).
+        let matched_live = live_by_key.get(&key);
+        let available_now = matched_live.is_some();
+        let downloaded = matched_live.map(|m| m.downloaded).unwrap_or(false);
 
         let all_meshes: Vec<String> = mesh_status.iter().map(|(m, _)| m.clone()).collect();
 
@@ -454,6 +469,7 @@ pub fn classify(
             meshes: all_meshes.clone(),
             needed_hardware,
             available_now,
+            downloaded,
             // A live-model match always wins: the model is running right
             // now regardless of what the catalog would otherwise say.
             status_here: if available_now {
@@ -714,6 +730,7 @@ mod tests {
         let live = vec![ModelInfo {
             name: "Qwen/Qwen3-8B".into(),
             devices: vec!["P300X2".into()],
+            downloaded: false,
         }];
         let bc = classify(Some(&cat), &live, Some("p300x2"), false);
         // live model wins -> runs_here, available_now, deduped with the catalog entry (matched by normalize_key)
@@ -739,6 +756,7 @@ mod tests {
         let live = vec![ModelInfo {
             name: "d".into(),
             devices: vec![],
+            downloaded: false,
         }];
         let bc = classify(Some(&cat), &live, Some("p300x2"), false);
 
@@ -756,11 +774,45 @@ mod tests {
     }
 
     #[test]
+    fn classify_propagates_downloaded_from_live_match() {
+        use crate::model::ModelInfo;
+        // A catalog model matched by a live model that is downloaded must carry
+        // downloaded:true into runs_here; a matched-but-not-downloaded live
+        // model stays downloaded:false; a catalog-only entry (no live match) is
+        // never downloaded.
+        let cat = serde_json::from_str::<CompatCatalog>(r#"{"models":[
+          {"id":"qwen3-8b","display_name":"Qwen3-8B","family":"Qwen","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Supported","software":["tt-inference-server"]}]},
+          {"id":"qwen3-32b","display_name":"Qwen3-32B","family":"Qwen","tasks":[],"compatibility":[{"hardware":"Quietbox 2","chip_set":"","hardware_family":"","status":"Supported","software":["tt-inference-server"]}]}
+        ]}"#).unwrap();
+        let live = vec![ModelInfo {
+            name: "Qwen/Qwen3-8B".into(),
+            devices: vec!["P300X2".into()],
+            downloaded: true,
+        }];
+        let bc = classify(Some(&cat), &live, Some("p300x2"), false);
+        let e8 = bc.runs_here.iter().find(|e| e.id == "qwen3-8b").unwrap();
+        assert!(e8.available_now && e8.downloaded, "live+downloaded → both true: {e8:?}");
+        let e32 = bc.runs_here.iter().find(|e| e.id == "qwen3-32b").unwrap();
+        assert!(!e32.available_now && !e32.downloaded, "catalog-only → neither: {e32:?}");
+
+        // A live-only append also carries downloaded through.
+        let live2 = vec![ModelInfo {
+            name: "some/Unlisted-Model".into(),
+            devices: vec![],
+            downloaded: true,
+        }];
+        let bc2 = classify(Some(&cat), &live2, Some("p300x2"), false);
+        let only = bc2.runs_here.iter().find(|e| e.id == "some/Unlisted-Model").unwrap();
+        assert!(only.downloaded, "live-only downloaded model → downloaded:true: {only:?}");
+    }
+
+    #[test]
     fn classify_unavailable_catalog_returns_live_only() {
         use crate::model::ModelInfo;
         let live = vec![ModelInfo {
             name: "X/Y".into(),
             devices: vec![],
+            downloaded: false,
         }];
         let bc = classify(None, &live, Some("p300x2"), false);
         assert!(!bc.catalog_available);
@@ -892,6 +944,7 @@ mod tests {
         let live = vec![ModelInfo {
             name: "forgeonly".into(),
             devices: vec!["P300X2".into()],
+            downloaded: false,
         }];
         let bc = classify(Some(&cat), &live, Some("p300x2"), false);
         assert_eq!(

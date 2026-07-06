@@ -341,10 +341,12 @@ async fn get_models() -> Json<ModelsResponse> {
             ModelInfo {
                 name: "mock-model".to_string(),
                 devices: vec!["P300X2".to_string()],
+                downloaded: true,
             },
             ModelInfo {
                 name: "mock-model-large".to_string(),
                 devices: vec!["GALAXY".to_string(), "T3K".to_string()],
+                downloaded: false,
             },
         ],
     })
