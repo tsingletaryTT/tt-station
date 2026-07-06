@@ -32,8 +32,11 @@ seed_vsix() {
   local tag
   tag="$(gh release view --repo "$repo" --json tagName --jq .tagName 2>/dev/null)" || {
     echo "   (skip vsix: couldn't reach GitHub releases)"; return 0; }
-  # Already have this release's vsix? Don't re-download ~80 MB.
-  if ls "$vsix_cache/"*"$tag"*.vsix >/dev/null 2>&1; then
+  # Already have this release's vsix? Don't re-download ~80 MB. The asset name
+  # carries the bare version (tt-vscode-toolkit-0.0.518.vsix), while the tag is
+  # v-prefixed (v0.0.518) — match on the version without the leading 'v'.
+  local ver="${tag#v}"
+  if ls "$vsix_cache/"*"$ver"*.vsix >/dev/null 2>&1; then
     echo "   vsix $tag already cached"; return 0
   fi
   mkdir -p "$vsix_cache"
