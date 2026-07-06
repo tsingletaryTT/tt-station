@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use libttstation::model::ServingStatus;
-use tt_station_agentd::serving::runpy::{RunPyBackend, RunPyConfig};
+use tt_station_agentd::serving::runpy::{tool_call_parser_for, RunPyBackend, RunPyConfig};
 use tt_station_agentd::serving::ServingBackend;
 
 mod support;
@@ -309,6 +309,142 @@ fn runpy_start_omits_device_id_when_not_configured() {
     assert!(
         !cmd.iter().any(|a| a == "--device-id"),
         "argv should not carry --device-id when unconfigured: {cmd:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Tool calling: enable OpenAI-style tool calling for families we know the
+// vLLM parser for, by injecting `--vllm-override-args` into the run.py argv.
+// Tool calling is NOT automatic in tt-inference-server -- see the
+// `enable_tool_calling` / `tool_call_parser_for` doc comments in
+// `src/serving/runpy.rs`.
+// ---------------------------------------------------------------------
+
+/// The per-family parser mapping. Chat/instruct models get a parser; base
+/// (non-chat) checkpoints and unknown families get `None` (so tool calling is
+/// left OFF rather than risking a wrong parser at startup). DeepSeek must win
+/// over Llama for the R1-Distill-Llama models.
+#[test]
+fn tool_call_parser_mapping_is_conservative_and_correct() {
+    // Llama instruct -> generation-specific parser.
+    assert_eq!(tool_call_parser_for("Llama-3.3-70B-Instruct"), Some("llama3_json"));
+    assert_eq!(
+        tool_call_parser_for("meta-llama/Llama-3.1-70B-Instruct"),
+        Some("llama3_json")
+    );
+    assert_eq!(tool_call_parser_for("Llama-3.2-3B-Instruct"), Some("pythonic"));
+    // Llama BASE checkpoints (no instruct) -> None, never a guessed parser.
+    assert_eq!(tool_call_parser_for("meta-llama/Llama-3.1-70B"), None);
+    // Qwen3/QwQ are chat by default; Qwen2.5 only when instruct.
+    assert_eq!(tool_call_parser_for("Qwen/Qwen3-8B"), Some("hermes"));
+    assert_eq!(tool_call_parser_for("Qwen/QwQ-32B"), Some("hermes"));
+    assert_eq!(tool_call_parser_for("Qwen/Qwen2.5-72B-Instruct"), Some("hermes"));
+    assert_eq!(tool_call_parser_for("Qwen/Qwen2.5-72B"), None);
+    // Mistral instruct.
+    assert_eq!(
+        tool_call_parser_for("mistralai/Mistral-7B-Instruct-v0.3"),
+        Some("mistral")
+    );
+    // DeepSeek wins over the embedded "Llama".
+    assert_eq!(
+        tool_call_parser_for("deepseek-ai/DeepSeek-R1-Distill-Llama-70B"),
+        Some("deepseek_v3")
+    );
+    // gpt-oss.
+    assert_eq!(tool_call_parser_for("openai/gpt-oss-20b"), Some("openai"));
+    // Unknown family -> nothing.
+    assert_eq!(tool_call_parser_for("some-random/Model-7B"), None);
+    // The bare "llama3" many other tests use is a base-ish name with no
+    // instruct tag -> None, so those tests get no tool-calling flag.
+    assert_eq!(tool_call_parser_for("llama3"), None);
+}
+
+/// Starting a tool-capable instruct model (default `enable_tool_calling`)
+/// must inject `--vllm-override-args` with the enable flag + the right parser.
+#[test]
+fn runpy_start_injects_tool_calling_override_args_for_instruct_model() {
+    let runner = FakeRunner::new(0);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend
+        .start("meta-llama/Llama-3.3-70B-Instruct")
+        .expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = find_runpy_cmd(&commands);
+    let val = cmd
+        .windows(2)
+        .find(|w| w[0] == "--vllm-override-args")
+        .map(|w| w[1].clone())
+        .expect("argv should carry --vllm-override-args for a tool-capable model");
+    assert!(
+        val.contains("enable_auto_tool_choice") && val.contains("true"),
+        "override args should enable auto tool choice: {val}"
+    );
+    assert!(
+        val.contains("tool_call_parser") && val.contains("llama3_json"),
+        "override args should set the llama3_json parser: {val}"
+    );
+}
+
+/// The parser is derived from the ORG-STRIPPED short model name (the same
+/// form run.py's `--model` gets), so an HF-id input still resolves.
+#[test]
+fn runpy_start_tool_calling_uses_org_stripped_name() {
+    let runner = FakeRunner::new(0);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend
+        .start("meta-llama/Llama-3.1-70B-Instruct")
+        .expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        cmd.windows(2)
+            .any(|w| w[0] == "--vllm-override-args" && w[1].contains("llama3_json")),
+        "tool calling should resolve from the stripped name: {cmd:?}"
+    );
+}
+
+/// A BASE (non-tool) model must NOT get `--vllm-override-args` -- enabling a
+/// parser on a checkpoint with no tool-aware chat template risks breaking
+/// startup, so we leave it off.
+#[test]
+fn runpy_start_omits_tool_calling_for_base_model() {
+    let runner = FakeRunner::new(0);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend
+        .start("meta-llama/Llama-3.1-70B")
+        .expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        !cmd.iter().any(|a| a == "--vllm-override-args"),
+        "a base model must not get tool-calling override args: {cmd:?}"
+    );
+}
+
+/// `enable_tool_calling = false` must suppress the injection even for a
+/// model we DO know a parser for.
+#[test]
+fn runpy_start_omits_tool_calling_when_disabled() {
+    let runner = FakeRunner::new(0);
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.enable_tool_calling = false;
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
+
+    backend
+        .start("Llama-3.3-70B-Instruct")
+        .expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        !cmd.iter().any(|a| a == "--vllm-override-args"),
+        "enable_tool_calling=false must suppress the override args: {cmd:?}"
     );
 }
 

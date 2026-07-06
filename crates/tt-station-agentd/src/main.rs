@@ -666,6 +666,13 @@ async fn main() -> Result<()> {
         // before every serve is the robust default.
         reset_before_serve: !rc.no_device_reset,
         reset_cmd: vec!["tt-smi".to_string(), "-r".to_string()],
+        // Default-on: enable OpenAI-style tool calling for families we know
+        // the vLLM parser for (see `RunPyConfig::enable_tool_calling`). This
+        // is what lets a served instruct model (e.g. Llama-3.3-70B-Instruct)
+        // accept tool calls from a coding agent -- tt-inference-server does
+        // NOT wire this up on its own. No CLI opt-out yet; the field stays
+        // configurable for tests and a future flag.
+        enable_tool_calling: true,
     };
 
     let backend = make_backend(&rc.backend, docker_config, runpy_config)

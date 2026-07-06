@@ -94,6 +94,79 @@ const DEFAULT_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// `ghcr.io/tenstorrent/tt-inference-server/`) that varies by mirror.
 const RELEASE_IMAGE_REPO_SUFFIX: &str = "vllm-tt-metal-src-release-ubuntu-22.04-amd64";
 
+/// The vLLM `--tool-call-parser` value for a model, or `None` if we don't
+/// know a safe one (in which case tool calling is NOT enabled -- a wrong
+/// parser can break vLLM startup, so we never guess).
+///
+/// This mirrors the per-model `tool_call_parser_name` metadata in
+/// tt-inference-server's `model_spec.py` (which the launcher itself never
+/// reads) and tt-studio's own `tool_call_parser_for` heuristic. The parser
+/// value is what tt-inference-server would need to launch vLLM with
+/// `--enable-auto-tool-choice --tool-call-parser <parser>` so that a served
+/// model accepts `tools`/`tool_choice:"auto"` from a coding agent.
+///
+/// Deliberately CONSERVATIVE: it returns `Some` only for chat/instruct
+/// models we can name a parser for. Base (non-chat) checkpoints like
+/// `Llama-3.1-70B` return `None` -- they have no tool-aware chat template, so
+/// enabling a parser would at best do nothing and at worst fail startup.
+///
+/// Matching notes:
+/// - DeepSeek is checked BEFORE Llama on purpose: `DeepSeek-R1-Distill-Llama-70B`
+///   contains "llama" but uses the `deepseek_v3` parser, not `llama3_json`.
+/// - Qwen3 / QwQ are chat models by default (no `-Instruct` suffix), so they
+///   match without requiring "instruct"; older Qwen2.5 needs the instruct tag.
+/// - Llama parser depends on the generation: 3.1/3.3 → `llama3_json`,
+///   3.2 → `pythonic`, 4 → `llama4_pythonic` (per the TT vLLM fork docs).
+pub fn tool_call_parser_for(model: &str) -> Option<&'static str> {
+    let s = model.to_lowercase();
+
+    // DeepSeek reasoning/distill chat models (must precede the llama branch).
+    if s.contains("deepseek") {
+        return Some("deepseek_v3");
+    }
+    // gpt-oss chat models.
+    if s.contains("gpt-oss") || s.contains("gpt_oss") {
+        return Some("openai");
+    }
+    // Qwen chat: Qwen3 / QwQ are chat by default; Qwen2.5 only when instruct.
+    if s.contains("qwq") || s.contains("qwen3") {
+        return Some("hermes");
+    }
+    if s.contains("qwen") && s.contains("instruct") {
+        return Some("hermes");
+    }
+    // Mistral instruct chat.
+    if s.contains("mistral") && s.contains("instruct") {
+        return Some("mistral");
+    }
+    // Llama instruct chat -- parser varies by generation.
+    if s.contains("llama") && s.contains("instruct") {
+        if s.contains("llama-3.2") || s.contains("llama3.2") {
+            return Some("pythonic");
+        }
+        if s.contains("llama-4") || s.contains("llama4") {
+            return Some("llama4_pythonic");
+        }
+        // 3.1 / 3.3 (and any other Llama-3.x instruct) use the JSON parser.
+        return Some("llama3_json");
+    }
+
+    None
+}
+
+/// Build the `--vllm-override-args` JSON payload that enables tool calling
+/// with `parser`. Emitted with underscore keys (`enable_auto_tool_choice` /
+/// `tool_call_parser`) -- the exact form verified on this box's
+/// tt-inference-server; run.py normalizes `-`/`_` either way. serde_json
+/// guarantees correct quoting/escaping of the value.
+fn tool_calling_override_args(parser: &str) -> String {
+    serde_json::json!({
+        "enable_auto_tool_choice": true,
+        "tool_call_parser": parser,
+    })
+    .to_string()
+}
+
 /// Everything `RunPyBackend` needs to build the real `run.py` invocation
 /// documented in `docs/reference/tt-inference-server-docker.md`. Grouped
 /// into one struct (rather than a growing `RunPyBackend::new` argument
@@ -193,6 +266,25 @@ pub struct RunPyConfig {
     /// `tt-smi -r` string) so tests can assert on it precisely and so a
     /// board that needs a different reset invocation can supply one.
     pub reset_cmd: Vec<String>,
+    /// When `true` (the default), `start` enables OpenAI-style tool calling
+    /// for any model whose family has a known vLLM tool-call parser (see
+    /// [`tool_call_parser_for`]) by passing run.py
+    /// `--vllm-override-args '{"enable_auto_tool_choice": true, "tool_call_parser": "<parser>"}'`.
+    ///
+    /// This is NOT automatic in tt-inference-server: `run.py` only wires the
+    /// parser into vLLM when told to (its `model_spec.json` carries a
+    /// `tool_call_parser_name` per model, but that metadata is inert -- the
+    /// launcher never reads it), and vLLM otherwise REJECTS a
+    /// `/v1/chat/completions` request that carries `tools`/`tool_choice:"auto"`.
+    /// So a coding agent (Claude Code, opencode, Cursor) pointed at a served
+    /// Llama-3.3-70B-Instruct fails on every tool call unless we launch it
+    /// with these flags -- hence default-on for the families we know the
+    /// parser for. Unknown families get NOTHING (see `tool_call_parser_for`):
+    /// a wrong parser can break server startup, so we never guess.
+    ///
+    /// Set to `false` to suppress the injection entirely (e.g. to pass tool
+    /// args by hand via a future override, or to debug a startup issue).
+    pub enable_tool_calling: bool,
 }
 
 impl Default for RunPyConfig {
@@ -235,6 +327,7 @@ impl Default for RunPyConfig {
             model_spec_path: None,
             reset_before_serve: true,
             reset_cmd: vec!["tt-smi".to_string(), "-r".to_string()],
+            enable_tool_calling: true,
         }
     }
 }
@@ -582,6 +675,17 @@ impl ServingBackend for RunPyBackend {
         if let Some(ids) = self.config.device_id.as_ref().filter(|ids| !ids.is_empty()) {
             args.push("--device-id".to_string());
             args.push(ids.clone());
+        }
+
+        // Enable OpenAI-style tool calling for families we know the vLLM
+        // parser for (see `enable_tool_calling` / `tool_call_parser_for`).
+        // `run_model` is the org-stripped short name the parser heuristic
+        // expects. Unknown families add nothing -- no guessed parser.
+        if self.config.enable_tool_calling {
+            if let Some(parser) = tool_call_parser_for(run_model) {
+                args.push("--vllm-override-args".to_string());
+                args.push(tool_calling_override_args(parser));
+            }
         }
 
         // `run.py` reads `MODEL_SOURCE` from its environment, not from an
