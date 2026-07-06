@@ -11,8 +11,10 @@ import TTStationKit
 /// `BoxViewModel` methods; it calls the exact same `run()`/`stop()`/
 /// `cancelStart()`/`canStopOrCancel` the model card uses today.
 ///
-/// Not yet wired into the window (Task 3) — this task only creates the view
-/// and confirms it compiles standalone against `BoxViewModel`/`TTTheme`.
+/// Pinned in the window below the scroll (see `WindowRootView` in
+/// `TTStationApp.swift`), so Run/Stop and the serving/endpoint state stay
+/// visible no matter where you are in the model list. It is the single owner
+/// of that display — the Model card no longer renders it.
 struct RunStopBar: View {
     @Bindable var box: BoxViewModel
 
