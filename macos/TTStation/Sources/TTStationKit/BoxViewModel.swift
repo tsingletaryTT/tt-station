@@ -37,6 +37,15 @@ public final class BoxViewModel: Identifiable {
     /// the amber "starting" status dot and the "Starting <model>…" message,
     /// which are additive to (and never mutate) the existing `status` logic.
     public var starting = false
+    /// True from the moment `cancelStart()` decides to abort an in-progress
+    /// load until the in-flight `run()` actually unwinds. Distinguishes a
+    /// user-initiated cancel from a plain load failure so `run()`'s `catch`
+    /// can land on a clean idle state instead of surfacing the agent's
+    /// abort-induced error, and so the UI can show "Canceling…" instead of
+    /// "Starting…". Cleared by `run()`'s own `defer`, not reset here — the
+    /// flag must still be visible inside `run()`'s `catch` block for the
+    /// unwind to take the cancel branch.
+    public var cancelling = false
     public var errorText: String?
     /// Non-nil once `startPairing()` has minted a pairing session and the
     /// box's console is showing a code, and cleared again once
@@ -240,16 +249,29 @@ public final class BoxViewModel: Identifiable {
     public func run() async {
         guard let model = selectedModel else { errorText = "Pick a model first."; return }
         // `starting` reflects the spin-up window (amber dot); `inFlight`
-        // continues to gate the buttons. Both clear together on completion.
+        // continues to gate the buttons. Both clear together on completion,
+        // and so does `cancelling` -- it's cleared here (not at the top of
+        // `run()`) so a cancel set *during* the in-flight await below is
+        // still visible to the `catch` branch that unwinds it.
         inFlight = true; starting = true
-        defer { inFlight = false; starting = false }
+        defer { inFlight = false; starting = false; cancelling = false }
         do {
             endpoint = try await commands.run(host: record.hostPort, model: model)
             status = .serving(model: model)
             // Persist the choice so this box defaults to it next time.
             registry.setLastModel(model, forHost: record.hostPort)
             errorText = nil
-        } catch { record(error) }
+        } catch {
+            if cancelling {
+                // User-initiated abort via cancelStart(): the agent's `stop`
+                // made this in-flight run fail fast. That's success from the
+                // user's point of view, not an error -- land on a clean idle
+                // state instead of surfacing the abort as a failure.
+                status = .idle; endpoint = nil; errorText = nil
+            } else {
+                record(error)
+            }
+        }
     }
 
     public func stop() async {
@@ -260,6 +282,27 @@ public final class BoxViewModel: Identifiable {
             status = .idle
             errorText = nil
         } catch { record(error) }
+    }
+
+    /// Cancel an in-progress model load: tell the agent to abort the spin-up
+    /// (`stop`), which makes the in-flight `run()` fail fast and unwind into
+    /// its `cancelling` branch above → clean idle. No-op unless a load is
+    /// actually starting (there's nothing to cancel otherwise), and no-op if
+    /// a cancel is already under way (don't double-fire `stop`).
+    public func cancelStart() async {
+        guard starting, !cancelling else { return }
+        cancelling = true
+        status = .idle // dot stops amber immediately; run()'s defer clears starting/inFlight when it returns.
+        try? await commands.stop(host: record.hostPort)
+    }
+
+    /// The primary stop/cancel control is available while a load is starting
+    /// (to cancel it) or while a model is serving (to stop it) -- but not
+    /// once a plain stop/cancel is already under way.
+    public var canStopOrCancel: Bool {
+        if cancelling { return false }
+        if starting { return true }
+        return status?.isServing ?? (endpoint != nil)
     }
 
     private func record(_ error: Error) {

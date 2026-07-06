@@ -134,8 +134,11 @@ struct BoxWorkspaceView: View {
         })
         .task { if box.models.isEmpty { await box.loadModels() } }
 
-        // Run is the primary action; Stop is a secondary, destructive one.
-        // Both gated by `inFlight`; Run additionally needs a model.
+        // Run is the primary action; Stop/Cancel is a secondary, destructive
+        // one. Run is gated by `inFlight` (stays disabled through a load);
+        // Stop/Cancel is gated by `canStopOrCancel` so it stays live during a
+        // load (to cancel it) — the only real way to abort a load is to tell
+        // the agent to `stop`, which makes the in-flight `run()` fail fast.
         HStack(spacing: 8) {
             Button { Task { await box.run() } } label: {
                 Label("Run", systemImage: "play.fill")
@@ -144,12 +147,21 @@ struct BoxWorkspaceView: View {
             .disabled(box.selectedModel == nil || box.inFlight)
             .help("Start serving the selected model on this box.")
 
-            Button(role: .destructive) { Task { await box.stop() } } label: {
-                Label("Stop", systemImage: "stop.fill")
+            if box.starting {
+                Button(role: .destructive) { Task { await box.cancelStart() } } label: {
+                    Label("Cancel", systemImage: "xmark.circle.fill")
+                }
+                .buttonStyle(.bordered)
+                .disabled(!box.canStopOrCancel)
+                .help("Cancel the in-progress model load.")
+            } else {
+                Button(role: .destructive) { Task { await box.stop() } } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .buttonStyle(.bordered)
+                .disabled(!box.canStopOrCancel)
+                .help("Stop the model currently serving on this box.")
             }
-            .buttonStyle(.bordered)
-            .disabled(box.inFlight)
-            .help("Stop the model currently serving on this box.")
 
             if box.inFlight { ProgressView().scaleEffect(0.6) }
         }
@@ -157,8 +169,14 @@ struct BoxWorkspaceView: View {
 
         // Spin-up feedback: shown while `run()` is in flight, before the
         // endpoint returns. First run pulls the model image, which can take
-        // minutes — say so, so the wait doesn't read as a hang.
-        if box.starting {
+        // minutes — say so, so the wait doesn't read as a hang. While a
+        // cancel is unwinding that load, say so instead ("Canceling…").
+        if box.cancelling {
+            HStack(spacing: 6) {
+                ProgressView().scaleEffect(0.6)
+                Text("Canceling…").font(.caption).foregroundStyle(.secondary)
+            }
+        } else if box.starting {
             HStack(spacing: 6) {
                 ProgressView().scaleEffect(0.6)
                 Text("Starting \(box.selectedModel ?? "model")… (first run can take a few minutes)")

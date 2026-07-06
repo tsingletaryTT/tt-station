@@ -10,6 +10,23 @@ final class FakeTTClient: TTCommands {
     var pairShouldSucceed = true
     var runEndpoint = Endpoint(baseURL: "http://h:8000/v1", model: "Qwen3-8B", requiresKey: false)
     var runError: TTError?
+    /// Cancel-a-load test seam: when `gateRun` is true, `run(host:model:)`
+    /// suspends (rather than returning/throwing immediately) so a test can
+    /// drive `cancelStart()` while a load is genuinely in flight, then call
+    /// `releaseRun()` to let it resume and return `runEndpoint`/throw
+    /// `runError` as normal. Default (`gateRun == false`) is unchanged --
+    /// `run()` still returns immediately -- so every pre-existing test is
+    /// unaffected.
+    var gateRun = false
+    private(set) var runIsWaiting = false
+    private var runGate: CheckedContinuation<Void, Never>?
+    func releaseRun() {
+        let c = runGate
+        runGate = nil
+        runIsWaiting = false
+        c?.resume()
+    }
+    private(set) var stopCalled = false
     /// Set to make `endpoint(host:)` throw instead of returning `runEndpoint`
     /// -- the hook `BoxViewModelTests` uses to drive the authed pairing probe
     /// in `refresh()` through its 401 (unpaired) / 409 (idle) / success
@@ -107,10 +124,18 @@ final class FakeTTClient: TTCommands {
         throw TTError.commandFailed(command: [], exitCode: 1, stderr: "invalid code")
     }
     func run(host: String, model: String) async throws -> Endpoint {
+        if gateRun {
+            runIsWaiting = true
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                runGate = c
+            }
+        }
         if let runError { throw runError }
         return runEndpoint
     }
-    func stop(host: String) async throws {}
+    func stop(host: String) async throws {
+        stopCalled = true
+    }
     func sshAuthorize(host: String) async throws -> SshAuthorizeInfo {
         sshAuthorizeCalled = true
         if let sshAuthorizeError { throw sshAuthorizeError }

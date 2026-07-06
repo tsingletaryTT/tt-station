@@ -330,4 +330,66 @@ final class BoxViewModelTests: XCTestCase {
         XCTAssertNil(vm.catalog)
         XCTAssertNil(vm.errorText)
     }
+
+    // MARK: - Cancel-a-load
+
+    /// The only real way to abort an in-progress `run()` is to tell the agent
+    /// to `stop` -- that makes the container spin-up fail fast. This test
+    /// drives a genuinely in-flight `run()` (gated by `FakeTTClient.gateRun`),
+    /// calls `cancelStart()` while it's still awaiting, and confirms: (a) it
+    /// calls through to `stop`, (b) the load, once released with an
+    /// agent-abort-shaped error, unwinds into a clean idle state rather than
+    /// surfacing the abort as a user-facing error.
+    func testCancelStartAbortsLoadViaStopAndLandsIdle() async {
+        let client = FakeTTClient()
+        client.gateRun = true
+        let (vm, _) = makeVM(client: client)
+        vm.selectedModel = "Qwen3-8B"
+
+        let runTask = Task { await vm.run() }
+
+        // Spin until the fake's run() is actually suspended, i.e. `starting`
+        // is genuinely true because of an in-flight await, not just a race.
+        while !client.runIsWaiting {
+            await Task.yield()
+        }
+        XCTAssertTrue(vm.starting)
+        XCTAssertTrue(vm.canStopOrCancel)
+
+        await vm.cancelStart()
+        XCTAssertTrue(client.stopCalled)
+        XCTAssertTrue(vm.cancelling)
+        XCTAssertEqual(vm.status, .idle)
+
+        // Simulate the agent aborting the spin-up: the in-flight `run()`
+        // fails fast with a command-failure once `stop` has killed the
+        // container being spun up.
+        client.runError = .commandFailed(command: ["run"], exitCode: 1, stderr: "aborted")
+        client.releaseRun()
+        await runTask.value
+
+        XCTAssertEqual(vm.status, .idle)
+        XCTAssertNil(vm.endpoint)
+        XCTAssertNil(vm.errorText)
+        XCTAssertFalse(vm.cancelling)
+        XCTAssertFalse(vm.starting)
+        XCTAssertFalse(vm.inFlight)
+    }
+
+    func testCancelStartNoOpWhenNotStarting() async {
+        let client = FakeTTClient()
+        let (vm, _) = makeVM(client: client)
+        XCTAssertFalse(vm.starting)
+        await vm.cancelStart()
+        // Fresh box: no load in flight, so cancelStart must do nothing.
+        XCTAssertFalse(client.stopCalled)
+        XCTAssertFalse(vm.cancelling)
+    }
+
+    func testCanStopOrCancelGating() async {
+        let (vm, _) = makeVM()
+        XCTAssertFalse(vm.canStopOrCancel)
+        vm.status = .serving(model: "m")
+        XCTAssertTrue(vm.canStopOrCancel)
+    }
 }

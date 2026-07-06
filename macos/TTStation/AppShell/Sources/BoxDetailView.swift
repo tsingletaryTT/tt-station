@@ -66,12 +66,25 @@ struct BoxDetailView: View {
                     .disabled(box.selectedModel == nil || box.inFlight)
                     .help("Run the selected model. Browse/choose models in the window.")
 
-                    Button(role: .destructive) { Task { await box.stop() } } label: {
-                        Label("Stop", systemImage: "stop.fill")
+                    // The only real way to abort a load is to tell the agent
+                    // to `stop`, which makes the in-flight `run()` fail fast
+                    // — so this control stays live (via `canStopOrCancel`)
+                    // through a load, relabeled "Cancel" while starting.
+                    if box.starting {
+                        Button(role: .destructive) { Task { await box.cancelStart() } } label: {
+                            Label("Cancel", systemImage: "xmark.circle.fill")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!box.canStopOrCancel)
+                        .help("Cancel the in-progress model load.")
+                    } else {
+                        Button(role: .destructive) { Task { await box.stop() } } label: {
+                            Label("Stop", systemImage: "stop.fill")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!box.canStopOrCancel)
+                        .help("Stop the model currently serving on this box.")
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(box.inFlight)
-                    .help("Stop the model currently serving on this box.")
 
                     if box.inFlight { ProgressView().scaleEffect(0.6) }
                 }
@@ -80,7 +93,12 @@ struct BoxDetailView: View {
                 // the browser now lives in the window, so Run is enabled here.
                 .task { if box.models.isEmpty { await box.loadModels() } }
 
-                if box.starting {
+                if box.cancelling {
+                    HStack(spacing: 6) {
+                        ProgressView().scaleEffect(0.6)
+                        Text("Canceling…").font(.caption).foregroundStyle(.secondary)
+                    }
+                } else if box.starting {
                     HStack(spacing: 6) {
                         ProgressView().scaleEffect(0.6)
                         Text("Starting \(box.selectedModel ?? "model")… (first run can take a few minutes)")
