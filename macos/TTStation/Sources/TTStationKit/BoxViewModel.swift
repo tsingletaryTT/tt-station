@@ -74,6 +74,20 @@ public final class BoxViewModel: Identifiable {
         RunningState.runningState(serving: serving, status: status, starting: starting)
     }
 
+    /// Single shared `/telemetry` socket for this box, ref-counted across
+    /// however many views currently want it (the window's `DeviceStripView`
+    /// and the popover's `BoxDetailView` — see `subscribeTelemetry()`) so
+    /// two open views never open two sockets. Owns the connection; views
+    /// only ever subscribe/unsubscribe, never call `telemetry.start`/`stop`
+    /// directly.
+    public let telemetry = TelemetryService()
+    /// Count of views currently subscribed to `telemetry`. Starts the
+    /// underlying socket on the 0->1 transition and stops it on 1->0; never
+    /// goes negative (`unsubscribeTelemetry()` floors at zero) so a stray
+    /// extra unsubscribe (e.g. a view tearing down twice) can't double-stop
+    /// or underflow the count.
+    private var telemetrySubscribers = 0
+
     private let commands: TTCommands
     private let registry: HostRegistry
 
@@ -87,6 +101,32 @@ public final class BoxViewModel: Identifiable {
         // get an authed `status()` call (see refresh()), so without this
         // seed they'd show no status at all until paired.
         self.status = record.status
+    }
+
+    /// Registers a view's interest in this box's live telemetry. Only the
+    /// 0->1 transition actually opens the socket (requesting the thin
+    /// `?view=lite` stream — see `TelemetryService.start`); a second (or
+    /// third, …) concurrent subscriber just bumps the count and rides the
+    /// existing connection. Pair every call with a matching
+    /// `unsubscribeTelemetry()` (e.g. in a view's `.onDisappear`).
+    public func subscribeTelemetry() {
+        telemetrySubscribers += 1
+        if telemetrySubscribers == 1 {
+            telemetry.start(host: record.host, ctrlPort: record.ctrlPort, lite: true)
+        }
+    }
+
+    /// Releases a view's interest in this box's live telemetry. Only the
+    /// last unsubscribe (count reaching zero) actually stops the socket;
+    /// the guard against `telemetrySubscribers > 0` makes an extra/unmatched
+    /// unsubscribe a no-op instead of underflowing the count or re-firing
+    /// `telemetry.stop()`.
+    public func unsubscribeTelemetry() {
+        guard telemetrySubscribers > 0 else { return }
+        telemetrySubscribers -= 1
+        if telemetrySubscribers == 0 {
+            telemetry.stop()
+        }
     }
 
     public func refresh() async {

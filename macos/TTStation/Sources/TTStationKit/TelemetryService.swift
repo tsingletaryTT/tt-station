@@ -54,6 +54,18 @@ public final class TelemetryService {
     /// Reconnect backoff ladder in seconds: 1s, 2s, then capped at 5s.
     private static let backoffStepsSeconds: [UInt64] = [1, 2, 5]
 
+    /// Test-only hook: called at the very top of `start(host:ctrlPort:lite:)`
+    /// with the exact arguments passed in, before any URL-building or
+    /// connection work happens. `nil` in production — exists purely so
+    /// `BoxViewModelTests` can observe ref-counted subscribe/unsubscribe
+    /// behavior (start-once, stop-at-zero) without opening a real socket.
+    /// Never assigned outside tests; leaving it nil is a no-op.
+    public var onStart: ((String, Int, Bool) -> Void)?
+
+    /// Test-only hook: called at the very top of `stop()`, before the
+    /// existing cancel/teardown logic. `nil` in production — see `onStart`.
+    public var onStop: (() -> Void)?
+
     public init(session: URLSession = .shared) {
         self.session = session
     }
@@ -65,7 +77,15 @@ public final class TelemetryService {
     /// `host`/`ctrlPort`, rather than no-op'ing. This matters for the app's
     /// case where the box being observed changes (e.g. the user switches
     /// boxes) — the caller shouldn't have to remember to `stop()` first.
-    public func start(host: String, ctrlPort: Int) {
+    ///
+    /// `lite` (default `true`) requests the thin `?view=lite` telemetry
+    /// stream from the agent instead of the full verbatim `tt-smi -s`
+    /// mirror — this is what lets `BoxViewModel`'s single shared
+    /// subscription (see `subscribeTelemetry()`) stay cheap even when both
+    /// the window's device strip and the popover are open at once.
+    public func start(host: String, ctrlPort: Int, lite: Bool = true) {
+        onStart?(host, ctrlPort, lite)
+
         stopCurrentRun()
 
         generation += 1
@@ -76,7 +96,8 @@ public final class TelemetryService {
         // the rest of the app already uses (mirrors `BoxRecord.hostPort` /
         // `WorkbenchLaunchers`'s `canonicalHost`).
         let canonicalHost = host.hasSuffix(".") ? String(host.dropLast()) : host
-        guard let url = URL(string: "ws://\(canonicalHost):\(ctrlPort)/telemetry") else {
+        let querySuffix = lite ? "?view=lite" : ""
+        guard let url = URL(string: "ws://\(canonicalHost):\(ctrlPort)/telemetry\(querySuffix)") else {
             state = .failed("invalid telemetry URL for \(canonicalHost):\(ctrlPort)")
             return
         }
@@ -93,6 +114,7 @@ public final class TelemetryService {
     /// cooperative, the current run's `generation` check is what actually
     /// guarantees it stops touching `state`/`snapshot` — see `generation`.
     public func stop() {
+        onStop?()
         stopCurrentRun()
         state = .idle
     }

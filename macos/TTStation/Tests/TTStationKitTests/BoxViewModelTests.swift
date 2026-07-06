@@ -437,4 +437,43 @@ final class BoxViewModelTests: XCTestCase {
         vm.status = .serving(model: "m")
         XCTAssertTrue(vm.canStopOrCancel)
     }
+
+    // MARK: - Shared ref-counted telemetry subscription
+
+    /// Two views (DeviceStripView, BoxDetailView) will both call
+    /// `subscribeTelemetry()`/`unsubscribeTelemetry()` on the same
+    /// `BoxViewModel` -- this must collapse to exactly one underlying
+    /// `TelemetryService.start()`/`stop()` pair no matter how many
+    /// subscribers stack up, and must never double-stop once the count
+    /// floors at zero.
+    func testTelemetrySubscribeStartsOnceRefCounted() async {
+        let (vm, _) = makeVM()
+        var starts = 0, stops = 0
+        vm.telemetry.onStart = { _, _, _ in starts += 1 }
+        vm.telemetry.onStop = { stops += 1 }
+
+        vm.subscribeTelemetry()          // 0->1: start
+        vm.subscribeTelemetry()          // 1->2: no new start
+        XCTAssertEqual(starts, 1)
+
+        vm.unsubscribeTelemetry()        // 2->1: no stop
+        XCTAssertEqual(stops, 0)
+
+        vm.unsubscribeTelemetry()        // 1->0: stop
+        XCTAssertEqual(stops, 1)
+
+        vm.unsubscribeTelemetry()        // floor at 0: no extra stop
+        XCTAssertEqual(stops, 1)
+    }
+
+    /// The shared subscription is what carries the thin-telemetry feature:
+    /// it must request the lite stream (`?view=lite`), not the full
+    /// `tt-smi -s` mirror.
+    func testTelemetrySubscribeRequestsLite() async {
+        let (vm, _) = makeVM()
+        var liteSeen: Bool?
+        vm.telemetry.onStart = { _, _, lite in liteSeen = lite }
+        vm.subscribeTelemetry()
+        XCTAssertEqual(liteSeen, true)
+    }
 }
