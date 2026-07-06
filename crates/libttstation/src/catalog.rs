@@ -250,10 +250,13 @@ fn live_only_entry(m: &ModelInfo) -> CatalogEntry {
 /// the three tiers the `tt catalog` command and the macOS model picker
 /// render (see [`BoxCatalog`]):
 ///
-/// - `runs_here`: models the box's `box_mesh` (or, absent a catalog, a
-///   live model) can serve right now.
-/// - `experimental`: models flagged `Experimental` on `box_mesh` (and not
-///   already `Supported` there).
+/// - `runs_here`: models the box can serve right now via tt-inference-server
+///   -- a live `/models` entry (always), or a catalog model `Supported` on
+///   `box_mesh` whose on-mesh entry lists `tt-inference-server` in `software`.
+/// - `experimental`: models flagged `Experimental` on `box_mesh`, OR
+///   `Supported` on `box_mesh` but only via a non-tt-inference-server tool
+///   (tt-forge/tt-metal, or no software listed) -- runnable "with the tools,"
+///   not run-now. (In both cases, not already in `runs_here`.)
 /// - `other_hardware`: models `Supported`/`Experimental` on *some* mesh,
 ///   but not `box_mesh` -- `needed_hardware` lists which mesh(es).
 ///
@@ -635,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_p150x2_box_runs_single_card_p150_model() {
+    fn classify_p150x2_box_demotes_no_software_single_card_p150_model() {
         // A p150x2 box (agent-detected 2-card P150 mesh) should be able to
         // run a model the catalog lists as Supported on single-card "P150"
         // -- not fall into other_hardware with a nonsensical
