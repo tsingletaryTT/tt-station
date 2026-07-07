@@ -31,6 +31,19 @@ struct BoxHeaderView: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // Product artwork for a recognized chassis (QuietBox 2 → p300x2).
+            // Baseline-aligned row, so pin the image to the top rather than
+            // letting it ride the text baseline.
+            if let art = DeviceArtwork.assetName(forMesh: box.record.deviceMesh) {
+                Image(art)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 48, height: 48)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .alignmentGuide(.firstTextBaseline) { $0[.top] }
+                    .help("Tenstorrent QuietBox 2")
+                    .accessibilityLabel("Tenstorrent QuietBox 2")
+            }
             Circle().fill(statusColor).frame(width: 9, height: 9).help(statusHelp)
             VStack(alignment: .leading, spacing: 2) {
                 Text(box.record.name).font(.title3.weight(.semibold))

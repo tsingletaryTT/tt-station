@@ -32,6 +32,16 @@ struct BoxRowView: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            // Small product thumbnail for a recognized chassis (QuietBox 2 →
+            // p300x2), so the box is identifiable at a glance in the popover.
+            if let art = DeviceArtwork.assetName(forMesh: box.record.deviceMesh) {
+                Image(art)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 28, height: 28)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                    .accessibilityLabel("Tenstorrent QuietBox 2")
+            }
             Circle().fill(statusColor).frame(width: 8, height: 8)
                 .help(statusHelp)
             VStack(alignment: .leading, spacing: 1) {
