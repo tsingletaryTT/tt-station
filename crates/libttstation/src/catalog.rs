@@ -99,7 +99,10 @@ pub fn hw_to_mesh(hardware: &str) -> String {
         "galaxy" => "T3K".to_string(),
         "quietbox" => "P150X4".to_string(),
         "quietbox 2" => "P300X2".to_string(),
-        "loudbox" => "P300X2".to_string(),
+        // TT-Loudbox is 4× Wormhole n300 (8 chips) -- NOT Blackhole p300. A
+        // real Loudbox detects as `n300x4` (see agent `detect_device_mesh`),
+        // so it must map there, not to the QuietBox 2's `P300X2`.
+        "loudbox" => "N300X4".to_string(),
         "2 x quietbox" => "P150X8".to_string(),
         "2 x galaxy" => "GALAXY".to_string(),
         "4 x galaxy" => "GALAXY".to_string(),
@@ -601,6 +604,8 @@ mod tests {
         assert_eq!(hw_to_mesh("Quietbox 2"), "P300X2");
         assert_eq!(hw_to_mesh("quietbox"), "P150X4");
         assert_eq!(hw_to_mesh("Galaxy"), "T3K");
+        // Loudbox is 4× Wormhole n300 (8 chips), not Blackhole p300 -> n300x4.
+        assert_eq!(hw_to_mesh("Loudbox"), "N300X4");
         assert_eq!(hw_to_mesh("p150"), "P150");
         assert_eq!(hw_to_mesh("p300"), "P300");
         assert_eq!(hw_to_mesh("2 x Quietbox"), "P150X8");

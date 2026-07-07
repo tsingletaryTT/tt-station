@@ -9,10 +9,9 @@ import Foundation
 /// maps to the `QuietBox2` image set. Matching is case-insensitive and
 /// tolerates a bare `p300` reported without the card-count suffix.
 ///
-/// NOTE: a Loudbox also presents as `p300x2` to the mesh detector; this app is
-/// QuietBox-2-focused, so `p300x2 → QuietBox 2` is the intended reading. If a
-/// Loudbox ever needs to be told apart, that requires a signal beyond the mesh
-/// (the agent doesn't report a chassis model today).
+/// `p300x2` unambiguously identifies a QuietBox 2: the only other p300-class
+/// chassis, the TT-Loudbox, is 4× Wormhole n300 (it detects as `n300x4`), not
+/// Blackhole — so there's no chassis to confuse a `p300x2` box with.
 public enum DeviceArtwork {
     /// The asset-catalog image name for `mesh`, or `nil` if none applies.
     public static func assetName(forMesh mesh: String?) -> String? {
