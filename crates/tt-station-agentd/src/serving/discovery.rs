@@ -120,6 +120,33 @@ pub fn discover_serving(
     entries
 }
 
+/// Reconcile the agent's in-memory serving status against docker reality
+/// (the [`discover_serving`] entries), returning the status that should
+/// actually be reported.
+///
+/// The agent's `status` is its last serving *intent*: it's flipped to
+/// `Serving(model)` on a successful `/run` and back to `Idle` only on the
+/// agent's own `/stop`. A model stopped OUT OF BAND -- a manual `docker stop`,
+/// a crash, a host reboot of the container -- never runs through `/stop`, so
+/// `status` gets stuck reporting `Serving` while nothing is actually up
+/// (observed live: `/status` said `serving:Llama-3.3-70B-Instruct` while
+/// `docker ps` was empty and `:8003` was dead). `/serving` didn't have this
+/// problem because it probes docker; this brings `/status` to the same truth.
+///
+/// Rule: a `Serving(_)` status only stays `Serving` if `discover_serving`
+/// found a live endpoint attributed to the agent (`source == "agent"` -- the
+/// agent's own serving port answering `/v1/models` for that model). Otherwise
+/// the agent's container is gone, so we report `Idle`. An already-`Idle`
+/// status is returned unchanged (a serve started out of band shows up in
+/// `/serving` as `external`; `/status` reflects the AGENT's serve only).
+pub fn reconcile_status(status: &ServingStatus, entries: &[ServingEntry]) -> ServingStatus {
+    match status {
+        ServingStatus::Serving(_) if entries.iter().any(|e| e.source == "agent") => status.clone(),
+        ServingStatus::Serving(_) => ServingStatus::Idle,
+        ServingStatus::Idle => ServingStatus::Idle,
+    }
+}
+
 /// Probe `GET {url}` (expected to be a `/v1/models` endpoint) and return the
 /// served model id from `data[0].id`, or `None` if the request fails, the
 /// body isn't JSON, `data[]` is empty/missing, or `data[0]` carries no string
@@ -169,6 +196,48 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;
+
+    fn entry(source: &str, model: &str, host_port: u16) -> ServingEntry {
+        ServingEntry {
+            base_url: format!("http://h:{host_port}/v1"),
+            model: model.to_string(),
+            host_port,
+            container: "c".to_string(),
+            source: source.to_string(),
+        }
+    }
+
+    #[test]
+    fn reconcile_keeps_serving_when_agent_endpoint_is_live() {
+        let status = ServingStatus::Serving("meta-llama/Llama-3.3-70B-Instruct".to_string());
+        let entries = vec![entry("agent", "meta-llama/Llama-3.3-70B-Instruct", 8003)];
+        assert_eq!(reconcile_status(&status, &entries), status);
+    }
+
+    #[test]
+    fn reconcile_flips_to_idle_when_nothing_is_serving() {
+        // The exact live bug: status says Serving, but docker reality is empty
+        // (manual `docker stop`) -> report Idle instead of the stale model.
+        let status = ServingStatus::Serving("meta-llama/Llama-3.3-70B-Instruct".to_string());
+        assert_eq!(reconcile_status(&status, &[]), ServingStatus::Idle);
+    }
+
+    #[test]
+    fn reconcile_flips_to_idle_when_only_external_serves() {
+        // Something ELSE is serving on another port (source: external), but the
+        // agent's own serve is gone -> the agent's /status must not claim it.
+        let status = ServingStatus::Serving("meta-llama/Llama-3.3-70B-Instruct".to_string());
+        let entries = vec![entry("external", "some/Other-Model", 9000)];
+        assert_eq!(reconcile_status(&status, &entries), ServingStatus::Idle);
+    }
+
+    #[test]
+    fn reconcile_leaves_idle_untouched() {
+        assert_eq!(
+            reconcile_status(&ServingStatus::Idle, &[entry("external", "x", 9000)]),
+            ServingStatus::Idle
+        );
+    }
 
     /// A `CommandRunner` fake that returns canned `docker ps` stdout and maps
     /// a probe URL to a canned `/v1/models` body (or an error, for a port

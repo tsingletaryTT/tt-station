@@ -57,6 +57,21 @@ pub trait ServingBackend: Send + Sync {
     /// this PoC, it doesn't.
     fn status(&self) -> Result<ServingStatus>;
 
+    /// The serving status RECONCILED against real serving state, self-correcting
+    /// a stale in-memory `Serving` when the serve actually died out of band (a
+    /// manual `docker stop`, a crash, a host reboot of the container -- none of
+    /// which run through the agent's `/stop`).
+    ///
+    /// Default: return `status()` unchanged -- correct for backends whose
+    /// in-memory status can't drift from reality (the dstack stub) or where a
+    /// hand-rolled `docker run` isn't reliably discoverable (`DockerBackend`,
+    /// the best-effort fallback). The `runpy` backend -- the real one -- probes
+    /// docker via its own `CommandRunner` and overrides this so `GET /status`
+    /// reports Idle once the container it launched is gone.
+    fn reconciled_status(&self) -> Result<ServingStatus> {
+        self.status()
+    }
+
     /// Return the box to a fresh state for a demo reset (`POST /reset`):
     /// stop whatever's serving and, on backends that manage board state,
     /// reset the board too.

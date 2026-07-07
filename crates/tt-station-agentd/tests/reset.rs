@@ -250,6 +250,17 @@ async fn reset_flips_status_from_serving_back_to_idle() {
     let client = reqwest::Client::new();
 
     let runner = FakeRunner::new(0);
+    // `/status` now reconciles against docker reality (see
+    // AppState::reconciled_status), so for the status to read `serving:llama3`
+    // the backend must find a live container: a tt-inference-server image
+    // publishing the RunPyConfig default serving port (8000) whose
+    // `/v1/models` reports the model. Without this, reconciliation would
+    // (correctly) report idle.
+    runner.set_run_output(
+        "docker ps",
+        "id\tghcr.io/tenstorrent/tt-inference-server/vllm:0.1\t0.0.0.0:8000->8000/tcp\tsrv\n",
+    );
+    runner.set_http_get(r#"{"data":[{"id":"llama3"}]}"#);
     let state = fresh_state_with(runner.clone());
     let base = serve(state.clone()).await;
     let token = pair(&client, &state, &base).await;

@@ -313,6 +313,58 @@ fn runpy_start_omits_device_id_when_not_configured() {
 }
 
 // ---------------------------------------------------------------------
+// reconciled_status: self-correct a stale `Serving` when the container died
+// out of band (manual `docker stop`, crash) — see runpy.rs / discovery.rs.
+// ---------------------------------------------------------------------
+
+/// After a successful `start`, `reconciled_status` must still report Serving
+/// while docker actually shows the container up on the serving port.
+#[test]
+fn runpy_reconciled_status_stays_serving_when_container_is_up() {
+    let runner = FakeRunner::new(0);
+    // docker ps shows a tt-inference-server container publishing :8080, and
+    // its /v1/models probe reports the served model — a live serve.
+    runner.set_run_output(
+        "docker ps",
+        "abc123\tghcr.io/tenstorrent/tt-inference-server/vllm:0.1\t0.0.0.0:8080->8080/tcp\ttt-serve\n",
+    );
+    runner.set_http_get(r#"{"data":[{"id":"Qwen/Qwen3-32B"}]}"#);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend.start("Qwen/Qwen3-32B").expect("start should succeed");
+    assert_eq!(
+        backend.reconciled_status().unwrap(),
+        ServingStatus::Serving("Qwen/Qwen3-32B".to_string()),
+        "a live container on the serving port must keep the status Serving"
+    );
+}
+
+/// The live bug: after a successful `start`, a manual `docker stop` leaves
+/// docker ps empty; `reconciled_status` must self-correct to Idle instead of
+/// reporting the stale served model.
+#[test]
+fn runpy_reconciled_status_flips_to_idle_after_out_of_band_stop() {
+    let runner = FakeRunner::new(0);
+    // start's readiness probe sees a model...
+    runner.set_http_get(r#"{"data":[{"id":"Qwen/Qwen3-32B"}]}"#);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+    backend.start("Qwen/Qwen3-32B").expect("start should succeed");
+    assert!(matches!(
+        backend.status().unwrap(),
+        ServingStatus::Serving(_)
+    ));
+
+    // ...then the container is stopped out of band: docker ps now reports
+    // nothing (FakeRunner's default empty `docker ps`), so reconciliation must
+    // report Idle even though the in-memory status still says Serving.
+    assert_eq!(
+        backend.reconciled_status().unwrap(),
+        ServingStatus::Idle,
+        "an empty docker ps must reconcile a stale Serving down to Idle"
+    );
+}
+
+// ---------------------------------------------------------------------
 // Tool calling: enable OpenAI-style tool calling for families we know the
 // vLLM parser for, by injecting `--vllm-override-args` into the run.py argv.
 // Tool calling is NOT automatic in tt-inference-server -- see the

@@ -857,6 +857,27 @@ impl ServingBackend for RunPyBackend {
         Ok(self.status.lock().expect("status mutex poisoned").clone())
     }
 
+    /// Reconcile the in-memory status against docker reality: if we think we're
+    /// `Serving` but no live `tt-inference-server` endpoint on our serving port
+    /// is actually answering `/v1/models` for that model, the container is gone
+    /// (a manual `docker stop`, a crash) -- report `Idle`. Probes via this
+    /// backend's own `CommandRunner` (real `docker ps` + `/v1/models` in prod;
+    /// a `FakeRunner` in tests), reusing the same discovery + decision the
+    /// `/serving` route uses. An idle status skips the probe entirely.
+    fn reconciled_status(&self) -> Result<ServingStatus> {
+        let status = self.status()?;
+        if !matches!(status, ServingStatus::Serving(_)) {
+            return Ok(status);
+        }
+        let entries = crate::serving::discovery::discover_serving(
+            self.runner.as_ref(),
+            &self.config.host,
+            self.config.service_port,
+            &status,
+        );
+        Ok(crate::serving::discovery::reconcile_status(&status, &entries))
+    }
+
     /// Read `model_spec.json` (see `model_spec_path`) and enumerate every
     /// model it lists, with the device meshes each one supports -- so a
     /// client (`GET /models`, `tt models`) never has to guess or hardcode

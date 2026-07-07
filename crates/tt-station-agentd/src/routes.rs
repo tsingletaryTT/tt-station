@@ -506,6 +506,45 @@ impl AppState {
             .clone()
     }
 
+    /// The current serving status, RECONCILED against docker reality, and
+    /// self-healing the stored state when it's stale.
+    ///
+    /// `status` is only the agent's last serving *intent* -- flipped to
+    /// `Serving` on `/run`, back to `Idle` only on the agent's own `/stop`. A
+    /// model stopped out of band (a manual `docker stop`, a crash) never runs
+    /// through `/stop`, so the stored status gets stuck reporting `Serving`
+    /// while nothing is actually up. This probes docker (`discover_serving`,
+    /// off the async runtime like `/serving`) and applies
+    /// [`reconcile_status`]: if the agent's own serve is gone, it calls
+    /// `set_idle()` so `/status`, `/endpoint`, AND the mDNS advertisement all
+    /// stop lying, then returns the corrected status.
+    ///
+    /// The docker probe (delegated to the backend) only runs when the stored
+    /// status is `Serving` (the only state that can be stale-positive); an
+    /// `Idle` status returns immediately without touching the backend, keeping
+    /// the common idle poll cheap. The probe is blocking I/O, so it runs on
+    /// `spawn_blocking` (like `/serving`).
+    async fn reconciled_status(&self) -> ServingStatus {
+        let stored = self.status();
+        if !matches!(stored, ServingStatus::Serving(_)) {
+            return stored;
+        }
+        let backend = self.backend();
+        let reconciled = tokio::task::spawn_blocking(move || backend.reconciled_status())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            // A join panic or backend error leaves the stored status as-is
+            // (never worse than today's behavior).
+            .unwrap_or_else(|| stored.clone());
+        if matches!(reconciled, ServingStatus::Idle) {
+            // Stale-positive: the backend's serve is gone. Heal the stored
+            // state (clears the endpoint + re-advertises Idle over mDNS).
+            self.set_idle();
+        }
+        reconciled
+    }
+
     /// Snapshot the currently-serving `Endpoint`, or `None` if idle.
     fn endpoint(&self) -> Option<Endpoint> {
         self.inner
@@ -963,10 +1002,14 @@ struct StatusResponse {
 async fn get_status(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Json<StatusResponse> {
+    // Reconcile against docker reality so a model stopped out of band (manual
+    // `docker stop`, crash) isn't reported as still serving. Self-heals the
+    // stored state as a side effect -- see `AppState::reconciled_status`.
+    let status = state.reconciled_status().await;
     Json(StatusResponse {
         name: state.name().to_string(),
         chips: state.chips().to_string(),
-        status: state.status().to_txt(),
+        status: status.to_txt(),
         device_mesh: state.device_mesh().map(str::to_string),
     })
 }
@@ -1247,6 +1290,10 @@ async fn get_endpoint(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
 ) -> Result<Json<Endpoint>, StatusCode> {
+    // Reconcile first: if the agent's serve died out of band, this clears the
+    // stored endpoint (via set_idle), so we return 409 (idle) instead of
+    // handing back a dead base_url.
+    let _ = state.reconciled_status().await;
     state.endpoint().map(Json).ok_or(StatusCode::CONFLICT)
 }
 
