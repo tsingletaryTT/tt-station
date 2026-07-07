@@ -62,30 +62,42 @@ public enum VSCodeLauncher {
     /// stdout, exits 0, and does NOT open a window, even when a `--remote
     /// <folder>` is also given. Combining the two (an earlier version did) is
     /// exactly why the window "did nothing." The toolkit install is a separate
-    /// `code` invocation (`installExtensionArgs`), run before this one.
+    /// step entirely — scp'd to the box and installed there via
+    /// `remoteInstallScript` (a local `--install-extension` wouldn't reach the
+    /// remote session at all).
     public static func remoteArgs(user: String, host: String, path: String) -> [String] {
         ["--remote", "ssh-remote+\(user)@\(host)", path]
     }
 
-    /// Builds `code` CLI args to install the tt-vscode-toolkit extension from
-    /// the marketplace by ID. Run as its OWN `code` invocation (it runs headless
-    /// and exits) — never merged with `remoteArgs`, or the window won't open
-    /// (see `remoteArgs`' comment). Used only as a FALLBACK when no local
-    /// `.vsix` is cached (see `installVsixArgs`).
-    public static func installExtensionArgs() -> [String] {
-        ["--install-extension", toolkitExtensionID]
-    }
+    /// Where the toolkit `.vsix` is copied (scp) on the box before install.
+    public static let remoteVsixPath = "/tmp/tt-vscode-toolkit.vsix"
 
-    /// Builds `code` CLI args to install the toolkit from a LOCAL `.vsix` file.
-    /// Preferred over `installExtensionArgs` because it is gallery-independent:
-    /// `--install-extension <id>` only works if the user's VS Code build is
-    /// pointed at a marketplace that carries the extension (the default MS
-    /// gallery, Open VSX, etc.), and forks/corporate builds often aren't — so
-    /// the ID silently no-ops. A `.vsix` path always installs. `--force` lets a
-    /// re-launch upgrade/reinstall without prompting. Like the ID variant, this
-    /// is its own headless `code` call, never merged with `remoteArgs`.
-    public static func installVsixArgs(vsixPath: String) -> [String] {
-        ["--install-extension", vsixPath, "--force"]
+    /// A shell script (run on the box over SSH) that installs the toolkit
+    /// `.vsix` into the REMOTE VS Code server.
+    ///
+    /// The toolkit is a workspace (remote) extension: it has to live in the
+    /// box's `~/.vscode-server/extensions`, not the Mac's local VS Code, or it
+    /// never appears in the Remote-SSH session. And you can't push a local
+    /// `.vsix` to a remote with `code --install-extension <vsix> --remote` —
+    /// that installs the file LOCALLY (verified). So we scp the vsix over and
+    /// run the box's own `code-server --install-extension` on it.
+    ///
+    /// `code-server` only exists after VS Code has bootstrapped its server on
+    /// the box (which the Remote-SSH window-open triggers), so this polls for
+    /// the binary for up to ~2 min before installing. `ls -t … | head -1`
+    /// picks the newest server build if a VS Code update left more than one.
+    /// `--force` makes a relaunch idempotently upgrade/reinstall.
+    public static func remoteInstallScript(vsixPath: String = remoteVsixPath) -> String {
+        """
+        CS=""
+        for i in $(seq 1 60); do
+          CS=$(ls -t ~/.vscode-server/cli/servers/Stable-*/server/bin/code-server 2>/dev/null | head -1)
+          [ -n "$CS" ] && break
+          sleep 2
+        done
+        if [ -z "$CS" ]; then echo "vscode-server not ready" >&2; exit 3; fi
+        "$CS" --install-extension '\(vsixPath)' --force
+        """
     }
 
     public static func defaultRemotePath(user: String) -> String { "/home/\(user)" }

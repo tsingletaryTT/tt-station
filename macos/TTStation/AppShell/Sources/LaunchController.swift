@@ -127,22 +127,9 @@ final class LaunchController {
         let t = sshTarget(host: Self.resolveIPv4(host) ?? host)
         let path = VSCodeLauncher.defaultRemotePath(user: t.user)
 
-        // Toolkit install is a SEPARATE, best-effort `code` invocation run
-        // first: `--install-extension` makes the CLI run headless and exit
-        // WITHOUT opening a window, so it can never share an invocation with
-        // the window-open below (that was the "does nothing" bug). Its failure
-        // is a nice-to-have miss, not a reason to skip the window.
-        //
-        // Prefer a locally-cached `.vsix` (seeded by install.sh from the latest
-        // GitHub release) — that install is gallery-independent, so it works
-        // even when the user's VS Code isn't pointed at the default marketplace.
-        // Only fall back to the marketplace ID when no `.vsix` is cached.
-        let installArgs = Self.cachedToolkitVsix().map { VSCodeLauncher.installVsixArgs(vsixPath: $0.path) }
-            ?? VSCodeLauncher.installExtensionArgs()
-        try? Self.runDetachedProcess(executable: code, args: installArgs)
-
         // The window-open is the primary action — surface an error only if THIS
-        // fails (a failed extension install must not block or error the window).
+        // fails. Opening the Remote-SSH window also bootstraps the box's
+        // vscode-server, which the toolkit install below waits on.
         do {
             try Self.runDetachedProcess(
                 executable: code,
@@ -150,6 +137,71 @@ final class LaunchController {
             )
         } catch {
             vscodeError = "failed to open VS Code: \(error.localizedDescription)"
+            return
+        }
+
+        // Install the toolkit into the REMOTE session. The toolkit is a
+        // workspace (remote) extension, so it must land in the box's
+        // `~/.vscode-server/extensions` — a local `code --install-extension`
+        // (even with `--remote`) installs the vsix on the Mac and never
+        // reaches the remote (verified). So we scp the cached vsix to the box
+        // and run the box's own `code-server --install-extension` on it.
+        //
+        // Backgrounded + best-effort: the window-open above is what the user
+        // waits on; the install polls for the (async-bootstrapped) server for
+        // up to ~2 min behind it. A miss sets a soft note, never blocks the
+        // window. No cached vsix (install.sh didn't seed one) → skip silently.
+        guard let vsix = Self.cachedToolkitVsix() else { return }
+        let user = t.user
+        let boxHost = t.host
+        let vsixPath = vsix.path
+        Task { [weak self] in
+            let ok = await Self.installToolkitOnRemote(
+                localVsix: vsixPath, user: user, host: boxHost)
+            if !ok {
+                self?.vscodeError =
+                    "VS Code opened, but installing the tt-vscode-toolkit on the box didn't complete — retry once the remote server has finished connecting."
+            }
+        }
+    }
+
+    /// scp the cached toolkit vsix to the box and install it into the remote
+    /// vscode-server (see `VSCodeLauncher.remoteInstallScript`). Returns whether
+    /// both steps succeeded. Best-effort — callers treat failure as a soft note.
+    static func installToolkitOnRemote(localVsix: String, user: String, host: String) async -> Bool {
+        guard await scpToBox(
+            localPath: localVsix, user: user, host: host,
+            remotePath: VSCodeLauncher.remoteVsixPath)
+        else { return false }
+        return await runSSHCommand(
+            user: user, host: host, command: VSCodeLauncher.remoteInstallScript())
+    }
+
+    /// Copy a local file to the box over scp, pinned to the same authorized key
+    /// and non-interactive flags as `runSSHCommand`. Returns exit-0 success.
+    static func scpToBox(localPath: String, user: String, host: String, remotePath: String) async -> Bool {
+        let key = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".ssh/id_ed25519").path
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/scp")
+        p.arguments = [
+            "-i", key,
+            "-o", "IdentitiesOnly=yes",
+            "-o", "PreferredAuthentications=publickey",
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=10",
+            localPath, "\(user)@\(host):\(remotePath)",
+        ]
+        return await withCheckedContinuation { continuation in
+            p.terminationHandler = { proc in
+                continuation.resume(returning: proc.terminationStatus == 0)
+            }
+            do {
+                try p.run()
+            } catch {
+                continuation.resume(returning: false)
+            }
         }
     }
 

@@ -68,23 +68,24 @@ final class WorkbenchLaunchersTests: XCTestCase {
     // Regression: the window-open args must NEVER carry `--install-extension`.
     // Combining install + `--remote <folder>` in one `code` invocation makes the
     // CLI run headless (install then exit 0) and never open a window — the toolkit
-    // install has to be a SEPARATE `code` call (see `installExtensionArgs`).
+    // install has to be a SEPARATE step (see `remoteInstallScript`).
     func testVSCodeRemoteArgsHasNoInstallFlag() {
         let args = VSCodeLauncher.remoteArgs(user: "u", host: "h", path: "/home/u")
         XCTAssertEqual(args, ["--remote", "ssh-remote+u@h", "/home/u"])
         XCTAssertFalse(args.contains("--install-extension"),
                        "remoteArgs must not combine install with window-open")
     }
-    func testVSCodeInstallExtensionArgs() {
-        XCTAssertEqual(VSCodeLauncher.installExtensionArgs(),
-                       ["--install-extension", "Tenstorrent.tt-vscode-toolkit"])
-    }
 
-    // Installing from a local .vsix path is gallery-independent — it works even
-    // when the user's VS Code isn't pointed at the default marketplace.
-    func testVSCodeInstallVsixArgs() {
-        XCTAssertEqual(
-            VSCodeLauncher.installVsixArgs(vsixPath: "/tmp/tt-vscode-toolkit-0.0.518.vsix"),
-            ["--install-extension", "/tmp/tt-vscode-toolkit-0.0.518.vsix", "--force"])
+    // The toolkit is installed ON THE BOX (a workspace/remote extension), so the
+    // install script must run the box's own `code-server --install-extension`
+    // against the scp'd vsix — after polling for the server to be bootstrapped.
+    func testVSCodeRemoteInstallScript() {
+        let script = VSCodeLauncher.remoteInstallScript()
+        XCTAssertTrue(script.contains("code-server"), script)
+        XCTAssertTrue(script.contains("--install-extension '/tmp/tt-vscode-toolkit.vsix' --force"), script)
+        // Polls for the bootstrapped server binary rather than assuming it's
+        // there (the Remote-SSH window-open triggers the bootstrap async).
+        XCTAssertTrue(script.contains(".vscode-server/cli/servers/Stable-"), script)
+        XCTAssertEqual(VSCodeLauncher.remoteVsixPath, "/tmp/tt-vscode-toolkit.vsix")
     }
 }
