@@ -118,7 +118,13 @@ final class LaunchController {
             vscodeError = "VS Code `code` CLI not found — in VS Code run \"Shell Command: Install 'code' command in PATH\"."
             return
         }
-        let t = sshTarget(host: host)
+        // Resolve `.local` to IPv4 first. VS Code Remote-SSH runs
+        // `ssh -o ConnectTimeout=15 ttuser@<host>`, and macOS resolves mDNS
+        // names IPv6-first — so ssh burns the whole timeout cycling through
+        // unreachable link-local `fe80::…` addresses and gives up before it
+        // reaches the working IPv4. Handing VS Code the IPv4 makes it connect
+        // immediately (same fix as the Open WebUI / tt-toplike launchers).
+        let t = sshTarget(host: Self.resolveIPv4(host) ?? host)
         let path = VSCodeLauncher.defaultRemotePath(user: t.user)
 
         // Toolkit install is a SEPARATE, best-effort `code` invocation run
