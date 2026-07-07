@@ -171,7 +171,14 @@ final class LaunchController {
             webUIError = "couldn't parse the box endpoint: \(endpoint.baseURL)"
             return
         }
-        let host = rawHost.hasSuffix(".") ? String(rawHost.dropLast()) : rawHost
+        let canonical = rawHost.hasSuffix(".") ? String(rawHost.dropLast()) : rawHost
+        // Resolve `.local` to IPv4 up front. macOS resolves mDNS names
+        // IPv6-first → a zoned link-local `fe80::…` that URLSession can't use
+        // (so the "already healthy → just open the browser" fast path would
+        // never fire) and that SSH would connect from/to. Same fix the
+        // tt-toplike launcher already applies (commit 2fd6ef2). Fall back to
+        // the name if resolution fails.
+        let host = Self.resolveIPv4(canonical) ?? canonical
         let webURL = OpenWebUILauncher.url(host: host)
         let healthURL = OpenWebUILauncher.healthURL(host: host)
 
@@ -291,12 +298,27 @@ final class LaunchController {
     /// whether it exited 0. Used to launch the box-hosted Open WebUI container
     /// (`docker run` includes a first-run image pull, so this can take a
     /// while — hence the async continuation rather than a blocking
-    /// `waitUntilExit`, mirroring `runBrewInstall`). `accept-new` lets a
-    /// first connection to an unknown host key through.
+    /// `waitUntilExit`, mirroring `runBrewInstall`).
+    ///
+    /// Auth is pinned to the exact key the pair flow authorizes on the box
+    /// (`tt ssh-authorize` installs `~/.ssh/id_ed25519.pub`):
+    /// - `-i ~/.ssh/id_ed25519` + `IdentitiesOnly=yes` offer only that key
+    ///   (not whatever an agent happens to hold);
+    /// - `PreferredAuthentications=publickey` + `BatchMode=yes` never fall back
+    ///   to a password prompt on a headless launch — so a rejected key fails
+    ///   fast with a real "publickey" error instead of the confusing repeated
+    ///   `Failed password` the box logged.
+    /// `accept-new` lets a first connection to an unknown host key through.
     static func runSSHCommand(user: String, host: String, command: String) async -> Bool {
+        let key = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".ssh/id_ed25519").path
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         p.arguments = [
+            "-i", key,
+            "-o", "IdentitiesOnly=yes",
+            "-o", "PreferredAuthentications=publickey",
+            "-o", "BatchMode=yes",
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ConnectTimeout=10",
             "\(user)@\(host)", command,
