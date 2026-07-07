@@ -56,3 +56,7 @@ tt-station-agentd = { path = ".", features = ["test-hooks"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 tempfile = { workspace = true }
+# mtime-setting for the `newest_log_file` unit test (logs.rs): the test needs
+# deterministic, distinct mtimes on two just-written files, which plain
+# `std::fs::write` can't guarantee on fast filesystems.
+filetime = "0.2"

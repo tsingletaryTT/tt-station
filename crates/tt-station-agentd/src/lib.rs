@@ -6,6 +6,7 @@ pub mod authkeys;
 pub mod config;
 pub mod device;
 pub mod inference;
+pub mod logs;
 pub mod pairing;
 pub mod procscan;
 pub mod routes;
