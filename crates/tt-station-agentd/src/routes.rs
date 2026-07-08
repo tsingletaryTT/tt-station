@@ -1683,6 +1683,137 @@ async fn get_logs(
     }
 }
 
+/// `GET /logs/stream` (UNAUTHED, like `GET /logs`/`GET /telemetry`): upgrade
+/// to a WebSocket and follow the same source `GET /logs` tails, pushing new
+/// lines as they're written instead of returning a single snapshot.
+///
+/// The handshake does no I/O itself -- it just parses `?source=`/`?tail=`
+/// (via the same [`parse_logs_query`] `GET /logs` uses) and hands the
+/// upgraded socket to [`logs_stream`], which owns the replay-then-follow
+/// loop.
+async fn logs_ws(
+    ws: WebSocketUpgrade,
+    axum::extract::State(state): axum::extract::State<AppState>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let (source_str, tail) = parse_logs_query(query.as_deref());
+    ws.on_upgrade(move |socket| logs_stream(socket, state, source_str, tail))
+}
+
+/// Follow-interval for the log tail poll. Short enough to feel live, long
+/// enough to be cheap. (Mirrors telemetry's interval+Delay approach.)
+const LOG_FOLLOW_INTERVAL: Duration = Duration::from_millis(500);
+
+/// The per-connection log-follow loop behind `GET /logs/stream`.
+///
+/// On connect: resolve the newest log file for `source`, replay its last
+/// `tail` lines (through [`crate::logs::redact_line`], same as `GET /logs`),
+/// then remember (path, end-of-file offset) and start following. Every
+/// [`LOG_FOLLOW_INTERVAL`] tick, re-resolve the newest file -- a fresh serve
+/// rotates to a new timestamped file, which this detects by the resolved
+/// path changing and handles by restarting the replay from byte 0 of the new
+/// file -- and otherwise reads whatever's been appended since `offset` via
+/// [`crate::logs::read_new_lines`]. If the file vanishes mid-follow (e.g. log
+/// rotation/cleanup outside this process), that's treated as "nothing to
+/// follow right now," not an error: `cur_path` is cleared and the next tick
+/// re-resolves rather than the connection dying.
+///
+/// An unknown `source` or a non-runpy backend (no `tt_inference_repo`
+/// configured) sends a single `{"error": "..."}` text frame and returns --
+/// same error shapes `GET /logs` uses, just delivered over the socket instead
+/// of as an HTTP status since a WebSocket upgrade has already committed to
+/// `101 Switching Protocols`.
+async fn logs_stream(mut socket: WebSocket, state: AppState, source_str: String, tail: usize) {
+    let source = match crate::logs::LogSource::parse(&source_str) {
+        Some(s) => s,
+        None => {
+            let _ = socket
+                .send(Message::Text(
+                    serde_json::json!({ "error": format!("unknown source '{source_str}'") })
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let repo = match state.tt_inference_repo() {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let _ = socket
+                .send(Message::Text(
+                    serde_json::json!({ "error": "logs unavailable: non-runpy backend" })
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let dir = crate::logs::logs_dir(&repo, source);
+
+    // Resolve the current newest file + replay its tail, tracking (path, offset).
+    let mut cur_path: Option<std::path::PathBuf> = None;
+    let mut offset: u64 = 0;
+
+    // Replay tail synchronously on connect.
+    if let Ok(Some(path)) = crate::logs::newest_log_file(&dir) {
+        if let Ok(lines) = crate::logs::tail_lines(&path, tail) {
+            for l in lines {
+                if socket
+                    .send(Message::Text(crate::logs::redact_line(&l).into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+        offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        cur_path = Some(path);
+    }
+
+    let mut ticker = tokio::time::interval(LOG_FOLLOW_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                // Re-resolve newest: a fresh serve creates a new timestamped file.
+                let newest = crate::logs::newest_log_file(&dir).ok().flatten();
+                if newest != cur_path {
+                    // Rotated to a new file -- replay it from the start.
+                    cur_path = newest.clone();
+                    offset = 0;
+                }
+                if let Some(path) = &cur_path {
+                    match crate::logs::read_new_lines(path, offset) {
+                        Ok((lines, new_off)) => {
+                            offset = new_off;
+                            for l in lines {
+                                if socket
+                                    .send(Message::Text(crate::logs::redact_line(&l).into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                        Err(_) => { /* file vanished mid-follow; re-resolve next tick */ cur_path = None; }
+                    }
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(_)) => {}
+                }
+            }
+        }
+    }
+}
+
 /// Parse `?source=<>&tail=<>` from a raw query string. Defaults: source
 /// `"container"`, tail `DEFAULT_TAIL`, capped at `MAX_TAIL`. A bare
 /// string-split rather than a typed `Query<T>` extractor -- same rationale as
@@ -1841,6 +1972,7 @@ pub fn app(state: AppState) -> Router {
         .route("/models", get(get_models))
         .route("/serving", get(get_serving))
         .route("/logs", get(get_logs))
+        .route("/logs/stream", get(logs_ws))
         .route("/telemetry", get(telemetry_ws))
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
