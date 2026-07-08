@@ -10,7 +10,7 @@
 //! header anyway costs nothing and keeps all four calls uniform.
 
 use crate::model::{
-    ConfigSummary, Endpoint, ModelsResponse, ServingList, ServingStatus, StatusInfo,
+    ConfigSummary, Endpoint, LogsInfo, ModelsResponse, ServingList, ServingStatus, StatusInfo,
 };
 use crate::pairing::join;
 use serde::{Deserialize, Serialize};
@@ -113,6 +113,29 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
 /// token to hang an `AgentClient` off of yet.
 pub async fn get_config(base: &str) -> anyhow::Result<ConfigSummary> {
     let url = join(base, "config");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
+
+    Ok(resp.json().await?)
+}
+
+/// `GET /logs?source=<source>&tail=<tail>` (UNAUTHED, mirroring the agent's
+/// own route -- see `tt-station-agentd::routes::get_logs`, Task 2): the
+/// trailing `tail` lines of the box's `source` log stream (`"container"` or
+/// `"run"`), bundled as a [`LogsInfo`].
+///
+/// A FREE function rather than an `AgentClient` method, same reasoning as
+/// [`list_models`]/[`get_status`]/[`get_config`]: `/logs` is unauthed
+/// read-only discovery (an operator debugging a stuck serve wants to `tt
+/// logs` a box it never bothered to pair with), so there's no bearer token to
+/// hang an `AgentClient` off of yet. `join` doesn't know about query strings,
+/// so the `?source=&tail=` suffix is appended directly onto its output.
+pub async fn get_logs(base: &str, source: &str, tail: usize) -> anyhow::Result<LogsInfo> {
+    let url = format!("{}?source={source}&tail={tail}", join(base, "logs"));
     let resp = reqwest::Client::new()
         .get(&url)
         .send()

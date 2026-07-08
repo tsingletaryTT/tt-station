@@ -56,7 +56,8 @@ use libttstation::discovery::{
     aggregate, manual::ManualProvider, mdns::MdnsProvider, DiscoveryProvider,
 };
 use libttstation::model::{
-    BoxRecord, ConfigSummary, Endpoint, ModelsResponse, ServingList, ServingStatus, StatusInfo,
+    BoxRecord, ConfigSummary, Endpoint, LogsInfo, ModelsResponse, ServingList, ServingStatus,
+    StatusInfo,
 };
 use libttstation::pairing::{pair_complete, pair_init};
 use libttstation::secrets::{default_store, FileStore, SecretStore};
@@ -194,6 +195,28 @@ enum Command {
         /// The box's control-plane address, as `host:port`.
         #[arg(long)]
         host: String,
+    },
+
+    /// Tail the serving logs from the box (container or run.py logs).
+    /// UNAUTHED on the agent side (like `status`/`models`/`serving`), so this
+    /// works even against a box `tt pair` was never run against.
+    Logs {
+        /// The box's control-plane address, as `host:port`.
+        #[arg(long)]
+        host: String,
+
+        /// Which log stream: "container" (default) or "run".
+        #[arg(long, default_value = "container")]
+        source: String,
+
+        /// How many trailing lines to fetch.
+        #[arg(long, default_value_t = 200)]
+        tail: usize,
+
+        /// Stream new lines live over the agent's `GET /logs/stream`
+        /// WebSocket (Ctrl-C to stop) instead of a one-shot snapshot.
+        #[arg(long)]
+        follow: bool,
     },
 
     /// Show the endpoint of whatever a paired box is currently serving.
@@ -364,6 +387,19 @@ fn main() -> Result<()> {
         Command::Serving { host } => {
             let list = run_async(cmd_serving(host))?;
             print_serving(&list, cli.json);
+        }
+        Command::Logs {
+            host,
+            source,
+            tail,
+            follow,
+        } => {
+            if *follow {
+                run_async(cmd_logs_follow(host, source, *tail))?;
+            } else {
+                let logs = run_async(cmd_logs(host, source, *tail))?;
+                print_logs(&logs, cli.json);
+            }
         }
         Command::Catalog {
             host,
@@ -708,6 +744,53 @@ async fn cmd_endpoint(host: &str) -> Result<Endpoint> {
 async fn cmd_serving(host: &str) -> Result<ServingList> {
     let base = format!("http://{host}");
     libttstation::agent_client::list_serving(&base).await
+}
+
+/// `tt logs --host <host:port> [--source <source>] [--tail <n>]`: UNAUTHED,
+/// like `cmd_status`/`cmd_serving` -- the agent's `GET /logs` has no
+/// `BearerAuth` extractor (Task 2), so this calls
+/// `libttstation::agent_client::get_logs` directly instead of going through
+/// `authed_client()`. This is the one-shot snapshot path; `--follow` instead
+/// takes `cmd_logs_follow` below.
+async fn cmd_logs(host: &str, source: &str, tail: usize) -> Result<LogsInfo> {
+    let base = format!("http://{host}");
+    libttstation::agent_client::get_logs(&base, source, tail).await
+}
+
+/// `tt logs --follow --host <host:port> [--source <source>] [--tail <n>]`:
+/// connect to the agent's `GET /logs/stream` WebSocket (Task 2, UNAUTHED like
+/// `/logs` itself), which replays the trailing `tail` lines and then pushes
+/// one text frame per new line as they're written -- and print each frame to
+/// stdout as it arrives until the connection closes (agent shutdown/restart)
+/// or the operator hits Ctrl-C.
+///
+/// Deliberately plain-text always, with no `--json` mode: unlike every other
+/// command's `--json` output, a log stream is inherently a sequence of
+/// already-unstructured lines rather than one decodable object, so wrapping
+/// each line in a JSON envelope would just be noise for a caller that almost
+/// certainly wants to `tail -f`-style pipe this straight through. See the
+/// task report for the fuller rationale.
+async fn cmd_logs_follow(host: &str, source: &str, tail: usize) -> Result<()> {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let url = format!("ws://{host}/logs/stream?source={source}&tail={tail}");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .with_context(|| format!("failed to connect to {url}"))?;
+    let (_write, mut read) = ws_stream.split();
+
+    while let Some(msg) = read.next().await {
+        // Non-text frames (ping/pong/close/binary) carry no log content --
+        // the agent's `/logs/stream` only ever sends `Message::Text` frames,
+        // but ignoring anything else here keeps this robust instead of
+        // erroring out on a stray control frame.
+        if let Message::Text(line) = msg? {
+            println!("{line}");
+        }
+    }
+
+    Ok(())
 }
 
 /// `tt catalog --host <host:port> [--refresh] [--catalog-file <path>]`:
@@ -1219,6 +1302,37 @@ fn print_serving(list: &ServingList, json: bool) {
     }
 }
 
+/// `tt logs`'s output (the one-shot `--follow`-less path -- `cmd_logs_follow`
+/// prints its own frames directly as they arrive, with no JSON mode at all,
+/// see that function's doc). Thin `println!` wrapper around
+/// [`format_logs`] -- see that function for the actual JSON/text formatting,
+/// factored out so it's unit-testable without capturing stdout, same pattern
+/// as [`format_boxrecord_line`]/[`endpoint_export_line`] above.
+fn print_logs(logs: &LogsInfo, json: bool) {
+    println!("{}", format_logs(logs, json));
+}
+
+/// Format a `tt logs` response for display. JSON mode: the whole `LogsInfo`
+/// object as a single-line `serde_json` string. Human mode: the `origin` (or
+/// a placeholder when there's nothing to tail yet -- e.g. no container
+/// running, no log file written) as a header line, then each log line bare,
+/// so it reads like a plain `tail`/`docker logs` invocation.
+fn format_logs(logs: &LogsInfo, json: bool) -> String {
+    if json {
+        serde_json::to_string(logs).expect("LogsInfo always serializes")
+    } else {
+        let mut out = format!(
+            "==> {} <==",
+            logs.origin.as_deref().unwrap_or("(no log yet)")
+        );
+        for line in &logs.lines {
+            out.push('\n');
+            out.push_str(line);
+        }
+        out
+    }
+}
+
 /// `tt catalog`'s output: JSON prints the whole `BoxCatalog` object (the
 /// exact shape the macOS app's model picker decodes); human mode prints the
 /// three tiers as sections -- "Runs on this box" / "Experimental" / "Needs
@@ -1380,6 +1494,54 @@ mod tests {
             endpoint_export_line(&ep),
             "export OPENAI_BASE_URL=http://127.0.0.1:8899/v1"
         );
+    }
+
+    /// `format_logs(.., json: true)` must emit valid, single-line
+    /// `serde_json` -- exactly the `LogsInfo` object, parseable back into the
+    /// same fields a caller (or `tt --json logs`'s consumer) would decode.
+    #[test]
+    fn print_logs_json_branch_emits_valid_json() {
+        let logs = LogsInfo {
+            source: "container".to_string(),
+            origin: Some("/mock/vllm.log".to_string()),
+            lines: vec!["line one".to_string(), "line two".to_string()],
+        };
+        let out = format_logs(&logs, true);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).expect("json branch must emit valid JSON");
+        assert_eq!(parsed["source"], "container");
+        assert_eq!(parsed["origin"], "/mock/vllm.log");
+        assert_eq!(parsed["lines"], serde_json::json!(["line one", "line two"]));
+    }
+
+    /// `format_logs(.., json: false)` must print an `origin` header followed
+    /// by every line, each on its own line.
+    #[test]
+    fn print_logs_text_branch_prints_each_line() {
+        let logs = LogsInfo {
+            source: "container".to_string(),
+            origin: Some("/mock/vllm.log".to_string()),
+            lines: vec!["line one".to_string(), "line two".to_string()],
+        };
+        let out = format_logs(&logs, false);
+        assert!(out.contains("/mock/vllm.log"));
+        let out_lines: Vec<&str> = out.lines().collect();
+        assert!(out_lines.contains(&"line one"));
+        assert!(out_lines.contains(&"line two"));
+    }
+
+    /// `format_logs(.., json: false)` with `origin: None` (nothing to tail
+    /// yet -- no container running, no log file written) must print the
+    /// "(no log yet)" placeholder header rather than an empty/blank line.
+    #[test]
+    fn print_logs_text_branch_placeholder_when_origin_is_none() {
+        let logs = LogsInfo {
+            source: "container".to_string(),
+            origin: None,
+            lines: vec![],
+        };
+        let out = format_logs(&logs, false);
+        assert!(out.contains("(no log yet)"));
     }
 
     /// `build_probe_client` must actually apply the requested timeout as

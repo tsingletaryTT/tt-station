@@ -21,6 +21,13 @@ reqwest = { workspace = true, features = ["blocking"] }
 # alternate-screen + key-event handling.
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+# `tt logs --follow` (Task 4): WebSocket client for the agent's
+# `GET /logs/stream` route, mirroring the versions `tt-station-agentd` already
+# uses as dev-deps for its own `/telemetry` WS integration test. The URL
+# scheme is `ws://` (never `wss://`), so no TLS feature is enabled on
+# tokio-tungstenite -- default features only.
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -13,10 +13,10 @@
 //! methods share and the brief calls out explicitly.
 
 use libttstation::agent_client::{
-    get_status, list_models, list_serving, reset, AgentClient, SshRevokeBy,
+    get_logs, get_status, list_models, list_serving, reset, AgentClient, SshRevokeBy,
 };
 use libttstation::model::{Endpoint, ServingStatus};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 const TOKEN: &str = "tok-abc123";
@@ -356,6 +356,36 @@ async fn get_status_parses_null_device_mesh_as_none() {
         .expect("get_status() should succeed");
 
     assert_eq!(info.device_mesh, None);
+}
+
+/// (Task 4) `get_logs(base, source, tail)` -- the free function `tt logs`
+/// calls, unauthed like `get_status`/`list_serving` -- should GET
+/// `{base}/logs?source=<source>&tail=<tail>` with no `Authorization` header
+/// and parse the `LogsInfo` body.
+#[tokio::test]
+async fn get_logs_parses_logs_info_with_no_auth_header() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/logs"))
+        .and(query_param("source", "container"))
+        .and(query_param("tail", "50"))
+        .and(NoAuthorizationHeader)
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "source": "container",
+            "origin": "/mock/vllm.log",
+            "lines": ["mock line 1", "mock line 2"]
+        })))
+        .mount(&server)
+        .await;
+
+    let logs = get_logs(&server.uri(), "container", 50)
+        .await
+        .expect("get_logs() should succeed against a mocked 200 response");
+
+    assert_eq!(logs.source, "container");
+    assert_eq!(logs.origin.as_deref(), Some("/mock/vllm.log"));
+    assert_eq!(logs.lines, vec!["mock line 1", "mock line 2"]);
 }
 
 /// (Task 3) `ssh_authorize(public_key, label)` should POST

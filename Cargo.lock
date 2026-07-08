@@ -2856,6 +2856,7 @@ dependencies = [
  "clap",
  "crossterm",
  "escargot",
+ "futures-util",
  "libttstation",
  "ratatui",
  "reqwest",
@@ -2863,6 +2864,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.24.0",
 ]
 
 [[package]]

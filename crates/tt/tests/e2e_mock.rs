@@ -278,6 +278,48 @@ fn tt_config_json_round_trips_from_mock_box() {
     assert_eq!(summary.active_profile.as_deref(), Some("mock"));
 }
 
+/// `tt --json logs --host <mock> --source container --tail 50` round-trips a
+/// `LogsInfo` from mock-box's fake `/logs` route (Task 4). UNAUTHED, like `tt
+/// status`/`tt serving`/`tt config` -- no `tt pair` needed first, so this
+/// spins up its own mock-box instance and drives just this one command
+/// against it, same harness as `tt_config_json_round_trips_from_mock_box`
+/// above.
+#[test]
+#[ignore] // hardware-free but network/process -- run with --ignored like the others
+fn tt_logs_json_round_trips_from_mock_box() {
+    let port: u16 = 18903;
+    let host = format!("127.0.0.1:{port}");
+
+    let _mock_box = spawn_mock_box(port);
+    wait_for_port(port);
+
+    let config_dir = TempConfigDir::new();
+
+    let logs_stdout = AssertCommand::cargo_bin("tt")
+        .unwrap()
+        .env("TT_CONFIG_DIR", &config_dir.0)
+        .args([
+            "--json",
+            "logs",
+            "--host",
+            &host,
+            "--source",
+            "container",
+            "--tail",
+            "50",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let logs: serde_json::Value =
+        serde_json::from_slice(&logs_stdout).expect("logs output is valid JSON");
+    assert_eq!(logs["source"], "container");
+    assert!(!logs["lines"].as_array().unwrap().is_empty());
+}
+
 /// `tt --json catalog --host <mock> --catalog-file <fixture>` (Task 4):
 /// classifies a trimmed fixture catalog (`tests/fixtures/compatibility.json`
 /// -- one Supported/one Experimental/one Galaxy-only/one Not-Supported model)

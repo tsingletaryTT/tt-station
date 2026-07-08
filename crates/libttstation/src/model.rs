@@ -178,6 +178,24 @@ pub struct ConfigSummary {
     pub tt_device: Option<String>, // None = auto-detected
 }
 
+/// `GET /logs`'s response body (Task 2's `tt-station-agentd::routes::LogsResponse`,
+/// which this mirrors field-for-field), as decoded by
+/// [`crate::agent_client::get_logs`] and printed by `tt logs` (Task 4).
+/// `source` echoes back which log stream was requested (`"container"` or
+/// `"run"`); `origin` is the box-side path/identifier the lines were read
+/// from (e.g. a container id or log file path), or `None` when there's
+/// nothing to tail yet (no container running, no log file written); `lines`
+/// is the trailing-`N`-lines snapshot (or, over `/logs/stream`, the replay
+/// portion) as plain strings -- no per-line structure imposed, since the
+/// underlying sources (`docker logs`, `run.py`'s stdout) are themselves
+/// unstructured text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LogsInfo {
+    pub source: String,
+    pub origin: Option<String>,
+    pub lines: Vec<String>,
+}
+
 /// A box's operator-facing lifecycle unit state, roughly mirroring
 /// systemd's own unit-state vocabulary (the agent runs as a systemd-managed
 /// service on the box) -- `Active`/`Inactive`/`Activating`/`Deactivating`/
