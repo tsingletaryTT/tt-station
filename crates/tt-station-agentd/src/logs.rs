@@ -99,11 +99,16 @@ pub fn read_new_lines(path: &Path, from_offset: u64) -> std::io::Result<(Vec<Str
         None => 0,            // no complete line yet
     };
     let complete = &buf[..complete_len];
-    let lines: Vec<String> = complete
+    // `complete` always ends in `\n` (or is empty), so splitting on `\n`
+    // always yields a trailing synthetic empty element — drop only that one,
+    // preserving any genuine blank lines in the middle of the chunk.
+    let mut lines: Vec<String> = complete
         .split(|&b| b == b'\n')
-        .filter(|s| !s.is_empty())
         .map(|s| String::from_utf8_lossy(s).into_owned())
         .collect();
+    if lines.last().is_some_and(|s| s.is_empty()) {
+        lines.pop();
+    }
     Ok((lines, from_offset + complete_len as u64))
 }
 
@@ -231,6 +236,16 @@ mod tests {
         std::fs::write(&p, "one\ntwo\npartial\nthree\n").unwrap();
         let (lines2, _off2) = read_new_lines(&p, off).unwrap();
         assert_eq!(lines2, vec!["partial", "three"]);
+    }
+
+    #[test]
+    fn read_new_lines_preserves_internal_blank_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("blank.log");
+        std::fs::write(&p, "one\n\ntwo\n").unwrap();
+        let (lines, off) = read_new_lines(&p, 0).unwrap();
+        assert_eq!(lines, vec!["one", "", "two"]);
+        assert_eq!(off, "one\n\ntwo\n".len() as u64);
     }
 
     #[test]
