@@ -1277,10 +1277,12 @@ async fn run_model(
 /// status stays `Idle` until `start` returns -- so a `/stop` that arrives
 /// mid-bring-up sees `None` here, yet must still reach the backend to trip its
 /// cancel flag (`RunPyBackend::stop`) and abort the in-flight serve rather than
-/// leaving it grinding to the health-poll ceiling. `backend.stop` is idempotent
-/// (a `docker stop` on nothing is a no-op), so calling it while genuinely idle
-/// is harmless. The same `spawn_blocking` treatment as `/run` applies: the sync
-/// `backend.stop` call must never run directly on the async runtime.
+/// leaving it grinding to the health-poll ceiling. Every `ServingBackend` is
+/// contractually idempotent here (see the doc on `ServingBackend::stop`) -- a
+/// `docker stop`/equivalent on nothing running must be a no-op, not an error --
+/// so calling `backend.stop` while genuinely idle is harmless. The same
+/// `spawn_blocking` treatment as `/run` applies: the sync `backend.stop` call
+/// must never run directly on the async runtime.
 async fn stop_model(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,

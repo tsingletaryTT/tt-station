@@ -508,7 +508,17 @@ impl ServingBackend for DockerBackend {
 
     fn stop(&self, model: &str) -> Result<()> {
         let container_name = self.container_name(model);
-        self.runner.run(&["docker", "stop", &container_name])?;
+        // Deliberately NOT `?`-propagated: `docker stop` exits non-zero when
+        // the container is already stopped or doesn't exist at all, and per
+        // this trait's doc (`ServingBackend::stop`) that's not an error --
+        // `stop` must be idempotent. `routes.rs::stop_model` now calls
+        // `backend.stop` unconditionally (even while idle, so it can cancel
+        // an in-flight `/run`), so surfacing a "nothing to stop" failure here
+        // would turn a harmless no-op into a 500 at the routes layer. A
+        // container that IS actually present and running still gets stopped
+        // by this call; only the "there was nothing to stop" outcome is
+        // swallowed.
+        let _ = self.runner.run(&["docker", "stop", &container_name]);
         *self.status.lock().expect("status mutex poisoned") = ServingStatus::Idle;
         Ok(())
     }

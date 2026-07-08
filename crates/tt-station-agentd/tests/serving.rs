@@ -307,6 +307,39 @@ fn docker_stop_issues_stop_command() {
     assert_eq!(backend.status().unwrap(), ServingStatus::Idle);
 }
 
+/// `stop` must be idempotent even when the underlying `docker stop` command
+/// fails -- exactly what happens on a real box when `docker stop` targets an
+/// already-stopped or missing container (it exits non-zero). This is a
+/// documented contract on `ServingBackend::stop` (see its trait doc in
+/// `serving/mod.rs`): "docker stop on an already-stopped/missing container
+/// is not treated as an error by `DockerBackend`". `routes.rs::stop_model`
+/// now calls `backend.stop` UNCONDITIONALLY (even while idle, so a `/stop`
+/// can cancel an in-flight `/run`) -- if `stop` propagated a `docker stop`
+/// failure, an operator hitting Stop while idle (or a client retrying after
+/// a timeout) would see a 500 instead of a harmless no-op.
+#[test]
+fn docker_stop_is_idempotent_when_docker_stop_fails() {
+    let runner = FakeRunner::new(0);
+    runner.fail_run(
+        "docker stop",
+        "Error: No such container: tt-inference-llama3",
+    );
+    let backend = DockerBackend::new(
+        config("some/image:tag", "127.0.0.1", 8080),
+        Box::new(runner.clone()),
+    );
+
+    backend
+        .stop("llama3")
+        .expect("stop must be idempotent: a failing docker stop is not an error");
+
+    assert_eq!(
+        backend.status().unwrap(),
+        ServingStatus::Idle,
+        "status should still flip to Idle even when docker stop fails"
+    );
+}
+
 /// `DstackBackend` is an intentional stub ahead of M4: `start` must fail
 /// loudly (never silently pretend to serve), naming dstack in the error so
 /// a caller trying to debug "why didn't my model start" isn't left
