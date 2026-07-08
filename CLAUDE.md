@@ -67,7 +67,13 @@ session, NOT part of tt-station. Design: `~/code/tt-toplike/docs/REMOTE_QUIETBOX
   (only processes the agent's uid can inspect); `inference` is DEFERRED (its absence means
   tt-toplike falls back to local view for that panel) — see `TT_TOPLIKE_STREAM.md`),
   `GET /serving` (unauthed — every running `tt-inference-server` `/v1`, `source: agent|external`),
-  `GET /config` (unauthed — redacted resolved config, no secrets).
+  `GET /config` (unauthed — redacted resolved config, no secrets),
+  `GET /logs` (unauthed — `?source=container|run&tail=N` tail of a `workflow_logs/` file;
+  `container`=serving-container stdout/stderr where failures actually live, `run`=run.py's
+  own log; `409` on non-runpy backends, `200`/`lines: []` when nothing's logged yet),
+  `GET /logs/stream` (unauthed **WebSocket** — replays then follows the same source,
+  re-resolving the newest file each ~500ms so a fresh serve is picked up). Every emitted
+  log line is redacted (masks `hf_…`/`sk-…`/`Bearer …` shapes) — see `docs/reference/logs.md`.
 - mDNS `_tenstorrent._tcp` status re-published on run/stop; graceful shutdown unregisters.
 - **Config file + named profiles:** optionally reads `agentd.toml` (default
   `$TT_CONFIG_DIR/agentd.toml` or `~/.config/tt-station/agentd.toml`, override with
@@ -80,10 +86,14 @@ session, NOT part of tt-station. Design: `~/code/tt-toplike/docs/REMOTE_QUIETBOX
 **CLI (`crates/tt`):** `discover` (`--host`/`--no-mdns`), `pair`/`pair-init`/`pair-complete`,
 `run`, `stop`, `status` (unauthed), `endpoint`, `models`, `serving`, `reset`,
 `config` (unauthed — active/available profiles + resolved backend + serving host/port, mirrors
-`GET /config`; see `docs/reference/agentd-config.md`), **`console`** (ratatui SSH operator TUI
+`GET /config`; see `docs/reference/agentd-config.md`), **`logs`** (unauthed —
+`tt logs [--source container|run] [--tail N] [--follow]`; one-shot tail respects global
+`--json`, `--follow` streams plain lines from `GET /logs/stream` until Ctrl-C; see
+`docs/reference/logs.md`), **`console`** (ratatui SSH operator TUI
 for THIS box's agent — start/stop/restart/reset/pair-localhost/profile-cycle/install-service;
 `--snapshot` prints one `BoxLifecycleSnapshot` JSON and exits, `--install-service` installs the
-systemd unit and exits; see `docs/reference/tt-console.md`). Global `--json`.
+systemd unit and exits; now also has an auto-tailing serving-log pane sourced from
+`GET /logs?source=container`; see `docs/reference/tt-console.md`). Global `--json`.
 Tokens in macOS Keychain / file store. Respects `TT_CONFIG_DIR`.
 
 **Agent as a `systemctl --user` service:** the agent can run under the user's systemd
@@ -139,7 +149,8 @@ API + `/v1` (used by the CLI e2e, no hardware).
 **Docs:** `docs/reference/tt-inference-server-docker.md` (the real run.py launch),
 `docs/reference/tt-console.md` (the `tt console` operator TUI: systemd unit model,
 keybindings, `--snapshot` JSON contract, configurable tool names, reset/pair-localhost),
-`docs/tt-studio-integration.md` (verdict: **no clean cache-share without modifying tt-studio**;
+`docs/reference/logs.md` (the `/logs`/`/logs/stream` contract, `tt logs`, the container-log
+visibility gap this closes), `docs/tt-studio-integration.md` (verdict: **no clean cache-share without modifying tt-studio**;
 `/serving` makes tt-studio's models visible), `docs/superpowers/{specs,plans}` (PoC, macOS
 menubar, connect launchers), `docs/superpowers/cleanup-analysis.md`.
 
@@ -170,3 +181,9 @@ detailed log; this file is the current-state map.
 - Agent: wrap `advertise_status` mDNS send in `spawn_blocking` (async-hygiene nit).
 - macOS: build-verify everything above; wire discovery-by-name into the app's `/remote`
   story if desired; App Intents / deep links (deferred in the connect spec).
+- Log viewing: an external-container (`docker logs`) fallback for containers with no
+  `workflow_logs/` file; a structured serve-phase field in `/status` (so "downloading
+  weights" vs "container crashed" are distinguishable without reading logs); a macOS
+  "View logs" button (`docs/reference/logs.md` has the pointer); `tt console`'s log pane
+  is auto-tail-only — manual scroll is unimplemented; the console/snapshot log fetch's
+  `tail=20` is hardcoded, not configurable.

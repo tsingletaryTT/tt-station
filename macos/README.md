@@ -49,6 +49,13 @@ quick actions (status, Run/Stop, a live temp chip, "Open window"), backed by a r
   The PIN handshake is the trust anchor; only the public key leaves the Mac; the installed
   key is tagged (`ttstation:<host>:<date>`) and revocable (`tt ssh-authorize --host <h>
   --revoke`). The SSH step is non-fatal — a pair that can't set up SSH still pairs.
+- **Log viewing (box side, not yet in the app)** — the box now exposes `GET /logs`
+  (`?source=container|run&tail=N`) and a `GET /logs/stream` WebSocket, both unauthed, for
+  tailing/following the serving container's log (where model-load failures actually
+  surface) or run.py's own launch log — see `docs/reference/logs.md`. Today this is only
+  reachable via `tt logs [--follow]` or the `tt console` TUI's log pane; a "View logs"
+  button in this app (streaming `/logs/stream` the same way the telemetry strip streams
+  `/telemetry`) is a brief for a future macOS session, not yet built.
 
 **Status:** v0.6.2 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
 (130 passing tests via `swift test`; ranking, mesh-match, telemetry decode, install-command

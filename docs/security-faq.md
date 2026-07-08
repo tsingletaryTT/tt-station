@@ -105,6 +105,8 @@ and **authenticated actions** (need a valid bearer token):
 | `GET /serving` | none | live `/v1` endpoints on the box (incl. external ones) |
 | `GET /config` | none | resolved serving config (profile, image, host/port — **no secrets**) |
 | `GET /telemetry` (WebSocket) | none | live `tt-smi` chip telemetry **+ a process list** (pid, name, **command line**, cpu/mem) |
+| `GET /logs` | none | tail of the box's serving/run.py log (`?source=container\|run`, redacted) — see `docs/reference/logs.md` |
+| `GET /logs/stream` (WebSocket) | none | live-follow of the same log |
 | `POST /pair/init` · `/pair/complete` | none | start/finish pairing (needs the on-screen code) |
 | `POST /run` · `/stop` · `/reset` | **bearer** | start/stop a model; reset the box |
 | `GET /endpoint` | **bearer** | the serving `/v1` URL |
