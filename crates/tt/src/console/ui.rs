@@ -174,6 +174,26 @@ pub fn serving_lines(s: &BoxLifecycleSnapshot) -> Vec<String> {
     lines
 }
 
+/// Log panel (Task 6): the trailing lines of the container's serving log, as
+/// last fetched from the agent's `GET /logs?source=container` route (Task 2)
+/// by [`crate::console::env::collect_snapshot`] -- this function does no
+/// fetching itself, it just renders whatever `snap.logs` already holds.
+///
+/// Auto-tail only: this always shows the last lines `collect_snapshot`
+/// fetched (already the newest `tail` lines from the agent), truncated to
+/// however many rows the pane's `Rect` has room for by `render_panel`/
+/// `Paragraph` itself. There is no manual scroll state or keybinding here --
+/// that's a documented follow-up (see `docs/reference/tt-console.md`), not an
+/// oversight: adding scroll state would mean this line-builder is no longer a
+/// pure function of the snapshot alone.
+pub fn log_lines(snap: &BoxLifecycleSnapshot) -> Vec<String> {
+    if snap.logs.is_empty() {
+        vec!["(no serving log yet)".to_string()]
+    } else {
+        snap.logs.clone()
+    }
+}
+
 /// Static keybinding footer -- not a function of the snapshot, but kept
 /// alongside the other line-builders since [`draw`] renders it the same way.
 fn footer_lines() -> Vec<String> {
@@ -186,11 +206,20 @@ fn footer_lines() -> Vec<String> {
 // Drawing
 // ---------------------------------------------------------------------
 
-/// Lay out the header / pairing / status / serving / footer panels and
+/// Lay out the header / pairing / status / serving / logs / footer panels and
 /// render each as a `Paragraph` in a `Block`. Pure with respect to its
 /// inputs (no I/O) even though it isn't unit-testable the same way the line
 /// builders are -- see the `renders_without_panicking` test, which drives it
 /// through a ratatui `TestBackend` instead of a real terminal.
+///
+/// Layout choice (Task 6): `serving` and `logs` are BOTH `Constraint::Min`
+/// (3 and 4 rows respectively) rather than pinning `serving` to a fixed
+/// `Length` -- ratatui's solver splits any space left over after every fixed
+/// (`Length`) constraint is satisfied proportionally across the `Min`
+/// constraints, so on a normal-height terminal both panels grow together
+/// instead of the log pane's growth coming entirely at `serving`'s expense
+/// (or vice versa). `logs` gets a slightly taller floor (4 vs 3) since a
+/// single log line is less informative alone than a single serving entry.
 pub fn draw(frame: &mut Frame, snap: &BoxLifecycleSnapshot) {
     let area = frame.area();
     let chunks = Layout::default()
@@ -199,7 +228,8 @@ pub fn draw(frame: &mut Frame, snap: &BoxLifecycleSnapshot) {
             Constraint::Length(4), // header
             Constraint::Length(4), // pairing card
             Constraint::Length(4), // status
-            Constraint::Min(3),    // serving (grows to fill remaining space)
+            Constraint::Min(3),    // serving (shares growable space with logs)
+            Constraint::Min(4),    // logs (auto-tail; shares growable space with serving)
             Constraint::Length(3), // footer keybindings
         ])
         .split(area);
@@ -208,7 +238,8 @@ pub fn draw(frame: &mut Frame, snap: &BoxLifecycleSnapshot) {
     render_panel(frame, chunks[1], "pairing", &pairing_lines(snap));
     render_panel(frame, chunks[2], "status", &status_lines(snap));
     render_panel(frame, chunks[3], "serving", &serving_lines(snap));
-    render_panel(frame, chunks[4], "keys", &footer_lines());
+    render_panel(frame, chunks[4], "logs", &log_lines(snap));
+    render_panel(frame, chunks[5], "keys", &footer_lines());
 }
 
 /// Render one bordered `Paragraph` panel. `Borders::LEFT | Borders::BOTTOM`
@@ -632,6 +663,7 @@ mod tests {
             serving: vec![],
             config: None,
             pairing: None,
+            logs: vec![],
         }
     }
 
@@ -770,6 +802,23 @@ mod tests {
     }
 
     #[test]
+    fn log_lines_show_placeholder_when_empty() {
+        let lines = log_lines(&idle_snap());
+        assert_eq!(lines, vec!["(no serving log yet)".to_string()]);
+    }
+
+    #[test]
+    fn log_lines_pass_through_snapshot_logs() {
+        let mut s = idle_snap();
+        s.logs = vec!["INFO starting server".to_string(), "INFO ready".to_string()];
+        let lines = log_lines(&s);
+        assert_eq!(
+            lines,
+            vec!["INFO starting server".to_string(), "INFO ready".to_string()]
+        );
+    }
+
+    #[test]
     fn next_profile_wraps_around() {
         let available = vec!["stable".to_string(), "bleeding".to_string()];
         assert_eq!(next_profile(None, &available), "stable");
@@ -787,6 +836,18 @@ mod tests {
         let buf = term.backend().buffer().clone();
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains("qb2-lab"));
+    }
+
+    #[test]
+    fn renders_logs_snapshot_without_panicking() {
+        let mut s = idle_snap();
+        s.logs = vec!["INFO starting server".to_string()];
+        let backend = TestBackend::new(60, 20);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| draw(f, &s)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("starting server"));
     }
 
     #[test]

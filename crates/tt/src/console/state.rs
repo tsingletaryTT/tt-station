@@ -234,6 +234,7 @@ mod tests {
             serving: vec![],
             config: None,
             pairing: None,
+            logs: vec![],
         }
     }
 

@@ -247,6 +247,14 @@ pub struct BoxLifecycleSnapshot {
     pub serving: Vec<ServingEntry>,
     pub config: Option<ConfigSummary>,
     pub pairing: Option<PairingState>,
+    /// Trailing lines of the current/most-recent serving log, from `GET
+    /// /logs?source=container&tail=<N>` (Task 6, dogfooding Task 2's route).
+    /// `#[serde(default)]` so a snapshot recorded before this field existed
+    /// still deserializes (the `--snapshot` JSON is a documented contract the
+    /// GTK panel consumes) -- an old/absent value degrades to `vec![]`, the
+    /// same "nothing to show yet" state as a box that hasn't served anything.
+    #[serde(default)]
+    pub logs: Vec<String>,
 }
 
 impl ServingStatus {
@@ -511,6 +519,7 @@ mod tests {
                 code: "042817".into(),
                 expires_in_secs: 107,
             }),
+            logs: vec!["line one".into(), "line two".into()],
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: BoxLifecycleSnapshot = serde_json::from_str(&json).unwrap();
@@ -519,5 +528,27 @@ mod tests {
         assert!(serde_json::to_string(&ServiceState::Inactive)
             .unwrap()
             .contains("inactive"));
+    }
+
+    /// `#[serde(default)]` on `logs` is REQUIRED, not decorative: a
+    /// `--snapshot` recorded before Task 6 (no `logs` key at all) must still
+    /// deserialize -- the GTK panel polls this JSON as a documented contract
+    /// and must not break against a slightly-older `tt console` binary.
+    #[test]
+    fn lifecycle_snapshot_deserializes_without_logs_field() {
+        let json = r#"{
+            "service": "active",
+            "reachable": true,
+            "name": null,
+            "chips": null,
+            "status": null,
+            "endpoint": null,
+            "serving": [],
+            "config": null,
+            "pairing": null
+        }"#;
+        let snap: BoxLifecycleSnapshot =
+            serde_json::from_str(json).expect("must deserialize without a `logs` key");
+        assert!(snap.logs.is_empty());
     }
 }

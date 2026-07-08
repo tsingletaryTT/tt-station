@@ -17,7 +17,9 @@
 use crate::console::names::ToolNames;
 use crate::console::state::{parse_pairing, parse_service_state};
 use anyhow::Result;
-use libttstation::model::{BoxLifecycleSnapshot, ConfigSummary, ServingList, ServingStatus};
+use libttstation::model::{
+    BoxLifecycleSnapshot, ConfigSummary, LogsInfo, ServingList, ServingStatus,
+};
 use serde::Deserialize;
 
 /// The fakeable seam for every side effect `tt console` needs: reading
@@ -223,6 +225,20 @@ pub fn collect_snapshot(env: &dyn LifecycleEnv, names: &ToolNames) -> BoxLifecyc
         .unwrap_or_default();
     let pairing = parse_pairing(&journal, env.now_unix());
 
+    // `/logs` (Task 2, dogfooded here rather than reading files directly):
+    // the last 20 lines of the container's serving log for the log pane
+    // (`ui::log_lines`). Same independent-degrade contract as `/config`/
+    // `/serving` above -- a non-2xx (e.g. 409 "no repo configured" on a
+    // non-runpy backend), a connection failure, or a body that doesn't parse
+    // as `LogsInfo` all fall through to `vec![]` via `unwrap_or_default`,
+    // never failing the rest of the snapshot.
+    let logs = env
+        .http_get("/logs?source=container&tail=20")
+        .ok()
+        .and_then(|body| serde_json::from_str::<LogsInfo>(&body).ok())
+        .map(|l| l.lines)
+        .unwrap_or_default();
+
     BoxLifecycleSnapshot {
         service,
         reachable,
@@ -236,6 +252,7 @@ pub fn collect_snapshot(env: &dyn LifecycleEnv, names: &ToolNames) -> BoxLifecyc
         serving,
         config,
         pairing,
+        logs,
     }
 }
 
@@ -311,5 +328,41 @@ mod tests {
         let snap = collect_snapshot(&env, &crate::console::names::ToolNames::from_env());
         assert!(!snap.reachable);
         assert_eq!(snap.pairing.map(|p| p.code), Some("042817".to_string()));
+    }
+
+    /// A canned `/logs?source=container&tail=20` body must populate
+    /// `snap.logs` -- the pane dogfoods Task 2's `/logs` route via
+    /// `LifecycleEnv::http_get`, exactly like `/config`/`/serving` above.
+    #[test]
+    fn logs_populate_from_agent_logs_route() {
+        let mut http = std::collections::HashMap::new();
+        http.insert(
+            "/logs?source=container&tail=20".to_string(),
+            Ok(r#"{"source":"container","origin":"/var/log/vllm.log","lines":["line one","line two"]}"#.to_string()),
+        );
+        let env = FakeEnv {
+            show: "ActiveState=active\nSubState=running\n".into(),
+            journal: vec![],
+            http,
+        };
+        let snap = collect_snapshot(&env, &crate::console::names::ToolNames::from_env());
+        assert_eq!(
+            snap.logs,
+            vec!["line one".to_string(), "line two".to_string()]
+        );
+    }
+
+    /// The agent being unreachable (or `/logs` erroring/parse-failing) must
+    /// degrade `logs` to empty, never fail the whole snapshot -- same
+    /// contract as every other HTTP-sourced field here.
+    #[test]
+    fn logs_degrade_to_empty_when_agent_down() {
+        let env = FakeEnv {
+            show: "ActiveState=active\nSubState=running\n".into(),
+            journal: vec![],
+            http: std::collections::HashMap::new(),
+        };
+        let snap = collect_snapshot(&env, &crate::console::names::ToolNames::from_env());
+        assert!(snap.logs.is_empty());
     }
 }

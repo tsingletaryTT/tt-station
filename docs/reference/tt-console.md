@@ -130,6 +130,7 @@ pub struct BoxLifecycleSnapshot {
     pub serving: Vec<ServingEntry>,       // from GET /serving
     pub config: Option<ConfigSummary>,    // from GET /config
     pub pairing: Option<PairingState>,    // parsed from the journal tail
+    pub logs: Vec<String>,                // from GET /logs?source=container&tail=20 (default [])
 }
 
 pub enum ServiceState { Active, Inactive, Activating, Deactivating, Failed, Unknown }
@@ -183,6 +184,28 @@ Notes on how the snapshot is assembled (`console::env::collect_snapshot`):
   `tt-station-agentd: pairing code: NNNNNN` (case-insensitive "pairing"/"code" + a
   standalone 6-digit run). This means a crashed-but-recently-logged agent can still surface
   its last pairing code even while `reachable` is `false`.
+- **`logs` comes from `GET /logs?source=container&tail=20`** (Task 2's route,
+  `libttstation::model::LogsInfo` reused rather than redefined) — the trailing 20 lines of
+  the box's current/most-recent serving container log. Same independent-degrade contract as
+  every other HTTP field here: an unreachable agent, a non-2xx response (e.g. `409` when no
+  `tt-inference-server` repo is configured for a non-`runpy` backend), or a body that fails to
+  parse as `LogsInfo` all degrade `logs` to `vec![]` — a serving-log pane with nothing to show
+  is exactly as normal a state as an idle box.
+
+## Log pane
+
+The TUI's `logs` panel (`ui::log_lines`) renders `snap.logs` — the last lines
+`collect_snapshot` fetched from `/logs?source=container` — or the placeholder
+`(no serving log yet)` when empty (no container has logged anything, or the box isn't
+running the `runpy` backend). It sits below `serving` in the layout, sharing the
+terminal's growable space with it (both are `Constraint::Min`, so on a taller terminal
+both panels grow together rather than one starving the other).
+
+This is **auto-tail only**: each ~1s snapshot refresh re-fetches the newest 20 lines and
+the pane shows however many of those fit in its `Rect`. There is no scrollback/history and
+no scroll keybinding in v1 — reviewing older log output is a documented follow-up (use `tt
+logs` directly, or `GET /logs/stream` for a live follow, until the pane grows scroll
+support).
 
 ## Configurable tool names
 
