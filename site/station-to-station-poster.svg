@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="680" height="680" viewBox="0 0 680 680" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>Station to Station — light poster variant</title>
+<desc>A light Swiss-poster sleeve: a dark stylized silhouette over a purple disc, flanked by a line-art QuietBox 2 and a flat purple iMac G3.</desc>
+<rect x="0" y="0" width="680" height="680" fill="#ECEAF2"/>
+<circle cx="340" cy="250" r="158" fill="#6E4AA6"/>
+<circle cx="340" cy="250" r="158" fill="none" stroke="#ECEAF2" stroke-width="2" opacity="0.5"/>
+<circle cx="340" cy="250" r="138" fill="none" stroke="#ECEAF2" stroke-width="1" opacity="0.35"/>
+<g stroke="#cfc9de" stroke-width="1">
+<line x1="0" y1="560" x2="680" y2="560"/>
+<line x1="60" y1="600" x2="620" y2="600"/>
+</g>
+<g>
+<rect x="86" y="392" width="140" height="150" rx="10" fill="#ECEAF2" stroke="#1A1526" stroke-width="2.5"/>
+<g stroke="#1A1526" stroke-width="2"><line x1="104" y1="414" x2="208" y2="414"/><line x1="104" y1="428" x2="208" y2="428"/><line x1="104" y1="442" x2="208" y2="442"/></g>
+<rect x="104" y="470" width="30" height="30" rx="5" fill="none" stroke="#1A1526" stroke-width="2"/>
+<path d="M111 496 L124 476 M119 496 L132 476" stroke="#159c8e" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+<rect x="150" y="480" width="44" height="6" rx="3" fill="#159c8e"/>
+</g>
+<g>
+<ellipse cx="547" cy="512" rx="66" ry="18" fill="#4a2f78"/>
+<path d="M514 474 Q508 512 547 519 Q586 512 580 474 Z" fill="#573a8c"/>
+<rect x="478" y="360" width="138" height="126" rx="32" fill="#6E4AA6"/>
+<rect x="478" y="360" width="138" height="126" rx="32" fill="none" stroke="#4a2f78" stroke-width="2"/>
+<rect x="496" y="376" width="102" height="80" rx="9" fill="#2b1c47"/>
+<circle cx="547" cy="470" r="6" fill="#4a2f78"/>
+</g>
+<polygon points="266,560 266,352 300,322 340,314 380,322 414,352 414,560" fill="#1A1526"/>
+<polygon points="326,330 354,330 340,430 332,430" fill="#ECEAF2"/>
+<rect x="331" y="294" width="20" height="38" fill="#2A2340"/>
+<polygon points="322,300 320,214 328,166 356,156 378,178 380,238 366,288 344,300" fill="#1A1526"/>
+<polygon points="356,156 378,178 380,238 368,282 356,236 356,190" fill="#2A2340"/>
+<path d="M320,206 Q316,148 352,140 Q386,138 384,182 Q374,156 344,156 Q326,160 326,206 Z" fill="#0F0B1A"/>
+<polygon points="360,194 373,191 372,202 360,204" fill="#C4B4DE"/>
+<circle cx="366" cy="198" r="2.4" fill="#0F0B1A"/>
+<text x="340" y="616" text-anchor="middle" fill="#1A1526" style="font-family:Helvetica,Arial,sans-serif;font-size:42px;letter-spacing:5px;font-weight:700">STATION TO STATION</text>
+<text x="340" y="646" text-anchor="middle" fill="#6E4AA6" style="font-family:Helvetica,Arial,sans-serif;font-size:14px;letter-spacing:3px;font-weight:500">Your Mac &#8644; Your QuietBox &#183; tt-station</text>
+</svg>

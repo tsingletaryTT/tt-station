@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="680" height="680" viewBox="0 0 680 680" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>Station to Station — purple duotone variant</title>
+<desc>A violet duotone sleeve: a stylized figure haloed by a spotlight, between a QuietBox 2 (left) and a purple iMac G3 (right).</desc>
+<rect x="0" y="0" width="680" height="680" fill="#0E0819"/>
+<circle cx="340" cy="210" r="150" fill="#1A0F30"/>
+<circle cx="340" cy="210" r="104" fill="#22143f"/>
+<polygon points="340,70 170,470 510,470" fill="#160C2a"/>
+<polygon points="340,96 240,470 440,470" fill="#1E1440"/>
+<polygon points="340,318 250,680 430,680" fill="#150D28"/>
+<polygon points="340,318 300,680 380,680" fill="#1E1638"/>
+<g stroke="#2a1f45" stroke-width="1">
+<line x1="0" y1="680" x2="315" y2="332"/><line x1="120" y1="680" x2="325" y2="332"/>
+<line x1="560" y1="680" x2="355" y2="332"/><line x1="680" y1="680" x2="365" y2="332"/>
+</g>
+<rect x="0" y="540" width="680" height="4" fill="#170f2c"/>
+<g>
+<rect x="70" y="372" width="150" height="158" rx="10" fill="#0F0A1C"/>
+<rect x="70" y="372" width="150" height="158" rx="10" fill="none" stroke="#33265a" stroke-width="1.5"/>
+<rect x="70" y="372" width="6" height="158" rx="3" fill="#1c1436"/>
+<g fill="#2a2050"><rect x="90" y="392" width="110" height="5" rx="2.5"/><rect x="90" y="404" width="110" height="5" rx="2.5"/><rect x="90" y="416" width="110" height="5" rx="2.5"/><rect x="90" y="428" width="110" height="5" rx="2.5"/></g>
+<rect x="90" y="455" width="34" height="34" rx="6" fill="#0A0714" stroke="#33265a" stroke-width="1"/>
+<path d="M98 483 L112 461 M107 483 L121 461" stroke="#4FD1C5" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+<rect x="150" y="462" width="48" height="6" rx="3" fill="#4FD1C5"/>
+<circle cx="205" cy="384" r="2.6" fill="#4FD1C5"/>
+</g>
+<g>
+<ellipse cx="547" cy="512" rx="70" ry="20" fill="#2E2450"/>
+<path d="M512 470 Q505 512 547 520 Q589 512 582 470 Z" fill="#3f2d6e"/>
+<rect x="474" y="356" width="146" height="132" rx="34" fill="#7C54BE"/>
+<rect x="474" y="356" width="146" height="132" rx="34" fill="none" stroke="#a888d8" stroke-width="1.5"/>
+<path d="M486 372 Q484 400 486 452" stroke="#c9b3ec" stroke-width="6" fill="none" stroke-linecap="round" opacity="0.6"/>
+<rect x="494" y="374" width="106" height="82" rx="9" fill="#160f24"/>
+<rect x="494" y="374" width="106" height="82" rx="9" fill="none" stroke="#2f2350" stroke-width="1"/>
+<g stroke="#291d47" stroke-width="1"><line x1="500" y1="386" x2="594" y2="386"/><line x1="500" y1="398" x2="594" y2="398"/><line x1="500" y1="410" x2="594" y2="410"/></g>
+<circle cx="547" cy="472" r="6.5" fill="#3f2d6e" stroke="#a888d8" stroke-width="1.2"/>
+</g>
+<polygon points="266,560 266,352 300,322 340,314 380,322 414,352 414,560" fill="#130C24"/>
+<polygon points="266,560 266,352 300,322 340,314 340,560" fill="#1a1132"/>
+<path d="M266,352 L300,322 L340,314 L380,322 L414,352" fill="none" stroke="#5a4a86" stroke-width="1.5"/>
+<polygon points="326,326 354,326 340,432 332,432" fill="#E7E1F2"/>
+<polygon points="333,326 347,326 344,372 336,372" fill="#120C20"/>
+<rect x="331" y="292" width="20" height="40" fill="#6E5C8C"/>
+<polygon points="331,292 351,292 358,314 324,314" fill="#130C24"/>
+<polygon points="322,300 320,214 328,168 356,158 376,178 378,236 366,286 344,300" fill="#6E5C8C"/>
+<polygon points="356,158 376,178 378,236 366,286 350,262 352,196" fill="#C4B4DE"/>
+<polygon points="322,300 320,214 328,168 340,168 340,262 344,300" fill="#2E2444"/>
+<path d="M320,206 Q316,150 352,142 Q384,140 382,182 Q372,158 344,158 Q326,162 326,206 Z" fill="#0E0A18"/>
+<polygon points="360,196 372,193 371,203 360,205" fill="#EDE7F5"/>
+<circle cx="366" cy="199" r="2.6" fill="#0A0714"/>
+<path d="M349,214 L356,222 L349,226" fill="none" stroke="#5a4c74" stroke-width="1.6" stroke-linecap="round"/>
+<path d="M352,250 L366,247" fill="none" stroke="#4a3e63" stroke-width="2" stroke-linecap="round"/>
+<text x="340" y="620" text-anchor="middle" fill="#F1ECF8" style="font-family:Helvetica,Arial,sans-serif;font-size:44px;letter-spacing:6px;font-weight:700">STATION TO STATION</text>
+<text x="340" y="650" text-anchor="middle" fill="#C4B4DE" style="font-family:Helvetica,Arial,sans-serif;font-size:14px;letter-spacing:3px;font-weight:400">Your Mac &#8644; Your QuietBox &#183; tt-station</text>
+</svg>

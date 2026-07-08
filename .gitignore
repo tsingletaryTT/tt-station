@@ -9,3 +9,6 @@ __pycache__/
 
 # Open WebUI drops a secret key if run from the repo root
 .webui_secret_key
+
+# macOS finder metadata
+.DS_Store
