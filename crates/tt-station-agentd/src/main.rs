@@ -715,6 +715,22 @@ async fn main() -> Result<()> {
     // sole-owner reason the other `with_*` builders above are.
     let state = state.with_config_summary(config_summary(&rc));
 
+    // Configure the additive `GET /logs` route (see routes.rs): only the
+    // runpy backend writes `workflow_logs/{docker_server,run_logs}` under the
+    // tt-inference-server checkout, so this is deliberately gated on
+    // `rc.backend == "runpy"` -- other backends (dstack, docker) leave the
+    // `AppState` default of `None`, and `/logs` answers 409 rather than
+    // pointing at a directory that will never exist. Applied here, before any
+    // clone of `state` exists, for the same sole-owner reason the other
+    // `with_*` builders above are. `rc.tt_inference_repo` is the same path
+    // `RunPyConfig::repo_dir` above was built from, so `/logs` can never see
+    // a different checkout than the one actually serving.
+    let state = if rc.backend == "runpy" {
+        state.with_log_source(rc.tt_inference_repo.clone())
+    } else {
+        state
+    };
+
     // Configure the additive `POST`/`DELETE /ssh/authorize` routes (Task 2,
     // see routes.rs): which account's `authorized_keys` a paired client's
     // key lands in. Applied here, before any clone of `state` exists, for

@@ -221,6 +221,10 @@ struct Inner {
     /// `"ttuser"` -- the run-user on QuietBox 2, this codebase's reference
     /// box (see the module-level `CLAUDE.md`). Set via `with_ssh_target`.
     ssh_user: String,
+    /// Path to the tt-inference-server checkout, when the runpy backend is
+    /// active. `None` for backends without a workflow_logs dir (e.g. dstack).
+    /// Enables the `/logs` routes to locate `workflow_logs/{docker_server,run_logs}`.
+    tt_inference_repo: Option<std::path::PathBuf>,
 }
 
 impl AppState {
@@ -298,6 +302,7 @@ impl AppState {
                 },
                 ssh_authorized_keys_path: PathBuf::new(),
                 ssh_user: "ttuser".to_string(),
+                tt_inference_repo: None,
             }),
         }
     }
@@ -364,6 +369,27 @@ impl AppState {
             }
             None => eprintln!(
                 "tt-station-agentd: with_serving_config called on an already-shared AppState; serving config not applied"
+            ),
+        }
+        self
+    }
+
+    /// Point the `/logs` routes at a tt-inference-server checkout. Additive
+    /// counterpart to `with_serving_config`/`with_device_mesh`/etc -- same
+    /// "call immediately after construction, while this is still the sole
+    /// owner of its `Arc<Inner>`" contract (`Arc::get_mut` only succeeds
+    /// then). Called after a clone exists, it logs a warning and leaves the
+    /// default (`None`, meaning `GET /logs` answers 409) in place rather
+    /// than panicking.
+    ///
+    /// Optional: an `AppState` never given this (e.g. the dstack backend,
+    /// which has no `workflow_logs` dir) still answers `/logs` -- with a 409
+    /// rather than a fabricated path.
+    pub fn with_log_source(mut self, repo_dir: impl Into<std::path::PathBuf>) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.tt_inference_repo = Some(repo_dir.into()),
+            None => eprintln!(
+                "tt-station-agentd: with_log_source called on an already-shared AppState; log source not applied"
             ),
         }
         self
@@ -487,6 +513,12 @@ impl AppState {
     /// (see `with_ssh_target`).
     fn ssh_user(&self) -> &str {
         &self.inner.ssh_user
+    }
+
+    /// The tt-inference-server checkout `GET /logs` tails workflow logs
+    /// from, if the runpy backend is active (see `with_log_source`).
+    fn tt_inference_repo(&self) -> Option<&std::path::Path> {
+        self.inner.tt_inference_repo.as_deref()
     }
 
     /// Cheap `Arc` clone of the serving backend, for a handler to move into
@@ -1572,6 +1604,108 @@ async fn get_serving(
     Json(ServingList { serving })
 }
 
+/// Body returned by `GET /logs`.
+#[derive(Serialize)]
+struct LogsResponse {
+    source: String,
+    /// Absolute path of the file being tailed, or `null` when nothing has been
+    /// logged yet for this source.
+    origin: Option<String>,
+    lines: Vec<String>,
+}
+
+/// `GET /logs` (UNAUTHED, like `/status`/`/models`/`/serving`): tail the
+/// newest tt-inference-server workflow log for `?source=container|run`.
+///
+/// Read-only file access, exactly as exposed as the other unauthed discovery
+/// routes -- see `crate::logs` for the pure tail/redact logic this delegates
+/// to. `?source` defaults to `container`; `?tail` defaults to
+/// `crate::logs::DEFAULT_TAIL`, capped at `crate::logs::MAX_TAIL`.
+///
+/// Error contract: an unrecognized `source` is a `400` (caller's mistake); no
+/// `tt_inference_repo` configured (non-runpy backend, e.g. dstack) is a `409`
+/// (this box simply has no such logs); no log file written yet is NOT an
+/// error -- it's a `200` with `lines: []` and `origin: null`, since "nothing
+/// served yet" is the normal state of an idle box, not a failure.
+async fn get_logs(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    RawQuery(query): RawQuery,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let (source_str, tail) = parse_logs_query(query.as_deref());
+    let source = match crate::logs::LogSource::parse(&source_str) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("unknown source '{source_str}'") })),
+            )
+        }
+    };
+    let repo = match state.tt_inference_repo() {
+        Some(p) => p.to_path_buf(),
+        None => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "logs unavailable: no tt-inference-server repo configured (non-runpy backend)"
+                })),
+            )
+        }
+    };
+
+    let resp = tokio::task::spawn_blocking(move || {
+        let dir = crate::logs::logs_dir(&repo, source);
+        let file = crate::logs::newest_log_file(&dir)?;
+        let (origin, lines) = match file {
+            Some(path) => {
+                let lines = crate::logs::tail_lines(&path, tail)?
+                    .iter()
+                    .map(|l| crate::logs::redact_line(l))
+                    .collect();
+                (Some(path.display().to_string()), lines)
+            }
+            None => (None, Vec::new()),
+        };
+        Ok::<_, std::io::Error>(LogsResponse {
+            source: source_str,
+            origin,
+            lines,
+        })
+    })
+    .await;
+
+    match resp {
+        Ok(Ok(r)) => (StatusCode::OK, Json(serde_json::to_value(r).unwrap())),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "failed to read logs" })),
+        ),
+    }
+}
+
+/// Parse `?source=<>&tail=<>` from a raw query string. Defaults: source
+/// `"container"`, tail `DEFAULT_TAIL`, capped at `MAX_TAIL`. A bare
+/// string-split rather than a typed `Query<T>` extractor -- same rationale as
+/// `telemetry_ws`'s `?view=lite` parsing: two simple params, not worth a
+/// serde struct, and any malformed/missing query just falls back to the safe
+/// defaults rather than erroring.
+fn parse_logs_query(query: Option<&str>) -> (String, usize) {
+    let mut source = "container".to_string();
+    let mut tail = crate::logs::DEFAULT_TAIL;
+    if let Some(q) = query {
+        for kv in q.split('&') {
+            if let Some(v) = kv.strip_prefix("source=") {
+                source = v.to_string();
+            } else if let Some(v) = kv.strip_prefix("tail=") {
+                if let Ok(n) = v.parse::<usize>() {
+                    tail = n.min(crate::logs::MAX_TAIL);
+                }
+            }
+        }
+    }
+    (source, tail)
+}
+
 /// Build the small `{ "error": "<message>" }` response for a `400 Bad
 /// Request` -- a validation failure the CALLER can fix (a bad/private key,
 /// a malformed label, a revoke request naming neither `label` nor
@@ -1706,6 +1840,7 @@ pub fn app(state: AppState) -> Router {
         .route("/config", get(get_config))
         .route("/models", get(get_models))
         .route("/serving", get(get_serving))
+        .route("/logs", get(get_logs))
         .route("/telemetry", get(telemetry_ws))
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
@@ -1753,5 +1888,50 @@ mod telemetry_inference_tests {
             requires_key: false,
         });
         assert_eq!(resolve_metrics_port(&state), 8003);
+    }
+}
+
+#[cfg(test)]
+mod logs_query_tests {
+    use super::*;
+
+    #[test]
+    fn parse_logs_query_defaults_to_container_and_default_tail() {
+        assert_eq!(
+            parse_logs_query(None),
+            ("container".to_string(), crate::logs::DEFAULT_TAIL)
+        );
+        assert_eq!(
+            parse_logs_query(Some("")),
+            ("container".to_string(), crate::logs::DEFAULT_TAIL)
+        );
+    }
+
+    #[test]
+    fn parse_logs_query_reads_explicit_source_and_tail() {
+        assert_eq!(
+            parse_logs_query(Some("source=run&tail=50")),
+            ("run".to_string(), 50)
+        );
+        // Order shouldn't matter.
+        assert_eq!(
+            parse_logs_query(Some("tail=50&source=run")),
+            ("run".to_string(), 50)
+        );
+    }
+
+    #[test]
+    fn parse_logs_query_caps_tail_at_max() {
+        let (_, tail) = parse_logs_query(Some("tail=999999"));
+        assert_eq!(tail, crate::logs::MAX_TAIL);
+    }
+
+    #[test]
+    fn parse_logs_query_ignores_unparseable_tail() {
+        // A non-numeric tail falls back to the default rather than erroring.
+        assert_eq!(
+            parse_logs_query(Some("tail=notanumber")),
+            ("container".to_string(), crate::logs::DEFAULT_TAIL)
+        );
     }
 }
