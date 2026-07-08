@@ -175,6 +175,17 @@ struct Inner {
     /// Defaults to `DEFAULT_TELEMETRY_INTERVAL_MS`; set via
     /// `with_telemetry_config` from `--telemetry-interval-ms`.
     telemetry_interval_ms: u64,
+    /// Short-TTL cache of the last raw `tt-smi -s` snapshot, shared across every
+    /// `/telemetry` connection. `tt-smi` is a device-touching shell-out that
+    /// contends with a running workload; without this, EACH connected client ran
+    /// its own `tt-smi` every interval, so N viewers meant N concurrent `tt-smi`
+    /// processes hammering the chip. With it, concurrent client ticks within one
+    /// interval collapse to a single run (the cheap per-connection process scan +
+    /// vLLM scrape still run per client). `tokio::sync::Mutex` because the lock is
+    /// held across the `spawn_blocking` shell-out to dedupe a thundering herd.
+    /// `None` until the first snapshot; zero clients means zero `tt-smi` (a client
+    /// tick is what populates it).
+    tt_smi_cache: tokio::sync::Mutex<Option<(Instant, String)>>,
     /// Host baked into the `base_url` of endpoints `GET /serving` reports --
     /// the agent's configured serving host (`--serving-host`), same value
     /// the serving backend uses for its own `Endpoint.base_url`. Defaults to
@@ -287,6 +298,7 @@ impl AppState {
                 advertiser: None,
                 tt_smi_bin: DEFAULT_TT_SMI_BIN.to_string(),
                 telemetry_interval_ms: DEFAULT_TELEMETRY_INTERVAL_MS,
+                tt_smi_cache: tokio::sync::Mutex::new(None),
                 serving_host: DEFAULT_SERVING_HOST.to_string(),
                 serving_port: DEFAULT_SERVING_PORT,
                 device_mesh: None,
@@ -484,6 +496,28 @@ impl AppState {
     /// Interval (ms) between `/telemetry` snapshots (see `with_telemetry_config`).
     fn telemetry_interval_ms(&self) -> u64 {
         self.inner.telemetry_interval_ms
+    }
+
+    /// Raw `tt-smi -s` snapshot, shared across all `/telemetry` clients with a
+    /// one-interval TTL. The first caller in each interval runs `tt-smi`; callers
+    /// that arrive while that result is still fresh reuse it — so N concurrent
+    /// clients cause ~one `tt-smi` per interval instead of one each. The lock is
+    /// held across the shell-out on purpose: a thundering herd of ticks blocks on
+    /// it, and by the time they acquire it the fresh result is already cached, so
+    /// only one `tt-smi` actually runs. Errors are NOT cached — the next tick
+    /// retries — and while an entry is stale the previous frame is replaced, never
+    /// served past its interval.
+    async fn cached_snapshot(&self) -> anyhow::Result<String> {
+        let ttl = Duration::from_millis(self.telemetry_interval_ms().max(1));
+        let mut cache = self.inner.tt_smi_cache.lock().await;
+        if let Some((at, json)) = cache.as_ref() {
+            if at.elapsed() < ttl {
+                return Ok(json.clone());
+            }
+        }
+        let json = collect_snapshot(self.tt_smi_bin().to_string()).await?;
+        *cache = Some((Instant::now(), json.clone()));
+        Ok(json)
     }
 
     /// Serving host baked into `GET /serving` `base_url`s (see `with_serving_config`).
@@ -1377,7 +1411,6 @@ async fn telemetry_ws(
 /// off-the-runtime discipline every `ServingBackend` call in this crate
 /// follows.
 async fn telemetry_stream(mut socket: WebSocket, state: AppState, lite: bool) {
-    let tt_smi_bin = state.tt_smi_bin().to_string();
     // Clamp to >=1ms: `tokio::time::interval` panics on a zero duration, and this
     // runs in a per-connection task, so `--telemetry-interval-ms 0` would panic
     // every telemetry client (the CLI also rejects 0; this is belt-and-suspenders).
@@ -1408,7 +1441,7 @@ async fn telemetry_stream(mut socket: WebSocket, state: AppState, lite: bool) {
             // immediately, so a freshly-connected client gets a frame right
             // away rather than waiting a full interval.
             _ = ticker.tick() => {
-                let frame = match collect_snapshot(tt_smi_bin.clone()).await {
+                let frame = match state.cached_snapshot().await {
                     Ok(json) => {
                         if lite {
                             // `?view=lite`: skip the process scan and the
@@ -2020,6 +2053,48 @@ mod telemetry_inference_tests {
             requires_key: false,
         });
         assert_eq!(resolve_metrics_port(&state), 8003);
+    }
+
+    #[tokio::test]
+    async fn cached_snapshot_dedupes_tt_smi_within_ttl() {
+        // Stub `tt-smi`: a script that records one run (appends a byte to a
+        // counter file) and prints a minimal snapshot. Two `cached_snapshot`
+        // calls within the TTL must execute it only ONCE — the whole point of
+        // the shared cache (N clients → ~one tt-smi per interval, not one each).
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ttsmi-dedup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let counter = dir.join("count");
+        let _ = std::fs::remove_file(&counter);
+        let script = dir.join("tt-smi-stub.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf x >> '{c}'\nprintf '{{\"device_info\":[]}}'\n",
+                c = counter.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // 10s TTL so both calls land in the same window.
+        let state = AppState::new(
+            "t".to_string(),
+            "1xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_telemetry_config(script.to_string_lossy().into_owned(), 10_000);
+
+        let a = state.cached_snapshot().await.unwrap();
+        let b = state.cached_snapshot().await.unwrap();
+        assert_eq!(a, b, "second call reuses the cached snapshot");
+        let runs = std::fs::read(&counter).map(|v| v.len()).unwrap_or(0);
+        assert_eq!(
+            runs, 1,
+            "tt-smi ran once within the TTL, not per call (got {runs})"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
