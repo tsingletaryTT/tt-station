@@ -1270,27 +1270,41 @@ async fn run_model(
     Ok(Json(RunResponse { endpoint }))
 }
 
-/// `POST /stop` (bearer-guarded): ask the backend to stop whatever model is
-/// currently serving.
+/// `POST /stop` (bearer-guarded): ask the backend to stop serving.
 ///
-/// If nothing is serving (`current_model()` is `None`), this is a no-op
-/// success -- there's no model name to hand the backend, and "stop" on an
-/// already-idle box isn't an error (same idempotency `DockerBackend::stop`
-/// itself documents for `docker stop` on a missing container). Otherwise the
-/// same `spawn_blocking` treatment as `/run` applies: the sync
+/// This ALWAYS calls `backend.stop()`, even when `current_model()` is `None`.
+/// A `/run` brings a model up on a `spawn_blocking` thread and `AppState`'s
+/// status stays `Idle` until `start` returns -- so a `/stop` that arrives
+/// mid-bring-up sees `None` here, yet must still reach the backend to trip its
+/// cancel flag (`RunPyBackend::stop`) and abort the in-flight serve rather than
+/// leaving it grinding to the health-poll ceiling. `backend.stop` is idempotent
+/// (a `docker stop` on nothing is a no-op), so calling it while genuinely idle
+/// is harmless. The same `spawn_blocking` treatment as `/run` applies: the sync
 /// `backend.stop` call must never run directly on the async runtime.
 async fn stop_model(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    if let Some(model) = state.current_model() {
-        let backend = state.backend();
+    // Breadcrumb before we stop -- distinguishes stopping a live model from a
+    // mid-bring-up abort (status is still `Idle` in the latter case).
+    eprintln!(
+        "tt-station-agentd: stop requested (was {})",
+        match state.current_model() {
+            Some(m) => format!("serving {m}"),
+            None => "idle/starting".to_string(),
+        }
+    );
 
-        tokio::task::spawn_blocking(move || backend.stop(&model))
-            .await
-            .map_err(|join_err| backend_error(anyhow::anyhow!("stop task panicked: {join_err}")))?
-            .map_err(backend_error)?;
-    }
+    // Model name is only used for logging by backends that track one;
+    // `RunPyBackend::stop` ignores the argument entirely. When nothing is
+    // serving there's no name to pass, so hand it an empty placeholder.
+    let model = state.current_model().unwrap_or_default();
+    let backend = state.backend();
+
+    tokio::task::spawn_blocking(move || backend.stop(&model))
+        .await
+        .map_err(|join_err| backend_error(anyhow::anyhow!("stop task panicked: {join_err}")))?
+        .map_err(backend_error)?;
 
     state.set_idle();
     Ok(Json(serde_json::json!({})))

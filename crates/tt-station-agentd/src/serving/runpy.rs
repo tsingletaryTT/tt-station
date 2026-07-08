@@ -60,6 +60,7 @@
 //! than duplicated) so tests can inject a fake instead of shelling out to a
 //! real `python3`/`docker` binary or making real HTTP requests.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -347,6 +348,18 @@ pub struct RunPyBackend {
     status: Arc<Mutex<ServingStatus>>,
     health_poll_attempts: u32,
     health_poll_interval: Duration,
+    /// Cooperative cancel flag for an in-flight `start`. A `/run` brings a
+    /// model up on a `spawn_blocking` thread and, until `start` returns,
+    /// `AppState`'s status stays `Idle` -- so a concurrent `/stop` can't be
+    /// gated on "a model is serving" or it would no-op and leave the doomed
+    /// bring-up grinding to the health-poll ceiling (~40 min). Instead `stop`
+    /// sets this flag; `start`'s poll loop checks it at the top of every
+    /// iteration and aborts promptly (best-effort stopping the container it
+    /// launched). `start` CLEARS it at entry so a stale earlier `/stop` never
+    /// kills a fresh run. `Arc` so a clone can be observed/flipped from
+    /// another thread; `SeqCst` throughout since the ordering cost is
+    /// irrelevant next to a 2s poll interval.
+    cancel: Arc<AtomicBool>,
 }
 
 impl RunPyBackend {
@@ -360,7 +373,18 @@ impl RunPyBackend {
             status: Arc::new(Mutex::new(ServingStatus::Idle)),
             health_poll_attempts: DEFAULT_HEALTH_POLL_ATTEMPTS,
             health_poll_interval: DEFAULT_HEALTH_POLL_INTERVAL,
+            cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Whether a cancel has been requested (`stop` was called) and not yet
+    /// cleared by a fresh `start`. Test-only observability hook for the
+    /// cancel flag, exposed the same way (and under the same `#[cfg]` gating)
+    /// as `with_health_poll` -- integration tests live in a separate crate
+    /// and can't see the private field otherwise.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn is_cancel_requested(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
     }
 
     /// Override the health-poll bound used by `start`. Same rationale (and
@@ -565,6 +589,13 @@ impl RunPyBackend {
 
 impl ServingBackend for RunPyBackend {
     fn start(&self, model: &str) -> Result<Endpoint> {
+        // Clear any stale cancel request at ENTRY -- before even the
+        // stale-container stop below. A `/stop` from a PREVIOUS run may have
+        // left the flag set; a fresh `/run` must not be killed by it. From
+        // here on, only a `/stop` that arrives DURING this bring-up (which
+        // sets the flag again, see `stop`) will trip the poll-loop abort.
+        self.cancel.store(false, Ordering::SeqCst);
+
         // Stop any STALE serving container FIRST -- before even the board
         // reset. Validated on real hardware: a leftover/crashed container
         // that's still publishing `service_port` holds the chips, so
@@ -764,8 +795,64 @@ impl ServingBackend for RunPyBackend {
         // client needs in its own `model` field, so prefer it. Fall back to
         // the ORIGINAL `model` argument only when `data` is non-empty (the
         // model IS queryable) but the `id` field itself can't be read.
+        // Tail the launched container's own log into the journal so
+        // `journalctl` explains a failed bring-up. Factored out of the
+        // timeout branch below because the container-death early-exit in the
+        // poll loop needs the exact same tail -- best-effort throughout: a
+        // missing/unreadable `container_log` just means no tail, never a hard
+        // error on top of the one we're already returning.
+        let tail_container_log = || {
+            if let Some(p) = &artifacts.container_log {
+                if let Ok(lines) = crate::logs::tail_lines(std::path::Path::new(p), 20) {
+                    eprintln!(
+                        "tt-station-agentd: last {} lines of container log ({p}):",
+                        lines.len()
+                    );
+                    for l in lines {
+                        eprintln!("tt-station-agentd:   {}", crate::logs::redact_line(&l));
+                    }
+                }
+            }
+        };
+
         let mut served_model: Option<String> = None;
         for _ in 0..self.health_poll_attempts {
+            // (1) Cancelled by a concurrent `/stop` (see `stop` + the `cancel`
+            //     field): abort this bring-up promptly rather than polling a
+            //     doomed launch to the ceiling. Best-effort stop the container
+            //     we launched so a cancelled run doesn't leave one holding the
+            //     chips.
+            if self.cancel.load(Ordering::SeqCst) {
+                if let Some(id) = &artifacts.container_id {
+                    let _ = self.runner.run(&["docker", "stop", id]);
+                }
+                return Err(anyhow::anyhow!(
+                    "runpy backend: serve of '{model}' aborted by stop request"
+                ));
+            }
+
+            // (2) Container died during startup: only checkable once run.py
+            //     handed us a container id. Probe liveness with `docker
+            //     inspect -f {{.State.Running}}`. Best-effort: a probe ERROR
+            //     means the container is gone (it's launched `--rm`, so a stop
+            //     removes it), and any trimmed answer other than `"true"`
+            //     means it's not running -- treat both as DEAD, tail its log,
+            //     and bail instead of grinding the health poll to its ceiling.
+            if let Some(id) = &artifacts.container_id {
+                let running = self
+                    .runner
+                    .run(&["docker", "inspect", "-f", "{{.State.Running}}", id])
+                    .map(|out| out.trim() == "true")
+                    .unwrap_or(false);
+                if !running {
+                    tail_container_log();
+                    return Err(anyhow::anyhow!(
+                        "runpy backend: serve of '{model}' failed -- container {id} \
+                         exited during startup (see container log)"
+                    ));
+                }
+            }
+
             // Cheap liveness gate: while the container is still coming up,
             // `/health` isn't 200 yet, so skip the `/v1/models` GET until it
             // is. `/v1/models` (below) is the AUTHORITATIVE gate.
@@ -809,22 +896,8 @@ impl ServingBackend for RunPyBackend {
             Some(m) => m,
             None => {
                 // On failure, surface the container's own tail so
-                // `journalctl` explains why -- best-effort: a missing
-                // `container_log` (run.py's output format drifted, or it
-                // failed before printing the line at all) or an unreadable
-                // file just means no tail, never a hard error on top of the
-                // one we're already returning.
-                if let Some(p) = &artifacts.container_log {
-                    if let Ok(lines) = crate::logs::tail_lines(std::path::Path::new(p), 20) {
-                        eprintln!(
-                            "tt-station-agentd: last {} lines of container log ({p}):",
-                            lines.len()
-                        );
-                        for l in lines {
-                            eprintln!("tt-station-agentd:   {}", crate::logs::redact_line(&l));
-                        }
-                    }
-                }
+                // `journalctl` explains why (see `tail_container_log`).
+                tail_container_log();
                 return Err(anyhow::anyhow!(
                     "runpy backend: model '{model}' did not become queryable on \
                      {models_url} within {} attempts",
@@ -849,6 +922,14 @@ impl ServingBackend for RunPyBackend {
     }
 
     fn stop(&self, _model: &str) -> Result<()> {
+        // Trip the cancel flag FIRST, before touching containers: a `/stop`
+        // that lands while a `/run` is still bringing the model up (status is
+        // `Idle` until `start` returns, so this path IS reached mid-flight)
+        // must make `start`'s poll loop abort. Setting it before
+        // `stop_serving_containers` means even if the container stop races the
+        // in-flight launch, the poll loop still sees the cancel and won't grind
+        // on. Harmless when nothing is in flight -- `start` clears it at entry.
+        self.cancel.store(true, Ordering::SeqCst);
         self.stop_serving_containers()?;
         *self.status.lock().expect("status mutex poisoned") = ServingStatus::Idle;
         Ok(())

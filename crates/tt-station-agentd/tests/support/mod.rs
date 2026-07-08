@@ -136,6 +136,18 @@ impl FakeRunner {
             .clone()
     }
 
+    /// How many `health_ok` probes have been made so far. Lets a test assert
+    /// that `RunPyBackend::start` BAILED early (on a cancel or a dead
+    /// container) instead of grinding its full health-poll ceiling -- the
+    /// probe count is the observable "didn't run all `health_poll_attempts`".
+    #[allow(dead_code)]
+    pub fn health_calls(&self) -> u32 {
+        *self
+            .health_calls_seen
+            .lock()
+            .expect("health mutex poisoned")
+    }
+
     /// Register canned stdout `output` for the next (and any subsequent)
     /// `run` call whose space-joined argv contains `matcher`. See the
     /// `run_outputs` field doc for why this exists (`docker ps` parsing in

@@ -331,7 +331,9 @@ fn runpy_reconciled_status_stays_serving_when_container_is_up() {
     runner.set_http_get(r#"{"data":[{"id":"Qwen/Qwen3-32B"}]}"#);
     let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
 
-    backend.start("Qwen/Qwen3-32B").expect("start should succeed");
+    backend
+        .start("Qwen/Qwen3-32B")
+        .expect("start should succeed");
     assert_eq!(
         backend.reconciled_status().unwrap(),
         ServingStatus::Serving("Qwen/Qwen3-32B".to_string()),
@@ -348,7 +350,9 @@ fn runpy_reconciled_status_flips_to_idle_after_out_of_band_stop() {
     // start's readiness probe sees a model...
     runner.set_http_get(r#"{"data":[{"id":"Qwen/Qwen3-32B"}]}"#);
     let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
-    backend.start("Qwen/Qwen3-32B").expect("start should succeed");
+    backend
+        .start("Qwen/Qwen3-32B")
+        .expect("start should succeed");
     assert!(matches!(
         backend.status().unwrap(),
         ServingStatus::Serving(_)
@@ -379,18 +383,27 @@ fn runpy_reconciled_status_flips_to_idle_after_out_of_band_stop() {
 #[test]
 fn tool_call_parser_mapping_is_conservative_and_correct() {
     // Llama instruct -> generation-specific parser.
-    assert_eq!(tool_call_parser_for("Llama-3.3-70B-Instruct"), Some("llama3_json"));
+    assert_eq!(
+        tool_call_parser_for("Llama-3.3-70B-Instruct"),
+        Some("llama3_json")
+    );
     assert_eq!(
         tool_call_parser_for("meta-llama/Llama-3.1-70B-Instruct"),
         Some("llama3_json")
     );
-    assert_eq!(tool_call_parser_for("Llama-3.2-3B-Instruct"), Some("pythonic"));
+    assert_eq!(
+        tool_call_parser_for("Llama-3.2-3B-Instruct"),
+        Some("pythonic")
+    );
     // Llama BASE checkpoints (no instruct) -> None, never a guessed parser.
     assert_eq!(tool_call_parser_for("meta-llama/Llama-3.1-70B"), None);
     // Qwen3/QwQ are chat by default; Qwen2.5 only when instruct.
     assert_eq!(tool_call_parser_for("Qwen/Qwen3-8B"), Some("hermes"));
     assert_eq!(tool_call_parser_for("Qwen/QwQ-32B"), Some("hermes"));
-    assert_eq!(tool_call_parser_for("Qwen/Qwen2.5-72B-Instruct"), Some("hermes"));
+    assert_eq!(
+        tool_call_parser_for("Qwen/Qwen2.5-72B-Instruct"),
+        Some("hermes")
+    );
     assert_eq!(tool_call_parser_for("Qwen/Qwen2.5-72B"), None);
     // Mistral instruct.
     assert_eq!(
@@ -1140,6 +1153,140 @@ fn runpy_stop_is_ok_when_nothing_running() {
         "expected only the ps query, no stop call: {commands:?}"
     );
     assert_eq!(backend.status().unwrap(), ServingStatus::Idle);
+}
+
+// ---------------------------------------------------------------------
+// Serve-lifecycle guard: an in-flight `start` must be cancellable by `stop`,
+// and the health poll must bail the moment the container dies rather than
+// grinding to its (~40 min) ceiling.
+// ---------------------------------------------------------------------
+
+/// A `/stop` arriving WHILE `start` is still polling (status is `Idle` until
+/// `start` returns, so `/stop` can't be gated on "serving") must abort the
+/// bring-up promptly -- `start` returns an "aborted by stop request" error
+/// after a handful of poll iterations, NOT after grinding all
+/// `health_poll_attempts`.
+#[test]
+fn start_aborts_promptly_when_cancel_set() {
+    // `/health` never becomes ready; a big attempt budget with a 1ms interval
+    // means "ground the whole ceiling" would be 2000 probes -- so bailing
+    // early is plainly observable via `health_calls`.
+    let runner = FakeRunner::new(u32::MAX); // never healthy
+    let backend = std::sync::Arc::new(
+        RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+            .with_health_poll(2_000, Duration::from_millis(1)),
+    );
+
+    // Trip cancel from another thread AFTER `start` has entered the poll loop
+    // (gate on the first health probe, so we don't race `start`'s clear-at-
+    // entry) -- exactly a concurrent `/stop` during bring-up.
+    let backend_stopper = std::sync::Arc::clone(&backend);
+    let runner_probe = runner.clone();
+    let stopper = std::thread::spawn(move || {
+        while runner_probe.health_calls() == 0 {
+            std::thread::yield_now();
+        }
+        backend_stopper.stop("").expect("stop should succeed");
+    });
+
+    let err = backend
+        .start("Llama-3.1-8B-Instruct")
+        .expect_err("start must abort once /stop trips the cancel flag");
+    stopper.join().expect("stopper thread panicked");
+
+    assert!(
+        err.to_string().contains("aborted by stop request"),
+        "error should say the serve was aborted by a stop request: {err}"
+    );
+    assert!(
+        runner.health_calls() < 2_000,
+        "start should bail on cancel, not grind the full poll ceiling \
+         (saw {} health probes)",
+        runner.health_calls()
+    );
+    // Aborted -- never flipped to serving.
+    assert_eq!(backend.status().unwrap(), ServingStatus::Idle);
+}
+
+/// If the container `run.py` launched dies during startup, `start` must bail
+/// the moment its liveness probe (`docker inspect -f {{.State.Running}}`)
+/// reports the container isn't running -- returning a "container exited"
+/// error WITHOUT grinding the health-poll ceiling.
+#[test]
+fn start_bails_when_container_dies() {
+    let runner = FakeRunner::new(u32::MAX); // /health never comes up...
+                                            // run.py stdout carries the launched container id (parsed into artifacts).
+    runner.set_run_output("run.py", "INFO: Created Docker container ID: deadbeef\n");
+    // ...and the liveness probe reports the container is NOT running.
+    runner.set_run_output("docker inspect", "false\n");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_health_poll(2_000, Duration::from_millis(1));
+
+    let err = backend
+        .start("Llama-3.1-8B-Instruct")
+        .expect_err("start must fail when the container dies during startup");
+
+    assert!(
+        err.to_string().contains("exited during startup"),
+        "error should say the container exited during startup: {err}"
+    );
+    assert!(
+        err.to_string().contains("deadbeef"),
+        "error should name the dead container id: {err}"
+    );
+    assert!(
+        runner.health_calls() < 2_000,
+        "start should bail on container death, not grind the ceiling \
+         (saw {} health probes)",
+        runner.health_calls()
+    );
+    // It actually probed liveness via `docker inspect <id>`.
+    assert!(
+        runner
+            .commands()
+            .iter()
+            .any(|c| { c.iter().any(|a| a == "inspect") && c.iter().any(|a| a == "deadbeef") }),
+        "start should probe container liveness with docker inspect: {:?}",
+        runner.commands()
+    );
+    assert_eq!(backend.status().unwrap(), ServingStatus::Idle);
+}
+
+/// `stop` must trip the internal cancel flag (so an in-flight `start` aborts)
+/// AND still do its normal container-stopping job.
+#[test]
+fn stop_sets_cancel_flag() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker ps", "abc123\n");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    assert!(
+        !backend.is_cancel_requested(),
+        "a fresh backend must not have cancel set"
+    );
+
+    backend.stop("llama3").expect("stop should succeed");
+
+    assert!(
+        backend.is_cancel_requested(),
+        "stop() must trip the cancel flag so an in-flight start() aborts"
+    );
+    // And it still ran stop_serving_containers: a `docker ps` then a
+    // `docker stop <id>` for what it found.
+    let commands = runner.commands();
+    assert!(
+        commands
+            .iter()
+            .any(|c| c.first().map(String::as_str) == Some("docker")
+                && c.get(1).map(String::as_str) == Some("ps")),
+        "stop() must still query docker ps: {commands:?}"
+    );
+    assert!(
+        commands.iter().any(
+            |c| c.get(1).map(String::as_str) == Some("stop") && c.iter().any(|a| a == "abc123")
+        ),
+        "stop() must docker stop the container docker ps returned: {commands:?}"
+    );
 }
 
 // ---------------------------------------------------------------------
