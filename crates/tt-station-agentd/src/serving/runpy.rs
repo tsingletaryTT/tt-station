@@ -706,11 +706,30 @@ impl ServingBackend for RunPyBackend {
         // their point of view -- exactly why tests only need to assert on
         // the argv, not the environment.
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.runner.run_in_dir_with_env(
+        let run_stdout = self.runner.run_in_dir_with_env(
             &self.config.repo_dir,
             &arg_refs,
             &[("MODEL_SOURCE", self.config.model_source.as_str())],
         )?;
+
+        // `run.py`'s captured stdout carries the underlying container id and
+        // both log file paths on a successful launch (see
+        // `parse_run_artifacts`). Emit them as breadcrumbs immediately so
+        // `journalctl` explains what got started even if the health poll
+        // below never completes -- without this, a wedged/slow container
+        // left NO trace of which container or log file it was. `artifacts`
+        // stays in scope through the poll loop below so the failure branch
+        // can tail `container_log` into the journal too.
+        let artifacts = parse_run_artifacts(&run_stdout);
+        if let Some(id) = &artifacts.container_id {
+            eprintln!("tt-station-agentd: serving container id: {id} (docker logs -f {id})");
+        }
+        if let Some(p) = &artifacts.container_log {
+            eprintln!("tt-station-agentd: container log: {p}");
+        }
+        if let Some(p) = &artifacts.run_log {
+            eprintln!("tt-station-agentd: run.py log: {p}");
+        }
 
         // Gate "serving" on the model actually being QUERYABLE on `/v1`, not
         // merely on `/health` returning 200. Verified on real hardware:
@@ -786,13 +805,33 @@ impl ServingBackend for RunPyBackend {
         // hand back an Endpoint -- status stays `Idle`, and `/run` turns this
         // into a 500, which is the whole point: never report a dead endpoint
         // as serving.
-        let served_model = served_model.ok_or_else(|| {
-            anyhow::anyhow!(
-                "runpy backend: model '{model}' did not become queryable on \
-                 {models_url} within {} attempts",
-                self.health_poll_attempts
-            )
-        })?;
+        let served_model = match served_model {
+            Some(m) => m,
+            None => {
+                // On failure, surface the container's own tail so
+                // `journalctl` explains why -- best-effort: a missing
+                // `container_log` (run.py's output format drifted, or it
+                // failed before printing the line at all) or an unreadable
+                // file just means no tail, never a hard error on top of the
+                // one we're already returning.
+                if let Some(p) = &artifacts.container_log {
+                    if let Ok(lines) = crate::logs::tail_lines(std::path::Path::new(p), 20) {
+                        eprintln!(
+                            "tt-station-agentd: last {} lines of container log ({p}):",
+                            lines.len()
+                        );
+                        for l in lines {
+                            eprintln!("tt-station-agentd:   {}", crate::logs::redact_line(&l));
+                        }
+                    }
+                }
+                return Err(anyhow::anyhow!(
+                    "runpy backend: model '{model}' did not become queryable on \
+                     {models_url} within {} attempts",
+                    self.health_poll_attempts
+                ));
+            }
+        };
 
         *self.status.lock().expect("status mutex poisoned") =
             ServingStatus::Serving(served_model.clone());
@@ -875,7 +914,9 @@ impl ServingBackend for RunPyBackend {
             self.config.service_port,
             &status,
         );
-        Ok(crate::serving::discovery::reconcile_status(&status, &entries))
+        Ok(crate::serving::discovery::reconcile_status(
+            &status, &entries,
+        ))
     }
 
     /// Read `model_spec.json` (see `model_spec_path`) and enumerate every
@@ -1009,4 +1050,70 @@ fn scan_downloaded_keys(host_hf_cache: Option<&str>) -> std::collections::HashSe
         keys.insert(libttstation::catalog::normalize_key(&repo_id));
     }
     keys
+}
+
+/// Artifacts `run.py` prints to stdout on a successful launch: the
+/// underlying Docker container id, the path to the container's own log file
+/// (streamed by `run.py` alongside the container), and the path to `run.py`'s
+/// own log file. All optional -- `run.py`'s output format may drift across
+/// versions, and a launch can fail before any of these lines are printed at
+/// all, so "missing" is a normal outcome, not a parse error.
+#[derive(Debug, Default)]
+struct RunArtifacts {
+    container_id: Option<String>,
+    container_log: Option<String>,
+    run_log: Option<String>,
+}
+
+/// Extract the container id + log paths run.py prints on a successful launch.
+/// All fields optional — run.py output format may drift; missing = None.
+fn parse_run_artifacts(stdout: &str) -> RunArtifacts {
+    let mut a = RunArtifacts::default();
+    for line in stdout.lines() {
+        if let Some(rest) = line.split("Created Docker container ID:").nth(1) {
+            a.container_id = Some(rest.trim().to_string());
+        } else if let Some(rest) = line
+            .split("Docker logs are also streamed to log file:")
+            .nth(1)
+        {
+            a.container_log = Some(rest.trim().to_string());
+        } else if let Some(rest) = line
+            .split("This log file is saved on local machine at:")
+            .nth(1)
+        {
+            a.run_log = Some(rest.trim().to_string());
+        }
+    }
+    a
+}
+
+#[cfg(test)]
+mod runpy_artifact_tests {
+    use super::*;
+
+    #[test]
+    fn parses_container_id_and_log_paths_from_runpy_stdout() {
+        let out = "\
+2026-07-07 13:52:50 - run_docker_server.py:352 - INFO: Created Docker container ID: 5d2dd4b5c9d9
+2026-07-07 13:52:50 - run_docker_server.py:354 - INFO: Docker logs are also streamed to log file: /home/ttuser/code/tt-inference-server/workflow_logs/docker_server/vllm_x.log
+2026-07-07 13:52:50 - run.py:731 - INFO: This log file is saved on local machine at: /home/ttuser/code/tt-inference-server/workflow_logs/run_logs/run_x.log";
+        let a = parse_run_artifacts(out);
+        assert_eq!(a.container_id.as_deref(), Some("5d2dd4b5c9d9"));
+        assert!(a
+            .container_log
+            .as_deref()
+            .unwrap()
+            .ends_with("docker_server/vllm_x.log"));
+        assert!(a
+            .run_log
+            .as_deref()
+            .unwrap()
+            .ends_with("run_logs/run_x.log"));
+    }
+
+    #[test]
+    fn parse_run_artifacts_tolerates_missing_fields() {
+        let a = parse_run_artifacts("nothing useful here");
+        assert!(a.container_id.is_none() && a.container_log.is_none() && a.run_log.is_none());
+    }
 }
