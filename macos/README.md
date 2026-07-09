@@ -68,6 +68,31 @@ sourced from Rust too: `tt ssh-authorize` reads/generates the Mac keypair and po
 key to the agent's authed `POST /ssh/authorize`, which appends it to `ttuser`'s
 `~/.ssh/authorized_keys` (idempotent, tagged; `DELETE` to revoke).
 
+## Install (for users)
+
+TTStation ships as a prebuilt **Apple Silicon** DMG on the repo's
+[Releases](https://github.com/tsingletaryTT/tt-station/releases) page.
+
+1. Download `TTStation-<version>-arm64.dmg` and open it.
+2. Drag **TTStation.app** onto **Applications**.
+3. The app is ad-hoc signed (no Apple Developer certificate yet), so macOS
+   quarantines it and may say *"TTStation is damaged."* Clear the quarantine
+   once:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/TTStation.app
+   ```
+
+4. Launch TTStation from Applications — it lives in the **menu bar**, not the
+   Dock. On first run it offers to add the `tt` CLI to `~/.local/bin`
+   (skippable; the app bundles its own copy and works either way). If you
+   already have a different `tt` on your PATH, TTStation leaves it alone and
+   offers to install as `tt-station` instead.
+
+> Building from source instead? See `macos/install.sh` (needs Xcode + Rust).
+> Notarizing to remove the quarantine step is a future upgrade once an Apple
+> Developer certificate is available.
+
 ## Install (recommended)
 
     macos/install.sh            # build Release → ~/Applications/TTStation.app, then launch
