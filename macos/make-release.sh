@@ -15,7 +15,7 @@ stage="$dist/stage"
 publish=""
 [[ "${1:-}" == "--publish" ]] && publish="1"
 
-ver="$(awk -F'"' '/MARKETING_VERSION:/{print $2}' "$proj/project.yml")"
+ver="$(awk -F'"' '/MARKETING_VERSION:/{print $2; exit}' "$proj/project.yml")"
 [[ -n "$ver" ]] || { echo "error: could not read MARKETING_VERSION"; exit 1; }
 dmg="$dist/TTStation-$ver-arm64.dmg"
 echo "==> Building TTStation $ver (arm64)"
@@ -50,6 +50,14 @@ codesign --force --deep --sign - "$stage/TTStation.app"
 codesign --verify --deep --strict "$stage/TTStation.app" || {
   echo "error: codesign verification failed"; exit 1; }
 
+# Enforce the arm64-only constraint on the app executable and the embedded
+# tt (catches a toolchain/target regression before it ships).
+for macho in "$stage/TTStation.app/Contents/MacOS/TTStation" \
+             "$stage/TTStation.app/Contents/Resources/bin/tt"; do
+  archs="$(lipo -archs "$macho" 2>/dev/null || true)"
+  [[ "$archs" == "arm64" ]] || { echo "error: $macho is not arm64-only (archs: ${archs:-none})"; exit 1; }
+done
+
 # 5. Assemble the DMG payload: app + /Applications alias + first-run note.
 ln -sf /Applications "$stage/Applications"
 cat > "$stage/FIRST-RUN.txt" <<EOF
@@ -83,6 +91,15 @@ echo "    sha256: $sha"
 if [[ -n "$publish" ]]; then
   command -v gh >/dev/null || { echo "error: gh not found for --publish"; exit 1; }
   tag="v$ver"
+  # In CI a git tag triggered this run (GITHUB_REF=refs/tags/<tag>); make sure
+  # it agrees with project.yml so we never publish to a different tag than the
+  # one pushed. Manual dispatch / local runs just use the project version.
+  if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+    gitver="${GITHUB_REF#refs/tags/}"
+    if [[ "$gitver" != "$tag" ]]; then
+      echo "error: pushed tag $gitver disagrees with project.yml $tag — bump MARKETING_VERSION to match"; exit 1
+    fi
+  fi
   echo "==> Publishing GitHub Release $tag"
   notes="TTStation $ver (arm64). Ad-hoc signed — after installing run:
 

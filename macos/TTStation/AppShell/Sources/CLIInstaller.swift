@@ -11,10 +11,13 @@ enum CLIInstaller {
 
     static func runFirstRunIfNeeded(defaults: UserDefaults = .standard) {
         guard !defaults.bool(forKey: offeredKey) else { return }
-        defaults.set(true, forKey: offeredKey)
 
         guard let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/tt").path,
               FileManager.default.isExecutableFile(atPath: bundled) else { return }
+        // Record the one-time offer only once we actually have something to
+        // offer: a dev/source build with no embedded tt must not consume it,
+        // since it shares this UserDefaults domain with a later real install.
+        defaults.set(true, forKey: offeredKey)
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let linkPath = "\(home)/.local/bin/tt"
@@ -37,6 +40,9 @@ enum CLIInstaller {
         guard let attrs = try? fm.attributesOfItem(atPath: path) else { return .absent }
         if (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
             let target = (try? fm.destinationOfSymbolicLink(atPath: path)) ?? ""
+            // An unreadable link target is treated as a foreign file at the
+            // link path, so the alert shows a real path instead of going blank.
+            if target.isEmpty { return .regularFile }
             return .symlink(target: target)
         }
         return .regularFile
