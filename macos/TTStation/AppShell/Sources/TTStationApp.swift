@@ -11,6 +11,7 @@ struct TTStationApp: App {
         let client = TTClient(runner: RealProcessRunner(locator: .standard()))
         let discovery = MDNSDiscoveryService(client: client, registry: registry)
         _model = State(initialValue: AppModel(commands: client, discovery: discovery, registry: registry))
+        CLIInstaller.runFirstRunIfNeeded()
     }
 
     var body: some Scene {
