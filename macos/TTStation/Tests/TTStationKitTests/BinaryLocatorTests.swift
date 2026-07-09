@@ -20,4 +20,33 @@ final class BinaryLocatorTests: XCTestCase {
             XCTAssertEqual(error as? TTError, .binaryNotFound(triedPaths: ["/x/tt", "/a/tt", "/b/tt"]))
         }
     }
+
+    func testStandardCandidatesAppendsBundledPathLast() {
+        let c = TTBinaryLocator.standardCandidates(home: "/Users/x", bundledPath: "/App/TTStation.app/Contents/Resources/bin/tt")
+        XCTAssertEqual(c, [
+            "/Users/x/.local/bin/tt",
+            "/opt/homebrew/bin/tt",
+            "/usr/local/bin/tt",
+            "/App/TTStation.app/Contents/Resources/bin/tt",
+        ])
+    }
+
+    func testStandardCandidatesOmitsBundledPathWhenNil() {
+        let c = TTBinaryLocator.standardCandidates(home: "/Users/x", bundledPath: nil)
+        XCTAssertEqual(c, [
+            "/Users/x/.local/bin/tt",
+            "/opt/homebrew/bin/tt",
+            "/usr/local/bin/tt",
+        ])
+    }
+
+    func testBundledPathUsedOnlyWhenPATHCandidatesAbsent() throws {
+        let candidates = TTBinaryLocator.standardCandidates(home: "/Users/x", bundledPath: "/App/tt")
+        // Only the bundled path exists → it is returned.
+        let onlyBundled = TTBinaryLocator(override: nil, candidates: candidates) { $0 == "/App/tt" }
+        XCTAssertEqual(try onlyBundled.locate(), "/App/tt")
+        // A PATH candidate exists → it wins over the bundled path.
+        let pathWins = TTBinaryLocator(override: nil, candidates: candidates) { $0 == "/opt/homebrew/bin/tt" }
+        XCTAssertEqual(try pathWins.locate(), "/opt/homebrew/bin/tt")
+    }
 }
