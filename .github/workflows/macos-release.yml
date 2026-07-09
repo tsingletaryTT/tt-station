@@ -1,0 +1,39 @@
+name: macOS release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (arm64)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-darwin
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Build + publish DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: macos/make-release.sh --publish
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TTStation-dmg
+          path: macos/dist/*.dmg
