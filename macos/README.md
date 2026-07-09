@@ -57,7 +57,7 @@ quick actions (status, Run/Stop, a live temp chip, "Open window"), backed by a r
   button in this app (streaming `/logs/stream` the same way the telemetry strip streams
   `/telemetry`) is a brief for a future macOS session, not yet built.
 
-**Status:** v0.6.2 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
+**Status:** v0.9.0 built (`macos/TTStation/`). Logic lives in the `TTStationKit` Swift package
 (130 passing tests via `swift test`; ranking, mesh-match, telemetry decode, install-command
 builders, and the `ttuser` SSH default are pure and unit-tested); the SwiftUI app target is
 generated with XcodeGen and builds clean. End-to-end verifiable against `mock-box` (no

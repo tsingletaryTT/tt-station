@@ -133,6 +133,14 @@ The device mesh is sourced from Rust: the agent detects it once at startup and r
 `/status` + the mDNS TXT record (so `tt --json discover`/`status` carry `device_mesh`). See
 `macos/README.md`.
 
+**Release installer (v0.9.0):** the app now bundles the `tt` CLI at `Contents/Resources/bin/tt`;
+ships as an arm64 DMG built by `macos/make-release.sh` (local source of truth, also called by
+`.github/workflows/macos-release.yml` on `v*` tags); the first-run prompt installs a
+`~/.local/bin/tt` symlink with foreign-`tt` collision handling (leaves a foreign `tt` alone,
+offers `tt-station`); ad-hoc signed (no notarization) so users run
+`xattr -dr com.apple.quarantine /Applications/TTStation.app` once. See
+`docs/superpowers/specs/2026-07-09-macos-release-installer-design.md`.
+
 **Keyless SSH on pairing (v0.4.0):** the workbench launchers SSH as **`ttuser`** (QuietBox 2
 default, override via the `tt.sshUser` UserDefault / agent `--ssh-user`). The pair flow has an
 opt-in toggle (default on) that, on a successful pair, installs this Mac's SSH **public** key on
