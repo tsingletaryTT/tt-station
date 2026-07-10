@@ -8,6 +8,7 @@ panel runs ON the box: launches are local (docker/terminal/xdg-open), never SSH.
 """
 
 import json
+import os
 import shutil
 from urllib.parse import urlparse
 
@@ -132,7 +133,6 @@ def resolve_tool(name):
     """Absolute path of a CLI tool, or None. Probes ~/.local/bin, /usr/local/bin,
     /usr/bin (GUI processes may not inherit the shell PATH), then falls back to
     shutil.which. Mirrors the macOS resolveBrewBinary probe order."""
-    import os
     home = os.path.expanduser("~")
     for p in (f"{home}/.local/bin/{name}", f"/usr/local/bin/{name}", f"/usr/bin/{name}"):
         if os.access(p, os.X_OK):

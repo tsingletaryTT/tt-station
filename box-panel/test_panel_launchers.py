@@ -63,6 +63,7 @@ class OpenWebUICommand(unittest.TestCase):
         self.assertIn("WEBUI_AUTH=false", cmd)
         # idempotent reuse guard + volume
         self.assertIn("State.Running", cmd)
+        self.assertIn("-f '{{.State.Running}}'", cmd)
         self.assertIn("ttstation-openwebui:/app/backend/data", cmd)
 
     def test_custom_host_port(self):

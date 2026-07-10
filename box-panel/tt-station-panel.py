@@ -687,8 +687,12 @@ class Panel(Gtk.ApplicationWindow):
         # the base URL (mirrors the macOS scratchDir).
         safe = base_url.replace("https://", "").replace("http://", "").replace("/", "_").replace(":", "_")
         cfg_dir = Path.home() / ".local/share/tt-station/opencode" / safe
-        cfg_dir.mkdir(parents=True, exist_ok=True)
-        (cfg_dir / "opencode.json").write_text(pl.build_opencode_config(base_url, model))
+        try:
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            (cfg_dir / "opencode.json").write_text(pl.build_opencode_config(base_url, model))
+        except OSError as e:
+            self._connect_log(f"couldn't write opencode config: {e}")
+            return
         cmd = pl.opencode_terminal_command(str(cfg_dir))
         # Run through a login shell so PATH resolves opencode.
         subprocess.Popen([*term, "bash", "-lc", cmd])

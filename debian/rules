@@ -51,6 +51,11 @@ override_dh_auto_install:
 	install -d debian/tt-station-panel/usr/share/tt-station-panel
 	install -m 755 box-panel/tt-station-panel.py \
 	    debian/tt-station-panel/usr/share/tt-station-panel/tt-station-panel.py
+	install -m 644 box-panel/panel_launchers.py \
+	    debian/tt-station-panel/usr/share/tt-station-panel/panel_launchers.py
+	install -d debian/tt-station-panel/usr/share/tt-station-panel/assets
+	install -m 644 box-panel/assets/tt-logo.png \
+	    debian/tt-station-panel/usr/share/tt-station-panel/assets/tt-logo.png
 	install -d debian/tt-station-panel/usr/bin
 	install -m 755 box-panel/tt-station-panel.wrapper \
 	    debian/tt-station-panel/usr/bin/tt-station-panel
