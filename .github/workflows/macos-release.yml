@@ -27,6 +27,18 @@ jobs:
       - name: Install xcodegen
         run: brew install xcodegen
 
+      # xcodegen (brew latest) writes a modern project format (objectVersion 77,
+      # i.e. Xcode 16+). The macos-14 image has an older Xcode selected by
+      # default, which fails with "future Xcode project file format (77)". Select
+      # the newest Xcode present on the runner so xcodebuild can read it.
+      - name: Select newest Xcode
+        run: |
+          latest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$latest" ]; then echo "no /Applications/Xcode_*.app found"; exit 1; fi
+          echo "Selecting $latest"
+          sudo xcode-select -s "$latest/Contents/Developer"
+          xcodebuild -version
+
       - name: Build + publish DMG
         env:
           GH_TOKEN: ${{ github.token }}
