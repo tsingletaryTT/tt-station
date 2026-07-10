@@ -47,6 +47,25 @@ override_dh_auto_install:
 	install -d debian/tt-station/usr/share/doc/tt-station
 	install -m 644 README.md \
 	    debian/tt-station/usr/share/doc/tt-station/README.md
+	# ── tt-station-panel (GTK on-box GUI) ──
+	install -d debian/tt-station-panel/usr/share/tt-station-panel
+	install -m 755 box-panel/tt-station-panel.py \
+	    debian/tt-station-panel/usr/share/tt-station-panel/tt-station-panel.py
+	install -d debian/tt-station-panel/usr/bin
+	install -m 755 box-panel/tt-station-panel.wrapper \
+	    debian/tt-station-panel/usr/bin/tt-station-panel
+	install -d debian/tt-station-panel/usr/share/applications
+	install -m 644 box-panel/com.tenstorrent.ttstation.panel.desktop \
+	    debian/tt-station-panel/usr/share/applications/com.tenstorrent.ttstation.panel.desktop
+	# Icons (existing PNGs under box-panel/assets/icons/hicolor)
+	for sz in 48x48 128x128 256x256; do \
+	    install -d debian/tt-station-panel/usr/share/icons/hicolor/$$sz/apps; \
+	    install -m 644 box-panel/assets/icons/hicolor/$$sz/apps/com.tenstorrent.ttstation.panel.png \
+	        debian/tt-station-panel/usr/share/icons/hicolor/$$sz/apps/com.tenstorrent.ttstation.panel.png; \
+	done
+	install -d debian/tt-station-panel/usr/share/doc/tt-station-panel
+	install -m 644 box-panel/README.md \
+	    debian/tt-station-panel/usr/share/doc/tt-station-panel/README.md
 
 # ── systemd: install the user unit but do NOT enable/start it on install ─────
 # NOTE: this box's debhelper (13.14.1ubuntu5) splits system vs. --user unit

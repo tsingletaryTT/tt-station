@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=tt-station Panel
+Comment=On-box control panel for Tenstorrent tt-station
+Exec=/usr/bin/tt-station-panel
+Icon=com.tenstorrent.ttstation.panel
+Terminal=false
+Categories=Utility;System;
+StartupWMClass=com.tenstorrent.ttstation.panel
