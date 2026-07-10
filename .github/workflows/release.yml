@@ -62,7 +62,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --title "$GITHUB_REF_NAME" \
               --generate-notes \
-              --verify-tag
+              --verify-tag || true
           fi
           gh release upload "$GITHUB_REF_NAME" \
             ../tt-station_*_amd64_${SUITE}.deb \
