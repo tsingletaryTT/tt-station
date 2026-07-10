@@ -137,7 +137,10 @@ operator runs `systemctl --user enable --now`). **`tt-station-panel`** ships the
 `/usr/bin/tt-station-panel` wrapper, a packaged `.desktop`, and hicolor icons (`Depends:
 tt-station, python3, gir1.2-gtk-4.0, python3-gi`). `install_desktop_icon()` no-ops when packaged.
 Workspace version unified at 0.9.0 (`[workspace.package]`, `scripts/bump-version.sh`); CI
-`release.yml` builds per-suite (noble/jammy) `.deb`s on `v*` tags, `ci.yml` enforces
+`release.yml` builds per-suite (noble/jammy) `.deb`s — a `v*` tag publishes a GitHub Release,
+while a manual **`workflow_dispatch`** run uploads the same `.deb`s as downloadable Actions
+artifacts (`tt-station-debs-<suite>`, 90d) with no Release (a pre-release/test-build flow;
+design: `docs/superpowers/specs/2026-07-10-deb-prerelease-ci-design.md`). `ci.yml` enforces
 version-consistency. `mock-box`/`libttstation` not packaged. Design/plan:
 `docs/superpowers/{specs,plans}/2026-07-10-*`. **Not yet run against a live box** — needs an
 owner install + GTK click-through (see follow-ups).
