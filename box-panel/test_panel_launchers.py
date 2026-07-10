@@ -51,5 +51,36 @@ class OpencodeConfig(unittest.TestCase):
         self.assertIn("meta-llama/L-70B", prov["models"])
 
 
+class OpenWebUICommand(unittest.TestCase):
+    def test_contains_key_pieces(self):
+        cmd = pl.build_openwebui_command(8003, host_port=3000)
+        self.assertIn("ttstation-openwebui", cmd)
+        self.assertIn("ghcr.io/open-webui/open-webui:main", cmd)
+        self.assertIn("-p 3000:8080", cmd)
+        self.assertIn("--add-host=host.docker.internal:host-gateway", cmd)
+        self.assertIn("http://host.docker.internal:8003/v1", cmd)
+        self.assertIn("WEBUI_AUTH=false", cmd)
+        # idempotent reuse guard + volume
+        self.assertIn("State.Running", cmd)
+        self.assertIn("ttstation-openwebui:/app/backend/data", cmd)
+
+    def test_custom_host_port(self):
+        cmd = pl.build_openwebui_command(8003, host_port=3100)
+        self.assertIn("-p 3100:8080", cmd)
+
+
+class TerminalCommand(unittest.TestCase):
+    def test_quotes_dir(self):
+        self.assertEqual(
+            pl.opencode_terminal_command("/home/x/.local/share/tt-station/opencode/h_8003"),
+            "cd '/home/x/.local/share/tt-station/opencode/h_8003' && opencode")
+
+
+class ResolveTerminal(unittest.TestCase):
+    def test_returns_none_or_list(self):
+        result = pl.resolve_terminal_emulator()
+        self.assertTrue(result is None or isinstance(result, list))
+
+
 if __name__ == "__main__":
     unittest.main()

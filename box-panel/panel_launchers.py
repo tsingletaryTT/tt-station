@@ -72,3 +72,60 @@ def build_opencode_config(base_url, model):
         "model": f"ttstation/{model}",
     }
     return json.dumps(cfg, indent=2, sort_keys=True)
+
+
+def build_openwebui_command(serving_port, host_port=3000):
+    """Idempotent shell script to (re)launch Open WebUI on the box, wired to the
+    box's LOCAL vLLM on `serving_port`. Reuse if already running; else remove any
+    stale container, pull with retries (first pull can flake), and `docker run`.
+    Ports the macOS OpenWebUILauncher.dockerCommand, run locally (no SSH).
+    """
+    c = OPENWEBUI_CONTAINER
+    img = OPENWEBUI_IMAGE
+    return (
+        f"if [ \"$(docker inspect -f '{{{{.State.Running}}}}' {c} 2>/dev/null)\" = \"true\" ]; then exit 0; fi\n"
+        f"docker rm -f {c} >/dev/null 2>&1 || true\n"
+        f"if ! docker image inspect {img} >/dev/null 2>&1; then\n"
+        f"  for i in 1 2 3 4 5; do docker pull {img} && break; sleep 3; done\n"
+        f"fi\n"
+        f"docker run -d --name {c} \\\n"
+        f"  -p {host_port}:{OPENWEBUI_INTERNAL_PORT} \\\n"
+        f"  --add-host=host.docker.internal:host-gateway \\\n"
+        f"  -e OPENAI_API_BASE_URL=http://host.docker.internal:{serving_port}/v1 \\\n"
+        f"  -e OPENAI_API_KEY=sk-none -e WEBUI_AUTH=false \\\n"
+        f"  -v {c}:/app/backend/data \\\n"
+        f"  {img}\n"
+    )
+
+
+def opencode_terminal_command(config_dir):
+    """The shell line a terminal runs: cd into the config dir and start opencode.
+    Single-quoted dir (our own scratch path under ~/.local/share, no quotes)."""
+    return f"cd '{config_dir}' && opencode"
+
+
+def resolve_terminal_emulator():
+    """An argv prefix that runs a shell command in a NEW terminal window, or None.
+
+    Tries, in order: x-terminal-emulator (Debian alternatives), gnome-terminal,
+    konsole, xterm. Each of these takes `-e <cmd...>` to run a command. The
+    caller appends `bash -lc "<command>"` so PATH resolves opencode via a login
+    shell (GUI apps don't inherit the shell PATH).
+    """
+    for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
+        path = shutil.which(term)
+        if path:
+            return [path, "-e"]
+    return None
+
+
+def resolve_tool(name):
+    """Absolute path of a CLI tool, or None. Probes ~/.local/bin, /usr/local/bin,
+    /usr/bin (GUI processes may not inherit the shell PATH), then falls back to
+    shutil.which. Mirrors the macOS resolveBrewBinary probe order."""
+    import os
+    home = os.path.expanduser("~")
+    for p in (f"{home}/.local/bin/{name}", f"/usr/local/bin/{name}", f"/usr/bin/{name}"):
+        if os.access(p, os.X_OK):
+            return p
+    return shutil.which(name)
