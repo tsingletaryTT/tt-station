@@ -12,9 +12,14 @@ This box (`tsingletaryTT-quietbox`) IS a real QuietBox: 4× Blackhole (`p300c`),
 
 ## ▶ PICK UP HERE — especially on the Mac
 
-**The entire macOS app (`macos/TTStation`, now v0.2.0) was authored on a Linux box
-with NO Swift toolchain — it is committed but has NEVER been compiled.** First thing
-on the Mac: build + verify it, fix any compile slips, then it's ready.
+**The macOS app (`macos/TTStation`, MARKETING_VERSION 0.9.0) was authored on a Linux box
+with NO Swift toolchain, but now BUILDS + SHIPS via CI:** `macos-release.yml` compiles it
+on a `macos-14` runner and published `TTStation-0.9.0-arm64.dmg` to the **v0.9.0 GitHub
+Release** (2026-07-10, alongside the four `.deb`s). CI gotcha found + fixed: brew's latest
+`xcodegen` emits objectVersion 77 (Xcode 16 format) which the runner's default Xcode can't
+read ("future Xcode project file format (77)") — the workflow now selects the newest
+`/Applications/Xcode_*.app` before `xcodebuild`. Still worth a **local** click-through on a
+real Mac against the live box (CI only proves it compiles, not that the UI/launchers behave).
 
 ```
 cd macos/TTStation && swift test                      # TTStationKit unit tests (pure logic)
