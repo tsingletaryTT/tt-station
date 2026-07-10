@@ -108,14 +108,23 @@ def resolve_terminal_emulator():
     """An argv prefix that runs a shell command in a NEW terminal window, or None.
 
     Tries, in order: x-terminal-emulator (Debian alternatives), gnome-terminal,
-    konsole, xterm. Each of these takes `-e <cmd...>` to run a command. The
+    konsole, xterm. Each entry pairs the terminal with the flag that makes it
+    treat the REST of the argv as the command to run: gnome-terminal needs `--`
+    (its `-e` takes a single deprecated string, not a trailing argv), while
+    x-terminal-emulator/konsole/xterm all accept `-e <cmd> <args...>`. The
     caller appends `bash -lc "<command>"` so PATH resolves opencode via a login
     shell (GUI apps don't inherit the shell PATH).
     """
-    for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
+    candidates = (
+        ("x-terminal-emulator", "-e"),
+        ("gnome-terminal", "--"),
+        ("konsole", "-e"),
+        ("xterm", "-e"),
+    )
+    for term, sep in candidates:
         path = shutil.which(term)
         if path:
-            return [path, "-e"]
+            return [path, sep]
     return None
 
 

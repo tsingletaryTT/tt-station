@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest import mock
 
 import panel_launchers as pl
 
@@ -80,6 +81,18 @@ class ResolveTerminal(unittest.TestCase):
     def test_returns_none_or_list(self):
         result = pl.resolve_terminal_emulator()
         self.assertTrue(result is None or isinstance(result, list))
+
+    def test_gnome_terminal_uses_double_dash(self):
+        with mock.patch.object(
+                pl.shutil, "which",
+                side_effect=lambda n: "/usr/bin/gnome-terminal" if n == "gnome-terminal" else None):
+            self.assertEqual(pl.resolve_terminal_emulator(), ["/usr/bin/gnome-terminal", "--"])
+
+    def test_xterm_uses_dash_e(self):
+        with mock.patch.object(
+                pl.shutil, "which",
+                side_effect=lambda n: "/usr/bin/xterm" if n == "xterm" else None):
+            self.assertEqual(pl.resolve_terminal_emulator(), ["/usr/bin/xterm", "-e"])
 
 
 if __name__ == "__main__":
