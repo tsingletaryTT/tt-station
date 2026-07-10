@@ -1,0 +1,18 @@
+[Unit]
+Description=tt-station box agent (QuietBox control plane)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/tt-station-agentd
+# systemd --user services get a minimal PATH that omits ~/.local/bin and any
+# virtualenv, so the agent couldn't find tt-smi (device-mesh detection) or the
+# python3 that runs tt-inference-server's run.py. %h is the user's home; the
+# tt-smi apt package installs to /usr/bin, and a venv/tt-smi symlink lives in
+# ~/.local/bin — cover both.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

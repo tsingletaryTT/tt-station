@@ -1,0 +1,32 @@
+Source: tt-station
+Section: utils
+Priority: optional
+Maintainer: Tenstorrent <software@tenstorrent.com>
+Build-Depends: debhelper-compat (= 13), rustc (>= 1.93), cargo
+Standards-Version: 4.6.2
+Homepage: https://github.com/tsingletaryTT/tt-station
+Rules-Requires-Root: no
+
+Package: tt-station
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Recommends: tt-smi, docker.io | docker-ce
+Suggests: tt-station-panel
+Description: Tenstorrent QuietBox control plane (CLI + box agent)
+ tt-station makes a Tenstorrent QuietBox plug-and-play on the LAN: discover a
+ box, pair once, run a model, and get one OpenAI-compatible /v1 endpoint served
+ by tt-inference-server (vLLM).
+ .
+ This package ships the `tt` CLI and the box-side agent `tt-station-agentd`
+ (installed as a systemd --user service, not auto-enabled). Enable it per-user
+ with: systemctl --user enable --now tt-station-agentd
+
+Package: tt-station-panel
+Architecture: amd64
+Depends: ${misc:Depends}, tt-station (= ${binary:Version}), python3, gir1.2-gtk-4.0, python3-gi
+Recommends: docker.io | docker-ce, xdg-utils
+Description: On-box GTK control panel for tt-station
+ A small GTK4 control surface that runs on the QuietBox itself: shows the live
+ 6-digit pairing code, agent/serving status and endpoint, and Start/Stop/
+ Restart/Reset the agent. Includes one-click Connect launchers (Open WebUI,
+ opencode) for the model the box is serving.
