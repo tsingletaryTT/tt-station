@@ -12,3 +12,20 @@ __pycache__/
 
 # macOS finder metadata
 .DS_Store
+
+# Debian packaging build artifacts
+/vendor/
+.cargo/config.toml
+debian/.cargo/
+debian/target/
+debian/files
+debian/*.substvars
+debian/debhelper-build-stamp
+debian/.debhelper/
+debian/tt-station/
+debian/tt-station-panel/
+# dh leaves these maintainer-script snippet/log leftovers next to debian/rules
+# (observed on this box's debhelper 13.14.1ubuntu5 after a real build) — not
+# in the brief's original list, added after `git add -n debian/` surfaced them.
+debian/*.debhelper.log
+debian/*.debhelper

@@ -50,6 +50,8 @@ any box:
                                                              ~/.config/tt-station/agentd.toml)
 """
 
+__version__ = "0.9.0"
+
 import json
 import os
 import socket
@@ -62,6 +64,10 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk, Gdk  # noqa: E402
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import panel_launchers as pl  # noqa: E402
 
 # ── Config ──────────────────────────────────────────────────────────────────
 REPO = Path(os.environ.get("TTS_REPO", str(Path.home() / "code/tt-inference-server")))
@@ -81,6 +87,8 @@ NAME = os.environ.get("TTS_NAME", "qb2-lab")
 CTRL_PORT = os.environ.get("TTS_CTRL_PORT", "8765")
 SERVING_HOST = os.environ.get("TTS_SERVING_HOST", f"{NAME}.local")
 SERVING_PORT = os.environ.get("TTS_SERVING_PORT", "8003")
+# Published host port for the on-box Open WebUI container (8080 is taken on QB2).
+OPENWEBUI_PORT = int(os.environ.get("TTS_OPENWEBUI_PORT", "3000"))
 TT_SMI_BIN = os.environ.get("TTS_TT_SMI_BIN", "tt-smi")
 # The agent's bearer-token store — its "who is paired" state. A box-operator
 # "Reset to fresh" (see reset_fresh) deletes this directly: the authed HTTP
@@ -364,6 +372,10 @@ class Panel(Gtk.ApplicationWindow):
         self.snapshot: dict | None = None
         self.code: str | None = None
         self.code_expires_at = 0.0
+        # (base_url, model) for the currently-serving endpoint, or None — set
+        # by _refresh_connect from each snapshot, consumed by the Connect
+        # launcher handlers below.
+        self._endpoint: tuple[str, str] | None = None
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         root.set_margin_top(16); root.set_margin_bottom(16)
@@ -474,6 +486,39 @@ class Panel(Gtk.ApplicationWindow):
         for b in (self.btn_start, self.btn_stop, self.btn_restart, self.btn_reset):
             btns.append(b)
         root.append(btns)
+
+        # ── Connect row: one-click launchers for the serving model. Shown only
+        # while the box is serving (see _refresh_connect). Mirrors the macOS
+        # app's Connect card, run LOCALLY here (docker / terminal / xdg-open).
+        self.connect_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        connect_hdr = Gtk.Label(label="Connect", xalign=0)
+        connect_hdr.add_css_class("subtle")
+        self.connect_row.append(connect_hdr)
+        connect_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, homogeneous=True)
+        self.btn_webui = Gtk.Button(label="Open WebUI")
+        self.btn_webui.set_tooltip_text(
+            "Start Open WebUI (a browser chat UI) as a docker container on this box, "
+            "wired to the serving model's /v1, then open it in the browser.")
+        self.btn_webui.connect("clicked", lambda _b: self.connect_openwebui())
+        self.btn_opencode = Gtk.Button(label="opencode")
+        self.btn_opencode.set_tooltip_text(
+            "Open a terminal running opencode (a coding agent) pointed at the "
+            "serving model's /v1.")
+        self.btn_opencode.connect("clicked", lambda _b: self.connect_opencode())
+        self.btn_copy_ep = Gtk.Button(label="Copy /v1")
+        self.btn_copy_ep.set_tooltip_text("Copy the serving /v1 base URL to the clipboard.")
+        self.btn_copy_ep.connect("clicked", lambda _b: self.connect_copy_endpoint())
+        self.btn_open_ep = Gtk.Button(label="Open endpoint")
+        self.btn_open_ep.set_tooltip_text("Open the serving /v1 base URL in the browser.")
+        self.btn_open_ep.connect("clicked", lambda _b: self.connect_open_endpoint())
+        for b in (self.btn_webui, self.btn_opencode, self.btn_copy_ep, self.btn_open_ep):
+            connect_btns.append(b)
+        self.connect_row.append(connect_btns)
+        self.connect_status = Gtk.Label(label="", xalign=0, wrap=True, max_width_chars=52)
+        self.connect_status.add_css_class("subtle")
+        self.connect_row.append(self.connect_status)
+        self.connect_row.set_visible(False)
+        root.append(self.connect_row)
 
         self.log_label = Gtk.Label(label="", xalign=0, wrap=True, max_width_chars=52)
         self.log_label.add_css_class("log"); root.append(self.log_label)
@@ -606,6 +651,92 @@ class Panel(Gtk.ApplicationWindow):
         self._clear_code()
         threading.Thread(target=worker, daemon=True).start()
 
+    # ── Connect launchers (local: docker / terminal / xdg-open) ──
+    def _connect_log(self, msg: str):
+        self.connect_status.set_text(msg)
+
+    def connect_copy_endpoint(self):
+        if not self._endpoint:
+            return
+        base_url, _model = self._endpoint
+        clip = Gdk.Display.get_default().get_clipboard()
+        clip.set(base_url)
+        self._connect_log(f"copied: {base_url}")
+
+    def connect_open_endpoint(self):
+        if not self._endpoint:
+            return
+        base_url, _model = self._endpoint
+        if not pl.resolve_tool("xdg-open"):
+            self._connect_log("xdg-open not found — install xdg-utils.")
+            return
+        subprocess.run(["xdg-open", base_url], check=False)
+
+    def connect_opencode(self):
+        if not self._endpoint:
+            return
+        base_url, model = self._endpoint
+        if not pl.resolve_tool("opencode"):
+            self._connect_log("opencode not installed — install it, then retry.")
+            return
+        term = pl.resolve_terminal_emulator()
+        if not term:
+            self._connect_log("no terminal emulator found (x-terminal-emulator/gnome-terminal/konsole/xterm).")
+            return
+        # Per-endpoint scratch dir under ~/.local/share, keyed by a safe form of
+        # the base URL (mirrors the macOS scratchDir).
+        safe = base_url.replace("https://", "").replace("http://", "").replace("/", "_").replace(":", "_")
+        cfg_dir = Path.home() / ".local/share/tt-station/opencode" / safe
+        try:
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            (cfg_dir / "opencode.json").write_text(pl.build_opencode_config(base_url, model))
+        except OSError as e:
+            self._connect_log(f"couldn't write opencode config: {e}")
+            return
+        cmd = pl.opencode_terminal_command(str(cfg_dir))
+        # Run through a login shell so PATH resolves opencode.
+        subprocess.Popen([*term, "bash", "-lc", cmd])
+        self._connect_log(f"opencode launched in a terminal ({model}).")
+
+    def connect_openwebui(self):
+        if not self._endpoint:
+            return
+        base_url, _model = self._endpoint
+        if not pl.resolve_tool("docker"):
+            self._connect_log("docker not found — install docker.io, then retry.")
+            return
+        serving_port = pl.serving_port_from_base_url(base_url, int(SERVING_PORT))
+        self._connect_log("starting Open WebUI on the box (first run pulls the image)…")
+
+        def worker():
+            script = pl.build_openwebui_command(serving_port, host_port=OPENWEBUI_PORT)
+            subprocess.run(["bash", "-lc", script], check=False)
+            # Poll the local health endpoint (~180s: first run pulls + inits).
+            url = f"http://localhost:{OPENWEBUI_PORT}"
+            health = f"{url}/health"
+            import urllib.request
+            for _ in range(180):
+                try:
+                    with urllib.request.urlopen(health, timeout=2) as r:
+                        if r.status == 200:
+                            GLib.idle_add(self._openwebui_ready, url)
+                            return
+                except OSError:
+                    pass
+                import time
+                time.sleep(1)
+            GLib.idle_add(self._connect_log,
+                          f"Open WebUI didn't come up on :{OPENWEBUI_PORT} — retry shortly.")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _openwebui_ready(self, url: str):
+        if pl.resolve_tool("xdg-open"):
+            subprocess.run(["xdg-open", url], check=False)
+            self._connect_log(f"Open WebUI ready — opened {url}")
+        else:
+            self._connect_log(f"Open WebUI ready at {url} (xdg-open missing).")
+
     # ── pairing code display + TTL ──
     def _set_code(self, code: str, ttl_secs: int):
         self.code = code
@@ -670,6 +801,7 @@ class Panel(Gtk.ApplicationWindow):
             self._clear_code()
 
         self._refresh_buttons()
+        self._refresh_connect()
         return False
 
     def _service_state(self) -> str:
@@ -682,6 +814,12 @@ class Panel(Gtk.ApplicationWindow):
         self.btn_restart.set_sensitive(on)
         self.btn_reset.set_sensitive(on)
 
+    def _refresh_connect(self):
+        """Show the Connect row only when the box is serving something, and
+        stash the current (base_url, model) for the launchers to use."""
+        self._endpoint = pl.endpoint_from_snapshot(self.snapshot)
+        self.connect_row.set_visible(self._endpoint is not None)
+
 
 def install_desktop_icon():
     """Best-effort: make the dock/taskbar show the Tenstorrent icon for this app.
@@ -693,6 +831,16 @@ def install_desktop_icon():
     theme and drop a matching `.desktop`. Idempotent, and wrapped so any
     failure here can never stop the panel from opening.
     """
+    # Packaged installs ship the .desktop + icons in system dirs (see the
+    # tt-station-panel .deb). When we're running from the packaged location, or
+    # the system entry already exists, skip the per-user self-install so we
+    # don't double-register. The from-source run (python3 box-panel/…) still
+    # self-installs, since neither condition holds there.
+    packaged_script = "/usr/share/tt-station-panel/"
+    system_desktop = Path("/usr/share/applications/com.tenstorrent.ttstation.panel.desktop")
+    if str(Path(__file__).resolve()).startswith(packaged_script) or system_desktop.exists():
+        return
+
     import shutil
 
     try:

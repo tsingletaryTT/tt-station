@@ -1,0 +1,6 @@
+tt-station (0.9.0) noble; urgency=medium
+
+  * Initial Debian packaging: tt-station (tt CLI + tt-station-agentd + systemd
+    user unit) and tt-station-panel (GTK4 on-box control panel).
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 10 Jul 2026 00:00:00 +0000

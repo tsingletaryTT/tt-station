@@ -1,0 +1,91 @@
+#!/usr/bin/make -f
+# debian/rules — debhelper build rules for tt-station.
+#
+# Rust workspace: builds two release binaries (tt, tt-station-agentd) with safe
+# default features. Crates are vendored under vendor/ and .cargo/config.toml
+# redirects cargo there; --frozen enforces no network fetches. Run build-deb.sh
+# to vendor first.
+
+export DH_VERBOSE = 1
+export DEB_BUILD_OPTIONS = nocheck
+
+# Isolate cargo state from the developer's ~/.cargo during packaging.
+export CARGO_HOME = $(CURDIR)/debian/.cargo
+export CARGO_TARGET_DIR = $(CURDIR)/debian/target
+export CARGO_NET_OFFLINE = true
+
+%:
+	dh $@
+
+# ── Clean ──────────────────────────────────────────────────────────────────
+override_dh_clean:
+	# dh_clean's compat-13 project-wide find deletes *.orig files, which would
+	# destroy the Cargo.toml.orig files under vendor/ that cargo's --frozen
+	# checksum verification needs. Replicate dh_clean's safe actions manually
+	# and skip the *.orig sweep.
+	rm -f debian/debhelper-build-stamp
+	rm -rf debian/.debhelper/
+	rm -f debian/tt-station.substvars debian/tt-station-panel.substvars debian/files
+	rm -rf debian/tt-station/ debian/tt-station-panel/ debian/tmp/
+
+# ── Compile ────────────────────────────────────────────────────────────────
+override_dh_auto_build:
+	cargo build --release --frozen -p tt
+	cargo build --release --frozen -p tt-station-agentd
+
+# ── Install ────────────────────────────────────────────────────────────────
+override_dh_auto_install:
+	# ── tt-station (CLI + agent + systemd user unit) ──
+	install -d debian/tt-station/usr/bin
+	install -m 755 debian/target/release/tt \
+	    debian/tt-station/usr/bin/tt
+	install -m 755 debian/target/release/tt-station-agentd \
+	    debian/tt-station/usr/bin/tt-station-agentd
+	install -d debian/tt-station/usr/lib/systemd/user
+	install -m 644 deploy/tt-station-agentd.package.service \
+	    debian/tt-station/usr/lib/systemd/user/tt-station-agentd.service
+	install -d debian/tt-station/usr/share/doc/tt-station
+	install -m 644 README.md \
+	    debian/tt-station/usr/share/doc/tt-station/README.md
+	# ── tt-station-panel (GTK on-box GUI) ──
+	install -d debian/tt-station-panel/usr/share/tt-station-panel
+	install -m 755 box-panel/tt-station-panel.py \
+	    debian/tt-station-panel/usr/share/tt-station-panel/tt-station-panel.py
+	install -m 644 box-panel/panel_launchers.py \
+	    debian/tt-station-panel/usr/share/tt-station-panel/panel_launchers.py
+	install -d debian/tt-station-panel/usr/share/tt-station-panel/assets
+	install -m 644 box-panel/assets/tt-logo.png \
+	    debian/tt-station-panel/usr/share/tt-station-panel/assets/tt-logo.png
+	install -d debian/tt-station-panel/usr/bin
+	install -m 755 box-panel/tt-station-panel.wrapper \
+	    debian/tt-station-panel/usr/bin/tt-station-panel
+	install -d debian/tt-station-panel/usr/share/applications
+	install -m 644 box-panel/com.tenstorrent.ttstation.panel.desktop \
+	    debian/tt-station-panel/usr/share/applications/com.tenstorrent.ttstation.panel.desktop
+	# Icons (existing PNGs under box-panel/assets/icons/hicolor)
+	for sz in 48x48 128x128 256x256; do \
+	    install -d debian/tt-station-panel/usr/share/icons/hicolor/$$sz/apps; \
+	    install -m 644 box-panel/assets/icons/hicolor/$$sz/apps/com.tenstorrent.ttstation.panel.png \
+	        debian/tt-station-panel/usr/share/icons/hicolor/$$sz/apps/com.tenstorrent.ttstation.panel.png; \
+	done
+	install -d debian/tt-station-panel/usr/share/doc/tt-station-panel
+	install -m 644 box-panel/README.md \
+	    debian/tt-station-panel/usr/share/doc/tt-station-panel/README.md
+
+# ── systemd: install the user unit but do NOT enable/start it on install ─────
+# NOTE: this box's debhelper (13.14.1ubuntu5) splits system vs. --user unit
+# handling into two separate dh sequence steps rather than a single
+# `dh_installsystemd --user` flag: dh_installsystemd (system units, a no-op
+# here — we ship no system unit) and dh_installsystemduser (user units, our
+# tt-station-agentd.service). Overriding only dh_installsystemd is NOT enough:
+# the default dh_installsystemduser step still runs afterward and — without
+# --no-enable — appends its own "enable on install" maintainer-script snippet
+# on top of ours, so both must be handled here. dh_installsystemduser has no
+# --no-start (at compat 13 it never generates a start/restart-on-upgrade
+# snippet anyway), so --no-enable alone gives "installed, not enabled, not
+# started".
+override_dh_installsystemduser:
+	dh_installsystemduser --name=tt-station-agentd --no-enable
+
+# ── Skip tests (need hardware; CI runs them separately) ──────────────────────
+override_dh_auto_test:

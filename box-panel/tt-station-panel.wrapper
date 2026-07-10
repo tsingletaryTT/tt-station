@@ -1,0 +1,3 @@
+#!/bin/bash
+# Launch the packaged tt-station GTK panel. Installed as /usr/bin/tt-station-panel.
+exec python3 /usr/share/tt-station-panel/tt-station-panel.py "$@"

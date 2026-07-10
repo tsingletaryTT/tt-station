@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # upload release assets
+
+jobs:
+  build-deb:
+    name: Build .deb (${{ matrix.suite }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            suite:  noble
+          - runner: ubuntu-22.04
+            suite:  jammy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packaging prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends devscripts debhelper rustc cargo
+
+      # rustup toolchain (>= 1.93) needed: apt's rustc is too old for the build-dep.
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Patch changelog suite (${{ matrix.suite }})
+        if: matrix.suite != 'noble'
+        run: sed -i "1s/) noble;/) ${{ matrix.suite }};/" debian/changelog
+
+      - name: Build .deb packages
+        run: ./build-deb.sh
+
+      - name: Rename packages with suite suffix
+        run: |
+          SUITE="${{ matrix.suite }}"
+          for deb in ../tt-station*.deb; do
+            newname="${deb%.deb}_${SUITE}.deb"
+            mv "$deb" "$newname"
+            echo "Renamed: $(basename "$deb") → $(basename "$newname")"
+          done
+
+      - name: Ensure release exists, then upload packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SUITE="${{ matrix.suite }}"
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — skipping create."
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --verify-tag || true
+          fi
+          gh release upload "$GITHUB_REF_NAME" \
+            ../tt-station_*_amd64_${SUITE}.deb \
+            ../tt-station-panel_*_amd64_${SUITE}.deb \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

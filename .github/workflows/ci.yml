@@ -1,0 +1,24 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  version-consistency:
+    name: Version consistency
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert version matches across Cargo.toml, changelog, and the panel
+        run: |
+          set -euo pipefail
+          CARGO=$(grep -m1 '^version = ' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          DEB=$(head -1 debian/changelog | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          PANEL=$(grep -m1 '^__version__ = ' box-panel/tt-station-panel.py | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "Cargo.toml:       $CARGO"
+          echo "debian/changelog: $DEB"
+          echo "panel __version__: $PANEL"
+          fail=0
+          [ "$DEB" = "$CARGO" ]   || { echo "::error::debian/changelog ($DEB) != Cargo.toml ($CARGO)"; fail=1; }
+          [ "$PANEL" = "$CARGO" ] || { echo "::error::panel __version__ ($PANEL) != Cargo.toml ($CARGO)"; fail=1; }
+          [ "$fail" -eq 0 ] || { echo "Run scripts/bump-version.sh <version> to fix."; exit 1; }
+          echo "All version strings agree: $CARGO"
