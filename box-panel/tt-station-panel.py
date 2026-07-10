@@ -827,6 +827,16 @@ def install_desktop_icon():
     theme and drop a matching `.desktop`. Idempotent, and wrapped so any
     failure here can never stop the panel from opening.
     """
+    # Packaged installs ship the .desktop + icons in system dirs (see the
+    # tt-station-panel .deb). When we're running from the packaged location, or
+    # the system entry already exists, skip the per-user self-install so we
+    # don't double-register. The from-source run (python3 box-panel/…) still
+    # self-installs, since neither condition holds there.
+    packaged_script = "/usr/share/tt-station-panel/"
+    system_desktop = Path("/usr/share/applications/com.tenstorrent.ttstation.panel.desktop")
+    if str(Path(__file__).resolve()).startswith(packaged_script) or system_desktop.exists():
+        return
+
     import shutil
 
     try:
