@@ -50,6 +50,8 @@ any box:
                                                              ~/.config/tt-station/agentd.toml)
 """
 
+__version__ = "0.9.0"
+
 import json
 import os
 import socket
