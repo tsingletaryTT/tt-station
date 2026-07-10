@@ -29,3 +29,6 @@ debian/tt-station-panel/
 # in the brief's original list, added after `git add -n debian/` surfaced them.
 debian/*.debhelper.log
 debian/*.debhelper
+
+# CI artifact staging dir (release.yml workflow_dispatch)
+/dist/

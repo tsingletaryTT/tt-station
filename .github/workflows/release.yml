@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual, on-demand build. Produces the same per-suite .debs but uploads them
+  # as downloadable GitHub Actions artifacts (see the workflow_dispatch-gated
+  # step below) instead of publishing a GitHub Release — a pre-release flow for
+  # grabbing a test build without cutting a tag.
+  workflow_dispatch:
 
 permissions:
   contents: write   # upload release assets
@@ -50,7 +55,11 @@ jobs:
             echo "Renamed: $(basename "$deb") → $(basename "$newname")"
           done
 
+      # Tag push (v*): publish to a GitHub Release. Gated to push events so a
+      # manual workflow_dispatch run never touches a Release (and never
+      # mis-resolves $GITHUB_REF_NAME to a branch name).
       - name: Ensure release exists, then upload packages
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -69,3 +78,27 @@ jobs:
             ../tt-station-panel_*_amd64_${SUITE}.deb \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
+
+      # Manual run (workflow_dispatch): no Release — upload the two .debs as a
+      # downloadable Actions artifact instead. dpkg-buildpackage writes the .debs
+      # to the parent dir; stage them into a dir INSIDE the workspace first, since
+      # actions/upload-artifact derives its layout from the paths' common ancestor
+      # and mishandles paths above the workspace root.
+      - name: Stage .debs for artifact upload
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          SUITE="${{ matrix.suite }}"
+          mkdir -p dist
+          cp ../tt-station_*_amd64_${SUITE}.deb \
+             ../tt-station-panel_*_amd64_${SUITE}.deb dist/
+          ls -lh dist/
+
+      # One artifact per suite — v4 requires unique artifact names per job.
+      - name: Upload .debs as artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tt-station-debs-${{ matrix.suite }}
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 90
