@@ -51,9 +51,12 @@ Mirrors tt-toplike's TUI/app split so headless boxes install only the core.
   itself lives at `/usr/share/tt-station-panel/tt-station-panel.py`).
 - `/usr/share/applications/com.tenstorrent.ttstation.panel.desktop` — a **packaged**
   `.desktop` (`Exec=/usr/bin/tt-station-panel`, `Icon=com.tenstorrent.ttstation.panel`).
-  Today `install_desktop_icon()` generates this at runtime; when the packaged file is
-  present the runtime generator becomes a no-op (guard on existence), so the from-source
-  run (`python3 box-panel/tt-station-panel.py`) still self-installs its desktop entry.
+  Today `install_desktop_icon()` generates a per-user entry at runtime under
+  `~/.local/share/applications`. It gains a guard: when the script is running from the
+  packaged location (`/usr/share/tt-station-panel/`) or the system `.desktop` already
+  exists at `/usr/share/applications/`, the runtime generator is skipped — so the
+  from-source run (`python3 box-panel/tt-station-panel.py`) still self-installs its entry,
+  and a packaged install doesn't double-register.
 - `/usr/share/icons/hicolor/{48x48,128x128,256x256}/apps/com.tenstorrent.ttstation.panel.png`
   — the existing PNGs from `box-panel/assets/icons/`.
 - `Depends: tt-station (= ${binary:Version}), python3, gir1.2-gtk-4.0, python3-gi`
