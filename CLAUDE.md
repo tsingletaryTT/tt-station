@@ -113,7 +113,34 @@ hidden when no config file exists). Config via `TTS_*` env (repo path, serving h
 `systemctl --user <verb>` (no more child-process supervision — closing the panel doesn't
 kill the agent), and status/pairing/serving/profile all come from a single poll of `tt
 console --snapshot` (the same `BoxLifecycleSnapshot` JSON the TUI renders) — one source of
-truth the panel and the TUI can never disagree about.
+truth the panel and the TUI can never disagree about. **Connect row** (shown only while
+serving): one-click **Open WebUI** (local `docker run` of `ghcr.io/open-webui/open-webui:main`
+wired to the box's own `/v1` via `host.docker.internal`, then `xdg-open`; `TTS_OPENWEBUI_PORT`,
+default 3000), **opencode** (writes a per-endpoint `opencode.json` under
+`~/.local/share/tt-station/opencode/`, opens a terminal emulator running `opencode` — resolves
+`x-terminal-emulator`/`gnome-terminal`(`--`)/`konsole`/`xterm`(`-e`)), plus **Copy /v1** /
+**Open endpoint**. Endpoint+model come from the snapshot's agent-source `serving` entry (not the
+unimplemented `/endpoint` route). Missing docker/opencode/terminal/xdg-open surface an inline
+message, never a crash. Pure builders live in `box-panel/panel_launchers.py`
+(`+ test_panel_launchers.py`, stdlib unittest); the panel is thin glue (worker thread +
+`GLib.idle_add`). Ported from the macOS Connect launchers, local (no SSH) since the panel runs
+on the box.
+
+**Linux packaging (`debian/`, `build-deb.sh`, v0.9.0):** two Ubuntu `.deb`s, modeled on
+tt-toplike (debhelper compat 13 + `dpkg-buildpackage`, vendored offline crates via `cargo
+vendor` + `--frozen`; `vendor/`/`.cargo/config.toml` not committed). **`tt-station`** ships
+`/usr/bin/tt`, `/usr/bin/tt-station-agentd`, and the systemd **user** unit at
+`/usr/lib/systemd/user/tt-station-agentd.service` **installed but not enabled/started**
+(`dh_installsystemduser --no-enable` — this box's debhelper lacks `dh_installsystemd --user`;
+operator runs `systemctl --user enable --now`). **`tt-station-panel`** ships the GTK panel to
+`/usr/share/tt-station-panel/` (incl. `panel_launchers.py` + `assets/tt-logo.png`), a
+`/usr/bin/tt-station-panel` wrapper, a packaged `.desktop`, and hicolor icons (`Depends:
+tt-station, python3, gir1.2-gtk-4.0, python3-gi`). `install_desktop_icon()` no-ops when packaged.
+Workspace version unified at 0.9.0 (`[workspace.package]`, `scripts/bump-version.sh`); CI
+`release.yml` builds per-suite (noble/jammy) `.deb`s on `v*` tags, `ci.yml` enforces
+version-consistency. `mock-box`/`libttstation` not packaged. Design/plan:
+`docs/superpowers/{specs,plans}/2026-07-10-*`. **Not yet run against a live box** — needs an
+owner install + GTK click-through (see follow-ups).
 
 **macOS app (`macos/TTStation`, v0.5.0 — native control room):** window-first veneer over
 `tt --json` with a fast MenuBarExtra popover for glance + quick actions (the menu-bar icon
@@ -185,6 +212,14 @@ commits, honest reports. Blend sources (glean + repos + docs). The git history i
 detailed log; this file is the current-state map.
 
 ## Known follow-ups (not blocking)
+- **Linux packaging + panel Connect launchers (v0.9.0): owner-gated verification.** The
+  `.deb`s build locally on this box (both packages, contents verified via `dpkg-deb`), and the
+  panel builders are unit-tested — but neither the packaged install nor the GTK Connect row has
+  run on a live box (no `gi`/GTK toolchain here). Do: `sudo dpkg -i ../tt-station*_0.9.0_amd64.deb`,
+  `systemctl --user enable --now tt-station-agentd`, launch the packaged panel, and click through
+  Open WebUI / opencode / copy-open while a model is serving. Tag `v0.9.0` to exercise
+  `release.yml` (per-suite noble/jammy). CI's rustup-toolchain step needs network for
+  `cargo vendor` + `sh.rustup.rs` — confirm on first tag.
 - tt-studio: real cache-sharing needs tt-studio running + config changes (see the doc).
 - Agent: wrap `advertise_status` mDNS send in `spawn_blocking` (async-hygiene nit).
 - macOS: build-verify everything above; wire discovery-by-name into the app's `/remote`
