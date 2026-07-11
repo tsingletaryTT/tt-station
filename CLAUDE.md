@@ -220,14 +220,23 @@ commits, honest reports. Blend sources (glean + repos + docs). The git history i
 detailed log; this file is the current-state map.
 
 ## Known follow-ups (not blocking)
-- **Linux packaging + panel Connect launchers (v0.9.0): owner-gated verification.** The
-  `.deb`s build locally on this box (both packages, contents verified via `dpkg-deb`), and the
-  panel builders are unit-tested — but neither the packaged install nor the GTK Connect row has
-  run on a live box (no `gi`/GTK toolchain here). Do: `sudo dpkg -i ../tt-station*_0.9.0_amd64.deb`,
-  `systemctl --user enable --now tt-station-agentd`, launch the packaged panel, and click through
-  Open WebUI / opencode / copy-open while a model is serving. Tag `v0.9.0` to exercise
-  `release.yml` (per-suite noble/jammy). CI's rustup-toolchain step needs network for
-  `cargo vendor` + `sh.rustup.rs` — confirm on first tag.
+- **Panel Connect launchers: finish the click-through WITH a serving model.** The GTK panel
+  now launches cleanly on this box (2026-07-10, via `/usr/bin/python3` on `DISPLAY=:0`):
+  `panel_launchers` imports, the Connect row is built, and `_refresh_connect` gating runs
+  error-free across poll cycles — with nothing serving, the Connect row is correctly HIDDEN.
+  Still unverified: the actual **button behavior** (Open WebUI `docker run` → browser, opencode
+  → terminal, copy/open) which needs a model serving. Do that next time a model is up.
+- **Wrapper needs `/usr/bin/python3` — fixed on main, ships v0.9.1 (NOT in the released v0.9.0
+  `.deb`).** The tt-smi venv (`~/.tenstorrent-venv`) is first on this box's PATH and lacks
+  `python3-gi`, so the v0.9.0 packaged wrapper's bare `python3` would `ModuleNotFoundError` from
+  a venv-activated shell (fine from the desktop menu's clean PATH). Wrapper now pins
+  `/usr/bin/python3`. To release: `scripts/bump-version.sh 0.9.1`, bump `MARKETING_VERSION` to
+  match, `git tag v0.9.1 && git push origin v0.9.1`.
+- **v0.9.0 is released** (2026-07-10): the GitHub Release carries all four `.deb`s
+  (`tt-station`/`tt-station-panel` × noble/jammy) + `TTStation-0.9.0-arm64.dmg`. Collaborator
+  first-run guide: `TESTING.md`. The manual `workflow_dispatch` `.deb` artifact flow is
+  validated (a manual Release run succeeded). Still owner-gated: install the `.deb`s on a box +
+  the DMG on a Mac and run the full discover → pair → run → connect loop.
 - tt-studio: real cache-sharing needs tt-studio running + config changes (see the doc).
 - Agent: wrap `advertise_status` mDNS send in `spawn_blocking` (async-hygiene nit).
 - macOS: build-verify everything above; wire discovery-by-name into the app's `/remote`
