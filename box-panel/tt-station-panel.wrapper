@@ -1,3 +1,10 @@
 #!/bin/bash
 # Launch the packaged tt-station GTK panel. Installed as /usr/bin/tt-station-panel.
-exec python3 /usr/share/tt-station-panel/tt-station-panel.py "$@"
+#
+# Use /usr/bin/python3 explicitly, NOT bare `python3`: the .deb's GTK deps
+# (python3-gi, gir1.2-gtk-4.0) install into the system interpreter, but a bare
+# `python3` resolves against PATH — and on a QuietBox the tt-smi virtualenv
+# (~/.tenstorrent-venv) is often first on PATH and has no `gi`, so the panel
+# would die with ModuleNotFoundError. The system python is the one the deps
+# target, so pin it.
+exec /usr/bin/python3 /usr/share/tt-station-panel/tt-station-panel.py "$@"
