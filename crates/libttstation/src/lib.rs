@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod model;
 pub mod pairing;
 pub mod secrets;
+pub mod wol;
 
 #[cfg(test)]
 mod smoke {

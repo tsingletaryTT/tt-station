@@ -175,6 +175,23 @@ pub async fn reset(base: &str, token: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `POST /power` — ask the box to run a power action (`reset-chips`,
+/// `suspend`, `reboot`, `shutdown`). Authed like `reset`. The box may tear
+/// down before the response fully arrives for machine ops; a dropped
+/// connection after a 2xx is expected, not an error.
+pub async fn power(base: &str, token: &str, action: &str) -> anyhow::Result<()> {
+    let url = join(base, "power");
+    reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "action": action }))
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
+    Ok(())
+}
+
 /// `POST /ssh/authorize`'s response body, as decoded by
 /// [`AgentClient::ssh_authorize`] -- see
 /// `tt-station-agentd::routes::SshAuthorizeResponse` (Task 2) for the wire
