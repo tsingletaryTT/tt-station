@@ -18,10 +18,11 @@
 //!   successfully, and there's no cache to fall back to). `stale` is always
 //!   `false` here -- there's no data to call stale.
 //!
-//! This mirrors `libttstation::catalog::classify`'s own `catalog: Option<&_>`
-//! + `catalog_stale: bool` contract: a caller that can't reach the network
-//! (or is offline) still gets a usable classification, just flagged as
-//! degraded rather than failing the whole command.
+//! This mirrors `libttstation::catalog::classify`'s own
+//! `catalog: Option<&_>` + `catalog_stale: bool` contract: a caller that
+//! can't reach the network (or is offline) still gets a usable
+//! classification, just flagged as degraded rather than failing the whole
+//! command.
 //!
 //! Any JSON parse error -- whether on a freshly fetched body or on a cache
 //! file already on disk -- makes that ONE source (fetch, or cache) count as
