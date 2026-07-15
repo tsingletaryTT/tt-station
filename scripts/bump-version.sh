@@ -9,11 +9,21 @@ NEW="${1:?usage: bump-version.sh <version>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SCRIPT_DIR"
 
-# Workspace version (the [workspace.package] version = "…" line).
-sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$NEW\"/" Cargo.toml
+# In-place edits use `perl -i` rather than `sed -i`: `sed -i` is NOT portable
+# across GNU and BSD/macOS sed (BSD's `-i` requires a backup-suffix argument, so
+# `sed -i -E …` silently eats `-E` as the suffix — dropping extended-regex mode
+# and leaving stray `*-E` files), and the `0,/re/` "first match" address below is
+# a GNU-only extension BSD sed rejects outright. `perl -i` behaves identically on
+# both. NEW is passed via the environment so it can't break the perl program text.
+
+# Workspace version: the [workspace.package] `version = "…"` line, which is the
+# first start-of-line `version = "x.y.z"` in the file (dependency versions are
+# indented/inline, never at column 0). The `$done` guard replaces only that first
+# match, mirroring the previous `0,/…/` intent.
+NEW="$NEW" perl -i -pe 'if (!$done && s/^version = "\d+\.\d+\.\d+"/version = "$ENV{NEW}"/) { $done = 1 }' Cargo.toml
 
 # Panel __version__.
-sed -i -E "s/^__version__ = \"[0-9]+\.[0-9]+\.[0-9]+\"/__version__ = \"$NEW\"/" box-panel/tt-station-panel.py
+NEW="$NEW" perl -i -pe 's/^__version__ = "\d+\.\d+\.\d+"/__version__ = "$ENV{NEW}"/' box-panel/tt-station-panel.py
 
 # debian/changelog: rewrite the first entry's version token in-place. We prepend
 # a fresh stanza so the changelog keeps history.
