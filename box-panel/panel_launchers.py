@@ -129,6 +129,25 @@ def resolve_terminal_emulator():
     return None
 
 
+# Local power actions for the box's own screen. reset-chips is a board reset
+# (tt-smi -r); the machine ops shell systemctl (permitted by the polkit rule
+# shipped with the tt-station .deb). No Wake — meaningless on the box itself.
+_POWER_COMMANDS = {
+    "reset-chips": ["tt-smi", "-r"],
+    "suspend": ["systemctl", "suspend"],
+    "reboot": ["systemctl", "reboot"],
+    "shutdown": ["systemctl", "poweroff"],
+}
+
+
+def power_command(action):
+    """Return the argv for a local power action, or raise ValueError."""
+    try:
+        return list(_POWER_COMMANDS[action])
+    except KeyError:
+        raise ValueError(f"unknown power action: {action}")
+
+
 def resolve_tool(name):
     """Absolute path of a CLI tool, or None. Probes ~/.local/bin, /usr/local/bin,
     /usr/bin (GUI processes may not inherit the shell PATH), then falls back to
