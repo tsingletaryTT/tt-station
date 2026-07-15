@@ -1,0 +1,16 @@
+// tt-station: let box operators power-manage this machine without an
+// interactive auth prompt, so `POST /power` (agent) and the box panel's
+// power row work headlessly. Grants ONLY the logind power actions, and only
+// to members of the `sudo` group (the QuietBox run-user is in it). Retarget
+// the group for a different setup — see docs/reference/power-controls.md.
+polkit.addRule(function(action, subject) {
+    if (subject.isInGroup("sudo") && (
+            action.id == "org.freedesktop.login1.reboot" ||
+            action.id == "org.freedesktop.login1.reboot-multiple-sessions" ||
+            action.id == "org.freedesktop.login1.power-off" ||
+            action.id == "org.freedesktop.login1.power-off-multiple-sessions" ||
+            action.id == "org.freedesktop.login1.suspend" ||
+            action.id == "org.freedesktop.login1.suspend-multiple-sessions")) {
+        return polkit.Result.YES;
+    }
+});

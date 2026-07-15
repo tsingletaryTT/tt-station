@@ -78,6 +78,20 @@ class TerminalCommand(unittest.TestCase):
             "cd '/home/x/.local/share/tt-station/opencode/h_8003' && opencode")
 
 
+class PowerCommandTests(unittest.TestCase):
+    def test_maps_each_action(self):
+        from panel_launchers import power_command
+        self.assertEqual(power_command("reset-chips"), ["tt-smi", "-r"])
+        self.assertEqual(power_command("suspend"), ["systemctl", "suspend"])
+        self.assertEqual(power_command("reboot"), ["systemctl", "reboot"])
+        self.assertEqual(power_command("shutdown"), ["systemctl", "poweroff"])
+
+    def test_rejects_unknown(self):
+        from panel_launchers import power_command
+        with self.assertRaises(ValueError):
+            power_command("halt")
+
+
 class ResolveTerminal(unittest.TestCase):
     def test_returns_none_or_list(self):
         result = pl.resolve_terminal_emulator()

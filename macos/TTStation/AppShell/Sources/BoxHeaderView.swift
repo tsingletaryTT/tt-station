@@ -23,10 +23,26 @@ struct BoxHeaderView: View {
     }
 
     private var statusHelp: String {
+        if let powerText = powerStatusText { return powerText }
         if box.errorText != nil { return "Error — see details below." }
         if box.starting { return "Starting a model…" }
         if box.status?.isServing == true { return "Serving a model" }
         return "Idle"
+    }
+
+    /// While a power op is in flight (Task 7), this takes over the header's
+    /// status line in place of the normal reachable/serving text — the
+    /// ensuing connection drop (or, for `.waking`, the box still being down
+    /// until it answers again) is expected, not an error, and the copy here
+    /// says so instead of `refresh()`'s generic timeout/network message.
+    private var powerStatusText: String? {
+        switch box.powerState {
+        case .suspending: return "Suspending…"
+        case .rebooting: return "Rebooting…"
+        case .poweredOff: return "Powered off — Wake to bring it back"
+        case .waking: return "Waking…"
+        case nil: return nil
+        }
     }
 
     var body: some View {
@@ -47,7 +63,12 @@ struct BoxHeaderView: View {
             Circle().fill(statusColor).frame(width: 9, height: 9).help(statusHelp)
             VStack(alignment: .leading, spacing: 2) {
                 Text(box.record.name).font(.title3.weight(.semibold))
-                Text(box.record.chips).font(.caption).foregroundStyle(.secondary)
+                // The power-op line (e.g. "Rebooting…") takes over from the
+                // normal chips summary while `powerState` is set — see
+                // `powerStatusText`.
+                Text(powerStatusText ?? box.record.chips)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
             // Secondary chip: the box's active config profile, if the
@@ -73,6 +94,13 @@ struct BoxHeaderView: View {
                     .foregroundStyle(TTTheme.teal)
                     .clipShape(Capsule())
                     .help("Device mesh reported by this box")
+            }
+            // Power controls only make sense once paired (the underlying
+            // `/power`/`/wake` calls are authed / need a known MAC) — an
+            // unpaired box just doesn't show the menu, same gating
+            // `BoxDetailView` uses for Run/Stop.
+            if box.isPaired {
+                PowerMenuView(box: box)
             }
         }
     }

@@ -7,7 +7,7 @@
 //!   without hardware.
 //! - `serve` (Task 12): a small HTTP server that fakes the *whole* agent
 //!   control API (`/status`, `/models`, `/config`, `/pair/*`, `/run`,
-//!   `/stop`, `/endpoint`) plus a fake vLLM-style OpenAI endpoint
+//!   `/stop`, `/endpoint`, `/power`) plus a fake vLLM-style OpenAI endpoint
 //!   (`/v1/chat/completions`, `/v1/models`),
 //!   so the `tt` CLI's discover -> pair -> run -> endpoint -> completion flow
 //!   can be end-to-end tested with no real agent or hardware involved.
@@ -130,6 +130,11 @@ async fn advertise(name: String, ctrl_port: u16, chips: String, apiver: u8) -> R
         // hardware-aware ranking exactly like the real QuietBox's detected
         // mesh does via `tt-station-agentd` (Task 3.5).
         device_mesh: Some("p300x2".to_string()),
+        // Mock-box has no real NIC to detect a MAC from, and a fake MAC
+        // would be actively misleading for a Wake-on-LAN target (unlike
+        // `device_mesh`, there's no "dev-parity" value that makes sense
+        // here) -- `None` (Task 3).
+        mac: None,
     };
 
     // Reuse the shared encoder so the advertised TXT keys (name, apiver,
@@ -385,6 +390,32 @@ async fn get_logs_mock() -> Json<LogsInfo> {
     })
 }
 
+/// JSON body accepted by `POST /power`. Same shape as the real agent's
+/// request (`{"action": "..."}`, see `agent_client::power`) -- `action` is
+/// intentionally accepted as a bare `String` and never validated against the
+/// four real literals (`reset-chips`/`suspend`/`reboot`/`shutdown`): that
+/// pre-flight check lives client-side in `tt`'s `Command::Power` dispatch
+/// arm (`crates/tt/src/main.rs`), so this mock only needs to prove the
+/// request reaches the box and gets accepted, not re-enforce a rule its
+/// caller already enforced.
+#[derive(Deserialize)]
+struct PowerRequest {
+    #[allow(dead_code)] // accepted for wire-shape compatibility; unused (see doc above)
+    action: String,
+}
+
+/// `POST /power { "action": "..." }`: a deliberate no-op. Real power actions
+/// (`tt-smi -r` for reset-chips, `systemctl suspend/reboot/poweroff` for the
+/// machine ops) run on the real agent (Task 4) -- this mock has no hardware
+/// or OS session to act on, and even if it did, actually suspending/
+/// rebooting/shutting down the developer's own machine because a test
+/// happened to hit this route would be a serious footgun. Always returns
+/// `200` so `tt power` can be exercised end-to-end (auth + request shape)
+/// with no hardware and no risk to the box running this mock.
+async fn power_mock(Json(_req): Json<PowerRequest>) -> StatusCode {
+    StatusCode::OK
+}
+
 /// `GET /endpoint`: the current `Endpoint`, or `409` if idle -- same
 /// contract as the real agent's `GET /endpoint` (Task 10), so `AgentClient`
 /// (Task 11) can be pointed at either without special-casing the mock.
@@ -634,6 +665,7 @@ fn app(state: MockState) -> Router {
         .route("/run", post(run_model))
         .route("/stop", post(stop_model))
         .route("/endpoint", get(get_endpoint))
+        .route("/power", post(power_mock))
         .route(
             "/ssh/authorize",
             post(ssh_authorize_mock).delete(ssh_revoke_mock),

@@ -14,6 +14,8 @@ public protocol TTCommands {
     func pairComplete(host: String, pairId: String, code: String) async throws -> PairResult
     func run(host: String, model: String) async throws -> Endpoint
     func stop(host: String) async throws
+    func power(_ action: PowerAction, host: String?) async throws
+    func wake(mac: String?, host: String?) async throws
     func sshAuthorize(host: String) async throws -> SshAuthorizeInfo
     func isAuthError(_ error: TTError) -> Bool
     func isIdleConflict(_ error: TTError) -> Bool
@@ -110,6 +112,36 @@ extension TTClient {
 
     public func stop(host: String) async throws {
         let args = ["--json", "stop", "--host", host]
+        let result = try await runner.run(args, timeout: 20)
+        guard result.exitCode == 0 else {
+            throw TTError.commandFailed(command: args, exitCode: result.exitCode, stderr: result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    /// `tt power <action> [--host]` -- authed on the CLI side (the agent must
+    /// already be paired). `host` is optional here to mirror the CLI's own
+    /// `--host: Option<String>` (see `Command::Power` in `crates/tt/src/
+    /// main.rs`), even though the CLI hard-errors without one -- that
+    /// validation belongs to `tt`, not this thin façade. Success output
+    /// (`{"action":...,"ok":true}`) carries nothing beyond what the exit code
+    /// already tells us, so this ignores the body like `stop` does.
+    public func power(_ action: PowerAction, host: String?) async throws {
+        var args = ["--json", "power", action.rawValue]
+        if let host { args += ["--host", host] }
+        let result = try await runner.run(args, timeout: 20)
+        guard result.exitCode == 0 else {
+            throw TTError.commandFailed(command: args, exitCode: result.exitCode, stderr: result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    /// `tt wake [--mac] [--host]` -- client-side Wake-on-LAN broadcast, no
+    /// contact with the (presumably powered-off/suspended) box at all. Same
+    /// ignore-the-body shape as `power`/`stop`: the JSON success body
+    /// (`{"mac":...,"sent":true}`) adds nothing the exit code doesn't.
+    public func wake(mac: String?, host: String?) async throws {
+        var args = ["--json", "wake"]
+        if let mac { args += ["--mac", mac] }
+        if let host { args += ["--host", host] }
         let result = try await runner.run(args, timeout: 20)
         guard result.exitCode == 0 else {
             throw TTError.commandFailed(command: args, exitCode: result.exitCode, stderr: result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))

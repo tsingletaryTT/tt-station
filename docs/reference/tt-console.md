@@ -131,6 +131,7 @@ pub struct BoxLifecycleSnapshot {
     pub config: Option<ConfigSummary>,    // from GET /config
     pub pairing: Option<PairingState>,    // parsed from the journal tail
     pub logs: Vec<String>,                // from GET /logs?source=container&tail=20 (default [])
+    pub polkit_power_advisory: Option<String>, // Some(msg) when the polkit power rule is missing
 }
 
 pub enum ServiceState { Active, Inactive, Activating, Deactivating, Failed, Unknown }
@@ -191,6 +192,12 @@ Notes on how the snapshot is assembled (`console::env::collect_snapshot`):
   `tt-inference-server` repo is configured for a non-`runpy` backend), or a body that fails to
   parse as `LogsInfo` all degrade `logs` to `vec![]` — a serving-log pane with nothing to show
   is exactly as normal a state as an idle box.
+- **`polkit_power_advisory` is a plain `Path::exists()` check**, not an HTTP/systemctl/journal
+  probe — `/etc/polkit-1/rules.d/49-tt-station-power.rules` (installed by the `tt-station`
+  `.deb`, see `docs/reference/power-controls.md`). `None` when the rule is present; `Some(msg)`
+  otherwise, always non-fatal and purely informational (only the three machine-power ops in
+  `POST /power` actually need the rule — reset-chips and every other route work without it).
+  Rendered as an extra line in the TUI's `status` panel when present.
 
 ## Log pane
 

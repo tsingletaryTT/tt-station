@@ -19,6 +19,7 @@ use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 use tt_station_agentd::config;
 use tt_station_agentd::device::detect_device_mesh;
+use tt_station_agentd::net;
 use tt_station_agentd::routes::{app, AppState, StatusAdvertiser};
 use tt_station_agentd::serving::docker::{CommandRunner, DockerConfig, RealCommandRunner};
 use tt_station_agentd::serving::make_backend;
@@ -359,6 +360,30 @@ struct Cli {
     /// assumes elsewhere -- see the module-level `CLAUDE.md`).
     #[arg(long = "ssh-user")]
     ssh_user: Option<String>,
+
+    /// Override the `reset-chips` `POST /power` command (default:
+    /// `tt-smi -r`). Space-separated argv, e.g. `--power-reset-chips-cmd
+    /// tt-smi -r --some-flag`. Only wired via `with_power_config` when at
+    /// least one `--power-*-cmd` flag is given; any flag left unset falls
+    /// back to ITS OWN built-in default, not an empty command. See
+    /// `docs/reference/power-controls.md`.
+    #[arg(long = "power-reset-chips-cmd", num_args = 1..)]
+    power_reset_chips_cmd: Option<Vec<String>>,
+
+    /// Override the `suspend` `POST /power` command (default: `systemctl
+    /// suspend`). See `--power-reset-chips-cmd` for the argv/fallback rules.
+    #[arg(long = "power-suspend-cmd", num_args = 1..)]
+    power_suspend_cmd: Option<Vec<String>>,
+
+    /// Override the `reboot` `POST /power` command (default: `systemctl
+    /// reboot`). See `--power-reset-chips-cmd` for the argv/fallback rules.
+    #[arg(long = "power-reboot-cmd", num_args = 1..)]
+    power_reboot_cmd: Option<Vec<String>>,
+
+    /// Override the `shutdown` `POST /power` command (default: `systemctl
+    /// poweroff`). See `--power-reset-chips-cmd` for the argv/fallback rules.
+    #[arg(long = "power-shutdown-cmd", num_args = 1..)]
+    power_shutdown_cmd: Option<Vec<String>>,
 }
 
 /// `docker` fallback-backend default serving image, used only when
@@ -740,6 +765,41 @@ async fn main() -> Result<()> {
     let (ssh_user, ssh_authorized_keys_path) = resolve_ssh_target(cli.ssh_user.clone());
     let state = state.with_ssh_target(ssh_authorized_keys_path, ssh_user);
 
+    // Configure the additive `POST /power` route (Task 2, see routes.rs):
+    // the four command vectors `run_power_command` shells out to. Only
+    // applied when the operator gave at least one `--power-*-cmd` flag --
+    // otherwise `AppState::new_inner`'s built-in defaults (`tt-smi -r` /
+    // `systemctl suspend|reboot|poweroff`) stand untouched, same "no-op
+    // unless asked" contract every other `with_*` builder here follows. A
+    // flag left unset even when a SIBLING flag is given still falls back to
+    // ITS OWN default (not an empty command) -- e.g. `--power-suspend-cmd`
+    // alone doesn't blank out reboot/shutdown/reset-chips.
+    let state = if cli.power_reset_chips_cmd.is_some()
+        || cli.power_suspend_cmd.is_some()
+        || cli.power_reboot_cmd.is_some()
+        || cli.power_shutdown_cmd.is_some()
+    {
+        let reset_chips = cli
+            .power_reset_chips_cmd
+            .clone()
+            .unwrap_or_else(|| vec!["tt-smi".to_string(), "-r".to_string()]);
+        let suspend = cli
+            .power_suspend_cmd
+            .clone()
+            .unwrap_or_else(|| vec!["systemctl".to_string(), "suspend".to_string()]);
+        let reboot = cli
+            .power_reboot_cmd
+            .clone()
+            .unwrap_or_else(|| vec!["systemctl".to_string(), "reboot".to_string()]);
+        let shutdown = cli
+            .power_shutdown_cmd
+            .clone()
+            .unwrap_or_else(|| vec!["systemctl".to_string(), "poweroff".to_string()]);
+        state.with_power_config(reset_chips, suspend, reboot, shutdown)
+    } else {
+        state
+    };
+
     // Detect this box's device mesh ONCE at startup (not per-request): run
     // `tt-smi -s` through the exact same command seam `GET /telemetry` uses
     // (`RealCommandRunner`, see `collect_snapshot` in routes.rs) and map its
@@ -754,6 +814,24 @@ async fn main() -> Result<()> {
     // outcome. See `detect_startup_device_mesh`'s doc comment.
     let device_mesh = detect_startup_device_mesh(&rc.tt_smi_bin).await;
     let state = state.with_device_mesh(device_mesh.clone());
+
+    // Detect this box's primary NIC MAC ONCE at startup (mirrors the
+    // device-mesh detection immediately above): best-effort, synchronous
+    // (no external `tt-smi`-style process that can hang, just `ip route
+    // get`/`/sys/class/net` reads -- see `net::primary_mac`'s doc comment),
+    // so it needs neither a timeout ceiling nor a `spawn_blocking` wrapper.
+    // Reported on `/status` and the mDNS TXT record so the Mac can send a
+    // Wake-on-LAN magic packet to this box when it's off. ANY failure here
+    // (no default route, unreadable `/sys/class/net`, no non-loopback iface)
+    // degrades to `None` -- Wake is simply unavailable for that box, never a
+    // startup failure.
+    let mac = net::primary_mac();
+    if mac.is_none() {
+        eprintln!(
+            "tt-station-agentd: could not detect a primary NIC MAC; Wake-on-LAN will be unavailable for this box"
+        );
+    }
+    let state = state.with_mac(mac.clone());
 
     // Bind the control-plane socket FIRST, then advertise on the LAN, so
     // discovery never races ahead of the control-plane API actually being
@@ -770,7 +848,7 @@ async fn main() -> Result<()> {
     // sharing the same underlying daemon, which gets attached to `state` so
     // `/run`/`/stop` can re-publish `status` whenever it changes instead of
     // it going stale after boot (see `StatusAdvertiser`'s doc comment).
-    let (_mdns_guard, status_advertiser) = advertise(&rc, state.status(), device_mesh)
+    let (_mdns_guard, status_advertiser) = advertise(&rc, state.status(), device_mesh, mac)
         .context("failed to start mDNS advertisement")?;
     let state = state.with_status_advertiser(Arc::new(status_advertiser));
 
@@ -871,6 +949,11 @@ struct MdnsStatusAdvertiser {
     /// re-emitted on every status re-publish -- see the identically-named
     /// field on [`BoxRecord`] (Task 3.5).
     device_mesh: Option<String>,
+    /// This box's startup-detected primary NIC MAC (or `None` if detection
+    /// failed/didn't run), captured once at construction in `advertise` and
+    /// re-emitted on every status re-publish -- see the identically-named
+    /// field on [`BoxRecord`] (Task 3, Wake-on-LAN).
+    mac: Option<String>,
 }
 
 impl StatusAdvertiser for MdnsStatusAdvertiser {
@@ -886,6 +969,11 @@ impl StatusAdvertiser for MdnsStatusAdvertiser {
             // the mDNS TXT record carries `device_mesh` just like `/status`
             // does, keeping every discovery path hardware-aware.
             device_mesh: self.device_mesh.clone(),
+            // Threaded through from the startup-detected primary NIC MAC
+            // (Task 3) so the mDNS TXT record carries `mac` just like
+            // `/status` does, letting the Mac send a Wake-on-LAN magic
+            // packet without a separate probe.
+            mac: self.mac.clone(),
         };
 
         let txt_pairs = txt_encode(&record);
@@ -938,7 +1026,10 @@ impl StatusAdvertiser for MdnsStatusAdvertiser {
 /// truth for what the box's status is at boot. Likewise `device_mesh` is
 /// passed in from the same startup detection `main` feeds to
 /// `AppState::with_device_mesh`, so the mDNS TXT record and `/status` never
-/// disagree about this box's hardware (Task 3.5).
+/// disagree about this box's hardware (Task 3.5). `mac` mirrors the same
+/// pattern for the box's startup-detected primary NIC MAC (Task 3), so the
+/// TXT record and `/status` never disagree about the Wake-on-LAN target
+/// either.
 ///
 /// Returns both the [`MdnsGuard`] (unregister/shutdown on drop, same as
 /// before this function grew a second return value) and an
@@ -949,6 +1040,7 @@ fn advertise(
     rc: &config::ResolvedConfig,
     status: ServingStatus,
     device_mesh: Option<String>,
+    mac: Option<String>,
 ) -> Result<(MdnsGuard, MdnsStatusAdvertiser)> {
     let host = format!("{}.local.", rc.name);
     let record = BoxRecord {
@@ -959,6 +1051,7 @@ fn advertise(
         status,
         apiver: rc.apiver,
         device_mesh: device_mesh.clone(),
+        mac: mac.clone(),
     };
 
     let txt_pairs = txt_encode(&record);
@@ -999,6 +1092,7 @@ fn advertise(
         chips: rc.chips.clone(),
         apiver: rc.apiver,
         device_mesh,
+        mac,
     };
 
     Ok((guard, status_advertiser))

@@ -50,7 +50,7 @@ any box:
                                                              ~/.config/tt-station/agentd.toml)
 """
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 import json
 import os
@@ -487,6 +487,47 @@ class Panel(Gtk.ApplicationWindow):
             btns.append(b)
         root.append(btns)
 
+        # ── Power row: LOCAL machine power actions, run right on this box's
+        # own screen (never over the network/agent). Reset chips is a board
+        # reset (tt-smi -r, same op as the agent's own pre-serve reset);
+        # Suspend/Reboot/Shut Down shell `systemctl <verb>` directly — the
+        # tt-station .deb ships a polkit rule (Task 9) that lets the run-user
+        # invoke these without a password prompt. Deliberately NO Wake button:
+        # waking the box FROM the box's own screen is meaningless (it's
+        # already awake to be looking at this).
+        power_hdr = Gtk.Label(label="Power", xalign=0)
+        power_hdr.add_css_class("subtle")
+        root.append(power_hdr)
+        power_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, homogeneous=True)
+        self.btn_power_reset = Gtk.Button(label="Reset chips")
+        self.btn_power_reset.set_tooltip_text(
+            "Reset the Blackhole board (tt-smi -r) — clears wedged mesh ethernet "
+            "cores. Runs immediately, no confirmation (non-destructive to the OS).")
+        self.btn_power_reset.connect("clicked", lambda _b: self.power_action("reset-chips"))
+        self.btn_power_suspend = Gtk.Button(label="Suspend")
+        self.btn_power_suspend.set_tooltip_text("Suspend this machine (systemctl suspend).")
+        self.btn_power_suspend.connect(
+            "clicked", lambda _b: self._confirm_power(
+                "suspend", "Suspend this box?",
+                "The box will suspend to RAM. Anything serving will pause until it wakes."))
+        self.btn_power_reboot = Gtk.Button(label="Reboot")
+        self.btn_power_reboot.set_tooltip_text("Reboot this machine (systemctl reboot).")
+        self.btn_power_reboot.connect(
+            "clicked", lambda _b: self._confirm_power(
+                "reboot", "Reboot this box?",
+                "The box will restart. Anything serving will be interrupted."))
+        self.btn_power_shutdown = Gtk.Button(label="Shut Down")
+        self.btn_power_shutdown.set_tooltip_text("Shut down this machine (systemctl poweroff).")
+        self.btn_power_shutdown.connect(
+            "clicked", lambda _b: self._confirm_power(
+                "shutdown", "Shut down this box?",
+                "The box will power off. You'll need physical/remote-power access "
+                "to turn it back on."))
+        for b in (self.btn_power_reset, self.btn_power_suspend,
+                  self.btn_power_reboot, self.btn_power_shutdown):
+            power_btns.append(b)
+        root.append(power_btns)
+
         # ── Connect row: one-click launchers for the serving model. Shown only
         # while the box is serving (see _refresh_connect). Mirrors the macOS
         # app's Connect card, run LOCALLY here (docker / terminal / xdg-open).
@@ -649,6 +690,54 @@ class Panel(Gtk.ApplicationWindow):
 
         self._log("hard reset: stopping agent, clearing pairings, resetting board…")
         self._clear_code()
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ── Power actions (local: tt-smi -r / systemctl suspend|reboot|poweroff) ──
+    def _confirm_power(self, action: str, question: str, consequence: str):
+        """Show a QUESTION/OK-CANCEL dialog naming the consequence before
+        running a disruptive power action (suspend/reboot/shutdown). reset-chips
+        skips this entirely (see power_action's direct wiring above) since it
+        doesn't touch the OS session."""
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text=question,
+            secondary_text=consequence,
+        )
+
+        def on_response(dlg, response):
+            dlg.destroy()
+            if response == Gtk.ResponseType.OK:
+                self.power_action(action)
+
+        dialog.connect("response", on_response)
+        dialog.present()
+
+    def power_action(self, action: str):
+        """Run a local power action's argv (panel_launchers.power_command) in
+        a worker thread — `systemctl suspend/reboot/poweroff` block until the
+        transition actually starts, so this must never run on the GTK main
+        thread. A missing binary (FileNotFoundError — e.g. no `tt-smi` on a
+        dev box, or `systemctl` absent) surfaces via the existing `_log` inline
+        message path, exactly like every other subprocess call in this file —
+        never a crash.
+        """
+        try:
+            argv = pl.power_command(action)
+        except ValueError as e:
+            self._log(f"power action failed: {e}")
+            return
+
+        def worker():
+            try:
+                subprocess.run(argv, check=False)
+                GLib.idle_add(self._log, f"{action}: {' '.join(argv)}")
+            except FileNotFoundError:
+                GLib.idle_add(self._log, f"{action} failed: {argv[0]!r} not found")
+
+        self._log(f"{action} requested ({' '.join(argv)})")
         threading.Thread(target=worker, daemon=True).start()
 
     # ── Connect launchers (local: docker / terminal / xdg-open) ──

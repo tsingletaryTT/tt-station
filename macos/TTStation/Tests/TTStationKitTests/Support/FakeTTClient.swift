@@ -136,6 +136,26 @@ final class FakeTTClient: TTCommands {
     func stop(host: String) async throws {
         stopCalled = true
     }
+    var powerError: TTError?
+    private(set) var powerCalled = false
+    private(set) var lastPowerAction: PowerAction?
+    private(set) var lastPowerHost: String?
+    func power(_ action: PowerAction, host: String?) async throws {
+        powerCalled = true
+        lastPowerAction = action
+        lastPowerHost = host
+        if let powerError { throw powerError }
+    }
+    var wakeError: TTError?
+    private(set) var wakeCalled = false
+    private(set) var lastWakeMac: String?
+    private(set) var lastWakeHost: String?
+    func wake(mac: String?, host: String?) async throws {
+        wakeCalled = true
+        lastWakeMac = mac
+        lastWakeHost = host
+        if let wakeError { throw wakeError }
+    }
     func sshAuthorize(host: String) async throws -> SshAuthorizeInfo {
         sshAuthorizeCalled = true
         if let sshAuthorizeError { throw sshAuthorizeError }

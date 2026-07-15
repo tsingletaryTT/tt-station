@@ -57,6 +57,13 @@ pub struct BoxRecord {
     /// -- see `txt_decode`'s doc comment. Task 3's `tt --json discover`
     /// output surfaces whatever this field ends up holding either way.
     pub device_mesh: Option<String>,
+    /// This box's detected primary NIC MAC (`"aa:bb:cc:dd:ee:ff"`), passed
+    /// through from the agent's `/status`/mDNS TXT `mac` field (Task 3 --
+    /// see `tt-station-agentd::routes::StatusResponse` and
+    /// `tt-station-agentd::net::primary_mac`). Lets a client (the Mac app)
+    /// send a Wake-on-LAN magic packet to this box when it's off. `None`
+    /// when detection failed/didn't run, mirroring `device_mesh` exactly.
+    pub mac: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -156,6 +163,12 @@ pub struct StatusInfo {
     /// named field on [`BoxRecord`] for the same concept surfaced via
     /// discovery instead of a direct status probe.
     pub device_mesh: Option<String>,
+    /// This box's detected primary NIC MAC, or `None` when the agent's own
+    /// detection failed/didn't run -- passed through verbatim from the
+    /// agent's `/status` `mac` field (Task 3). See the identically-named
+    /// field on [`BoxRecord`] for the same concept surfaced via discovery
+    /// instead of a direct status probe.
+    pub mac: Option<String>,
 }
 
 /// `GET /config`'s response body (see `tt-station-agentd::routes::get_config`,
@@ -255,6 +268,19 @@ pub struct BoxLifecycleSnapshot {
     /// same "nothing to show yet" state as a box that hasn't served anything.
     #[serde(default)]
     pub logs: Vec<String>,
+    /// One-line advisory when the polkit rule that lets `POST /power`'s
+    /// suspend/reboot/shutdown actions (and the box panel's local power row)
+    /// run without an interactive auth prompt -- `/etc/polkit-1/rules.d/
+    /// 49-tt-station-power.rules`, installed by the `tt-station` `.deb`
+    /// (Task 9, see `docs/reference/power-controls.md`) -- is missing.
+    /// `None` when the rule is present, purely informational either way:
+    /// nothing here is fatal, and reset-chips/the CLI/every other route are
+    /// unaffected by its absence (only the machine-power ops need it).
+    /// `#[serde(default)]` for the same forward-compat reason as `logs`: a
+    /// `--snapshot` recorded before this field existed must still
+    /// deserialize.
+    #[serde(default)]
+    pub polkit_power_advisory: Option<String>,
 }
 
 impl ServingStatus {
@@ -289,6 +315,12 @@ pub fn txt_encode(rec: &BoxRecord) -> Vec<(String, String)> {
     // empty `device_mesh=` pair) is how `None` round-trips (Task 3.5).
     if let Some(mesh) = &rec.device_mesh {
         pairs.push(("device_mesh".to_string(), mesh.clone()));
+    }
+    // Same reasoning as `device_mesh` immediately above: only emit `mac`
+    // when known, so absence of the key (not an empty `mac=` pair) is how
+    // `None` round-trips (Task 3, Wake-on-LAN).
+    if let Some(mac) = &rec.mac {
+        pairs.push(("mac".to_string(), mac.clone()));
     }
     pairs
 }
@@ -336,6 +368,11 @@ pub fn txt_decode(
         // agents, or advertisers that never learned their mesh, simply omit
         // the key, and that must decode to `None` rather than erroring.
         device_mesh: txt.get("device_mesh").cloned(),
+        // `mac` is optional in the TXT map, same reasoning as `device_mesh`
+        // (Task 3) -- older agents, or boxes where MAC detection failed,
+        // simply omit the key, and that must decode to `None` rather than
+        // erroring.
+        mac: txt.get("mac").cloned(),
     })
 }
 
@@ -392,6 +429,7 @@ mod tests {
             status: ServingStatus::Serving("llama3".to_string()),
             apiver: 1,
             device_mesh: Some("p300x2".to_string()),
+            mac: Some("aa:bb:cc:dd:ee:ff".to_string()),
         };
         let json = serde_json::to_string(&rec).unwrap();
         assert!(
@@ -439,6 +477,8 @@ mod tests {
         // or advertisers that never learned their mesh) must still decode
         // cleanly to `None` rather than erroring or inventing a value.
         assert_eq!(rec.device_mesh, None);
+        // Same back-compat guarantee for `mac` (Task 3, Wake-on-LAN).
+        assert_eq!(rec.mac, None);
     }
 
     /// `txt_encode` must emit a `device_mesh` pair when the record has one,
@@ -454,6 +494,7 @@ mod tests {
             status: ServingStatus::Idle,
             apiver: 1,
             device_mesh: Some("p300x2".to_string()),
+            mac: None,
         };
         let pairs = txt_encode(&rec);
         assert!(
@@ -475,6 +516,7 @@ mod tests {
             status: ServingStatus::Idle,
             apiver: 1,
             device_mesh: None,
+            mac: None,
         };
         let pairs = txt_encode(&rec);
         assert!(
@@ -495,6 +537,64 @@ mod tests {
         txt.insert("device_mesh".into(), "p300x2".into());
         let rec = txt_decode("qb2-lab", "qb2-lab.local", 8765, &txt).unwrap();
         assert_eq!(rec.device_mesh, Some("p300x2".to_string()));
+    }
+
+    /// `txt_encode` must emit a `mac` pair when the record has one -- mirrors
+    /// `txt_encode_includes_device_mesh_when_some` exactly (Task 3,
+    /// Wake-on-LAN).
+    #[test]
+    fn txt_encode_includes_mac_when_some() {
+        let rec = BoxRecord {
+            name: "qb2-lab".to_string(),
+            host: "qb2-lab.local".to_string(),
+            ctrl_port: 8765,
+            chips: "4xBH".to_string(),
+            status: ServingStatus::Idle,
+            apiver: 1,
+            device_mesh: None,
+            mac: Some("aa:bb:cc:dd:ee:ff".to_string()),
+        };
+        let pairs = txt_encode(&rec);
+        assert!(
+            pairs.contains(&("mac".to_string(), "aa:bb:cc:dd:ee:ff".to_string())),
+            "expected a mac pair, got: {pairs:?}"
+        );
+    }
+
+    /// `txt_encode` must NOT emit an empty `mac` pair when the record has
+    /// none -- mirrors `txt_encode_omits_device_mesh_when_none` exactly.
+    #[test]
+    fn txt_encode_omits_mac_when_none() {
+        let rec = BoxRecord {
+            name: "qb2-lab".to_string(),
+            host: "qb2-lab.local".to_string(),
+            ctrl_port: 8765,
+            chips: "4xBH".to_string(),
+            status: ServingStatus::Idle,
+            apiver: 1,
+            device_mesh: None,
+            mac: None,
+        };
+        let pairs = txt_encode(&rec);
+        assert!(
+            !pairs.iter().any(|(k, _)| k == "mac"),
+            "expected no mac pair, got: {pairs:?}"
+        );
+    }
+
+    /// `txt_decode` must read a present `mac` key back into `Some` -- mirrors
+    /// `txt_decode_reads_device_mesh_when_present` exactly.
+    #[test]
+    fn txt_decode_reads_mac_when_present() {
+        let mut txt = std::collections::HashMap::new();
+        txt.insert("name".into(), "qb2-lab".into());
+        txt.insert("apiver".into(), "1".into());
+        txt.insert("chips".into(), "4xBH".into());
+        txt.insert("status".into(), "idle".into());
+        txt.insert("ctrl".into(), "8765".into());
+        txt.insert("mac".into(), "aa:bb:cc:dd:ee:ff".into());
+        let rec = txt_decode("qb2-lab", "qb2-lab.local", 8765, &txt).unwrap();
+        assert_eq!(rec.mac, Some("aa:bb:cc:dd:ee:ff".to_string()));
     }
 
     /// `BoxLifecycleSnapshot` is the one shared JSON contract for a box's
@@ -520,6 +620,7 @@ mod tests {
                 expires_in_secs: 107,
             }),
             logs: vec!["line one".into(), "line two".into()],
+            polkit_power_advisory: Some("power controls need the polkit rule".into()),
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: BoxLifecycleSnapshot = serde_json::from_str(&json).unwrap();
@@ -550,5 +651,7 @@ mod tests {
         let snap: BoxLifecycleSnapshot =
             serde_json::from_str(json).expect("must deserialize without a `logs` key");
         assert!(snap.logs.is_empty());
+        // Same back-compat guarantee for `polkit_power_advisory` (Task 9).
+        assert!(snap.polkit_power_advisory.is_none());
     }
 }

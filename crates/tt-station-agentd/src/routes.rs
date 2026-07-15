@@ -206,6 +206,14 @@ struct Inner {
     /// Purely additive: only `GET /status` reads it, so a client (Task 3's
     /// `tt --json status`) can rank models by hardware fit.
     device_mesh: Option<String>,
+    /// This box's primary NIC MAC (`"aa:bb:cc:dd:ee:ff"`), detected ONCE at
+    /// startup by `net::primary_mac` (see `main.rs`). `None` when detection
+    /// failed (no default route, unreadable `/sys/class/net`, no usable
+    /// non-loopback iface) -- never fatal, just an absent hint. Defaults to
+    /// `None`; set via `with_mac`. Purely additive: only `GET /status` reads
+    /// it, so a client (the Mac app) can send a Wake-on-LAN magic packet to
+    /// this box when it's off.
+    mac: Option<String>,
     /// Redacted view of the agent's resolved serving config, served verbatim
     /// by `GET /config` -- see `libttstation::model::ConfigSummary`'s doc
     /// comment for why it deliberately carries no secrets. Defaults to an
@@ -236,6 +244,20 @@ struct Inner {
     /// active. `None` for backends without a workflow_logs dir (e.g. dstack).
     /// Enables the `/logs` routes to locate `workflow_logs/{docker_server,run_logs}`.
     tt_inference_repo: Option<std::path::PathBuf>,
+    /// Command vector run for `PowerAction::ResetChips` (a `tt-smi -r` board
+    /// reset). Defaults to `["tt-smi", "-r"]`; overridden by
+    /// `with_power_config` (tests / mock-box inject a harmless stub so no
+    /// real board reset fires). See `run_power_command`.
+    power_reset_chips_cmd: Vec<String>,
+    /// Command vector run for `PowerAction::Suspend`. Defaults to
+    /// `["systemctl", "suspend"]`; overridden by `with_power_config`.
+    power_suspend_cmd: Vec<String>,
+    /// Command vector run for `PowerAction::Reboot`. Defaults to
+    /// `["systemctl", "reboot"]`; overridden by `with_power_config`.
+    power_reboot_cmd: Vec<String>,
+    /// Command vector run for `PowerAction::Shutdown`. Defaults to
+    /// `["systemctl", "poweroff"]`; overridden by `with_power_config`.
+    power_shutdown_cmd: Vec<String>,
 }
 
 impl AppState {
@@ -302,6 +324,7 @@ impl AppState {
                 serving_host: DEFAULT_SERVING_HOST.to_string(),
                 serving_port: DEFAULT_SERVING_PORT,
                 device_mesh: None,
+                mac: None,
                 config_summary: ConfigSummary {
                     active_profile: None,
                     available_profiles: vec![],
@@ -315,6 +338,10 @@ impl AppState {
                 ssh_authorized_keys_path: PathBuf::new(),
                 ssh_user: "ttuser".to_string(),
                 tt_inference_repo: None,
+                power_reset_chips_cmd: vec!["tt-smi".to_string(), "-r".to_string()],
+                power_suspend_cmd: vec!["systemctl".to_string(), "suspend".to_string()],
+                power_reboot_cmd: vec!["systemctl".to_string(), "reboot".to_string()],
+                power_shutdown_cmd: vec!["systemctl".to_string(), "poweroff".to_string()],
             }),
         }
     }
@@ -427,6 +454,26 @@ impl AppState {
         self
     }
 
+    /// Set this box's detected primary NIC MAC (see the `mac` field's doc
+    /// comment). Additive counterpart to `with_device_mesh`/
+    /// `with_serving_config`/etc -- same "call immediately after
+    /// construction, while this is still the sole owner of its `Arc<Inner>`"
+    /// contract (`Arc::get_mut` only succeeds then). Called after a clone
+    /// exists, it logs a warning and leaves the default (`None`) in place
+    /// rather than panicking.
+    ///
+    /// Optional: an `AppState` never given this config still answers
+    /// `/status` with `"mac": null` (Wake-on-LAN simply unavailable).
+    pub fn with_mac(mut self, mac: Option<String>) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.mac = mac,
+            None => eprintln!(
+                "tt-station-agentd: with_mac called on an already-shared AppState; mac not applied"
+            ),
+        }
+        self
+    }
+
     /// Attach the redacted `ConfigSummary` `GET /config` serves. Additive
     /// counterpart to `with_serving_config`/`with_telemetry_config` -- same
     /// "call immediately after construction, while this is still the sole
@@ -474,6 +521,37 @@ impl AppState {
         self
     }
 
+    /// Override the four power-action command vectors (tests / mock-box
+    /// inject a harmless stub so no real power event fires). Additive
+    /// counterpart to `with_ssh_target`/`with_log_source`/etc -- same "call
+    /// immediately after construction, while this is still the sole owner
+    /// of its `Arc<Inner>`" contract (`Arc::get_mut` only succeeds then).
+    /// Called after a clone exists, it logs a warning and leaves the
+    /// defaults in place rather than panicking.
+    ///
+    /// Defaults set in `new_inner` (unchanged if this is never called):
+    /// `tt-smi -r` (reset-chips) and `systemctl suspend|reboot|poweroff`.
+    pub fn with_power_config(
+        mut self,
+        reset_chips: Vec<String>,
+        suspend: Vec<String>,
+        reboot: Vec<String>,
+        shutdown: Vec<String>,
+    ) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => {
+                inner.power_reset_chips_cmd = reset_chips;
+                inner.power_suspend_cmd = suspend;
+                inner.power_reboot_cmd = reboot;
+                inner.power_shutdown_cmd = shutdown;
+            }
+            None => eprintln!(
+                "tt-station-agentd: with_power_config called on an already-shared AppState; power config not applied"
+            ),
+        }
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.inner.name
     }
@@ -486,6 +564,12 @@ impl AppState {
     /// or never ran (see `with_device_mesh`). Read by `GET /status`.
     pub fn device_mesh(&self) -> Option<&str> {
         self.inner.device_mesh.as_deref()
+    }
+
+    /// This box's detected primary NIC MAC, or `None` if detection failed or
+    /// never ran (see `with_mac`). Read by `GET /status`.
+    pub fn mac(&self) -> Option<&str> {
+        self.inner.mac.as_deref()
     }
 
     /// `tt-smi` binary the `/telemetry` stream runs (see `with_telemetry_config`).
@@ -553,6 +637,49 @@ impl AppState {
     /// from, if the runpy backend is active (see `with_log_source`).
     fn tt_inference_repo(&self) -> Option<&std::path::Path> {
         self.inner.tt_inference_repo.as_deref()
+    }
+
+    /// Run the configured command for `action`, blocking (call under
+    /// `spawn_blocking` -- this shells out, same rule as `ServingBackend::
+    /// start`/`stop`). Machine ops (suspend/reboot/shutdown) best-effort
+    /// stop any serving container first so a model isn't hard-killed by the
+    /// machine going down; a stop failure is logged but non-fatal here --
+    /// we're taking the box down regardless, so refusing the power action
+    /// over a stop that didn't work would just strand the operator. Does
+    /// NOT touch tokens/SSH/status: unlike `POST /reset` (which unpairs),
+    /// every power action here -- including `reset-chips` -- preserves
+    /// pairing.
+    pub fn run_power_command(&self, action: crate::power::PowerAction) -> anyhow::Result<()> {
+        use crate::power::PowerAction;
+
+        if action.is_machine_op() {
+            if let Some(ep) = self.endpoint() {
+                if let Err(e) = self.backend().stop(&ep.model) {
+                    eprintln!(
+                        "power: best-effort stop of '{}' before {action:?} failed (continuing): {e}",
+                        ep.model
+                    );
+                }
+            }
+        }
+
+        let cmd = match action {
+            PowerAction::ResetChips => &self.inner.power_reset_chips_cmd,
+            PowerAction::Suspend => &self.inner.power_suspend_cmd,
+            PowerAction::Reboot => &self.inner.power_reboot_cmd,
+            PowerAction::Shutdown => &self.inner.power_shutdown_cmd,
+        };
+        let (bin, args) = cmd
+            .split_first()
+            .ok_or_else(|| anyhow::anyhow!("empty power command configured for {action:?}"))?;
+        let status = std::process::Command::new(bin)
+            .args(args)
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to spawn power command {cmd:?}: {e}"))?;
+        if !status.success() {
+            anyhow::bail!("power command {cmd:?} exited with {status}");
+        }
+        Ok(())
     }
 
     /// Cheap `Arc` clone of the serving backend, for a handler to move into
@@ -1063,6 +1190,11 @@ struct StatusResponse {
     /// `tt --json status`) rank models by hardware fit without its own
     /// `tt-smi` access.
     device_mesh: Option<String>,
+    /// This box's detected primary NIC MAC (`"aa:bb:cc:dd:ee:ff"`), or `null`
+    /// when detection failed/didn't run -- see `AppState::with_mac`. Lets a
+    /// client (the Mac app) send a Wake-on-LAN magic packet to this box when
+    /// it's off.
+    mac: Option<String>,
 }
 
 async fn get_status(
@@ -1077,6 +1209,7 @@ async fn get_status(
         chips: state.chips().to_string(),
         status: status.to_txt(),
         device_mesh: state.device_mesh().map(str::to_string),
+        mac: state.mac().map(str::to_string),
     })
 }
 
@@ -1361,6 +1494,90 @@ async fn reset(
     state.set_idle();
 
     Ok(Json(serde_json::json!({})))
+}
+
+/// The success status for a power action: reset-chips completes synchronously
+/// (200), while machine ops only *initiate* teardown before the box goes down
+/// (202 Accepted).
+fn power_success_status(action: crate::power::PowerAction) -> StatusCode {
+    if action.is_machine_op() {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    }
+}
+
+/// JSON body accepted by `POST /power`.
+#[derive(Deserialize)]
+struct PowerRequest {
+    action: String,
+}
+
+/// `POST /power { "action": "reset-chips" | "suspend" | "reboot" | "shutdown" }`
+/// (bearer-guarded, same `BearerAuth` gate as `/run`/`/stop`/`/reset`): run
+/// the configured command for `action` via `AppState::run_power_command`.
+///
+/// Status codes:
+///   - `400` if `action` doesn't parse (`PowerAction::parse`) -- caller error,
+///     checked before anything runs.
+///   - `200 {}` on a successful `reset-chips` -- it completes synchronously
+///     (board reset), so the caller can trust the response body.
+///   - `202 { "action", "accepted": true }` on a successful machine op
+///     (suspend/reboot/shutdown) -- the command only *initiates* teardown;
+///     the box may go down before a `200` could ever be observed, so this
+///     reports "accepted", not "done".
+///   - `403` if the command fails with a permission/polkit-shaped error
+///     (no rule installed for the run-user to invoke `systemctl`/`tt-smi`
+///     without a password) -- the operator's box to fix, not this agent's,
+///     so the message points at `docs/reference/power-controls.md`.
+///   - `500` for any other command failure (e.g. the binary itself is
+///     missing) -- `backend_error`, same as every other route's fallback.
+async fn power(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(req): Json<PowerRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let action = crate::power::PowerAction::parse(&req.action).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("unknown power action: {}", req.action),
+            }),
+        )
+    })?;
+
+    let s = state.clone();
+    tokio::task::spawn_blocking(move || s.run_power_command(action))
+        .await
+        .map_err(|join_err| backend_error(anyhow::anyhow!("power task panicked: {join_err}")))?
+        .map_err(|e| {
+            // A permission failure (no polkit rule) is the operator's to fix --
+            // distinguish it from a generic 500 with a pointer to the doc.
+            let msg = e.to_string();
+            if msg.contains("Interactive authentication required")
+                || msg.contains("Access denied")
+                || msg.contains("not authorized")
+            {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "{msg} — the box is not permitted to {}. Install the polkit rule (see docs/reference/power-controls.md).",
+                            req.action
+                        ),
+                    }),
+                )
+            } else {
+                backend_error(e)
+            }
+        })?;
+
+    let body = if action.is_machine_op() {
+        serde_json::json!({ "action": req.action, "accepted": true })
+    } else {
+        serde_json::json!({})
+    };
+    Ok((power_success_status(action), Json(body)))
 }
 
 /// `GET /endpoint` (bearer-guarded): the `Endpoint` of whatever's currently
@@ -2028,6 +2245,7 @@ pub fn app(state: AppState) -> Router {
         .route("/run", post(run_model))
         .route("/stop", post(stop_model))
         .route("/reset", post(reset))
+        .route("/power", post(power))
         .route("/endpoint", get(get_endpoint))
         .route("/ssh/authorize", post(ssh_authorize).delete(ssh_revoke))
         .with_state(state)
@@ -2111,6 +2329,45 @@ mod telemetry_inference_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_power_command_runs_the_configured_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ttpower-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("ran");
+        let _ = std::fs::remove_file(&marker);
+        let script = dir.join("fake-power.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf x >> '{m}'\n", m = marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cmd = vec![script.to_string_lossy().into_owned()];
+
+        let state = AppState::new(
+            "t".to_string(),
+            "1xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_power_config(cmd.clone(), cmd.clone(), cmd.clone(), cmd.clone());
+
+        state
+            .run_power_command(crate::power::PowerAction::Reboot)
+            .expect("power command runs");
+        assert!(marker.exists(), "configured power command was executed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn power_success_status_is_202_for_machine_ops_200_for_reset_chips() {
+        use crate::power::PowerAction;
+        assert_eq!(power_success_status(PowerAction::ResetChips), StatusCode::OK);
+        assert_eq!(power_success_status(PowerAction::Suspend), StatusCode::ACCEPTED);
+        assert_eq!(power_success_status(PowerAction::Reboot), StatusCode::ACCEPTED);
+        assert_eq!(power_success_status(PowerAction::Shutdown), StatusCode::ACCEPTED);
     }
 }
 

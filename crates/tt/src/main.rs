@@ -15,6 +15,8 @@
 //!   tt [--json] serving --host <host:port>
 //!   tt [--json] catalog --host <host:port> [--refresh] [--catalog-file <path>]
 //!   tt [--json] ssh-authorize --host <host:port> [--revoke] [--date <YYYY-MM-DD>]
+//!   tt [--json] power <reset-chips|suspend|reboot|shutdown> --host <host:port>
+//!   tt [--json] wake --mac <aa:bb:cc:dd:ee:ff>
 //!   tt console [--snapshot] [--install-service] [--ctrl-port <port>]
 //!
 //! `--json` is global (accepted before or after the subcommand) and switches
@@ -64,6 +66,14 @@ use libttstation::secrets::{default_store, FileStore, SecretStore};
 use serde::Deserialize;
 
 mod console;
+
+/// The four power actions the agent's `POST /power` route accepts (Task 4).
+/// `tt power`'s dispatch arm checks an operator-supplied action against this
+/// list BEFORE resolving a host/token or making any network call, so a typo
+/// fails fast with a clear message instead of after a round trip. Kept as
+/// one array (rather than duplicating the four literals in the check and
+/// the error message) so the two can never drift apart.
+const POWER_ACTIONS: [&str; 4] = ["reset-chips", "suspend", "reboot", "shutdown"];
 
 #[derive(Parser)]
 #[command(name = "tt", about = "Operator CLI for tt-station")]
@@ -306,6 +316,40 @@ enum Command {
         yes: bool,
     },
 
+    /// Power-manage a box: reset its chips (tt-smi -r, keeps pairing) or take
+    /// the machine down (suspend/reboot/shutdown). Authed -- the box must be
+    /// paired. Machine ops disconnect this box shortly after they're accepted.
+    Power {
+        /// One of: reset-chips, suspend, reboot, shutdown.
+        action: String,
+        /// The box, as host:port. Required -- there's no persisted
+        /// discovery cache yet to resolve a default/only-paired box from
+        /// (see `Command::Wake`'s doc for the same gap on the MAC side).
+        #[arg(long)]
+        host: Option<String>,
+    },
+
+    /// Wake a suspended/powered-off box by broadcasting a Wake-on-LAN magic
+    /// packet from this machine. Uses the box's MAC learned at discovery, or
+    /// --mac. Requires WoL enabled in the box's BIOS/NIC.
+    Wake {
+        /// The target MAC (aa:bb:cc:dd:ee:ff). Required -- `tt` doesn't
+        /// persist a discovery cache between invocations yet, so there's no
+        /// stored `BoxRecord.mac` to resolve `--host` against here (and
+        /// contacting the box live to ask isn't an option: the whole point
+        /// of Wake-on-LAN is reaching a box that can't answer HTTP right
+        /// now). A future discovery cache could let `--host` resolve this
+        /// automatically; until then, callers must know the MAC (e.g. from
+        /// a live `tt discover` run before the box went to sleep).
+        #[arg(long)]
+        mac: Option<String>,
+        /// The box whose stored MAC to wake (currently informational only
+        /// -- see `mac`'s doc; kept as a parameter so a future discovery
+        /// cache can wire it up without a CLI-surface change).
+        #[arg(long)]
+        host: Option<String>,
+    },
+
     /// Operator TUI for managing THIS box's agent as a systemd `--user`
     /// service. Run ON the box itself (e.g. over SSH) -- unlike every other
     /// subcommand above, there's no `--host`: it talks to `127.0.0.1
@@ -443,6 +487,47 @@ fn main() -> Result<()> {
             let summary = run_async(cmd_reset(host.as_deref()))?;
             print_reset(&summary, cli.json);
         }
+        Command::Power { action, host } => {
+            // Validate BEFORE resolving a host/token or making any network
+            // call -- an unknown action is a pure client-side mistake and
+            // should fail fast/clearly rather than after a round trip (or,
+            // worse, after the agent runs something on an unrecognized
+            // action it happens to accept).
+            if !POWER_ACTIONS.contains(&action.as_str()) {
+                anyhow::bail!(
+                    "unknown power action {action:?}; expected one of: {}",
+                    POWER_ACTIONS.join(", ")
+                );
+            }
+            let host = host.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "tt power requires --host <host:port>; there's no default/only-paired-box \
+                     resolution yet (no persisted discovery cache to draw from)"
+                )
+            })?;
+            run_async(cmd_power(host, action))?;
+            print_power(action, cli.json);
+        }
+        Command::Wake { mac, host } => {
+            let mac_str = mac.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "tt wake requires --mac <aa:bb:cc:dd:ee:ff>; {}",
+                    match host {
+                        Some(h) => format!(
+                            "no stored MAC is known for --host {h} yet (no persisted \
+                             discovery cache -- and the box can't be asked live, since \
+                             it may be powered off/suspended, which is the whole point \
+                             of Wake-on-LAN)"
+                        ),
+                        None => "no --host was given either to look one up from".to_string(),
+                    }
+                )
+            })?;
+            let mac_bytes = libttstation::wol::parse_mac(&mac_str)
+                .ok_or_else(|| anyhow::anyhow!("invalid MAC address {mac_str:?}"))?;
+            cmd_wake(mac_bytes)?;
+            print_wake(&mac_str, cli.json);
+        }
         Command::Console {
             snapshot,
             install_service,
@@ -533,6 +618,10 @@ fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> Result<BoxRe
         /// `null`), so this stays compatible with any `/status` responder
         /// that predates Task 2 (e.g. `mock-box`).
         device_mesh: Option<String>,
+        /// (Task 3) The box's detected primary NIC MAC -- see
+        /// `tt-station-agentd::routes::StatusResponse::mac`. Same
+        /// missing/`null` -> `None` back-compat reasoning as `device_mesh`.
+        mac: Option<String>,
     }
 
     let url = format!("http://{host}:{port}/status");
@@ -560,6 +649,9 @@ fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> Result<BoxRe
         // `libttstation::model::txt_decode`), so it's the one discover path
         // that can populate `device_mesh` from real data instead of `None`.
         device_mesh: resp.device_mesh,
+        // Same "this IS the per-box probe" reasoning as `device_mesh` above,
+        // applied to the box's detected primary NIC MAC (Task 3).
+        mac: resp.mac,
     })
 }
 
@@ -943,6 +1035,54 @@ async fn cmd_reset(host: Option<&str>) -> Result<ResetSummary> {
     })
 }
 
+/// `tt power <action> --host <host:port>`: ask the box to run a power
+/// action (reset-chips/suspend/reboot/shutdown). Mirrors `cmd_reset`'s own
+/// token lookup rather than going through `authed_client` -- like
+/// `agent_client::reset`, `agent_client::power` is a free function (base +
+/// token passed separately), not an `AgentClient` method, since it's a
+/// one-shot action call with nothing left to reuse afterward (see that
+/// function's doc in `agent_client.rs`).
+///
+/// Unlike `cmd_reset`, a missing token here IS a hard error -- there's no
+/// "clear local state anyway" local half of the job for `tt power` to fall
+/// back to; if the box was never paired, there's nothing this command can
+/// usefully do.
+async fn cmd_power(host: &str, action: &str) -> Result<()> {
+    let token = build_store()?.get(host)?.ok_or_else(|| {
+        anyhow::anyhow!("no token stored for {host}; run `tt pair {host}` first")
+    })?;
+    let base = format!("http://{host}");
+    libttstation::agent_client::power(&base, &token, action).await
+}
+
+/// `tt wake --mac <mac>`: broadcast a Wake-on-LAN magic packet to the LAN
+/// broadcast address on port 9 (the conventional WoL target -- `discard`,
+/// chosen historically because nothing needs to listen on it for the packet
+/// to do its job).
+///
+/// Deliberately synchronous and NEVER touches the network beyond this one
+/// UDP send -- no HTTP call to the box at all, unlike every other command in
+/// this file. That's not an oversight: the whole point of Wake-on-LAN is
+/// reaching a box that's powered off or suspended and therefore can't answer
+/// HTTP (or anything else) right now. `main`'s dispatch calls this directly
+/// rather than through `run_async` (see the module doc for why `main` isn't
+/// `#[tokio::main]`) since there's no `.await` anywhere in this path.
+fn cmd_wake(mac: [u8; 6]) -> Result<()> {
+    let packet = libttstation::wol::magic_packet(mac);
+
+    // Bind an ephemeral local port (":0") -- we're only ever sending, never
+    // receiving, so there's nothing meaningful to bind to a fixed port.
+    let socket =
+        std::net::UdpSocket::bind("0.0.0.0:0").context("binding a UDP socket for Wake-on-LAN")?;
+    socket
+        .set_broadcast(true)
+        .context("enabling broadcast on the Wake-on-LAN socket")?;
+    socket
+        .send_to(&packet, "255.255.255.255:9")
+        .context("sending the Wake-on-LAN magic packet")?;
+    Ok(())
+}
+
 /// Print exactly what `tt reset` will clear and require the operator to type
 /// `y` (one stdin line) to proceed. Returns `true` only on an affirmative
 /// `y`/`Y`; anything else (including EOF/empty) declines. Skipped entirely by
@@ -1229,6 +1369,33 @@ fn print_reset_aborted(json: bool) {
     }
 }
 
+/// `tt power`'s success output: JSON carries the action back (so a scripted
+/// caller can confirm which action landed) plus a fixed `ok: true` -- the
+/// call already `error_for_status`-ed inside `agent_client::power`, so
+/// reaching this point at all means success. Human mode is a one-line
+/// confirmation; machine ops (suspend/reboot/shutdown) tend to drop the
+/// connection right after accepting the request, so this message
+/// deliberately says "sent"/"requested", not "completed".
+fn print_power(action: &str, json: bool) {
+    if json {
+        println!("{}", serde_json::json!({ "action": action, "ok": true }));
+    } else {
+        println!("power action '{action}' sent");
+    }
+}
+
+/// `tt wake`'s success output: JSON carries the MAC the packet was sent to
+/// plus a fixed `sent: true` (there's no delivery confirmation for a UDP
+/// broadcast -- "sent" is all `tt wake` can ever honestly claim). Human mode
+/// mirrors that same "sent", not "woke".
+fn print_wake(mac: &str, json: bool) {
+    if json {
+        println!("{}", serde_json::json!({ "mac": mac, "sent": true }));
+    } else {
+        println!("Wake-on-LAN packet sent to {mac}");
+    }
+}
+
 /// `tt status`'s output. JSON mode adds (Task 3) `device_mesh` alongside the
 /// existing `status` key so a caller (the macOS app, eventually) can read
 /// both from one call; human mode is unchanged -- still just the bare
@@ -1476,6 +1643,7 @@ mod tests {
             status: ServingStatus::Serving("llama3".into()),
             apiver: 1,
             device_mesh: Some("p300x2".into()),
+            mac: Some("aa:bb:cc:dd:ee:ff".into()),
         };
         let line = format_boxrecord_line(&rec);
         assert!(line.contains("qb2-lab"));

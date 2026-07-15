@@ -102,6 +102,51 @@ extension TTClientTests {
         XCTAssertEqual(fake.lastArgs, ["--json", "stop", "--host", "h:8080"])
     }
 
+    func testPowerBuildsArgsWithHost() async throws {
+        let fake = FakeProcessRunner()
+        fake.nextResult = ProcessResult(stdout: Data(#"{"action":"reboot","ok":true}"#.utf8), stderr: "", exitCode: 0)
+        let client = TTClient(runner: fake)
+        try await client.power(.reboot, host: "h:8080")
+        XCTAssertEqual(fake.lastArgs, ["--json", "power", "reboot", "--host", "h:8080"])
+    }
+
+    func testPowerOmitsHostWhenNil() async throws {
+        let fake = FakeProcessRunner()
+        fake.nextResult = ProcessResult(stdout: Data(#"{"action":"reset-chips","ok":true}"#.utf8), stderr: "", exitCode: 0)
+        let client = TTClient(runner: fake)
+        try await client.power(.resetChips, host: nil)
+        XCTAssertEqual(fake.lastArgs, ["--json", "power", "reset-chips"])
+    }
+
+    func testPowerThrowsOnNonZeroExit() async {
+        let fake = FakeProcessRunner()
+        fake.nextResult = ProcessResult(stdout: Data(), stderr: "no token stored for h:8080", exitCode: 1)
+        let client = TTClient(runner: fake)
+        do {
+            try await client.power(.shutdown, host: "h:8080")
+            XCTFail("expected throw")
+        } catch {
+            XCTAssertEqual(error as? TTError,
+                .commandFailed(command: ["--json", "power", "shutdown", "--host", "h:8080"], exitCode: 1, stderr: "no token stored for h:8080"))
+        }
+    }
+
+    func testWakeBuildsArgsWithMacAndHost() async throws {
+        let fake = FakeProcessRunner()
+        fake.nextResult = ProcessResult(stdout: Data(#"{"mac":"aa:bb:cc:dd:ee:ff","sent":true}"#.utf8), stderr: "", exitCode: 0)
+        let client = TTClient(runner: fake)
+        try await client.wake(mac: "aa:bb:cc:dd:ee:ff", host: "h:8080")
+        XCTAssertEqual(fake.lastArgs, ["--json", "wake", "--mac", "aa:bb:cc:dd:ee:ff", "--host", "h:8080"])
+    }
+
+    func testWakeOmitsMissingArgs() async throws {
+        let fake = FakeProcessRunner()
+        fake.nextResult = ProcessResult(stdout: Data(#"{"sent":true}"#.utf8), stderr: "", exitCode: 0)
+        let client = TTClient(runner: fake)
+        try await client.wake(mac: nil, host: nil)
+        XCTAssertEqual(fake.lastArgs, ["--json", "wake"])
+    }
+
     func testIsAuthError() {
         let client = TTClient(runner: FakeProcessRunner())
         XCTAssertTrue(client.isAuthError(.commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080; run `tt pair`")))
