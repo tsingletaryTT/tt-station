@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/libttstation", "crates/tt", "crates/tt-station-agentd", "crates/mock-box"]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 
 [workspace.dependencies]

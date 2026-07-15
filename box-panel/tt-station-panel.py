@@ -50,7 +50,7 @@ any box:
                                                              ~/.config/tt-station/agentd.toml)
 """
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
 
 import json
 import os

@@ -1,3 +1,9 @@
+tt-station (0.10.1) noble; urgency=medium
+
+  * Release 0.10.1.
+
+ -- Tenstorrent <software@tenstorrent.com>  Wed, 15 Jul 2026 13:31:04 -0700
+
 tt-station (0.10.0) noble; urgency=medium
 
   * Release 0.10.0.
