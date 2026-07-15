@@ -167,15 +167,23 @@ operator runs `systemctl --user enable --now`). **`tt-station-panel`** ships the
 `/usr/bin/tt-station-panel` wrapper, a packaged `.desktop`, and hicolor icons (`Depends:
 tt-station, python3, gir1.2-gtk-4.0, python3-gi`). `install_desktop_icon()` no-ops when packaged.
 `tt-station` also ships the **polkit rule** for box power (`deploy/tt-station-power.rules` →
-`/usr/share/polkit-1/rules.d/`) as an explicit **conffile** (survives upgrades if edited).
+`/etc/polkit-1/rules.d/49-tt-station-power.rules`) as a **conffile** — debhelper auto-registers
+`/etc` files as conffiles, so no `debian/*.conffiles` list is needed (a manual list double-registers).
 Workspace version unified at 0.10.0 (`[workspace.package]`, `scripts/bump-version.sh`); CI
 `release.yml` builds per-suite (noble/jammy) `.deb`s — a `v*` tag publishes a GitHub Release,
 while a manual **`workflow_dispatch`** run uploads the same `.deb`s as downloadable Actions
 artifacts (`tt-station-debs-<suite>`, 90d) with no Release (a pre-release/test-build flow;
 design: `docs/superpowers/specs/2026-07-10-deb-prerelease-ci-design.md`). `ci.yml` enforces
 version-consistency. `mock-box`/`libttstation` not packaged. Design/plan:
-`docs/superpowers/{specs,plans}/2026-07-10-*`. **Not yet run against a live box** — needs an
-owner install + GTK click-through (see follow-ups).
+`docs/superpowers/{specs,plans}/2026-07-10-*`. **Deb install verified in a fresh QB2 container**
+(2026-07-15, `tt-developer-image`'s golden `tenstorrent/qb2-env:latest`, Ubuntu 24.04/noble): the
+core `tt-station` deb installs cleanly, `tt`/`tt-station-agentd` run, `tt power`/`tt wake` present,
+the systemd user unit is valid, and the polkit rule lands at `/etc/polkit-1/rules.d/` (root-readable,
+correct). That test **caught + fixed a duplicate-conffile defect** — `debian/tt-station.conffiles`
+manually listed the /etc rule that debhelper already auto-registers, so dpkg registered it twice;
+removed the file (fix on `main`, NOT in the released v0.10.0 deb — needs a v0.10.1). The GTK panel
+deb correctly refuses to configure without `gir1.2-gtk-4.0` (expected on a headless box). Still
+owner-gated: install on a **real** box + GTK click-through, and exercise the destructive power ops.
 
 **macOS app (`macos/TTStation`, v0.5.0 — native control room):** window-first veneer over
 `tt --json` with a fast MenuBarExtra popover for glance + quick actions (the menu-bar icon
@@ -252,7 +260,7 @@ detailed log; this file is the current-state map.
 - **Box power controls: owner testing on real hardware.** Box-side is built/installed/verified
   on this box (route responds, MAC advertised, CLI present), but the destructive machine ops
   (`suspend`/`reboot`/`shutdown`) and the polkit rule that authorizes them have NOT been exercised
-  end to end — do a `.deb` install that lands `/usr/share/polkit-1/rules.d/` and confirm each op
+  end to end — do a `.deb` install that lands `/etc/polkit-1/rules.d/` and confirm each op
   actually runs (and `reset-chips` keeps pairing). Wake-on-LAN needs WoL enabled in the box
   BIOS/NIC and a Mac on the same L2 broadcast domain. macOS `PowerMenuView` needs a click-through.
 - **Panel Connect launchers: finish the click-through WITH a serving model.** The GTK panel
