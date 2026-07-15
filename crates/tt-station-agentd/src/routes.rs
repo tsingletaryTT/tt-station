@@ -236,6 +236,20 @@ struct Inner {
     /// active. `None` for backends without a workflow_logs dir (e.g. dstack).
     /// Enables the `/logs` routes to locate `workflow_logs/{docker_server,run_logs}`.
     tt_inference_repo: Option<std::path::PathBuf>,
+    /// Command vector run for `PowerAction::ResetChips` (a `tt-smi -r` board
+    /// reset). Defaults to `["tt-smi", "-r"]`; overridden by
+    /// `with_power_config` (tests / mock-box inject a harmless stub so no
+    /// real board reset fires). See `run_power_command`.
+    power_reset_chips_cmd: Vec<String>,
+    /// Command vector run for `PowerAction::Suspend`. Defaults to
+    /// `["systemctl", "suspend"]`; overridden by `with_power_config`.
+    power_suspend_cmd: Vec<String>,
+    /// Command vector run for `PowerAction::Reboot`. Defaults to
+    /// `["systemctl", "reboot"]`; overridden by `with_power_config`.
+    power_reboot_cmd: Vec<String>,
+    /// Command vector run for `PowerAction::Shutdown`. Defaults to
+    /// `["systemctl", "poweroff"]`; overridden by `with_power_config`.
+    power_shutdown_cmd: Vec<String>,
 }
 
 impl AppState {
@@ -315,6 +329,10 @@ impl AppState {
                 ssh_authorized_keys_path: PathBuf::new(),
                 ssh_user: "ttuser".to_string(),
                 tt_inference_repo: None,
+                power_reset_chips_cmd: vec!["tt-smi".to_string(), "-r".to_string()],
+                power_suspend_cmd: vec!["systemctl".to_string(), "suspend".to_string()],
+                power_reboot_cmd: vec!["systemctl".to_string(), "reboot".to_string()],
+                power_shutdown_cmd: vec!["systemctl".to_string(), "poweroff".to_string()],
             }),
         }
     }
@@ -474,6 +492,37 @@ impl AppState {
         self
     }
 
+    /// Override the four power-action command vectors (tests / mock-box
+    /// inject a harmless stub so no real power event fires). Additive
+    /// counterpart to `with_ssh_target`/`with_log_source`/etc -- same "call
+    /// immediately after construction, while this is still the sole owner
+    /// of its `Arc<Inner>`" contract (`Arc::get_mut` only succeeds then).
+    /// Called after a clone exists, it logs a warning and leaves the
+    /// defaults in place rather than panicking.
+    ///
+    /// Defaults set in `new_inner` (unchanged if this is never called):
+    /// `tt-smi -r` (reset-chips) and `systemctl suspend|reboot|poweroff`.
+    pub fn with_power_config(
+        mut self,
+        reset_chips: Vec<String>,
+        suspend: Vec<String>,
+        reboot: Vec<String>,
+        shutdown: Vec<String>,
+    ) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => {
+                inner.power_reset_chips_cmd = reset_chips;
+                inner.power_suspend_cmd = suspend;
+                inner.power_reboot_cmd = reboot;
+                inner.power_shutdown_cmd = shutdown;
+            }
+            None => eprintln!(
+                "tt-station-agentd: with_power_config called on an already-shared AppState; power config not applied"
+            ),
+        }
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.inner.name
     }
@@ -553,6 +602,49 @@ impl AppState {
     /// from, if the runpy backend is active (see `with_log_source`).
     fn tt_inference_repo(&self) -> Option<&std::path::Path> {
         self.inner.tt_inference_repo.as_deref()
+    }
+
+    /// Run the configured command for `action`, blocking (call under
+    /// `spawn_blocking` -- this shells out, same rule as `ServingBackend::
+    /// start`/`stop`). Machine ops (suspend/reboot/shutdown) best-effort
+    /// stop any serving container first so a model isn't hard-killed by the
+    /// machine going down; a stop failure is logged but non-fatal here --
+    /// we're taking the box down regardless, so refusing the power action
+    /// over a stop that didn't work would just strand the operator. Does
+    /// NOT touch tokens/SSH/status: unlike `POST /reset` (which unpairs),
+    /// every power action here -- including `reset-chips` -- preserves
+    /// pairing.
+    pub fn run_power_command(&self, action: crate::power::PowerAction) -> anyhow::Result<()> {
+        use crate::power::PowerAction;
+
+        if action.is_machine_op() {
+            if let Some(ep) = self.endpoint() {
+                if let Err(e) = self.backend().stop(&ep.model) {
+                    eprintln!(
+                        "power: best-effort stop of '{}' before {action:?} failed (continuing): {e}",
+                        ep.model
+                    );
+                }
+            }
+        }
+
+        let cmd = match action {
+            PowerAction::ResetChips => &self.inner.power_reset_chips_cmd,
+            PowerAction::Suspend => &self.inner.power_suspend_cmd,
+            PowerAction::Reboot => &self.inner.power_reboot_cmd,
+            PowerAction::Shutdown => &self.inner.power_shutdown_cmd,
+        };
+        let (bin, args) = cmd
+            .split_first()
+            .ok_or_else(|| anyhow::anyhow!("empty power command configured for {action:?}"))?;
+        let status = std::process::Command::new(bin)
+            .args(args)
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to spawn power command {cmd:?}: {e}"))?;
+        if !status.success() {
+            anyhow::bail!("power command {cmd:?} exited with {status}");
+        }
+        Ok(())
     }
 
     /// Cheap `Arc` clone of the serving backend, for a handler to move into
@@ -2110,6 +2202,36 @@ mod telemetry_inference_tests {
             "tt-smi ran once within the TTL, not per call (got {runs})"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_power_command_runs_the_configured_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ttpower-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("ran");
+        let _ = std::fs::remove_file(&marker);
+        let script = dir.join("fake-power.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf x >> '{m}'\n", m = marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cmd = vec![script.to_string_lossy().into_owned()];
+
+        let state = AppState::new(
+            "t".to_string(),
+            "1xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_power_config(cmd.clone(), cmd.clone(), cmd.clone(), cmd.clone());
+
+        state
+            .run_power_command(crate::power::PowerAction::Reboot)
+            .expect("power command runs");
+        assert!(marker.exists(), "configured power command was executed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

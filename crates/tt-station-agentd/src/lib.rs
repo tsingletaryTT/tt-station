@@ -8,6 +8,7 @@ pub mod device;
 pub mod inference;
 pub mod logs;
 pub mod pairing;
+pub mod power;
 pub mod procscan;
 pub mod routes;
 pub mod serving;
