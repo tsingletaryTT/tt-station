@@ -130,6 +130,11 @@ async fn advertise(name: String, ctrl_port: u16, chips: String, apiver: u8) -> R
         // hardware-aware ranking exactly like the real QuietBox's detected
         // mesh does via `tt-station-agentd` (Task 3.5).
         device_mesh: Some("p300x2".to_string()),
+        // Mock-box has no real NIC to detect a MAC from, and a fake MAC
+        // would be actively misleading for a Wake-on-LAN target (unlike
+        // `device_mesh`, there's no "dev-parity" value that makes sense
+        // here) -- `None` (Task 3).
+        mac: None,
     };
 
     // Reuse the shared encoder so the advertised TXT keys (name, apiver,

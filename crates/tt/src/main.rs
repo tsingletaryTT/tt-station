@@ -533,6 +533,10 @@ fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> Result<BoxRe
         /// `null`), so this stays compatible with any `/status` responder
         /// that predates Task 2 (e.g. `mock-box`).
         device_mesh: Option<String>,
+        /// (Task 3) The box's detected primary NIC MAC -- see
+        /// `tt-station-agentd::routes::StatusResponse::mac`. Same
+        /// missing/`null` -> `None` back-compat reasoning as `device_mesh`.
+        mac: Option<String>,
     }
 
     let url = format!("http://{host}:{port}/status");
@@ -560,6 +564,9 @@ fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> Result<BoxRe
         // `libttstation::model::txt_decode`), so it's the one discover path
         // that can populate `device_mesh` from real data instead of `None`.
         device_mesh: resp.device_mesh,
+        // Same "this IS the per-box probe" reasoning as `device_mesh` above,
+        // applied to the box's detected primary NIC MAC (Task 3).
+        mac: resp.mac,
     })
 }
 
@@ -1476,6 +1483,7 @@ mod tests {
             status: ServingStatus::Serving("llama3".into()),
             apiver: 1,
             device_mesh: Some("p300x2".into()),
+            mac: Some("aa:bb:cc:dd:ee:ff".into()),
         };
         let line = format_boxrecord_line(&rec);
         assert!(line.contains("qb2-lab"));

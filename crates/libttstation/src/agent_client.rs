@@ -63,7 +63,8 @@ pub async fn list_serving(base: &str) -> anyhow::Result<ServingList> {
 /// `tt-station-agentd::routes::get_status`, which has no `BearerAuth`
 /// extractor): the agent's current serving status (parsed via
 /// [`ServingStatus::from_txt`]) plus (Task 3) its detected `device_mesh`
-/// hint, bundled as a [`StatusInfo`].
+/// hint and detected `mac` hint (Wake-on-LAN target, also Task 3), bundled
+/// as a [`StatusInfo`].
 ///
 /// A FREE function rather than an `AgentClient` method, same reasoning as
 /// [`list_models`] and [`crate::pairing::pair_init`]: a client that hasn't
@@ -74,16 +75,17 @@ pub async fn list_serving(base: &str) -> anyhow::Result<ServingList> {
 /// going through `authed_client()`, so a `tt status` on an unpaired box
 /// works instead of failing with "no token stored".
 ///
-/// `device_mesh` deserializes to `None` when the agent's JSON omits the key
-/// entirely (serde's derive treats a missing `Option<T>` field as `None`
-/// rather than an error) -- lets this keep working unmodified against
-/// `mock-box`, whose `/status` fixture predates Task 2 and doesn't send the
-/// key at all.
+/// `device_mesh`/`mac` both deserialize to `None` when the agent's JSON
+/// omits the key entirely (serde's derive treats a missing `Option<T>`
+/// field as `None` rather than an error) -- lets this keep working
+/// unmodified against `mock-box`, whose `/status` fixture predates Task 2
+/// and doesn't send either key at all.
 pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
     #[derive(Deserialize)]
     struct StatusResponse {
         status: String,
         device_mesh: Option<String>,
+        mac: Option<String>,
     }
 
     let url = join(base, "status");
@@ -98,6 +100,7 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
     Ok(StatusInfo {
         status: ServingStatus::from_txt(&body.status)?,
         device_mesh: body.device_mesh,
+        mac: body.mac,
     })
 }
 

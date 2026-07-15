@@ -69,6 +69,7 @@ mod tests {
             status: ServingStatus::Idle,
             apiver: 1,
             device_mesh: Some("p300x2".into()),
+            mac: Some("aa:bb:cc:dd:ee:ff".into()),
         };
         let providers: Vec<Box<dyn DiscoveryProvider>> = vec![
             Box::new(Fake(vec![r.clone()])),

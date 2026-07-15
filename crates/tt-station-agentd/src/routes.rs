@@ -206,6 +206,14 @@ struct Inner {
     /// Purely additive: only `GET /status` reads it, so a client (Task 3's
     /// `tt --json status`) can rank models by hardware fit.
     device_mesh: Option<String>,
+    /// This box's primary NIC MAC (`"aa:bb:cc:dd:ee:ff"`), detected ONCE at
+    /// startup by `net::primary_mac` (see `main.rs`). `None` when detection
+    /// failed (no default route, unreadable `/sys/class/net`, no usable
+    /// non-loopback iface) -- never fatal, just an absent hint. Defaults to
+    /// `None`; set via `with_mac`. Purely additive: only `GET /status` reads
+    /// it, so a client (the Mac app) can send a Wake-on-LAN magic packet to
+    /// this box when it's off.
+    mac: Option<String>,
     /// Redacted view of the agent's resolved serving config, served verbatim
     /// by `GET /config` -- see `libttstation::model::ConfigSummary`'s doc
     /// comment for why it deliberately carries no secrets. Defaults to an
@@ -316,6 +324,7 @@ impl AppState {
                 serving_host: DEFAULT_SERVING_HOST.to_string(),
                 serving_port: DEFAULT_SERVING_PORT,
                 device_mesh: None,
+                mac: None,
                 config_summary: ConfigSummary {
                     active_profile: None,
                     available_profiles: vec![],
@@ -445,6 +454,26 @@ impl AppState {
         self
     }
 
+    /// Set this box's detected primary NIC MAC (see the `mac` field's doc
+    /// comment). Additive counterpart to `with_device_mesh`/
+    /// `with_serving_config`/etc -- same "call immediately after
+    /// construction, while this is still the sole owner of its `Arc<Inner>`"
+    /// contract (`Arc::get_mut` only succeeds then). Called after a clone
+    /// exists, it logs a warning and leaves the default (`None`) in place
+    /// rather than panicking.
+    ///
+    /// Optional: an `AppState` never given this config still answers
+    /// `/status` with `"mac": null` (Wake-on-LAN simply unavailable).
+    pub fn with_mac(mut self, mac: Option<String>) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.mac = mac,
+            None => eprintln!(
+                "tt-station-agentd: with_mac called on an already-shared AppState; mac not applied"
+            ),
+        }
+        self
+    }
+
     /// Attach the redacted `ConfigSummary` `GET /config` serves. Additive
     /// counterpart to `with_serving_config`/`with_telemetry_config` -- same
     /// "call immediately after construction, while this is still the sole
@@ -535,6 +564,12 @@ impl AppState {
     /// or never ran (see `with_device_mesh`). Read by `GET /status`.
     pub fn device_mesh(&self) -> Option<&str> {
         self.inner.device_mesh.as_deref()
+    }
+
+    /// This box's detected primary NIC MAC, or `None` if detection failed or
+    /// never ran (see `with_mac`). Read by `GET /status`.
+    pub fn mac(&self) -> Option<&str> {
+        self.inner.mac.as_deref()
     }
 
     /// `tt-smi` binary the `/telemetry` stream runs (see `with_telemetry_config`).
@@ -1155,6 +1190,11 @@ struct StatusResponse {
     /// `tt --json status`) rank models by hardware fit without its own
     /// `tt-smi` access.
     device_mesh: Option<String>,
+    /// This box's detected primary NIC MAC (`"aa:bb:cc:dd:ee:ff"`), or `null`
+    /// when detection failed/didn't run -- see `AppState::with_mac`. Lets a
+    /// client (the Mac app) send a Wake-on-LAN magic packet to this box when
+    /// it's off.
+    mac: Option<String>,
 }
 
 async fn get_status(
@@ -1169,6 +1209,7 @@ async fn get_status(
         chips: state.chips().to_string(),
         status: status.to_txt(),
         device_mesh: state.device_mesh().map(str::to_string),
+        mac: state.mac().map(str::to_string),
     })
 }
 

@@ -19,6 +19,7 @@ use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 use tt_station_agentd::config;
 use tt_station_agentd::device::detect_device_mesh;
+use tt_station_agentd::net;
 use tt_station_agentd::routes::{app, AppState, StatusAdvertiser};
 use tt_station_agentd::serving::docker::{CommandRunner, DockerConfig, RealCommandRunner};
 use tt_station_agentd::serving::make_backend;
@@ -814,6 +815,24 @@ async fn main() -> Result<()> {
     let device_mesh = detect_startup_device_mesh(&rc.tt_smi_bin).await;
     let state = state.with_device_mesh(device_mesh.clone());
 
+    // Detect this box's primary NIC MAC ONCE at startup (mirrors the
+    // device-mesh detection immediately above): best-effort, synchronous
+    // (no external `tt-smi`-style process that can hang, just `ip route
+    // get`/`/sys/class/net` reads -- see `net::primary_mac`'s doc comment),
+    // so it needs neither a timeout ceiling nor a `spawn_blocking` wrapper.
+    // Reported on `/status` and the mDNS TXT record so the Mac can send a
+    // Wake-on-LAN magic packet to this box when it's off. ANY failure here
+    // (no default route, unreadable `/sys/class/net`, no non-loopback iface)
+    // degrades to `None` -- Wake is simply unavailable for that box, never a
+    // startup failure.
+    let mac = net::primary_mac();
+    if mac.is_none() {
+        eprintln!(
+            "tt-station-agentd: could not detect a primary NIC MAC; Wake-on-LAN will be unavailable for this box"
+        );
+    }
+    let state = state.with_mac(mac.clone());
+
     // Bind the control-plane socket FIRST, then advertise on the LAN, so
     // discovery never races ahead of the control-plane API actually being
     // reachable.
@@ -829,7 +848,7 @@ async fn main() -> Result<()> {
     // sharing the same underlying daemon, which gets attached to `state` so
     // `/run`/`/stop` can re-publish `status` whenever it changes instead of
     // it going stale after boot (see `StatusAdvertiser`'s doc comment).
-    let (_mdns_guard, status_advertiser) = advertise(&rc, state.status(), device_mesh)
+    let (_mdns_guard, status_advertiser) = advertise(&rc, state.status(), device_mesh, mac)
         .context("failed to start mDNS advertisement")?;
     let state = state.with_status_advertiser(Arc::new(status_advertiser));
 
@@ -930,6 +949,11 @@ struct MdnsStatusAdvertiser {
     /// re-emitted on every status re-publish -- see the identically-named
     /// field on [`BoxRecord`] (Task 3.5).
     device_mesh: Option<String>,
+    /// This box's startup-detected primary NIC MAC (or `None` if detection
+    /// failed/didn't run), captured once at construction in `advertise` and
+    /// re-emitted on every status re-publish -- see the identically-named
+    /// field on [`BoxRecord`] (Task 3, Wake-on-LAN).
+    mac: Option<String>,
 }
 
 impl StatusAdvertiser for MdnsStatusAdvertiser {
@@ -945,6 +969,11 @@ impl StatusAdvertiser for MdnsStatusAdvertiser {
             // the mDNS TXT record carries `device_mesh` just like `/status`
             // does, keeping every discovery path hardware-aware.
             device_mesh: self.device_mesh.clone(),
+            // Threaded through from the startup-detected primary NIC MAC
+            // (Task 3) so the mDNS TXT record carries `mac` just like
+            // `/status` does, letting the Mac send a Wake-on-LAN magic
+            // packet without a separate probe.
+            mac: self.mac.clone(),
         };
 
         let txt_pairs = txt_encode(&record);
@@ -997,7 +1026,10 @@ impl StatusAdvertiser for MdnsStatusAdvertiser {
 /// truth for what the box's status is at boot. Likewise `device_mesh` is
 /// passed in from the same startup detection `main` feeds to
 /// `AppState::with_device_mesh`, so the mDNS TXT record and `/status` never
-/// disagree about this box's hardware (Task 3.5).
+/// disagree about this box's hardware (Task 3.5). `mac` mirrors the same
+/// pattern for the box's startup-detected primary NIC MAC (Task 3), so the
+/// TXT record and `/status` never disagree about the Wake-on-LAN target
+/// either.
 ///
 /// Returns both the [`MdnsGuard`] (unregister/shutdown on drop, same as
 /// before this function grew a second return value) and an
@@ -1008,6 +1040,7 @@ fn advertise(
     rc: &config::ResolvedConfig,
     status: ServingStatus,
     device_mesh: Option<String>,
+    mac: Option<String>,
 ) -> Result<(MdnsGuard, MdnsStatusAdvertiser)> {
     let host = format!("{}.local.", rc.name);
     let record = BoxRecord {
@@ -1018,6 +1051,7 @@ fn advertise(
         status,
         apiver: rc.apiver,
         device_mesh: device_mesh.clone(),
+        mac: mac.clone(),
     };
 
     let txt_pairs = txt_encode(&record);
@@ -1058,6 +1092,7 @@ fn advertise(
         chips: rc.chips.clone(),
         apiver: rc.apiver,
         device_mesh,
+        mac,
     };
 
     Ok((guard, status_advertiser))

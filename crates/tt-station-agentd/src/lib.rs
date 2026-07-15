@@ -7,6 +7,7 @@ pub mod config;
 pub mod device;
 pub mod inference;
 pub mod logs;
+pub mod net;
 pub mod pairing;
 pub mod power;
 pub mod procscan;
