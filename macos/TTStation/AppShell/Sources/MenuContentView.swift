@@ -27,6 +27,18 @@ struct MenuContentView: View {
             }
             if let selected = model.selectedBox {
                 Divider()
+                // Mirrors `BoxHeaderView`'s power menu (Task 7) so power
+                // control is reachable from the popover too, not just the
+                // resizable window — same `PowerMenuView`, same `isPaired`
+                // gate, just embedded next to the selected box's name here
+                // since the popover has no header row of its own.
+                HStack {
+                    Text(selected.record.name).font(.subheadline.weight(.semibold))
+                    Spacer()
+                    if selected.isPaired {
+                        PowerMenuView(box: selected)
+                    }
+                }
                 BoxDetailView(box: selected)
             }
             Divider()

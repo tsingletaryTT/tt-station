@@ -11,18 +11,27 @@ public struct BoxRecord: Codable, Equatable {
     /// rank models by hardware fit. `nil` for older agents that predate this
     /// field or for boxes discovered without it (e.g. some mDNS TXT records).
     public let deviceMesh: String?
+    /// This box's detected primary NIC MAC (`"aa:bb:cc:dd:ee:ff"`), passed
+    /// through verbatim from the agent's `/status`/mDNS TXT `mac` field —
+    /// mirrors `libttstation::model::BoxRecord.mac` on the Rust side (Task
+    /// 3), which the CLI's `tt --json discover`/`status` output already
+    /// carries. `nil` when detection failed/didn't run, or for an agent that
+    /// predates this field — same back-compat shape as `deviceMesh`. This is
+    /// the Wake-on-LAN target `PowerMenuView`/`BoxViewModel.wakeBox()` send.
+    public let mac: String?
 
     enum CodingKeys: String, CodingKey {
-        case name, host, chips, apiver
+        case name, host, chips, apiver, mac
         case ctrlPort = "ctrl_port"
         case statusRaw = "status"
         case deviceMesh = "device_mesh"
     }
 
-    public init(name: String, host: String, ctrlPort: Int, chips: String, statusRaw: String, apiver: Int, deviceMesh: String? = nil) {
+    public init(name: String, host: String, ctrlPort: Int, chips: String, statusRaw: String, apiver: Int, deviceMesh: String? = nil, mac: String? = nil) {
         self.name = name; self.host = host; self.ctrlPort = ctrlPort
         self.chips = chips; self.statusRaw = statusRaw; self.apiver = apiver
         self.deviceMesh = deviceMesh
+        self.mac = mac
     }
 
     /// `host:port` — the identity string every `tt` command keys off of.

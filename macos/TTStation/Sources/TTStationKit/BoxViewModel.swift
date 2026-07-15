@@ -62,6 +62,12 @@ public final class BoxViewModel: Identifiable {
     /// start of every `completePairing` call so a stale note from a previous
     /// pairing attempt never lingers on screen.
     public var sshMessage: String?
+    /// Transient state after a power op is issued (Task 6/7): `.suspending`/
+    /// `.rebooting`/`.poweredOff` set by `issuePower`, `.waking` by
+    /// `wakeBox()`. Non-nil tells the UI (`BoxHeaderView`) the ensuing
+    /// connection drop is expected, not an error. Cleared by `refresh()`
+    /// once the box is reachable again — see `PowerTransition`.
+    public var powerState: PowerState?
 
     /// The row-level "what's this box doing right now" summary, derived from
     /// `serving`/`status`/`starting` — see `RunningState.runningState` for
@@ -164,6 +170,14 @@ public final class BoxViewModel: Identifiable {
         // discovery-seeded status on failure; this is not a pairing signal.
         status = (try? await commands.status(host: record.hostPort)) ?? record.status
 
+        // Whether this refresh actually got an HTTP response out of the box
+        // at all (regardless of what it said) — the signal `PowerTransition`
+        // needs to know the box is back, distinct from `isPaired` (which is
+        // about token validity, not reachability). Starts optimistic;
+        // flipped to `false` only in the generic-failure branches below,
+        // which is where a rebooted/suspended/off box's dropped connection
+        // actually lands.
+        var reachable = true
         do {
             let ep = try await commands.endpoint(host: record.hostPort)
             isPaired = true
@@ -172,19 +186,23 @@ public final class BoxViewModel: Identifiable {
             await loadModels()
         } catch let e as TTError where commands.isAuthError(e) {
             // 401: no valid token for this box — the normal unpaired signal,
-            // not an error to surface.
+            // not an error to surface. Still proves the box answered HTTP.
             isPaired = false
             registry.markUnpaired(record.hostPort)
             endpoint = nil
         } catch let e as TTError where commands.isIdleConflict(e) {
-            // 409: authed fine, just nothing serving right now.
+            // 409: authed fine, just nothing serving right now. Also proves
+            // the box answered HTTP.
             isPaired = true
             registry.markPaired(record.hostPort)
             endpoint = nil
             await loadModels()
         } catch let e as TTError {
             // Network/timeout/other — not an auth signal. Leave
-            // `isPaired`/the registry untouched.
+            // `isPaired`/the registry untouched. This is also the branch a
+            // suspended/rebooting/powered-off box's refresh lands in, so it
+            // marks the box unreachable for `powerState` purposes.
+            reachable = false
             if case let .timedOut(_, seconds) = e {
                 errorText = Self.timeoutMessage(seconds: seconds)
             } else if case let .commandFailed(_, _, stderr) = e {
@@ -193,8 +211,13 @@ public final class BoxViewModel: Identifiable {
                 errorText = String(describing: e)
             }
         } catch {
+            reachable = false
             errorText = error.localizedDescription
         }
+        // Recompute the power-op transient state now that we know whether
+        // the box just answered: clears once it's reachable again (came
+        // back from reboot / was woken), persists while it's still down.
+        powerState = PowerTransition.onReachabilityChange(powerState, reachable: reachable)
     }
 
     private static func timeoutMessage(seconds: Double) -> String {
@@ -366,6 +389,38 @@ public final class BoxViewModel: Identifiable {
         if cancelling { return false }
         if starting { return true }
         return status?.isServing ?? (endpoint != nil)
+    }
+
+    /// Fire a power action (`PowerMenuView`) and set the expected transient
+    /// state so the following connection drop isn't rendered as an error.
+    /// `resetChips` is instantaneous (`PowerTransition.next` returns `nil`
+    /// for it) — it never disconnects the box/agent, so there's nothing to
+    /// mask. The three machine ops (suspend/reboot/shutdown) do disconnect
+    /// almost immediately after the agent accepts them, so `commands.power`
+    /// failing here is the *expected* outcome, not a real error — see the
+    /// swallow below. Always passes `record.hostPort`: `TTClient.power`
+    /// requires a real `--host` and fails outright given `nil` (Task 6
+    /// Minor).
+    public func issuePower(_ action: PowerAction) async {
+        powerState = PowerTransition.next(issued: action, reachable: true)
+        do {
+            try await commands.power(action, host: record.hostPort)
+        } catch {
+            // Machine ops routinely drop the connection right after the
+            // agent accepts them — that's success, not failure. The
+            // `powerState` set above already communicates what's happening,
+            // so this is a deliberate swallow, not an oversight.
+        }
+    }
+
+    /// Send a Wake-on-LAN magic packet at this box's last-known MAC. Fires
+    /// directly (no confirmation) since waking a box is never destructive.
+    /// `record.mac` is `nil` for an agent/discovery record that predates
+    /// Task 3's MAC detection — `TTClient.wake` requires a real MAC and
+    /// fails outright given `nil`, same reasoning as `issuePower`'s host.
+    public func wakeBox() async {
+        powerState = .waking
+        try? await commands.wake(mac: record.mac, host: record.hostPort)
     }
 
     private func record(_ error: Error) {
