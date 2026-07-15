@@ -59,6 +59,18 @@ pub trait LifecycleEnv {
     /// on why today's `-o cat` journal tail gives it nothing to compute an
     /// age from yet.
     fn now_unix(&self) -> u64;
+
+    /// Whether the polkit rule that lets `POST /power`'s machine ops (and the
+    /// box panel's local power row) run without an interactive auth prompt is
+    /// installed -- see [`crate::console::state::POLKIT_POWER_RULE_PATH`] and
+    /// `docs/reference/power-controls.md`. Given a default body (a real
+    /// `Path::exists()` check) rather than requiring every implementer to
+    /// answer it: [`RealLifecycleEnv`] gets the real answer for free, and a
+    /// fake `LifecycleEnv` in tests can override it to force either branch
+    /// without touching the filesystem.
+    fn polkit_power_rule_present(&self) -> bool {
+        std::path::Path::new(crate::console::state::POLKIT_POWER_RULE_PATH).exists()
+    }
 }
 
 /// The real [`LifecycleEnv`]: shells out to `systemctl`/`journalctl`, and
@@ -239,6 +251,13 @@ pub fn collect_snapshot(env: &dyn LifecycleEnv, names: &ToolNames) -> BoxLifecyc
         .map(|l| l.lines)
         .unwrap_or_default();
 
+    // Polkit rule presence (Task 9): a plain existence check, not an HTTP/
+    // systemctl/journal probe, so it degrades the same informational way as
+    // everything else here -- `polkit_power_advisory` just turns the bool
+    // into `None`/`Some(message)`.
+    let polkit_power_advisory =
+        crate::console::state::polkit_power_advisory(env.polkit_power_rule_present());
+
     BoxLifecycleSnapshot {
         service,
         reachable,
@@ -253,6 +272,7 @@ pub fn collect_snapshot(env: &dyn LifecycleEnv, names: &ToolNames) -> BoxLifecyc
         config,
         pairing,
         logs,
+        polkit_power_advisory,
     }
 }
 
@@ -265,6 +285,13 @@ mod tests {
         show: String,
         journal: Vec<String>,
         http: std::collections::HashMap<String, anyhow::Result<String>>,
+        /// Overrides [`LifecycleEnv::polkit_power_rule_present`]'s default
+        /// (real) filesystem check, so tests can force either branch without
+        /// touching `/etc/polkit-1/rules.d/`. `true` in every existing
+        /// literal below -- those tests predate Task 9 and don't care about
+        /// this field, so `true` (rule present, no advisory noise) keeps
+        /// their assertions unaffected.
+        polkit_rule_present: bool,
     }
     impl LifecycleEnv for FakeEnv {
         fn systemctl_show(&self, _u: &str) -> anyhow::Result<String> {
@@ -285,6 +312,9 @@ mod tests {
         fn now_unix(&self) -> u64 {
             1000
         }
+        fn polkit_power_rule_present(&self) -> bool {
+            self.polkit_rule_present
+        }
     }
 
     #[test]
@@ -293,6 +323,7 @@ mod tests {
             show: "ActiveState=active\nSubState=running\n".into(),
             journal: vec![],
             http: std::collections::HashMap::new(), // all GETs error
+            polkit_rule_present: true,
         };
         let snap = collect_snapshot(&env, &crate::console::names::ToolNames::from_env());
         assert_eq!(snap.service, ServiceState::Active);
@@ -312,6 +343,7 @@ mod tests {
             show: "ActiveState=active\nSubState=running\n".into(),
             journal: vec![],
             http,
+            polkit_rule_present: true,
         };
         let snap = collect_snapshot(&env, &crate::console::names::ToolNames::from_env());
         assert!(snap.reachable);
@@ -324,6 +356,7 @@ mod tests {
             show: "ActiveState=active\nSubState=running\n".into(),
             journal: vec!["tt-station-agentd: pairing code: 042817".to_string()],
             http: std::collections::HashMap::new(),
+            polkit_rule_present: true,
         };
         let snap = collect_snapshot(&env, &crate::console::names::ToolNames::from_env());
         assert!(!snap.reachable);
@@ -344,6 +377,7 @@ mod tests {
             show: "ActiveState=active\nSubState=running\n".into(),
             journal: vec![],
             http,
+            polkit_rule_present: true,
         };
         let snap = collect_snapshot(&env, &crate::console::names::ToolNames::from_env());
         assert_eq!(
@@ -361,8 +395,41 @@ mod tests {
             show: "ActiveState=active\nSubState=running\n".into(),
             journal: vec![],
             http: std::collections::HashMap::new(),
+            polkit_rule_present: true,
         };
         let snap = collect_snapshot(&env, &crate::console::names::ToolNames::from_env());
         assert!(snap.logs.is_empty());
+    }
+
+    /// The polkit-rule check flows straight into `snap.polkit_power_advisory`
+    /// via `state::polkit_power_advisory` -- present means no advisory.
+    #[test]
+    fn polkit_advisory_absent_when_rule_present() {
+        let env = FakeEnv {
+            show: "ActiveState=active\nSubState=running\n".into(),
+            journal: vec![],
+            http: std::collections::HashMap::new(),
+            polkit_rule_present: true,
+        };
+        let snap = collect_snapshot(&env, &crate::console::names::ToolNames::from_env());
+        assert!(snap.polkit_power_advisory.is_none());
+    }
+
+    /// Missing rule -> a one-line advisory naming the doc, surfaced in the
+    /// snapshot regardless of every other field's state (agent down here,
+    /// same "informational, never fatal" contract as `logs`/`config`).
+    #[test]
+    fn polkit_advisory_present_when_rule_missing() {
+        let env = FakeEnv {
+            show: "ActiveState=active\nSubState=running\n".into(),
+            journal: vec![],
+            http: std::collections::HashMap::new(),
+            polkit_rule_present: false,
+        };
+        let snap = collect_snapshot(&env, &crate::console::names::ToolNames::from_env());
+        let advisory = snap
+            .polkit_power_advisory
+            .expect("missing rule must produce an advisory");
+        assert!(advisory.contains("docs/reference/power-controls.md"));
     }
 }

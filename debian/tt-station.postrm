@@ -1,0 +1,26 @@
+#!/bin/sh
+# postrm for tt-station.
+#
+# On purge, remove the polkit rule installed to
+# /etc/polkit-1/rules.d/49-tt-station-power.rules (see debian/rules'
+# override_dh_auto_install and deploy/tt-station-power.rules). That rule
+# grants the `sudo` group headless reboot/power-off/suspend so the agent's
+# `POST /power` and the box panel's local power row don't hit an interactive
+# polkit auth prompt -- see docs/reference/power-controls.md.
+#
+# The file lives under /etc/, so debhelper's dh_installdeb auto-registers it
+# as a conffile: dpkg already preserves it across a plain `remove` and clears
+# it on `purge` on its own. This explicit `rm -f` is a belt-and-suspenders
+# no-op in that case (removing an already-gone file is not an error) --
+# kept so the "removed on purge" contract holds even if that automatic
+# behavior ever changes.
+
+set -e
+
+if [ "$1" = "purge" ]; then
+    rm -f /etc/polkit-1/rules.d/49-tt-station-power.rules
+fi
+
+#DEBHELPER#
+
+exit 0

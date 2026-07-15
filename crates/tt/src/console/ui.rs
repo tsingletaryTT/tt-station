@@ -143,6 +143,12 @@ pub fn status_lines(s: &BoxLifecycleSnapshot) -> Vec<String> {
         Some(ep) => lines.push(format!("endpoint: {} ({})", ep.base_url, ep.model)),
         None => lines.push("endpoint: (none)".to_string()),
     }
+    // Task 9: a one-line, non-fatal advisory when the polkit power rule is
+    // missing -- only appended when `Some`, so a healthy box's status panel
+    // is unchanged from before this field existed.
+    if let Some(advisory) = &s.polkit_power_advisory {
+        lines.push(advisory.clone());
+    }
     lines
 }
 
@@ -664,6 +670,7 @@ mod tests {
             config: None,
             pairing: None,
             logs: vec![],
+            polkit_power_advisory: None,
         }
     }
 
@@ -778,6 +785,29 @@ mod tests {
         s.status = Some(ServingStatus::Serving("llama3".into()));
         let lines = status_lines(&s);
         assert!(lines.iter().any(|l| l.contains("state: serving llama3")));
+    }
+
+    /// Task 9: the status panel appends the polkit advisory line when
+    /// present -- non-fatal, informational, and pointing at the doc.
+    #[test]
+    fn status_lines_show_polkit_advisory_when_present() {
+        let mut s = idle_snap();
+        s.polkit_power_advisory = Some(
+            "power controls need the polkit rule -- see docs/reference/power-controls.md"
+                .to_string(),
+        );
+        let lines = status_lines(&s);
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("docs/reference/power-controls.md")));
+    }
+
+    /// A healthy box (rule present, `None` advisory) shows no extra line --
+    /// the status panel is exactly what it was before Task 9.
+    #[test]
+    fn status_lines_omit_polkit_advisory_when_absent() {
+        let lines = status_lines(&idle_snap());
+        assert_eq!(lines.len(), 2, "expected only state + endpoint lines");
     }
 
     #[test]

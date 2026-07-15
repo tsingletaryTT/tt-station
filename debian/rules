@@ -44,6 +44,14 @@ override_dh_auto_install:
 	install -d debian/tt-station/usr/lib/systemd/user
 	install -m 644 deploy/tt-station-agentd.package.service \
 	    debian/tt-station/usr/lib/systemd/user/tt-station-agentd.service
+	# polkit rule: grants the `sudo` group headless reboot/power-off/suspend
+	# so `POST /power` (agent) and the panel's local power row don't hit an
+	# interactive auth prompt. Shipped in tt-station (not the panel package)
+	# since both the agent and the panel rely on it. Removed on purge --
+	# see debian/tt-station.postrm. Doc: docs/reference/power-controls.md.
+	install -d debian/tt-station/etc/polkit-1/rules.d
+	install -m 644 deploy/tt-station-power.rules \
+	    debian/tt-station/etc/polkit-1/rules.d/49-tt-station-power.rules
 	install -d debian/tt-station/usr/share/doc/tt-station
 	install -m 644 README.md \
 	    debian/tt-station/usr/share/doc/tt-station/README.md

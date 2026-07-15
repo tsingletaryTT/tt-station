@@ -19,6 +19,34 @@ use libttstation::model::{BoxLifecycleSnapshot, PairingState, ServiceState, Serv
 /// for the same underlying pairing attempt, so they must agree on its TTL.
 pub const PAIRING_TTL_SECS: u64 = 120;
 
+/// Where the `tt-station` `.deb` installs the polkit rule that grants
+/// `POST /power`'s suspend/reboot/shutdown actions (and the box panel's
+/// local power row) permission to run without an interactive auth prompt --
+/// see `deploy/tt-station-power.rules`, `debian/rules`' `override_dh_auto_install`,
+/// and `docs/reference/power-controls.md`. `tt console` checks for this
+/// path's existence (via `LifecycleEnv::polkit_power_rule_present`) purely to
+/// surface an informational advisory when it's absent -- reset-chips and
+/// every other route work fine without it; only the three machine-power ops
+/// need it.
+pub const POLKIT_POWER_RULE_PATH: &str = "/etc/polkit-1/rules.d/49-tt-station-power.rules";
+
+/// Build the one-line advisory `tt console` shows (in both `--snapshot` JSON
+/// and the TUI's status panel) when the polkit power rule is missing, or
+/// `None` when it's present. Pure function of a bool -- exhaustively
+/// testable without touching a filesystem -- so the actual `Path::exists()`
+/// check lives at the edge (`LifecycleEnv::polkit_power_rule_present`) and
+/// this just decides what to say about the result.
+pub fn polkit_power_advisory(rule_present: bool) -> Option<String> {
+    if rule_present {
+        None
+    } else {
+        Some(format!(
+            "power controls need the polkit rule (missing: {POLKIT_POWER_RULE_PATH}) -- \
+             see docs/reference/power-controls.md or install the tt-station .deb"
+        ))
+    }
+}
+
 /// Parse the `ActiveState=` line out of `systemctl show <unit>` output into
 /// a [`ServiceState`]. Only `ActiveState` is consulted (not `SubState`) --
 /// `SubState` gives finer detail (e.g. `running` vs `start` vs `dead`) but
@@ -235,6 +263,7 @@ mod tests {
             config: None,
             pairing: None,
             logs: vec![],
+            polkit_power_advisory: None,
         }
     }
 
@@ -280,5 +309,17 @@ mod tests {
             derive_state(&snap(ServiceState::Failed, false, None)),
             LifecycleState::Failed
         );
+    }
+
+    #[test]
+    fn polkit_power_advisory_is_none_when_rule_present() {
+        assert_eq!(polkit_power_advisory(true), None);
+    }
+
+    #[test]
+    fn polkit_power_advisory_names_the_missing_rule_and_the_doc() {
+        let advisory = polkit_power_advisory(false).expect("rule missing must produce an advisory");
+        assert!(advisory.contains(POLKIT_POWER_RULE_PATH));
+        assert!(advisory.contains("docs/reference/power-controls.md"));
     }
 }

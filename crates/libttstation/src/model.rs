@@ -268,6 +268,19 @@ pub struct BoxLifecycleSnapshot {
     /// same "nothing to show yet" state as a box that hasn't served anything.
     #[serde(default)]
     pub logs: Vec<String>,
+    /// One-line advisory when the polkit rule that lets `POST /power`'s
+    /// suspend/reboot/shutdown actions (and the box panel's local power row)
+    /// run without an interactive auth prompt -- `/etc/polkit-1/rules.d/
+    /// 49-tt-station-power.rules`, installed by the `tt-station` `.deb`
+    /// (Task 9, see `docs/reference/power-controls.md`) -- is missing.
+    /// `None` when the rule is present, purely informational either way:
+    /// nothing here is fatal, and reset-chips/the CLI/every other route are
+    /// unaffected by its absence (only the machine-power ops need it).
+    /// `#[serde(default)]` for the same forward-compat reason as `logs`: a
+    /// `--snapshot` recorded before this field existed must still
+    /// deserialize.
+    #[serde(default)]
+    pub polkit_power_advisory: Option<String>,
 }
 
 impl ServingStatus {
@@ -607,6 +620,7 @@ mod tests {
                 expires_in_secs: 107,
             }),
             logs: vec!["line one".into(), "line two".into()],
+            polkit_power_advisory: Some("power controls need the polkit rule".into()),
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: BoxLifecycleSnapshot = serde_json::from_str(&json).unwrap();
@@ -637,5 +651,7 @@ mod tests {
         let snap: BoxLifecycleSnapshot =
             serde_json::from_str(json).expect("must deserialize without a `logs` key");
         assert!(snap.logs.is_empty());
+        // Same back-compat guarantee for `polkit_power_advisory` (Task 9).
+        assert!(snap.polkit_power_advisory.is_none());
     }
 }
