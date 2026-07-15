@@ -1,3 +1,9 @@
+tt-station (0.10.0) noble; urgency=medium
+
+  * Release 0.10.0.
+
+ -- Tenstorrent <software@tenstorrent.com>  Wed, 15 Jul 2026 10:18:23 -0700
+
 tt-station (0.9.0) noble; urgency=medium
 
   * Initial Debian packaging: tt-station (tt CLI + tt-station-agentd + systemd

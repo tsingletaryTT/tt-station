@@ -22,6 +22,7 @@ struct PowerMenuView: View {
         Menu {
             Button("Reset chips") { Task { await box.issuePower(.resetChips) } }
             Button("Wake") { Task { await box.wakeBox() } }
+                .disabled((box.record.mac ?? "").isEmpty)
             Divider()
             Button("Suspend", role: .destructive) { confirm = .suspend }
             Button("Reboot…", role: .destructive) { confirm = .reboot }

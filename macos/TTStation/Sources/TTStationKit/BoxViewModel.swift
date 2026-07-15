@@ -409,12 +409,26 @@ public final class BoxViewModel: Identifiable {
             // Machine ops routinely drop the connection right after the
             // agent accepts them — that's success, not failure. The
             // `powerState` set above already communicates what's happening,
-            // so a thrown error there is a deliberate swallow, not an
+            // so a thrown error there is USUALLY a deliberate swallow, not an
             // oversight. `.resetChips` never disconnects, though — it's a
             // no-op signal (`PowerTransition.next` returns `nil` for it) —
             // so a real failure there (bad token, `tt-smi -r` error, agent
             // 500) must actually reach the user via `errorText`.
-            if !action.isMachineOp { record(error) }
+            //
+            // But a machine op can also fail WITHOUT the box ever going down
+            // — a 403 from a box missing the polkit rule, or a 401 from a
+            // stale/missing token — and that failure looks identical to the
+            // expected post-accept disconnect unless we look at the error
+            // text. Surface those (the op never ran; the box stays
+            // reachable and `powerState` will clear on the next `refresh()`
+            // via `onReachabilityChange`), and keep swallowing everything
+            // else for machine ops.
+            let text = "\(error)".lowercased()
+            let isPermissionOrAuth = [
+                "not permitted", "polkit", "authentication", "not authorized",
+                "access denied", "unauthorized", "401", "403", "no token",
+            ].contains { text.contains($0) }
+            if !action.isMachineOp || isPermissionOrAuth { record(error) }
         }
     }
 
@@ -423,9 +437,24 @@ public final class BoxViewModel: Identifiable {
     /// `record.mac` is `nil` for an agent/discovery record that predates
     /// Task 3's MAC detection — `TTClient.wake` requires a real MAC and
     /// fails outright given `nil`, same reasoning as `issuePower`'s host.
+    ///
+    /// Guards on a known MAC *before* touching `powerState`: without a MAC
+    /// there's no packet to send, so setting `.waking` here would leave the
+    /// UI showing "Waking…" forever with nothing actually in flight (an
+    /// unreachable box never clears it via `refresh()`'s reachability check).
+    /// `PowerMenuView` also disables the Wake button in this case, so this
+    /// guard is belt-and-suspenders against any other call site.
     public func wakeBox() async {
+        guard let mac = record.mac, !mac.isEmpty else {
+            record(NSError(
+                domain: "TTStation.wakeBox",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "No MAC known for this box — discover it while the box is reachable, or it may not support Wake-on-LAN."]
+            ))
+            return
+        }
         powerState = .waking
-        try? await commands.wake(mac: record.mac, host: record.hostPort)
+        try? await commands.wake(mac: mac, host: record.hostPort)
     }
 
     private func record(_ error: Error) {
