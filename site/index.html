@@ -277,6 +277,13 @@
     .lineage-desc { font-size: 0.82rem; color: var(--muted); line-height: 1.55; }
     .lineage-desc .real { color: var(--green); } .lineage-desc .soon { color: var(--yellow); }
 
+    /* ── Notice bar (independent / unsigned) ────────────────────────────────── */
+    .notice-bar { background: var(--bg2); border-bottom: 1px solid var(--border); color: var(--muted); font-size: 0.78rem; text-align: center; padding: 0.55rem 1.25rem; line-height: 1.55; }
+    .notice-bar strong { color: var(--teal-dim); font-weight: 600; }
+    .footer-disclaimer { color: var(--muted); font-size: 0.75rem; line-height: 1.6; max-width: 64rem; margin-top: 1.25rem; }
+    .footer-disclaimer a { color: var(--teal-dim); text-decoration: none; }
+    .footer-disclaimer a:hover { text-decoration: underline; }
+
     /* ── Install ──────────────────────────────────────────────────────────── */
     .install-block { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 2rem 2.25rem; max-width: 66rem; }
     @media (max-width: 620px) { .install-block { padding: 1.5rem 1.25rem; } }
@@ -370,6 +377,11 @@
   </style>
 </head>
 <body>
+
+<!-- ── Notice bar (independent side project) ────────────────────────────────── -->
+<div class="notice-bar">
+  <strong>tt-station is a personal sidequest</strong> — not yet an official Tenstorrent product or repository. Binaries are unsigned.
+</div>
 
 <!-- ── Nav ────────────────────────────────────────────────────────────────── -->
 <nav class="topnav">
@@ -683,9 +695,49 @@ c.chat.completions.<span class="f">create</span>(
   <h2 class="section-heading">Setup — the happy path</h2>
   <p class="section-sub">
     Two machines: the QuietBox (which already runs <code>tt-inference-server</code>) and your Mac.
-    Build the Rust binaries with <code>cargo</code> on each. In ideal, on-a-trusted-LAN conditions,
-    it's four commands.
+    Grab the latest tagged release — a macOS app (<code>.dmg</code>) and Ubuntu packages
+    (<code>.deb</code>) — or build the Rust binaries from source with <code>cargo</code>.
   </p>
+
+  <p class="section-label" style="margin-top:0.25rem;">Download a release</p>
+  <div class="install-block">
+    <div class="install-row">
+      <span class="install-num">◆</span>
+      <div class="install-body">
+        <p class="where">On your Mac</p>
+        <p>Download <code>TTStation-&lt;version&gt;-arm64.dmg</code> from the <a href="https://github.com/tsingletaryTT/tt-station/releases/latest" target="_blank" rel="noopener">latest release</a> and drag <code>TTStation.app</code> into Applications. The app isn't code-signed yet, so clear the quarantine flag once:</p>
+        <div class="cmd-wrap">
+          <code class="cmd" id="cmddl1">xattr -dr com.apple.quarantine /Applications/TTStation.app</code>
+          <button class="cmd-copy" data-target="cmddl1">Copy</button>
+        </div>
+        <p style="margin-top:0.85rem;">Launch it from Applications — it lives in the menu bar. The DMG bundles the <code>tt</code> CLI and offers to add it to <code>~/.local/bin</code> on first run, so the CLI steps below work too.</p>
+      </div>
+    </div>
+    <div class="install-row">
+      <span class="install-num">◆</span>
+      <div class="install-body">
+        <p class="where">On the QuietBox (Ubuntu)</p>
+        <p>Download the <code>tt-station</code> <code>.deb</code> matching your Ubuntu release (<code>noble</code> or <code>jammy</code>) from the <a href="https://github.com/tsingletaryTT/tt-station/releases/latest" target="_blank" rel="noopener">latest release</a>, install it, and enable the box agent as a user service:</p>
+        <div class="cmd-wrap">
+          <code class="cmd" id="cmddl2">sudo apt install ./tt-station_&lt;version&gt;_amd64_noble.deb
+systemctl --user enable --now tt-station-agentd</code>
+          <button class="cmd-copy" data-target="cmddl2">Copy</button>
+        </div>
+        <p style="margin-top:0.85rem;">The optional <code>tt-station-panel</code> <code>.deb</code> adds the on-box GTK control panel. These packages aren't signed or served from an apt repo — you're installing a local <code>.deb</code> you downloaded.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <span class="ci">◆</span>
+    <div>
+      <strong>Unsigned binaries.</strong> Code signing / notarization isn't set up yet, so macOS
+      quarantines the app (the <code>xattr</code> step above) and the <code>.deb</code>s aren't served
+      from a signed apt repo. Every tagged release ships the same artifacts, built in CI.
+    </div>
+  </div>
+
+  <p class="section-label" style="margin-top:2.5rem;">Build from source</p>
   <div class="install-block">
     <div class="install-row">
       <span class="install-num">1</span>
@@ -831,14 +883,20 @@ echo "$OPENAI_BASE_URL"           # → http://qb2-lab.local:8002/v1</code>
 
 <!-- ── Footer ────────────────────────────────────────────────────────────── -->
 <footer class="footer">
-  <div class="footer-brand">tt-station &nbsp;<span>· plug-and-play Tenstorrent from your Mac · research preview</span></div>
+  <div class="footer-brand">tt-station &nbsp;<span>· plug-and-play Tenstorrent from your Mac · a personal sidequest</span></div>
   <ul class="footer-links">
     <li><a href="https://github.com/tsingletaryTT/tt-station" target="_blank" rel="noopener">GitHub</a></li>
+    <li><a href="https://github.com/tsingletaryTT/tt-station/releases/latest" target="_blank" rel="noopener">Releases</a></li>
     <li><a href="https://github.com/tsingletaryTT/tt-station#readme" target="_blank" rel="noopener">README</a></li>
     <li><a href="https://github.com/tsingletaryTT/tt-station/blob/main/macos/README.md" target="_blank" rel="noopener">macOS app</a></li>
     <li><a href="https://docs.tenstorrent.com" target="_blank" rel="noopener">Tenstorrent Docs</a></li>
     <li><a href="https://tenstorrent.com" target="_blank" rel="noopener">Tenstorrent</a></li>
   </ul>
+  <p class="footer-disclaimer">
+    tt-station is a personal sidequest by Taylor Singletary — not yet an official Tenstorrent product or
+    repository, and not affiliated with or endorsed by Tenstorrent. Binaries are unsigned; see
+    <a href="#setup">Setup</a> for the quarantine step.
+  </p>
 </footer>
 
 <script>
