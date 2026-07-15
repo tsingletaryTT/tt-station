@@ -226,11 +226,14 @@ both the agent and the panel depend on it) installs the file to:
 
 `debian/rules`' `override_dh_auto_install` copies `deploy/tt-station-power.rules` there
 (mode 644, root-owned, same as every other file the package ships — no maintainer-script copy
-step needed since dpkg lays out package-owned files directly). `debian/tt-station.postrm`
-removes it explicitly on `purge` (files under `/etc/` are also auto-registered as conffiles by
-debhelper's `dh_installdeb`, so dpkg itself already preserves the file across a plain `remove`
-and clears it at `purge` — the explicit `rm -f` in postrm is a documented belt-and-suspenders
-no-op on top of that, not the only thing standing between "purged" and "rule still present").
+step needed since dpkg lays out package-owned files directly). It's also listed explicitly in
+`debian/tt-station.conffiles`, so dpkg treats it as a **conffile** unambiguously (files under
+`/etc/` are auto-registered as conffiles by debhelper's `dh_installdeb` too, but the explicit
+listing removes any doubt) — a plain upgrade or `remove` **preserves** the file (including a
+locally-edited copy, which dpkg keeps or prompts on conflict), and only `purge` clears it.
+`debian/tt-station.postrm` also removes it explicitly on `purge` — a documented
+belt-and-suspenders no-op on top of dpkg's own conffile handling, not the only thing standing
+between "purged" and "rule still present".
 
 ### The `sudo`-group default, and how to retarget it
 
@@ -246,11 +249,16 @@ sudo systemctl restart polkit   # or just wait — polkit picks up rules.d chang
 ```
 
 (polkit reloads `rules.d/*.rules` automatically on file changes in modern versions; restarting
-the `polkit` service is the fallback if a change doesn't seem to take.) A future `.deb` upgrade
-will overwrite this local edit — track any customization outside the package if it needs to
-survive upgrades, or carry the retargeted rule as a local override in
-`/etc/polkit-1/rules.d/` under a *different* filename with a lower sort prefix (rules load in
-filename order; polkit uses the *first* matching rule that returns a non-`undefined` result).
+the `polkit` service is the fallback if a change doesn't seem to take.) The installed rule is a
+dpkg **conffile** (`/etc/polkit-1/rules.d/49-tt-station-power.rules` is listed in
+`debian/tt-station.conffiles`), so a locally-edited copy is **preserved** across a future
+`.deb` upgrade — dpkg detects the local modification and either keeps your version automatically
+or prompts you to resolve the conflict; it is never silently overwritten. `purge` (not a plain
+upgrade or `remove`) still deletes it — see `debian/tt-station.postrm`. If you'd rather not rely
+on conffile handling at all (e.g. you're not using the `.deb`, or you just prefer it), carry the
+retargeted rule as a local override in `/etc/polkit-1/rules.d/` under a *different* filename with
+a lower sort prefix instead (rules load in filename order; polkit uses the *first* matching rule
+that returns a non-`undefined` result).
 
 ### Manual install (non-`.deb` setups)
 
