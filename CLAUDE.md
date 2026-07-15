@@ -10,9 +10,26 @@ This box (`tsingletaryTT-quietbox`) IS a real QuietBox: 4× Blackhole (`p300c`),
 
 ---
 
-## ▶ PICK UP HERE — especially on the Mac
+## ▶ PICK UP HERE
 
-**The macOS app (`macos/TTStation`, MARKETING_VERSION 0.9.0) was authored on a Linux box
+**Box power & hardware controls shipped (v0.10.0, merge `dd42c9a`, 2026-07-15):** the box
+can now be power-managed end to end — agent `POST /power` (authed: `reset-chips` via `tt-smi -r`
+keeps pairing → 200; `suspend`/`reboot`/`shutdown` machine ops → 202 then disconnect; polkit
+denial → 403), the NIC MAC is advertised in `/status` + mDNS TXT for **Wake-on-LAN**, `tt power`
+/ `tt wake` CLI subcommands, `libttstation` WoL magic-packet builder, GTK panel local power row
+(with confirm), macOS PowerMenu in the header + popover, and a polkit rule packaged as a conffile
+(`deploy/tt-station-power.rules`). Reference: `docs/reference/power-controls.md`.
+
+**Box-side is built, installed, and verified live on this box (2026-07-15):** `cargo build/test/
+clippy` all green (fixed a pre-existing clippy `doc_lazy_continuation` in `catalog.rs`, commit
+`876ffd3`); fresh `tt` + `tt-station-agentd` copied into `~/.local/bin` and the systemd `--user`
+agent restarted. Confirmed live: `/status` carries `mac`, `POST /power` → 401 unauthed (route
+exists), `tt power`/`tt wake` in `--help`. **Still owner-gated:** macOS click-through of the new
+PowerMenu on a real Mac, and a `.deb` install-test that exercises the polkit rule on a box.
+
+### macOS build/click-through
+
+**The macOS app (`macos/TTStation`, MARKETING_VERSION now 0.10.0) was authored on a Linux box
 with NO Swift toolchain, but now BUILDS + SHIPS via CI:** `macos-release.yml` compiles it
 on a `macos-14` runner and published `TTStation-0.9.0-arm64.dmg` to the **v0.9.0 GitHub
 Release** (2026-07-10, alongside the four `.deb`s). CI gotcha found + fixed: brew's latest
@@ -79,6 +96,10 @@ session, NOT part of tt-station. Design: `~/code/tt-toplike/docs/REMOTE_QUIETBOX
   `GET /logs/stream` (unauthed **WebSocket** — replays then follows the same source,
   re-resolving the newest file each ~500ms so a fresh serve is picked up). Every emitted
   log line is redacted (masks `hf_…`/`sk-…`/`Bearer …` shapes) — see `docs/reference/logs.md`.
+  **`POST /power` (authed)** — `reset-chips` (`tt-smi -r`, keeps pairing) → 200; machine ops
+  `suspend`/`reboot`/`shutdown` → 202 (box disconnects shortly after); polkit denial → 403.
+  The primary-NIC MAC is advertised in `/status` + the mDNS TXT record so a Mac can Wake-on-LAN
+  a powered-down box. Command executor is configurable; see `docs/reference/power-controls.md`.
 - mDNS `_tenstorrent._tcp` status re-published on run/stop; graceful shutdown unregisters.
 - **Config file + named profiles:** optionally reads `agentd.toml` (default
   `$TT_CONFIG_DIR/agentd.toml` or `~/.config/tt-station/agentd.toml`, override with
@@ -90,6 +111,9 @@ session, NOT part of tt-station. Design: `~/code/tt-toplike/docs/REMOTE_QUIETBOX
 
 **CLI (`crates/tt`):** `discover` (`--host`/`--no-mdns`), `pair`/`pair-init`/`pair-complete`,
 `run`, `stop`, `status` (unauthed), `endpoint`, `models`, `serving`, `reset`,
+**`power`** (authed — `reset-chips`/`suspend`/`reboot`/`shutdown`) and **`wake`** (broadcasts a
+Wake-on-LAN magic packet from this machine using the MAC learned at discovery, or `--mac`; needs
+WoL enabled in the box BIOS/NIC — see `docs/reference/power-controls.md`),
 `config` (unauthed — active/available profiles + resolved backend + serving host/port, mirrors
 `GET /config`; see `docs/reference/agentd-config.md`), **`logs`** (unauthed —
 `tt logs [--source container|run] [--tail N] [--follow]`; one-shot tail respects global
@@ -110,7 +134,8 @@ Stop/Restart under this model are just `systemctl --user start|stop|restart
 tt-station-agentd.service`.
 
 **Box panel (`box-panel/tt-station-panel.py`, GTK4):** the box's own screen — Start/Stop/
-Restart/Reset the agent, **live 6-digit pairing code** (with TTL), status/endpoint,
+Restart/Reset the agent, a **local power row** (reset-chips/suspend/reboot/shutdown, each behind
+a confirm dialog — pure builders in `panel_launchers.py`), **live 6-digit pairing code** (with TTL), status/endpoint,
 **profile dropdown** (reads `agentd.toml`'s profile list, passes `--profile` on Start/Restart;
 hidden when no config file exists). Config via `TTS_*` env (repo path, serving host/port,
 `TTS_IMAGE`, `TTS_AUTOSTART`, `TTS_CONFIG` for the profile dropdown's TOML path).
@@ -131,7 +156,7 @@ message, never a crash. Pure builders live in `box-panel/panel_launchers.py`
 `GLib.idle_add`). Ported from the macOS Connect launchers, local (no SSH) since the panel runs
 on the box.
 
-**Linux packaging (`debian/`, `build-deb.sh`, v0.9.0):** two Ubuntu `.deb`s, modeled on
+**Linux packaging (`debian/`, `build-deb.sh`, v0.10.0):** two Ubuntu `.deb`s, modeled on
 tt-toplike (debhelper compat 13 + `dpkg-buildpackage`, vendored offline crates via `cargo
 vendor` + `--frozen`; `vendor/`/`.cargo/config.toml` not committed). **`tt-station`** ships
 `/usr/bin/tt`, `/usr/bin/tt-station-agentd`, and the systemd **user** unit at
@@ -141,7 +166,9 @@ operator runs `systemctl --user enable --now`). **`tt-station-panel`** ships the
 `/usr/share/tt-station-panel/` (incl. `panel_launchers.py` + `assets/tt-logo.png`), a
 `/usr/bin/tt-station-panel` wrapper, a packaged `.desktop`, and hicolor icons (`Depends:
 tt-station, python3, gir1.2-gtk-4.0, python3-gi`). `install_desktop_icon()` no-ops when packaged.
-Workspace version unified at 0.9.0 (`[workspace.package]`, `scripts/bump-version.sh`); CI
+`tt-station` also ships the **polkit rule** for box power (`deploy/tt-station-power.rules` →
+`/usr/share/polkit-1/rules.d/`) as an explicit **conffile** (survives upgrades if edited).
+Workspace version unified at 0.10.0 (`[workspace.package]`, `scripts/bump-version.sh`); CI
 `release.yml` builds per-suite (noble/jammy) `.deb`s — a `v*` tag publishes a GitHub Release,
 while a manual **`workflow_dispatch`** run uploads the same `.deb`s as downloadable Actions
 artifacts (`tt-station-debs-<suite>`, 90d) with no Release (a pre-release/test-build flow;
@@ -153,7 +180,9 @@ owner install + GTK click-through (see follow-ups).
 **macOS app (`macos/TTStation`, v0.5.0 — native control room):** window-first veneer over
 `tt --json` with a fast MenuBarExtra popover for glance + quick actions (the menu-bar icon
 badges + rows highlight currently-serving models). The resizable window is a card-based
-control room: **box header** with a detected **device-mesh badge** (`P300X2`); a **live
+control room: **box header** with a detected **device-mesh badge** (`P300X2`) and a **power menu**
+(`PowerMenuView` — reset-chips/suspend/reboot/shutdown with a confirm sheet + expected-disconnect
+state; also mirrored in the MenuBarExtra popover, backed by `PowerControls`/`TTClient.power`); a **live
 device strip** (per-device temp/power/aiclk streamed from the agent's `/telemetry` WebSocket
 — the one read-only Swift I/O path); a **read-only Config card** (active/available profiles,
 backend, serving endpoint — from `tt config`); a **3-tier hardware-aware model browser**
@@ -220,6 +249,12 @@ commits, honest reports. Blend sources (glean + repos + docs). The git history i
 detailed log; this file is the current-state map.
 
 ## Known follow-ups (not blocking)
+- **Box power controls: owner testing on real hardware.** Box-side is built/installed/verified
+  on this box (route responds, MAC advertised, CLI present), but the destructive machine ops
+  (`suspend`/`reboot`/`shutdown`) and the polkit rule that authorizes them have NOT been exercised
+  end to end — do a `.deb` install that lands `/usr/share/polkit-1/rules.d/` and confirm each op
+  actually runs (and `reset-chips` keeps pairing). Wake-on-LAN needs WoL enabled in the box
+  BIOS/NIC and a Mac on the same L2 broadcast domain. macOS `PowerMenuView` needs a click-through.
 - **Panel Connect launchers: finish the click-through WITH a serving model.** The GTK panel
   now launches cleanly on this box (2026-07-10, via `/usr/bin/python3` on `DISPLAY=:0`):
   `panel_launchers` imports, the Connect row is built, and `_refresh_connect` gating runs
