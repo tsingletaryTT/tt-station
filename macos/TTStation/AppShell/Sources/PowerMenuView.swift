@@ -23,8 +23,8 @@ struct PowerMenuView: View {
             Button("Reset chips") { Task { await box.issuePower(.resetChips) } }
             Button("Wake") { Task { await box.wakeBox() } }
             Divider()
-            Button("Suspend") { confirm = .suspend }
-            Button("Reboot…") { confirm = .reboot }
+            Button("Suspend", role: .destructive) { confirm = .suspend }
+            Button("Reboot…", role: .destructive) { confirm = .reboot }
             Button("Shut Down…", role: .destructive) { confirm = .shutdown }
         } label: {
             Image(systemName: "power")

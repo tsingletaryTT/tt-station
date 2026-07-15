@@ -409,7 +409,12 @@ public final class BoxViewModel: Identifiable {
             // Machine ops routinely drop the connection right after the
             // agent accepts them — that's success, not failure. The
             // `powerState` set above already communicates what's happening,
-            // so this is a deliberate swallow, not an oversight.
+            // so a thrown error there is a deliberate swallow, not an
+            // oversight. `.resetChips` never disconnects, though — it's a
+            // no-op signal (`PowerTransition.next` returns `nil` for it) —
+            // so a real failure there (bad token, `tt-smi -r` error, agent
+            // 500) must actually reach the user via `errorText`.
+            if !action.isMachineOp { record(error) }
         }
     }
 
