@@ -426,6 +426,70 @@ fn tt_catalog_json_classifies_fixture_against_mock_box() {
     );
 }
 
+/// `tt power reset-chips --host <mock> --json` round-trips against
+/// mock-box's `/power` route (a deliberate no-op -- it never runs a real
+/// `systemctl`/`tt-smi` command, see `mock-box/src/main.rs`'s `power_mock`),
+/// so this exercises the full authed dispatch (`build_store` token lookup +
+/// `agent_client::power`) with no hardware. `/power` is authed like
+/// `/reset`, so this pairs first -- same harness as every other test above.
+#[test]
+#[ignore] // hardware-free but network/process -- run with --ignored like the others
+fn tt_power_reset_chips_against_mock_box() {
+    let port: u16 = 18904;
+    let host = format!("127.0.0.1:{port}");
+
+    let _mock_box = spawn_mock_box(port);
+    wait_for_port(port);
+
+    let config_dir = TempConfigDir::new();
+
+    AssertCommand::cargo_bin("tt")
+        .unwrap()
+        .env("TT_CONFIG_DIR", &config_dir.0)
+        .args(["--json", "pair", &host, "--code", "000000"])
+        .assert()
+        .success();
+
+    let power_stdout = AssertCommand::cargo_bin("tt")
+        .unwrap()
+        .env("TT_CONFIG_DIR", &config_dir.0)
+        .args(["--json", "power", "reset-chips", "--host", &host])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let result: serde_json::Value =
+        serde_json::from_slice(&power_stdout).expect("power output is valid JSON");
+    assert_eq!(result["action"], "reset-chips");
+    assert_eq!(result["ok"], true);
+}
+
+/// Unknown `tt power` actions must be rejected BEFORE any HTTP call -- the
+/// four valid literals (`reset-chips`/`suspend`/`reboot`/`shutdown`) are
+/// checked client-side in the `Command::Power` dispatch arm. No mock-box and
+/// no pairing needed here: `--host 127.0.0.1:1` is never actually contacted
+/// (nothing listens there), which is exactly the point -- if validation ran
+/// AFTER the network call instead of before, this would hang/fail with a
+/// connection error rather than the clear "unknown power action" message.
+#[test]
+fn tt_power_rejects_unknown_action_before_any_network_call() {
+    let stderr = AssertCommand::cargo_bin("tt")
+        .unwrap()
+        .args(["power", "explode", "--host", "127.0.0.1:1"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(
+        stderr.contains("unknown power action"),
+        "expected an unknown-power-action error, got: {stderr}"
+    );
+}
+
 /// Regression test for the nested-runtime panic in `tt catalog`'s primary
 /// usage path -- `tt catalog --host <h>` WITHOUT `--catalog-file`.
 ///
