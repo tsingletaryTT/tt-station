@@ -359,6 +359,30 @@ struct Cli {
     /// assumes elsewhere -- see the module-level `CLAUDE.md`).
     #[arg(long = "ssh-user")]
     ssh_user: Option<String>,
+
+    /// Override the `reset-chips` `POST /power` command (default:
+    /// `tt-smi -r`). Space-separated argv, e.g. `--power-reset-chips-cmd
+    /// tt-smi -r --some-flag`. Only wired via `with_power_config` when at
+    /// least one `--power-*-cmd` flag is given; any flag left unset falls
+    /// back to ITS OWN built-in default, not an empty command. See
+    /// `docs/reference/power-controls.md`.
+    #[arg(long = "power-reset-chips-cmd", num_args = 1..)]
+    power_reset_chips_cmd: Option<Vec<String>>,
+
+    /// Override the `suspend` `POST /power` command (default: `systemctl
+    /// suspend`). See `--power-reset-chips-cmd` for the argv/fallback rules.
+    #[arg(long = "power-suspend-cmd", num_args = 1..)]
+    power_suspend_cmd: Option<Vec<String>>,
+
+    /// Override the `reboot` `POST /power` command (default: `systemctl
+    /// reboot`). See `--power-reset-chips-cmd` for the argv/fallback rules.
+    #[arg(long = "power-reboot-cmd", num_args = 1..)]
+    power_reboot_cmd: Option<Vec<String>>,
+
+    /// Override the `shutdown` `POST /power` command (default: `systemctl
+    /// poweroff`). See `--power-reset-chips-cmd` for the argv/fallback rules.
+    #[arg(long = "power-shutdown-cmd", num_args = 1..)]
+    power_shutdown_cmd: Option<Vec<String>>,
 }
 
 /// `docker` fallback-backend default serving image, used only when
@@ -739,6 +763,41 @@ async fn main() -> Result<()> {
     // process's own run-user and `$HOME` -- see `resolve_ssh_target`.
     let (ssh_user, ssh_authorized_keys_path) = resolve_ssh_target(cli.ssh_user.clone());
     let state = state.with_ssh_target(ssh_authorized_keys_path, ssh_user);
+
+    // Configure the additive `POST /power` route (Task 2, see routes.rs):
+    // the four command vectors `run_power_command` shells out to. Only
+    // applied when the operator gave at least one `--power-*-cmd` flag --
+    // otherwise `AppState::new_inner`'s built-in defaults (`tt-smi -r` /
+    // `systemctl suspend|reboot|poweroff`) stand untouched, same "no-op
+    // unless asked" contract every other `with_*` builder here follows. A
+    // flag left unset even when a SIBLING flag is given still falls back to
+    // ITS OWN default (not an empty command) -- e.g. `--power-suspend-cmd`
+    // alone doesn't blank out reboot/shutdown/reset-chips.
+    let state = if cli.power_reset_chips_cmd.is_some()
+        || cli.power_suspend_cmd.is_some()
+        || cli.power_reboot_cmd.is_some()
+        || cli.power_shutdown_cmd.is_some()
+    {
+        let reset_chips = cli
+            .power_reset_chips_cmd
+            .clone()
+            .unwrap_or_else(|| vec!["tt-smi".to_string(), "-r".to_string()]);
+        let suspend = cli
+            .power_suspend_cmd
+            .clone()
+            .unwrap_or_else(|| vec!["systemctl".to_string(), "suspend".to_string()]);
+        let reboot = cli
+            .power_reboot_cmd
+            .clone()
+            .unwrap_or_else(|| vec!["systemctl".to_string(), "reboot".to_string()]);
+        let shutdown = cli
+            .power_shutdown_cmd
+            .clone()
+            .unwrap_or_else(|| vec!["systemctl".to_string(), "poweroff".to_string()]);
+        state.with_power_config(reset_chips, suspend, reboot, shutdown)
+    } else {
+        state
+    };
 
     // Detect this box's device mesh ONCE at startup (not per-request): run
     // `tt-smi -s` through the exact same command seam `GET /telemetry` uses

@@ -1455,6 +1455,90 @@ async fn reset(
     Ok(Json(serde_json::json!({})))
 }
 
+/// The success status for a power action: reset-chips completes synchronously
+/// (200), while machine ops only *initiate* teardown before the box goes down
+/// (202 Accepted).
+fn power_success_status(action: crate::power::PowerAction) -> StatusCode {
+    if action.is_machine_op() {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    }
+}
+
+/// JSON body accepted by `POST /power`.
+#[derive(Deserialize)]
+struct PowerRequest {
+    action: String,
+}
+
+/// `POST /power { "action": "reset-chips" | "suspend" | "reboot" | "shutdown" }`
+/// (bearer-guarded, same `BearerAuth` gate as `/run`/`/stop`/`/reset`): run
+/// the configured command for `action` via `AppState::run_power_command`.
+///
+/// Status codes:
+///   - `400` if `action` doesn't parse (`PowerAction::parse`) -- caller error,
+///     checked before anything runs.
+///   - `200 {}` on a successful `reset-chips` -- it completes synchronously
+///     (board reset), so the caller can trust the response body.
+///   - `202 { "action", "accepted": true }` on a successful machine op
+///     (suspend/reboot/shutdown) -- the command only *initiates* teardown;
+///     the box may go down before a `200` could ever be observed, so this
+///     reports "accepted", not "done".
+///   - `403` if the command fails with a permission/polkit-shaped error
+///     (no rule installed for the run-user to invoke `systemctl`/`tt-smi`
+///     without a password) -- the operator's box to fix, not this agent's,
+///     so the message points at `docs/reference/power-controls.md`.
+///   - `500` for any other command failure (e.g. the binary itself is
+///     missing) -- `backend_error`, same as every other route's fallback.
+async fn power(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(req): Json<PowerRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let action = crate::power::PowerAction::parse(&req.action).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("unknown power action: {}", req.action),
+            }),
+        )
+    })?;
+
+    let s = state.clone();
+    tokio::task::spawn_blocking(move || s.run_power_command(action))
+        .await
+        .map_err(|join_err| backend_error(anyhow::anyhow!("power task panicked: {join_err}")))?
+        .map_err(|e| {
+            // A permission failure (no polkit rule) is the operator's to fix --
+            // distinguish it from a generic 500 with a pointer to the doc.
+            let msg = e.to_string();
+            if msg.contains("Interactive authentication required")
+                || msg.contains("Access denied")
+                || msg.contains("not authorized")
+            {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "{msg} — the box is not permitted to {}. Install the polkit rule (see docs/reference/power-controls.md).",
+                            req.action
+                        ),
+                    }),
+                )
+            } else {
+                backend_error(e)
+            }
+        })?;
+
+    let body = if action.is_machine_op() {
+        serde_json::json!({ "action": req.action, "accepted": true })
+    } else {
+        serde_json::json!({})
+    };
+    Ok((power_success_status(action), Json(body)))
+}
+
 /// `GET /endpoint` (bearer-guarded): the `Endpoint` of whatever's currently
 /// serving, or `409 Conflict` if the box is idle. `409` rather than `404`
 /// because the route itself exists and is reachable -- what's missing is a
@@ -2120,6 +2204,7 @@ pub fn app(state: AppState) -> Router {
         .route("/run", post(run_model))
         .route("/stop", post(stop_model))
         .route("/reset", post(reset))
+        .route("/power", post(power))
         .route("/endpoint", get(get_endpoint))
         .route("/ssh/authorize", post(ssh_authorize).delete(ssh_revoke))
         .with_state(state)
@@ -2233,6 +2318,15 @@ mod telemetry_inference_tests {
             .expect("power command runs");
         assert!(marker.exists(), "configured power command was executed");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn power_success_status_is_202_for_machine_ops_200_for_reset_chips() {
+        use crate::power::PowerAction;
+        assert_eq!(power_success_status(PowerAction::ResetChips), StatusCode::OK);
+        assert_eq!(power_success_status(PowerAction::Suspend), StatusCode::ACCEPTED);
+        assert_eq!(power_success_status(PowerAction::Reboot), StatusCode::ACCEPTED);
+        assert_eq!(power_success_status(PowerAction::Shutdown), StatusCode::ACCEPTED);
     }
 }
 
