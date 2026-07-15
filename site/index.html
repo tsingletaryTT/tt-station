@@ -6,8 +6,14 @@
   <title>tt-station — Your Tenstorrent QuietBox, as your Mac sees it</title>
   <meta name="description" content="Discover a Tenstorrent QuietBox on your LAN like an AirPlay device, pair once, run a model, and point any OpenAI client at one /v1 endpoint. A box-side agent plus a native macOS app — the thin glue that makes local Tenstorrent inference feel plug-and-play.">
   <meta property="og:title" content="tt-station — plug-and-play Tenstorrent from your Mac">
-  <meta property="og:description" content="Discover → pair → run → one OpenAI-compatible /v1 endpoint. A native macOS control room on one side, a Rust agent on the other. No llama.cpp required.">
+  <!-- The social-share summary is deliberately just the quote — mysterious, no context. -->
+  <meta property="og:description" content="Such is the stuff, from where dreams are woven.">
   <meta property="og:image" content="assets/station_to_station_v2_duotone.png">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="tt-station">
+  <meta name="twitter:description" content="Such is the stuff, from where dreams are woven.">
+  <meta name="twitter:image" content="assets/station_to_station_v2_duotone.png">
   <link rel="icon" type="image/svg+xml" href="station-to-station-poster.svg">
   <style>
     /* ── Reset & base ─────────────────────────────────────────────────────── */
@@ -363,6 +369,9 @@
     }
     .poster p { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); text-align: center; max-width: 36rem; line-height: 1.6; }
     .poster p .accent { color: var(--teal); }
+    .poster-quote { font-family: var(--mono); font-size: 0.92rem; color: var(--text); text-align: center; max-width: 38rem; line-height: 1.7; margin-top: 1.4rem; font-style: italic; }
+    .poster-quote .singer { font-style: normal; }
+    .poster-quote .attr { display: block; font-style: normal; font-size: 0.72rem; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 0.55rem; }
 
     /* ── Footer ───────────────────────────────────────────────────────────── */
     .footer {
@@ -374,6 +383,28 @@
     .footer-brand span { color: var(--muted2); font-weight: 400; }
     .footer-links { display: flex; gap: 1.5rem; list-style: none; flex-wrap: wrap; }
     .footer-links a { font-size: 0.85rem; color: var(--muted); }
+
+    /* ── Mobile polish (phones) ───────────────────────────────────────────────
+       The site's grids already stack at 820–900px; this tier tunes the small-
+       phone experience: no sideways scroll, tighter vertical rhythm, readable
+       code/terminal type, and full-width tap targets. */
+    @media (max-width: 560px) {
+      /* Belt-and-suspenders: nothing should push the layout wider than the
+         viewport (e.g. a rotated flow-arrow label or a long inline token). */
+      html, body { overflow-x: hidden; }
+      .section { padding-top: 3.25rem; padding-bottom: 3.25rem; }
+      .hero { padding-top: 2.5rem; padding-bottom: 3rem; }
+      .hero-tagline { font-size: 1rem; line-height: 1.6; }
+      /* Full-width, centered CTA buttons are easier to tap. */
+      .hero-cta { gap: 0.6rem; }
+      .hero-cta .btn-primary, .hero-cta .btn-secondary { flex: 1 1 12rem; justify-content: center; }
+      /* Keep code + terminal inside the screen; long lines scroll in-place. */
+      .window, .term, .cmd, .cmd-wrap, .callout, .install-block { max-width: 100%; }
+      .term { font-size: 0.7rem; padding: 0.9rem 1rem; }
+      .cmd { font-size: 0.74rem; }
+      .install-body p { font-size: 0.88rem; }
+      .poster-quote { font-size: 0.85rem; }
+    }
   </style>
 </head>
 <body>
@@ -879,6 +910,7 @@ echo "$OPENAI_BASE_URL"           # → http://qb2-lab.local:8002/v1</code>
 <section class="poster">
   <img src="station-to-station.svg" alt="Station to Station — the Thin White Daemon: a stylized figure standing between a QuietBox terminal and an iMac G3, screenprint-style">
   <p><span class="accent">“Station to Station”</span> — the thin glue between your Mac and your QuietBox.</p>
+  <p class="poster-quote"><span class="singer">👨‍🎤</span> “Such is the stuff, from where dreams are woven.” <span class="singer">👩‍🎤</span><span class="attr">David Bowie</span></p>
 </section>
 
 <!-- ── Footer ────────────────────────────────────────────────────────────── -->
