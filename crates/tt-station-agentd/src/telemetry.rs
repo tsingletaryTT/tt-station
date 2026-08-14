@@ -176,6 +176,7 @@ mod tests {
                     prefix_hit_rate: 0.0,
                     preemptions_delta: 0,
                 }),
+                media: None,
             }]),
             ..sample_toplike()
         }

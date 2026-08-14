@@ -1,3 +1,12 @@
+tt-station (0.11.0) noble; urgency=medium
+
+  * Release 0.11.0.
+  * telemetry: report media/diffusion workloads (tt-media-inference-server)
+    in the tt_toplike.inference stream as a `media` object, alongside the
+    existing vLLM `serving` object.
+
+ -- Tenstorrent <software@tenstorrent.com>  Fri, 14 Aug 2026 16:43:45 -0700
+
 tt-station (0.10.1) noble; urgency=medium
 
   * Release 0.10.1.

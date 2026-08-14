@@ -61,9 +61,28 @@ the truth.
 
 **tt-toplike is a SEPARATE repo, owner-managed.** The remote-QuietBox work
 (`WsBackend`, `--remote HOST:PORT`, `--remote <name>` via `tt discover`, and the
-`/remote` slash command that hot-swaps to a box's live telemetry) is on tt-toplike's
-`inference-server-monitoring` branch, committed locally there — NOT pushed by this
-session, NOT part of tt-station. Design: `~/code/tt-toplike/docs/REMOTE_QUIETBOX_DESIGN.md`.
+`/remote` slash command that hot-swaps to a box's live telemetry) has **shipped**: it's
+merged to tt-toplike's `main` (v0.8.0), no longer an unpushed branch. Design:
+`~/code/tt-toplike/docs/REMOTE_QUIETBOX_DESIGN.md`.
+
+**Compat with tt-toplike (re-verified 2026-08-14).** `tt-toplike/src/backend/remote_ext.rs`
+is the canonical `tt_toplike` schema and is **unchanged at `schema: 1`** across PRs #20–#23.
+agentd's wire structs match field-for-field (`ProcInfo`↔`RemoteProc`,
+`ServingInfo`↔`RemoteServing`, `MediaInfo`↔`RemoteMedia`). Verified by capturing real
+`/telemetry` frames off this box and replaying them through tt-toplike's own
+`parse_extension` in a worktree at `origin/main`, plus a live `tt-toplike --remote
+localhost:8765` session (4× p300c, real telemetry). To redo that check: worktree
+tt-toplike at `origin/main`, add a test to `remote_ext.rs`'s `mod tests` that
+`include_str!`s a captured frame and asserts `parse_extension` + `parse_tt_smi_snapshot`
+both succeed.
+
+Two evolutions in tt-toplike NOT adopted here: it now installs from **ppa.tenstorrent.com**
+(#22 — deliberately deferred, we're not ready for a PPA), and #23's richer per-device
+telemetry (tt-kmd class attrs, live PCIe bandwidth, fan RPM, therm trips) is read from
+**local sysfs** and so does NOT cross the WebSocket — a remote viewer of this box sees none
+of it. #23 also reads tt-smi **6.x**'s top-level `processes[]`; this box is on tt-smi
+**5.3.0**, so that path is dormant, and when 6.x lands it will partly overlap agentd's own
+`tt_toplike.processes` scan — decide deliberately rather than shipping both.
 
 ---
 
@@ -85,9 +104,13 @@ session, NOT part of tt-station. Design: `~/code/tt-toplike/docs/REMOTE_QUIETBOX
   `POST /pair/init|complete`, `POST /run|stop`, `GET /endpoint`, `POST /reset` (authed),
   `GET /telemetry` (**WebSocket**, unauthed — streams `tt-smi -s` for remote tt-toplike;
   frames now carry an OPTIONAL ADDITIVE `tt_toplike` key alongside the verbatim tt-smi JSON —
-  `{ schema: 1, processes: [{pid,name,cmd,uses_tt,cpu_pct,mem_bytes}] }`, `uses_tt` best-effort
-  (only processes the agent's uid can inspect); `inference` is DEFERRED (its absence means
-  tt-toplike falls back to local view for that panel) — see `TT_TOPLIKE_STREAM.md`),
+  `{ schema: 1, processes: [{pid,name,cmd,uses_tt,cpu_pct,mem_bytes}], inference: [...] }`,
+  `uses_tt` best-effort (only processes the agent's uid can inspect). `inference` is
+  IMPLEMENTED (`inference.rs`): one `/metrics` scrape, two server flavors told apart by
+  namespace — vLLM (`vllm:*`) → a `serving` object, tt-media-inference-server
+  (`tt_media_server_*`, e.g. SkyReels) → a `media` object, mutually exclusive. The key is
+  OMITTED when agentd has no authoritative opinion, which is what makes tt-toplike fall back
+  to its local view for that panel — see `TT_TOPLIKE_STREAM.md`),
   `GET /serving` (unauthed — every running `tt-inference-server` `/v1`, `source: agent|external`),
   `GET /config` (unauthed — redacted resolved config, no secrets),
   `GET /logs` (unauthed — `?source=container|run&tail=N` tail of a `workflow_logs/` file;

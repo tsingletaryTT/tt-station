@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! The `tt_toplike.inference` telemetry enrichment: scrape a vLLM
-//! Prometheus `/metrics` endpoint and fold it into the wire shape
+//! The `tt_toplike.inference` telemetry enrichment: scrape an inference
+//! server's Prometheus `/metrics` endpoint and fold it into the wire shape
 //! `tt-toplike --remote`'s `[i]` view deserializes.
+//!
+//! Two server flavors share that one endpoint and are told apart by which
+//! metric namespace the body carries (see `parse_scrape`):
+//!   - **vLLM** (`vllm:*`) -- LLM serving; folds to the `serving` object.
+//!   - **tt-media-inference-server** (`tt_media_server_*`) -- diffusion/video
+//!     models like SkyReels, where tokens/sec is meaningless; folds to the
+//!     `media` object. The two are mutually exclusive on the wire.
 //!
 //! Mirrors the metric names and rate/average math of tt-toplike's own
 //! reference parser (`tt-toplike/src/workload/inference_server/metrics.rs`)
@@ -12,12 +19,14 @@
 //! `GET /telemetry`) compute identical numbers from the identical scrape.
 //!
 //! Three layers, same split as `procscan.rs`:
-//!   - **Wire types** (`InferenceInfo`, `ServingInfo`, `Phase`) -- the
-//!     `Serialize` shapes `tt-toplike` decodes. Field names/types and the
-//!     `Phase` strings are load-bearing; see the module-level brief this was
+//!   - **Wire types** (`InferenceInfo`, `ServingInfo`, `MediaInfo`, `Phase`)
+//!     -- the `Serialize` shapes `tt-toplike` decodes (`RemoteInference`,
+//!     `RemoteServing`, `RemoteMedia`). Field names/types and the `Phase`
+//!     strings are load-bearing; see the module-level brief this was
 //!     built from.
-//!   - **Pure helpers** (`parse_vllm_metrics`, `extract_model_name`,
-//!     `ServingInfo::fold`, `build_inference`) -- take already-fetched text
+//!   - **Pure helpers** (`parse_vllm_metrics`, `parse_media_metrics`,
+//!     `parse_scrape`, `extract_model_name`, `ServingInfo::fold`,
+//!     `MediaInfo::fold`, `build_inference`) -- take already-fetched text
 //!     or already-parsed counters, so they're unit-testable with canned
 //!     `/metrics` bodies and no real HTTP.
 //!   - **`InferenceSampler`** -- the stateful seam owned once per
@@ -160,6 +169,170 @@ pub fn extract_model_name(text: &str) -> Option<String> {
     None
 }
 
+// ── Media / diffusion server (tt-media-inference-server) ─────────────────
+//
+// Diffusion/video models (SkyReels, SDXL, z-image) run under
+// tt-media-inference-server, which exposes a DIFFERENT Prometheus namespace --
+// `tt_media_server_*` -- on the SAME `/metrics` endpoint agentd already
+// scrapes. vLLM's token counters don't exist there (and tokens/sec is
+// meaningless for image/video generation), so media servers get their own
+// counters + parser + fold. Mirrors tt-toplike's `parse_media_metrics` /
+// `MediaStats` (`src/workload/inference_server/metrics.rs`) so a box watching
+// itself locally and a laptop watching it remotely compute identical numbers.
+
+/// Raw cumulative counters + a gauge + histogram sums/counts from one
+/// media-server `/metrics` scrape, summed across distinct label sets
+/// (`model_type`, `device_id`) so the display sees one fleet figure.
+///
+/// Metric names mirror tt-toplike's, which verified them against a live
+/// `tt-media-inference-server` 0.15.0 SkyReels scrape: the real signals are
+/// `requests_base_total`, `jobs_in_progress`, the
+/// `requests_base_duration_seconds_total` histogram, and `post_processing`.
+/// The `pre_processing` / `model_inference` / `device_warmup` families aren't
+/// emitted by that build but are parsed best-effort (other runners may emit
+/// them) and simply stay 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MediaCounters {
+    /// `tt_media_server_requests_base_total` -- completed generations (the
+    /// duration histogram observes on completion, so this tracks finished work).
+    pub requests_total: u64,
+    /// `tt_media_server_requests_base_total{status="error"|"failed"|"failure"}`,
+    /// if the server labels failures (0.15.0 does not, so it stays 0).
+    pub errored_total: u64,
+    /// `tt_media_server_jobs_in_progress` -- in-flight generations right now.
+    pub jobs_in_progress: u32,
+    /// `tt_media_server_requests_base_duration_seconds_total_{sum,count}` --
+    /// end-to-end per-generation wall time (queue + compute + post).
+    pub duration_sum: f64,
+    pub duration_count: u64,
+    /// `tt_media_server_post_processing_duration_seconds_{sum,count}`.
+    pub post_sum: f64,
+    pub post_count: u64,
+    /// `tt_media_server_pre_processing_duration_seconds_{sum,count}`.
+    pub pre_sum: f64,
+    pub pre_count: u64,
+    /// `tt_media_server_model_inference_duration_seconds_{sum,count}`.
+    pub inference_sum: f64,
+    pub inference_count: u64,
+    /// `tt_media_server_device_warmup_duration_seconds_{sum,count}`.
+    pub warmup_sum: f64,
+    pub warmup_count: u64,
+}
+
+/// Parse the media-server counters we render. `None` if the text carries no
+/// `tt_media_server_` metric lines at all (a vLLM or non-media server), which
+/// folds to `media: None` downstream -- mirroring `parse_vllm_metrics`.
+///
+/// Unlike the vLLM parser (where later labelled lines win, matching its own
+/// reference), this one SUMS across distinct label sets so a multi-device or
+/// multi-model server reports a fleet total -- again matching its reference.
+pub fn parse_media_metrics(text: &str) -> Option<MediaCounters> {
+    let mut c = MediaCounters::default();
+    let mut saw_media = false;
+    // The live server (prometheus multiprocess mode) emits each series TWICE --
+    // byte-identical `name{labels}` lines. Since we sum across label sets,
+    // those duplicates would double every value (jobs_in_progress 2->4), so
+    // count each distinct series (name + full label block) at most once.
+    // Genuine multi-device series have different label blocks -> still summed.
+    //
+    // This keys on the exact `name{labels}` byte substring, so it assumes the
+    // exporter emits a given series with a STABLE label order (true for the
+    // prometheus client's multiprocess output). Labels re-emitted in a
+    // different order would key differently and double-count -- not a concern
+    // for this exporter, but noted since fleet totals rest on it.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || !line.starts_with("tt_media_server_") {
+            continue;
+        }
+        saw_media = true;
+        let Some(v) = line_value(line) else { continue };
+        // Series identity = everything up to the value: `name{labels}` when
+        // labelled, else the bare metric name.
+        let series_key = match line.rfind('}') {
+            Some(i) => &line[..=i],
+            None => line.split_whitespace().next().unwrap_or(line),
+        };
+        if !seen.insert(series_key) {
+            continue;
+        }
+        // `is_metric` compares the exact metric name, so histogram `_bucket` /
+        // `_created` companion lines never collide with the `_sum`/`_count`
+        // or base-counter names below.
+        if is_metric(line, "tt_media_server_requests_base_total") {
+            let n = v.max(0.0) as u64;
+            if line.contains("status=\"error\"")
+                || line.contains("status=\"failed\"")
+                || line.contains("status=\"failure\"")
+            {
+                c.errored_total += n;
+            } else {
+                c.requests_total += n;
+            }
+        } else if is_metric(line, "tt_media_server_jobs_in_progress") {
+            // A gauge (not cumulative); summed across label sets for a fleet total.
+            c.jobs_in_progress += v.max(0.0) as u32;
+        } else if is_metric(
+            line,
+            "tt_media_server_requests_base_duration_seconds_total_sum",
+        ) {
+            c.duration_sum += v.max(0.0);
+        } else if is_metric(
+            line,
+            "tt_media_server_requests_base_duration_seconds_total_count",
+        ) {
+            c.duration_count += v.max(0.0) as u64;
+        } else if is_metric(line, "tt_media_server_post_processing_duration_seconds_sum") {
+            c.post_sum += v.max(0.0);
+        } else if is_metric(
+            line,
+            "tt_media_server_post_processing_duration_seconds_count",
+        ) {
+            c.post_count += v.max(0.0) as u64;
+        } else if is_metric(line, "tt_media_server_pre_processing_duration_seconds_sum") {
+            c.pre_sum += v.max(0.0);
+        } else if is_metric(line, "tt_media_server_pre_processing_duration_seconds_count") {
+            c.pre_count += v.max(0.0) as u64;
+        } else if is_metric(line, "tt_media_server_model_inference_duration_seconds_sum") {
+            c.inference_sum += v.max(0.0);
+        } else if is_metric(
+            line,
+            "tt_media_server_model_inference_duration_seconds_count",
+        ) {
+            c.inference_count += v.max(0.0) as u64;
+        } else if is_metric(line, "tt_media_server_device_warmup_duration_seconds_sum") {
+            c.warmup_sum += v.max(0.0);
+        } else if is_metric(line, "tt_media_server_device_warmup_duration_seconds_count") {
+            c.warmup_count += v.max(0.0) as u64;
+        }
+    }
+    saw_media.then_some(c)
+}
+
+/// Which flavor of inference server the one `/metrics` scrape turned out to
+/// be. The two namespaces are mutually exclusive in practice (a given server
+/// is either vLLM or tt-media-inference-server), and the wire shape mirrors
+/// that: an `InferenceInfo` carries `serving` OR `media`, never both.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScrapeCounters {
+    Vllm(VllmCounters),
+    Media(MediaCounters),
+}
+
+/// Classify one `/metrics` body. vLLM is tried first: it's the primary path
+/// agentd serves, and checking it first makes the precedence explicit rather
+/// than incidental should a body ever somehow carry both namespaces.
+/// `None` when the body is neither (an unreachable/error page, or a server
+/// whose metrics we don't understand) -- which folds to "no authoritative
+/// opinion" downstream.
+pub fn parse_scrape(text: &str) -> Option<ScrapeCounters> {
+    if let Some(v) = parse_vllm_metrics(text) {
+        return Some(ScrapeCounters::Vllm(v));
+    }
+    parse_media_metrics(text).map(ScrapeCounters::Media)
+}
+
 /// Display-ready serving stats folded from the previous tick's counters.
 /// This is the `serving` object on the wire -- field names/types here are
 /// load-bearing (see this module's doc comment).
@@ -287,6 +460,108 @@ impl ServingInfo {
     }
 }
 
+/// Display-ready media/diffusion stats -- the `media` object on the wire, and
+/// the counterpart to `ServingInfo` for servers where "tokens/sec" is
+/// meaningless: throughput is generations, the live-work signal is
+/// `jobs_in_progress`, and timing is the end-to-end per-generation duration
+/// plus whichever pipeline stages the server exposes.
+///
+/// Field names/types mirror tt-toplike's `RemoteMedia` exactly (see this
+/// module's doc comment). Note this carries the two CUMULATIVE totals
+/// (`completed_total`/`errored_total`) alongside the per-tick deltas, because
+/// the remote UI displays them directly as "N done" / "errors N" -- a remote
+/// viewer can't reconstruct them from deltas it only started observing midway.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct MediaInfo {
+    pub generations_per_min: f32,
+    pub jobs_in_progress: u32,
+    pub completed_total: u64,
+    pub errored_total: u64,
+    pub completed_delta: u32,
+    pub errored_delta: u32,
+    pub duration_avg_s: f32,
+    pub post_avg_s: f32,
+    pub pre_avg_s: f32,
+    pub inference_avg_s: f32,
+    pub warmup_avg_s: f32,
+}
+
+impl MediaInfo {
+    /// Fold `cur` against the previous tick's counters over `elapsed_secs`
+    /// (real measured wall-time from `InferenceSampler`, not a nominal
+    /// cadence -- the same adaptation `ServingInfo::fold` makes to
+    /// tt-toplike's `MediaStats::fold`, which assumes a fixed cadence).
+    ///
+    /// A counter reset (`cur` < `prev`, e.g. the server restarted) clamps
+    /// that rate/delta to 0. Without `prev`, rates and deltas are 0 but the
+    /// gauges and cumulative totals still populate.
+    pub fn fold(prev: Option<&MediaCounters>, cur: &MediaCounters, elapsed_secs: f32) -> MediaInfo {
+        // Guard a near-zero (or first-tick, where it's unused) elapsed time
+        // from producing a divide-by-near-zero spike.
+        let secs = elapsed_secs.max(0.001);
+        let delta = |c: u64, p: u64| -> u32 { c.saturating_sub(p) as u32 };
+        let (gen_per_min, completed, errored) = match prev {
+            Some(p) => {
+                let per_sec = cur.requests_total.saturating_sub(p.requests_total) as f32 / secs;
+                (
+                    per_sec * 60.0,
+                    delta(cur.requests_total, p.requests_total),
+                    delta(cur.errored_total, p.errored_total),
+                )
+            }
+            None => (0.0, 0, 0),
+        };
+        // Windowed mean over just this tick's completed work (cur - prev), so
+        // a slow generation moves the number instead of being drowned by the
+        // lifetime mean; falls back to the lifetime mean when nothing
+        // completed this window, so the display holds its last steady value
+        // rather than dropping to 0. Identical rule to `ServingInfo::fold`.
+        let wavg = |cur_sum: f64, cur_count: u64, prev_sum: f64, prev_count: u64| -> f32 {
+            let d_count = cur_count.saturating_sub(prev_count);
+            if d_count > 0 {
+                ((cur_sum - prev_sum).max(0.0) / d_count as f64) as f32
+            } else if cur_count > 0 {
+                (cur_sum / cur_count as f64) as f32
+            } else {
+                0.0
+            }
+        };
+        let avg = |cur_sum: f64,
+                   cur_count: u64,
+                   ps: fn(&MediaCounters) -> f64,
+                   pc: fn(&MediaCounters) -> u64|
+         -> f32 { wavg(cur_sum, cur_count, prev.map_or(0.0, ps), prev.map_or(0, pc)) };
+        MediaInfo {
+            generations_per_min: gen_per_min.max(0.0),
+            jobs_in_progress: cur.jobs_in_progress,
+            completed_total: cur.requests_total,
+            errored_total: cur.errored_total,
+            completed_delta: completed,
+            errored_delta: errored,
+            duration_avg_s: avg(
+                cur.duration_sum,
+                cur.duration_count,
+                |c| c.duration_sum,
+                |c| c.duration_count,
+            ),
+            post_avg_s: avg(cur.post_sum, cur.post_count, |c| c.post_sum, |c| c.post_count),
+            pre_avg_s: avg(cur.pre_sum, cur.pre_count, |c| c.pre_sum, |c| c.pre_count),
+            inference_avg_s: avg(
+                cur.inference_sum,
+                cur.inference_count,
+                |c| c.inference_sum,
+                |c| c.inference_count,
+            ),
+            warmup_avg_s: avg(
+                cur.warmup_sum,
+                cur.warmup_count,
+                |c| c.warmup_sum,
+                |c| c.warmup_count,
+            ),
+        }
+    }
+}
+
 /// The `phase` enum on the wire. `#[serde(rename_all = "lowercase")]` yields
 /// exactly `down`/`compiling`/`loading`/`ready`/`alarm` -- the byte-significant
 /// strings `tt-toplike --remote` matches on. `Compiling`/`Down`/`Alarm` are
@@ -319,6 +594,13 @@ pub struct InferenceInfo {
     /// Always emitted (as JSON `null` when absent) -- same reasoning as
     /// `progress`.
     pub serving: Option<ServingInfo>,
+    /// Live media/diffusion stats (tt-media-inference-server, e.g. SkyReels).
+    /// Mutually exclusive with `serving`: a given server is one flavor or the
+    /// other. Always emitted (as JSON `null` when absent) for consistency with
+    /// its siblings -- tt-toplike's `RemoteMedia` field carries a serde
+    /// default so either form decodes, and a tt-toplike predating the field
+    /// ignores the unknown key rather than failing the whole extension.
+    pub media: Option<MediaInfo>,
 }
 
 /// Strip an `org/` prefix off a model id for display, e.g.
@@ -348,9 +630,10 @@ fn display_label(model: &str) -> String {
 ///     entirely so the consumer falls back to its own local probe).
 pub fn build_inference(
     status: &ServingStatus,
-    parsed: Option<VllmCounters>,
+    parsed: Option<ScrapeCounters>,
     model_name_hint: Option<String>,
     prev: Option<&VllmCounters>,
+    prev_media: Option<&MediaCounters>,
     elapsed_secs: f32,
 ) -> Option<InferenceInfo> {
     match (status, parsed) {
@@ -362,15 +645,26 @@ pub fn build_inference(
                 // Falling back to a literal "unknown" (rather than e.g.
                 // silently dropping the entry) keeps the wire contract's
                 // "Some means agentd knows a workload's state" honest even
-                // when the vLLM build doesn't label its metrics.
+                // when the server build doesn't label its metrics.
                 ServingStatus::Idle => model_name_hint.unwrap_or_else(|| "unknown".to_string()),
+            };
+            // Exactly one of `serving`/`media` is populated, per the flavor
+            // the scrape identified.
+            let (serving, media) = match counters {
+                ScrapeCounters::Vllm(c) => {
+                    (Some(ServingInfo::fold(prev, &c, elapsed_secs)), None)
+                }
+                ScrapeCounters::Media(c) => {
+                    (None, Some(MediaInfo::fold(prev_media, &c, elapsed_secs)))
+                }
             };
             Some(InferenceInfo {
                 label: display_label(&model),
                 key: model,
                 phase: Phase::Ready,
                 progress: None,
-                serving: Some(ServingInfo::fold(prev, &counters, elapsed_secs)),
+                serving,
+                media,
             })
         }
         (ServingStatus::Serving(model), None) => Some(InferenceInfo {
@@ -379,6 +673,7 @@ pub fn build_inference(
             phase: Phase::Loading,
             progress: None,
             serving: None,
+            media: None,
         }),
         (ServingStatus::Idle, None) => None,
     }
@@ -391,6 +686,10 @@ pub fn build_inference(
 /// `tick`-ed every push).
 pub struct InferenceSampler {
     prev: Option<VllmCounters>,
+    /// Separate baseline for a media server. Kept independently of `prev`
+    /// (rather than one enum-shaped slot) so the two flavors never
+    /// cross-contaminate each other's rate math.
+    prev_media: Option<MediaCounters>,
     prev_at: Option<Instant>,
 }
 
@@ -398,6 +697,7 @@ impl InferenceSampler {
     pub fn new() -> Self {
         Self {
             prev: None,
+            prev_media: None,
             prev_at: None,
         }
     }
@@ -417,18 +717,35 @@ impl InferenceSampler {
         scrape_body: Option<&str>,
     ) -> Option<InferenceInfo> {
         let now = Instant::now();
-        let parsed = scrape_body.and_then(parse_vllm_metrics);
+        let parsed = scrape_body.and_then(parse_scrape);
         let model_hint = scrape_body.and_then(extract_model_name);
         let elapsed_secs = self
             .prev_at
             .map(|at| now.duration_since(at).as_secs_f32())
             .unwrap_or(0.0);
 
-        let info = build_inference(status, parsed, model_hint, self.prev.as_ref(), elapsed_secs);
+        let info = build_inference(
+            status,
+            parsed,
+            model_hint,
+            self.prev.as_ref(),
+            self.prev_media.as_ref(),
+            elapsed_secs,
+        );
 
-        if let Some(counters) = parsed {
-            self.prev = Some(counters);
-            self.prev_at = Some(now);
+        // Only the flavor we actually saw this tick updates its baseline; a
+        // failed or unrecognized scrape leaves BOTH alone, so a single blip
+        // doesn't reset the rate baseline.
+        match parsed {
+            Some(ScrapeCounters::Vllm(c)) => {
+                self.prev = Some(c);
+                self.prev_at = Some(now);
+            }
+            Some(ScrapeCounters::Media(c)) => {
+                self.prev_media = Some(c);
+                self.prev_at = Some(now);
+            }
+            None => {}
         }
 
         info
@@ -606,7 +923,15 @@ vllm:num_preemptions_total{engine=\"0\",model_name=\"M\"} 3.0
     fn serving_plus_scrape_is_ready_with_serving_stats() {
         let status = ServingStatus::Serving("meta-llama/Llama-3.1-8B-Instruct".to_string());
         let parsed = parse_vllm_metrics(SAMPLE);
-        let info = build_inference(&status, parsed, None, None, 0.0).expect("Some");
+        let info = build_inference(
+            &status,
+            parsed.map(ScrapeCounters::Vllm),
+            None,
+            None,
+            None,
+            0.0,
+        )
+        .expect("Some");
         assert_eq!(info.phase, Phase::Ready);
         assert_eq!(info.key, "meta-llama/Llama-3.1-8B-Instruct");
         assert_eq!(info.label, "Llama-3.1-8B-Instruct");
@@ -617,7 +942,7 @@ vllm:num_preemptions_total{engine=\"0\",model_name=\"M\"} 3.0
     #[test]
     fn serving_plus_failed_scrape_is_loading_with_no_serving_stats() {
         let status = ServingStatus::Serving("Qwen/Qwen3-32B".to_string());
-        let info = build_inference(&status, None, None, None, 0.0).expect("Some");
+        let info = build_inference(&status, None, None, None, None, 0.0).expect("Some");
         assert_eq!(info.phase, Phase::Loading);
         assert_eq!(info.key, "Qwen/Qwen3-32B");
         assert_eq!(info.label, "Qwen3-32B");
@@ -627,7 +952,7 @@ vllm:num_preemptions_total{engine=\"0\",model_name=\"M\"} 3.0
 
     #[test]
     fn idle_plus_failed_scrape_omits_the_entry() {
-        let info = build_inference(&ServingStatus::Idle, None, None, None, 0.0);
+        let info = build_inference(&ServingStatus::Idle, None, None, None, None, 0.0);
         assert_eq!(info, None);
     }
 
@@ -637,7 +962,15 @@ vllm:num_preemptions_total{engine=\"0\",model_name=\"M\"} 3.0
         // is Idle in agentd's own bookkeeping, but the live scrape wins.
         let parsed = parse_vllm_metrics(SAMPLE);
         let hint = extract_model_name(SAMPLE);
-        let info = build_inference(&ServingStatus::Idle, parsed, hint, None, 0.0).expect("Some");
+        let info = build_inference(
+            &ServingStatus::Idle,
+            parsed.map(ScrapeCounters::Vllm),
+            hint,
+            None,
+            None,
+            0.0,
+        )
+        .expect("Some");
         assert_eq!(info.phase, Phase::Ready);
         assert_eq!(info.key, "meta-llama/Llama-3.1-8B-Instruct");
         assert!(info.serving.is_some());
@@ -647,7 +980,15 @@ vllm:num_preemptions_total{engine=\"0\",model_name=\"M\"} 3.0
     fn idle_plus_scrape_with_no_model_name_label_falls_back_to_unknown() {
         let unlabelled = "vllm:num_requests_running 0.0\n";
         let parsed = parse_vllm_metrics(unlabelled);
-        let info = build_inference(&ServingStatus::Idle, parsed, None, None, 0.0).expect("Some");
+        let info = build_inference(
+            &ServingStatus::Idle,
+            parsed.map(ScrapeCounters::Vllm),
+            None,
+            None,
+            None,
+            0.0,
+        )
+        .expect("Some");
         assert_eq!(info.key, "unknown");
         assert_eq!(info.label, "unknown");
     }
@@ -676,6 +1017,7 @@ vllm:num_preemptions_total{engine=\"0\",model_name=\"M\"} 3.0
             phase: Phase::Loading,
             progress: None,
             serving: None,
+            media: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("\"progress\":null"), "{json}");
@@ -729,5 +1071,335 @@ vllm:num_preemptions_total{engine=\"0\",model_name=\"M\"} 3.0
         let third = sampler.tick(&status, Some(&sample2)).expect("Some");
         let serving = third.serving.expect("serving stats present");
         assert!(serving.generation_tps > 0.0);
+    }
+
+    // ── Media / diffusion server (tt-media-inference-server) ─────────────
+
+    /// Shaped after a real `tt-media-inference-server` 0.15.0 SkyReels
+    /// scrape: the `tt_media_server_*` namespace, and -- critically -- the
+    /// prometheus multiprocess exporter emitting each series TWICE,
+    /// byte-identically. A parser that naively sums would double every value.
+    const MEDIA_SAMPLE: &str = "\
+# HELP tt_media_server_requests_base_total Completed generations.
+# TYPE tt_media_server_requests_base_total counter
+tt_media_server_requests_base_total{device_id=\"0\",model_type=\"skyreels\"} 12.0
+tt_media_server_requests_base_total{device_id=\"0\",model_type=\"skyreels\"} 12.0
+tt_media_server_jobs_in_progress{model_type=\"skyreels\"} 2.0
+tt_media_server_jobs_in_progress{model_type=\"skyreels\"} 2.0
+tt_media_server_requests_base_duration_seconds_total_sum{model_type=\"skyreels\"} 240.0
+tt_media_server_requests_base_duration_seconds_total_sum{model_type=\"skyreels\"} 240.0
+tt_media_server_requests_base_duration_seconds_total_count{model_type=\"skyreels\"} 12.0
+tt_media_server_requests_base_duration_seconds_total_count{model_type=\"skyreels\"} 12.0
+tt_media_server_post_processing_duration_seconds_sum{model_type=\"skyreels\"} 6.0
+tt_media_server_post_processing_duration_seconds_count{model_type=\"skyreels\"} 12.0
+";
+
+    #[test]
+    fn parses_the_media_counters() {
+        let c = parse_media_metrics(MEDIA_SAMPLE).expect("media metrics present");
+        assert_eq!(c.requests_total, 12);
+        assert_eq!(c.errored_total, 0);
+        assert_eq!(c.jobs_in_progress, 2);
+        assert_eq!(c.duration_sum, 240.0);
+        assert_eq!(c.duration_count, 12);
+        assert_eq!(c.post_sum, 6.0);
+        assert_eq!(c.post_count, 12);
+        // Families this build doesn't emit stay 0 (parsed best-effort).
+        assert_eq!(c.pre_count, 0);
+        assert_eq!(c.inference_count, 0);
+        assert_eq!(c.warmup_count, 0);
+    }
+
+    #[test]
+    fn media_duplicate_series_are_counted_once() {
+        // The doubled lines in MEDIA_SAMPLE must not double the totals --
+        // this is the whole reason the parser keys on `name{labels}`.
+        let c = parse_media_metrics(MEDIA_SAMPLE).unwrap();
+        assert_eq!(c.requests_total, 12, "duplicate series double-counted");
+        assert_eq!(c.jobs_in_progress, 2, "duplicate gauge double-counted");
+    }
+
+    #[test]
+    fn media_distinct_label_sets_are_summed() {
+        // Genuinely different label blocks are separate series -> summed,
+        // giving a fleet total across devices.
+        let text = "\
+tt_media_server_requests_base_total{device_id=\"0\",model_type=\"skyreels\"} 12.0
+tt_media_server_requests_base_total{device_id=\"1\",model_type=\"skyreels\"} 5.0
+tt_media_server_jobs_in_progress{device_id=\"0\"} 2.0
+tt_media_server_jobs_in_progress{device_id=\"1\"} 1.0
+";
+        let c = parse_media_metrics(text).unwrap();
+        assert_eq!(c.requests_total, 17);
+        assert_eq!(c.jobs_in_progress, 3);
+    }
+
+    #[test]
+    fn media_error_status_routes_to_errored_total() {
+        let text = "\
+tt_media_server_requests_base_total{model_type=\"skyreels\",status=\"ok\"} 12.0
+tt_media_server_requests_base_total{model_type=\"skyreels\",status=\"error\"} 3.0
+tt_media_server_requests_base_total{model_type=\"skyreels\",status=\"failed\"} 2.0
+";
+        let c = parse_media_metrics(text).unwrap();
+        assert_eq!(c.requests_total, 12);
+        assert_eq!(c.errored_total, 5);
+    }
+
+    #[test]
+    fn none_when_no_media_metrics() {
+        // A vLLM body carries no `tt_media_server_` lines -> not a media
+        // server, so the media view must stay absent (mirrors
+        // `none_when_no_vllm_metrics`).
+        assert_eq!(parse_media_metrics(SAMPLE), None);
+    }
+
+    #[test]
+    fn media_fold_computes_generations_per_min_and_deltas() {
+        let prev = MediaCounters {
+            requests_total: 12,
+            errored_total: 1,
+            duration_count: 12,
+            duration_sum: 240.0,
+            ..Default::default()
+        };
+        let cur = MediaCounters {
+            requests_total: 18,
+            errored_total: 3,
+            jobs_in_progress: 2,
+            duration_count: 18,
+            duration_sum: 420.0,
+            ..Default::default()
+        };
+        // 6 generations over 2s -> 3/s -> 180/min.
+        let m = MediaInfo::fold(Some(&prev), &cur, 2.0);
+        assert_eq!(m.generations_per_min, 180.0);
+        assert_eq!(m.completed_delta, 6);
+        assert_eq!(m.errored_delta, 2);
+        assert_eq!(m.jobs_in_progress, 2);
+        // Cumulative totals ride along so a remote viewer shows real
+        // "N done" / "errors N" instead of reconstructing from deltas.
+        assert_eq!(m.completed_total, 18);
+        assert_eq!(m.errored_total, 3);
+        // Windowed mean over just this tick: 180s / 6 completions = 30s.
+        assert_eq!(m.duration_avg_s, 30.0);
+    }
+
+    #[test]
+    fn media_fold_without_prev_is_zero_rates_but_keeps_gauges() {
+        let cur = MediaCounters {
+            requests_total: 12,
+            jobs_in_progress: 3,
+            duration_sum: 240.0,
+            duration_count: 12,
+            ..Default::default()
+        };
+        let m = MediaInfo::fold(None, &cur, 0.0);
+        assert_eq!(m.generations_per_min, 0.0);
+        assert_eq!(m.completed_delta, 0);
+        assert_eq!(m.errored_delta, 0);
+        // Gauge + cumulative totals still populate on the first tick.
+        assert_eq!(m.jobs_in_progress, 3);
+        assert_eq!(m.completed_total, 12);
+        // No previous -> lifetime mean: 240/12 = 20s.
+        assert_eq!(m.duration_avg_s, 20.0);
+    }
+
+    #[test]
+    fn media_fold_clamps_counter_reset_to_zero() {
+        // Server restarted: counters went backwards. Rates/deltas must clamp
+        // to 0 rather than underflow into huge numbers.
+        let prev = MediaCounters {
+            requests_total: 500,
+            errored_total: 10,
+            ..Default::default()
+        };
+        let cur = MediaCounters {
+            requests_total: 2,
+            errored_total: 0,
+            ..Default::default()
+        };
+        let m = MediaInfo::fold(Some(&prev), &cur, 1.0);
+        assert_eq!(m.generations_per_min, 0.0);
+        assert_eq!(m.completed_delta, 0);
+        assert_eq!(m.errored_delta, 0);
+    }
+
+    #[test]
+    fn media_fold_falls_back_to_lifetime_mean_when_nothing_completed() {
+        // Nothing completed this window -> hold the lifetime mean rather than
+        // dropping the displayed average to 0 (same rule as ServingInfo).
+        let prev = MediaCounters {
+            duration_sum: 240.0,
+            duration_count: 12,
+            post_sum: 6.0,
+            post_count: 12,
+            ..Default::default()
+        };
+        let cur = prev;
+        let m = MediaInfo::fold(Some(&prev), &cur, 2.0);
+        assert_eq!(m.duration_avg_s, 20.0); // 240/12
+        assert_eq!(m.post_avg_s, 0.5); // 6/12
+        // Never-observed stages stay 0 (callers hide a zero stage row).
+        assert_eq!(m.pre_avg_s, 0.0);
+        assert_eq!(m.inference_avg_s, 0.0);
+        assert_eq!(m.warmup_avg_s, 0.0);
+    }
+
+    #[test]
+    fn parse_scrape_picks_the_right_server_flavor() {
+        // One endpoint, two possible namespaces -- the scrape decides which.
+        assert!(matches!(
+            parse_scrape(SAMPLE),
+            Some(ScrapeCounters::Vllm(_))
+        ));
+        assert!(matches!(
+            parse_scrape(MEDIA_SAMPLE),
+            Some(ScrapeCounters::Media(_))
+        ));
+        assert!(parse_scrape("# nothing useful here\n").is_none());
+    }
+
+    #[test]
+    fn media_scrape_is_ready_with_media_stats_and_no_serving() {
+        // `serving` and `media` are mutually exclusive on the wire.
+        let counters = parse_media_metrics(MEDIA_SAMPLE).unwrap();
+        let info = build_inference(
+            &ServingStatus::Serving("SkyReels-V1".into()),
+            Some(ScrapeCounters::Media(counters)),
+            None,
+            None,
+            None,
+            1.0,
+        )
+        .expect("Some");
+        assert_eq!(info.phase, Phase::Ready);
+        assert!(info.serving.is_none(), "media workload has no vLLM serving");
+        let media = info.media.expect("media stats present");
+        assert_eq!(media.jobs_in_progress, 2);
+        assert_eq!(media.completed_total, 12);
+    }
+
+    #[test]
+    fn vllm_scrape_leaves_media_absent() {
+        let counters = parse_vllm_metrics(SAMPLE).unwrap();
+        let info = build_inference(
+            &ServingStatus::Serving("M".into()),
+            Some(ScrapeCounters::Vllm(counters)),
+            None,
+            None,
+            None,
+            1.0,
+        )
+        .expect("Some");
+        assert!(info.serving.is_some());
+        assert!(info.media.is_none(), "vLLM workload has no media stats");
+    }
+
+    #[test]
+    fn media_info_serializes_with_the_remote_media_field_names() {
+        // These key names are the wire contract with tt-toplike's
+        // `RemoteMedia`; a rename here silently blanks the remote UI.
+        let counters = parse_media_metrics(MEDIA_SAMPLE).unwrap();
+        let info = build_inference(
+            &ServingStatus::Serving("SkyReels-V1".into()),
+            Some(ScrapeCounters::Media(counters)),
+            None,
+            None,
+            None,
+            1.0,
+        )
+        .unwrap();
+        let v = serde_json::to_value(&info).unwrap();
+        let media = v.get("media").expect("media key present");
+        for key in [
+            "generations_per_min",
+            "jobs_in_progress",
+            "completed_total",
+            "errored_total",
+            "completed_delta",
+            "errored_delta",
+            "duration_avg_s",
+            "post_avg_s",
+            "pre_avg_s",
+            "inference_avg_s",
+            "warmup_avg_s",
+        ] {
+            assert!(media.get(key).is_some(), "missing wire field `{key}`");
+        }
+    }
+
+    #[test]
+    fn inference_info_serializes_media_as_explicit_null_for_vllm() {
+        // `media` is always emitted (null when absent), matching how
+        // `progress`/`serving` are handled. tt-toplike's `RemoteMedia` field
+        // has a serde default so either form decodes, and an OLDER
+        // tt-toplike simply ignores the unknown key.
+        let counters = parse_vllm_metrics(SAMPLE).unwrap();
+        let info = build_inference(
+            &ServingStatus::Serving("M".into()),
+            Some(ScrapeCounters::Vllm(counters)),
+            None,
+            None,
+            None,
+            1.0,
+        )
+        .unwrap();
+        let v = serde_json::to_value(&info).unwrap();
+        assert!(v.get("media").is_some(), "media key emitted");
+        assert!(v["media"].is_null(), "media is null for a vLLM workload");
+    }
+
+    #[test]
+    fn sampler_media_first_tick_zero_rate_second_tick_real_rate() {
+        let mut sampler = InferenceSampler::new();
+        let status = ServingStatus::Serving("SkyReels-V1".into());
+
+        let first = sampler.tick(&status, Some(MEDIA_SAMPLE)).expect("Some");
+        let m1 = first.media.expect("media present");
+        assert_eq!(m1.generations_per_min, 0.0, "no baseline on first tick");
+        assert_eq!(m1.completed_total, 12);
+
+        // More generations completed by the next scrape.
+        let sample2 = MEDIA_SAMPLE.replace("} 12.0", "} 18.0");
+        let second = sampler.tick(&status, Some(&sample2)).expect("Some");
+        let m2 = second.media.expect("media present");
+        assert!(
+            m2.generations_per_min > 0.0,
+            "second tick computes a real rate"
+        );
+        assert_eq!(m2.completed_delta, 6);
+    }
+
+    #[test]
+    fn sampler_failed_scrape_does_not_reset_media_baseline() {
+        let mut sampler = InferenceSampler::new();
+        let status = ServingStatus::Serving("SkyReels-V1".into());
+        sampler.tick(&status, Some(MEDIA_SAMPLE));
+
+        // A blip: the scrape failed entirely -> loading, no stats.
+        let blip = sampler.tick(&status, None).expect("Some");
+        assert_eq!(blip.phase, Phase::Loading);
+        assert!(blip.media.is_none());
+
+        // The held media baseline must have survived the blip.
+        let sample2 = MEDIA_SAMPLE.replace("} 12.0", "} 18.0");
+        let third = sampler.tick(&status, Some(&sample2)).expect("Some");
+        assert_eq!(third.media.expect("media").completed_delta, 6);
+    }
+
+    #[test]
+    fn media_histogram_companion_lines_do_not_collide() {
+        // `_bucket` / `_created` companions share a prefix with the
+        // `_sum`/`_count` names; exact-name matching must ignore them.
+        let text = "\
+tt_media_server_requests_base_duration_seconds_total_bucket{le=\"5.0\"} 99.0
+tt_media_server_requests_base_duration_seconds_total_created 1.7e9
+tt_media_server_requests_base_duration_seconds_total_sum 240.0
+tt_media_server_requests_base_duration_seconds_total_count 12.0
+";
+        let c = parse_media_metrics(text).unwrap();
+        assert_eq!(c.duration_sum, 240.0);
+        assert_eq!(c.duration_count, 12);
     }
 }

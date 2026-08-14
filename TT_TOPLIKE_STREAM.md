@@ -95,10 +95,35 @@ example frame from its `--serve` implementation; agentd's output should match th
 tt-toplike `--remote` renders processes + inference identically whether the publisher is another
 tt-toplike or agentd.
 
+## Media / diffusion workloads
+
+Diffusion and video models (SkyReels, SDXL, z-image) run under **tt-media-inference-server**,
+which exposes a different Prometheus namespace — `tt_media_server_*` — on the *same* `/metrics`
+endpoint. vLLM's token counters don't exist there, so those workloads carry a `media` object
+**instead of** `serving` (the two are mutually exclusive):
+
+```json
+"media": {
+  "generations_per_min": 3.2, "jobs_in_progress": 2,
+  "completed_total": 18, "errored_total": 0,
+  "completed_delta": 6, "errored_delta": 0,
+  "duration_avg_s": 30.0, "post_avg_s": 0.5,
+  "pre_avg_s": 0.0, "inference_avg_s": 0.0, "warmup_avg_s": 0.0
+}
+```
+
+`completed_total`/`errored_total` are **cumulative** (the UI shows them as "N done" / "errors N");
+everything else follows the same delta/windowed-average rules as `serving`. Stages the server
+doesn't emit (`pre`/`inference`/`warmup` on the 0.15.0 SkyReels build) stay `0.0` and the UI
+hides those rows.
+
 ## Status
 
-- tt-toplike side: `--serve`/`/serve` publisher + `--remote` richer-frame consumer is being built
-  now (spec: tt-toplike `docs/superpowers/specs/2026-07-05-serve-broadcast-design.md`). The
-  telemetry-only path (today's agentd) keeps working with an honest LOCAL fallback label.
-- tt-station side: this brief. No rush — agentd can adopt the extension whenever; tt-toplike
-  degrades gracefully until then.
+- **tt-toplike side: shipped and merged.** The `--serve` publisher and `--remote` consumer are on
+  `main` (v0.8.0), not a branch. `src/backend/remote_ext.rs` is the canonical schema — still
+  `schema: 1`; the `media` object and `RemoteMedia`'s `completed_total`/`errored_total` were added
+  additively (serde defaults), so older producers keep decoding.
+- **tt-station side: implemented.** agentd emits `processes` always and `inference` (with either
+  `serving` or `media`) when it has an authoritative opinion. Verified by replaying real agentd
+  frames through tt-toplike's own `parse_extension` at `origin/main`, plus a live
+  `tt-toplike --remote` session against this box.
