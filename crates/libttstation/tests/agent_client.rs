@@ -13,7 +13,7 @@
 //! methods share and the brief calls out explicitly.
 
 use libttstation::agent_client::{
-    get_logs, get_status, list_models, list_serving, reset, AgentClient, SshRevokeBy,
+    get_logs, get_status, list_models, list_serving, power, reset, AgentClient, SshRevokeBy,
 };
 use libttstation::model::{Endpoint, ServingStatus};
 use wiremock::matchers::{header, method, path, query_param};
@@ -176,6 +176,79 @@ async fn run_maps_409_to_the_agents_contention_message() {
         message.contains("0100014311601055"),
         "the contended board must survive to the caller: {message}"
     );
+}
+
+/// `reset(base, token)` on a `409` -- the agent REFUSED the reset because
+/// another tenant holds chips, or because it could not determine whether
+/// one does -- must surface the agent's own message. This is the same
+/// defect `run()` had, on the more dangerous surface: the refusal names the
+/// board, the holder, and the remedy ("stop that session" vs "fix gozer"),
+/// and `error_for_status`'s "HTTP status client error (409 Conflict)"
+/// discards all three. `tt reset` also keys off this being an Err to leave
+/// local pairing alone (see `crates/tt/tests/reset_refusal.rs`).
+#[tokio::test]
+async fn reset_maps_409_to_the_agents_refusal_message() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/reset"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+            "error": "refusing to reset this box: it would run a WHOLE-BOX `tt-smi -r` -- \
+                      another tenant holds chips -- board 0100014311601055 is held by \
+                      claude:ttm-optimize. Stop that session (or `gozer release` its lease) first."
+        })))
+        .mount(&server)
+        .await;
+
+    let err = reset(&server.uri(), TOKEN)
+        .await
+        .expect_err("reset() should fail on 409");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("claude:ttm-optimize"),
+        "the holder the agent named must survive to the caller: {message}"
+    );
+    assert!(
+        message.contains("0100014311601055"),
+        "the contended board must survive to the caller: {message}"
+    );
+    assert!(
+        message.contains("409"),
+        "keep the stable (409) marker so a caller can branch on the case: {message}"
+    );
+}
+
+/// The same for `power(base, token, "reset-chips")`, the OTHER whole-box
+/// reset path -- including the "could not be determined" refusal, whose
+/// remedy (fix gozer / reset by hand) is the entire value of the message.
+#[tokio::test]
+async fn power_maps_409_to_the_agents_refusal_message() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/power"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+            "error": "refusing reset-chips: it would run a WHOLE-BOX board reset -- \
+                      `gozer status` could not be read, so whether another tenant holds chips \
+                      cannot be determined. Fix gozer first, or reset the box by hand."
+        })))
+        .mount(&server)
+        .await;
+
+    let err = power(&server.uri(), TOKEN, "reset-chips")
+        .await
+        .expect_err("power() should fail on 409");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("could not be read"),
+        "the reason must survive to the caller -- it is what tells the operator \
+         whether to stop a session or fix gozer: {message}"
+    );
+    assert!(message.contains("409"), "{message}");
 }
 
 /// `endpoint()` on a `409` (nothing currently serving, per the agent's own

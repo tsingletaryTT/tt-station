@@ -164,31 +164,93 @@ pub async fn get_logs(base: &str, source: &str, tail: usize) -> anyhow::Result<L
 /// reusable authenticated handle to hang onto afterward anyway.
 ///
 /// The agent responds `{}` on success -- nothing to parse out of it.
+///
+/// A **`409 Conflict` is a REFUSAL, not a failure**: the agent declined to
+/// run a whole-box `tt-smi -r` because another tenant holds chips, or
+/// because it could not determine whether one does. Its body names the
+/// board, the holder, and the remedy, so that message is passed through
+/// verbatim rather than collapsed by `error_for_status` -- see
+/// [`is_refusal`], which is how `tt reset` tells this apart from an
+/// unreachable box (a refusal means the box is fine and said no, so local
+/// pairing must be left alone; the server deliberately preserved it).
 pub async fn reset(base: &str, token: &str) -> anyhow::Result<()> {
     let url = join(base, "reset");
-    reqwest::Client::new()
+    let resp = reqwest::Client::new()
         .post(&url)
         .bearer_auth(token)
         .send()
-        .await?
-        .error_for_status()
+        .await?;
+
+    if resp.status() == reqwest::StatusCode::CONFLICT {
+        anyhow::bail!("the box refused the reset {}: {}", REFUSAL_MARKER, refusal_detail(resp).await);
+    }
+
+    resp.error_for_status()
         .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
     Ok(())
+}
+
+/// The stable marker every refusal message carries, so a caller can branch
+/// on the CASE without depending on the agent's wording -- the same
+/// convention `AgentClient::endpoint`'s idle `409` already established for
+/// the Mac app. Read through [`is_refusal`] rather than matched by hand.
+pub const REFUSAL_MARKER: &str = "(409)";
+
+/// Whether `err` is an agent REFUSAL (a `409`) rather than an ordinary
+/// failure.
+///
+/// The distinction is load-bearing for `tt reset`: an unreachable or broken
+/// box must not block the local "forget everything" half of the command,
+/// but a box that deliberately refused reset NOTHING -- and kept the
+/// caller's pairing on purpose -- so forgetting the token there would
+/// destroy the only credential that can reach it, for no gain.
+pub fn is_refusal(err: &anyhow::Error) -> bool {
+    err.to_string().contains(REFUSAL_MARKER)
+}
+
+/// The `{"error": "..."}` detail out of a refusal response, or a plain
+/// fallback when the body isn't the shape this agent version sends. Shared
+/// by [`reset`] and [`power`] so both refusals read alike.
+async fn refusal_detail(resp: reqwest::Response) -> String {
+    resp.json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|body| {
+            body.get("error")
+                .and_then(|e| e.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "the box declined; no reason was reported".to_string())
 }
 
 /// `POST /power` — ask the box to run a power action (`reset-chips`,
 /// `suspend`, `reboot`, `shutdown`). Authed like `reset`. The box may tear
 /// down before the response fully arrives for machine ops; a dropped
 /// connection after a 2xx is expected, not an error.
+///
+/// A `409 Conflict` is a REFUSAL, handled exactly as in [`reset`]:
+/// `reset-chips` is the other whole-box `tt-smi -r` path, and the agent
+/// declines it while another tenant holds chips -- or while it cannot tell.
+/// The body's reason is what tells the operator which of the two they are
+/// in, so it is passed through rather than discarded.
 pub async fn power(base: &str, token: &str, action: &str) -> anyhow::Result<()> {
     let url = join(base, "power");
-    reqwest::Client::new()
+    let resp = reqwest::Client::new()
         .post(&url)
         .bearer_auth(token)
         .json(&serde_json::json!({ "action": action }))
         .send()
-        .await?
-        .error_for_status()
+        .await?;
+
+    if resp.status() == reqwest::StatusCode::CONFLICT {
+        anyhow::bail!(
+            "the box refused {action} {}: {}",
+            REFUSAL_MARKER,
+            refusal_detail(resp).await
+        );
+    }
+
+    resp.error_for_status()
         .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
     Ok(())
 }

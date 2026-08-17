@@ -632,6 +632,17 @@ async fn sweep_stale_leases_at_startup(capability: Option<&gozer::Capability>) {
                  leases stay held"
             );
         }
+        // Blew past the ceiling. Like `detect_startup_device_mesh`, the
+        // spawned blocking task keeps running in the background (there is no
+        // cooperative way to kill it) -- and unlike that one, this task can
+        // still issue a `gozer release`, which resets chips. That is safe
+        // for a specific reason worth stating: every lease id it can act on
+        // was read from a `gozer status`/`history` snapshot taken BEFORE the
+        // socket bound, so a straggler can only ever release a lease that
+        // was already stale when the sweep started. It cannot name a lease
+        // acquired after the bind (a `/run` arriving on the freshly-open
+        // socket), because it never saw one. The window is bounded by the
+        // data, not just by the timeout.
         Err(_elapsed) => {
             eprintln!(
                 "tt-station-agentd: startup lease sweep timed out after {STARTUP_LEASE_SWEEP_TIMEOUT:?}; \

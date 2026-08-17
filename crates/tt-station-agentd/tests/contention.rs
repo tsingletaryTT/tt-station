@@ -222,6 +222,11 @@ async fn run_under_contention_returns_409_naming_the_holder_and_no_duration() {
         "the response must name the holder: {error}"
     );
     assert!(
+        !error.contains("could not be read"),
+        "a KNOWN holder must not also be reported as undeterminable -- the two \
+         reasons send an operator to two different places: {error}"
+    );
+    assert!(
         error.contains("0100014311601055"),
         "the response must name the contended board: {error}"
     );
@@ -275,6 +280,11 @@ async fn reset_refuses_and_keeps_pairing_when_a_foreign_lease_is_held() {
     assert!(
         error.contains("claude:ttm-optimize"),
         "the refusal must name the holder: {error}"
+    );
+    assert!(
+        !error.contains("could not be read"),
+        "a KNOWN holder must not also be reported as undeterminable -- the two \
+         reasons send an operator to two different places: {error}"
     );
 
     assert!(
@@ -339,6 +349,11 @@ async fn power_reset_chips_refuses_when_a_foreign_lease_is_held() {
     assert!(
         error.contains("claude:ttm-optimize"),
         "the refusal must name the holder: {error}"
+    );
+    assert!(
+        !error.contains("could not be read"),
+        "a KNOWN holder must not also be reported as undeterminable -- the two \
+         reasons send an operator to two different places: {error}"
     );
     assert!(
         !marker.exists(),

@@ -791,6 +791,59 @@ fn foreign_leases_is_undetermined_when_status_is_unreadable() {
     );
 }
 
+/// A payload with NO `chips` array at all must be `Undetermined`, not
+/// `None`.
+///
+/// This is the schema-shaped path back to fail-open: while `chips` carried
+/// `#[serde(default)]`, `{"grain":"board"}` (or any future gozer payload
+/// that renames or nests that array) parsed cleanly to an empty `Vec`,
+/// `snapshot_leases` answered `Some(empty)`, the guard read "nobody is on
+/// this box", and both whole-box `tt-smi -r` paths ran. That is exactly the
+/// collapse `Undetermined` exists to prevent -- "I could not understand the
+/// answer" becoming "nobody is here" -- arriving through the schema instead
+/// of the exit code.
+///
+/// Forward-compatibility for UNKNOWN fields stays (serde ignores them); it
+/// just does not extend to the one field the guard's whole decision rests on.
+#[test]
+fn foreign_leases_is_undetermined_when_the_payload_has_no_chips_array() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("gozer status", 0, r#"{"grain":"board"}"#, "");
+    assert_eq!(
+        gozer::foreign_leases(&runner, &sweep_capability(), 8080),
+        ForeignLeases::Undetermined,
+        "a payload whose chips array could not be read is UNKNOWN, never empty"
+    );
+}
+
+/// The same payload through `snapshot_leases` is `None` -- the single place
+/// the decision is made, so `GET /leases` (which absorbs `None` via
+/// `unwrap_or_default`) and the guard cannot disagree about it.
+#[test]
+fn snapshot_leases_returns_none_when_the_payload_has_no_chips_array() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("status", 0, r#"{"grain":"board"}"#, "");
+    let capability = Capability {
+        path: "gozer".to_string(),
+        version: "gozer 0.1.0".to_string(),
+    };
+    assert_eq!(gozer::snapshot_leases(&runner, &capability), None);
+}
+
+/// An EMPTY chips array, on the other hand, is a real answer -- gozer said
+/// it looked and found nothing -- and must stay `None`/`Clear`. Without
+/// this, "fail closed on a missing array" could be over-applied into
+/// refusing on a genuinely idle box.
+#[test]
+fn foreign_leases_is_none_when_chips_is_present_and_empty() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("gozer status", 0, r#"{"grain":"board","chips":[]}"#, "");
+    assert_eq!(
+        gozer::foreign_leases(&runner, &sweep_capability(), 8080),
+        ForeignLeases::None
+    );
+}
+
 /// The refusal REASON differs by outcome, and says which situation the
 /// operator is in: someone holds chips (stop them), or gozer could not be
 /// read (fix gozer / reset by hand). A guard that refused with the same
@@ -813,6 +866,16 @@ fn foreign_leases_refusal_reason_distinguishes_held_from_undetermined() {
     assert!(
         !unknown.contains("is held by"),
         "an undetermined guard must not imply anyone holds anything: {unknown}"
+    );
+    // The capability is probed ONCE at startup, so a gozer uninstalled
+    // afterwards leaves a live agentd refusing every reset with a message
+    // about fixing gozer -- correct when it is broken, a dead end when it
+    // was removed on purpose. The remedy for that case (restart agentd) has
+    // to be in the message, or the refusal reads as permanent.
+    assert!(
+        unknown.contains("restart"),
+        "the advice must cover a gozer that was UNINSTALLED, not just a broken \
+         one -- restarting agentd re-probes and turns leasing off: {unknown}"
     );
 
     assert_eq!(

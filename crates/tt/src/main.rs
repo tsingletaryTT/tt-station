@@ -1025,6 +1025,15 @@ struct ResetSummary {
 /// machine), so a box that's already gone/unreachable never blocks the local
 /// cleanup.
 ///
+/// **One failure is different: a REFUSAL (`409`).** The agent declines a
+/// whole-box reset while another tenant holds chips, or while it cannot tell
+/// whether one does -- and on refusal it deliberately preserves the caller's
+/// pairing, because nothing happened. Treating that as a warning and clearing
+/// the token anyway would leave the operator with an untouched box, a
+/// destroyed credential, and an opaque HTTP status where the holder's name
+/// should be. So a refusal returns early, with the agent's own message
+/// (holder + remedy) attached, and the local clear below is SKIPPED.
+///
 /// Local cleanup then clears EVERY stored token via `SecretStore::clear`
 /// (`secrets.json` is the only state this CLI persists -- there's no separate
 /// known-hosts file to purge). The confirmation prompt is handled by the
@@ -1040,6 +1049,23 @@ async fn cmd_reset(host: Option<&str>) -> Result<ResetSummary> {
                 let base = format!("http://{host}");
                 match libttstation::agent_client::reset(&base, &token).await {
                     Ok(()) => box_reset = true,
+                    // A REFUSAL (409) is not a failed call -- the box is
+                    // healthy, it declined, and it reset NOTHING (it also
+                    // deliberately kept this token: the agent preserves
+                    // pairing on refusal). Clearing local state here would
+                    // destroy the only credential that can reach the box,
+                    // in exchange for nothing, and hide the reason. So this
+                    // is a HARD error that returns before the clear below.
+                    Err(e) if libttstation::agent_client::is_refusal(&e) => {
+                        return Err(e.context(format!(
+                            "{host} refused the reset, so nothing was reset and your pairing \
+                             was left intact"
+                        )));
+                    }
+                    // Any OTHER failure (unreachable, wrong token, 5xx) is
+                    // still only a warning: the local half of `tt reset` --
+                    // forgetting every box on this machine -- must not be
+                    // blocked by a box that has gone away.
                     Err(e) => eprintln!(
                         "warning: failed to reset box {host}: {e}; clearing local state anyway"
                     ),

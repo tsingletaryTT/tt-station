@@ -537,9 +537,27 @@ struct StatusChip {
 /// `gozer topology --json`, which reports the identical value) -- read here
 /// too so `snapshot_leases` can compute `max_concurrent` without a second
 /// shell-out to `gozer topology`.
+///
+/// **`chips` is deliberately NOT `#[serde(default)]`.** Every other field
+/// here and in `StatusChip` is, because tolerating unknown/absent fields is
+/// how this survives a gozer that grows or renames something it doesn't
+/// read. `chips` is the exception: it is the field the reset guards' entire
+/// decision rests on. With a default, `{"grain":"board"}` -- or any future
+/// payload that renames or nests the array -- would parse cleanly to an
+/// EMPTY vec, `snapshot_leases` would answer `Some(empty)`,
+/// `foreign_leases` would report `None`, and both whole-box `tt-smi -r`
+/// paths would run on a box whose occupancy was never actually read. That
+/// is the same "I could not understand the answer" -> "nobody is here"
+/// collapse `ForeignLeases::Undetermined` exists to prevent, arriving
+/// through the schema instead of the exit code. Required, it fails the
+/// parse, `snapshot_leases` yields `None`, and the guards refuse.
+///
+/// `GET /leases` already absorbs that `None` via `unwrap_or_default()`
+/// (see `routes.rs`'s `gozer_snapshot`), so the strictness costs nothing
+/// there: an unreadable payload reports zero leases, exactly as an
+/// unreadable one always did.
 #[derive(Debug, Default, Deserialize)]
 struct StatusReport {
-    #[serde(default)]
     chips: Vec<StatusChip>,
     #[serde(default)]
     grain: Option<String>,
@@ -1010,7 +1028,9 @@ impl ForeignLeases {
                 "`gozer status` could not be read, so whether another tenant holds chips cannot \
                  be determined -- and a whole-box reset would take theirs down with yours. Fix \
                  gozer first (`gozer status` should answer; `gozer reconcile` clears a stuck \
-                 gate), or reset the box by hand once you know it is yours."
+                 gate); if gozer was UNINSTALLED, restart tt-station-agentd -- it probes for \
+                 gozer once at startup, so a live agent keeps trying to use one that is no \
+                 longer there. Otherwise reset the box by hand once you know it is yours."
                     .to_string(),
             ),
         }
