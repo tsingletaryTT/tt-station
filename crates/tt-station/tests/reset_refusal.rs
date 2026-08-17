@@ -1,4 +1,4 @@
-//! `tt reset --host <h>` against a box that REFUSES the reset (HTTP 409).
+//! `tt-station reset --host <h>` against a box that REFUSES the reset (HTTP 409).
 //!
 //! The agent refuses a whole-box reset when another tenant holds chips, or
 //! when it cannot determine whether one does (see
@@ -9,9 +9,9 @@
 //! token regardless, so a correctly-refused reset left the box untouched,
 //! the token destroyed, and no indication of who held the box.
 //!
-//! Driven through the real `tt` binary against a hand-rolled one-shot HTTP
+//! Driven through the real `tt-station` binary against a hand-rolled one-shot HTTP
 //! server (a dozen lines of `std::net`) rather than a mock framework: the
-//! only thing under test is what the binary does with a 409, and the tt
+//! only thing under test is what the binary does with a 409, and the tt-station
 //! crate has no HTTP-mocking dev-dependency. `TT_CONFIG_DIR` points the
 //! binary's secret store at a temp dir, so no real `~/.config` is touched.
 
@@ -47,7 +47,7 @@ fn serve_one_409(listener: TcpListener) {
     });
 }
 
-/// A refused `tt reset --host` must FAIL, name the holder, and leave the
+/// A refused `tt-station reset --host` must FAIL, name the holder, and leave the
 /// stored token exactly where it was.
 ///
 /// The surviving token is the assertion that matters: it is the side channel
@@ -72,8 +72,8 @@ fn refused_reset_fails_loudly_and_keeps_local_pairing() {
     )
     .expect("seed secrets.json");
 
-    let assert = AssertCommand::cargo_bin("tt")
-        .expect("built tt binary")
+    let assert = AssertCommand::cargo_bin("tt-station")
+        .expect("built tt-station binary")
         .env("TT_CONFIG_DIR", dir.path())
         .args(["reset", "--host", &host, "--yes"])
         .assert()

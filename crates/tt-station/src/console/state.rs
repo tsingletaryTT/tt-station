@@ -1,4 +1,4 @@
-//! Pure lifecycle logic for `tt console`: parse `systemctl show` output into
+//! Pure lifecycle logic for `tt-station console`: parse `systemctl show` output into
 //! a [`ServiceState`], parse tailed journal lines into a [`PairingState`],
 //! and derive an overall [`LifecycleState`] from a [`BoxLifecycleSnapshot`].
 //!
@@ -23,14 +23,14 @@ pub const PAIRING_TTL_SECS: u64 = 120;
 /// `POST /power`'s suspend/reboot/shutdown actions (and the box panel's
 /// local power row) permission to run without an interactive auth prompt --
 /// see `deploy/tt-station-power.rules`, `debian/rules`' `override_dh_auto_install`,
-/// and `docs/reference/power-controls.md`. `tt console` checks for this
+/// and `docs/reference/power-controls.md`. `tt-station console` checks for this
 /// path's existence (via `LifecycleEnv::polkit_power_rule_present`) purely to
 /// surface an informational advisory when it's absent -- reset-chips and
 /// every other route work fine without it; only the three machine-power ops
 /// need it.
 pub const POLKIT_POWER_RULE_PATH: &str = "/etc/polkit-1/rules.d/49-tt-station-power.rules";
 
-/// Build the one-line advisory `tt console` shows (in both `--snapshot` JSON
+/// Build the one-line advisory `tt-station console` shows (in both `--snapshot` JSON
 /// and the TUI's status panel) when the polkit power rule is missing, or
 /// `None` when it's present. Pure function of a bool -- exhaustively
 /// testable without touching a filesystem -- so the actual `Path::exists()`
@@ -50,7 +50,7 @@ pub fn polkit_power_advisory(rule_present: bool) -> Option<String> {
 /// Parse the `ActiveState=` line out of `systemctl show <unit>` output into
 /// a [`ServiceState`]. Only `ActiveState` is consulted (not `SubState`) --
 /// `SubState` gives finer detail (e.g. `running` vs `start` vs `dead`) but
-/// `ActiveState` alone is enough to distinguish the six states `tt console`
+/// `ActiveState` alone is enough to distinguish the six states `tt-station console`
 /// cares about. Unrecognized or missing `ActiveState` values (e.g. `systemctl
 /// show` on a unit that doesn't exist, or output that isn't `systemctl show`
 /// at all) map to [`ServiceState::Unknown`] rather than panicking -- the
@@ -129,7 +129,7 @@ fn find_six_digit_run(s: &str) -> Option<String> {
     None
 }
 
-/// The operator-facing lifecycle state `tt console` renders for one box --
+/// The operator-facing lifecycle state `tt-station console` renders for one box --
 /// a small, display-ready summary of the raw [`BoxLifecycleSnapshot`],
 /// collapsing "which systemd state + is it reachable + what's it serving"
 /// into the handful of states an operator actually needs to distinguish.

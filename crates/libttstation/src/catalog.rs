@@ -154,7 +154,7 @@ pub fn software_is_tis(software: &[String]) -> bool {
 }
 
 /// A single row in the merged, box-aware model catalog (see [`BoxCatalog`]).
-/// This is the WIRE contract for `tt catalog`'s JSON output and what the
+/// This is the WIRE contract for `tt-station catalog`'s JSON output and what the
 /// macOS app's model picker decodes -- it is deliberately flatter than
 /// [`CompatModel`]/[`HardwareCompat`] (no per-hardware software split, no
 /// `Other` status variant) because by the time a [`CatalogEntry`] exists,
@@ -177,7 +177,7 @@ pub struct CatalogEntry {
     /// further means "its weights are already on disk, so it starts fast
     /// rather than triggering a large first-run download." A catalog entry with
     /// no live match is never `downloaded`. `#[serde(default)]` keeps older
-    /// `tt catalog` output decodable.
+    /// `tt-station catalog` output decodable.
     #[serde(default)]
     pub downloaded: bool,
     pub status_here: String,
@@ -185,7 +185,7 @@ pub struct CatalogEntry {
 
 /// `classify`'s full output: the compatibility catalog and a box's live
 /// `/models` merged into three tiers relative to that box's detected mesh
-/// (see [`classify`] for the merge rules). This is what `tt catalog`
+/// (see [`classify`] for the merge rules). This is what `tt-station catalog`
 /// prints and what the macOS app's model picker renders directly -- one
 /// shared shape so both agree on what "runs here" / "experimental" /
 /// "needs other hardware" mean.
@@ -338,7 +338,7 @@ fn dedupe_catalog_models(models: &[CompatModel]) -> Vec<CompatModel> {
 }
 
 /// Merge the public compatibility catalog with a box's live `/models` into
-/// the three tiers the `tt catalog` command and the macOS model picker
+/// the three tiers the `tt-station catalog` command and the macOS model picker
 /// render (see [`BoxCatalog`]):
 ///
 /// - `runs_here`: models the box can serve right now via tt-inference-server

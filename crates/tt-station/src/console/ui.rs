@@ -1,4 +1,4 @@
-//! The interactive `tt console` TUI -- Task 7.
+//! The interactive `tt-station console` TUI -- Task 7.
 //!
 //! Layout is display logic (pure) plus a thin ratatui/crossterm shell:
 //!
@@ -499,8 +499,8 @@ fn run_action(result: anyhow::Result<()>, verb: &str) -> String {
     }
 }
 
-/// `R`eset, wired by shelling out to the `tt` binary itself
-/// (`tt reset --host 127.0.0.1:<port> --yes`) rather than duplicating the
+/// `R`eset, wired by shelling out to the `tt-station` binary itself
+/// (`tt-station reset --host 127.0.0.1:<port> --yes`) rather than duplicating the
 /// HTTP call `cmd_reset` (in `main.rs`) already makes. This keeps the one
 /// auth touchpoint (bearer token lookup/clearing) centralized in the CLI
 /// that already owns it -- see the module doc and the task report for the
@@ -509,7 +509,7 @@ fn run_action(result: anyhow::Result<()>, verb: &str) -> String {
 /// I3 fix: `cmd_reset` (`main.rs`) treats "no token stored for this host" as
 /// a WARNING, not an error -- it still clears local state and returns `Ok`
 /// (reset is also "forget every box on this machine," which should succeed
-/// even when a specific `--host` was never paired). Shelling out to `tt
+/// even when a specific `--host` was never paired). Shelling out to `tt-station
 /// reset` therefore can't distinguish "the box was actually reset" from "no
 /// token, nothing happened on the box" by exit code alone -- both look like
 /// success. So this checks the SAME `SecretStore` `cmd_reset`/`build_store`
@@ -542,12 +542,12 @@ fn localhost_token_exists(host: &str) -> anyhow::Result<bool> {
 
 /// `p`air-localhost: run a COMPLETE, correct self-pair against the agent at
 /// `host` (`127.0.0.1:<ctrl-port>`), by calling the exact same functions
-/// `tt pair-init`/`tt pair-complete` call (`main.rs`'s `cmd_pair_init`/
+/// `tt-station pair-init`/`tt-station pair-complete` call (`main.rs`'s `cmd_pair_init`/
 /// `cmd_pair_complete`) in-process -- not a second HTTP client, and not a
-/// shelled-out `tt pair` subprocess.
+/// shelled-out `tt-station pair` subprocess.
 ///
-/// I2 fix: the previous implementation shelled `tt pair <host> --code
-/// <snap.pairing.code>`, but `cmd_pair` (what `tt pair` runs) ALWAYS calls
+/// I2 fix: the previous implementation shelled `tt-station pair <host> --code
+/// <snap.pairing.code>`, but `cmd_pair` (what `tt-station pair` runs) ALWAYS calls
 /// `pair_init` first, which mints a brand-new `pair_id` + code -- so
 /// `snap.pairing.code` (whatever the collector last saw in the journal,
 /// possibly from an unrelated pairing attempt, e.g. one a LAN client just
@@ -567,7 +567,7 @@ fn localhost_token_exists(host: &str) -> anyhow::Result<bool> {
 ///      in journald and this read.
 ///   3. `cmd_pair_complete(host, pair_id, code, enable_ssh: false)` exchanges
 ///      them for a bearer token and persists it via the SAME `SecretStore`
-///      `tt pair`/`tt reset` use -- so `R`eset (and every other authed
+///      `tt-station pair`/`tt-station reset` use -- so `R`eset (and every other authed
 ///      command run against `host` afterward) sees it immediately.
 fn run_pair(env: &dyn LifecycleEnv, names: &ToolNames, host: &str) -> String {
     let pair_id = match crate::run_async(crate::cmd_pair_init(host)) {

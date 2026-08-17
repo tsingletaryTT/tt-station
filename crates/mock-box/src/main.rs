@@ -9,7 +9,7 @@
 //!   control API (`/status`, `/models`, `/config`, `/pair/*`, `/run`,
 //!   `/stop`, `/endpoint`, `/power`) plus a fake vLLM-style OpenAI endpoint
 //!   (`/v1/chat/completions`, `/v1/models`),
-//!   so the `tt` CLI's discover -> pair -> run -> endpoint -> completion flow
+//!   so the `tt-station` CLI's discover -> pair -> run -> endpoint -> completion flow
 //!   can be end-to-end tested with no real agent or hardware involved.
 //!
 //! Both subcommands share `libttstation`'s `BoxRecord`/`Endpoint`/
@@ -75,7 +75,7 @@ enum Command {
     },
 
     /// Serve a fake agent control API + fake vLLM endpoint over HTTP, so the
-    /// `tt` CLI can be driven end-to-end with no real agent/hardware.
+    /// `tt-station` CLI can be driven end-to-end with no real agent/hardware.
     Serve {
         /// Control-plane HTTP port to listen on. The fake vLLM endpoint
         /// `/run` hands back also lives on this same port, under `/v1`.
@@ -194,7 +194,7 @@ async fn advertise(name: String, ctrl_port: u16, chips: String, apiver: u8) -> R
 /// inventory, and whatever it's currently "serving" (if anything).
 ///
 /// No auth, no pairing-code validation, no per-pair-id bookkeeping: this is
-/// a mock built to let the `tt` CLI's happy path run end-to-end without
+/// a mock built to let the `tt-station` CLI's happy path run end-to-end without
 /// hardware, not a faithful reimplementation of `tt-station-agentd`'s
 /// security model. See `pair_init`/`pair_complete` below for exactly what's
 /// simplified away.
@@ -338,7 +338,7 @@ async fn stop_model(State(state): State<MockState>) -> Json<serde_json::Value> {
 
 /// `GET /models`: a small canned `ModelsResponse` -- doesn't consult
 /// `MockState` at all (there's no real `model_spec.json` behind this mock),
-/// just enough shape for `tt models` (and the e2e test) to exercise the
+/// just enough shape for `tt-station models` (and the e2e test) to exercise the
 /// discover -> models -> pair -> run flow with no real agent/hardware.
 async fn get_models() -> Json<ModelsResponse> {
     Json(ModelsResponse {
@@ -361,7 +361,7 @@ async fn get_models() -> Json<ModelsResponse> {
 /// `GET /config`: a fixed, canned `ConfigSummary` -- doesn't consult
 /// `MockState` at all (there's no real config-file/profile resolution behind
 /// this mock, unlike `tt-station-agentd::routes::get_config`, Task 5), just
-/// enough shape for `tt config` (and its e2e test, Task 6) to exercise the
+/// enough shape for `tt-station config` (and its e2e test, Task 6) to exercise the
 /// unauthed discover -> config flow with no real agent/hardware. The
 /// `active_profile: "mock"` value is what that e2e test asserts on.
 async fn get_config() -> Json<ConfigSummary> {
@@ -380,7 +380,7 @@ async fn get_config() -> Json<ConfigSummary> {
 /// `GET /logs?source=&tail=`: a fixed, canned `LogsInfo` -- doesn't consult
 /// `MockState`, `?source`, or `?tail` at all (there's no real container/log
 /// file behind this mock, unlike `tt-station-agentd::routes::get_logs`, Task
-/// 2), just enough shape for `tt logs` (and its e2e test, Task 4) to
+/// 2), just enough shape for `tt-station logs` (and its e2e test, Task 4) to
 /// exercise the unauthed discover -> logs flow with no real agent/hardware.
 async fn get_logs_mock() -> Json<LogsInfo> {
     Json(LogsInfo {
@@ -394,8 +394,8 @@ async fn get_logs_mock() -> Json<LogsInfo> {
 /// request (`{"action": "..."}`, see `agent_client::power`) -- `action` is
 /// intentionally accepted as a bare `String` and never validated against the
 /// four real literals (`reset-chips`/`suspend`/`reboot`/`shutdown`): that
-/// pre-flight check lives client-side in `tt`'s `Command::Power` dispatch
-/// arm (`crates/tt/src/main.rs`), so this mock only needs to prove the
+/// pre-flight check lives client-side in `tt-station`'s `Command::Power` dispatch
+/// arm (`crates/tt-station/src/main.rs`), so this mock only needs to prove the
 /// request reaches the box and gets accepted, not re-enforce a rule its
 /// caller already enforced.
 #[derive(Deserialize)]
@@ -410,7 +410,7 @@ struct PowerRequest {
 /// or OS session to act on, and even if it did, actually suspending/
 /// rebooting/shutting down the developer's own machine because a test
 /// happened to hit this route would be a serious footgun. Always returns
-/// `200` so `tt power` can be exercised end-to-end (auth + request shape)
+/// `200` so `tt-station power` can be exercised end-to-end (auth + request shape)
 /// with no hardware and no risk to the box running this mock.
 async fn power_mock(Json(_req): Json<PowerRequest>) -> StatusCode {
     StatusCode::OK
@@ -430,8 +430,8 @@ async fn get_endpoint(State(state): State<MockState>) -> Result<Json<Endpoint>, 
 
 /// `GET /leases` (Task 4 of the tt-station x tt-gozer integration): a
 /// canned two-chip `LeaseList` -- one board `HELD` by a fake tenant, one
-/// `FREE` -- standing in for a real `gozer status --json` proxy, so `tt
-/// leases` has SOME end-to-end coverage (`crates/tt/tests/e2e_mock.rs`)
+/// `FREE` -- standing in for a real `gozer status --json` proxy, so `tt-station
+/// leases` has SOME end-to-end coverage (`crates/tt-station/tests/e2e_mock.rs`)
 /// without a real `gozer` binary or hardware anywhere in this mock. No auth
 /// check, matching every other authed-in-reality route on this mock (see
 /// the module doc / `ssh_authorize_mock`'s comment) -- and, like the real
@@ -466,7 +466,7 @@ async fn get_leases() -> Json<LeaseList> {
 
 /// `POST /v1/chat/completions`: a canned OpenAI-style chat completion. The
 /// request body is intentionally not validated or even inspected -- the
-/// point of this mock is proving `tt`'s discover -> pair -> run -> endpoint
+/// point of this mock is proving `tt-station`'s discover -> pair -> run -> endpoint
 /// -> completion plumbing works, not exercising the completion API surface.
 async fn chat_completions(
     State(state): State<MockState>,
@@ -573,7 +573,7 @@ async fn telemetry_stream(mut socket: WebSocket, lite: bool) {
 // ---------------------------------------------------------------------
 // `/ssh/authorize` / `/ssh/authorize` (DELETE): fake the SSH-key-install
 // flow (Task 2's real route) against a throwaway temp file instead of a
-// real `authorized_keys`, so `tt`'s SSH-authorize command (Task 6) and the
+// real `authorized_keys`, so `tt-station`'s SSH-authorize command (Task 6) and the
 // app's flow (Task 9) can be exercised end-to-end with no hardware and,
 // just as importantly, without ever touching THIS dev machine's real
 // `~/.ssh` -- mock-box runs directly on a developer's Mac, unlike the real
@@ -606,7 +606,7 @@ fn mock_ssh_authorized_keys_path() -> PathBuf {
 
 /// The account name reported back as `ssh_user` -- fixed to `"ttuser"` to
 /// match the real agent's QuietBox-2 default (`with_ssh_target`'s doc
-/// comment in `tt-station-agentd/src/routes.rs`), so client code (the `tt`
+/// comment in `tt-station-agentd/src/routes.rs`), so client code (the `tt-station`
 /// CLI, the app) exercises the exact same value against mock and real.
 const MOCK_SSH_USER: &str = "ttuser";
 
@@ -716,7 +716,7 @@ fn app(state: MockState) -> Router {
 /// Bind `ctrl_port` and serve the fake control API + fake vLLM endpoint
 /// until the process is killed. No graceful-shutdown handling (unlike
 /// `tt-station-agentd`) -- this is a disposable test fixture, normally
-/// killed outright by whatever spawned it (see `crates/tt/tests/e2e_mock.rs`).
+/// killed outright by whatever spawned it (see `crates/tt-station/tests/e2e_mock.rs`).
 async fn serve(ctrl_port: u16, name: String, chips: String) -> Result<()> {
     let state = MockState::new(name.clone(), chips, ctrl_port);
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", ctrl_port))

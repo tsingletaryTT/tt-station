@@ -267,7 +267,7 @@ struct Cli {
 
     /// Path to `model_spec.json` -- the ground-truth model/device-mesh
     /// catalog `run.py` validates `--model`/`--tt-device` against, and that
-    /// `RunPyBackend::list_models` (`GET /models`, `tt models`) reads to
+    /// `RunPyBackend::list_models` (`GET /models`, `tt-station models`) reads to
     /// enumerate what this box can serve. Only meaningful for the `runpy`
     /// backend.
     ///
@@ -1065,7 +1065,7 @@ async fn main() -> Result<()> {
     // `tt-smi -s` through the exact same command seam `GET /telemetry` uses
     // (`RealCommandRunner`, see `collect_snapshot` in routes.rs) and map its
     // stdout through `device::detect_device_mesh`. Reported on `/status` so
-    // a client (Task 3's `tt --json status`) can rank models by hardware fit
+    // a client (Task 3's `tt-station --json status`) can rank models by hardware fit
     // without its own `tt-smi` access. ANY failure here (binary missing,
     // non-zero exit, unrecognized/mixed fleet, OR a hang) degrades to `None`
     // -- bounded to `STARTUP_DEVICE_MESH_TIMEOUT` (~10s) via

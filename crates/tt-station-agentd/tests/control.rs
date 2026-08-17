@@ -313,7 +313,7 @@ impl FakeStatusAdvertiser {
 }
 
 /// A successful `POST /run` must re-publish `Serving(<model>)` through the
-/// attached `StatusAdvertiser` -- the fix for `tt discover` over mDNS
+/// attached `StatusAdvertiser` -- the fix for `tt-station discover` over mDNS
 /// showing a stale `idle` while the box is actually serving.
 #[tokio::test]
 async fn run_notifies_status_advertiser_of_serving() {

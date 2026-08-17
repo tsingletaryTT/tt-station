@@ -15,7 +15,7 @@ pub enum ServingStatus {
 /// that serializes a `ServingStatus` -- directly, or nested in a
 /// `BoxRecord` -- gets the canonical wire form for free instead of having to
 /// re-encode it by hand (see the removed `DiscoveredBox` workaround in
-/// `crates/tt/src/main.rs`, which existed only because this wasn't true).
+/// `crates/tt-station/src/main.rs`, which existed only because this wasn't true).
 impl Serialize for ServingStatus {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -52,9 +52,9 @@ pub struct BoxRecord {
     /// -- see `tt-station-agentd::routes::StatusResponse`). Only populated
     /// when the record actually came from a live `/status` probe (today,
     /// `ManualProvider`'s manual-host path via `manual_status_fetch` in the
-    /// `tt` CLI); mDNS-discovered records (`txt_decode`, below) are always
+    /// `tt-station` CLI); mDNS-discovered records (`txt_decode`, below) are always
     /// `None` here because the mDNS TXT advertisement doesn't carry this key
-    /// -- see `txt_decode`'s doc comment. Task 3's `tt --json discover`
+    /// -- see `txt_decode`'s doc comment. Task 3's `tt-station --json discover`
     /// output surfaces whatever this field ends up holding either way.
     pub device_mesh: Option<String>,
     /// This box's detected primary NIC MAC (`"aa:bb:cc:dd:ee:ff"`), passed
@@ -78,10 +78,10 @@ pub struct Endpoint {
 /// tt-studio's FastAPI, or a manual operator run). Populated by
 /// `tt-station-agentd`'s `GET /serving` route (see
 /// `serving::discovery::discover_serving`) and consumed by
-/// `agent_client::list_serving` / `tt serving` / the macOS toolbar.
+/// `agent_client::list_serving` / `tt-station serving` / the macOS toolbar.
 ///
 /// Shared here (rather than defined privately in the agent) so the agent, the
-/// `tt` CLI, and any future GUI all decode the exact same wire shape -- same
+/// `tt-station` CLI, and any future GUI all decode the exact same wire shape -- same
 /// reasoning as [`Endpoint`]/[`ModelInfo`] living in this crate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServingEntry {
@@ -168,7 +168,7 @@ pub struct LeaseEntry {
 /// startup probe failed), so `leases` is trivially empty and tells a client
 /// nothing about actual chip contention. `available: true, leases: []`
 /// means gozer IS installed and genuinely reports every chip free. A client
-/// (the Mac app, `tt leases`) needs to tell those two apart, which is why
+/// (the Mac app, `tt-station leases`) needs to tell those two apart, which is why
 /// this is a struct with an explicit flag rather than just
 /// `Vec<LeaseEntry>` -- and why the route returns this (200 OK) rather than
 /// a 4xx/5xx when gozer is absent.
@@ -183,7 +183,7 @@ pub struct LeaseList {
 /// meshes it supports (that entry's own keys, e.g. `GALAXY`, `T3K`,
 /// `P300X2`). See `ServingBackend::list_models`
 /// (`tt-station-agentd/src/serving/mod.rs`) for how this is populated and
-/// `agent_client::list_models`/`tt models` for how a client consumes it --
+/// `agent_client::list_models`/`tt-station models` for how a client consumes it --
 /// the point of enumerating this at all is so a caller never has to guess
 /// or hardcode which models a given box can serve.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -238,7 +238,7 @@ pub struct LeasingSummary {
 }
 
 /// `GET /status`'s response body, as decoded by
-/// [`crate::agent_client::get_status`] and printed by `tt --json status`
+/// [`crate::agent_client::get_status`] and printed by `tt-station --json status`
 /// (Task 3). `status` is the already-parsed [`ServingStatus`] (via
 /// [`ServingStatus::from_txt`]) rather than the raw `idle`/`serving:<model>`
 /// string the agent sends over the wire -- `get_status` does that parsing so
@@ -280,7 +280,7 @@ pub struct StatusInfo {
 /// `GET /config`'s response body (see `tt-station-agentd::routes::get_config`,
 /// Task 5): a REDACTED view of the agent's fully-resolved serving config
 /// (`tt-station-agentd::config::ResolvedConfig`, Task 1-3) -- just enough for
-/// the GTK panel, the `tt config` CLI (Task 6), and the Mac app to render
+/// the GTK panel, the `tt-station config` CLI (Task 6), and the Mac app to render
 /// "what am I actually about to serve with," without ever exposing secrets.
 /// There is deliberately no `hf_token` (or any token-store) field here: the
 /// struct's shape enforces the "secrets never leave the box" constraint by
@@ -299,7 +299,7 @@ pub struct ConfigSummary {
 
 /// `GET /logs`'s response body (Task 2's `tt-station-agentd::routes::LogsResponse`,
 /// which this mirrors field-for-field), as decoded by
-/// [`crate::agent_client::get_logs`] and printed by `tt logs` (Task 4).
+/// [`crate::agent_client::get_logs`] and printed by `tt-station logs` (Task 4).
 /// `source` echoes back which log stream was requested (`"container"` or
 /// `"run"`); `origin` is the box-side path/identifier the lines were read
 /// from (e.g. a container id or log file path), or `None` when there's
@@ -319,8 +319,8 @@ pub struct LogsInfo {
 /// systemd's own unit-state vocabulary (the agent runs as a systemd-managed
 /// service on the box) -- `Active`/`Inactive`/`Activating`/`Deactivating`/
 /// `Failed`, plus `Unknown` for "couldn't determine" (e.g. the box is
-/// unreachable). `tt console`'s collector reads this from the box; the TUI,
-/// `tt console --snapshot` JSON, and the GTK panel all render off the same
+/// unreachable). `tt-station console`'s collector reads this from the box; the TUI,
+/// `tt-station console --snapshot` JSON, and the GTK panel all render off the same
 /// values. `#[serde(rename_all = "snake_case")]` so the wire/JSON form reads
 /// naturally (`"inactive"`, not `"Inactive"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,7 +335,7 @@ pub enum ServiceState {
 }
 
 /// A live pairing code as currently shown on the box (GTK panel) or
-/// reported by the agent, plus its remaining TTL -- lets `tt console`
+/// reported by the agent, plus its remaining TTL -- lets `tt-station console`
 /// surface "pair with this box" affordances without a separate round trip
 /// to fetch the code and its expiry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,7 +348,7 @@ pub struct PairingState {
 /// service up, is the box reachable at all, and (when known) its identity,
 /// hardware, serving status, endpoint, live `/serving` entries, redacted
 /// config, and any active pairing code. This is the single shared JSON
-/// contract behind `tt console` (both the interactive TUI and its
+/// contract behind `tt-station console` (both the interactive TUI and its
 /// `--snapshot` JSON output) and the GTK box panel -- one definition here
 /// means all three always agree on the wire shape, rather than each
 /// hand-rolling their own view of "what state is this box in." Later tasks
@@ -520,10 +520,10 @@ mod tests {
         }
     }
 
-    /// Wire-compat guard: `BoxRecord` (as serialized by `tt --json discover`,
+    /// Wire-compat guard: `BoxRecord` (as serialized by `tt-station --json discover`,
     /// decoded by the macOS app) must emit `status` as the plain
     /// `idle`/`serving:<model>` STRING, not the derived-enum shape. This is
-    /// exactly the shape `DiscoveredBox` in `crates/tt/src/main.rs` used to
+    /// exactly the shape `DiscoveredBox` in `crates/tt-station/src/main.rs` used to
     /// hand-roll before `ServingStatus` grew its own `Serialize` impl.
     #[test]
     fn boxrecord_serializes_status_as_canonical_txt_string() {
@@ -704,7 +704,7 @@ mod tests {
     }
 
     /// `BoxLifecycleSnapshot` is the one shared JSON contract for a box's
-    /// operator-facing lifecycle state -- `tt console` (TUI + `--snapshot`
+    /// operator-facing lifecycle state -- `tt-station console` (TUI + `--snapshot`
     /// JSON) and the GTK box panel both decode/encode this exact shape
     /// (Task 2). Round-trip through serde_json must be lossless, and
     /// `ServiceState` (mirroring systemd-ish unit states) must serialize as
@@ -740,7 +740,7 @@ mod tests {
     /// `#[serde(default)]` on `logs` is REQUIRED, not decorative: a
     /// `--snapshot` recorded before Task 6 (no `logs` key at all) must still
     /// deserialize -- the GTK panel polls this JSON as a documented contract
-    /// and must not break against a slightly-older `tt console` binary.
+    /// and must not break against a slightly-older `tt-station console` binary.
     #[test]
     fn lifecycle_snapshot_deserializes_without_logs_field() {
         let json = r#"{

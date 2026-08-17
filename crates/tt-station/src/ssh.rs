@@ -1,13 +1,13 @@
-//! `tt ssh-authorize`'s guts: SSH key selection/generation, the install
+//! `tt-station ssh-authorize`'s guts: SSH key selection/generation, the install
 //! label format, and the reusable "read/gen key, call the agent" routine.
 //!
 //! Split out from `main.rs` for two reasons: (1) the key-selection and
 //! label-format logic is pure and worth unit-testing in isolation (see the
 //! `tests` module below -- no filesystem fixture beyond a `tempfile` dir,
 //! no network, no clock), and (2) [`authorize`] is meant to be called again
-//! by Task 7's `tt pair --enable-ssh`, which already has an [`AgentClient`]
+//! by Task 7's `tt-station pair --enable-ssh`, which already has an [`AgentClient`]
 //! in hand and just wants "make sure my key is on this box" without
-//! re-shelling out to `tt ssh-authorize` as a subprocess.
+//! re-shelling out to `tt-station ssh-authorize` as a subprocess.
 //!
 //! NEVER reads or transmits the private half of a keypair -- every path
 //! below only ever touches the `.pub` file.
@@ -18,7 +18,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use libttstation::agent_client::{AgentClient, SshAuthorizeResult};
 
-/// Pick which public key file `tt ssh-authorize` should install, preferring
+/// Pick which public key file `tt-station ssh-authorize` should install, preferring
 /// a modern ed25519 key over a legacy RSA one; `None` if `ssh_dir` has
 /// neither. Pure over a directory path (no `$HOME` lookup inside) so it's
 /// unit-testable against a fixture temp dir instead of the operator's real
@@ -33,7 +33,7 @@ pub fn select_public_key_path(ssh_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The `ttstation:<identity>:<date>` marker `tt ssh-authorize` tags onto
+/// The `ttstation:<identity>:<date>` marker `tt-station ssh-authorize` tags onto
 /// every key it installs -- lets a later look at `authorized_keys` (or a
 /// `--revoke` by label, though this CLI prefers revoking by key material --
 /// see `cmd_ssh_revoke` in `main.rs`) tell which Mac/day authorized which
@@ -56,12 +56,12 @@ pub fn ssh_label(identity: &str, date: &str) -> String {
 /// Today's date as `YYYY-MM-DD`, derived from the system clock.
 ///
 /// This workspace has no date/time-formatting dependency (no `chrono`,
-/// `time`, etc. -- see `crates/tt/Cargo.toml`) and pulling one in just for a
+/// `time`, etc. -- see `crates/tt-station/Cargo.toml`) and pulling one in just for a
 /// single `YYYY-MM-DD` string felt like overkill, so this hand-rolls the
 /// Unix-days -> civil-calendar conversion via [`civil_from_unix_days`]
 /// (Howard Hinnant's well-known `civil_from_days` algorithm -- proleptic
 /// Gregorian, correct for any day count, no leap-year special-casing bugs).
-/// `--date` on `tt ssh-authorize` lets an operator/script override this
+/// `--date` on `tt-station ssh-authorize` lets an operator/script override this
 /// entirely for determinism; `ssh_label`'s own unit tests pass a literal
 /// date rather than depending on this function at all.
 pub fn today_ymd() -> String {
@@ -97,8 +97,8 @@ pub fn civil_from_unix_days(days: i64) -> String {
 }
 
 /// The outcome of a successful `authorize` call, independent of `--json`/
-/// human-text formatting -- what both `tt ssh-authorize` and (eventually)
-/// `tt pair --enable-ssh` need to report to their caller.
+/// human-text formatting -- what both `tt-station ssh-authorize` and (eventually)
+/// `tt-station pair --enable-ssh` need to report to their caller.
 pub struct AuthorizeOutcome {
     pub authorized: bool,
     pub ssh_user: String,
@@ -109,11 +109,11 @@ pub struct AuthorizeOutcome {
 /// Resolve (generating if necessary) the operator's SSH public key under
 /// `home/.ssh`, then hand it to `client` tagged with `ssh_label(<this
 /// Mac's hostname>, date)`. This is the ENTIRE "make sure my Mac's key is
-/// on this box" routine -- `tt ssh-authorize` (`main.rs::cmd_ssh_authorize`)
+/// on this box" routine -- `tt-station ssh-authorize` (`main.rs::cmd_ssh_authorize`)
 /// is a thin wrapper that just resolves `client`/`home`/`date` and prints
-/// the result, specifically so Task 7's `tt pair --enable-ssh` can call
+/// the result, specifically so Task 7's `tt-station pair --enable-ssh` can call
 /// this directly with the `AgentClient` it already built for pairing,
-/// instead of shelling out to `tt ssh-authorize` as a subprocess.
+/// instead of shelling out to `tt-station ssh-authorize` as a subprocess.
 ///
 /// Deliberately takes no `host` parameter: the label identifies the
 /// INSTALLING MAC, not the target box, so it's derived here via
@@ -171,7 +171,7 @@ fn read_public_key(path: &Path) -> Result<String> {
 /// path). Owner-verified, not unit-tested -- it mutates real files under
 /// `~/.ssh` and depends on an external binary being on `$PATH`.
 ///
-/// `-N ""` = no passphrase: this key exists so an unattended `tt`
+/// `-N ""` = no passphrase: this key exists so an unattended `tt-station`
 /// invocation can install/rotate it without a human typing a passphrase
 /// every time, which is the whole point of this command existing. `-C`
 /// tags the comment with the Mac's hostname purely so a human eyeballing

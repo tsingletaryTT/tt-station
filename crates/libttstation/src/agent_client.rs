@@ -1,7 +1,7 @@
 //! Client side of the agent control plane (Task 10's routes on
 //! `tt-station-agentd`): `GET /status`, `POST /run`, `POST /stop`, and
 //! `GET /endpoint`. Lives in `libttstation` for the same reason
-//! [`crate::pairing`] does -- so any future caller (the `tt` CLI in Task 12,
+//! [`crate::pairing`] does -- so any future caller (the `tt-station` CLI in Task 12,
 //! a GUI, another service) can drive an agent without reimplementing the
 //! HTTP calls.
 //!
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 /// `GET /models` (UNAUTHED, mirroring the agent's own route -- see
 /// `tt-station-agentd::routes::get_models`): enumerate the models the agent
-/// at `base` can serve, so a caller (the `tt` CLI's `models` command today)
+/// at `base` can serve, so a caller (the `tt-station` CLI's `models` command today)
 /// never has to guess or hardcode a model id before calling
 /// [`AgentClient::run`].
 ///
@@ -46,7 +46,7 @@ pub async fn list_models(base: &str) -> anyhow::Result<ModelsResponse> {
 /// A FREE function rather than an `AgentClient` method, same reasoning as
 /// [`list_models`]/[`get_status`]: `/serving` is unauthed read-only
 /// discovery, so a caller that hasn't paired (no bearer token) can still see
-/// what's serving. `tt serving` calls this directly instead of going through
+/// what's serving. `tt-station serving` calls this directly instead of going through
 /// `authed_client()`.
 pub async fn list_serving(base: &str) -> anyhow::Result<ServingList> {
     let url = join(base, "serving");
@@ -71,9 +71,9 @@ pub async fn list_serving(base: &str) -> anyhow::Result<ServingList> {
 /// [`list_models`] and [`crate::pairing::pair_init`]: a client that hasn't
 /// paired yet (no bearer token to construct an `AgentClient` with) still
 /// wants a live status dot for discovery/UI purposes, and the agent's
-/// `/status` route doesn't require a token to answer that. `tt status`
-/// (`crates/tt/src/main.rs::cmd_status`) calls this directly instead of
-/// going through `authed_client()`, so a `tt status` on an unpaired box
+/// `/status` route doesn't require a token to answer that. `tt-station status`
+/// (`crates/tt-station/src/main.rs::cmd_status`) calls this directly instead of
+/// going through `authed_client()`, so a `tt-station status` on an unpaired box
 /// works instead of failing with "no token stored".
 ///
 /// `device_mesh`/`mac`/`leasing` all deserialize to `None` when the agent's
@@ -126,7 +126,7 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
 ///
 /// A FREE function rather than an `AgentClient` method, same reasoning as
 /// [`list_models`]/[`get_status`]: `/config` is unauthed read-only discovery
-/// (the GTK panel and `tt config` want to show "what will this box actually
+/// (the GTK panel and `tt-station config` want to show "what will this box actually
 /// serve with" before/without a pairing existing), so there's no bearer
 /// token to hang an `AgentClient` off of yet.
 pub async fn get_config(base: &str) -> anyhow::Result<ConfigSummary> {
@@ -148,7 +148,7 @@ pub async fn get_config(base: &str) -> anyhow::Result<ConfigSummary> {
 ///
 /// A FREE function rather than an `AgentClient` method, same reasoning as
 /// [`list_models`]/[`get_status`]/[`get_config`]: `/logs` is unauthed
-/// read-only discovery (an operator debugging a stuck serve wants to `tt
+/// read-only discovery (an operator debugging a stuck serve wants to `tt-station
 /// logs` a box it never bothered to pair with), so there's no bearer token to
 /// hang an `AgentClient` off of yet. `join` doesn't know about query strings,
 /// so the `?source=&tail=` suffix is appended directly onto its output.
@@ -167,12 +167,12 @@ pub async fn get_logs(base: &str, source: &str, tail: usize) -> anyhow::Result<L
 /// `POST /reset` (bearer-guarded): ask the agent at `base` to return the box
 /// to a fresh-install state -- stop any serving container, reset the board,
 /// and clear ALL of its issued bearer tokens (see
-/// `tt-station-agentd::routes::reset`). Used by `tt reset --host <h>` to reset
+/// `tt-station-agentd::routes::reset`). Used by `tt-station reset --host <h>` to reset
 /// the remote box before it forgets its local copy of the token.
 ///
 /// A FREE function rather than an [`AgentClient`] method, mirroring the
 /// action-command style of [`list_models`]/[`get_status`]: the one caller
-/// (`tt reset`) already has the `host`+`token` in hand and doesn't otherwise
+/// (`tt-station reset`) already has the `host`+`token` in hand and doesn't otherwise
 /// build an `AgentClient`, and `reset` deliberately invalidates the very
 /// token it authenticates with (a fresh box has no tokens), so there's no
 /// reusable authenticated handle to hang onto afterward anyway.
@@ -184,11 +184,11 @@ pub async fn get_logs(base: &str, source: &str, tail: usize) -> anyhow::Result<L
 /// because it could not determine whether one does. Its body names the
 /// board, the holder, and the remedy, so that message is passed through
 /// verbatim rather than collapsed by `error_for_status` -- see
-/// [`is_refusal`], which is how `tt reset` tells this apart from an
+/// [`is_refusal`], which is how `tt-station reset` tells this apart from an
 /// unreachable box (a refusal means the box is fine and said no, so local
 /// pairing must be left alone; the server deliberately preserved it).
 ///
-/// `force` is `tt reset --force`: it overrides that refusal, because a lease
+/// `force` is `tt-station reset --force`: it overrides that refusal, because a lease
 /// is a courtesy between tenants and not a lock on the owner's own box. The
 /// agent proceeds and logs whose chips it stepped on.
 ///
@@ -224,7 +224,7 @@ pub const REFUSAL_MARKER: &str = "(409)";
 /// Whether `err` is an agent REFUSAL (a `409`) rather than an ordinary
 /// failure.
 ///
-/// The distinction is load-bearing for `tt reset`: an unreachable or broken
+/// The distinction is load-bearing for `tt-station reset`: an unreachable or broken
 /// box must not block the local "forget everything" half of the command,
 /// but a box that deliberately refused reset NOTHING -- and kept the
 /// caller's pairing on purpose -- so forgetting the token there would
@@ -236,7 +236,7 @@ pub const REFUSAL_MARKER: &str = "(409)";
 /// `": " <detail the AGENT supplied>` -- and that detail is arbitrary text
 /// from the box: a holder `who`, a model id, a gozer `reason`. A plain
 /// `contains(REFUSAL_MARKER)` therefore fired on any ORDINARY failure whose
-/// message merely happened to carry `(409)` somewhere, and `tt reset` turns a
+/// message merely happened to carry `(409)` somewhere, and `tt-station reset` turns a
 /// false positive into a hard error that refuses to clear local state -- the
 /// exact opposite of what a broken box is supposed to do.
 ///
@@ -366,7 +366,7 @@ impl AgentClient {
     /// passed through rather than collapsed into a generic HTTP-status
     /// error -- see the special case in the body.
     ///
-    /// `force` is `tt run --force`: serve anyway. The agent then serves
+    /// `force` is `tt-station run --force`: serve anyway. The agent then serves
     /// WITHOUT a lease rather than taking the holder's away (which would make
     /// `gozer status` describe those chips as ours while the neighbour's
     /// container still drove them) -- see the agent's

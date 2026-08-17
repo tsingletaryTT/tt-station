@@ -1,8 +1,8 @@
-//! `LifecycleEnv`: the fakeable seam between `tt console`'s pure lifecycle
+//! `LifecycleEnv`: the fakeable seam between `tt-station console`'s pure lifecycle
 //! logic (`console::state`) and the outside world (systemctl, journalctl,
 //! the agent's HTTP control API, and spawning helper commands).
 //!
-//! Every I/O `tt console` needs goes through this trait so tests can swap in
+//! Every I/O `tt-station console` needs goes through this trait so tests can swap in
 //! a `FakeEnv` instead of touching a real systemd instance or an agent
 //! process. [`collect_snapshot`] is the one function that walks the trait and
 //! assembles a [`BoxLifecycleSnapshot`] -- see its doc comment for the
@@ -22,7 +22,7 @@ use libttstation::model::{
 };
 use serde::Deserialize;
 
-/// The fakeable seam for every side effect `tt console` needs: reading
+/// The fakeable seam for every side effect `tt-station console` needs: reading
 /// systemd unit state, tailing the agent's journal, hitting its HTTP control
 /// API, and (for actions, a later task) spawning a command. Kept as five
 /// small verbs rather than one "run a shell command" primitive so a
@@ -49,7 +49,7 @@ pub trait LifecycleEnv {
     fn http_get(&self, path: &str) -> Result<String>;
 
     /// Spawn `argv[0]` with `argv[1..]` and wait for it to exit, `Err` on a
-    /// non-zero exit code. Used by `tt console`'s operator actions (start/
+    /// non-zero exit code. Used by `tt-station console`'s operator actions (start/
     /// stop/restart the service, etc. -- a later task); [`collect_snapshot`]
     /// itself never calls this.
     fn run(&self, argv: &[&str]) -> Result<()>;
@@ -76,7 +76,7 @@ pub trait LifecycleEnv {
 /// The real [`LifecycleEnv`]: shells out to `systemctl`/`journalctl`, and
 /// speaks HTTP to the agent's own control API on `127.0.0.1:<ctrl_port>`
 /// (the agent binds control there -- see `tt-station-agentd`'s server setup;
-/// `tt console` runs on the box itself, so `127.0.0.1` is always correct,
+/// `tt-station console` runs on the box itself, so `127.0.0.1` is always correct,
 /// unlike the CLI's `discover`/`pair` flows which target a remote host).
 ///
 /// No `names: ToolNames` field here (there used to be one) -- every method
@@ -162,7 +162,7 @@ impl LifecycleEnv for RealLifecycleEnv {
 /// its OWN function-local (non-`pub`) struct of the same shape before
 /// throwing `name`/`chips` away and returning just a [`libttstation::model::
 /// StatusInfo`] (`status` + `device_mesh`) -- neither is reusable from here.
-/// `tt console` needs `name`/`chips` too (they're `BoxLifecycleSnapshot`
+/// `tt-station console` needs `name`/`chips` too (they're `BoxLifecycleSnapshot`
 /// fields), so this struct exists purely to decode the same wire bytes;
 /// see the task-4 report for why a shared `pub` type isn't threaded through
 /// instead (a good follow-up for whoever touches this next).

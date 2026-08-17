@@ -646,7 +646,7 @@ impl DockerBackend {
                 // `POST /run` answers 409 for a contended box, not 500.
                 Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
                     "docker backend: cannot serve '{model}' -- no chips are available: {detail}. \
-                     Pass `--force` to serve anyway (`tt run --force`) -- it is your box, and \
+                     Pass `--force` to serve anyway (`tt-station run --force`) -- it is your box, and \
                      the override is logged."
                 ))))
             }

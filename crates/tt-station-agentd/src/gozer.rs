@@ -128,7 +128,7 @@ const EXIT_NO_LEASE: i32 = 13;
 /// ("give me all my TT chips"), which is exactly how tt-station behaved
 /// before gozer existed. So the common case stays whole-box and
 /// contention-free: one tenant, no neighbour to negotiate with, no `409` on
-/// the first `tt run` of the day.
+/// the first `tt-station run` of the day.
 ///
 /// **This REVERSES an earlier ruling in this integration.** For its first
 /// five tasks the value was `"1"` -- gozer's own default, which a board-grain
@@ -625,7 +625,7 @@ struct StatusReport {
 /// **A lease this agent itself holds is worded differently.** `own_service_port`
 /// is the caller's own serving port, and any clause whose `who` is
 /// `tt-station:<that port>:<model>` is rewritten by [`own_lease_clause`] into
-/// "this box is already serving `<model>`; `tt stop` first". Naming our own
+/// "this box is already serving `<model>`; `tt-station stop` first". Naming our own
 /// `who` back at the operator as though it were a stranger sends them looking
 /// for a tenant who does not exist -- see that function's doc comment.
 pub fn contention_detail(
@@ -824,7 +824,7 @@ pub fn own_lease_clause(who: &str, own_service_port: u16) -> Option<String> {
         return None;
     }
     Some(format!(
-        "this box is already serving {model} on port {port} -- stop it first (`tt stop`)"
+        "this box is already serving {model} on port {port} -- stop it first (`tt-station stop`)"
     ))
 }
 

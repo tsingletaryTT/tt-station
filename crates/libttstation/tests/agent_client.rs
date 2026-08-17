@@ -145,7 +145,7 @@ async fn endpoint_returns_endpoint_on_200() {
 /// must surface the agent's OWN message, which names the board and the
 /// holder. `error_for_status`'s generic "HTTP status client error (409
 /// Conflict)" would throw away the only part a user can act on -- and
-/// "naming the holder" is the whole promise `tt run` makes on a contended
+/// "naming the holder" is the whole promise `tt-station run` makes on a contended
 /// box.
 #[tokio::test]
 async fn run_maps_409_to_the_agents_contention_message() {
@@ -184,8 +184,8 @@ async fn run_maps_409_to_the_agents_contention_message() {
 /// defect `run()` had, on the more dangerous surface: the refusal names the
 /// board, the holder, and the remedy ("stop that session" vs "fix gozer"),
 /// and `error_for_status`'s "HTTP status client error (409 Conflict)"
-/// discards all three. `tt reset` also keys off this being an Err to leave
-/// local pairing alone (see `crates/tt/tests/reset_refusal.rs`).
+/// discards all three. `tt-station reset` also keys off this being an Err to leave
+/// local pairing alone (see `crates/tt-station/tests/reset_refusal.rs`).
 #[tokio::test]
 async fn reset_maps_409_to_the_agents_refusal_message() {
     let server = MockServer::start().await;
@@ -220,7 +220,7 @@ async fn reset_maps_409_to_the_agents_refusal_message() {
     );
     assert!(
         libttstation::agent_client::is_refusal(&err),
-        "`tt reset` branches on this: {message}"
+        "`tt-station reset` branches on this: {message}"
     );
 }
 
@@ -229,7 +229,7 @@ async fn reset_maps_409_to_the_agents_refusal_message() {
 ///
 /// A refusal's detail is arbitrary text from the box -- a holder `who`, a model
 /// id, a gozer `reason` -- so a bare `contains("(409)")` fired on any ordinary
-/// failure whose message merely happened to carry that substring. `tt reset`
+/// failure whose message merely happened to carry that substring. `tt-station reset`
 /// turns a false positive into a HARD error that refuses to clear local state,
 /// which is exactly the opposite of what an unreachable or broken box is
 /// supposed to do: forget it locally and move on.
@@ -397,7 +397,7 @@ async fn list_serving_parses_serving_list_with_no_auth_header() {
     assert_eq!(list.serving[1].source, "external");
 }
 
-/// `get_status(base)` -- the free function `tt status` calls so it works
+/// `get_status(base)` -- the free function `tt-station status` calls so it works
 /// against an unpaired box -- should GET `{base}/status` with no
 /// `Authorization` header and parse the `serving:<model>` case via
 /// `ServingStatus::from_txt`.
@@ -436,7 +436,7 @@ async fn get_status_parses_serving_status_with_no_auth_header() {
 }
 
 /// `/status`'s `leasing` object must reach the client. It was on the wire from
-/// the moment the agent grew it, and invisible to `tt status`/`tt status
+/// the moment the agent grew it, and invisible to `tt-station status`/`tt-station status
 /// --json` because `StatusInfo` had no field to decode it into -- so the
 /// gozer integration's own `GET /status` deliverable never actually arrived
 /// anywhere a user could see it.
@@ -587,7 +587,7 @@ async fn get_status_parses_null_device_mesh_as_none() {
     assert_eq!(info.device_mesh, None);
 }
 
-/// (Task 4) `get_logs(base, source, tail)` -- the free function `tt logs`
+/// (Task 4) `get_logs(base, source, tail)` -- the free function `tt-station logs`
 /// calls, unauthed like `get_status`/`list_serving` -- should GET
 /// `{base}/logs?source=<source>&tail=<tail>` with no `Authorization` header
 /// and parse the `LogsInfo` body.
@@ -718,7 +718,7 @@ async fn ssh_revoke_by_public_key_sends_delete_with_public_key_body() {
 /// `reset` unforced is the one asymmetry, and it is deliberate: it sends NO
 /// body at all (pinned by `reset_posts_to_reset_with_bearer_and_succeeds_on_
 /// empty_body` above), which is what lets the agent read a bodyless `/reset`
-/// from an older `tt` as unforced.
+/// from an older `tt-station` as unforced.
 #[tokio::test]
 async fn force_reaches_the_wire_on_run_reset_and_power() {
     let server = MockServer::start().await;

@@ -1,7 +1,7 @@
 //! Unit tests for the `libttstation::pairing` client (Task 8), run against a
 //! `wiremock` mock server rather than a real `tt-station-agentd` instance --
 //! that keeps this crate's tests from depending on the agent crate at all
-//! (libttstation sits *below* agentd/tt in the dependency graph) while still
+//! (libttstation sits *below* agentd/tt-station in the dependency graph) while still
 //! exercising the real `reqwest` request/response path.
 //!
 //! Covers the three cases the brief calls out:

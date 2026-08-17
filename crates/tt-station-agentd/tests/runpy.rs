@@ -933,7 +933,7 @@ fn runpy_start_omits_override_image_by_default_without_auto_image() {
 
 /// `start` must strip any `org/` prefix before passing `--model` to run.py
 /// -- `run.py` validates `--model` against `model_spec.json`'s SHORT model
-/// names, but `tt models` (and callers generally) deal in HF ids.
+/// names, but `tt-station models` (and callers generally) deal in HF ids.
 #[test]
 fn runpy_start_strips_org_prefix_for_runpy_model_flag() {
     let runner = FakeRunner::new(0);
@@ -1643,7 +1643,7 @@ fn runpy_start_fails_without_touching_chips_when_unavailable() {
 }
 
 // ---------------------------------------------------------------------
-// `--force` on `tt run`: the contention refusal above is a POLITENESS
+// `--force` on `tt-station run`: the contention refusal above is a POLITENESS
 // refusal, so the owner can overrule it. The mechanism is deliberate --
 // serve WITHOUT a lease rather than take the holder's lease off them, which
 // would leave `gozer status` describing chips as ours while the neighbour's
@@ -2236,8 +2236,8 @@ fn tt_device_of(commands: &[Vec<String>]) -> Option<String> {
 /// derives the mesh from the GRANT's chip count while `resolve_tt_device`
 /// derives it from every board `tt-smi -s` reports; with a whole-box grant
 /// those two inputs are the same set, so the two answers must agree. If they
-/// ever diverge, the ordinary `tt run` on a gozer box starts describing a
-/// different mesh from the ordinary `tt run` on a box without gozer -- and
+/// ever diverge, the ordinary `tt-station run` on a gozer box starts describing a
+/// different mesh from the ordinary `tt-station run` on a box without gozer -- and
 /// that is now the path almost every serve takes, not an edge case.
 ///
 /// Both halves are asserted from the recorded argv rather than against a
@@ -2268,7 +2268,7 @@ fn runpy_leased_whole_box_serve_passes_the_same_tt_device_as_an_unleased_one() {
     assert_eq!(
         leased_device, unleased_device,
         "a whole-box lease must describe the same mesh the whole box describes, \
-         or the common `tt run` differs between a gozer box and a bare one"
+         or the common `tt-station run` differs between a gozer box and a bare one"
     );
     assert_eq!(
         leased_device.as_deref(),
@@ -2890,7 +2890,7 @@ fn gozer_indices(commands: &[Vec<String>], verb: &str) -> Vec<usize> {
 /// an `eprintln!`. A's lease is then held forever with no container and
 /// un-reset chips, and it survives a restart too: both leases carry
 /// `who = tt-station:<same port>:<model>`, so the startup sweep sees the port
-/// in use and KEEPS both. One `tt run` without a preceding `tt stop`
+/// in use and KEEPS both. One `tt-station run` without a preceding `tt-station stop`
 /// permanently halves the box.
 ///
 /// The fix is an ordering one -- sweep, release what we hold, THEN acquire --
@@ -2951,7 +2951,7 @@ fn runpy_start_twice_releases_the_first_lease_before_acquiring_again() {
 /// `acquire` comes back `Unavailable` and `contention_detail` reports OUR OWN
 /// lease back to us: `no chips are available: board <serial> is held by
 /// tt-station:8080:model-a`. The user is told a stranger holds the board they
-/// are already using, and `tt run` -- which worked before gozer -- now fails.
+/// are already using, and `tt-station run` -- which worked before gozer -- now fails.
 #[test]
 fn runpy_start_twice_on_a_single_board_box_swaps_instead_of_self_contending() {
     let gozer = FakeGozerBox::with_boards(1, 0);
@@ -3057,9 +3057,9 @@ fn runpy_start_names_its_own_serve_rather_than_a_stranger_when_contended() {
         .expect_err("nothing can be granted while the only board is held");
     let message = err.to_string();
     assert!(
-        message.contains("model-a") && message.contains("tt stop"),
+        message.contains("model-a") && message.contains("tt-station stop"),
         "a lease held by this box's OWN serving port must read as 'this box \
-         is already serving <model>; tt stop first', not as a stranger \
+         is already serving <model>; tt-station stop first', not as a stranger \
          holding the board: {message}"
     );
     assert!(
@@ -3075,7 +3075,7 @@ fn runpy_start_names_its_own_serve_rather_than_a_stranger_when_contended() {
 /// The unit carries `Restart=on-failure`. Restart agentd while a model serves
 /// and the startup sweep correctly KEEPS that lease (something is still on its
 /// port) -- but the new process's backend starts with `self.lease == None`, so
-/// the next `tt stop` stopped the container and released nothing. The lease
+/// the next `tt-station stop` stopped the container and released nothing. The lease
 /// then only went away via gozer's reap, and a REAPED lease is never reset
 /// (gozer's `--fresh` is the protected path), so the next tenant got un-reset
 /// silicon with wedged ethernet cores -- the failure `reset_before_serve`

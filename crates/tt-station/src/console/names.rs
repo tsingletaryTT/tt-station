@@ -1,5 +1,7 @@
 //! Single source of truth for the project's CLI tool + service names, so a
-//! future rename (`tt` → `tt-cli`, etc.) is a one-place change. Every
+//! rename is a one-place change. This is not hypothetical: the CLI was
+//! originally `tt`, which collided with (and shadowed) Tenstorrent's official
+//! `tt` from `tenstorrent/tt-cli`, and became `tt-station` here. Every
 //! systemctl/journalctl/unit-template reference resolves names from here.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,7 +24,7 @@ fn resolve(
             .unwrap_or_else(|| default.to_string())
     }
     ToolNames {
-        tt_bin: or_default(tt_bin, "tt"),
+        tt_bin: or_default(tt_bin, "tt-station"),
         agent_bin: or_default(agent_bin, "tt-station-agentd"),
         service_name: or_default(service_name, "tt-station-agentd.service"),
     }
@@ -49,7 +51,7 @@ mod tests {
     #[test]
     fn defaults_when_unset() {
         let n = resolve(None, None, None);
-        assert_eq!(n.tt_bin, "tt");
+        assert_eq!(n.tt_bin, "tt-station");
         assert_eq!(n.agent_bin, "tt-station-agentd");
         assert_eq!(n.service_name, "tt-station-agentd.service");
     }
@@ -57,11 +59,11 @@ mod tests {
     #[test]
     fn env_overrides_win() {
         let n = resolve(
-            Some("tt-cli".to_string()),
+            Some("tt-station-nightly".to_string()),
             None,
             Some("quietbox-agent.service".to_string()),
         );
-        assert_eq!(n.tt_bin, "tt-cli");
+        assert_eq!(n.tt_bin, "tt-station-nightly");
         assert_eq!(n.agent_bin, "tt-station-agentd");
         assert_eq!(n.service_name, "quietbox-agent.service");
     }
@@ -73,7 +75,7 @@ mod tests {
             Some(String::new()),
             Some(String::new()),
         );
-        assert_eq!(n.tt_bin, "tt");
+        assert_eq!(n.tt_bin, "tt-station");
         assert_eq!(n.agent_bin, "tt-station-agentd");
         assert_eq!(n.service_name, "tt-station-agentd.service");
     }

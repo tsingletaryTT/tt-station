@@ -1,23 +1,23 @@
-//! `tt`: the operator-facing CLI for tt-station.
+//! `tt-station`: the operator-facing CLI for tt-station.
 //!
 //! Wires together everything `libttstation` provides -- discovery, pairing,
 //! secret storage, and the agent control-plane client -- into the commands
 //! an operator (or the Task 12 e2e test) actually runs:
 //!
-//!   tt [--json] discover [--host <h:p>]... [--no-mdns] [--timeout-ms <ms>]
-//!   tt [--json] pair <host:port> [--code <code>] [--enable-ssh]
-//!   tt [--json] models --host <host:port>
-//!   tt [--json] run <model> --host <host:port> [--force]
-//!   tt [--json] stop --host <host:port>
-//!   tt [--json] status --host <host:port>
-//!   tt [--json] config --host <host:port>
-//!   tt [--json] endpoint --host <host:port>
-//!   tt [--json] serving --host <host:port>
-//!   tt [--json] catalog --host <host:port> [--refresh] [--catalog-file <path>]
-//!   tt [--json] ssh-authorize --host <host:port> [--revoke] [--date <YYYY-MM-DD>]
-//!   tt [--json] power <reset-chips|suspend|reboot|shutdown> --host <host:port> [--force]
-//!   tt [--json] wake --mac <aa:bb:cc:dd:ee:ff>
-//!   tt console [--snapshot] [--install-service] [--ctrl-port <port>]
+//!   tt-station [--json] discover [--host <h:p>]... [--no-mdns] [--timeout-ms <ms>]
+//!   tt-station [--json] pair <host:port> [--code <code>] [--enable-ssh]
+//!   tt-station [--json] models --host <host:port>
+//!   tt-station [--json] run <model> --host <host:port> [--force]
+//!   tt-station [--json] stop --host <host:port>
+//!   tt-station [--json] status --host <host:port>
+//!   tt-station [--json] config --host <host:port>
+//!   tt-station [--json] endpoint --host <host:port>
+//!   tt-station [--json] serving --host <host:port>
+//!   tt-station [--json] catalog --host <host:port> [--refresh] [--catalog-file <path>]
+//!   tt-station [--json] ssh-authorize --host <host:port> [--revoke] [--date <YYYY-MM-DD>]
+//!   tt-station [--json] power <reset-chips|suspend|reboot|shutdown> --host <host:port> [--force]
+//!   tt-station [--json] wake --mac <aa:bb:cc:dd:ee:ff>
+//!   tt-station console [--snapshot] [--install-service] [--ctrl-port <port>]
 //!
 //! `--json` is global (accepted before or after the subcommand) and switches
 //! every command's stdout from human-readable text to machine-readable JSON.
@@ -68,7 +68,7 @@ use serde::Deserialize;
 mod console;
 
 /// The four power actions the agent's `POST /power` route accepts (Task 4).
-/// `tt power`'s dispatch arm checks an operator-supplied action against this
+/// `tt-station power`'s dispatch arm checks an operator-supplied action against this
 /// list BEFORE resolving a host/token or making any network call, so a typo
 /// fails fast with a clear message instead of after a round trip. Kept as
 /// one array (rather than duplicating the four literals in the check and
@@ -76,11 +76,11 @@ mod console;
 const POWER_ACTIONS: [&str; 4] = ["reset-chips", "suspend", "reboot", "shutdown"];
 
 #[derive(Parser)]
-#[command(name = "tt", about = "Operator CLI for tt-station")]
+#[command(name = "tt-station", about = "Operator CLI for tt-station")]
 struct Cli {
     /// Emit machine-readable JSON on stdout instead of human-readable text.
     /// Global so it can appear before or after the subcommand
-    /// (`tt --json discover` and `tt discover --json` both work).
+    /// (`tt-station --json discover` and `tt-station discover --json` both work).
     #[arg(long, global = true)]
     json: bool,
 
@@ -122,9 +122,9 @@ enum Command {
         code: Option<String>,
 
         /// Also install this Mac's SSH public key on the box as part of
-        /// pairing (Task 6's `tt ssh-authorize` flow, run inline instead of
+        /// pairing (Task 6's `tt-station ssh-authorize` flow, run inline instead of
         /// as a separate command). Opt-in: the app drives this in Task 9,
-        /// but a scripted/manual `tt pair` can ask for it directly. SSH
+        /// but a scripted/manual `tt-station pair` can ask for it directly. SSH
         /// failure never fails pairing itself -- see `maybe_enable_ssh`.
         #[arg(long = "enable-ssh")]
         enable_ssh: bool,
@@ -132,7 +132,7 @@ enum Command {
 
     /// Start pairing with a box: trigger it to mint a 6-digit code and print
     /// it on ITS OWN console, and return the `pair_id` this attempt needs to
-    /// be completed with (see `tt pair-complete`). Split out from `tt pair`
+    /// be completed with (see `tt-station pair-complete`). Split out from `tt-station pair`
     /// so a caller (e.g. a GUI shell) can drive the two round-trips as
     /// separate one-shot steps instead of blocking on stdin for the code.
     PairInit {
@@ -140,14 +140,14 @@ enum Command {
         host: String,
     },
 
-    /// Finish pairing with a box: exchange the `pair_id` from `tt pair-init`
+    /// Finish pairing with a box: exchange the `pair_id` from `tt-station pair-init`
     /// and the code the box printed on its console for a bearer token, and
-    /// store it under `host` exactly like `tt pair` does.
+    /// store it under `host` exactly like `tt-station pair` does.
     PairComplete {
         /// The box's control-plane address, as `host:port`.
         host: String,
 
-        /// The `pair_id` returned by `tt pair-init`.
+        /// The `pair_id` returned by `tt-station pair-init`.
         #[arg(long = "pair-id")]
         pair_id: String,
 
@@ -163,8 +163,8 @@ enum Command {
 
     /// Enumerate the models a box can serve, per its `model_spec.json` --
     /// so an operator (or script) never has to guess/hardcode a model id
-    /// before `tt run`. UNAUTHED on the agent side (like `status`), so this
-    /// works even against a box `tt pair` was never run against.
+    /// before `tt-station run`. UNAUTHED on the agent side (like `status`), so this
+    /// works even against a box `tt-station pair` was never run against.
     Models {
         /// The box's control-plane address, as `host:port`.
         #[arg(long)]
@@ -178,7 +178,7 @@ enum Command {
         model: String,
 
         /// The box's control-plane address, as `host:port`. Must already be
-        /// paired (see `tt pair`).
+        /// paired (see `tt-station pair`).
         #[arg(long)]
         host: String,
 
@@ -208,7 +208,7 @@ enum Command {
 
     /// Show the box's resolved serving config (active/available profiles,
     /// backend, endpoint). UNAUTHED on the agent side (like `status`/
-    /// `models`/`serving`), so this works even against a box `tt pair` was
+    /// `models`/`serving`), so this works even against a box `tt-station pair` was
     /// never run against.
     Config {
         /// The box's control-plane address, as `host:port`.
@@ -218,7 +218,7 @@ enum Command {
 
     /// Tail the serving logs from the box (container or run.py logs).
     /// UNAUTHED on the agent side (like `status`/`models`/`serving`), so this
-    /// works even against a box `tt pair` was never run against.
+    /// works even against a box `tt-station pair` was never run against.
     Logs {
         /// The box's control-plane address, as `host:port`.
         #[arg(long)]
@@ -246,9 +246,9 @@ enum Command {
     },
 
     /// List EVERY live `tt-inference-server` `/v1` endpoint on a box --
-    /// whoever launched it (this agent's `tt run`, tt-studio, or a manual
+    /// whoever launched it (this agent's `tt-station run`, tt-studio, or a manual
     /// `run.py`). UNAUTHED on the agent side (like `status`/`models`), so it
-    /// works even against a box `tt pair` was never run against.
+    /// works even against a box `tt-station pair` was never run against.
     Serving {
         /// The box's control-plane address, as `host:port`.
         #[arg(long)]
@@ -259,12 +259,12 @@ enum Command {
     /// -- who holds what, and whether it's `HELD`/`HELD-FOREIGN`/`CLAIMED`/
     /// `STALE`/`BUSY-UNTRACKED`/`FREE`. AUTHED, unlike `serving`/`status`/
     /// `models` above -- the agent's `GET /leases` is bearer-guarded (Task 4
-    /// of the tt-station x tt-gozer integration), so this needs `tt pair`
+    /// of the tt-station x tt-gozer integration), so this needs `tt-station pair`
     /// first. Reports leasing as unavailable (not an error) on a box
     /// without gozer installed.
     Leases {
         /// The box's control-plane address, as `host:port`. Must already be
-        /// paired (see `tt pair`).
+        /// paired (see `tt-station pair`).
         #[arg(long)]
         host: String,
     },
@@ -274,7 +274,7 @@ enum Command {
     /// box's detected device mesh and its live `/models` list, into three
     /// tiers -- runs here, experimental, needs other hardware (see
     /// `libttstation::catalog::classify`). UNAUTHED on the agent side (like
-    /// `status`/`models`), so this works even against a box `tt pair` was
+    /// `status`/`models`), so this works even against a box `tt-station pair` was
     /// never run against; a down/unreachable agent still prints a useful
     /// listing (just without `box_mesh`/live-model info -- see `cmd_catalog`).
     Catalog {
@@ -301,11 +301,11 @@ enum Command {
     /// into it -- e.g. for `tt-toplike`'s remote telemetry, or just a shell.
     /// This command NEVER opens an SSH connection itself: it only ever
     /// reads/sends the PUBLIC half of a keypair to the agent (see
-    /// `crates/tt/src/ssh.rs`), which installs it and reports back which
+    /// `crates/tt-station/src/ssh.rs`), which installs it and reports back which
     /// account (`ssh_user`, e.g. `ttuser`) to connect as.
     SshAuthorize {
         /// The box's control-plane address, as `host:port`. Must already be
-        /// paired (see `tt pair`) -- `/ssh/authorize` is bearer-guarded.
+        /// paired (see `tt-station pair`) -- `/ssh/authorize` is bearer-guarded.
         #[arg(long)]
         host: String,
 
@@ -372,14 +372,14 @@ enum Command {
     /// packet from this machine. Uses the box's MAC learned at discovery, or
     /// --mac. Requires WoL enabled in the box's BIOS/NIC.
     Wake {
-        /// The target MAC (aa:bb:cc:dd:ee:ff). Required -- `tt` doesn't
+        /// The target MAC (aa:bb:cc:dd:ee:ff). Required -- `tt-station` doesn't
         /// persist a discovery cache between invocations yet, so there's no
         /// stored `BoxRecord.mac` to resolve `--host` against here (and
         /// contacting the box live to ask isn't an option: the whole point
         /// of Wake-on-LAN is reaching a box that can't answer HTTP right
         /// now). A future discovery cache could let `--host` resolve this
         /// automatically; until then, callers must know the MAC (e.g. from
-        /// a live `tt discover` run before the box went to sleep).
+        /// a live `tt-station discover` run before the box went to sleep).
         #[arg(long)]
         mac: Option<String>,
         /// The box whose stored MAC to wake (currently informational only
@@ -548,7 +548,7 @@ fn main() -> Result<()> {
             }
             let host = host.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "tt power requires --host <host:port>; there's no default/only-paired-box \
+                    "tt-station power requires --host <host:port>; there's no default/only-paired-box \
                      resolution yet (no persisted discovery cache to draw from)"
                 )
             })?;
@@ -558,7 +558,7 @@ fn main() -> Result<()> {
         Command::Wake { mac, host } => {
             let mac_str = mac.clone().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "tt wake requires --mac <aa:bb:cc:dd:ee:ff>; {}",
+                    "tt-station wake requires --mac <aa:bb:cc:dd:ee:ff>; {}",
                     match host {
                         Some(h) => format!(
                             "no stored MAC is known for --host {h} yet (no persisted \
@@ -601,7 +601,7 @@ fn run_async<F: std::future::Future>(fut: F) -> F::Output {
 // Command implementations
 // ---------------------------------------------------------------------
 
-/// `tt discover`: run mDNS browsing (unless `--no-mdns`) and/or probe any
+/// `tt-station discover`: run mDNS browsing (unless `--no-mdns`) and/or probe any
 /// `--host` addresses, via `libttstation::discovery::aggregate`.
 fn cmd_discover(hosts: &[String], no_mdns: bool, timeout_ms: u64) -> Result<Vec<BoxRecord>> {
     let mut providers: Vec<Box<dyn DiscoveryProvider>> = Vec::new();
@@ -633,7 +633,7 @@ fn cmd_discover(hosts: &[String], no_mdns: bool, timeout_ms: u64) -> Result<Vec<
 /// are set to `timeout` -- without this, `reqwest::blocking::get` uses no
 /// request timeout at all and falls back to the OS's default TCP connect
 /// timeout (on the order of minutes) when a host is routable but not
-/// answering, which makes `tt discover --host <dead-ip>:<port> --timeout-ms
+/// answering, which makes `tt-station discover --host <dead-ip>:<port> --timeout-ms
 /// <n>` hang far longer than `--timeout-ms` promises. Split out as its own
 /// function so it's unit-testable without making a real network call.
 fn build_probe_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
@@ -702,7 +702,7 @@ fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> Result<BoxRe
     })
 }
 
-/// `tt pair <host:port> [--enable-ssh]`: run the pairing handshake and store
+/// `tt-station pair <host:port> [--enable-ssh]`: run the pairing handshake and store
 /// the resulting token under `host` in the `SecretStore`. Returns the token
 /// (so the caller can decide how much of it to print) and, when
 /// `enable_ssh` was requested, the outcome of the inline SSH-authorize step
@@ -730,9 +730,9 @@ async fn cmd_pair(
     Ok((token, ssh))
 }
 
-/// `tt pair-init <host:port>`: one-shot first half of pairing. Triggers the
+/// `tt-station pair-init <host:port>`: one-shot first half of pairing. Triggers the
 /// box to mint a 6-digit code (printed on ITS console) and returns the
-/// `pair_id` needed to complete the handshake via `tt pair-complete`. Unlike
+/// `pair_id` needed to complete the handshake via `tt-station pair-complete`. Unlike
 /// `cmd_pair`, this never reads stdin -- it's meant to be called by a caller
 /// (e.g. a GUI shell) that will surface the `pair_id` and prompt for the code
 /// itself, potentially across a process boundary.
@@ -741,10 +741,10 @@ async fn cmd_pair_init(host: &str) -> Result<String> {
     pair_init(&base).await
 }
 
-/// `tt pair-complete <host:port> --pair-id <id> --code <code> [--enable-ssh]`:
-/// one-shot second half of pairing. Exchanges the `pair_id` from a prior `tt
+/// `tt-station pair-complete <host:port> --pair-id <id> --code <code> [--enable-ssh]`:
+/// one-shot second half of pairing. Exchanges the `pair_id` from a prior `tt-station
 /// pair-init` and the code the box printed for a bearer token, and stores it
-/// under `host` exactly like `cmd_pair` does -- so `tt run`/`tt status`/etc.
+/// under `host` exactly like `cmd_pair` does -- so `tt-station run`/`tt-station status`/etc.
 /// against the same `host` work identically regardless of which pairing path
 /// was used. Like `cmd_pair`, an `--enable-ssh` request runs AFTER the token
 /// is stored and its result is reported rather than propagated as an error
@@ -761,8 +761,8 @@ async fn cmd_pair_complete(
     Ok(maybe_enable_ssh(host, &token, enable_ssh).await)
 }
 
-/// The outcome of `--enable-ssh`'s inline SSH-authorize step on `tt pair`/
-/// `tt pair-complete`. Deliberately NOT folded into `cmd_pair`/
+/// The outcome of `--enable-ssh`'s inline SSH-authorize step on `tt-station pair`/
+/// `tt-station pair-complete`. Deliberately NOT folded into `cmd_pair`/
 /// `cmd_pair_complete`'s `Result<_>` -- per the Task 7 brief, SSH failure
 /// must be non-fatal to pairing: by the time this type is produced, the
 /// pairing token has ALREADY been exchanged and persisted, so there is
@@ -780,7 +780,7 @@ enum SshEnableOutcome {
 /// Run Task 6's shared [`ssh::authorize`] routine right after a successful
 /// pair, reusing the token that pairing just stored instead of re-reading it
 /// from the `SecretStore` (`token` is passed in rather than looked up so
-/// this never races a concurrent `tt pair` for the same host). Returns
+/// this never races a concurrent `tt-station pair` for the same host). Returns
 /// `None` when `--enable-ssh` wasn't passed at all -- as opposed to `Some`
 /// wrapping an `Err`, which means SSH was requested and failed. Any error
 /// from `ssh::authorize` (agent unreachable, `ssh-keygen` missing, `$HOME`
@@ -826,7 +826,7 @@ fn prompt_for_code() -> Result<String> {
     Ok(line.trim().to_string())
 }
 
-/// `tt models --host <host:port>`: enumerate the models `host` can serve.
+/// `tt-station models --host <host:port>`: enumerate the models `host` can serve.
 /// UNAUTHED on the agent side, so this needs no stored token -- unlike
 /// every other command below, it doesn't go through `authed_client`.
 async fn cmd_models(host: &str) -> Result<ModelsResponse> {
@@ -834,7 +834,7 @@ async fn cmd_models(host: &str) -> Result<ModelsResponse> {
     libttstation::agent_client::list_models(&base).await
 }
 
-/// `tt run <model> --host <host:port> [--force]`: load the stored token for
+/// `tt-station run <model> --host <host:port> [--force]`: load the stored token for
 /// `host` and ask the agent to start serving `model`.
 ///
 /// `force` passes `{"force": true}`, which turns the box's contention `409`
@@ -845,15 +845,15 @@ async fn cmd_run(host: &str, model: &str, force: bool) -> Result<Endpoint> {
     client.run(model, force).await
 }
 
-/// `tt stop --host <host:port>`.
+/// `tt-station stop --host <host:port>`.
 async fn cmd_stop(host: &str) -> Result<()> {
     authed_client(host)?.stop().await
 }
 
-/// `tt status --host <host:port>`: UNAUTHED, like `cmd_models` -- the
+/// `tt-station status --host <host:port>`: UNAUTHED, like `cmd_models` -- the
 /// agent's `GET /status` has no `BearerAuth` extractor, so this calls
 /// `libttstation::agent_client::get_status` directly instead of going
-/// through `authed_client()`. This is what lets `tt status` (and the
+/// through `authed_client()`. This is what lets `tt-station status` (and the
 /// discovery UI it backs) show a live status dot for a discovered-but-
 /// unpaired box, instead of failing with "no token stored for <host>".
 /// `cmd_run`/`cmd_stop`/`cmd_endpoint` are unaffected -- `/run`, `/stop`,
@@ -864,23 +864,23 @@ async fn cmd_status(host: &str) -> Result<StatusInfo> {
     libttstation::agent_client::get_status(&base).await
 }
 
-/// `tt config --host <host:port>`: UNAUTHED, like `cmd_status`/`cmd_models`/
+/// `tt-station config --host <host:port>`: UNAUTHED, like `cmd_status`/`cmd_models`/
 /// `cmd_serving` -- the agent's `GET /config` has no `BearerAuth` extractor
 /// (Task 5), so this calls `libttstation::agent_client::get_config` directly
 /// instead of going through `authed_client()`. Lets an operator (or the GTK
 /// panel/Mac app) see "what will this box actually serve with" even against
-/// a box `tt pair` was never run against.
+/// a box `tt-station pair` was never run against.
 async fn cmd_config(host: &str) -> Result<ConfigSummary> {
     let base = format!("http://{host}");
     libttstation::agent_client::get_config(&base).await
 }
 
-/// `tt endpoint --host <host:port>`.
+/// `tt-station endpoint --host <host:port>`.
 async fn cmd_endpoint(host: &str) -> Result<Endpoint> {
     authed_client(host)?.endpoint().await
 }
 
-/// `tt serving --host <host:port>`: list every live `tt-inference-server`
+/// `tt-station serving --host <host:port>`: list every live `tt-inference-server`
 /// `/v1` endpoint on `host`. UNAUTHED on the agent side, so (like
 /// `cmd_models`/`cmd_status`) it needs no stored token and doesn't go through
 /// `authed_client`.
@@ -889,7 +889,7 @@ async fn cmd_serving(host: &str) -> Result<ServingList> {
     libttstation::agent_client::list_serving(&base).await
 }
 
-/// `tt leases --host <host:port>`: AUTHED, unlike `cmd_serving`/`cmd_status`/
+/// `tt-station leases --host <host:port>`: AUTHED, unlike `cmd_serving`/`cmd_status`/
 /// `cmd_models` above -- the agent's `GET /leases` has a `BearerAuth`
 /// extractor (Task 4), so this goes through `authed_client()` exactly like
 /// `cmd_run`/`cmd_stop`/`cmd_endpoint`.
@@ -897,7 +897,7 @@ async fn cmd_leases(host: &str) -> Result<LeaseList> {
     authed_client(host)?.list_leases().await
 }
 
-/// `tt logs --host <host:port> [--source <source>] [--tail <n>]`: UNAUTHED,
+/// `tt-station logs --host <host:port> [--source <source>] [--tail <n>]`: UNAUTHED,
 /// like `cmd_status`/`cmd_serving` -- the agent's `GET /logs` has no
 /// `BearerAuth` extractor (Task 2), so this calls
 /// `libttstation::agent_client::get_logs` directly instead of going through
@@ -908,7 +908,7 @@ async fn cmd_logs(host: &str, source: &str, tail: usize) -> Result<LogsInfo> {
     libttstation::agent_client::get_logs(&base, source, tail).await
 }
 
-/// `tt logs --follow --host <host:port> [--source <source>] [--tail <n>]`:
+/// `tt-station logs --follow --host <host:port> [--source <source>] [--tail <n>]`:
 /// connect to the agent's `GET /logs/stream` WebSocket (Task 2, UNAUTHED like
 /// `/logs` itself), which replays the trailing `tail` lines and then pushes
 /// one text frame per new line as they're written -- and print each frame to
@@ -944,7 +944,7 @@ async fn cmd_logs_follow(host: &str, source: &str, tail: usize) -> Result<()> {
     Ok(())
 }
 
-/// `tt catalog --host <host:port> [--refresh] [--catalog-file <path>]`:
+/// `tt-station catalog --host <host:port> [--refresh] [--catalog-file <path>]`:
 /// resolve the box's live mesh/models and merge them with the public
 /// compatibility catalog via `libttstation::catalog::classify`.
 ///
@@ -963,7 +963,7 @@ async fn cmd_logs_follow(host: &str, source: &str, tail: usize) -> Result<()> {
 /// nothing left for this function itself to fail on:
 /// - `box_mesh`/`live_models` come from `/status`/`/models`, both UNAUTHED
 ///   (like `cmd_status`/`cmd_models`) -- an unreachable/down agent just
-///   yields `None`/`[]` here rather than an error, so `tt catalog` still
+///   yields `None`/`[]` here rather than an error, so `tt-station catalog` still
 ///   prints a useful other_hardware/experimental listing even against a box
 ///   that's off or was never paired with.
 /// - a down/offline catalog fetch still leaves `live_models` (if any)
@@ -990,12 +990,12 @@ async fn cmd_catalog(
     libttstation::catalog::classify(catalog, &live_models, box_mesh.as_deref(), stale)
 }
 
-/// `tt ssh-authorize --host <host:port>`: resolve (generating if needed)
+/// `tt-station ssh-authorize --host <host:port>`: resolve (generating if needed)
 /// this Mac's SSH public key and install it on `host`, tagged with
 /// `ssh_label(<this Mac's hostname>, date)` -- NOT `host`; the label
 /// identifies the installing Mac, not the box it's installing to (see
 /// [`ssh::authorize`]'s doc comment). Thin wrapper around
-/// [`ssh::authorize`] -- exists so Task 7's `tt pair --enable-ssh` can call
+/// [`ssh::authorize`] -- exists so Task 7's `tt-station pair --enable-ssh` can call
 /// `ssh::authorize` directly with an `AgentClient` it already built for
 /// pairing, instead of going through this CLI-argument-shaped entry point.
 async fn cmd_ssh_authorize(host: &str, date: &str) -> Result<ssh::AuthorizeOutcome> {
@@ -1004,7 +1004,7 @@ async fn cmd_ssh_authorize(host: &str, date: &str) -> Result<ssh::AuthorizeOutco
     ssh::authorize(&client, &home, date).await
 }
 
-/// `tt ssh-authorize --host <host:port> --revoke`: remove this Mac's key
+/// `tt-station ssh-authorize --host <host:port> --revoke`: remove this Mac's key
 /// from `host`. Revokes by the key MATERIAL itself
 /// (`SshRevokeBy::PublicKey`) rather than by label -- an authorize call's
 /// label embeds the date it ran on, so revoking by label would require the
@@ -1039,7 +1039,7 @@ async fn cmd_ssh_revoke(host: &str) -> Result<PathBuf> {
     Ok(key_path)
 }
 
-/// Outcome of a `tt reset`, surfaced both to `--json` output and human text.
+/// Outcome of a `tt-station reset`, surfaced both to `--json` output and human text.
 /// `local_cleared` is effectively always `true` on success (clearing local
 /// state is the one thing `reset` always does); `box_reset` is `true` only
 /// when a `--host` box was actually reset over the wire.
@@ -1048,7 +1048,7 @@ struct ResetSummary {
     box_reset: bool,
 }
 
-/// `tt reset [--host <h>] [--yes] [--force]`: return this machine (and
+/// `tt-station reset [--host <h>] [--yes] [--force]`: return this machine (and
 /// optionally one box) to a fresh-install state.
 ///
 /// `force` tells the box to reset even while another tenant holds its chips
@@ -1102,7 +1102,7 @@ async fn cmd_reset(host: Option<&str>, force: bool) -> Result<ResetSummary> {
                         )));
                     }
                     // Any OTHER failure (unreachable, wrong token, 5xx) is
-                    // still only a warning: the local half of `tt reset` --
+                    // still only a warning: the local half of `tt-station reset` --
                     // forgetting every box on this machine -- must not be
                     // blocked by a box that has gone away.
                     Err(e) => eprintln!(
@@ -1126,7 +1126,7 @@ async fn cmd_reset(host: Option<&str>, force: bool) -> Result<ResetSummary> {
     })
 }
 
-/// `tt power <action> --host <host:port> [--force]`: ask the box to run a power
+/// `tt-station power <action> --host <host:port> [--force]`: ask the box to run a power
 /// action (reset-chips/suspend/reboot/shutdown). `force` overrides
 /// `reset-chips`'s foreign-lease refusal and is ignored for the machine ops
 /// (see `agent_client::power`). Mirrors `cmd_reset`'s own
@@ -1137,18 +1137,18 @@ async fn cmd_reset(host: Option<&str>, force: bool) -> Result<ResetSummary> {
 /// function's doc in `agent_client.rs`).
 ///
 /// Unlike `cmd_reset`, a missing token here IS a hard error -- there's no
-/// "clear local state anyway" local half of the job for `tt power` to fall
+/// "clear local state anyway" local half of the job for `tt-station power` to fall
 /// back to; if the box was never paired, there's nothing this command can
 /// usefully do.
 async fn cmd_power(host: &str, action: &str, force: bool) -> Result<()> {
     let token = build_store()?.get(host)?.ok_or_else(|| {
-        anyhow::anyhow!("no token stored for {host}; run `tt pair {host}` first")
+        anyhow::anyhow!("no token stored for {host}; run `tt-station pair {host}` first")
     })?;
     let base = format!("http://{host}");
     libttstation::agent_client::power(&base, &token, action, force).await
 }
 
-/// `tt wake --mac <mac>`: broadcast a Wake-on-LAN magic packet to the LAN
+/// `tt-station wake --mac <mac>`: broadcast a Wake-on-LAN magic packet to the LAN
 /// broadcast address on port 9 (the conventional WoL target -- `discard`,
 /// chosen historically because nothing needs to listen on it for the packet
 /// to do its job).
@@ -1176,7 +1176,7 @@ fn cmd_wake(mac: [u8; 6]) -> Result<()> {
     Ok(())
 }
 
-/// Print exactly what `tt reset` will clear and require the operator to type
+/// Print exactly what `tt-station reset` will clear and require the operator to type
 /// `y` (one stdin line) to proceed. Returns `true` only on an affirmative
 /// `y`/`Y`; anything else (including EOF/empty) declines. Skipped entirely by
 /// `--yes` (see `main`).
@@ -1203,11 +1203,11 @@ fn confirm_reset(host: Option<&str>) -> Result<bool> {
 }
 
 /// Build an `AgentClient` for `host`, using the token stored by a prior
-/// `tt pair`. Shared by every command that needs an authenticated call.
+/// `tt-station pair`. Shared by every command that needs an authenticated call.
 fn authed_client(host: &str) -> Result<AgentClient> {
     let token = build_store()?
         .get(host)?
-        .ok_or_else(|| anyhow::anyhow!("no token stored for {host}; run `tt pair {host}` first"))?;
+        .ok_or_else(|| anyhow::anyhow!("no token stored for {host}; run `tt-station pair {host}` first"))?;
     Ok(AgentClient::new(format!("http://{host}"), token))
 }
 
@@ -1268,8 +1268,8 @@ fn format_boxrecord_line(rec: &BoxRecord) -> String {
     )
 }
 
-/// The `export OPENAI_BASE_URL=...` line `tt endpoint` prints by default
-/// (non-`--json`), so an operator can `eval "$(tt endpoint --host ...)"` or
+/// The `export OPENAI_BASE_URL=...` line `tt-station endpoint` prints by default
+/// (non-`--json`), so an operator can `eval "$(tt-station endpoint --host ...)"` or
 /// copy-paste it straight into a shell.
 fn endpoint_export_line(ep: &Endpoint) -> String {
     format!("export OPENAI_BASE_URL={}", ep.base_url)
@@ -1298,7 +1298,7 @@ fn print_discover(boxes: &[BoxRecord], json: bool) {
     }
 }
 
-/// `tt pair`'s output. `ssh` is `None` when `--enable-ssh` wasn't passed
+/// `tt-station pair`'s output. `ssh` is `None` when `--enable-ssh` wasn't passed
 /// (JSON: `"ssh": null`; human: no extra line) -- see [`ssh_json`] and
 /// [`print_ssh_note`] for the two output shapes when it was.
 fn print_pair(host: &str, token: &str, ssh: Option<&SshEnableOutcome>, json: bool) {
@@ -1312,8 +1312,8 @@ fn print_pair(host: &str, token: &str, ssh: Option<&SshEnableOutcome>, json: boo
     }
 }
 
-/// `tt pair-init`'s output: JSON carries the `pair_id` a caller needs to pass
-/// to `tt pair-complete`; human mode spells out the whole next step so a
+/// `tt-station pair-init`'s output: JSON carries the `pair_id` a caller needs to pass
+/// to `tt-station pair-complete`; human mode spells out the whole next step so a
 /// human operator (not just a scripted caller) can complete pairing without
 /// re-reading `--help`.
 fn print_pair_init(host: &str, pair_id: &str, json: bool) {
@@ -1325,12 +1325,12 @@ fn print_pair_init(host: &str, pair_id: &str, json: bool) {
     } else {
         println!(
             "pairing started with {host}; enter the 6-digit code shown on the box, then run: \
-             tt pair-complete {host} --pair-id {pair_id} --code <CODE>"
+             tt-station pair-complete {host} --pair-id {pair_id} --code <CODE>"
         );
     }
 }
 
-/// `tt pair-complete`'s output. Deliberately doesn't echo the token back
+/// `tt-station pair-complete`'s output. Deliberately doesn't echo the token back
 /// (unlike `print_pair`) -- the caller already has it via the stored
 /// `SecretStore` entry, and this command's whole point is to be driven by a
 /// non-interactive caller that just needs a success/failure signal. `ssh`
@@ -1346,7 +1346,7 @@ fn print_pair_complete(host: &str, ssh: Option<&SshEnableOutcome>, json: bool) {
     }
 }
 
-/// The `ssh` field `tt pair`/`tt pair-complete --json` add when
+/// The `ssh` field `tt-station pair`/`tt-station pair-complete --json` add when
 /// `--enable-ssh` was passed: `null` when the flag was never set, `{error}`
 /// on a non-fatal SSH failure, or `{authorized, ssh_user, already_present}`
 /// mirroring `print_ssh_authorize`'s own shape on success (minus
@@ -1370,7 +1370,7 @@ fn ssh_json(ssh: Option<&SshEnableOutcome>) -> serde_json::Value {
     }
 }
 
-/// Human-mode line for `--enable-ssh`'s outcome on `tt pair`/`tt
+/// Human-mode line for `--enable-ssh`'s outcome on `tt-station pair`/`tt-station
 /// pair-complete`; a no-op when `ssh` is `None` (flag never passed).
 /// Wording matches the task 7 spec exactly: success reads like
 /// `print_ssh_authorize`'s own success line ("SSH enabled -- connect as
@@ -1389,9 +1389,9 @@ fn print_ssh_note(host: &str, ssh: Option<&SshEnableOutcome>) {
     }
 }
 
-/// `tt models`'s output: JSON prints the whole `ModelsResponse` object;
+/// `tt-station models`'s output: JSON prints the whole `ModelsResponse` object;
 /// human mode prints one model per line as `<name>\t<dev1,dev2,...>`, so
-/// it's both `grep`-able and roughly aligned like `tt discover`'s output.
+/// it's both `grep`-able and roughly aligned like `tt-station discover`'s output.
 fn print_models(resp: &ModelsResponse, json: bool) {
     if json {
         println!(
@@ -1429,7 +1429,7 @@ fn print_stop(json: bool) {
     }
 }
 
-/// `tt reset`'s success output: JSON is the machine-readable summary the
+/// `tt-station reset`'s success output: JSON is the machine-readable summary the
 /// task spec calls for (`{"local_cleared":..,"box_reset":..}`); human mode
 /// says what happened in plain words.
 fn print_reset(summary: &ResetSummary, json: bool) {
@@ -1449,7 +1449,7 @@ fn print_reset(summary: &ResetSummary, json: bool) {
     }
 }
 
-/// `tt reset`'s output when the operator declines the confirmation prompt:
+/// `tt-station reset`'s output when the operator declines the confirmation prompt:
 /// nothing was cleared, locally or remotely.
 fn print_reset_aborted(json: bool) {
     if json {
@@ -1462,7 +1462,7 @@ fn print_reset_aborted(json: bool) {
     }
 }
 
-/// `tt power`'s success output: JSON carries the action back (so a scripted
+/// `tt-station power`'s success output: JSON carries the action back (so a scripted
 /// caller can confirm which action landed) plus a fixed `ok: true` -- the
 /// call already `error_for_status`-ed inside `agent_client::power`, so
 /// reaching this point at all means success. Human mode is a one-line
@@ -1477,9 +1477,9 @@ fn print_power(action: &str, json: bool) {
     }
 }
 
-/// `tt wake`'s success output: JSON carries the MAC the packet was sent to
+/// `tt-station wake`'s success output: JSON carries the MAC the packet was sent to
 /// plus a fixed `sent: true` (there's no delivery confirmation for a UDP
-/// broadcast -- "sent" is all `tt wake` can ever honestly claim). Human mode
+/// broadcast -- "sent" is all `tt-station wake` can ever honestly claim). Human mode
 /// mirrors that same "sent", not "woke".
 fn print_wake(mac: &str, json: bool) {
     if json {
@@ -1489,7 +1489,7 @@ fn print_wake(mac: &str, json: bool) {
     }
 }
 
-/// `tt status`'s output. JSON mode adds (Task 3) `device_mesh` and (the gozer
+/// `tt-station status`'s output. JSON mode adds (Task 3) `device_mesh` and (the gozer
 /// integration) `leasing` alongside the existing `status` key so a caller (the
 /// macOS app) can read them from one call; human mode prints the bare
 /// `idle`/`serving:<model>` txt line, plus a leasing line when the box has
@@ -1538,9 +1538,9 @@ fn print_status(info: &StatusInfo, json: bool) {
     }
 }
 
-/// `tt config`'s output: JSON prints the whole `ConfigSummary` object
+/// `tt-station config`'s output: JSON prints the whole `ConfigSummary` object
 /// (pretty-printed per the task spec, unlike this module's other `--json`
-/// output -- `tt config` is meant to be read by a human debugging "what will
+/// output -- `tt-station config` is meant to be read by a human debugging "what will
 /// this box actually serve with," not just piped machine-to-machine); human
 /// mode prints active profile, available profiles, backend, and
 /// `host:port`.
@@ -1574,9 +1574,9 @@ fn print_config(summary: &ConfigSummary, json: bool) {
     }
 }
 
-/// `tt serving`'s output: JSON prints the whole `ServingList` object; human
+/// `tt-station serving`'s output: JSON prints the whole `ServingList` object; human
 /// mode prints one endpoint per line as `<model>\t<base_url>\t<source>`, so
-/// it's both `grep`-able and roughly aligned like `tt models`/`tt discover`.
+/// it's both `grep`-able and roughly aligned like `tt-station models`/`tt-station discover`.
 fn print_serving(list: &ServingList, json: bool) {
     if json {
         println!(
@@ -1592,7 +1592,7 @@ fn print_serving(list: &ServingList, json: bool) {
     }
 }
 
-/// `tt leases`'s output: JSON prints the whole `LeaseList` object (`available`
+/// `tt-station leases`'s output: JSON prints the whole `LeaseList` object (`available`
 /// plus every `LeaseEntry`); human mode prints one chip per line as
 /// `<chip>\t<bdf>\t<board>\t<state>\t<who>` (`who` shown as `-` when nobody
 /// holds it), or a one-line "leasing unavailable" note when `available` is
@@ -1627,7 +1627,7 @@ fn print_leases(list: &LeaseList, json: bool) {
     }
 }
 
-/// `tt logs`'s output (the one-shot `--follow`-less path -- `cmd_logs_follow`
+/// `tt-station logs`'s output (the one-shot `--follow`-less path -- `cmd_logs_follow`
 /// prints its own frames directly as they arrive, with no JSON mode at all,
 /// see that function's doc). Thin `println!` wrapper around
 /// [`format_logs`] -- see that function for the actual JSON/text formatting,
@@ -1637,7 +1637,7 @@ fn print_logs(logs: &LogsInfo, json: bool) {
     println!("{}", format_logs(logs, json));
 }
 
-/// Format a `tt logs` response for display. JSON mode: the whole `LogsInfo`
+/// Format a `tt-station logs` response for display. JSON mode: the whole `LogsInfo`
 /// object as a single-line `serde_json` string. Human mode: the `origin` (or
 /// a placeholder when there's nothing to tail yet -- e.g. no container
 /// running, no log file written) as a header line, then each log line bare,
@@ -1658,7 +1658,7 @@ fn format_logs(logs: &LogsInfo, json: bool) -> String {
     }
 }
 
-/// `tt catalog`'s output: JSON prints the whole `BoxCatalog` object (the
+/// `tt-station catalog`'s output: JSON prints the whole `BoxCatalog` object (the
 /// exact shape the macOS app's model picker decodes); human mode prints the
 /// three tiers as sections -- "Runs on this box" / "Experimental" / "Needs
 /// other hardware" -- each listing `display_name` (and, for the last
@@ -1714,7 +1714,7 @@ fn print_catalog(bc: &libttstation::catalog::BoxCatalog, json: bool) {
     }
 }
 
-/// `tt endpoint`'s output: JSON prints the `Endpoint` object; human mode
+/// `tt-station endpoint`'s output: JSON prints the `Endpoint` object; human mode
 /// prints the `export OPENAI_BASE_URL=...` line per the task spec, so it's
 /// directly `eval`-able.
 fn print_endpoint_export(ep: &Endpoint, json: bool) {
@@ -1728,7 +1728,7 @@ fn print_endpoint_export(ep: &Endpoint, json: bool) {
     }
 }
 
-/// `tt ssh-authorize`'s success output (the non-`--revoke` path). `--json`
+/// `tt-station ssh-authorize`'s success output (the non-`--revoke` path). `--json`
 /// emits exactly the shape the task spec calls for: `{authorized, ssh_user,
 /// already_present, public_key_path}`. Human mode leads with the one line
 /// an operator actually needs to act on -- what account to `ssh` in as --
@@ -1752,7 +1752,7 @@ fn print_ssh_authorize(host: &str, outcome: &ssh::AuthorizeOutcome, json: bool) 
     }
 }
 
-/// `tt ssh-authorize --revoke`'s success output. Includes `public_key_path`
+/// `tt-station ssh-authorize --revoke`'s success output. Includes `public_key_path`
 /// in `--json` mode too, mirroring `print_ssh_authorize`, so a caller can
 /// always tell which of this Mac's keys the command acted on.
 fn print_ssh_revoke(key_path: &std::path::Path, json: bool) {
@@ -1824,7 +1824,7 @@ mod tests {
 
     /// `format_logs(.., json: true)` must emit valid, single-line
     /// `serde_json` -- exactly the `LogsInfo` object, parseable back into the
-    /// same fields a caller (or `tt --json logs`'s consumer) would decode.
+    /// same fields a caller (or `tt-station --json logs`'s consumer) would decode.
     #[test]
     fn print_logs_json_branch_emits_valid_json() {
         let logs = LogsInfo {
@@ -1871,7 +1871,7 @@ mod tests {
     }
 
     /// `build_probe_client` must actually apply the requested timeout as
-    /// both the request and connect timeout -- this is the fix for `tt
+    /// both the request and connect timeout -- this is the fix for `tt-station
     /// discover --host <dead-ip>:<port>` hanging on the OS's default TCP
     /// connect timeout instead of respecting `--timeout-ms`. `reqwest`
     /// doesn't expose a getter to read the configured timeout back off a
@@ -1905,7 +1905,7 @@ mod tests {
         assert_eq!(value.as_object().unwrap().len(), 2);
     }
 
-    /// Task 7: `tt pair`/`tt pair-complete --json` without `--enable-ssh`
+    /// Task 7: `tt-station pair`/`tt-station pair-complete --json` without `--enable-ssh`
     /// must carry `"ssh": null`, not omit the key or fabricate a value --
     /// `maybe_enable_ssh` returns `None` in exactly this case.
     #[test]

@@ -1,4 +1,4 @@
-//! `LifecycleActions`: the operator-facing verbs `tt console` exposes on top
+//! `LifecycleActions`: the operator-facing verbs `tt-station console` exposes on top
 //! of [`LifecycleEnv`] -- start/stop/restart the agent's systemd unit, pin a
 //! profile via a systemd drop-in, and install the unit file itself.
 //!
@@ -9,12 +9,12 @@
 //! to systemctl with the right verb," and threading file I/O through the
 //! trait too would just be indirection with nothing to fake against.
 //!
-//! Reset and pair-localhost are NOT here -- they reuse existing `tt` command
+//! Reset and pair-localhost are NOT here -- they reuse existing `tt-station` command
 //! fns (`cmd_reset`, the pairing flow) and are wired as thin wrappers in a
 //! later task, rather than duplicating the HTTP calls those fns already make.
 //!
-//! `tt` is a bin crate; nothing in `main.rs` constructs a [`LifecycleActions`]
-//! yet (that's the `tt console` wiring task). Until then rustc's dead-code
+//! `tt-station` is a bin crate; nothing in `main.rs` constructs a [`LifecycleActions`]
+//! yet (that's the `tt-station console` wiring task). Until then rustc's dead-code
 //! lint would flag this whole module as unused -- same situation as
 //! `console::names`/`console::state`/`console::env`, and the same fix: allow
 //! it here and drop the allow once something calls it.
@@ -25,10 +25,10 @@ use crate::console::names::ToolNames;
 use std::path::PathBuf;
 
 /// The systemd unit template, baked into the binary at compile time so
-/// `tt console install` never depends on a copy of `deploy/` being present
+/// `tt-station console install` never depends on a copy of `deploy/` being present
 /// on the target box (the binary carries its own template). The four `../`
-/// climb from `crates/tt/src/console/` (this file's directory) up through
-/// `src/`, `tt/`, `crates/` to the repo root, where `deploy/` lives.
+/// climb from `crates/tt-station/src/console/` (this file's directory) up through
+/// `src/`, `tt-station/`, `crates/` to the repo root, where `deploy/` lives.
 const UNIT_TEMPLATE: &str = include_str!("../../../../deploy/tt-station-agentd.service");
 
 /// Fill the [`UNIT_TEMPLATE`] placeholders: `{{AGENT_BIN}}` with the absolute
@@ -91,7 +91,7 @@ fn dirs_config_systemd_user() -> PathBuf {
     )
 }
 
-/// Operator actions for `tt console`: start/stop/restart the agent's systemd
+/// Operator actions for `tt-station console`: start/stop/restart the agent's systemd
 /// unit, pin a profile, and install the unit file. Every `systemctl` call
 /// goes through `env.run` so tests can assert exact argv against a recording
 /// fake; see the module doc for why the drop-in/unit file writes go straight
@@ -235,7 +235,7 @@ mod tests {
     }
     fn names() -> ToolNames {
         ToolNames {
-            tt_bin: "tt".into(),
+            tt_bin: "tt-station".into(),
             agent_bin: "tt-station-agentd".into(),
             service_name: "svc.service".into(),
         }

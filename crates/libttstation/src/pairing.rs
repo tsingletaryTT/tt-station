@@ -1,6 +1,6 @@
 //! Client side of the pairing handshake (Task 8) -- the counterpart to the
 //! `POST /pair/init` and `POST /pair/complete` routes `tt-station-agentd`
-//! exposes (Task 7). Lives in `libttstation` rather than the `tt` CLI crate
+//! exposes (Task 7). Lives in `libttstation` rather than the `tt-station` CLI crate
 //! (Task 12) so any future client (CLI, GUI, another service) can drive
 //! pairing without reimplementing the HTTP calls.
 //!

@@ -92,8 +92,8 @@ pub const MAX_PAIR_ATTEMPTS: u32 = 5;
 
 /// Seam for re-publishing this box's advertised `status` whenever it
 /// changes (`/run` succeeding, `/stop` completing), so the mDNS TXT record
-/// `tt discover` reads over the LAN never goes stale the way it did before
-/// this trait existed (see the module-level findings doc: `tt discover`
+/// `tt-station discover` reads over the LAN never goes stale the way it did before
+/// this trait existed (see the module-level findings doc: `tt-station discover`
 /// over mDNS kept reporting `idle` while the box was actually serving,
 /// because the TXT record was only ever published once, at boot).
 ///
@@ -222,7 +222,7 @@ struct Inner {
     /// failed or the fleet doesn't match a known mesh -- never fatal, just
     /// an absent hint. Defaults to `None`; set via `with_device_mesh`.
     /// Purely additive: only `GET /status` reads it, so a client (Task 3's
-    /// `tt --json status`) can rank models by hardware fit.
+    /// `tt-station --json status`) can rank models by hardware fit.
     device_mesh: Option<String>,
     /// This box's primary NIC MAC (`"aa:bb:cc:dd:ee:ff"`), detected ONCE at
     /// startup by `net::primary_mac` (see `main.rs`). `None` when detection
@@ -770,7 +770,7 @@ impl AppState {
     /// call: a lease held by anyone other than this agent's own session
     /// refuses the call and names the holder (as does a lease state that could
     /// not be determined at all), and `force` -- the operator's
-    /// `tt power reset-chips --force` -- overrides either refusal and logs what
+    /// `tt-station power reset-chips --force` -- overrides either refusal and logs what
     /// it stepped on. The other three actions are untouched:
     /// suspend/reboot/shutdown take the whole machine down, where a lease
     /// check would be theatre, so `force` is meaningless for them and ignored.
@@ -1350,7 +1350,7 @@ struct StatusResponse {
     /// This box's detected device-mesh label (`"p300x2"`, `"n300x4"`, ...),
     /// or `null` when detection failed/didn't run -- see
     /// `AppState::with_device_mesh`. Lets a client (Task 3's
-    /// `tt --json status`) rank models by hardware fit without its own
+    /// `tt-station --json status`) rank models by hardware fit without its own
     /// `tt-smi` access.
     device_mesh: Option<String>,
     /// This box's detected primary NIC MAC (`"aa:bb:cc:dd:ee:ff"`), or `null`
@@ -1441,7 +1441,7 @@ async fn get_leases(
 
 /// `GET /config` (UNAUTHED, like `GET /status`): the agent's redacted
 /// serving-config summary -- active/available profiles plus the resolved
-/// backend/serving-host/port/image/repo/device -- so the GTK panel, the `tt
+/// backend/serving-host/port/image/repo/device -- so the GTK panel, the `tt-station
 /// config` CLI, and the Mac app can render "what am I actually about to
 /// serve with" without pairing first. `ConfigSummary` carries no secrets by
 /// construction (no `hf_token` field exists on it), so there's nothing for
@@ -1573,7 +1573,7 @@ impl FromRequestParts<AppState> for BearerAuth {
 #[derive(Deserialize)]
 struct RunRequest {
     model: String,
-    /// `tt run --force`: serve even though gozer will not grant the chips,
+    /// `tt-station run --force`: serve even though gozer will not grant the chips,
     /// because another tenant holds them (or because gozer cannot be asked).
     /// See `ServingBackend::start_forcing`.
     ///
@@ -1641,7 +1641,7 @@ fn contention_aware_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse
 /// backend to start serving `model`.
 ///
 /// `force` (default `false`, so an older client is unaffected) is
-/// `tt run --force`: serve even though the box's chips are held by somebody
+/// `tt-station run --force`: serve even though the box's chips are held by somebody
 /// else. It answers a `409` that would otherwise stand -- see
 /// `ServingBackend::start_forcing` and `RunPyBackend::acquire_lease`'s `force`
 /// section for what it does (serve unleased) and does not (take the holder's
@@ -1748,11 +1748,11 @@ async fn stop_model(
 /// entry (the `BearerAuth` extractor), so this handler still runs to
 /// completion and returns `200 {}`.
 ///
-/// The body is OPTIONAL: `{"force": true}` is `tt reset --force`, which
+/// The body is OPTIONAL: `{"force": true}` is `tt-station reset --force`, which
 /// overrides the foreign-lease refusal (see `RunPyBackend::reset_forcing`).
 /// Every existing client posts `/reset` with no body and no content-type at
 /// all, which `Option<Json<..>>` reads as `None` -> unforced, so the polite
-/// default is what an older `tt` still gets. (A request that DOES declare
+/// default is what an older `tt-station` still gets. (A request that DOES declare
 /// `application/json` and then carries an unparseable body is a `400` rather
 /// than a silent unforced reset -- guessing which one a garbled `{"force":
 /// ...}` meant is exactly the wrong thing to do on a destructive route, and
@@ -1817,7 +1817,7 @@ fn power_success_status(action: crate::power::PowerAction) -> StatusCode {
 #[derive(Deserialize)]
 struct PowerRequest {
     action: String,
-    /// `tt power reset-chips --force`: run the whole-box board reset even
+    /// `tt-station power reset-chips --force`: run the whole-box board reset even
     /// though another tenant holds chips (or gozer cannot be asked). Ignored
     /// for suspend/reboot/shutdown, which have no lease check to override.
     /// `#[serde(default)]` keeps every pre-`--force` client working.
@@ -1828,7 +1828,7 @@ struct PowerRequest {
 /// JSON body OPTIONALLY accepted by `POST /reset` -- see the `reset` handler.
 #[derive(Deserialize)]
 struct ResetRequest {
-    /// `tt reset --force`: run the whole-box `tt-smi -r` even though another
+    /// `tt-station reset --force`: run the whole-box `tt-smi -r` even though another
     /// tenant holds chips (or gozer cannot be asked).
     #[serde(default)]
     force: bool,

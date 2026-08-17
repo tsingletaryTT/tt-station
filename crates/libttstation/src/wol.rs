@@ -1,4 +1,4 @@
-//! Wake-on-LAN magic-packet construction (client-side; `tt wake` sends it).
+//! Wake-on-LAN magic-packet construction (client-side; `tt-station wake` sends it).
 
 /// Parse a MAC address (`:` or `-` separated hex) into 6 bytes.
 pub fn parse_mac(s: &str) -> Option<[u8; 6]> {

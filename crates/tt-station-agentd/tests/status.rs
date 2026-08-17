@@ -53,7 +53,7 @@ async fn status_returns_name_and_idle_status() {
 }
 
 /// `GET /status` on a state built with `.with_device_mesh(Some(..))` should
-/// echo that mesh label verbatim, so Task 3's `tt --json status` can carry it
+/// echo that mesh label verbatim, so Task 3's `tt-station --json status` can carry it
 /// to the app without its own `tt-smi` access.
 #[tokio::test]
 async fn status_reports_device_mesh_when_set() {

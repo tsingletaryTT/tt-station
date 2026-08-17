@@ -477,7 +477,7 @@ impl RunPyBackend {
     ///
     /// ## `force`
     ///
-    /// `force` is the operator's `tt run --force`, and its effect is narrow
+    /// `force` is the operator's `tt-station run --force`, and its effect is narrow
     /// and deliberate: **when gozer will not grant chips, serve WITHOUT a
     /// lease** (`Ok(None)`) instead of returning a `Contention`. The
     /// alternative -- releasing the holder's lease and acquiring it ourselves
@@ -565,7 +565,7 @@ impl RunPyBackend {
                 // unchanged, plus the pointer at the override.
                 Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
                     "runpy backend: cannot serve '{model}' -- no chips are available: {detail}. \
-                     Pass `--force` to serve anyway (`tt run --force`) -- it is your box, and \
+                     Pass `--force` to serve anyway (`tt-station run --force`) -- it is your box, and \
                      the override is logged."
                 ))))
             }
@@ -1058,8 +1058,8 @@ impl ServingBackend for RunPyBackend {
 
         // THE ORDER OF THE NEXT STEPS IS THE SAFETY PROPERTY:
         // observe -> sweep -> release what we observed -> acquire. Getting it
-        // wrong is what stranded a board on every `tt run` that wasn't
-        // preceded by a `tt stop`; see each step's comment for the specific
+        // wrong is what stranded a board on every `tt-station run` that wasn't
+        // preceded by a `tt-station stop`; see each step's comment for the specific
         // failure.
 
         // (0) Note which lease we are holding, if any, BEFORE anything else,
@@ -1171,7 +1171,7 @@ impl ServingBackend for RunPyBackend {
 
         // `run.py --model` wants the SHORT model name (e.g. `Qwen3-32B`,
         // matching `model_spec.json`'s own keys' basenames), but callers
-        // (and `tt models`, which lists `model_spec.json`'s HF-id keys
+        // (and `tt-station models`, which lists `model_spec.json`'s HF-id keys
         // verbatim) naturally pass a Hugging Face id like `Qwen/Qwen3-32B`.
         // Stripping any `org/` prefix here means BOTH forms work: `run.py`
         // gets the short name it validates against, while `model` (the
@@ -1834,7 +1834,7 @@ impl ServingBackend for RunPyBackend {
 
     /// Read `model_spec.json` (see `model_spec_path`) and enumerate every
     /// model it lists, with the device meshes each one supports -- so a
-    /// client (`GET /models`, `tt models`) never has to guess or hardcode
+    /// client (`GET /models`, `tt-station models`) never has to guess or hardcode
     /// which models this box can actually run.
     ///
     /// `model_spec.json`'s shape (verified on real hardware):
@@ -1855,7 +1855,7 @@ impl ServingBackend for RunPyBackend {
     /// (case-insensitive), and its reported `devices` are ONLY the meshes
     /// that have one (media-only meshes are dropped). A model with no vLLM
     /// mesh at all (e.g. an image/video/embedding model that's `"media"`
-    /// everywhere) is omitted entirely -- otherwise `tt models` would list
+    /// everywhere) is omitted entirely -- otherwise `tt-station models` would list
     /// models this box can't actually run.
     ///
     /// Parsed via `serde_json::Value` rather than a strict typed struct so an

@@ -1,4 +1,4 @@
-//! `tt console`: the operator TUI for managing this box's agent as a
+//! `tt-station console`: the operator TUI for managing this box's agent as a
 //! systemd `--user` service, plus two non-interactive escape hatches used by
 //! other tools instead of the TUI itself:
 //!
@@ -23,19 +23,19 @@ pub mod ui;
 use env::RealLifecycleEnv;
 use names::ToolNames;
 
-/// Entry point for `tt console [--snapshot] [--install-service] [--ctrl-port
+/// Entry point for `tt-station console [--snapshot] [--install-service] [--ctrl-port
 /// <port>]`, dispatched from `main.rs`'s `Command::Console` arm.
 ///
 /// Exactly one of three things happens, in this priority order:
 ///   1. `install_service` -- resolve the agent binary's path and install the
 ///      systemd unit, then return. Takes priority over `--snapshot` so
-///      `tt console --snapshot --install-service` (an odd combination, but
+///      `tt-station console --snapshot --install-service` (an odd combination, but
 ///      not one worth rejecting) does the more consequential action.
 ///   2. `snapshot` -- collect and print one [`BoxLifecycleSnapshot`] as JSON,
 ///      then return.
 ///   3. otherwise -- launch the interactive TUI (`ui::run_tui`, Task 7).
 ///
-/// `json` is accepted (mirroring every other `tt` subcommand's global
+/// `json` is accepted (mirroring every other `tt-station` subcommand's global
 /// `--json` flag) but unused today: `--snapshot`'s output is ALWAYS JSON
 /// (that's the whole point of the flag), `--install-service` always prints a
 /// human confirmation line, and the TUI has no non-interactive output mode.

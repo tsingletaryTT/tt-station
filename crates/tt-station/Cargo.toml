@@ -1,5 +1,5 @@
 [package]
-name = "tt"
+name = "tt-station"
 version.workspace = true
 edition.workspace = true
 
@@ -11,17 +11,17 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # `blocking` on top of the workspace's `default-features = false` + `json`
-# base: `tt discover`'s manual-host probe runs from inside `ManualProvider`'s
+# base: `tt-station discover`'s manual-host probe runs from inside `ManualProvider`'s
 # sync `fetch` closure (no async runtime is entered for `discover` at all --
 # see main.rs), so it needs `reqwest::blocking` rather than the async client
 # `libttstation` uses for pairing/agent calls. Same pattern already used by
 # `tt-station-agentd`'s Docker backend.
 reqwest = { workspace = true, features = ["blocking"] }
-# `tt console`'s interactive TUI (Task 7): terminal backend + raw-mode/
+# `tt-station console`'s interactive TUI (Task 7): terminal backend + raw-mode/
 # alternate-screen + key-event handling.
 ratatui = { workspace = true }
 crossterm = { workspace = true }
-# `tt logs --follow` (Task 4): WebSocket client for the agent's
+# `tt-station logs --follow` (Task 4): WebSocket client for the agent's
 # `GET /logs/stream` route, mirroring the versions `tt-station-agentd` already
 # uses as dev-deps for its own `/telemetry` WS integration test. The URL
 # scheme is `ws://` (never `wss://`), so no TLS feature is enabled on

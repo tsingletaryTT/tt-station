@@ -1,5 +1,5 @@
 //! End-to-end test: discover -> pair -> run -> endpoint -> completion, all
-//! driven through the real `tt` binary against a real (mock) HTTP server --
+//! driven through the real `tt-station` binary against a real (mock) HTTP server --
 //! no actual agent or hardware anywhere in the loop. This is the Task 12 /
 //! M2 CI stand-in: if this passes, the whole PoC flow works.
 //!
@@ -7,7 +7,7 @@
 //! port; run it explicitly:
 //!
 //!   cargo build --workspace
-//!   cargo test -p tt --test e2e_mock -- --ignored
+//!   cargo test -p tt-station --test e2e_mock -- --ignored
 
 use assert_cmd::Command as AssertCommand;
 use std::net::TcpStream;
@@ -49,7 +49,7 @@ fn spawn_mock_box(port: u16) -> MockBox {
 
 /// Poll `127.0.0.1:port` until something is listening (or panic after a
 /// generous timeout) -- `mock-box` binds its socket asynchronously relative
-/// to when we spawn it, so the first `tt discover` call needs to wait for
+/// to when we spawn it, so the first `tt-station discover` call needs to wait for
 /// that instead of racing it.
 fn wait_for_port(port: u16) {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -63,7 +63,7 @@ fn wait_for_port(port: u16) {
 }
 
 /// A `TT_CONFIG_DIR` scratch directory, unique per test run and cleaned up
-/// on drop, so this test never touches (or collides with) a real `tt`
+/// on drop, so this test never touches (or collides with) a real `tt-station`
 /// config dir or a concurrently-running instance of itself.
 struct TempConfigDir(std::path::PathBuf);
 
@@ -98,11 +98,11 @@ fn discover_pair_run_endpoint_completion_against_mock_box() {
 
     let config_dir = TempConfigDir::new();
 
-    // --- 1. `tt --json discover --host <mock>` lists the mock box. ---
+    // --- 1. `tt-station --json discover --host <mock>` lists the mock box. ---
     // `--no-mdns`: this environment may have no multicast/avahi available,
     // and we don't need real LAN discovery to prove the CLI's plumbing --
     // the manual-host path is what's under test here.
-    let discover_stdout = AssertCommand::cargo_bin("tt")
+    let discover_stdout = AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["--json", "discover", "--host", &host, "--no-mdns"])
@@ -123,9 +123,9 @@ fn discover_pair_run_endpoint_completion_against_mock_box() {
     assert_eq!(boxes[0]["host"], "127.0.0.1");
     assert_eq!(boxes[0]["ctrl_port"], port);
 
-    // --- 1b. `tt --json models --host <mock>` lists the mock's canned
-    // models -- UNAUTHED, so this works even before `tt pair`. ---
-    let models_stdout = AssertCommand::cargo_bin("tt")
+    // --- 1b. `tt-station --json models --host <mock>` lists the mock's canned
+    // models -- UNAUTHED, so this works even before `tt-station pair`. ---
+    let models_stdout = AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["--json", "models", "--host", &host])
@@ -146,11 +146,11 @@ fn discover_pair_run_endpoint_completion_against_mock_box() {
     );
     assert_eq!(models_array[0]["name"], "mock-model");
 
-    // --- 2. `tt --json pair <host> --code 000000` stores a token. ---
+    // --- 2. `tt-station --json pair <host> --code 000000` stores a token. ---
     // The mock accepts any code (see mock-box/src/main.rs's pair_complete),
     // so "000000" is arbitrary -- what matters is that pairing succeeds and
     // a token ends up in this test's scratch TT_CONFIG_DIR.
-    AssertCommand::cargo_bin("tt")
+    AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["--json", "pair", &host, "--code", "000000"])
@@ -168,9 +168,9 @@ fn discover_pair_run_endpoint_completion_against_mock_box() {
         "secrets file should be keyed by the paired host"
     );
 
-    // --- 3. `tt --json run llama3 --host <host>` returns an Endpoint JSON
+    // --- 3. `tt-station --json run llama3 --host <host>` returns an Endpoint JSON
     // whose base_url contains "/v1". ---
-    let run_stdout = AssertCommand::cargo_bin("tt")
+    let run_stdout = AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["--json", "run", "llama3", "--host", &host])
@@ -208,11 +208,11 @@ fn discover_pair_run_endpoint_completion_against_mock_box() {
         .expect("completion has choices[0].message.content");
     assert_eq!(content, "hello from mock-box");
 
-    // --- Bonus: `tt endpoint --host <host>` (non-json) prints the export
-    // line, and `tt stop` + `tt status` round-trip back to idle. Not
+    // --- Bonus: `tt-station endpoint --host <host>` (non-json) prints the export
+    // line, and `tt-station stop` + `tt-station status` round-trip back to idle. Not
     // required by the brief's five-step sequence, but cheap extra coverage
     // of the remaining commands using the same live mock. ---
-    let endpoint_stdout = AssertCommand::cargo_bin("tt")
+    let endpoint_stdout = AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["endpoint", "--host", &host])
@@ -224,14 +224,14 @@ fn discover_pair_run_endpoint_completion_against_mock_box() {
     let endpoint_text = String::from_utf8(endpoint_stdout).unwrap();
     assert!(endpoint_text.trim().starts_with("export OPENAI_BASE_URL="));
 
-    AssertCommand::cargo_bin("tt")
+    AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["stop", "--host", &host])
         .assert()
         .success();
 
-    let status_stdout = AssertCommand::cargo_bin("tt")
+    let status_stdout = AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["--json", "status", "--host", &host])
@@ -244,9 +244,9 @@ fn discover_pair_run_endpoint_completion_against_mock_box() {
     assert_eq!(status["status"], "idle");
 }
 
-/// `tt --json config --host <mock>` round-trips a `ConfigSummary` from
-/// mock-box's fake `/config` route (Task 6). UNAUTHED, like `tt
-/// status`/`tt serving`/`tt models` -- no `tt pair` needed first, so this
+/// `tt-station --json config --host <mock>` round-trips a `ConfigSummary` from
+/// mock-box's fake `/config` route (Task 6). UNAUTHED, like `tt-station
+/// status`/`tt-station serving`/`tt-station models` -- no `tt-station pair` needed first, so this
 /// spins up its own mock-box instance and drives just this one command
 /// against it, using the exact same harness (`spawn_mock_box`,
 /// `wait_for_port`, `TempConfigDir`) as
@@ -262,7 +262,7 @@ fn tt_config_json_round_trips_from_mock_box() {
 
     let config_dir = TempConfigDir::new();
 
-    let config_stdout = AssertCommand::cargo_bin("tt")
+    let config_stdout = AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["--json", "config", "--host", &host])
@@ -278,9 +278,9 @@ fn tt_config_json_round_trips_from_mock_box() {
     assert_eq!(summary.active_profile.as_deref(), Some("mock"));
 }
 
-/// `tt --json logs --host <mock> --source container --tail 50` round-trips a
-/// `LogsInfo` from mock-box's fake `/logs` route (Task 4). UNAUTHED, like `tt
-/// status`/`tt serving`/`tt config` -- no `tt pair` needed first, so this
+/// `tt-station --json logs --host <mock> --source container --tail 50` round-trips a
+/// `LogsInfo` from mock-box's fake `/logs` route (Task 4). UNAUTHED, like `tt-station
+/// status`/`tt-station serving`/`tt-station config` -- no `tt-station pair` needed first, so this
 /// spins up its own mock-box instance and drives just this one command
 /// against it, same harness as `tt_config_json_round_trips_from_mock_box`
 /// above.
@@ -295,7 +295,7 @@ fn tt_logs_json_round_trips_from_mock_box() {
 
     let config_dir = TempConfigDir::new();
 
-    let logs_stdout = AssertCommand::cargo_bin("tt")
+    let logs_stdout = AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args([
@@ -320,15 +320,15 @@ fn tt_logs_json_round_trips_from_mock_box() {
     assert!(!logs["lines"].as_array().unwrap().is_empty());
 }
 
-/// `tt --json catalog --host <mock> --catalog-file <fixture>` (Task 4):
+/// `tt-station --json catalog --host <mock> --catalog-file <fixture>` (Task 4):
 /// classifies a trimmed fixture catalog (`tests/fixtures/compatibility.json`
 /// -- one Supported/one Experimental/one Galaxy-only/one Not-Supported model)
 /// against mock-box's canned `/status` (`device_mesh: "p300x2"`) and
 /// `/models` (`mock-model`, `mock-model-large`), entirely without hardware or
 /// network -- `--catalog-file` bypasses both the real CDN fetch and the
-/// on-disk cache (see `tt::catalog::load_catalog`'s `file_override` path),
-/// and mock-box stands in for a live agent, UNAUTHED just like `tt
-/// status`/`tt models`, so this needs no prior `tt pair`.
+/// on-disk cache (see `tt_station::catalog::load_catalog`'s `file_override` path),
+/// and mock-box stands in for a live agent, UNAUTHED just like `tt-station
+/// status`/`tt-station models`, so this needs no prior `tt-station pair`.
 #[test]
 #[ignore] // hardware-free but network/process -- run with --ignored like the others
 fn tt_catalog_json_classifies_fixture_against_mock_box() {
@@ -341,7 +341,7 @@ fn tt_catalog_json_classifies_fixture_against_mock_box() {
     let config_dir = TempConfigDir::new();
 
     // Absolute path built from CARGO_MANIFEST_DIR (this crate's own
-    // `crates/tt/`) rather than a path relative to the test binary's cwd --
+    // `crates/tt-station/`) rather than a path relative to the test binary's cwd --
     // `cargo test` doesn't guarantee a stable cwd, but this env var is
     // always set at compile time to the crate root.
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -353,7 +353,7 @@ fn tt_catalog_json_classifies_fixture_against_mock_box() {
         "fixture must exist at {fixture_path:?}"
     );
 
-    let catalog_stdout = AssertCommand::cargo_bin("tt")
+    let catalog_stdout = AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args([
@@ -426,7 +426,7 @@ fn tt_catalog_json_classifies_fixture_against_mock_box() {
     );
 }
 
-/// `tt power reset-chips --host <mock> --json` round-trips against
+/// `tt-station power reset-chips --host <mock> --json` round-trips against
 /// mock-box's `/power` route (a deliberate no-op -- it never runs a real
 /// `systemctl`/`tt-smi` command, see `mock-box/src/main.rs`'s `power_mock`),
 /// so this exercises the full authed dispatch (`build_store` token lookup +
@@ -443,14 +443,14 @@ fn tt_power_reset_chips_against_mock_box() {
 
     let config_dir = TempConfigDir::new();
 
-    AssertCommand::cargo_bin("tt")
+    AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["--json", "pair", &host, "--code", "000000"])
         .assert()
         .success();
 
-    let power_stdout = AssertCommand::cargo_bin("tt")
+    let power_stdout = AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["--json", "power", "reset-chips", "--host", &host])
@@ -466,9 +466,9 @@ fn tt_power_reset_chips_against_mock_box() {
     assert_eq!(result["ok"], true);
 }
 
-/// `tt leases --host <mock> --json` round-trips against mock-box's canned
+/// `tt-station leases --host <mock> --json` round-trips against mock-box's canned
 /// `/leases` route (Task 4 of the tt-station x tt-gozer integration -- see
-/// `mock-box/src/main.rs`'s `get_leases`), so `tt leases` has SOME
+/// `mock-box/src/main.rs`'s `get_leases`), so `tt-station leases` has SOME
 /// end-to-end coverage even with no real `gozer` binary or hardware
 /// anywhere in the loop. `/leases` is bearer-guarded on the real agent, so
 /// this pairs first -- same harness as `tt_power_reset_chips_against_mock_box`
@@ -485,14 +485,14 @@ fn tt_leases_json_round_trips_from_mock_box() {
 
     let config_dir = TempConfigDir::new();
 
-    AssertCommand::cargo_bin("tt")
+    AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["--json", "pair", &host, "--code", "000000"])
         .assert()
         .success();
 
-    let leases_stdout = AssertCommand::cargo_bin("tt")
+    let leases_stdout = AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["--json", "leases", "--host", &host])
@@ -521,7 +521,7 @@ fn tt_leases_json_round_trips_from_mock_box() {
     assert_eq!(first["since"], serde_json::Value::Null);
 }
 
-/// Unknown `tt power` actions must be rejected BEFORE any HTTP call -- the
+/// Unknown `tt-station power` actions must be rejected BEFORE any HTTP call -- the
 /// four valid literals (`reset-chips`/`suspend`/`reboot`/`shutdown`) are
 /// checked client-side in the `Command::Power` dispatch arm. No mock-box and
 /// no pairing needed here: `--host 127.0.0.1:1` is never actually contacted
@@ -530,7 +530,7 @@ fn tt_leases_json_round_trips_from_mock_box() {
 /// connection error rather than the clear "unknown power action" message.
 #[test]
 fn tt_power_rejects_unknown_action_before_any_network_call() {
-    let stderr = AssertCommand::cargo_bin("tt")
+    let stderr = AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .args(["power", "explode", "--host", "127.0.0.1:1"])
         .assert()
@@ -545,8 +545,8 @@ fn tt_power_rejects_unknown_action_before_any_network_call() {
     );
 }
 
-/// Regression test for the nested-runtime panic in `tt catalog`'s primary
-/// usage path -- `tt catalog --host <h>` WITHOUT `--catalog-file`.
+/// Regression test for the nested-runtime panic in `tt-station catalog`'s primary
+/// usage path -- `tt-station catalog --host <h>` WITHOUT `--catalog-file`.
 ///
 /// `cmd_catalog` used to call `catalog::load_catalog` (which builds a
 /// `reqwest::blocking::Client` in `fetch_remote`) from INSIDE the Tokio
@@ -563,12 +563,12 @@ fn tt_power_rejects_unknown_action_before_any_network_call() {
 /// forced down the `fetch_remote()` branch that used to panic.
 ///
 /// The assertion is deliberately network-outcome-agnostic: whether this test
-/// runner has internet access or not, `tt catalog` must exit 0 and print
+/// runner has internet access or not, `tt-station catalog` must exit 0 and print
 /// parseable `BoxCatalog` JSON with a `runs_here` array -- offline, the fetch
 /// fails and `load_catalog` degrades to `(None, false)` (still a valid,
 /// classifiable catalog per its degradation contract); online, the real
 /// fetch succeeds. Either way, the process must not panic. This is exactly
-/// the pre-fix panic: a debug build of `tt catalog --host <mock> --json`
+/// the pre-fix panic: a debug build of `tt-station catalog --host <mock> --json`
 /// (no `--catalog-file`) crashed instead of exiting 0.
 #[test]
 #[ignore] // hardware-free but network/process -- run with --ignored like the others
@@ -584,7 +584,7 @@ fn tt_catalog_without_catalog_file_does_not_panic_in_nested_runtime() {
     // and into `fetch_remote()`, the branch that used to panic.
     let config_dir = TempConfigDir::new();
 
-    let output = AssertCommand::cargo_bin("tt")
+    let output = AssertCommand::cargo_bin("tt-station")
         .unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["--json", "catalog", "--host", &host])

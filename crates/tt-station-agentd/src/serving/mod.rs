@@ -5,7 +5,7 @@
 //! confidential-VM orchestrator) takes over the same role in M4. Both live
 //! behind the one `ServingBackend` trait so nothing above this module --
 //! the agent's control routes (Task 10), the Mac-side `AgentClient` (Task
-//! 11), or the `tt` CLI (Task 12) -- ever has to know or care which backend
+//! 11), or the `tt-station` CLI (Task 12) -- ever has to know or care which backend
 //! is actually running. Swapping Docker for dstack later should be a
 //! one-line change at whatever call site constructs the backend, not a
 //! rewrite of everything that talks to it.
@@ -35,7 +35,7 @@ pub trait ServingBackend: Send + Sync {
     /// implementation gives up and returns an error). On success, returns
     /// the `Endpoint` clients should send inference requests to.
     ///
-    /// `force` is the operator's `tt run --force`: it overrides a refusal
+    /// `force` is the operator's `tt-station run --force`: it overrides a refusal
     /// caused by ANOTHER TENANT holding chips, or by gozer being unreadable.
     /// It never overrides anything protecting the caller from an accident
     /// (see `RunPyBackend::acquire_lease` for exactly what it does and does
@@ -170,7 +170,7 @@ pub trait ServingBackend: Send + Sync {
     /// caller in async context must hop off the runtime (e.g.
     /// `tokio::task::spawn_blocking`) before calling it.
     ///
-    /// `force` is the operator's `tt reset --force`: it overrides the
+    /// `force` is the operator's `tt-station reset --force`: it overrides the
     /// foreign-lease refusal (and the "gozer could not be read" refusal) that
     /// `RunPyBackend::reset_forcing` applies by default. It overrides nothing
     /// else -- notably not the stop-before-release ordering, which exists to
@@ -198,7 +198,7 @@ pub trait ServingBackend: Send + Sync {
     }
 
     /// Enumerate the models this backend can serve, so a caller (`GET
-    /// /models`, `tt models`) never has to guess or hardcode a model id --
+    /// /models`, `tt-station models`) never has to guess or hardcode a model id --
     /// see `libttstation::model::ModelsResponse`.
     ///
     /// Default implementation reports an empty catalog with no known

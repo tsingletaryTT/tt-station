@@ -1,6 +1,6 @@
 //! `SecretStore` — per-box bearer token storage.
 //!
-//! After pairing with a box, `tt` needs to remember a bearer token per box
+//! After pairing with a box, `tt-station` needs to remember a bearer token per box
 //! name so subsequent CLI invocations don't have to re-pair. Two
 //! implementations exist:
 //!
@@ -31,7 +31,7 @@ pub trait SecretStore {
     fn delete(&self, box_name: &str) -> Result<()>;
 
     /// Remove EVERY stored token at once -- "forget all paired boxes on this
-    /// machine", the local half of `tt reset`. Not an error if nothing is
+    /// machine", the local half of `tt-station reset`. Not an error if nothing is
     /// stored (an already-empty store is the desired end state).
     fn clear(&self) -> Result<()>;
 }
@@ -174,7 +174,7 @@ impl SecretStore for KeychainStore {
 
     /// Clear every tt-station token by enumerating this service's
     /// generic-password items and deleting each one -- the Keychain has no
-    /// single "delete all for service" call, so `tt reset` has to find the
+    /// single "delete all for service" call, so `tt-station reset` has to find the
     /// accounts (box names) first, then delete them one at a time via the
     /// same `delete` path above.
     ///
@@ -286,8 +286,8 @@ pub fn resolve_store_kind(
 
 /// Path to the persisted "which store to use" marker: a one-line file
 /// (contents `file` or `keychain`) under the config dir. Lives alongside
-/// `secrets.json` so both the terminal `tt` and the macOS app's
-/// subprocess-launched `tt` (which doesn't inherit the launching shell's
+/// `secrets.json` so both the terminal `tt-station` and the macOS app's
+/// subprocess-launched `tt-station` (which doesn't inherit the launching shell's
 /// env vars, but does share `$HOME` via launchd) resolve to the same file
 /// and therefore agree on the same store.
 fn marker_path() -> PathBuf {
@@ -303,7 +303,7 @@ fn marker_contents() -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// The `SecretStore` `tt` should use by default: the macOS Keychain on
+/// The `SecretStore` `tt-station` should use by default: the macOS Keychain on
 /// macOS, and a [`FileStore`] under the user's config dir everywhere else --
 /// unless overridden by the `TT_SECRET_STORE` env var or a persisted marker
 /// file (see [`resolve_store_kind`]), which lets macOS opt into the file

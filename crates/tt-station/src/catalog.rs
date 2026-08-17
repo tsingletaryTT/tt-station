@@ -4,7 +4,7 @@
 //! `libttstation::catalog::CompatCatalog` (parsing/mapping) is deliberately
 //! I/O-free -- see that module's doc. This module is the I/O layer on top:
 //! get the JSON from the network, cache it on disk for [`TTL`] seconds, and
-//! degrade gracefully when the network is unavailable. `tt catalog` (a later
+//! degrade gracefully when the network is unavailable. `tt-station catalog` (a later
 //! task) is the only caller; this module has no CLI surface of its own.
 //!
 //! ## Degradation contract
@@ -31,7 +31,7 @@
 //! left behind by a previous crashed write, for instance, is treated the
 //! same as no cache file at all.
 
-// This module's only caller is `tt catalog` (Task 4, `main.rs::cmd_catalog`),
+// This module's only caller is `tt-station catalog` (Task 4, `main.rs::cmd_catalog`),
 // which wires `load_catalog` in.
 
 use std::fs;
@@ -47,14 +47,14 @@ const URL: &str = "https://d1oi7xemha0dsy.cloudfront.net/data/compatibility.json
 /// match how often the upstream catalog realistically changes (new model
 /// support lands on the order of days/weeks, not minutes) while still
 /// picking up updates within a day of normal use -- an operator running
-/// `tt catalog` daily always sees data at most a day stale without ever
+/// `tt-station catalog` daily always sees data at most a day stale without ever
 /// paying for a network round-trip on every single invocation.
 const TTL: u64 = 86400;
 
 /// How long a single fetch attempt is allowed to hang before giving up and
 /// falling back to whatever's cached (see [`load_catalog`]). Mirrors the
 /// bounded-timeout pattern `main.rs`'s `build_probe_client` already uses for
-/// `tt discover`'s manual-host probe -- a `reqwest::blocking::get` with no
+/// `tt-station discover`'s manual-host probe -- a `reqwest::blocking::get` with no
 /// timeout configured can hang far longer than any interactive CLI command
 /// should tolerate.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -174,12 +174,12 @@ fn write_cache(path: &Path, body: &str) {
 /// - `file_override`, when given, wins outright: read+parse exactly that
 ///   file, ignore the network and the on-disk cache entirely, `stale`
 ///   always `false` (there's no "cache age" concept for a caller-supplied
-///   fixture). This is the fast path `tt catalog --catalog-file <path>`
+///   fixture). This is the fast path `tt-station catalog --catalog-file <path>`
 ///   (Task 4) and its e2e test are meant to exercise instead of a real
 ///   network call.
 /// - Otherwise: if `!refresh` and the cache file exists and is fresh (see
 ///   [`is_fresh`]/[`TTL`]), parse and return it straight from disk -- no
-///   network round-trip on the common case (an operator running `tt
+///   network round-trip on the common case (an operator running `tt-station
 ///   catalog` more than once within the TTL window).
 /// - Otherwise (no fresh cache, `refresh` requested, or the fresh cache
 ///   failed to parse): fetch from [`URL`]. On success, write the cache and
@@ -331,7 +331,7 @@ mod tests {
     /// throwaway `TT_CONFIG_DIR` cache dir so it never touches this
     /// machine's real `~/.cache/tt-station/`. `#[ignore]`d so `cargo test`
     /// (and CI) never depends on network access -- run explicitly with
-    /// `cargo test -p tt catalog::tests::manual_live_fetch_smoke -- --ignored
+    /// `cargo test -p tt-station catalog::tests::manual_live_fetch_smoke -- --ignored
     /// --nocapture` to confirm the real endpoint is reachable and parses.
     /// This is the one piece of this module Task 3's brief calls out as
     /// "owner-verified" rather than unit-testable in CI (see the task
