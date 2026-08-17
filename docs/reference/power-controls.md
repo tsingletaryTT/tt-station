@@ -83,6 +83,13 @@ side effects differ — and both now refuse with `409` while another tenant hold
 for the same reason (see above, and the design doc's "`POST /reset` refuses rather than resetting
 a neighbour").
 
+**Everything else about leasing** — `tt leases`, `/status`'s `leasing` object, `--gozer-path` /
+`[global].gozer_path`, what a leased `tt run` does differently, and how a lease survives an agentd
+restart — is in [`chip-leasing.md`](chip-leasing.md). The one fact to carry over here: a refusal
+naming a `STALE` or `HELD-FOREIGN` holder means the tenant is already gone, and `gozer status`
+reports no lease id to pass to `gozer release`, so the remedy is `gozer reconcile` on the box. The
+refusal message says so and names the state.
+
 ---
 
 ## 2. `mac` in `/status` and the mDNS TXT record

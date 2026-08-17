@@ -53,6 +53,7 @@ all — see "Precedence").
 | `no_token_persistence` | bool | Opt out of persisting bearer tokens across restarts (in-memory only). Default `false`. |
 | `telemetry_interval_ms` | integer (u64) | Interval between `tt-smi -s` snapshots pushed on `GET /telemetry`. Default `1000`. |
 | `tt_smi_bin` | string | `tt-smi` binary the telemetry stream runs. Default `"tt-smi"`. |
+| `gozer_path` | string (path) | `gozer` binary agentd probes for **once** at startup, to lease chips per board instead of serving whole-box. Optional and **no default string**: unset means "search `$PATH`", and finding nothing there means leasing is simply off (see [`chip-leasing.md`](chip-leasing.md)). Tilde-expanded. |
 
 ### `[profile.<name>]` — how a profile serves
 
@@ -94,6 +95,9 @@ chips = "4xBH"
 token_store = "~/.config/tt-station/agentd-tokens.json"
 telemetry_interval_ms = 1000
 tt_smi_bin = "tt-smi"
+# Optional: lease chips per board instead of serving whole-box. Omit entirely
+# (or leave `gozer` off $PATH) and this box serves exactly as it always has.
+gozer_path = "~/.local/bin/gozer"
 
 [profile.stable]
 backend = "runpy"

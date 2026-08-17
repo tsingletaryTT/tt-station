@@ -153,7 +153,7 @@ cargo test -p tt --test e2e_mock -- --ignored   # CLI end-to-end against the moc
 | `crates/mock-box` | Dev fixture: mDNS advertise + fake control API + `/v1` |
 | `macos/TTStation` | Native macOS app (menu bar + control room) |
 | `box-panel/` | GTK panel for the QuietBox's own screen |
-| `docs/reference/` | Config schema, `tt console`, the real run.py launch |
+| `docs/reference/` | Config schema, `tt console`, chip leasing, power controls, the real run.py launch |
 | `site/` | Project landing page (`index.html`) and assets |
 
 ## Status
