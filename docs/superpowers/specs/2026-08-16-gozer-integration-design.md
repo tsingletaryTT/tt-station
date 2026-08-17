@@ -204,6 +204,17 @@ already covers it: agentd's death makes the lease reapable, and the orphaned con
 
 ### When chips are unavailable
 
+*Corrected against gozer's actual output.* `gozer acquire`'s unavailable payload is only
+`{"granted": false, "queued": false}` — it names no holder. The queued payload carries
+`ahead` (a list of `who` strings waiting), but still not who *holds*. And `gozer status
+--json` carries `who`, `reason` and `state` per chip but **no `since`**.
+
+So agentd names the holder by cross-referencing `gozer status --json`, and **duration is not
+available** — "board ...4055 is held by claude:ttm-optimize" rather than "...since 14:02".
+Adding `since` to gozer's per-chip status output is a small, worthwhile follow-up in that
+repo; it is not a blocker here, and agentd must not fabricate a duration it cannot know.
+
+
 `gozer acquire` exits 10 (queued) or 12 (unavailable). agentd does **not** queue; it releases
 any ticket and returns a clear error naming the board, the holder's `who`, and how long they
 have held it. With two boards and a small number of tenants, "board ...4055 is held by
