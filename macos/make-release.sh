@@ -20,6 +20,48 @@ ver="$(awk -F'"' '/MARKETING_VERSION:/{print $2; exit}' "$proj/project.yml")"
 dmg="$dist/TTStation-$ver-arm64.dmg"
 echo "==> Building TTStation $ver (arm64)"
 
+# 0. Guard the CLI-name seams no test can reach. Runs FIRST, deliberately:
+# these are string comparisons, and failing them after a cargo release build
+# plus an xcodebuild wastes several minutes to report a typo.
+#
+# `AppShell/` has no test target — Package.swift declares only TTStationKit —
+# so CLIInstaller.swift's path literals are compiled but never asserted. The
+# bundle one has to agree with the `cp` destination in step 3, and if the two
+# drift the failure is SILENT: CLIInstaller's `guard … isExecutableFile else
+# { return }` just returns, the first-run install prompt never appears, and the
+# app still works via BinaryLocator's in-bundle fallback. Nobody finds out
+# until someone asks why `tt-station` never landed in ~/.local/bin.
+cli="tt-station"
+installer="$proj/Sources/CLIInstaller.swift"
+locator="$here/TTStation/Sources/TTStationKit/BinaryLocator.swift"
+echo "==> Checking CLI name seams"
+
+for f in "$installer" "$locator"; do
+  [[ -f "$f" ]] || { echo "error: expected Swift source missing: $f"; exit 1; }
+done
+
+grep -qF "appendingPathComponent(\"bin/$cli\")" "$installer" || {
+  echo "error: $installer does not look up the bundled CLI at 'bin/$cli',"
+  echo "       which is where step 3 of this script copies it. A mismatch"
+  echo "       silently disables the first-run install prompt."; exit 1; }
+
+grep -qF ".local/bin/$cli" "$installer" || {
+  echo "error: $installer does not install the CLI as ~/.local/bin/$cli"; exit 1; }
+
+grep -qF "bin/$cli" "$locator" || {
+  echo "error: $locator does not search for '$cli'"; exit 1; }
+
+# The invariant that matters most over time. `tt` is the name of Tenstorrent's
+# official CLI (tenstorrent/tt-cli). This app once symlinked its own binary to
+# ~/.local/bin/tt and shadowed the real tool on every Mac it ran on. Refuse to
+# build anything that reintroduces a bare `tt` binary path.
+shadow="$(grep -rnF 'bin/tt"' "$here/TTStation" --include=*.swift || true)"
+[[ -z "$shadow" ]] || {
+  echo "error: a Swift source references a bare \`tt\` binary path:"
+  echo "$shadow"
+  echo "       \`tt\` belongs to Tenstorrent's official CLI (tenstorrent/tt-cli);"
+  echo "       installing under that name shadows it. Use '$cli'."; exit 1; }
+
 # 1. Build the arm64 tt-station CLI.
 echo "==> cargo build --release -p tt-station (aarch64-apple-darwin)"
 ( cd "$repo_root" && cargo build --release -p tt-station --target aarch64-apple-darwin )
