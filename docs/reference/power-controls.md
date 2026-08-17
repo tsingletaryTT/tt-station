@@ -37,6 +37,14 @@ match it.
 - **`reset-chips`** — runs the configured board-reset command (`tt-smi -r` by default). Does
   **not** stop serving first (there's nothing to gracefully stop for a chip reset), does **not**
   clear tokens/SSH/pairing. Completes synchronously.
+  **Refused (`409`) while another tenant holds a gozer lease.** `tt-smi -r` with no targets is a
+  WHOLE-BOX reset, and on a box where `gozer` is arbitrating chips between tenants that resets
+  the neighbour's chips mid-run. So when `gozer` is installed and reports a lease held by anyone
+  other than this agent's own session (matched on the `tt-station:<serving_port>:` `who` prefix),
+  the call is refused and the holder is named. A `BUSY-UNTRACKED` chip is *not* a refusal — it is
+  not a lease, there is nobody to name, and untracked work wedging the box is one of the main
+  reasons to reach for a chip reset. With no gozer installed, behaviour is exactly as before.
+  See `crates/tt-station-agentd/src/gozer.rs`'s `foreign_lease_holders`.
 - **`suspend` / `reboot` / `shutdown`** (the "machine ops",
   `PowerAction::is_machine_op() == true` for everything but `reset-chips`) —
   1. Best-effort stop any serving container first (reuses the backend's normal `stop` path) so a
@@ -53,6 +61,7 @@ match it.
 | Unknown `action` string | `400` | `{"error": "unknown power action: …"}"` — checked before any network/token/command work |
 | `reset-chips` succeeds | `200` | `{}` — completes synchronously, so the caller can trust the response |
 | `suspend`/`reboot`/`shutdown` succeeds | `202 Accepted` | `{"action": "...", "accepted": true}` — the command only *initiates* teardown; the box may go down before a `200` could ever be observed, so the response says "accepted," never "done" |
+| `reset-chips` refused because another tenant holds chips | `409 Conflict` | `{"error": "refusing reset-chips: … board <serial> is held by <who>. …"}` — the box's state conflicts with the request; nothing ran. No duration is reported: gozer exposes no lease start time |
 | Command fails with a permission/polkit-shaped error (message contains "Interactive authentication required", "Access denied", or "not authorized") | `403` | Points at this doc — see §6 below |
 | Any other command failure (e.g. the binary itself is missing) | `500` | The generic `backend_error` fallback used by every other route |
 | No bearer token / bad token | `401` | Standard `BearerAuth` rejection |
@@ -66,7 +75,9 @@ power.
 board reset" — that's the existing `/reset` (and `tt reset --host …`). If you want "clear a
 wedged mesh without losing pairing" — that's `POST /power {"action":"reset-chips"}` (`tt power
 reset-chips --host …`). They both ultimately run the same `tt-smi -r`; only the token/SSH/pairing
-side effects differ.
+side effects differ — and both now refuse with `409` while another tenant holds a gozer lease,
+for the same reason (see above, and the design doc's "`POST /reset` refuses rather than resetting
+a neighbour").
 
 ---
 

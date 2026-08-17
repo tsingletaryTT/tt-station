@@ -405,3 +405,382 @@ fn snapshot_leases_returns_none_on_malformed_json() {
 
     assert_eq!(gozer::snapshot_leases(&runner, &capability), None);
 }
+
+// ---------------------------------------------------------------------
+// The startup sweep (Task 5). On startup agentd releases every
+// `tt-station:`-prefixed lease whose SERVICE PORT has nothing serving on
+// it -- the one reconciliation rule in the design doc's "One startup
+// sweep" section. One rule, one direction: the reverse case (a container
+// with no lease) is covered by `--owner-pid` + `BUSY-UNTRACKED`.
+//
+// Every test here drives `gozer::startup_sweep` through a fake
+// `CommandRunner`, and asserts on the RECORDED ARGV (the side channel),
+// never on the return value alone: a sweep that returned the right report
+// while shelling out `gozer release` on somebody else's lease would be the
+// worst possible pass.
+// ---------------------------------------------------------------------
+
+/// `gozer status --json` with one board held by a tt-station lease for
+/// service port 8080, and one board free.
+const STATUS_JSON_TT_STATION_HELD: &str = r#"{"grain":"board","chips":[
+    {"dev_index":0,"bdf":"0000:01:00.0","board":"0100014311601055","card":"p300",
+     "state":"CLAIMED","who":"tt-station:8080:meta-llama/Llama-3.3-70B-Instruct",
+     "pid":4242,"reason":"serving via tt-station-agentd","pids_holding":[],"overstayed":false},
+    {"dev_index":1,"bdf":"0000:02:00.0","board":"0100014311601055","card":"p300",
+     "state":"CLAIMED","who":"tt-station:8080:meta-llama/Llama-3.3-70B-Instruct",
+     "pid":4242,"reason":"serving via tt-station-agentd","pids_holding":[],"overstayed":false},
+    {"dev_index":2,"bdf":"0000:03:00.0","board":"0100014311601048","card":"p300",
+     "state":"FREE","who":null,"pid":null,"reason":null,"pids_holding":[],"overstayed":false}],
+    "queue":[]}"#;
+
+/// `gozer history --json` showing that same lease still open: a `granted`
+/// record with no later `released`/`reaped` for the same id. This is the
+/// ONLY place a lease id can be read from (gozer's `status --json` carries
+/// `who` but no `lease_id`) -- see `gozer::startup_sweep`'s doc comment.
+const HISTORY_JSON_OPEN_TT_STATION_LEASE: &str = r#"{"history":[
+    {"ts":"2026-08-16T10:00:00Z","event":"granted","lease_id":"ab12ef",
+     "who":"tt-station:8080:meta-llama/Llama-3.3-70B-Instruct","chips":2},
+    {"ts":"2026-08-16T10:05:00Z","event":"granted","lease_id":"cc99aa",
+     "who":"claude:ttm-optimize","chips":2}]}"#;
+
+/// `docker ps` output (the `discover_serving` format: id/image/ports/name)
+/// with a container publishing host port 8080.
+const DOCKER_PS_SERVING_8080: &str = "c1\tghcr.io/tenstorrent/tt-inference-server:rel\t0.0.0.0:8080->8000/tcp\ttt-agent-llama";
+
+fn sweep_capability() -> Capability {
+    Capability {
+        path: "gozer".to_string(),
+        version: "gozer 0.1.0".to_string(),
+    }
+}
+
+/// A `FakeRunner` canned for the sweep: a `docker ps` answer, gozer
+/// `status`, gozer `history`, and a successful `release`.
+fn sweep_runner(docker_ps: &str) -> FakeRunner {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker ps", docker_ps);
+    runner.set_run_capturing("gozer status", 0, STATUS_JSON_TT_STATION_HELD, "");
+    runner.set_run_capturing("gozer history", 0, HISTORY_JSON_OPEN_TT_STATION_LEASE, "");
+    runner.set_run_capturing(
+        "gozer release",
+        0,
+        r#"{"released":true,"message":"released ab12ef"}"#,
+        "",
+    );
+    runner
+}
+
+/// Every `gozer release <id>` invocation recorded by `runner`, as the id
+/// it targeted -- the side channel that proves what the sweep actually did
+/// to the box, rather than what it reported having done.
+fn released_lease_ids(runner: &FakeRunner) -> Vec<String> {
+    runner
+        .commands()
+        .iter()
+        .filter(|cmd| {
+            cmd.first().map(String::as_str) == Some("gozer")
+                && cmd.get(1).map(String::as_str) == Some("release")
+        })
+        .filter_map(|cmd| cmd.get(2).cloned())
+        .collect()
+}
+
+/// THE SWEEP, RELEASING HALF. A `tt-station:` lease naming service port
+/// 8080, and NOTHING published on 8080 -- the agent that took it is gone.
+/// The lease must be released (which is what resets its chips and hands
+/// the board back), named by the id resolved from `gozer history`.
+#[test]
+fn startup_sweep_releases_a_tt_station_lease_whose_port_has_nothing_serving() {
+    // A running container, but on a DIFFERENT port -- proves the sweep
+    // matches on the lease's own port and not merely on "docker has
+    // something running".
+    let runner = sweep_runner(
+        "c9\tghcr.io/tenstorrent/tt-inference-server:rel\t0.0.0.0:9001->8000/tcp\tsomeone-else",
+    );
+
+    let report = gozer::startup_sweep(&runner, &sweep_capability());
+
+    assert_eq!(
+        released_lease_ids(&runner),
+        vec!["ab12ef".to_string()],
+        "exactly the stale tt-station lease must be released: {:?}",
+        runner.commands()
+    );
+    assert_eq!(report.released, vec!["ab12ef".to_string()]);
+    assert!(report.kept.is_empty(), "nothing to keep: {report:?}");
+}
+
+/// THE SWEEP, LEAVING THE OTHER HALF ALONE. The same lease, but something
+/// IS published on 8080 -- a live session that survived an agentd restart.
+/// Releasing it would reset the chips under a running model, so the sweep
+/// must issue no `gozer release` at all.
+#[test]
+fn startup_sweep_leaves_a_tt_station_lease_whose_port_is_serving() {
+    let runner = sweep_runner(DOCKER_PS_SERVING_8080);
+
+    let report = gozer::startup_sweep(&runner, &sweep_capability());
+
+    assert!(
+        released_lease_ids(&runner).is_empty(),
+        "a lease whose port is still serving must NEVER be released -- that \
+         resets a live model's chips: {:?}",
+        runner.commands()
+    );
+    assert_eq!(report.kept, vec!["ab12ef".to_string()]);
+}
+
+/// A lease held by someone who is NOT tt-station is never a sweep
+/// candidate, whatever docker is or isn't running. `claude:ttm-optimize`
+/// holds a board with no published port anywhere -- exactly the shape that
+/// would be swept if the `tt-station:` filter were dropped.
+#[test]
+fn startup_sweep_never_touches_a_foreign_lease() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker ps", "");
+    runner.set_run_capturing(
+        "gozer status",
+        0,
+        r#"{"grain":"board","chips":[
+            {"dev_index":0,"bdf":"0000:01:00.0","board":"b1","state":"CLAIMED",
+             "who":"claude:ttm-optimize","reason":"bringup"}],"queue":[]}"#,
+        "",
+    );
+    runner.set_run_capturing(
+        "gozer history",
+        0,
+        r#"{"history":[{"ts":"t","event":"granted","lease_id":"cc99aa",
+             "who":"claude:ttm-optimize"}]}"#,
+        "",
+    );
+
+    let report = gozer::startup_sweep(&runner, &sweep_capability());
+
+    assert!(
+        released_lease_ids(&runner).is_empty(),
+        "a foreign lease must never be released by the sweep: {:?}",
+        runner.commands()
+    );
+    assert!(report.released.is_empty() && report.kept.is_empty());
+}
+
+/// A lease already CLOSED in history (`granted` then `released`) must not
+/// be released again: gozer reuses lease ids, so a stale id can name
+/// somebody else's live lease by the time the sweep runs. Here status
+/// still shows the `who` as holding -- so the ONLY thing stopping a
+/// re-release is the history bookkeeping.
+#[test]
+fn startup_sweep_ignores_a_lease_id_that_history_shows_already_released() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker ps", "");
+    runner.set_run_capturing("gozer status", 0, STATUS_JSON_TT_STATION_HELD, "");
+    runner.set_run_capturing(
+        "gozer history",
+        0,
+        r#"{"history":[
+            {"ts":"t1","event":"granted","lease_id":"ab12ef",
+             "who":"tt-station:8080:meta-llama/Llama-3.3-70B-Instruct"},
+            {"ts":"t2","event":"released","lease_id":"ab12ef"}]}"#,
+        "",
+    );
+
+    let report = gozer::startup_sweep(&runner, &sweep_capability());
+
+    assert!(
+        released_lease_ids(&runner).is_empty(),
+        "a lease id history says is already gone must not be released again -- \
+         gozer reuses ids: {:?}",
+        runner.commands()
+    );
+    assert_eq!(
+        report.unresolved.len(),
+        1,
+        "the holder is still reported, but with no id to act on: {report:?}"
+    );
+}
+
+/// An UNREADABLE `docker ps` means the sweep cannot know whether anything
+/// is serving, so it must do NOTHING -- never release on a guess. The
+/// failure direction is always "leave the lease alone".
+#[test]
+fn startup_sweep_does_nothing_when_docker_is_unreadable() {
+    let runner = sweep_runner("");
+    runner.fail_run("docker ps", "docker: command not found");
+
+    let report = gozer::startup_sweep(&runner, &sweep_capability());
+
+    assert!(
+        released_lease_ids(&runner).is_empty(),
+        "no release may happen while docker's state is unknown: {:?}",
+        runner.commands()
+    );
+    assert!(report.released.is_empty());
+    assert!(
+        !runner
+            .commands()
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("gozer")),
+        "the sweep must not even ask gozer anything once docker is unreadable: {:?}",
+        runner.commands()
+    );
+}
+
+/// An unreadable `gozer status` (non-zero exit -- e.g. a stuck mutex) is
+/// the same story: no releases, and no `history` call either.
+///
+/// NOTE the runner is built from scratch rather than by overriding
+/// `sweep_runner`'s canned `status`: `FakeRunner` matches canned responses
+/// in INSERTION order, first match wins, so a later registration for the
+/// same matcher is silently ignored -- and this test would then pass while
+/// exercising the healthy-status path.
+#[test]
+fn startup_sweep_does_nothing_when_gozer_status_is_unreadable() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker ps", "");
+    runner.set_run_capturing("gozer status", 16, "", "mutex stuck");
+    runner.set_run_capturing("gozer history", 0, HISTORY_JSON_OPEN_TT_STATION_LEASE, "");
+    runner.set_run_capturing("gozer release", 0, r#"{"released":true}"#, "");
+
+    let report = gozer::startup_sweep(&runner, &sweep_capability());
+
+    assert!(released_lease_ids(&runner).is_empty());
+    assert!(report.released.is_empty());
+    assert!(
+        !runner.commands().iter().any(|cmd| {
+            cmd.first().map(String::as_str) == Some("gozer")
+                && cmd.get(1).map(String::as_str) == Some("history")
+        }),
+        "no point reading history when the live lease state is unknown: {:?}",
+        runner.commands()
+    );
+}
+
+/// A `who` that doesn't carry a parseable service port can't be swept --
+/// there is no port to check -- so it is reported, never guessed at.
+#[test]
+fn startup_sweep_reports_but_never_releases_a_who_with_no_parseable_port() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker ps", "");
+    runner.set_run_capturing(
+        "gozer status",
+        0,
+        r#"{"grain":"board","chips":[
+            {"dev_index":0,"bdf":"0000:01:00.0","board":"b1","state":"CLAIMED",
+             "who":"tt-station:not-a-port:llama3","reason":null}],"queue":[]}"#,
+        "",
+    );
+    runner.set_run_capturing(
+        "gozer history",
+        0,
+        r#"{"history":[{"ts":"t","event":"granted","lease_id":"ab12ef",
+             "who":"tt-station:not-a-port:llama3"}]}"#,
+        "",
+    );
+
+    let report = gozer::startup_sweep(&runner, &sweep_capability());
+
+    assert!(
+        released_lease_ids(&runner).is_empty(),
+        "an unparseable who must never be swept: {:?}",
+        runner.commands()
+    );
+    assert_eq!(report.unresolved.len(), 1, "{report:?}");
+}
+
+/// The `who` format is a shared contract with both serving backends
+/// (`tt-station:<service_port>:<model>`), and the model half may itself
+/// contain colons (`org/model:tag`) -- the port is the SECOND field, not
+/// "everything after the last colon".
+#[test]
+fn service_port_is_parsed_from_the_second_who_field() {
+    assert_eq!(gozer::who_service_port("tt-station:8080:llama3"), Some(8080));
+    assert_eq!(
+        gozer::who_service_port("tt-station:8003:ghcr.io/org/model:0.14"),
+        Some(8003)
+    );
+    // Not one of ours.
+    assert_eq!(gozer::who_service_port("claude:ttm-optimize"), None);
+    // Ours, but malformed.
+    assert_eq!(gozer::who_service_port("tt-station:llama3"), None);
+    assert_eq!(gozer::who_service_port("tt-station::llama3"), None);
+    assert_eq!(gozer::who_service_port("tt-station:99999999:m"), None);
+}
+
+// ---------------------------------------------------------------------
+// `foreign_lease_holders` -- the guard both whole-box `tt-smi -r` paths
+// (`POST /reset` and `POST /power reset-chips`) refuse on. Ownership is
+// decided by the `who` prefix `tt-station:<our service port>:`.
+// ---------------------------------------------------------------------
+
+/// A lease naming OUR OWN service port is ours, whatever model it names --
+/// it must not block our own reset. A lease naming a DIFFERENT port, or
+/// anyone else entirely, is foreign and must be named. `FREE` chips are
+/// never holders, and two chips of one board yield ONE clause.
+#[test]
+fn foreign_lease_holders_names_everyone_but_our_own_service_port() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing(
+        "gozer status",
+        0,
+        r#"{"grain":"board","chips":[
+            {"dev_index":0,"bdf":"0000:01:00.0","board":"board-a","state":"CLAIMED",
+             "who":"tt-station:8080:llama3","reason":"serving"},
+            {"dev_index":1,"bdf":"0000:02:00.0","board":"board-a","state":"CLAIMED",
+             "who":"tt-station:8080:llama3","reason":"serving"},
+            {"dev_index":2,"bdf":"0000:03:00.0","board":"board-b","state":"CLAIMED",
+             "who":"claude:ttm-optimize","reason":"bringup"},
+            {"dev_index":3,"bdf":"0000:04:00.0","board":"board-b","state":"CLAIMED",
+             "who":"claude:ttm-optimize","reason":"bringup"},
+            {"dev_index":4,"bdf":"0000:05:00.0","board":"board-c","state":"FREE",
+             "who":null,"reason":null}],"queue":[]}"#,
+        "",
+    );
+
+    let holders = gozer::foreign_lease_holders(&runner, &sweep_capability(), 8080)
+        .expect("a foreign lease is held");
+    assert_eq!(
+        holders, "board board-b is held by claude:ttm-optimize",
+        "our own lease and the FREE board must not appear, and one board must \
+         yield one clause however many of its chips are held"
+    );
+
+    // Same payload, a DIFFERENT service port: now the `tt-station:8080:`
+    // lease is somebody else's too.
+    let holders = gozer::foreign_lease_holders(&runner, &sweep_capability(), 9999)
+        .expect("both leases are foreign to port 9999");
+    assert!(holders.contains("tt-station:8080:llama3"), "{holders}");
+    assert!(holders.contains("claude:ttm-optimize"), "{holders}");
+}
+
+/// A `BUSY-UNTRACKED` chip is NOT a lease -- no `who`, nobody to name -- so
+/// it must not read as a foreign holder. Untracked work wedging the box is
+/// one of the main reasons an operator resets it.
+#[test]
+fn foreign_lease_holders_ignores_busy_untracked_chips() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing(
+        "gozer status",
+        0,
+        r#"{"grain":"board","chips":[
+            {"dev_index":0,"bdf":"0000:01:00.0","board":"board-a",
+             "state":"BUSY-UNTRACKED","who":null,"reason":null}],"queue":[]}"#,
+        "",
+    );
+
+    assert_eq!(
+        gozer::foreign_lease_holders(&runner, &sweep_capability(), 8080),
+        None
+    );
+}
+
+/// FAILS OPEN: an unreadable `gozer status` yields `None` (the reset
+/// proceeds), per the design doc's failure-modes table -- see the function's
+/// doc comment for why this one place is not fail-closed.
+#[test]
+fn foreign_lease_holders_fails_open_when_status_is_unreadable() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("gozer status", 16, "", "mutex stuck");
+    assert_eq!(
+        gozer::foreign_lease_holders(&runner, &sweep_capability(), 8080),
+        None
+    );
+}

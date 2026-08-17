@@ -454,6 +454,14 @@ pub struct DockerBackend {
 ///
 /// `RunPyBackend` needs no equivalent: its `stop` ignores the model argument
 /// entirely and sweeps by published port, so its stop cannot miss.
+///
+/// **Known limitation** (listed with the others in `crate::gozer`'s module
+/// doc): `container_name` is recorded only at SUCCESSFUL handover. The
+/// failing exits inside `start` stop the container through an in-scope local
+/// instead, because there is no `HeldLease` yet. The two agree today --
+/// both derive from the same `container_name(model)` -- but they are two
+/// implementations of "stop the right container", and a change to either
+/// has to keep them agreeing.
 #[derive(Debug, Clone)]
 struct HeldLease {
     /// gozer's lease id, the argument to `gozer release`.
@@ -587,9 +595,12 @@ impl DockerBackend {
                 let detail = holder
                     .or_else(|| crate::gozer::contention_detail(self.runner.as_ref(), capability))
                     .unwrap_or_else(|| "gozer reports no free chips".to_string());
-                Err(anyhow::anyhow!(
+                // A `Contention`, not a bare `anyhow!` -- same reasoning
+                // (and same wording) as `RunPyBackend::acquire_lease`:
+                // `POST /run` answers 409 for a contended box, not 500.
+                Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
                     "docker backend: cannot serve '{model}' -- no chips are available: {detail}"
-                ))
+                ))))
             }
             crate::gozer::Outcome::Failed(message) => Err(anyhow::anyhow!(
                 "docker backend: cannot serve '{model}' -- gozer acquire failed: {message}"

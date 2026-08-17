@@ -120,7 +120,12 @@ pub struct ServingList {
 /// * `chip` -- gozer's `dev_index`, the box-local numeric ASIC identifier
 ///   (distinct from `bdf`, the PCI address, and `board`, the board serial --
 ///   same three-way split `gozer::Grant` already draws between `chips`
-///   (BDFs) and `dev_indices`).
+///   (BDFs) and `dev_indices`). **Carries the same open caveat its sibling
+///   `gozer::Grant::dev_indices` documents: this is `/dev/tenstorrent/<n>`
+///   numbering, which is NOT established to be run.py's `--device-id`
+///   namespace.** Anything wiring this into a device picker (say, a
+///   Mac-side "serve on chip N") must read that field's doc, and
+///   `tt-station-agentd::gozer`'s known-limitations section, first.
 /// * `bdf` -- the PCI BDF (e.g. `"0000:01:00.0"`).
 /// * `board` -- the board serial this chip belongs to (e.g.
 ///   `"0100014311601055"`).

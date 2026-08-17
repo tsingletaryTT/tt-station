@@ -67,6 +67,12 @@ const DEFAULT_SERVING_PORT: u16 = 8000;
 /// roughly the same cadence) into one subprocess, short enough that a real
 /// lease change on the box (someone else's `gozer acquire`/`release`) shows
 /// up well within a human noticing it.
+///
+/// **Known limitation** (listed with the others in `crate::gozer`'s module
+/// doc): because it is cached, `/leases` can lag reality by up to this TTL.
+/// That makes it a status VIEW, never an interlock -- nothing may decide
+/// whether to touch chips from it. The two reset refusals deliberately call
+/// `gozer::foreign_lease_holders` fresh rather than reading this cache.
 const GOZER_LEASE_CACHE_TTL: Duration = Duration::from_millis(300);
 
 /// How long a pairing code stays valid after `/pair/init` mints it. Short
@@ -753,8 +759,46 @@ impl AppState {
     /// NOT touch tokens/SSH/status: unlike `POST /reset` (which unpairs),
     /// every power action here -- including `reset-chips` -- preserves
     /// pairing.
+    ///
+    /// **`reset-chips` REFUSES while another tenant holds a lease.** It runs
+    /// `power_reset_chips_cmd` -- `["tt-smi", "-r"]` by default, a WHOLE-BOX
+    /// reset -- and, because `is_machine_op()` is false for it, it skips the
+    /// backend entirely: no serving stop, no lease release, and (before this)
+    /// no scoping of any kind. It is the second of the two whole-box reset
+    /// paths (`POST /reset` is the other) and gets the identical treatment:
+    /// a lease held by anyone other than this agent's own session refuses the
+    /// call and names the holder (see `gozer::foreign_lease_holders`). The
+    /// other three actions are untouched -- suspend/reboot/shutdown take the
+    /// whole machine down, where a lease check would be theatre.
+    ///
+    /// Ownership is matched against `Inner::serving_port`, which `main.rs`
+    /// fills from the same `--serving-port` it gives the backend as its
+    /// `service_port`/`host_port` -- so the port in a lease this agent took
+    /// and the port checked here are the same value by construction, not by
+    /// coincidence.
+    ///
+    /// Shells out through `RealCommandRunner`, like `gozer_snapshot` and
+    /// `get_serving` -- NOT through the backend's injected runner, since the
+    /// power path deliberately doesn't go near the backend.
     pub fn run_power_command(&self, action: crate::power::PowerAction) -> anyhow::Result<()> {
         use crate::power::PowerAction;
+
+        if matches!(action, PowerAction::ResetChips) {
+            if let Some(capability) = &self.inner.gozer {
+                let runner = RealCommandRunner;
+                if let Some(holders) = crate::gozer::foreign_lease_holders(
+                    &runner,
+                    capability,
+                    self.inner.serving_port,
+                ) {
+                    return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
+                        "refusing reset-chips: it would run a WHOLE-BOX board reset while \
+                         another tenant holds chips -- {holders}. Stop that session (or \
+                         `gozer release` its lease) first."
+                    ))));
+                }
+            }
+        }
 
         if action.is_machine_op() {
             if let Some(ep) = self.endpoint() {
@@ -1555,6 +1599,34 @@ fn backend_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
+/// `backend_error`, except that a failure caused by ANOTHER TENANT HOLDING
+/// CHIPS answers `409 Conflict` instead of `500`.
+///
+/// Nothing went wrong in those cases: the box's current state conflicts with
+/// what was asked (`POST /run` on a fully-leased box, `POST /reset` or
+/// `POST /power reset-chips` while a neighbour holds a lease), which is
+/// exactly what 409 means -- and it is the same code `GET /endpoint` already
+/// uses for "well-formed request, wrong box state". A client can retry a 409
+/// after the holder finishes; a 500 tells it to go looking for a bug.
+///
+/// Detected by walking the error chain rather than matching on message text,
+/// so a `.context(..)` added anywhere between the backend and here cannot
+/// silently turn a 409 back into a 500. The message is passed through
+/// verbatim -- it already names the board and the holder, and (deliberately)
+/// no duration, since gozer exposes none. Used by the three routes that can
+/// contend; every other route keeps `backend_error`.
+fn contention_aware_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
+    if err.chain().any(|cause| cause.is::<crate::gozer::Contention>()) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        );
+    }
+    backend_error(err)
+}
+
 /// `POST /run { "model": "..." }` (bearer-guarded): ask the backend to start
 /// serving `model`.
 ///
@@ -1578,7 +1650,9 @@ async fn run_model(
         .await
         .map_err(|join_err| backend_error(anyhow::anyhow!("run task panicked: {join_err}")))?;
 
-    let endpoint = result.map_err(backend_error)?;
+    // A contended box answers 409 (naming the board and the holder), not
+    // 500 -- see `contention_aware_error`.
+    let endpoint = result.map_err(contention_aware_error)?;
     state.set_serving(endpoint.clone());
 
     Ok(Json(RunResponse { endpoint }))
@@ -1656,7 +1730,10 @@ async fn reset(
     tokio::task::spawn_blocking(move || backend.reset())
         .await
         .map_err(|join_err| backend_error(anyhow::anyhow!("reset task panicked: {join_err}")))?
-        .map_err(backend_error)?;
+        // A reset REFUSED because another tenant holds chips is a 409, and
+        // (note the `?`) it aborts the route before the token clearing
+        // below: a refusal must leave the box, and the pairing, untouched.
+        .map_err(contention_aware_error)?;
 
     // Forget every issued token (invalidates the caller's own -- expected).
     state.clear_tokens();
@@ -1749,7 +1826,9 @@ async fn power(
                     }),
                 )
             } else {
-                backend_error(e)
+                // `reset-chips` refused because another tenant holds chips
+                // is a 409, not a 500 -- see `contention_aware_error`.
+                contention_aware_error(e)
             }
         })?;
 

@@ -2334,3 +2334,200 @@ fn runpy_list_models_defaults_path_to_repo_dir_slash_model_spec_json() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------
+// THE NO-GOZER FALLBACK SUITE (Task 5). `runpy_start_without_gozer_is_
+// unchanged` above pins `start`'s whole command vector; these do the same
+// for `stop` and `reset`. This is the suite that protects every existing
+// single-tenant box, and the one most likely to rot: a presence assertion
+// ("it still runs tt-smi -r") passes just as well when leasing has inserted
+// a gozer call, dropped a docker stop, or reordered the sequence. Assert
+// every command, in order, byte for byte.
+// ---------------------------------------------------------------------
+
+/// `stop` with no gozer capability: the published-port sweep, one
+/// `docker stop` per id it found, and NOTHING else. Byte-identical to the
+/// pre-leasing behaviour.
+#[test]
+fn runpy_stop_without_gozer_is_unchanged() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker ps", "abc123\n");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend.stop("llama3").expect("stop should succeed");
+
+    let expected: Vec<Vec<String>> = vec![
+        vec!["docker", "ps", "--filter", "publish=8080", "-q"],
+        vec!["docker", "stop", "abc123"],
+    ]
+    .into_iter()
+    .map(|cmd| cmd.into_iter().map(str::to_string).collect())
+    .collect();
+
+    assert_eq!(
+        runner.commands(),
+        expected,
+        "the unleased stop sequence must not change at all -- no gozer \
+         subprocess, and no extra docker call"
+    );
+    assert_eq!(backend.status().unwrap(), ServingStatus::Idle);
+}
+
+/// `reset` with no gozer capability: the published-port sweep, one
+/// `docker stop`, and the BARE whole-box `tt-smi -r` -- no BDF targets, no
+/// lease check, no gozer subprocess. On a single-tenant box the whole-box
+/// reset is the protective behaviour (it clears wedged ethernet cores), and
+/// this pins it.
+#[test]
+fn runpy_reset_without_gozer_is_unchanged() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker ps", "abc123\n");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend.reset().expect("reset should succeed");
+
+    let expected: Vec<Vec<String>> = vec![
+        vec!["docker", "ps", "--filter", "publish=8080", "-q"],
+        vec!["docker", "stop", "abc123"],
+        // Bare: `tt-smi -r` with no targets is a WHOLE-BOX reset, which is
+        // exactly right when nothing can be leasing chips beside us.
+        vec!["tt-smi", "-r"],
+    ]
+    .into_iter()
+    .map(|cmd| cmd.into_iter().map(str::to_string).collect())
+    .collect();
+
+    assert_eq!(
+        runner.commands(),
+        expected,
+        "the unleased reset sequence must not change at all"
+    );
+}
+
+// ---------------------------------------------------------------------
+// `POST /reset` must not reset a neighbour's chips (Task 5). `/reset` is
+// NOT an eviction command and this version has no implicit preemption, so
+// a whole-box `tt-smi -r` while someone else holds a lease is refused and
+// the holder is named. Refusing is the honest option: the operator can
+// always stop the other session deliberately first.
+// ---------------------------------------------------------------------
+
+/// A foreign lease is held (`claude:ttm-optimize`) -> `reset` must REFUSE,
+/// name the holder, and issue no `tt-smi` at all. The command-vector
+/// assertion is the point: an implementation that refused *after* running
+/// the reset would satisfy an error-message-only test.
+#[test]
+fn runpy_reset_refuses_and_names_the_holder_when_a_foreign_lease_is_held() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("gozer status", 0, STATUS_JSON_HELD, "");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    let err = backend
+        .reset()
+        .expect_err("reset must refuse while another tenant holds a lease");
+    assert!(
+        err.to_string().contains("claude:ttm-optimize"),
+        "the refusal must name the holder: {err}"
+    );
+
+    let commands = runner.commands();
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("tt-smi")),
+        "a refused reset must not reset ANYTHING: {commands:?}"
+    );
+    assert!(
+        !commands.iter().any(|cmd| {
+            cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")
+        }),
+        "a refused reset must not stop containers either: {commands:?}"
+    );
+}
+
+/// The lease held is OUR OWN (`tt-station:<our service port>:<model>`) --
+/// nobody else is on the box -- so `/reset` proceeds exactly as it always
+/// did: stop, whole-box `tt-smi -r`, and release the lease.
+#[test]
+fn runpy_reset_proceeds_when_the_only_lease_is_its_own() {
+    let runner = leasing_runner(0);
+    runner.set_run_capturing(
+        "gozer status",
+        0,
+        // `who` is what THIS backend writes at acquire time: service port
+        // 8080, which is the port `config(..)` below configures.
+        r#"{"grain":"board","chips":[
+            {"dev_index":0,"bdf":"0000:01:00.0","board":"b1","state":"CLAIMED",
+             "who":"tt-station:8080:llama3","reason":"serving"}],"queue":[]}"#,
+        "",
+    );
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend.reset().expect("reset must proceed on our own lease");
+
+    let commands = runner.commands();
+    assert!(
+        commands
+            .iter()
+            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-r".to_string()]),
+        "our own lease must not block our own whole-box reset: {commands:?}"
+    );
+}
+
+/// A chip in gozer's `BUSY-UNTRACKED` state is NOT a lease -- there is no
+/// `who` to name and no lease to own -- so it must not block `/reset`.
+/// Untracked work wedging the box is one of the main reasons an operator
+/// reaches for `/reset` in the first place.
+#[test]
+fn runpy_reset_proceeds_when_a_chip_is_busy_untracked() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing(
+        "gozer status",
+        0,
+        r#"{"grain":"board","chips":[
+            {"dev_index":0,"bdf":"0000:01:00.0","board":"b1",
+             "state":"BUSY-UNTRACKED","who":null,"reason":null}],"queue":[]}"#,
+        "",
+    );
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend.reset().expect("an untracked chip must not block /reset");
+    assert!(
+        runner
+            .commands()
+            .iter()
+            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-r".to_string()]),
+        "{:?}",
+        runner.commands()
+    );
+}
+
+/// An UNREADABLE `gozer status` (exit 16, a stuck mutex -- or exit 14, an
+/// unreadable topology) must NOT block `/reset`. This is the one place in
+/// the leasing code that fails OPEN, and it is deliberate: the design doc's
+/// failure-modes table degrades a `status` that cannot read the box to
+/// "leasing disabled for this call", and a wedged box is exactly what an
+/// operator reaches for `/reset` to clear.
+#[test]
+fn runpy_reset_proceeds_when_gozer_status_is_unreadable() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("gozer status", 16, "", "mutex stuck");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend
+        .reset()
+        .expect("an unreadable gozer must not disable /reset");
+    assert!(
+        runner
+            .commands()
+            .iter()
+            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-r".to_string()]),
+        "{:?}",
+        runner.commands()
+    );
+}

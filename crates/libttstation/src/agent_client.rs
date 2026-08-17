@@ -246,6 +246,11 @@ impl AgentClient {
 
     /// `POST /run { "model": "..." }`: ask the agent to start serving
     /// `model`, returning the resulting [`Endpoint`].
+    ///
+    /// A `409 Conflict` means the box's chips are held by another tenant;
+    /// the agent's own message (which names the board and the holder) is
+    /// passed through rather than collapsed into a generic HTTP-status
+    /// error -- see the special case in the body.
     pub async fn run(&self, model: &str) -> anyhow::Result<Endpoint> {
         #[derive(Serialize)]
         struct RunRequest<'a> {
@@ -258,14 +263,39 @@ impl AgentClient {
         }
 
         let url = join(&self.base, "run");
-        let resp = self
-            .send(
-                reqwest::Client::new()
-                    .post(&url)
-                    .json(&RunRequest { model }),
-                &url,
-            )
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&RunRequest { model })
+            .send()
             .await?;
+
+        // `409 Conflict` is the agent's CONTENTION answer: another tenant
+        // holds the chips, and the body names the board and the holder (see
+        // `tt-station-agentd::routes::contention_aware_error`). That message
+        // is the entire point -- `error_for_status`'s "HTTP status client
+        // error (409 Conflict)" would throw away the only part a user can
+        // act on. Same special-case shape `endpoint()` below uses for its
+        // own 409, including a stable "(409)" marker for consumers that
+        // want to branch on the case rather than the wording. NOTE there is
+        // deliberately no duration in it: gozer exposes no lease start time.
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            let detail = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| {
+                    body.get("error")
+                        .and_then(|e| e.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "no chips are available on this box".to_string());
+            anyhow::bail!("cannot serve '{model}' (409): {detail}");
+        }
+
+        let resp = resp
+            .error_for_status()
+            .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
 
         let body: RunResponse = resp.json().await?;
         Ok(body.endpoint)

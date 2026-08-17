@@ -140,6 +140,44 @@ async fn endpoint_returns_endpoint_on_200() {
     );
 }
 
+/// `run(model)` on a `409` (the agent refused because another tenant holds
+/// the chips -- see `tt-station-agentd::routes::contention_aware_error`)
+/// must surface the agent's OWN message, which names the board and the
+/// holder. `error_for_status`'s generic "HTTP status client error (409
+/// Conflict)" would throw away the only part a user can act on -- and
+/// "naming the holder" is the whole promise `tt run` makes on a contended
+/// box.
+#[tokio::test]
+async fn run_maps_409_to_the_agents_contention_message() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/run"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+            "error": "runpy backend: cannot serve 'llama3' -- no chips are available: \
+                      board 0100014311601055 is held by claude:ttm-optimize"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AgentClient::new(server.uri(), TOKEN);
+    let err = client
+        .run("llama3")
+        .await
+        .expect_err("run() should fail on 409");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("claude:ttm-optimize"),
+        "the holder the agent named must survive to the caller: {message}"
+    );
+    assert!(
+        message.contains("0100014311601055"),
+        "the contended board must survive to the caller: {message}"
+    );
+}
+
 /// `endpoint()` on a `409` (nothing currently serving, per the agent's own
 /// `GET /endpoint` semantics) must map to a clear `Err` mentioning that no
 /// model is serving, not a generic "409" error or a panic trying to parse a

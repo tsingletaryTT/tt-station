@@ -947,8 +947,11 @@ fn docker_start_refuses_to_serve_when_the_leased_mesh_cannot_be_derived() {
     );
 }
 
-/// With NO gozer capability, `stop` must behave exactly as before: one
-/// `docker stop`, no gozer subprocess.
+/// THE NO-GOZER FALLBACK SUITE (Task 5), `stop` half. A WHOLE-VECTOR PIN,
+/// not a length check plus a "no gozer" check: this is the assertion that
+/// protects every existing single-tenant box from an argv regression, and
+/// weaker forms of it pass just as well when leasing has inserted a call,
+/// dropped one, or reordered the sequence.
 #[test]
 fn docker_stop_unleased_issues_no_gozer_call() {
     let runner = FakeRunner::new(0);
@@ -959,9 +962,40 @@ fn docker_stop_unleased_issues_no_gozer_call() {
 
     backend.stop("llama3").expect("stop should succeed");
 
-    let commands = runner.commands();
-    assert_eq!(commands.len(), 1, "{commands:?}");
-    assert!(!commands.iter().any(|cmd| cmd[0] == "gozer"));
+    let expected: Vec<Vec<String>> = vec![vec!["docker", "stop", "tt-inference-llama3"]]
+        .into_iter()
+        .map(|cmd| cmd.into_iter().map(str::to_string).collect())
+        .collect();
+    assert_eq!(
+        runner.commands(),
+        expected,
+        "the unleased stop sequence must not change at all -- one docker stop \
+         naming the model's container, and no gozer subprocess"
+    );
+}
+
+/// THE NO-GOZER FALLBACK SUITE (Task 5), `reset` half. `DockerBackend`
+/// takes `ServingBackend::reset`'s default no-op implementation (see its
+/// trait doc: a reset with no model in hand has no container name to
+/// address), so an unleased `reset` must shell out to NOTHING -- no
+/// `tt-smi -r`, no gozer, no docker. Pinned here so a later change that
+/// gives this backend a real reset has to come past this test rather than
+/// quietly starting to touch a shared box's chips.
+#[test]
+fn docker_reset_without_gozer_is_unchanged() {
+    let runner = FakeRunner::new(0);
+    let backend = DockerBackend::new(
+        config("some/image:tag", "127.0.0.1", 8080),
+        Box::new(runner.clone()),
+    );
+
+    backend.reset().expect("reset should succeed");
+
+    assert_eq!(
+        runner.commands(),
+        Vec::<Vec<String>>::new(),
+        "the unleased reset must run no command at all"
+    );
 }
 
 /// A grant that names no device indices must REFUSE the serve rather than

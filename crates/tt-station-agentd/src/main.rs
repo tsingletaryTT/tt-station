@@ -574,6 +574,73 @@ async fn detect_startup_gozer(gozer_path: Option<&str>) -> Option<gozer::Capabil
     }
 }
 
+/// How long the startup lease sweep may take before agentd stops waiting on
+/// it. Everything between the capability probe and the socket bind delays
+/// serving (same note as `detect_startup_device_mesh`), and this one shells
+/// out three or four times -- `docker ps`, `gozer status`, `gozer history`,
+/// and a `gozer release` per stale lease -- so it gets a ceiling of its own.
+/// Generous relative to the probe's 5s because `docker ps` on a loaded box
+/// is not instant, and because giving up early only postpones the reclaim to
+/// the next restart.
+const STARTUP_LEASE_SWEEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Reclaim this agent's own abandoned chip leases at startup: release every
+/// `tt-station:` lease whose service port has nothing serving on it (see
+/// `gozer::startup_sweep`, which holds the rule and every safety property).
+///
+/// A no-op -- not a single subprocess -- when gozer is absent, which is the
+/// whole "gozer is optional" contract. Bounded and never fatal for the same
+/// reasons `detect_startup_device_mesh`/`detect_startup_gozer` are: a wedged
+/// `docker`/`gozer` must delay the socket bind by at most
+/// `STARTUP_LEASE_SWEEP_TIMEOUT`, never hang the daemon, and a sweep that
+/// times out or panics just leaves the leases where they are.
+///
+/// Called AFTER the capability probe (it needs the probe's result) and
+/// before the bind, so a Mac connecting to a freshly-restarted agent sees a
+/// box whose lease state already matches what is actually running.
+async fn sweep_stale_leases_at_startup(capability: Option<&gozer::Capability>) {
+    let Some(capability) = capability.cloned() else {
+        return;
+    };
+
+    let sweep = tokio::time::timeout(
+        STARTUP_LEASE_SWEEP_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            let runner = RealCommandRunner;
+            gozer::startup_sweep(&runner, &capability)
+        }),
+    )
+    .await;
+
+    match sweep {
+        Ok(Ok(report)) => {
+            // `startup_sweep` already logs each decision as it makes it; one
+            // summary line here is what an operator greps for at boot.
+            if !report.released.is_empty() || !report.unresolved.is_empty() {
+                eprintln!(
+                    "tt-station-agentd: startup lease sweep released {} stale lease(s), kept {}, \
+                     could not resolve {}",
+                    report.released.len(),
+                    report.kept.len(),
+                    report.unresolved.len()
+                );
+            }
+        }
+        Ok(Err(join_err)) => {
+            eprintln!(
+                "tt-station-agentd: startup lease sweep task panicked: {join_err}; any stale \
+                 leases stay held"
+            );
+        }
+        Err(_elapsed) => {
+            eprintln!(
+                "tt-station-agentd: startup lease sweep timed out after {STARTUP_LEASE_SWEEP_TIMEOUT:?}; \
+                 any stale leases stay held (they are reclaimed on the next restart)"
+            );
+        }
+    }
+}
+
 /// Build the serving backend this process will run on, PROBING FOR GOZER
 /// FIRST so the probed capability can be handed to the backend that is
 /// actually constructed.
@@ -830,6 +897,13 @@ async fn main() -> Result<()> {
         runpy_config,
     )
     .await?;
+
+    // Reconcile gozer's lease state against what is actually running, ONCE,
+    // right after the probe that produced `gozer_capability` -- before the
+    // socket bind below, so the first `/leases` a Mac ever asks for already
+    // reflects reality. A no-op when gozer is absent. See
+    // `sweep_stale_leases_at_startup` (bounded, never fatal).
+    sweep_stale_leases_at_startup(gozer_capability.as_ref()).await;
 
     // Persist issued bearer tokens across restarts by default (see
     // `--token-store`'s doc comment) -- `--no-token-persistence` (folded into

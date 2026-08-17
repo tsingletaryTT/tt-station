@@ -6,9 +6,11 @@
 //! **Scope of this module today:** capability probing (`probe`), the
 //! leasing verbs a serving backend needs (`acquire`, `release`,
 //! `contention_detail`), grant/outcome parsing (`Outcome::from_captured`),
-//! the release-on-drop `LeaseGuard`, and (Task 4) the read-only
-//! `snapshot_leases` behind `GET /leases`/`GET /status`'s `leasing` field.
-//! The startup reconciliation sweep is separate follow-up work.
+//! the release-on-drop `LeaseGuard`, (Task 4) the read-only
+//! `snapshot_leases` behind `GET /leases`/`GET /status`'s `leasing` field,
+//! and (Task 5) the `startup_sweep` that reclaims this agent's own abandoned
+//! leases plus the `foreign_lease_holders` guard both whole-box reset paths
+//! refuse on.
 //!
 //! **gozer is OPTIONAL.** Its absence is a normal outcome (logged once, at
 //! info, via `eprintln!` -- this crate doesn't pull in a logging framework
@@ -35,6 +37,58 @@
 //! agent's own pid), or the lease silently evaporates under a healthy
 //! session. `acquire` below is the one place that builds that call, and it
 //! always passes the flag.
+//!
+//! # Known limitations
+//!
+//! Recorded here, in the code a maintainer of this integration actually
+//! opens, rather than only in the design doc. None of these is a bug to be
+//! fixed by tightening the code below; each is a real boundary of what this
+//! version knows.
+//!
+//! 1. **`--device-id`'s namespace is UNVERIFIED for the runpy backend.**
+//!    run.py's `--device-id` takes a *logical* index list; gozer's
+//!    `dev_index` is `/dev/tenstorrent/<n>`. `tt-smi` treats those as
+//!    different namespaces, and no reading of either codebase settles which
+//!    one run.py means. If they differ, a leased serve pins the WRONG chips,
+//!    comes up healthy, and nothing detects it. See the long comment at the
+//!    `--device-id` construction in `serving/runpy.rs::start`.
+//!    **The docker backend's `--device /dev/tenstorrent/<n>` mapping is NOT
+//!    in doubt** -- gozer reads `dev_index` from the kernel's own
+//!    `/sys/bus/pci/devices/<bdf>/tenstorrent/tenstorrent!N`, confirmed on
+//!    hardware. Only the runpy half is open; do not conflate the two.
+//!    *A cheaper way to close it than a single-chip serve:* gozer's grant
+//!    already carries `env: {"TT_VISIBLE_DEVICES": "<bdf>,<bdf>"}` -- BDFs,
+//!    no ambiguity -- and `RunPyBackend` already passes env to the child via
+//!    `CommandRunner::run_in_dir_with_env`. Whether run.py forwards it into
+//!    the container is the experiment worth running first.
+//! 2. **A lease REAPED rather than released never resets its chips**
+//!    (inherited from gozer: `--fresh` is the protected path). The next
+//!    plain `acquire` then gets un-reset silicon. So agentd prefers an
+//!    explicit `release` everywhere -- which is exactly what `LeaseGuard`,
+//!    `release_lease`, and the startup sweep exist to guarantee.
+//! 3. **`GET /leases` is CACHED** (`routes::GOZER_LEASE_CACHE_TTL`), so it
+//!    can lag reality by up to that TTL -- a lease taken or released by
+//!    another tenant a moment ago may not be visible yet. It is a status
+//!    view, never an interlock; nothing may decide whether to reset chips
+//!    from `/leases`. (The two reset refusals deliberately call
+//!    `foreign_lease_holders` fresh instead of reading that cache.)
+//! 4. **The startup sweep resolves lease ids from `gozer history`**,
+//!    because `gozer status --json` reports `who` but no `lease_id` while
+//!    `gozer release` takes an id. A live lease whose id history cannot
+//!    account for is reported and left alone, never guessed at. Exposing
+//!    `lease_id` in gozer's own `status --json` would delete that whole step
+//!    and is the clean fix -- a small change, in that repo.
+//! 5. **`HeldLease.container_name` (docker backend) is recorded only at
+//!    successful handover**; the failing exits inside `start` stop the
+//!    container through an in-scope local instead. The two agree today
+//!    because both derive from the same `container_name(model)` binding --
+//!    but they are two implementations of "stop the right container", and a
+//!    change to either has to keep them agreeing.
+//! 6. **`DockerBackend` has no cancel flag**, deliberately: `RunPyBackend`
+//!    has one because a `/stop` mid-bring-up must abort its health poll, and
+//!    adding one to the docker backend would change UNLEASED behaviour --
+//!    outside this integration's remit. Its in-flight failure paths are
+//!    bounded by `LeaseGuard` instead, so a lease can still never leak.
 
 use anyhow::{Context, Result};
 use libttstation::model::LeaseEntry;
@@ -619,6 +673,374 @@ pub fn snapshot_leases(runner: &dyn CommandRunner, capability: &Capability) -> O
         max_concurrent,
     })
 }
+
+/// The `--who` prefix every lease this agent takes carries, and the filter
+/// the startup sweep selects on. The full format is a shared contract
+/// between both serving backends: `tt-station:<service_port>:<model>` (see
+/// `RunPyBackend::acquire_lease` / `DockerBackend::acquire_lease`, which are
+/// the only two places it is written, and [`who_service_port`], which is the
+/// only place it is read).
+pub const WHO_PREFIX: &str = "tt-station:";
+
+/// The SERVICE PORT out of one of this agent's own `--who` strings
+/// (`tt-station:<service_port>:<model>`), or `None` for a `who` that isn't
+/// ours or doesn't carry a parseable port.
+///
+/// **The port is the second field, not "everything after the last colon".**
+/// A model id may itself contain colons (`ghcr.io/org/model:0.14`), so this
+/// splits into exactly three parts and reads the middle one.
+///
+/// Why the port and not a container name: `run.py` names its own container
+/// and only reveals the id after launch -- long after the lease has to
+/// exist -- so agentd cannot know a name at acquire time. The port is known
+/// before launch and survives a container restart, which makes it the
+/// better key regardless (see the design doc's "One startup sweep").
+pub fn who_service_port(who: &str) -> Option<u16> {
+    let rest = who.strip_prefix(WHO_PREFIX)?;
+    let (port, model) = rest.split_once(':')?;
+    // A `who` with no model half is not one this agent wrote; refusing it
+    // keeps the sweep's input to exactly the shape both backends emit.
+    if model.is_empty() {
+        return None;
+    }
+    port.parse::<u16>().ok()
+}
+
+/// What one [`startup_sweep`] did, for the caller to log. Not consumed for
+/// control flow anywhere -- the sweep's real effect is the `gozer release`
+/// calls it makes -- but a startup line naming what was reclaimed (and what
+/// could not be) is the only place an operator learns why a board came back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    /// Lease ids released because nothing was serving on their port.
+    pub released: Vec<String>,
+    /// Lease ids left alone because something IS serving on their port.
+    pub kept: Vec<String>,
+    /// `who` strings that name a live tt-station lease this sweep could NOT
+    /// act on -- no lease id resolvable from `gozer history`, or no
+    /// parseable service port in the `who`. Reported, never guessed at.
+    pub unresolved: Vec<String>,
+}
+
+/// How many `gozer history` records the sweep reads. Bounded because this
+/// runs between the capability probe and the socket bind, where everything
+/// delays serving (see `main.rs`'s `detect_startup_device_mesh`); 200 is
+/// far more than the handful of events a box accumulates between agentd
+/// restarts, and `history.jsonl` is cleared with `/tmp` on every reboot.
+const HISTORY_SCAN_RECORDS: &str = "200";
+
+/// One `gozer history --json` record. Only the three fields the sweep needs
+/// are declared; serde ignores the rest (`ts`, `chips`, `reason`, ...).
+#[derive(Debug, Deserialize)]
+struct HistoryRecord {
+    #[serde(default)]
+    event: Option<String>,
+    #[serde(default)]
+    lease_id: Option<String>,
+    #[serde(default)]
+    who: Option<String>,
+}
+
+/// `gozer history --json`'s top-level payload.
+#[derive(Debug, Default, Deserialize)]
+struct HistoryReport {
+    #[serde(default)]
+    history: Vec<HistoryRecord>,
+}
+
+/// THE STARTUP SWEEP: release every `tt-station:` lease whose service port
+/// has nothing serving on it.
+///
+/// One rule, one direction (the design doc's "One startup sweep"). The
+/// reverse case -- a container with no lease -- is already covered by
+/// `--owner-pid`: agentd's death makes the lease reapable, and the orphaned
+/// container shows up as `BUSY-UNTRACKED`, which gozer refuses to allocate.
+///
+/// The order of the three questions is the safety property:
+///
+/// 1. **What is running?** [`crate::serving::discovery::running_published_ports`].
+///    An unreadable `docker ps` ends the sweep immediately -- gozer is not
+///    even asked -- because "nothing is serving" and "I could not tell" must
+///    never collapse into the same answer when the consequence is a chip
+///    reset.
+/// 2. **Which leases are live, and whose?** [`snapshot_leases`]. Only chips
+///    that are not `FREE` and whose `who` starts with [`WHO_PREFIX`] are
+///    candidates; a neighbour's lease is never touched.
+/// 3. **Which lease id is that?** `gozer history --json`. This step exists
+///    only because `gozer status --json` reports `who` but NOT `lease_id`,
+///    and `gozer release` takes an id -- so the id is reconstructed from the
+///    history log: the latest `granted`/`adopted` record for that exact
+///    `who` with no later `released`/`reaped` for the same id. A `who` whose
+///    id cannot be resolved that way is REPORTED, never guessed at
+///    (`SweepReport::unresolved`): gozer reuses lease ids, and releasing a
+///    stale one could reset a different tenant's chips. Exposing `lease_id`
+///    in gozer's own `status --json` would remove this step entirely and is
+///    the clean fix -- see the module doc's known limitations.
+///
+/// Best-effort throughout, and never fatal: every failure mode (docker
+/// unreadable, `status` unreadable, `history` unreadable, a release gozer
+/// refuses) leaves the lease exactly where it was and logs.
+pub fn startup_sweep(runner: &dyn CommandRunner, capability: &Capability) -> SweepReport {
+    let mut report = SweepReport::default();
+
+    // 1. Docker first: without it there is no question to answer, and no
+    //    reason to spawn a single gozer subprocess.
+    let Some(ports_in_use) = crate::serving::discovery::running_published_ports(runner) else {
+        eprintln!(
+            "tt-station-agentd: skipping the startup lease sweep -- `docker ps` could not be \
+             read, so nothing can be proven stale"
+        );
+        return report;
+    };
+
+    // 2. Live lease state, from the same `gozer status --json` parse
+    //    `GET /leases` uses.
+    let Some(snapshot) = snapshot_leases(runner, capability) else {
+        eprintln!(
+            "tt-station-agentd: skipping the startup lease sweep -- `gozer status --json` could \
+             not be read"
+        );
+        return report;
+    };
+    let mut live_who: Vec<String> = Vec::new();
+    for lease in &snapshot.leases {
+        if lease.state == "FREE" {
+            continue;
+        }
+        let Some(who) = lease.who.as_deref() else {
+            continue;
+        };
+        if who.starts_with(WHO_PREFIX) && !live_who.iter().any(|seen| seen == who) {
+            live_who.push(who.to_string());
+        }
+    }
+    if live_who.is_empty() {
+        return report;
+    }
+
+    // 3. `who` -> lease id, from the history log (see this fn's doc).
+    let open = open_leases_from_history(runner, capability);
+
+    let mut handled: Vec<String> = Vec::new();
+    for (lease_id, who) in open {
+        if !live_who.contains(&who) {
+            // Either not one of ours, or history says open while gozer's
+            // live state does not. Not corroborated -> not touched.
+            continue;
+        }
+        handled.push(who.clone());
+        let Some(port) = who_service_port(&who) else {
+            eprintln!(
+                "tt-station-agentd: lease '{lease_id}' is held by '{who}', which carries no \
+                 parseable service port; leaving it alone"
+            );
+            report.unresolved.push(who);
+            continue;
+        };
+        if ports_in_use.contains(&port) {
+            eprintln!(
+                "tt-station-agentd: leaving lease '{lease_id}' ({who}) alone -- something is \
+                 still serving on port {port}"
+            );
+            report.kept.push(lease_id);
+            continue;
+        }
+        eprintln!(
+            "tt-station-agentd: releasing stale lease '{lease_id}' ({who}) -- nothing is serving \
+             on port {port}"
+        );
+        match release(runner, capability, &lease_id) {
+            Ok(()) => report.released.push(lease_id),
+            Err(err) => eprintln!(
+                "tt-station-agentd: could not release stale lease '{lease_id}': {err:#} -- it \
+                 stays held; clear it by hand with `gozer release {lease_id}`"
+            ),
+        }
+    }
+
+    // Anything gozer reports as a live tt-station lease that history could
+    // not put an id to. Named, so an operator can clear it by hand.
+    for who in live_who {
+        if !handled.contains(&who) {
+            eprintln!(
+                "tt-station-agentd: lease held by '{who}' has no resolvable lease id in \
+                 `gozer history`; leaving it alone (clear it by hand if it is stale)"
+            );
+            report.unresolved.push(who);
+        }
+    }
+
+    report
+}
+
+/// `(lease_id, who)` for every lease `gozer history --json` shows as still
+/// open: a `granted`/`adopted` record with no later `released`/`reaped` for
+/// the same id. Empty on any failure (unreadable history, non-zero exit,
+/// unparseable JSON) -- which makes the sweep a no-op rather than a guess.
+///
+/// A later `granted` for an id that is already open REPLACES the earlier
+/// record's `who` rather than adding a second entry: gozer reuses ids, and
+/// the most recent grant is the one that describes the lease alive now.
+fn open_leases_from_history(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+) -> Vec<(String, String)> {
+    let Ok(captured) = runner.run_capturing(&[
+        capability.path.as_str(),
+        "history",
+        "--json",
+        "-n",
+        HISTORY_SCAN_RECORDS,
+    ]) else {
+        eprintln!("tt-station-agentd: could not run `gozer history`; no lease ids to sweep with");
+        return Vec::new();
+    };
+    if captured.code != 0 {
+        eprintln!(
+            "tt-station-agentd: `gozer history --json` exited {}; no lease ids to sweep with",
+            captured.code
+        );
+        return Vec::new();
+    }
+    let Ok(report) = serde_json::from_str::<HistoryReport>(&captured.stdout) else {
+        eprintln!(
+            "tt-station-agentd: could not parse `gozer history --json`; no lease ids to sweep with"
+        );
+        return Vec::new();
+    };
+
+    let mut open: Vec<(String, String)> = Vec::new();
+    for record in report.history {
+        let Some(lease_id) = record.lease_id else {
+            continue;
+        };
+        match record.event.as_deref() {
+            Some("granted") | Some("adopted") => {
+                let who = record.who.unwrap_or_default();
+                match open.iter_mut().find(|(id, _)| *id == lease_id) {
+                    Some(existing) => existing.1 = who,
+                    None => open.push((lease_id, who)),
+                }
+            }
+            Some("released") | Some("reaped") => open.retain(|(id, _)| *id != lease_id),
+            // `queued`/`refused`/anything else leaves the lease as it was.
+            _ => {}
+        }
+    }
+    open
+}
+
+/// Every lease currently held by someone OTHER than this agent's own
+/// session on `own_service_port`, as a human-readable clause per board --
+/// or `None` when nothing foreign is held (or gozer's state can't be read).
+///
+/// This is the guard on both whole-box `tt-smi -r` paths: `POST /reset`
+/// (`RunPyBackend::reset`) and `POST /power {"action":"reset-chips"}`
+/// (`AppState::run_power_command`). Neither is an eviction command, and
+/// this version has no implicit preemption, so a lease held by anyone else
+/// means the reset is refused and the holder named (see the design doc's
+/// "`POST /reset` refuses rather than resetting a neighbour").
+///
+/// **Ownership is decided by the `who` prefix**, `tt-station:<port>:` --
+/// the same string this agent writes at acquire time. A lease naming this
+/// agent's own service port is ours (whatever model it names, and even if
+/// it outlived the backend's in-memory record of it), so our own serve
+/// never blocks our own reset.
+///
+/// **A `BUSY-UNTRACKED` chip is deliberately NOT a refusal.** It is not a
+/// lease: there is no `who` to name and nobody to ask. It is also one of
+/// the main reasons an operator reaches for a reset in the first place, so
+/// refusing on it would disable the tool exactly when it is most needed.
+///
+/// **Fails OPEN**, unlike most of this module: an unreadable `gozer status`
+/// yields `None`, so the reset proceeds. That is deliberate and follows the
+/// design doc's failure-modes table, whose rule for a `status` that cannot
+/// read the box (exit 14, topology unreadable) is "leasing disabled for this
+/// call" -- i.e. degrade to the pre-integration behaviour, not refuse. It is
+/// also the honest reading of the situation: a box whose topology gozer
+/// cannot read is a box gozer is not handing to anyone either, and it is
+/// exactly the wedged state an operator reaches for a reset to clear.
+/// Refusing there would disable the tool at the moment it is needed, on the
+/// strength of a signal that says nothing about who holds what.
+///
+/// The pre-serve reset in `start` is the fail-CLOSED path (it refuses
+/// without a grant, because it can simply not serve); this one guards a
+/// deliberate operator action on a box they are already sitting at.
+pub fn foreign_lease_holders(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+    own_service_port: u16,
+) -> Option<String> {
+    let snapshot = snapshot_leases(runner, capability)?;
+    let own_prefix = format!("{WHO_PREFIX}{own_service_port}:");
+
+    let mut clauses: Vec<String> = Vec::new();
+    for lease in &snapshot.leases {
+        if lease.state == "FREE" {
+            continue;
+        }
+        let Some(who) = lease.who.as_deref() else {
+            // No `who` -- `BUSY-UNTRACKED` and friends. See the doc comment.
+            continue;
+        };
+        if who.starts_with(&own_prefix) {
+            continue;
+        }
+        let board = if lease.board.is_empty() {
+            "(unknown board)"
+        } else {
+            lease.board.as_str()
+        };
+        let clause = format!("board {board} is held by {who}");
+        if !clauses.contains(&clause) {
+            clauses.push(clause);
+        }
+    }
+
+    if clauses.is_empty() {
+        None
+    } else {
+        Some(clauses.join("; "))
+    }
+}
+
+/// A request that could not proceed because chips are held by someone else
+/// -- the box's state conflicts with what was asked, rather than anything
+/// having gone wrong.
+///
+/// It exists to carry that distinction from wherever it is discovered
+/// (`acquire_lease`'s unavailable outcome, `reset`'s refusal) up to the
+/// route layer, which answers `409 Conflict` instead of `backend_error`'s
+/// blanket `500` (see `routes::contention_aware_error`). Wrapped in an
+/// `anyhow::Error` like any other failure, so every intermediate `?` and
+/// `.context(..)` keeps working; the route recovers it with
+/// `err.chain().any(|e| e.is::<Contention>())`.
+///
+/// **Never carries a duration.** gozer's per-chip status has no lease-start
+/// time (see `StatusChip`), so a contention message names the board and the
+/// holder and stops there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Contention {
+    message: String,
+}
+
+impl Contention {
+    /// Build one from a fully-formed, caller-facing message (each backend
+    /// words its own, e.g. `"runpy backend: cannot serve 'x' -- ..."`).
+    pub fn new(message: impl Into<String>) -> Contention {
+        Contention {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for Contention {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Contention {}
 
 /// A held lease, released on `Drop`.
 ///

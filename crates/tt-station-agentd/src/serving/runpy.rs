@@ -494,9 +494,14 @@ impl RunPyBackend {
                 let detail = holder
                     .or_else(|| crate::gozer::contention_detail(self.runner.as_ref(), capability))
                     .unwrap_or_else(|| "gozer reports no free chips".to_string());
-                Err(anyhow::anyhow!(
+                // A `Contention`, not a bare `anyhow!`: this is the box's
+                // state conflicting with the request, not a failure, and
+                // `POST /run` answers 409 rather than 500 for it (see
+                // `routes::contention_aware_error`). The message itself is
+                // unchanged.
+                Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
                     "runpy backend: cannot serve '{model}' -- no chips are available: {detail}"
-                ))
+                ))))
             }
             crate::gozer::Outcome::Failed(message) => Err(anyhow::anyhow!(
                 "runpy backend: cannot serve '{model}' -- gozer acquire failed: {message}"
@@ -1018,6 +1023,20 @@ impl ServingBackend for RunPyBackend {
         // it -- not gozer (its lease looks satisfied), not tt-station, not
         // the neighbour, until their workload corrupts or hangs. Treat the
         // mapping as unverified until someone runs that single-chip serve.
+        //
+        // A CHEAPER EXPERIMENT THAN THAT SERVE: gozer's grant also carries
+        // `env: {"TT_VISIBLE_DEVICES": "<bdf>,<bdf>"}` -- BDFs, so no
+        // namespace question at all -- and this backend already hands env
+        // to the child (see `run_in_dir_with_env` below). Whether run.py
+        // forwards that variable into the container it builds is the thing
+        // to check first; if it does, the ambiguous index list stops being
+        // the only pin. Recorded in `crate::gozer`'s known-limitations
+        // section, which is where this whole list lives.
+        //
+        // NOTE the DOCKER backend's `--device /dev/tenstorrent/<n>` mapping
+        // is NOT in the same doubt -- gozer reads `dev_index` from the
+        // kernel's own `tenstorrent!N` symlink. Only this selector is open.
+        //
         // Pinned by tests/runpy.rs's
         // `runpy_start_device_id_comes_from_grant_dev_indices`.
         let device_id: Option<String> = match &lease {
@@ -1421,7 +1440,36 @@ impl ServingBackend for RunPyBackend {
     /// `tt-smi` is flaky or absent. It's gated on `reset_before_serve` for
     /// the same reason `start` gates its reset: a box configured with
     /// `--no-device-reset` doesn't want `tt-smi -r` run at all.
+    ///
+    /// **It REFUSES outright while another tenant holds a lease.** The board
+    /// reset below is the whole-box `reset_cmd` (`tt-smi -r` with no
+    /// targets), unlike `start`'s now lease-scoped one, and it cannot be
+    /// scoped the same way: `/reset` has no grant in hand, and the whole
+    /// point of the untargeted form here is to clear a box the operator has
+    /// declared dirty. On a two-tenant box that resets the neighbour's chips
+    /// mid-run. `/reset` is not an eviction command and this version has no
+    /// implicit preemption (see the design doc's "`POST /reset` refuses
+    /// rather than resetting a neighbour"), so a foreign lease refuses the
+    /// whole call and names the holder -- BEFORE anything is stopped or
+    /// reset, so a refusal leaves the box exactly as it found it. The
+    /// operator can always stop the other session deliberately first.
     fn reset(&self) -> Result<()> {
+        // Refuse FIRST, act second: a reset that stopped containers and then
+        // refused would be worse than either outcome on its own.
+        if let Some(capability) = &self.gozer {
+            if let Some(holders) = crate::gozer::foreign_lease_holders(
+                self.runner.as_ref(),
+                capability,
+                self.config.service_port,
+            ) {
+                return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
+                    "refusing to reset this box: it would run a WHOLE-BOX `tt-smi -r` while \
+                     another tenant holds chips -- {holders}. Stop that session (or `gozer \
+                     release` its lease) first."
+                ))));
+            }
+        }
+
         // Stop any serving container first (same helper start/stop use).
         self.stop_serving_containers()
             .context("failed to stop serving container during reset")?;
@@ -1447,9 +1495,10 @@ impl ServingBackend for RunPyBackend {
         // NOTE the board reset above is still the WHOLE-BOX `reset_cmd`,
         // unlike `start`'s (now lease-scoped) one. `/reset` is an explicit
         // operator "return this box to a fresh state" action that also
-        // unpairs, so its blast radius is unchanged here deliberately;
-        // scoping it is a separate decision, not a side effect of this
-        // change.
+        // unpairs, so its blast radius is deliberately unchanged -- what
+        // guards it instead is the foreign-lease refusal at the TOP of this
+        // method, which means the whole-box form can only ever run when no
+        // other tenant holds chips.
         if let Err(err) = self.release_lease() {
             eprintln!("releasing chip lease during reset failed: {err:#} -- continuing");
         }

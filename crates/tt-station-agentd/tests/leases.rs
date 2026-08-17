@@ -157,10 +157,14 @@ async fn leases_reports_unavailable_when_gozer_absent_and_requires_auth() {
         .send()
         .await
         .expect("GET /leases (no auth) failed to even connect");
-    assert_ne!(
+    // Exactly 401, like every other authed-route test in this crate
+    // (`tests/ssh_authorize.rs`, `tests/control.rs`): a looser "not 200"
+    // would also accept a 500 from a handler that ran and then blew up,
+    // which is a regression, not a rejection.
+    assert_eq!(
         unauthed.status(),
-        reqwest::StatusCode::OK,
-        "an unauthenticated GET /leases must not succeed"
+        reqwest::StatusCode::UNAUTHORIZED,
+        "an unauthenticated GET /leases must be rejected with 401"
     );
 
     let token = pair(&client, &state, &base).await;

@@ -120,6 +120,52 @@ pub fn discover_serving(
     entries
 }
 
+/// Every HOST port a running container publishes, or `None` when `docker
+/// ps` could not be read at all.
+///
+/// This is [`discover_serving`]'s question narrowed to the one fact the
+/// startup lease sweep needs -- "is anything on this box holding the port
+/// this lease named?" -- and it deliberately answers it WITHOUT
+/// `discover_serving`'s two extra gates:
+///
+/// * **no image filter.** Any container publishing the port counts. The
+///   sweep's job is to avoid releasing a lease whose session is still
+///   alive; being wrong in the "leave it alone" direction costs an operator
+///   one manual `gozer release`, while being wrong in the other direction
+///   resets a running model's chips.
+/// * **no `/v1/models` readiness probe.** A container still loading a 70B
+///   model publishes its port for many minutes before it answers anything.
+///   Treating that as "nothing is serving" would release its lease and
+///   reset its chips mid-load -- precisely the collision this integration
+///   exists to prevent.
+///
+/// `None` vs `Some(empty)` is load-bearing: "docker says nothing is
+/// running" is an answer the sweep may act on, "I could not ask docker" is
+/// not (see `crate::gozer::startup_sweep`).
+///
+/// Shares [`DOCKER_PS_FORMAT`] and [`parse_published_host_port`] with
+/// `discover_serving` rather than shelling out in a second format -- one
+/// parser for the `Ports` column, one place to fix if docker's spelling
+/// ever changes.
+pub fn running_published_ports(runner: &dyn CommandRunner) -> Option<std::collections::BTreeSet<u16>> {
+    let ps_output = runner
+        .run(&["docker", "ps", "--format", DOCKER_PS_FORMAT])
+        .ok()?;
+
+    let mut ports = std::collections::BTreeSet::new();
+    for line in ps_output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Columns are exactly the four `DOCKER_PS_FORMAT` fields, tab-joined;
+        // only the third (`Ports`) matters here.
+        let ports_column = line.split('\t').nth(2).unwrap_or("");
+        ports.extend(published_host_ports(ports_column));
+    }
+    Some(ports)
+}
+
 /// Reconcile the agent's in-memory serving status against docker reality
 /// (the [`discover_serving`] entries), returning the status that should
 /// actually be reported.
@@ -173,6 +219,21 @@ fn probe_served_model(runner: &dyn CommandRunner, url: &str) -> Option<String> {
 /// follows the last `:` on the host side, which handles the IPv4, `:::`, and
 /// bracketed-IPv6 spellings uniformly. The first mapping that parses wins.
 fn parse_published_host_port(ports: &str) -> Option<u16> {
+    published_host_ports(ports).into_iter().next()
+}
+
+/// EVERY published host port in a `docker ps` `Ports` column, in column
+/// order (see [`parse_published_host_port`], which is this function's
+/// first element and the shape `discover_serving` wants).
+///
+/// [`running_published_ports`] needs all of them, not just the first: a
+/// container that publishes two ports would otherwise register only one,
+/// and a lease naming the *other* one would look unserved and be released
+/// out from under a live model. Duplicates are normal here -- docker lists
+/// the IPv4 and IPv6 mappings of one port separately -- and the caller's
+/// set dedupes them.
+fn published_host_ports(ports: &str) -> Vec<u16> {
+    let mut found = Vec::new();
     for part in ports.split(',') {
         let part = part.trim();
         // Only published mappings carry `->`; the host side is before it.
@@ -185,10 +246,10 @@ fn parse_published_host_port(ports: &str) -> Option<u16> {
             continue;
         };
         if let Ok(port) = port_str.trim().parse::<u16>() {
-            return Some(port);
+            found.push(port);
         }
     }
-    None
+    found
 }
 
 #[cfg(test)]
@@ -413,6 +474,70 @@ c2\tghcr.io/tenstorrent/tt-inference-server:rel\t0.0.0.0:8003->8000/tcp\ttt-stud
         let entries = discover_serving(&runner, "127.0.0.1", 8000, &status);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].source, "external");
+    }
+
+    /// [`running_published_ports`] answers a DIFFERENT question than
+    /// [`discover_serving`]: "which host ports do running containers
+    /// publish", with no `/v1/models` readiness gate and no image filter.
+    /// The startup lease sweep asks it that question, and a readiness gate
+    /// there would be actively dangerous -- a container still loading a 70B
+    /// model publishes its port but answers nothing, and treating that as
+    /// "nothing serving" would release its lease and reset its chips
+    /// mid-load.
+    #[test]
+    fn running_published_ports_collects_every_publish_regardless_of_image_or_readiness() {
+        // 8003: a serving image that ANSWERS nothing (no /v1/models canned)
+        //       -> still counted, because the container is there.
+        // 9999: not a tt-inference-server image at all -> still counted.
+        // (no port): exposed-only, nothing published -> not counted.
+        let ps = "\
+c1\tghcr.io/tenstorrent/tt-inference-server:rel\t0.0.0.0:8003->8000/tcp\ttt-agent
+c2\tnginx:latest\t0.0.0.0:9999->80/tcp\tsome-web
+c3\tghcr.io/tenstorrent/tt-inference-server:rel\t8000/tcp\ttt-exposed-only";
+
+        let runner = FakeProbe::new(Some(ps), &[]);
+        let ports = running_published_ports(&runner).expect("docker ps succeeded");
+
+        assert_eq!(ports, [8003u16, 9999].into_iter().collect());
+        assert!(
+            runner.probed.lock().expect("probed mutex poisoned").is_empty(),
+            "this must not probe /v1/models at all -- readiness is not the question"
+        );
+    }
+
+    /// A container publishing MORE THAN ONE host port registers all of
+    /// them. `parse_published_host_port` deliberately answers only the
+    /// first (that's `discover_serving`'s contract), but the sweep asks
+    /// "is this exact port taken?" -- and a lease naming the second port of
+    /// a two-port container would look unserved and be released out from
+    /// under a live model.
+    #[test]
+    fn running_published_ports_keeps_every_port_of_a_multi_port_container() {
+        let ps = "c1\tany/image\t0.0.0.0:8080->8000/tcp, :::8080->8000/tcp, 0.0.0.0:9100->9100/tcp\tmulti";
+        let runner = FakeProbe::new(Some(ps), &[]);
+        assert_eq!(
+            running_published_ports(&runner),
+            Some([8080u16, 9100].into_iter().collect())
+        );
+    }
+
+    /// An unreadable `docker ps` yields `None`, NOT an empty set: "docker
+    /// told me nothing is running" and "I could not ask docker" are
+    /// different answers, and the sweep must refuse to act on the second.
+    #[test]
+    fn running_published_ports_is_none_when_docker_cannot_be_read() {
+        let runner = FakeProbe::new(None, &[]);
+        assert_eq!(running_published_ports(&runner), None);
+    }
+
+    /// Docker present, nothing running -> an EMPTY set (a real answer).
+    #[test]
+    fn running_published_ports_is_empty_when_nothing_runs() {
+        let runner = FakeProbe::new(Some(""), &[]);
+        assert_eq!(
+            running_published_ports(&runner),
+            Some(std::collections::BTreeSet::new())
+        );
     }
 
     #[test]
