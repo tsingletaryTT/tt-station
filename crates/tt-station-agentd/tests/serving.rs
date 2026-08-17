@@ -278,18 +278,11 @@ fn docker_start_times_out_when_never_healthy() {
     assert!(err.to_string().contains("llama3"));
 }
 
-/// `stop` should ask `docker ps` for the model's container and stop what it
-/// names, then reset status back to `Idle`.
-///
-/// The `docker ps` half is not incidental. `stop` used to `let _ =` its
-/// `docker stop`, which made "there was nothing to stop" (idempotent, fine)
-/// and "a running container refused to stop" (a release about to reset live
-/// chips) indistinguishable. Asking first separates them -- see
-/// `DockerBackend::stop_container`.
+/// `stop` should issue a `docker stop` command naming the model's
+/// container, and reset status back to `Idle`.
 #[test]
 fn docker_stop_issues_stop_command() {
     let runner = FakeRunner::new(0);
-    runner.set_run_output("docker ps", "deadbeef\n");
     let backend = DockerBackend::new(
         config("some/image:tag", "127.0.0.1", 8080),
         Box::new(runner.clone()),
@@ -297,39 +290,36 @@ fn docker_stop_issues_stop_command() {
 
     backend.stop("llama3").expect("stop should succeed");
 
-    let expected: Vec<Vec<String>> = vec![
-        // ANCHORED (`^name$`): `--filter name=` is an unanchored regexp, so
-        // the bare form would also match `tt-inference-llama3-scratch`.
-        vec!["docker", "ps", "--filter", "name=^tt-inference-llama3$", "-q"],
-        vec!["docker", "stop", "deadbeef"],
-    ]
-    .into_iter()
-    .map(|cmd| cmd.into_iter().map(str::to_string).collect())
-    .collect();
-    assert_eq!(runner.commands(), expected);
+    let commands = runner.commands();
+    assert_eq!(
+        commands.len(),
+        1,
+        "expected exactly one docker stop command"
+    );
+    assert_eq!(commands[0][0], "docker");
+    assert_eq!(commands[0][1], "stop");
+    assert!(
+        commands[0].iter().any(|a| a.contains("llama3")),
+        "docker stop args should mention the model: {:?}",
+        commands[0]
+    );
 
     assert_eq!(backend.status().unwrap(), ServingStatus::Idle);
 }
 
-/// `stop` must be idempotent when there is nothing to stop -- exactly what
-/// happens on a real box when the container is already gone. This is a
+/// `stop` must be idempotent even when the underlying `docker stop` command
+/// fails -- exactly what happens on a real box when `docker stop` targets an
+/// already-stopped or missing container (it exits non-zero). This is a
 /// documented contract on `ServingBackend::stop` (see its trait doc in
-/// `serving/mod.rs`), and `routes.rs::stop_model` calls `backend.stop`
-/// UNCONDITIONALLY (even while idle, so a `/stop` can cancel an in-flight
-/// `/run`) -- if `stop` failed here, an operator hitting Stop while idle (or
-/// a client retrying after a timeout) would see a 500 instead of a no-op.
-///
-/// It used to get that by discarding the `docker stop` result outright. It
-/// now gets it by ASKING `docker ps` first, so "nothing to stop" is an empty
-/// loop -- and a `docker stop` that fails against a container docker just
-/// said WAS running is a real failure again (see
-/// `docker_stop_keeps_the_lease_when_the_container_will_not_stop`, the case
-/// where swallowing it reset a live workload's chips).
+/// `serving/mod.rs`): "docker stop on an already-stopped/missing container
+/// is not treated as an error by `DockerBackend`". `routes.rs::stop_model`
+/// now calls `backend.stop` UNCONDITIONALLY (even while idle, so a `/stop`
+/// can cancel an in-flight `/run`) -- if `stop` propagated a `docker stop`
+/// failure, an operator hitting Stop while idle (or a client retrying after
+/// a timeout) would see a 500 instead of a harmless no-op.
 #[test]
-fn docker_stop_is_idempotent_when_nothing_is_running() {
+fn docker_stop_is_idempotent_when_docker_stop_fails() {
     let runner = FakeRunner::new(0);
-    // `docker ps` reports nothing; a `docker stop` that would have failed is
-    // never issued at all.
     runner.fail_run(
         "docker stop",
         "Error: No such container: tt-inference-llama3",
@@ -341,20 +331,12 @@ fn docker_stop_is_idempotent_when_nothing_is_running() {
 
     backend
         .stop("llama3")
-        .expect("stop must be idempotent when there is nothing to stop");
+        .expect("stop must be idempotent: a failing docker stop is not an error");
 
-    assert!(
-        !runner.commands().iter().any(|cmd| {
-            cmd.first().map(String::as_str) == Some("docker")
-                && cmd.get(1).map(String::as_str) == Some("stop")
-        }),
-        "no `docker stop` may be issued when `docker ps` named nothing: {:?}",
-        runner.commands()
-    );
     assert_eq!(
         backend.status().unwrap(),
         ServingStatus::Idle,
-        "status should still flip to Idle when there was nothing to stop"
+        "status should still flip to Idle even when docker stop fails"
     );
 }
 
@@ -1008,26 +990,15 @@ fn docker_stop_unleased_issues_no_gozer_call() {
 
     backend.stop("llama3").expect("stop should succeed");
 
-    // The `docker ps` probe replaced the old blind `docker stop` -- see
-    // `DockerBackend::stop_container`. Nothing is canned as running here, so
-    // the sequence is the probe and nothing else. What this pin still
-    // guarantees, and is here for, is that NO gozer subprocess appears on the
-    // unleased path.
-    let expected: Vec<Vec<String>> = vec![vec![
-        "docker",
-        "ps",
-        "--filter",
-        "name=^tt-inference-llama3$",
-        "-q",
-    ]]
-    .into_iter()
-    .map(|cmd| cmd.into_iter().map(str::to_string).collect())
-    .collect();
+    let expected: Vec<Vec<String>> = vec![vec!["docker", "stop", "tt-inference-llama3"]]
+        .into_iter()
+        .map(|cmd| cmd.into_iter().map(str::to_string).collect())
+        .collect();
     assert_eq!(
         runner.commands(),
         expected,
-        "the unleased stop sequence must not change beyond the ps-then-stop \
-         shape -- one probe for the model's container, and no gozer subprocess"
+        "the unleased stop sequence must not change at all -- one docker stop \
+         naming the model's container, and no gozer subprocess"
     );
 }
 
@@ -1247,6 +1218,14 @@ fn docker_start_twice_releases_the_first_lease_before_acquiring_again() {
 /// advertises them free. Ask `docker ps` first, like `RunPyBackend` does, so
 /// "nothing to stop" is an empty loop and a real failure propagates BEFORE
 /// the release.
+///
+/// **The inspection is GATED on holding a lease**, and this test is the
+/// positive side of that gate: it asserts the probe happens and that the
+/// lease survives a failed stop. The negative side is
+/// `docker_stop_unleased_issues_no_gozer_call`, whose whole-vector pin is
+/// byte-identical to its pre-leasing form -- unleased there is no release, so
+/// no chip reset, so nothing for the probe to protect, and the no-gozer path
+/// keeps its original blind `docker stop` exactly.
 #[test]
 fn docker_stop_keeps_the_lease_when_the_container_will_not_stop() {
     let gozer = FakeGozerBox::with_boards(1, 0);
@@ -1274,6 +1253,29 @@ fn docker_stop_keeps_the_lease_when_the_container_will_not_stop() {
         vec!["lease-1".to_string()],
         "the lease must NOT be released while its container is still running \
          -- the release resets those chips and then advertises them free"
+    );
+
+    // The gate's positive side: a LEASED stop inspects before it stops, which
+    // is the only reason it can tell a failed stop of a running container from
+    // "there was nothing to stop".
+    let commands = gozer.commands();
+    let probe_index = docker_ps_name_probe_index(&commands, "tt-inference-llama3")
+        .unwrap_or_else(|| panic!("a leased stop must inspect first: {commands:?}"));
+    let stop_index = commands
+        .iter()
+        .enumerate()
+        .position(|(i, cmd)| {
+            i > probe_index
+                && cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")
+        })
+        .unwrap_or_else(|| panic!("and then stop what the probe named: {commands:?}"));
+    assert!(
+        !commands[stop_index + 1..].iter().any(|cmd| {
+            cmd.first().map(String::as_str) == Some("gozer")
+                && cmd.get(1).map(String::as_str) == Some("release")
+        }),
+        "no release may follow a stop that failed: {commands:?}"
     );
 }
 

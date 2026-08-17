@@ -735,6 +735,13 @@ impl DockerBackend {
     /// brought over here because `stop`'s `let _ = docker stop` could not tell
     /// two very different outcomes apart.
     ///
+    /// **Only reached while a lease is HELD**, which is the whole reason it
+    /// exists: `stop` gates on that (see its comment), and the other two
+    /// callers -- `stop_launched_container` and `stop_and_release_held_lease`
+    /// -- are unreachable without one. An unleased `stop` keeps its original
+    /// blind `docker stop`, because with no release to follow there are no
+    /// chips for this inspection to protect.
+    ///
     /// `docker stop` exits non-zero both when there was nothing to stop (the
     /// idempotent case `stop` must swallow) and when a container that IS
     /// running would not stop (a daemon that has gone away, a stop timeout).
@@ -1163,29 +1170,57 @@ impl ServingBackend for DockerBackend {
     fn stop(&self, model: &str) -> Result<()> {
         // A held lease names its own container; only fall back to the
         // model-derived name when nothing is leased (see this method's doc).
-        let container_name = self
+        let held_container = self
             .lease
             .lock()
             .expect("lease mutex poisoned")
             .as_ref()
-            .map(|held| held.container_name.clone())
+            .map(|held| held.container_name.clone());
+        let container_name = held_container
+            .clone()
             .unwrap_or_else(|| self.container_name(model));
-        // IDEMPOTENT, but no longer BLIND. This used to be
-        // `let _ = self.runner.run(&["docker", "stop", &container_name]);`,
-        // discarding the result so that stopping an already-stopped/missing
-        // container (which `docker stop` reports as a non-zero exit) stayed
-        // the no-op `ServingBackend::stop`'s contract requires -- `routes.rs`
-        // calls this unconditionally, even while idle, so a "nothing to stop"
-        // failure must not become a 500.
+
+        // IDEMPOTENT either way; INSPECTED only when a lease is held.
         //
-        // But it swallowed the OTHER non-zero exit too: a container that is
-        // genuinely running and would not stop. The release below then reset
-        // that live container's chips and advertised them free. `stop_container`
-        // asks `docker ps` first, so "nothing to stop" is an empty loop and a
-        // real stop failure propagates HERE -- before the release, and with the
-        // lease left recorded so a later `/stop` can retry both halves.
-        self.stop_container(&container_name)
-            .context("failed to stop the serving container")?;
+        // The unleased branch is the original line, unchanged:
+        // `let _ = docker stop <name>`. It discards the result so that
+        // stopping an already-stopped/missing container (which `docker stop`
+        // reports as a non-zero exit) stays the no-op
+        // `ServingBackend::stop`'s contract requires -- `routes.rs` calls this
+        // unconditionally, even while idle, so a "nothing to stop" failure
+        // must not become a 500.
+        //
+        // That blindness IS a real defect, but only in the leased branch: it
+        // cannot tell "there was nothing to stop" from "a container that is
+        // genuinely running would not stop" (daemon unreachable, stop
+        // timeout), and the `release_lease()` below RESETS exactly those
+        // chips and advertises them free while a live root-owned container
+        // keeps driving them -- which gozer's `/proc/<pid>/fd`-based
+        // `still_open` check cannot see. So the leased branch asks
+        // `docker ps` first (see `stop_container`), making "nothing to stop"
+        // an empty loop and a real stop failure propagate HERE, before the
+        // release, with the lease left recorded so a later `/stop` retries
+        // both halves.
+        //
+        // WHY THE GATE, and not simply inspecting always: without a lease
+        // there is no release, no chip reset, and therefore nothing for the
+        // inspection to protect -- its safety benefit unleased is exactly
+        // zero. Against zero benefit stands this integration's most valuable
+        // promise, that a box without gozer behaves EXACTLY as it did before,
+        // and that promise is worth more provable (an untouched argv pin)
+        // than argued. Same rule as `start`'s error-path stops: gate a
+        // NEWLY ADDED command on `lease.is_some()`, and leave an
+        // already-ungated one alone (which is why `RunPyBackend`'s
+        // cancel-path stop is deliberately NOT gated -- gating there would
+        // delete protection the no-gozer path already had).
+        match &held_container {
+            Some(_) => self
+                .stop_container(&container_name)
+                .context("failed to stop the serving container")?,
+            None => {
+                let _ = self.runner.run(&["docker", "stop", &container_name]);
+            }
+        }
         *self.status.lock().expect("status mutex poisoned") = ServingStatus::Idle;
 
         // Release LAST, after the container is actually stopped: gozer
