@@ -2092,6 +2092,93 @@ fn runpy_start_leased_tt_device_is_derived_from_the_grant() {
     );
 }
 
+/// A `gozer acquire --json` grant for the WHOLE BOX: all four `p300c` ASICs of
+/// this box, which is what `--chips all` gets on an idle machine.
+const GRANT_JSON_WHOLE_BOX: &str = r#"{"granted":true,"lease_id":"lease-whole",
+    "units":["0100014311601055","0100014311601048"],
+    "chips":["0000:01:00.0","0000:02:00.0","0000:03:00.0","0000:04:00.0"],
+    "dev_indices":[0,1,2,3],
+    "expanded":true,"requested":"all","neighbours":[],"owner_pid":4242}"#;
+
+/// The `--tt-device` value out of a recorded run.py invocation.
+fn tt_device_of(commands: &[Vec<String>]) -> Option<String> {
+    find_runpy_cmd(commands)
+        .windows(2)
+        .find(|w| w[0] == "--tt-device")
+        .map(|w| w[1].clone())
+}
+
+/// THE NEW COMMON PATH. `DEFAULT_LEASE_CHIPS` is `"all"`, so on an idle box a
+/// leased serve is granted the whole box -- and it must then pass the SAME
+/// `--tt-device` an unleased serve auto-detects on that same box.
+///
+/// This is the pin that makes the new default safe to ship. `leased_tt_device`
+/// derives the mesh from the GRANT's chip count while `resolve_tt_device`
+/// derives it from every board `tt-smi -s` reports; with a whole-box grant
+/// those two inputs are the same set, so the two answers must agree. If they
+/// ever diverge, the ordinary `tt run` on a gozer box starts describing a
+/// different mesh from the ordinary `tt run` on a box without gozer -- and
+/// that is now the path almost every serve takes, not an edge case.
+///
+/// Both halves are asserted from the recorded argv rather than against a
+/// hardcoded string, so the test compares the two code paths against each
+/// other; the literal `p300x2` check is only there to prove neither of them
+/// silently resolved to nothing.
+#[test]
+fn runpy_leased_whole_box_serve_passes_the_same_tt_device_as_an_unleased_one() {
+    // (a) No gozer at all -- the pre-leasing path, auto-detecting across the box.
+    let unleased = FakeRunner::new(0);
+    unleased.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    RunPyBackend::new(config("127.0.0.1", 8080), Box::new(unleased.clone()))
+        .start("llama3")
+        .expect("the unleased serve should succeed");
+    let unleased_device = tt_device_of(&unleased.commands());
+
+    // (b) gozer present, granting the whole box (what `--chips all` gets).
+    let leased = FakeRunner::new(0);
+    leased.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    leased.set_run_capturing("gozer acquire", 0, GRANT_JSON_WHOLE_BOX, "");
+    leased.set_run_capturing("gozer release", 0, r#"{"released":true}"#, "");
+    RunPyBackend::new(config("127.0.0.1", 8080), Box::new(leased.clone()))
+        .with_gozer(Some(gozer_capability()))
+        .start("llama3")
+        .expect("the leased whole-box serve should succeed");
+    let leased_device = tt_device_of(&leased.commands());
+
+    assert_eq!(
+        leased_device, unleased_device,
+        "a whole-box lease must describe the same mesh the whole box describes, \
+         or the common `tt run` differs between a gozer box and a bare one"
+    );
+    assert_eq!(
+        leased_device.as_deref(),
+        Some("p300x2"),
+        "and it must be this box's real mesh, not two matching `None`s"
+    );
+
+    // The acquire really did ask for everything -- the default under test.
+    let commands = leased.commands();
+    let acquire = find_gozer_cmd(&commands, "acquire")
+        .unwrap_or_else(|| panic!("expected a gozer acquire: {commands:?}"));
+    assert!(
+        acquire.windows(2).any(|w| w[0] == "--chips" && w[1] == "all"),
+        "the default request is the whole box: {acquire:?}"
+    );
+    // Still SCOPED, not a bare whole-box reset: the grant's BDFs are named
+    // even when they happen to be every BDF on the box. `tt-smi -r` with no
+    // target is a different command and must not reappear via this default.
+    assert!(
+        commands.iter().any(|cmd| {
+            cmd == &vec![
+                "tt-smi".to_string(),
+                "-r".to_string(),
+                "0000:01:00.0,0000:02:00.0,0000:03:00.0,0000:04:00.0".to_string(),
+            ]
+        }),
+        "a whole-box GRANT still resets by BDF, not by omission: {commands:?}"
+    );
+}
+
 /// Fail closed, exactly like `Grant::reset_target`: if the `(board_type,
 /// count)` table has no mesh for the granted shape, refuse the serve rather
 /// than guessing a mesh name or falling back to the whole-box one.

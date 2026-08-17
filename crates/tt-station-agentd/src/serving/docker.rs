@@ -676,9 +676,13 @@ impl DockerBackend {
     /// gozer actually granted, not for the whole box.
     ///
     /// `config.tt_device` is a plain `String` with a production default of
-    /// `p300x2` (see `main.rs`'s `DEFAULT_DOCKER_TT_DEVICE`), while
-    /// `DEFAULT_LEASE_CHIPS` asks for one board -- so passing it verbatim
-    /// under a lease names a mesh WIDER than the lease on every real box.
+    /// `p300x2` (see `main.rs`'s `DEFAULT_DOCKER_TT_DEVICE`), while a grant is
+    /// whatever gozer actually handed over -- `DEFAULT_LEASE_CHIPS` asks for
+    /// `"all"`, so on an idle box the two agree, but a grant NARROWER than the
+    /// box (another tenant already holds a board, or a caller asked for fewer
+    /// chips) makes the configured value name a mesh WIDER than the lease.
+    /// Deriving it from the grant is the only form that is right in both
+    /// cases.
     ///
     /// Unlike the runpy path, the cross-tenant half of that is contained
     /// here: `--device` already restricts the container's cgroup to the

@@ -123,15 +123,34 @@ const EXIT_NO_LEASE: i32 = 13;
 
 /// The `--chips` value every `acquire` from this agent asks for.
 ///
-/// `"1"` is gozer's own default, and on a board-grain box (this one) gozer
-/// EXPANDS a one-chip request to the whole board it lives on -- reported
-/// back as `Grant::expanded`. So "1" means "one board's worth", which is
-/// exactly the unit this integration exists to hand out: two boards, two
-/// tenants. Asking for `"all"` instead would hand a single serve the whole
-/// box and defeat the point; asking for a literal chip count would need
-/// per-board topology knowledge that gozer already owns and agentd
-/// deliberately does not reimplement (see the module doc).
-pub const DEFAULT_LEASE_CHIPS: &str = "1";
+/// **`"all"` -- the whole box.** The overwhelmingly common request this
+/// integration serves is an owner on a Mac asking for their own hardware
+/// ("give me all my TT chips"), which is exactly how tt-station behaved
+/// before gozer existed. So the common case stays whole-box and
+/// contention-free: one tenant, no neighbour to negotiate with, no `409` on
+/// the first `tt run` of the day.
+///
+/// **This REVERSES an earlier ruling in this integration.** For its first
+/// five tasks the value was `"1"` -- gozer's own default, which a board-grain
+/// box expands to the whole board that chip lives on -- on the reasoning that
+/// "two boards, two tenants" is the unit the integration exists to hand out.
+/// That inverted the priority. Per-board sharing is the SPECIAL case, entered
+/// deliberately; making it the default meant a Mac user who asked for nothing
+/// in particular got half their box and then contended with their own local
+/// agents over the other half. See the design doc's "Ownership: an advisory
+/// model" section.
+///
+/// **Per-board leases are not gone**, in either direction:
+///
+/// * other tenants (a local agent, `gozer acquire --chips 1`) still take
+///   board-grain leases, and this agent's whole-box request then contends with
+///   them -- reported with the holder named, and overridable with `--force`
+///   (see [`Contention`] and `ForeignLeases::resolve`);
+/// * [`acquire`] still takes `chips` as a parameter, so a narrower request is
+///   one argument away. Nothing in agentd's config surface exposes it today;
+///   if a per-serve chip count is ever wanted, it belongs there rather than in
+///   a second constant here.
+pub const DEFAULT_LEASE_CHIPS: &str = "all";
 
 /// A working `gozer` binary this agent found, cached from a single startup
 /// probe (see `probe`) rather than re-probed per call -- gozer's

@@ -912,12 +912,15 @@ fn docker_stop_stops_the_leases_own_container_even_when_given_no_model() {
 /// A leased serve must name the mesh it actually LEASED, not the whole box.
 ///
 /// `DockerConfig::tt_device` is a plain `String` with a production default of
-/// `p300x2` (two boards) while `DEFAULT_LEASE_CHIPS` is `"1"` (one board), so
-/// passing it verbatim under a lease describes a mesh wider than the lease on
-/// every real box. The cgroup means the container physically cannot open the
-/// neighbour's board, so this is not a cross-tenant bug -- it is a serve that
-/// asks for hardware it was not given and then fails to come up, looking like
-/// a flaky bring-up rather than a misconfiguration.
+/// `p300x2` (two boards). `DEFAULT_LEASE_CHIPS` now asks for `"all"`, so on an
+/// IDLE box the configured value and the granted shape agree -- but a grant
+/// narrower than the box (a neighbour already holds a board, as `GRANT_JSON`
+/// models with its 2 chips of 4) makes the configured value describe a mesh
+/// wider than the lease, which is the case under test here. The cgroup means
+/// the container physically cannot open the neighbour's board, so this is not
+/// a cross-tenant bug -- it is a serve that asks for hardware it was not given
+/// and then fails to come up, looking like a flaky bring-up rather than a
+/// misconfiguration.
 #[test]
 fn docker_start_tt_device_describes_the_lease_not_the_box() {
     let runner = leasing_runner(0);
