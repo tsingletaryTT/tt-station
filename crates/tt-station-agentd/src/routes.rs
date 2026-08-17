@@ -1752,7 +1752,11 @@ async fn stop_model(
 /// overrides the foreign-lease refusal (see `RunPyBackend::reset_forcing`).
 /// Every existing client posts `/reset` with no body and no content-type at
 /// all, which `Option<Json<..>>` reads as `None` -> unforced, so the polite
-/// default is what an older `tt` still gets.
+/// default is what an older `tt` still gets. (A request that DOES declare
+/// `application/json` and then carries an unparseable body is a `400` rather
+/// than a silent unforced reset -- guessing which one a garbled `{"force":
+/// ...}` meant is exactly the wrong thing to do on a destructive route, and
+/// failing there resets nothing.)
 async fn reset(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
