@@ -218,8 +218,28 @@ pub const REFUSAL_MARKER: &str = "(409)";
 /// but a box that deliberately refused reset NOTHING -- and kept the
 /// caller's pairing on purpose -- so forgetting the token there would
 /// destroy the only credential that can reach it, for no gain.
+///
+/// **Anchored to the prefix this client itself writes, not a bare `contains`.**
+/// Every refusal message here has the shape
+/// `<phrase this client wrote> (409)` optionally followed by
+/// `": " <detail the AGENT supplied>` -- and that detail is arbitrary text
+/// from the box: a holder `who`, a model id, a gozer `reason`. A plain
+/// `contains(REFUSAL_MARKER)` therefore fired on any ORDINARY failure whose
+/// message merely happened to carry `(409)` somewhere, and `tt reset` turns a
+/// false positive into a hard error that refuses to clear local state -- the
+/// exact opposite of what a broken box is supposed to do.
+///
+/// So: split off the agent-supplied detail at the first `": "` and require the
+/// marker to terminate what remains, i.e. the phrase this client wrote. That
+/// is what makes the check depend on this module's own wording rather than on
+/// whatever a remote box put in a lease `reason`.
 pub fn is_refusal(err: &anyhow::Error) -> bool {
-    err.to_string().contains(REFUSAL_MARKER)
+    let message = err.to_string();
+    let own_phrase = message
+        .split_once(": ")
+        .map(|(head, _)| head)
+        .unwrap_or(message.as_str());
+    own_phrase.ends_with(REFUSAL_MARKER)
 }
 
 /// The `{"error": "..."}` detail out of a refusal response, or a plain

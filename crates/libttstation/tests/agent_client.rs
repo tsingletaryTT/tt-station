@@ -218,6 +218,43 @@ async fn reset_maps_409_to_the_agents_refusal_message() {
         message.contains("409"),
         "keep the stable (409) marker so a caller can branch on the case: {message}"
     );
+    assert!(
+        libttstation::agent_client::is_refusal(&err),
+        "`tt reset` branches on this: {message}"
+    );
+}
+
+/// `is_refusal` must key off the phrase THIS CLIENT writes, not off `(409)`
+/// appearing anywhere in the message.
+///
+/// A refusal's detail is arbitrary text from the box -- a holder `who`, a model
+/// id, a gozer `reason` -- so a bare `contains("(409)")` fired on any ordinary
+/// failure whose message merely happened to carry that substring. `tt reset`
+/// turns a false positive into a HARD error that refuses to clear local state,
+/// which is exactly the opposite of what an unreachable or broken box is
+/// supposed to do: forget it locally and move on.
+#[test]
+fn is_refusal_ignores_a_409_that_appears_only_in_agent_supplied_detail() {
+    use libttstation::agent_client::is_refusal;
+
+    // A genuine refusal, whose DETAIL also happens to contain the marker
+    // (a lease `reason` naming a ticket, say). Still a refusal.
+    assert!(is_refusal(&anyhow::anyhow!(
+        "the box refused the reset (409): board b1 is held by claude:bug-(409) (CLAIMED)"
+    )));
+    // The bare-marker form `endpoint()` writes: no detail at all.
+    assert!(is_refusal(&anyhow::anyhow!(
+        "no model is currently serving on this agent (409)"
+    )));
+    // NOT a refusal: an ordinary failure that merely mentions the marker in
+    // its own detail half. The old `contains` check called this a refusal.
+    assert!(!is_refusal(&anyhow::anyhow!(
+        "request to http://box:8080/reset failed: upstream said retry-after-(409)"
+    )));
+    // NOT a refusal: nothing resembling the marker at all.
+    assert!(!is_refusal(&anyhow::anyhow!(
+        "error sending request for url (http://box:8080/reset)"
+    )));
 }
 
 /// The same for `power(base, token, "reset-chips")`, the OTHER whole-box
