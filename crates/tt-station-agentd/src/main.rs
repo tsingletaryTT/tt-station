@@ -626,8 +626,10 @@ async fn sweep_stale_leases_at_startup(
             // reaped lease is NEVER reset, handing the next tenant un-reset
             // silicon with wedged ethernet cores. See
             // `ServingBackend::adopt_lease`.
+            let mut adopted = 0usize;
             for lease in &report.adoptable {
                 if backend.adopt_lease(&lease.lease_id, &lease.who) {
+                    adopted += 1;
                     eprintln!(
                         "tt-station-agentd: adopted lease '{}' ({}) from a previous agentd \
                          process -- `/stop` will release it (and reset its chips). NOTE its \
@@ -655,12 +657,18 @@ async fn sweep_stale_leases_at_startup(
                 || !report.unresolved.is_empty()
                 || !report.adoptable.is_empty()
             {
+                // `adopted` is the count that was actually ADOPTED, not the
+                // count offered: an `adopt_lease` that returned `false` leaves
+                // an unowned lease, and saying "adopted" of it would make this
+                // summary contradict the per-lease WARNING above -- which
+                // would otherwise be the only accurate signal.
                 eprintln!(
                     "tt-station-agentd: startup lease sweep released {} stale lease(s), kept {} \
-                     ({} of ours, adopted), could not resolve {}",
+                     ({} of ours: {adopted} adopted, {} left unowned), could not resolve {}",
                     report.released.len(),
                     report.kept.len(),
                     report.adoptable.len(),
+                    report.adoptable.len() - adopted,
                     report.unresolved.len()
                 );
             }

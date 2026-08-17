@@ -2925,3 +2925,91 @@ fn runpy_start_without_gozer_passes_only_model_source() {
         "an unleased serve's child environment must not change"
     );
 }
+
+/// THE SWAP MUST RELEASE THE LEASE IT OBSERVED, NOT WHATEVER IS IN THE SLOT.
+///
+/// `routes.rs`'s `run_model` does not serialize `start`, so two overlapping
+/// `POST /run`s interleave:
+///
+/// 1. T1 enters the swap and observes lease `lease-1`.
+/// 2. T2 races ahead, acquires `lease-2`, and its handover stores `lease-2` in
+///    the backend's slot -- overwriting `lease-1`.
+/// 3. T1 releases. A plain `take()` hands it **`lease-2`**, so `gozer release`
+///    resets the chips underneath T2's live container and then advertises them
+///    FREE.
+///
+/// That is this integration's core hazard, and the code added to prevent the
+/// strand is what made it reachable: before this branch `start` never released
+/// at all. So the swap compares before it takes -- and when the slot has moved
+/// on, it leaves the newer lease strictly alone.
+///
+/// The interleave is deterministic, not threaded: `on_run` fires the concurrent
+/// handover during the swap's own `docker ps`, which is inside the window
+/// between the observation and the release.
+///
+/// NOTE what this does NOT claim to fix: `start` is still not serialized, so
+/// `lease-1` ends up stranded here (T2's handover dropped it, and releasing it
+/// blind would be unsafe -- gozer reuses ids). A wasted board is the accepted
+/// residual; a reset under a live container is not.
+#[test]
+fn runpy_swap_never_releases_a_lease_recorded_by_a_concurrent_serve() {
+    // Three boards: one for the first serve, one for the "concurrent" serve
+    // whose lease must survive, and one for the swap's own fresh acquire.
+    let gozer = FakeGozerBox::with_boards(3, 0);
+    let runner = gozer.runner();
+    runner.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    let backend = std::sync::Arc::new(
+        RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
+            .with_gozer(Some(gozer_capability())),
+    );
+
+    backend.start("model-a").expect("the first start should succeed");
+    assert_eq!(gozer.held_lease_ids(), vec!["lease-1".to_string()]);
+
+    // A genuinely-held second lease, as a concurrent serve would have taken.
+    let concurrent = gozer.preexisting_lease("tt-station:8080:model-c");
+    assert_eq!(concurrent, "lease-2");
+
+    // The interleave: while the swap is between observing `lease-1` and
+    // releasing it, the concurrent serve's handover lands `lease-2` in the slot.
+    let racer = std::sync::Arc::clone(&backend);
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired_probe = std::sync::Arc::clone(&fired);
+    runner.on_run("docker ps", move || {
+        if !fired_probe.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            racer.overwrite_lease_for_test("lease-2");
+        }
+    });
+
+    backend
+        .start("model-b")
+        .expect("the swap should still serve, having declined to release");
+
+    // THE assertion: `lease-2` was never handed to `gozer release`. A test that
+    // merely counted releases would pass against the broken version, which
+    // releases exactly once -- naming the wrong lease.
+    let commands = gozer.commands();
+    let released_ids: Vec<String> = commands
+        .iter()
+        .filter(|cmd| {
+            cmd.first().map(String::as_str) == Some("gozer")
+                && cmd.get(1).map(String::as_str) == Some("release")
+        })
+        .filter_map(|cmd| cmd.get(2).cloned())
+        .collect();
+    assert!(
+        !released_ids.iter().any(|id| id == "lease-2"),
+        "the swap must NEVER release a lease a concurrent serve recorded -- \
+         that resets the chips under its live container: released {released_ids:?}"
+    );
+    assert!(
+        released_ids.iter().all(|id| id == "lease-1"),
+        "the only lease the swap may ever release is the one it OBSERVED: \
+         released {released_ids:?}"
+    );
+    assert!(
+        gozer.held_lease_ids().contains(&"lease-2".to_string()),
+        "the concurrent serve's lease must still be held afterwards: {:?}",
+        gozer.held_lease_ids()
+    );
+}

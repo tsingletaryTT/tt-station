@@ -30,6 +30,10 @@ type RunCapturingCanned = (String, i32, String, String);
 /// lives behind trips clippy's `type_complexity`.
 type ChildEnv = Vec<(String, String)>;
 
+/// A side effect to run when a `run` argv matches, paired with its matcher.
+/// Named alias for the same `type_complexity` reason as the two above.
+type RunHook = (String, Box<dyn Fn() + Send + Sync>);
+
 /// A scratch `model_spec.json` fixture, unique per call and removed on drop.
 /// Was duplicated near-identically in `tests/models.rs` and `tests/runpy.rs`
 /// (both files' own doc comments admitted it); consolidated here now that
@@ -140,6 +144,13 @@ pub struct FakeRunner {
     /// `RunPyBackend` passes `MODEL_SOURCE` plus (under a lease) the grant's
     /// own `TT_VISIBLE_DEVICES` that way rather than in argv.
     child_envs: Arc<Mutex<Vec<ChildEnv>>>,
+    /// Side effects fired when a `run` call's space-joined argv contains a
+    /// registered substring -- the seam a test uses to interleave something
+    /// into the middle of a backend call (e.g. landing a second lease in the
+    /// backend's slot while `start`'s swap is between its `docker ps` and its
+    /// `gozer release`). Fired before the canned failure/output lookup, so a
+    /// hook still runs on a command that is about to fail.
+    run_hooks: Arc<Mutex<Vec<RunHook>>>,
 }
 
 /// Default `http_get` body when nothing is configured: a non-empty `data`
@@ -166,7 +177,18 @@ impl FakeRunner {
             run_capturing_outputs: Arc::new(Mutex::new(Vec::new())),
             run_capturing_failures: Arc::new(Mutex::new(Vec::new())),
             child_envs: Arc::new(Mutex::new(Vec::new())),
+            run_hooks: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Run `action` whenever a future `run` call's space-joined argv contains
+    /// `matcher` -- see the `run_hooks` field.
+    #[allow(dead_code)]
+    pub fn on_run(&self, matcher: &str, action: impl Fn() + Send + Sync + 'static) {
+        self.run_hooks
+            .lock()
+            .expect("run_hooks mutex poisoned")
+            .push((matcher.to_string(), Box::new(action)));
     }
 
     /// The `env` pairs handed to each `run_in_dir_with_env` call, in order --
@@ -575,6 +597,19 @@ impl CommandRunner for FakeRunner {
             .push(args.iter().map(|s| s.to_string()).collect());
 
         let joined = args.join(" ");
+
+        // Side effects first, so a hook still fires on a command that is
+        // about to return a canned failure -- see `run_hooks`.
+        for (matcher, action) in self
+            .run_hooks
+            .lock()
+            .expect("run_hooks mutex poisoned")
+            .iter()
+        {
+            if joined.contains(matcher.as_str()) {
+                action();
+            }
+        }
 
         if let Some((_, message)) = self
             .run_failures

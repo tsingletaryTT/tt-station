@@ -120,10 +120,23 @@ The `409` is the important new outcome: a contended box is the box's *state* con
 request, not a failure, so it is retriable and distinguishable from a `500`. Its message names the
 board and the holder — and no duration, per §2.
 
-**Swapping models needs no explicit stop.** `start` runs sweep → release any lease this agent
-already holds → acquire → scoped reset → launch, so `tt run B` while A serves hands A's board
-back (resetting it) before asking for chips again. `tt stop` first is still the clearer thing to
-do, and on a single-board box it is the same sequence either way.
+**Swapping models needs no explicit stop.** `tt run B` while A serves hands A's board back
+(resetting it) before asking gozer for chips again, so a swap does not strand a board. The exact
+sequence differs by backend:
+
+| Backend | `start` sequence |
+|---|---|
+| `runpy` (default) | note the held lease → sweep whatever publishes `serving_port` → release that lease → acquire → **scoped** `tt-smi -r <bdf>,<bdf>` → launch |
+| `docker` | note the held lease → stop *its recorded container* → release that lease → acquire → launch (**no** stale-container sweep and **no** board reset — this backend has never run one) |
+
+`tt stop` first is still the clearer thing to do, and on a single-board box it is the same
+sequence either way.
+
+Only the lease this agent observed at the top of `start` is released. If a concurrent `POST /run`
+records its own lease in the meantime, the swap declines to release, logs the supersession, and
+leaves the newer lease alone — releasing it would reset the chips under a live container. Two
+overlapping `/run`s are not otherwise serialised, so one can still leave a board stranded (wasted,
+not reset); prefer one `tt run` at a time.
 
 ### `POST /reset` (`tt reset --host …`) and `power reset-chips` (`tt power reset-chips --host …`)
 

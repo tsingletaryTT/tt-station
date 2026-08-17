@@ -1362,3 +1362,70 @@ fn docker_adopt_lease_refuses_a_who_with_no_model() {
     assert!(!backend.adopt_lease("ab12ef", "tt-station:8080:"));
     assert!(!backend.adopt_lease("ab12ef", "someone-else:whatever"));
 }
+
+/// THE SWAP MUST RELEASE THE LEASE IT OBSERVED, NOT WHATEVER IS IN THE SLOT --
+/// docker's half, where the window is widest: a `docker ps` AND a
+/// `docker stop` sit between the observation and the release.
+///
+/// Interleaving (see `RunPyBackend`'s twin test for the full narration): T1
+/// observes `lease-1`, a concurrent serve's handover stores `lease-2` in the
+/// slot, and a plain `take()` would hand T1 `lease-2` -- resetting the chips
+/// under a live container and advertising them free.
+#[test]
+fn docker_swap_never_releases_a_lease_recorded_by_a_concurrent_serve() {
+    let gozer = FakeGozerBox::with_boards(3, 0);
+    let runner = gozer.runner();
+    runner.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    runner.set_run_output("docker ps", "deadbeef\n");
+    let backend = std::sync::Arc::new(
+        DockerBackend::new(
+            config("some/image:tag", "127.0.0.1", 8080),
+            Box::new(gozer.clone()),
+        )
+        .with_gozer(Some(gozer_capability())),
+    );
+
+    backend.start("model-a").expect("the first start should succeed");
+    assert_eq!(gozer.held_lease_ids(), vec!["lease-1".to_string()]);
+
+    let concurrent = gozer.preexisting_lease("tt-station:8080:model-c");
+    assert_eq!(concurrent, "lease-2");
+
+    let racer = std::sync::Arc::clone(&backend);
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fired_probe = std::sync::Arc::clone(&fired);
+    runner.on_run("docker ps", move || {
+        if !fired_probe.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            racer.overwrite_lease_for_test("lease-2", "tt-inference-model-c");
+        }
+    });
+
+    backend
+        .start("model-b")
+        .expect("the swap should still serve, having declined to release");
+
+    let commands = gozer.commands();
+    let released_ids: Vec<String> = commands
+        .iter()
+        .filter(|cmd| {
+            cmd.first().map(String::as_str) == Some("gozer")
+                && cmd.get(1).map(String::as_str) == Some("release")
+        })
+        .filter_map(|cmd| cmd.get(2).cloned())
+        .collect();
+    assert!(
+        !released_ids.iter().any(|id| id == "lease-2"),
+        "the swap must NEVER release a lease a concurrent serve recorded -- \
+         that resets the chips under its live container: released {released_ids:?}"
+    );
+    assert!(
+        released_ids.iter().all(|id| id == "lease-1"),
+        "the only lease the swap may ever release is the one it OBSERVED: \
+         released {released_ids:?}"
+    );
+    assert!(
+        gozer.held_lease_ids().contains(&"lease-2".to_string()),
+        "the concurrent serve's lease must still be held afterwards: {:?}",
+        gozer.held_lease_ids()
+    );
+}

@@ -431,6 +431,22 @@ impl RunPyBackend {
         self.cancel.load(Ordering::SeqCst)
     }
 
+    /// Test-only: overwrite the recorded lease id, modelling a CONCURRENT
+    /// `start` whose success handover stored ITS lease while this call was
+    /// mid-swap (`routes.rs`'s `run_model` does not serialize `start`).
+    ///
+    /// That interleaving is the only way to reach `release_observed_lease`'s
+    /// compare-and-take mismatch branch, and it is the branch that stands
+    /// between the unserialized-`start` race and a chip reset under a live
+    /// container -- so it needs a deterministic test rather than two threads
+    /// and a hope. Gated exactly like `with_health_poll`/`is_cancel_requested`:
+    /// this crate's own tests, or downstream integration tests via
+    /// `test-hooks`. Never compiled into a release binary.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn overwrite_lease_for_test(&self, lease_id: &str) {
+        *self.lease.lock().expect("lease mutex poisoned") = Some(lease_id.to_string());
+    }
+
     /// Override the health-poll bound used by `start`. Same rationale (and
     /// same `#[cfg]` gating) as `DockerBackend::with_health_poll`.
     #[cfg(any(test, feature = "test-hooks"))]
@@ -605,24 +621,95 @@ impl RunPyBackend {
         Ok(())
     }
 
-    /// Hand back a lease held on behalf of a PREVIOUS serve, called by
-    /// `start` between the stale-container sweep and the fresh acquire.
+    /// Hand back a SPECIFIC lease -- the one `observed_lease` saw at the top
+    /// of `start` -- on the swap path, and only if it is still the lease this
+    /// backend holds. **COMPARE-AND-TAKE, not take.**
     ///
-    /// A thin, deliberately-named wrapper around `release_lease` (a no-op
-    /// when nothing is held, which covers the no-gozer path and the ordinary
-    /// "nothing was serving" case): the name is what makes `start`'s
-    /// sweep -> release -> acquire ordering readable, and what stops a later
-    /// reader from "simplifying" the release back out of `start` on the
-    /// grounds that `stop` already does one. `stop` only runs when a client
-    /// calls it; a `tt run` that swaps models without a preceding `tt stop`
-    /// never reaches it, which is precisely the case that stranded a board.
+    /// `release_lease` (above) releases whatever is in the slot, which is
+    /// right for `/stop`: whatever is held is what the caller asked to stop.
+    /// It is WRONG for the swap, because `routes.rs`'s `run_model` does not
+    /// serialize `start`, so two overlapping `POST /run`s interleave like
+    /// this:
     ///
-    /// The container that lease belonged to is ALREADY STOPPED by the time
-    /// this runs -- `start`'s sweep clears whatever publishes this agent's
-    /// `service_port`, which is exactly what a lease of ours is attached to
-    /// -- so the chip reset `gozer release` performs lands on an idle board.
-    fn release_held_lease(&self) -> Result<()> {
-        self.release_lease()
+    /// 1. T1 enters the swap and observes lease `L1`.
+    /// 2. T2 races ahead, acquires `L2`, and its handover stores `L2` in the
+    ///    slot (overwriting `L1`, with the warning that logs).
+    /// 3. T1 releases... and a plain `take()` hands it **`L2`** -- resetting
+    ///    the chips underneath T2's live container and then advertising them
+    ///    FREE. That is this integration's core hazard, reached through the
+    ///    code added to prevent the strand: before this branch, `start` never
+    ///    released at all, so the shape did not exist.
+    ///
+    /// So the id is taken out of the slot ONLY if the slot still holds it. If
+    /// it does not, the newer lease is left strictly alone and the supersession
+    /// is logged.
+    ///
+    /// **The superseded lease is deliberately NOT released either.** It is
+    /// stranded (T2's handover dropped it), and releasing it anyway would be
+    /// unsafe for the same reason `release_lease` takes rather than clones:
+    /// gozer REUSES lease ids, so by the time this ran, `L1` could name a
+    /// different tenant's lease and releasing it would reset THEIR chips.
+    /// A stranded board is a wasted board; a reset under a live container
+    /// destroys someone's work. Serializing `start` per backend is the durable
+    /// answer to the strand, and is a larger change than this.
+    fn release_observed_lease(&self, observed: Option<String>) -> Result<()> {
+        let Some(capability) = &self.gozer else {
+            return Ok(());
+        };
+        let Some(observed) = observed else {
+            return Ok(());
+        };
+
+        // Compare and take under ONE lock, so exactly one caller can ever own
+        // this id (the property `release_lease`'s `take()` exists for) AND it
+        // is only ever the id we actually observed.
+        {
+            let mut slot = self.lease.lock().expect("lease mutex poisoned");
+            match slot.as_deref() {
+                Some(current) if current == observed => *slot = None,
+                Some(newer) => {
+                    eprintln!(
+                        "tt-station-agentd: not releasing lease '{observed}' -- a concurrent \
+                         serve has since recorded lease '{newer}', so '{observed}' was \
+                         superseded. Releasing it now would reset the chips of a live serve. \
+                         '{observed}' is stranded; clear it by hand with `gozer release \
+                         {observed}` after checking `gozer status`."
+                    );
+                    return Ok(());
+                }
+                None => {
+                    eprintln!(
+                        "tt-station-agentd: lease '{observed}' was already released by a \
+                         concurrent stop; nothing to hand back"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        if let Err(err) = crate::gozer::release(self.runner.as_ref(), capability, &observed) {
+            // Same restore-on-refusal policy as `release_lease`: put it back
+            // only if the slot is still empty, so a newer lease is never
+            // overwritten.
+            let mut slot = self.lease.lock().expect("lease mutex poisoned");
+            match slot.as_deref() {
+                None => *slot = Some(observed),
+                Some(newer) => eprintln!(
+                    "tt-station-agentd: lease '{observed}' was refused release and a newer lease \
+                     '{newer}' has since been recorded; the refused lease is NOT retried and \
+                     must be cleaned up by hand -- check `gozer status`"
+                ),
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Which lease this backend is holding right now, if any -- read once, at
+    /// the TOP of `start`, so the swap below releases exactly the lease that
+    /// was held when the swap was decided on. See `release_observed_lease`.
+    fn observed_lease(&self) -> Option<String> {
+        self.lease.lock().expect("lease mutex poisoned").clone()
     }
 
     /// Adopt a lease this agent's PREVIOUS process left behind (see
@@ -902,10 +989,18 @@ impl ServingBackend for RunPyBackend {
         // sets the flag again, see `stop`) will trip the poll-loop abort.
         self.cancel.store(false, Ordering::SeqCst);
 
-        // THE ORDER OF THE NEXT THREE STEPS IS THE SAFETY PROPERTY:
-        // sweep -> release what we already hold -> acquire. Getting it wrong
-        // is what stranded a board on every `tt run` that wasn't preceded by
-        // a `tt stop`; see each step's comment for the specific failure.
+        // THE ORDER OF THE NEXT STEPS IS THE SAFETY PROPERTY:
+        // observe -> sweep -> release what we observed -> acquire. Getting it
+        // wrong is what stranded a board on every `tt run` that wasn't
+        // preceded by a `tt stop`; see each step's comment for the specific
+        // failure.
+
+        // (0) Note which lease we are holding, if any, BEFORE anything else,
+        // so step (2) can release exactly that one. Reading it later would
+        // let a concurrent `/run`'s handover substitute ITS lease for ours in
+        // the slot, and the release would reset a live serve's chips -- see
+        // `release_observed_lease`, which compares before it takes.
+        let superseded_lease = self.observed_lease();
 
         // (1) Stop any STALE serving container FIRST -- before the lease,
         // before the board reset. Validated on real hardware: a
@@ -927,11 +1022,11 @@ impl ServingBackend for RunPyBackend {
         self.stop_serving_containers()
             .context("failed to stop stale serving container before launch")?;
 
-        // (2) SWAP: hand back any lease this backend is still holding before
-        // asking for chips again. The sweep above has already stopped that
-        // serve's container (same published port), so the release -- and the
-        // chip reset it performs -- lands on an idle board, which is exactly
-        // the ordering `stop` uses.
+        // (2) SWAP: hand back the lease observed in step (0) before asking for
+        // chips again. The sweep above has already stopped that serve's
+        // container (same published port), so the release -- and the chip
+        // reset it performs -- lands on an idle board, which is exactly the
+        // ordering `stop` uses.
         //
         // Without this, `start` asked gozer for chips while its own previous
         // lease was still held. On a multi-board box gozer answered with the
@@ -947,7 +1042,7 @@ impl ServingBackend for RunPyBackend {
         // A refused release (gozer exit 15) FAILS the start rather than
         // pressing on: the chips were not handed back and not reset, so
         // acquiring anyway could only ever strand them again.
-        self.release_held_lease().context(
+        self.release_observed_lease(superseded_lease).context(
             "failed to hand back the lease of the previous serve before starting a new one",
         )?;
 
