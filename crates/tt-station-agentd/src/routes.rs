@@ -258,6 +258,16 @@ struct Inner {
     /// Command vector run for `PowerAction::Shutdown`. Defaults to
     /// `["systemctl", "poweroff"]`; overridden by `with_power_config`.
     power_shutdown_cmd: Vec<String>,
+    /// This box's detected `gozer` capability (resolved path + version),
+    /// from a single startup probe (see `main.rs`'s `detect_startup_gozer`,
+    /// mirroring `detect_startup_device_mesh`). `None` when gozer isn't
+    /// installed, the probe failed, or (today) simply hasn't been wired in
+    /// by a caller that skips `with_gozer` -- gozer is optional throughout
+    /// (see `gozer`'s module doc), so `None` is a normal, fully-supported
+    /// value, never an error. Defaults to `None`; set via `with_gozer`.
+    /// Purely additive: nothing outside a future leasing-aware route reads
+    /// it yet -- Task 1 only stores it.
+    gozer: Option<crate::gozer::Capability>,
 }
 
 impl AppState {
@@ -342,6 +352,7 @@ impl AppState {
                 power_suspend_cmd: vec!["systemctl".to_string(), "suspend".to_string()],
                 power_reboot_cmd: vec!["systemctl".to_string(), "reboot".to_string()],
                 power_shutdown_cmd: vec!["systemctl".to_string(), "poweroff".to_string()],
+                gozer: None,
             }),
         }
     }
@@ -550,6 +561,36 @@ impl AppState {
             ),
         }
         self
+    }
+
+    /// Set this box's detected `gozer` capability (see the `gozer` field's
+    /// doc comment). Additive counterpart to `with_device_mesh`/`with_mac`
+    /// -- same "call immediately after construction, while this is still
+    /// the sole owner of its `Arc<Inner>`" contract (`Arc::get_mut` only
+    /// succeeds then). Called after a clone exists, it logs a warning and
+    /// leaves the default (`None`) in place rather than panicking.
+    ///
+    /// Optional: an `AppState` never given this still behaves exactly as
+    /// before gozer existed -- whole-box serving, no leasing. `main.rs`
+    /// calls this with the result of a bounded startup probe
+    /// (`detect_startup_gozer`, mirroring `detect_startup_device_mesh`);
+    /// tests that don't care about gozer never need to call it.
+    pub fn with_gozer(mut self, gozer: Option<crate::gozer::Capability>) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.gozer = gozer,
+            None => eprintln!(
+                "tt-station-agentd: with_gozer called on an already-shared AppState; gozer capability not applied"
+            ),
+        }
+        self
+    }
+
+    /// This box's detected `gozer` capability, or `None` if gozer is absent
+    /// or was never probed for (see `with_gozer`). Not read by any route
+    /// yet -- Task 1 only stores it; a later task exposes it via
+    /// `GET /status`'s `leasing` field (see the design doc).
+    pub fn gozer(&self) -> Option<&crate::gozer::Capability> {
+        self.inner.gozer.as_ref()
     }
 
     pub fn name(&self) -> &str {

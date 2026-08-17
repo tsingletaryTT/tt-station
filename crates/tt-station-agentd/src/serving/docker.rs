@@ -127,6 +127,53 @@ pub trait CommandRunner: Send + Sync {
         let _ = url;
         Err(anyhow::anyhow!("CommandRunner::http_get not implemented"))
     }
+
+    /// Run a command and return its exit code plus stdout/stderr, WITHOUT
+    /// collapsing a non-zero exit into an `Err` the way `run` does (see
+    /// `run_and_capture`, which discards the code and keeps only stderr).
+    ///
+    /// This exists for `gozer` (`src/gozer.rs`): its contract lives IN its
+    /// exit codes -- `0` granted, `10` queued, `12` unavailable, `13` no
+    /// such lease, `14` topology unreadable, `15` release refused, `16`
+    /// mutex stuck, `130` interrupted -- and it emits its `--json` payload
+    /// on stdout even when the exit code is non-zero. A caller with only
+    /// `run` can read neither: the code is gone, and a non-zero exit means
+    /// the JSON on stdout is discarded along with it.
+    ///
+    /// Default implementation delegates to `run` and reports exit `0` with
+    /// no stderr on success -- adequate for any EXISTING implementor that
+    /// only ever cared about success/failure, so adding this method breaks
+    /// no current `CommandRunner`. Only implementors that actually need
+    /// faithful exit-code/stdout/stderr capture (`RealCommandRunner` here,
+    /// plus the two test fakes -- `FakeRunner` in `tests/support/mod.rs` and
+    /// `RecordingFakeRunner` below) override it explicitly. `run` itself is
+    /// left completely untouched: every existing caller keeps its current
+    /// behavior.
+    fn run_capturing(&self, args: &[&str]) -> Result<CapturedOutput> {
+        self.run(args).map(|stdout| CapturedOutput {
+            code: 0,
+            stdout,
+            stderr: String::new(),
+        })
+    }
+}
+
+/// Exit code, stdout, and stderr from a `run_capturing` call -- the
+/// un-collapsed sibling of what `run`'s plain `Result<String>` throws away
+/// on a non-zero exit. See `CommandRunner::run_capturing`'s doc comment for
+/// why gozer specifically needs this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedOutput {
+    /// Process exit code. `-1` when the process was killed by a signal
+    /// rather than exiting normally (see `std::process::ExitStatus::code`),
+    /// which never happens for gozer's own documented contract but is a
+    /// real possibility for any subprocess in general.
+    pub code: i32,
+    /// Captured stdout, trimmed of trailing whitespace (matches
+    /// `run_and_capture`'s existing convention for `run`).
+    pub stdout: String,
+    /// Captured stderr, trimmed the same way.
+    pub stderr: String,
 }
 
 /// Real `CommandRunner`: shells out to the `docker` binary on `$PATH` for
@@ -185,6 +232,25 @@ impl CommandRunner for RealCommandRunner {
             .and_then(|c| c.get(url).send())
             .map(|resp| resp.status().is_success())
             .unwrap_or(false)
+    }
+
+    fn run_capturing(&self, args: &[&str]) -> Result<CapturedOutput> {
+        let (program, rest) = args.split_first().ok_or_else(|| {
+            anyhow::anyhow!("CommandRunner::run_capturing called with empty argv")
+        })?;
+        let output = std::process::Command::new(program)
+            .args(rest)
+            .output()
+            .with_context(|| format!("failed to spawn {}", args.join(" ")))?;
+        Ok(CapturedOutput {
+            // `.code()` is `None` only when the process was killed by a
+            // signal rather than exiting -- `-1` is a clearly-out-of-band
+            // sentinel (real exit codes are 0-255) rather than silently
+            // treating "killed by signal" as a successful exit 0.
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
     }
 
     fn http_get(&self, url: &str) -> Result<String> {
@@ -553,12 +619,18 @@ mod tests {
     #[derive(Clone)]
     struct RecordingFakeRunner {
         commands: Arc<Mutex<Vec<Vec<String>>>>,
+        /// Canned `run_capturing` response, set via `set_capture`. `None`
+        /// (the default) means `run_capturing` reports a plain success:
+        /// exit 0, empty stdout/stderr -- fine for every existing caller of
+        /// this fake, which only exercises `run`.
+        capture: Arc<Mutex<Option<(i32, String, String)>>>,
     }
 
     impl RecordingFakeRunner {
         fn new() -> Self {
             RecordingFakeRunner {
                 commands: Arc::new(Mutex::new(Vec::new())),
+                capture: Arc::new(Mutex::new(None)),
             }
         }
 
@@ -567,6 +639,15 @@ mod tests {
                 .lock()
                 .expect("commands mutex poisoned")
                 .clone()
+        }
+
+        /// Set the canned exit code/stdout/stderr the next (and any
+        /// subsequent) `run_capturing` call returns -- e.g.
+        /// `set_capture(12, r#"{"granted":false}"#, "")` to exercise a
+        /// gozer-style non-zero exit with a JSON payload on stdout.
+        fn set_capture(&self, code: i32, stdout: &str, stderr: &str) {
+            *self.capture.lock().expect("capture mutex poisoned") =
+                Some((code, stdout.to_string(), stderr.to_string()));
         }
     }
 
@@ -577,6 +658,24 @@ mod tests {
                 .expect("commands mutex poisoned")
                 .push(args.iter().map(|s| s.to_string()).collect());
             Ok(String::new())
+        }
+
+        fn run_capturing(&self, args: &[&str]) -> Result<CapturedOutput> {
+            self.commands
+                .lock()
+                .expect("commands mutex poisoned")
+                .push(args.iter().map(|s| s.to_string()).collect());
+            let (code, stdout, stderr) = self
+                .capture
+                .lock()
+                .expect("capture mutex poisoned")
+                .clone()
+                .unwrap_or((0, String::new(), String::new()));
+            Ok(CapturedOutput {
+                code,
+                stdout,
+                stderr,
+            })
         }
 
         fn health_ok(&self, _url: &str) -> bool {
@@ -632,5 +731,64 @@ mod tests {
             model,
             "--model should carry the ORIGINAL, unsanitized model id"
         );
+    }
+
+    /// `run_capturing` on the real runner must preserve a NON-ZERO exit code
+    /// plus both stdout and stderr, rather than collapsing everything into a
+    /// stringified `Err` the way `run`/`run_and_capture` do. This is the
+    /// whole reason `run_capturing` exists: gozer's contract lives in its
+    /// exit codes (10 queued, 12 unavailable, ...) and it emits `--json` on
+    /// stdout even on a non-zero exit -- a caller that only has `run` cannot
+    /// read either.
+    #[test]
+    fn real_command_runner_run_capturing_preserves_nonzero_exit_and_streams() {
+        let runner = RealCommandRunner;
+        let captured = runner
+            .run_capturing(&["sh", "-c", "echo out; echo err >&2; exit 7"])
+            .expect("run_capturing should return Ok even on a non-zero exit");
+        assert_eq!(captured.code, 7);
+        assert_eq!(captured.stdout, "out");
+        assert_eq!(captured.stderr, "err");
+    }
+
+    /// The success path: exit 0, stdout captured, no error.
+    #[test]
+    fn real_command_runner_run_capturing_reports_zero_on_success() {
+        let runner = RealCommandRunner;
+        let captured = runner
+            .run_capturing(&["sh", "-c", "echo hi"])
+            .expect("run_capturing should succeed");
+        assert_eq!(captured.code, 0);
+        assert_eq!(captured.stdout, "hi");
+        assert_eq!(captured.stderr, "");
+    }
+
+    /// A command that fails to spawn at all (unlike a non-zero exit) is
+    /// still a genuine `Err` -- there's no exit code to report because the
+    /// process never ran.
+    #[test]
+    fn real_command_runner_run_capturing_errors_when_spawn_fails() {
+        let runner = RealCommandRunner;
+        assert!(runner
+            .run_capturing(&["tt-station-agentd-definitely-not-a-real-binary"])
+            .is_err());
+    }
+
+    /// `RecordingFakeRunner::run_capturing` must report whatever exit
+    /// code/stdout/stderr a test canned via `set_capture`, so `src/`-internal
+    /// tests (e.g. `gozer.rs`'s own unit tests, if any land here later) can
+    /// exercise a non-zero-exit-with-JSON-on-stdout response without a real
+    /// `gozer` binary.
+    #[test]
+    fn recording_fake_runner_run_capturing_returns_canned_exit_code() {
+        let runner = RecordingFakeRunner::new();
+        runner.set_capture(12, r#"{"granted":false}"#, "");
+
+        let captured = runner
+            .run_capturing(&["gozer", "acquire", "--json"])
+            .expect("run_capturing should succeed against the fake");
+        assert_eq!(captured.code, 12);
+        assert_eq!(captured.stdout, r#"{"granted":false}"#);
+        assert_eq!(captured.stderr, "");
     }
 }

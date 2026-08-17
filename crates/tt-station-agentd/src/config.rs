@@ -41,6 +41,7 @@ pub struct GlobalSection {
     pub no_token_persistence: Option<bool>,
     pub telemetry_interval_ms: Option<u64>,
     pub tt_smi_bin: Option<String>,
+    pub gozer_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -71,6 +72,7 @@ pub struct CliOverrides {
     pub no_token_persistence: bool, // clap SetTrue flag — false = "not set"
     pub telemetry_interval_ms: Option<u64>,
     pub tt_smi_bin: Option<String>,
+    pub gozer_path: Option<String>,
     // serving-scoped
     pub backend: Option<String>,
     pub tt_inference_repo: Option<String>,
@@ -105,6 +107,15 @@ pub struct ResolvedConfig {
     pub token_store: Option<PathBuf>, // None iff persistence disabled
     pub telemetry_interval_ms: u64,
     pub tt_smi_bin: String,
+    /// Resolved `gozer` binary path, tilde-expanded. `None` when neither
+    /// `--gozer-path` nor `[global].gozer_path` was given -- unlike
+    /// `tt_smi_bin`, there's no built-in default STRING here (`"gozer"`
+    /// on `$PATH` isn't assumed at this layer); `gozer::probe` does its own
+    /// `$PATH` search when this is `None`, so an unset value still resolves
+    /// to a working binary if one is on `$PATH`. gozer is optional (see
+    /// `gozer`'s module doc), so `None` all the way through to `probe`
+    /// failing to find anything is a perfectly normal outcome, not an error.
+    pub gozer_path: Option<String>,
     // active serving profile
     pub active_profile: Option<String>, // None = implicit default profile
     pub available_profiles: Vec<String>, // sorted; empty when no [profile.*]
@@ -255,6 +266,12 @@ pub fn resolve(
         pick([&cli.telemetry_interval_ms, &g.telemetry_interval_ms, &None]).unwrap_or(1000);
     let tt_smi_bin =
         pick([&cli.tt_smi_bin, &g.tt_smi_bin, &None]).unwrap_or_else(|| "tt-smi".into());
+    // No `unwrap_or_else` default string here (unlike `tt_smi_bin`): `None`
+    // is a legitimate, common resolved value -- `gozer::probe` treats it as
+    // "search $PATH", not "misconfigured". Only expand `~/` when a value was
+    // actually given; `expand_tilde` on an absent value would just produce
+    // an empty string to expand, which isn't the same as "not configured".
+    let gozer_path = pick([&cli.gozer_path, &g.gozer_path, &None]).map(|p| expand_tilde(&p));
 
     let no_token_persistence = cli.no_token_persistence || g.no_token_persistence.unwrap_or(false);
     let token_store = if no_token_persistence {
@@ -302,6 +319,7 @@ pub fn resolve(
         token_store,
         telemetry_interval_ms,
         tt_smi_bin,
+        gozer_path,
         active_profile,
         available_profiles,
         backend,

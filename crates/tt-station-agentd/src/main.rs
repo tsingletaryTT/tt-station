@@ -19,6 +19,7 @@ use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 use tt_station_agentd::config;
 use tt_station_agentd::device::detect_device_mesh;
+use tt_station_agentd::gozer;
 use tt_station_agentd::net;
 use tt_station_agentd::routes::{app, AppState, StatusAdvertiser};
 use tt_station_agentd::serving::docker::{CommandRunner, DockerConfig, RealCommandRunner};
@@ -331,6 +332,20 @@ struct Cli {
     #[arg(long = "tt-smi-bin")]
     tt_smi_bin: Option<String>,
 
+    /// `gozer` binary this agent probes for once at startup (see
+    /// `gozer::probe`) to arbitrate chip leases with other tenants on the
+    /// same box. Optional -- gozer is not a hard dependency (see the
+    /// `gozer` module doc): when unset, resolution falls back to `gozer` on
+    /// `$PATH`, and if that isn't found either, this box simply serves
+    /// whole-box with no leasing, exactly as it always has.
+    ///
+    /// No clap default: `resolve` supplies `None` (meaning "search $PATH")
+    /// when this and `[global].gozer_path` are both absent -- unlike
+    /// `--tt-smi-bin`, there's no built-in default STRING, since `gozer`'s
+    /// own `$PATH` search already covers the common case.
+    #[arg(long = "gozer-path")]
+    gozer_path: Option<String>,
+
     /// Path to agentd.toml. Defaults to `$TT_CONFIG_DIR/agentd.toml` if
     /// `TT_CONFIG_DIR` is set, else `$HOME/.config/tt-station/agentd.toml`.
     /// An explicit path that is missing/unreadable is a hard error.
@@ -501,6 +516,64 @@ async fn detect_startup_device_mesh(tt_smi_bin: &str) -> Option<String> {
     }
 }
 
+/// How long the startup `gozer` probe waits for `<path> --version` before
+/// giving up and treating gozer as absent. Mirrors
+/// `STARTUP_DEVICE_MESH_TIMEOUT` -- gozer is an external, optional binary
+/// this agent doesn't control (see the `gozer` module doc), so a probe here
+/// must not become a hang of the whole daemon.
+const STARTUP_GOZER_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Probe for `gozer` ONCE at startup (not per request), through the same
+/// bounded `spawn_blocking` + `timeout` shape `detect_startup_device_mesh`
+/// uses for `tt-smi`. gozer is OPTIONAL: a missing binary, a non-zero exit,
+/// malformed output, a hang, or a `spawn_blocking` panic all degrade to
+/// `None` -- never a startup failure. `gozer::probe` itself already logs the
+/// found/absent outcome for every case it can see; this wrapper only adds
+/// the timeout-specific case `probe` can't observe on its own (a genuinely
+/// hung subprocess never returns control to it).
+///
+/// Bounded to `STARTUP_GOZER_PROBE_TIMEOUT` (~5s -- gozer's own `--version`
+/// is expected to be near-instant, unlike `tt-smi -s`'s device scan, hence
+/// the shorter ceiling than `STARTUP_DEVICE_MESH_TIMEOUT`), so a wedged
+/// `gozer` binary can delay the socket bind below by at most that ceiling,
+/// same "everything between here and the bind delays startup" note as
+/// `detect_startup_device_mesh`.
+async fn detect_startup_gozer(gozer_path: Option<&str>) -> Option<gozer::Capability> {
+    let path_hint = gozer_path.map(|s| s.to_string());
+    let probe_result = tokio::time::timeout(
+        STARTUP_GOZER_PROBE_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            let runner = RealCommandRunner;
+            gozer::probe(&runner, path_hint.as_deref())
+        }),
+    )
+    .await;
+
+    match probe_result {
+        // Ran to completion within the timeout, and the blocking task
+        // didn't panic -- `gozer::probe` already logged which of "found" or
+        // "absent" this is and why.
+        Ok(Ok(capability)) => capability,
+        // The `spawn_blocking` task panicked.
+        Ok(Err(join_err)) => {
+            eprintln!(
+                "tt-station-agentd: gozer probe task panicked: {join_err}; leasing unavailable, serving whole-box as before"
+            );
+            None
+        }
+        // Blew past STARTUP_GOZER_PROBE_TIMEOUT -- a wedged `gozer` binary.
+        // The spawned blocking task keeps running in the background (no
+        // cooperative way to kill it), but startup stops waiting on it.
+        Err(_elapsed) => {
+            eprintln!(
+                "tt-station-agentd: gozer probe timed out after {:?}; leasing unavailable, serving whole-box as before",
+                STARTUP_GOZER_PROBE_TIMEOUT
+            );
+            None
+        }
+    }
+}
+
 /// Resolve the `(ssh_user, authorized_keys_path)` target for `POST`/`DELETE
 /// /ssh/authorize` (Task 2).
 ///
@@ -595,6 +668,7 @@ async fn main() -> Result<()> {
         no_token_persistence: cli.no_token_persistence,
         telemetry_interval_ms: cli.telemetry_interval_ms,
         tt_smi_bin: cli.tt_smi_bin.clone(),
+        gozer_path: cli.gozer_path.clone(),
         backend: cli.backend.map(|b| b.to_string()),
         tt_inference_repo: cli.tt_inference_repo.clone(),
         serving_image: cli.serving_image.clone(),
@@ -814,6 +888,16 @@ async fn main() -> Result<()> {
     // outcome. See `detect_startup_device_mesh`'s doc comment.
     let device_mesh = detect_startup_device_mesh(&rc.tt_smi_bin).await;
     let state = state.with_device_mesh(device_mesh.clone());
+
+    // Probe for `gozer` ONCE at startup (mirrors the device-mesh detection
+    // immediately above): bounded, degrades to `None`, and gozer's absence
+    // is a normal outcome, never a startup failure -- see the `gozer`
+    // module doc and `detect_startup_gozer`'s doc comment. Stored on
+    // `AppState` before any clone of it exists (same `Arc::get_mut`
+    // requirement every other `with_*` builder here relies on) so a later
+    // task can read it back via `AppState::gozer()` without a second probe.
+    let gozer_capability = detect_startup_gozer(rc.gozer_path.as_deref()).await;
+    let state = state.with_gozer(gozer_capability);
 
     // Detect this box's primary NIC MAC ONCE at startup (mirrors the
     // device-mesh detection immediately above): best-effort, synchronous

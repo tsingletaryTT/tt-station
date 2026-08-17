@@ -16,7 +16,13 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use tt_station_agentd::serving::docker::CommandRunner;
+use tt_station_agentd::serving::docker::{CapturedOutput, CommandRunner};
+
+/// One canned `run_capturing` response: `(argv substring matcher, exit code,
+/// stdout, stderr)`. Named alias (rather than the bare 4-tuple inline) so
+/// `FakeRunner`'s `run_capturing_outputs` field doesn't trip clippy's
+/// `type_complexity` lint.
+type RunCapturingCanned = (String, i32, String, String);
 
 /// A scratch `model_spec.json` fixture, unique per call and removed on drop.
 /// Was duplicated near-identically in `tests/models.rs` and `tests/runpy.rs`
@@ -102,6 +108,26 @@ pub struct FakeRunner {
     /// How many `http_get` calls have been seen -- indexes into
     /// `http_get_sequence`.
     http_get_calls_seen: Arc<Mutex<usize>>,
+    /// Canned `run_capturing` response -- `(code, stdout, stderr)` -- for
+    /// calls whose space-joined argv CONTAINS a registered substring, e.g.
+    /// `("gozer --version", 0, "gozer 0.1.0", "")`. Checked in insertion
+    /// order, first match wins, same convention as `run_outputs`/
+    /// `run_failures` -- but a DISTINCT list from those two: `run_capturing`
+    /// preserves a non-zero exit code and stdout TOGETHER (that's the whole
+    /// reason it exists -- see `CommandRunner::run_capturing`'s doc comment),
+    /// which `run_outputs`/`run_failures` can't represent (they only know
+    /// "succeeded with this stdout" or "failed with this message", never
+    /// "exited N with this stdout/stderr"). A call matching nothing gets
+    /// `CapturedOutput { code: 0, stdout: "", stderr: "" }`.
+    run_capturing_outputs: Arc<Mutex<Vec<RunCapturingCanned>>>,
+    /// Canned FAILURES for `run_capturing` -- mirrors `run_failures`, but for
+    /// `run_capturing`'s separate canning list. Lets a test model "the
+    /// command couldn't even be spawned" (e.g. `gozer` genuinely absent),
+    /// which is a real `Err` and distinct from a clean non-zero EXIT (which
+    /// `run_capturing_outputs` models instead). Checked in insertion order,
+    /// same convention as `run_failures`; a match short-circuits
+    /// `run_capturing` with `Err` before it consults `run_capturing_outputs`.
+    run_capturing_failures: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 /// Default `http_get` body when nothing is configured: a non-empty `data`
@@ -125,6 +151,8 @@ impl FakeRunner {
             http_get_response: Arc::new(Mutex::new(None)),
             http_get_sequence: Arc::new(Mutex::new(Vec::new())),
             http_get_calls_seen: Arc::new(Mutex::new(0)),
+            run_capturing_outputs: Arc::new(Mutex::new(Vec::new())),
+            run_capturing_failures: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -198,6 +226,38 @@ impl FakeRunner {
             .expect("http_get_sequence mutex poisoned") =
             bodies.iter().map(|b| b.map(str::to_string)).collect();
     }
+
+    /// Register a canned `run_capturing` response -- exit `code` plus
+    /// `stdout`/`stderr` -- for the next (and any subsequent) `run_capturing`
+    /// call whose space-joined argv contains `matcher`. E.g.
+    /// `set_run_capturing("gozer --version", 0, "gozer 0.1.0", "")`, or
+    /// `set_run_capturing("gozer acquire", 12, r#"{"granted":false}"#, "")`
+    /// to exercise gozer's non-zero-exit-with-JSON-on-stdout contract.
+    #[allow(dead_code)]
+    pub fn set_run_capturing(&self, matcher: &str, code: i32, stdout: &str, stderr: &str) {
+        self.run_capturing_outputs
+            .lock()
+            .expect("run_capturing_outputs mutex poisoned")
+            .push((
+                matcher.to_string(),
+                code,
+                stdout.to_string(),
+                stderr.to_string(),
+            ));
+    }
+
+    /// Make any future `run_capturing` call whose space-joined argv contains
+    /// `matcher` return `Err` with `message` instead of a `CapturedOutput` --
+    /// e.g. `fail_run_capturing("gozer", "No such file or directory")` to
+    /// exercise "gozer genuinely isn't installed" (a real spawn failure),
+    /// distinct from a clean non-zero exit (see `set_run_capturing`).
+    #[allow(dead_code)]
+    pub fn fail_run_capturing(&self, matcher: &str, message: &str) {
+        self.run_capturing_failures
+            .lock()
+            .expect("run_capturing_failures mutex poisoned")
+            .push((matcher.to_string(), message.to_string()));
+    }
 }
 
 impl CommandRunner for FakeRunner {
@@ -228,6 +288,46 @@ impl CommandRunner for FakeRunner {
             .map(|(_, output)| output.clone())
             .unwrap_or_default();
         Ok(output)
+    }
+
+    fn run_capturing(&self, args: &[&str]) -> Result<CapturedOutput> {
+        self.commands
+            .lock()
+            .expect("commands mutex poisoned")
+            .push(args.iter().map(|s| s.to_string()).collect());
+
+        let joined = args.join(" ");
+
+        if let Some((_, message)) = self
+            .run_capturing_failures
+            .lock()
+            .expect("run_capturing_failures mutex poisoned")
+            .iter()
+            .find(|(matcher, _)| joined.contains(matcher.as_str()))
+        {
+            return Err(anyhow::anyhow!(message.clone()));
+        }
+
+        let canned = self
+            .run_capturing_outputs
+            .lock()
+            .expect("run_capturing_outputs mutex poisoned")
+            .iter()
+            .find(|(matcher, ..)| joined.contains(matcher.as_str()))
+            .cloned();
+
+        Ok(match canned {
+            Some((_, code, stdout, stderr)) => CapturedOutput {
+                code,
+                stdout,
+                stderr,
+            },
+            None => CapturedOutput {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        })
     }
 
     fn health_ok(&self, _url: &str) -> bool {

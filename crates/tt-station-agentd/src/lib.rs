@@ -5,6 +5,7 @@
 pub mod authkeys;
 pub mod config;
 pub mod device;
+pub mod gozer;
 pub mod inference;
 pub mod logs;
 pub mod net;
