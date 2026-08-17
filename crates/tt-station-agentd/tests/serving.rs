@@ -1304,3 +1304,59 @@ fn docker_stop_is_idempotent_and_releases_when_nothing_is_running() {
         gozer.held_lease_ids()
     );
 }
+
+/// IMPORTANT 4, docker's half. An adopted lease has to name the container
+/// `stop` must halt before releasing, and the only thing available is the
+/// lease's `who` (`tt-station:<port>:<model>`) -- whose model half
+/// reconstructs exactly the `--name` the previous process's `start` passed,
+/// since both go through `container_name`.
+#[test]
+fn docker_stop_releases_a_lease_adopted_from_a_previous_process() {
+    let gozer = FakeGozerBox::with_boards(1, 0);
+    let runner = gozer.runner();
+    runner.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    // The adopted serve's container is still running.
+    runner.set_run_output("docker ps", "deadbeef\n");
+    let lease_id = gozer.preexisting_lease("tt-station:8080:meta-llama/Llama-3.1-8B");
+    let backend = DockerBackend::new(
+        config("some/image:tag", "127.0.0.1", 8080),
+        Box::new(gozer.clone()),
+    )
+    .with_gozer(Some(gozer_capability()));
+
+    assert!(backend.adopt_lease(&lease_id, "tt-station:8080:meta-llama/Llama-3.1-8B"));
+
+    // `routes.rs` passes an empty model once `/reset` has cleared it; the
+    // adopted lease's own container name must be what gets stopped.
+    backend.stop("").expect("stop should succeed");
+
+    let commands = gozer.commands();
+    assert!(
+        docker_ps_name_probe_index(&commands, "tt-inference-meta-llama-Llama-3.1-8B").is_some(),
+        "the adopted lease must name its own container, reconstructed from the \
+         model in its `who`: {commands:?}"
+    );
+    assert!(
+        gozer.held_lease_ids().is_empty(),
+        "the adopted lease must be RELEASED by /stop -- an explicit release \
+         resets its chips, gozer's reap does not: {:?}",
+        gozer.held_lease_ids()
+    );
+}
+
+/// A `who` with no model half names no container, so there is nothing this
+/// backend could safely stop before releasing -- adoption must refuse rather
+/// than record a lease whose release would reset chips under a container it
+/// cannot find.
+#[test]
+fn docker_adopt_lease_refuses_a_who_with_no_model() {
+    let gozer = FakeGozerBox::with_boards(1, 0);
+    let backend = DockerBackend::new(
+        config("some/image:tag", "127.0.0.1", 8080),
+        Box::new(gozer.clone()),
+    )
+    .with_gozer(Some(gozer_capability()));
+
+    assert!(!backend.adopt_lease("ab12ef", "tt-station:8080:"));
+    assert!(!backend.adopt_lease("ab12ef", "someone-else:whatever"));
+}

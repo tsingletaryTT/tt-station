@@ -795,12 +795,30 @@ pub struct SweepReport {
     pub released: Vec<String>,
     /// Lease ids left alone because something IS serving on their port.
     pub kept: Vec<String>,
+    /// The subset of `kept` whose service port is THIS agent's own -- i.e.
+    /// leases a previous process of this same agent took, whose serve is
+    /// still running, and which the freshly-started backend knows nothing
+    /// about. The caller hands each to `ServingBackend::adopt_lease` so the
+    /// next `/stop` RELEASES it (resetting its chips) rather than leaving it
+    /// to gozer's reap, which does not reset. See that method's doc comment.
+    pub adoptable: Vec<AdoptableLease>,
     /// `who` strings that name a live tt-station lease this sweep could NOT
     /// act on -- no lease id resolvable from `gozer history`, or no
     /// parseable service port in the `who`. Reported, never guessed at.
     pub unresolved: Vec<String>,
 }
 
+/// A KEPT lease that belongs to this agent's own serving port, and so can be
+/// handed to the freshly-built backend -- see [`SweepReport::adoptable`] and
+/// `ServingBackend::adopt_lease`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdoptableLease {
+    pub lease_id: String,
+    /// The lease's full `tt-station:<port>:<model>` identity, which the
+    /// docker backend needs to reconstruct the container name it must stop
+    /// before releasing.
+    pub who: String,
+}
 
 /// How many `gozer history` records the sweep reads. Bounded because this
 /// runs between the capability probe and the socket bind, where everything
@@ -868,7 +886,17 @@ struct HistoryReport {
 /// Best-effort throughout, and never fatal: every failure mode (docker
 /// unreadable, `status` unreadable, `history` unreadable, a release gozer
 /// refuses) leaves the lease exactly where it was and logs.
-pub fn startup_sweep(runner: &dyn CommandRunner, capability: &Capability) -> SweepReport {
+///
+/// `own_service_port` is this agent's own serving port, and it decides one
+/// thing only: which KEPT leases land in [`SweepReport::adoptable`]. It never
+/// affects what gets released -- the release rule is still "nothing is
+/// serving on this lease's port", for every `tt-station:` lease regardless of
+/// whose port it names.
+pub fn startup_sweep(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+    own_service_port: u16,
+) -> SweepReport {
     let mut report = SweepReport::default();
 
     // 1. Docker first: without it there is no question to answer, and no
@@ -944,6 +972,17 @@ pub fn startup_sweep(runner: &dyn CommandRunner, capability: &Capability) -> Swe
                 "tt-station-agentd: leaving lease '{lease_id}' ({who}) alone -- something is \
                  still serving on port {port}"
             );
+            // A kept lease on OUR OWN serving port is one a previous process
+            // of this agent took for a serve that is still up -- the
+            // `Restart=on-failure` case. The freshly-built backend has no
+            // record of it, so hand it back to the caller to adopt or nothing
+            // will ever release it, and a REAPED lease is never reset.
+            if port == own_service_port {
+                report.adoptable.push(AdoptableLease {
+                    lease_id: lease_id.clone(),
+                    who: who.clone(),
+                });
+            }
             report.kept.push(lease_id);
             continue;
         }

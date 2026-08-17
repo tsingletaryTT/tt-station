@@ -798,6 +798,44 @@ impl DockerBackend {
         self.release_lease()
     }
 
+    /// Adopt a lease this agent's PREVIOUS process left behind (see
+    /// `ServingBackend::adopt_lease`), so the next `/stop` releases it -- and
+    /// thereby RESETS its chips -- instead of leaving it to gozer's reap,
+    /// which does not.
+    ///
+    /// `who` (`tt-station:<port>:<model>`) is what makes this safe for this
+    /// backend: `HeldLease` needs a container name to stop before releasing,
+    /// and the model in `who` reconstructs exactly the name the previous
+    /// process's `start` passed to `--name` (both go through
+    /// `container_name`, which is the single binding -- see `HeldLease`).
+    ///
+    /// Returns `false` when leasing is off, this backend already tracks a
+    /// lease, or `who` carries no model half to name a container from; the
+    /// caller logs that loudly rather than adopting something it cannot stop.
+    fn adopt_lease_id(&self, lease_id: &str, who: &str) -> bool {
+        if self.gozer.is_none() {
+            return false;
+        }
+        // `tt-station:<port>:<model>` -- everything after the SECOND colon is
+        // the model, which may itself contain colons (`repo/model:0.14`).
+        let Some(model) = who
+            .strip_prefix(crate::gozer::WHO_PREFIX)
+            .and_then(|rest| rest.split_once(':'))
+            .map(|(_, model)| model)
+            .filter(|model| !model.is_empty())
+        else {
+            return false;
+        };
+        let mut held = self.lease.lock().expect("lease mutex poisoned");
+        if held.is_some() {
+            return false;
+        }
+        *held = Some(HeldLease {
+            lease_id: lease_id.to_string(),
+            container_name: self.container_name(model),
+        });
+        true
+    }
 
     /// Give back the lease this backend holds on behalf of a running serve,
     /// if any, and forget it. A no-op (`Ok(())`) when nothing is leased --
@@ -1163,6 +1201,13 @@ impl ServingBackend for DockerBackend {
         // `/stop` retries the release. A no-gozer/no-lease backend gets
         // `Ok(())` here, so the idempotent-stop contract above is unchanged.
         self.release_lease()
+    }
+
+    /// Adopt a lease left behind by a previous agentd process -- see
+    /// `ServingBackend::adopt_lease`. `who` carries the model, which is how
+    /// the container name to stop before releasing is reconstructed.
+    fn adopt_lease(&self, lease_id: &str, who: &str) -> bool {
+        self.adopt_lease_id(lease_id, who)
     }
 
     fn status(&self) -> Result<ServingStatus> {

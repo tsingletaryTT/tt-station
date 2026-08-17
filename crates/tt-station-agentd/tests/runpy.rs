@@ -2794,3 +2794,80 @@ fn runpy_start_names_its_own_serve_rather_than_a_stranger_when_contended() {
          it were another tenant: {message}"
     );
 }
+
+/// IMPORTANT 4: a lease adopted from a PREVIOUS agentd process must be
+/// released by the next `/stop`.
+///
+/// The unit carries `Restart=on-failure`. Restart agentd while a model serves
+/// and the startup sweep correctly KEEPS that lease (something is still on its
+/// port) -- but the new process's backend starts with `self.lease == None`, so
+/// the next `tt stop` stopped the container and released nothing. The lease
+/// then only went away via gozer's reap, and a REAPED lease is never reset
+/// (gozer's `--fresh` is the protected path), so the next tenant got un-reset
+/// silicon with wedged ethernet cores -- the failure `reset_before_serve`
+/// exists to prevent.
+#[test]
+fn runpy_stop_releases_a_lease_adopted_from_a_previous_process() {
+    let gozer = FakeGozerBox::with_boards(1, 0);
+    gozer.runner().set_run_output("tt-smi -s", TT_SMI_TWO_P300C);
+    // The lease a previous process of this agent took, for a serve that is
+    // still running -- what `startup_sweep` hands back as `adoptable`.
+    let lease_id = gozer.preexisting_lease("tt-station:8080:model-a");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    assert!(
+        backend.adopt_lease(&lease_id, "tt-station:8080:model-a"),
+        "a backend holding no lease must adopt the one the sweep kept"
+    );
+
+    backend.stop("model-a").expect("stop should succeed");
+
+    assert!(
+        gozer.held_lease_ids().is_empty(),
+        "the adopted lease must be RELEASED by /stop -- an explicit release \
+         resets its chips, gozer's reap does not: {:?}",
+        gozer.held_lease_ids()
+    );
+}
+
+/// Adoption must never overwrite a lease this backend is already tracking:
+/// that record is what `stop` releases, and replacing it would strand the
+/// live one. The caller logs the refusal loudly instead.
+#[test]
+fn runpy_adopt_lease_refuses_to_overwrite_a_live_lease() {
+    let gozer = FakeGozerBox::with_boards(2, 0);
+    gozer.runner().set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend.start("model-a").expect("start should succeed");
+
+    assert!(
+        !backend.adopt_lease("some-other-lease", "tt-station:8080:model-b"),
+        "adoption must refuse while a lease is already recorded"
+    );
+
+    backend.stop("model-a").expect("stop should succeed");
+    assert!(
+        gozer.held_lease_ids().is_empty(),
+        "the LIVE lease must still be the one stop releases: {:?}",
+        gozer.held_lease_ids()
+    );
+}
+
+/// Without gozer there is nothing to adopt and no way to release, so
+/// adoption must refuse rather than record an id this backend could never
+/// hand back.
+#[test]
+fn runpy_adopt_lease_refuses_without_gozer() {
+    let runner = FakeRunner::new(0);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    assert!(!backend.adopt_lease("ab12ef", "tt-station:8080:model-a"));
+    assert!(
+        runner.commands().is_empty(),
+        "a refused adoption must not shell out to anything: {:?}",
+        runner.commands()
+    );
+}

@@ -625,6 +625,26 @@ impl RunPyBackend {
         self.release_lease()
     }
 
+    /// Adopt a lease this agent's PREVIOUS process left behind (see
+    /// `ServingBackend::adopt_lease`), so the next `/stop` releases it --
+    /// and thereby RESETS its chips -- instead of leaving it to gozer's reap,
+    /// which does not.
+    ///
+    /// Returns `false` (adopting nothing) when leasing is off or this backend
+    /// already tracks a lease; the caller logs that loudly rather than
+    /// silently overwriting a live record.
+    fn adopt_lease_id(&self, lease_id: &str) -> bool {
+        if self.gozer.is_none() {
+            return false;
+        }
+        let mut held = self.lease.lock().expect("lease mutex poisoned");
+        if held.is_some() {
+            return false;
+        }
+        *held = Some(lease_id.to_string());
+        true
+    }
+
     /// Resolve where `model_spec.json` lives: `config.model_spec_path` if
     /// explicitly set, else `<repo_dir>/model_spec.json` -- the file
     /// `run.py` itself validates `--model`/`--tt-device` against (see the
@@ -1454,6 +1474,14 @@ impl ServingBackend for RunPyBackend {
             // `--no-auth`.
             requires_key: !self.config.no_auth,
         })
+    }
+
+    /// Adopt a lease left behind by a previous agentd process -- see
+    /// `ServingBackend::adopt_lease`. `who` is unused here: this backend
+    /// finds its container by published port, not by name, so the lease id
+    /// alone is everything `stop` needs.
+    fn adopt_lease(&self, lease_id: &str, _who: &str) -> bool {
+        self.adopt_lease_id(lease_id)
     }
 
     fn stop(&self, _model: &str) -> Result<()> {

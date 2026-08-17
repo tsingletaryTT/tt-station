@@ -41,6 +41,41 @@ pub trait ServingBackend: Send + Sync {
     /// not treated as an error by `DockerBackend`.
     fn stop(&self, model: &str) -> Result<()>;
 
+    /// Take ownership of a gozer lease this agent's PREVIOUS process left
+    /// behind, so the next `stop` releases it. Returns whether it was
+    /// adopted.
+    ///
+    /// **Why this exists.** The agent's unit carries `Restart=on-failure`.
+    /// Restart agentd while a model is serving and the startup sweep
+    /// correctly KEEPS that lease (something is still on its port) -- but the
+    /// new process's backend starts with no lease recorded, so the next
+    /// `/stop` stops the container and releases nothing. The lease then only
+    /// ever goes away via gozer's reap, and **a reaped lease is not reset**
+    /// (gozer's `--fresh` is the protected path). The next tenant gets
+    /// un-reset silicon with wedged ethernet cores -- the exact failure
+    /// `reset_before_serve` exists to prevent.
+    ///
+    /// `who` is the lease's `tt-station:<port>:<model>` identity, which
+    /// `DockerBackend` needs to reconstruct the container name it must stop
+    /// before releasing.
+    ///
+    /// **The adopted lease's `--owner-pid` names the DEAD process**, so gozer
+    /// may reap it out from under this one at any point. That is precisely
+    /// the argument for adopting it and releasing it explicitly on the next
+    /// `/stop` rather than waiting for the reap: an explicit release resets
+    /// the chips, a reap does not. It is not an argument for re-acquiring --
+    /// that would mean releasing (and resetting) a board a live container is
+    /// still driving.
+    ///
+    /// Default: adopt nothing and say so, correct for a backend that does not
+    /// lease (`DstackBackend`). A caller that gets `false` for a lease on its
+    /// own serving port must LOG IT LOUDLY, naming the id -- an unowned lease
+    /// is an operator-visible problem and the log line is what explains it.
+    fn adopt_lease(&self, lease_id: &str, who: &str) -> bool {
+        let _ = (lease_id, who);
+        false
+    }
+
     /// Current serving status, independent of any particular `start`/`stop`
     /// call in this process -- e.g. so `/status` can report reality even
     /// after the agent itself restarted.

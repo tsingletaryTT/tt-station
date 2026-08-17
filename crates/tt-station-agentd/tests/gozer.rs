@@ -447,6 +447,11 @@ const HISTORY_JSON_OPEN_TT_STATION_LEASE: &str = r#"{"history":[
 /// with a container publishing host port 8080.
 const DOCKER_PS_SERVING_8080: &str = "c1\tghcr.io/tenstorrent/tt-inference-server:rel\t0.0.0.0:8080->8000/tcp\ttt-agent-llama";
 
+/// The serving port this agent is configured for in the sweep tests -- the
+/// same one `STATUS_JSON_TT_STATION_HELD`'s `who` names, so a KEPT lease
+/// there is one of OURS and lands in `SweepReport::adoptable`.
+const SWEEP_SERVING_PORT: u16 = 8080;
+
 fn sweep_capability() -> Capability {
     Capability {
         path: "gozer".to_string(),
@@ -498,7 +503,7 @@ fn startup_sweep_releases_a_tt_station_lease_whose_port_has_nothing_serving() {
         "c9\tghcr.io/tenstorrent/tt-inference-server:rel\t0.0.0.0:9001->8000/tcp\tsomeone-else",
     );
 
-    let report = gozer::startup_sweep(&runner, &sweep_capability());
+    let report = gozer::startup_sweep(&runner, &sweep_capability(), SWEEP_SERVING_PORT);
 
     assert_eq!(
         released_lease_ids(&runner),
@@ -518,7 +523,7 @@ fn startup_sweep_releases_a_tt_station_lease_whose_port_has_nothing_serving() {
 fn startup_sweep_leaves_a_tt_station_lease_whose_port_is_serving() {
     let runner = sweep_runner(DOCKER_PS_SERVING_8080);
 
-    let report = gozer::startup_sweep(&runner, &sweep_capability());
+    let report = gozer::startup_sweep(&runner, &sweep_capability(), SWEEP_SERVING_PORT);
 
     assert!(
         released_lease_ids(&runner).is_empty(),
@@ -527,6 +532,48 @@ fn startup_sweep_leaves_a_tt_station_lease_whose_port_is_serving() {
         runner.commands()
     );
     assert_eq!(report.kept, vec!["ab12ef".to_string()]);
+    // IMPORTANT 4: a kept lease on THIS agent's own serving port belongs to a
+    // previous process of this same agent, and the freshly-built backend knows
+    // nothing about it. It must come back as ADOPTABLE -- with its `who`, which
+    // is how the docker backend reconstructs the container name it has to stop
+    // before releasing -- or nothing will ever release it, and gozer's reap
+    // does NOT reset chips.
+    assert_eq!(
+        report.adoptable,
+        vec![gozer::AdoptableLease {
+            lease_id: "ab12ef".to_string(),
+            who: "tt-station:8080:meta-llama/Llama-3.3-70B-Instruct".to_string(),
+        }],
+        "a kept lease on our own port must be offered for adoption: {report:?}"
+    );
+}
+
+/// The other half of adoption's boundary: a KEPT `tt-station:` lease naming a
+/// DIFFERENT service port is not ours to adopt. It belongs to a second agentd
+/// on this box (or to a differently-configured one), and recording it would
+/// make our `/stop` release -- and reset -- a board somebody else is serving
+/// on. Kept, never adopted.
+#[test]
+fn startup_sweep_does_not_offer_another_agents_kept_lease_for_adoption() {
+    let runner = sweep_runner(DOCKER_PS_SERVING_8080);
+
+    // This agent serves on 9090; the live lease names 8080.
+    let report = gozer::startup_sweep(&runner, &sweep_capability(), 9090);
+
+    assert_eq!(
+        report.kept,
+        vec!["ab12ef".to_string()],
+        "still kept -- something is serving on its port: {report:?}"
+    );
+    assert!(
+        report.adoptable.is_empty(),
+        "a lease on another agent's serving port must never be adopted: {report:?}"
+    );
+    assert!(
+        released_lease_ids(&runner).is_empty(),
+        "and it must certainly not be released: {:?}",
+        runner.commands()
+    );
 }
 
 /// A lease held by someone who is NOT tt-station is never a sweep
@@ -553,7 +600,7 @@ fn startup_sweep_never_touches_a_foreign_lease() {
         "",
     );
 
-    let report = gozer::startup_sweep(&runner, &sweep_capability());
+    let report = gozer::startup_sweep(&runner, &sweep_capability(), SWEEP_SERVING_PORT);
 
     assert!(
         released_lease_ids(&runner).is_empty(),
@@ -583,7 +630,7 @@ fn startup_sweep_ignores_a_lease_id_that_history_shows_already_released() {
         "",
     );
 
-    let report = gozer::startup_sweep(&runner, &sweep_capability());
+    let report = gozer::startup_sweep(&runner, &sweep_capability(), SWEEP_SERVING_PORT);
 
     assert!(
         released_lease_ids(&runner).is_empty(),
@@ -606,7 +653,7 @@ fn startup_sweep_does_nothing_when_docker_is_unreadable() {
     let runner = sweep_runner("");
     runner.fail_run("docker ps", "docker: command not found");
 
-    let report = gozer::startup_sweep(&runner, &sweep_capability());
+    let report = gozer::startup_sweep(&runner, &sweep_capability(), SWEEP_SERVING_PORT);
 
     assert!(
         released_lease_ids(&runner).is_empty(),
@@ -640,7 +687,7 @@ fn startup_sweep_does_nothing_when_gozer_status_is_unreadable() {
     runner.set_run_capturing("gozer history", 0, HISTORY_JSON_OPEN_TT_STATION_LEASE, "");
     runner.set_run_capturing("gozer release", 0, r#"{"released":true}"#, "");
 
-    let report = gozer::startup_sweep(&runner, &sweep_capability());
+    let report = gozer::startup_sweep(&runner, &sweep_capability(), SWEEP_SERVING_PORT);
 
     assert!(released_lease_ids(&runner).is_empty());
     assert!(report.released.is_empty());
@@ -676,7 +723,7 @@ fn startup_sweep_reports_but_never_releases_a_who_with_no_parseable_port() {
         "",
     );
 
-    let report = gozer::startup_sweep(&runner, &sweep_capability());
+    let report = gozer::startup_sweep(&runner, &sweep_capability(), SWEEP_SERVING_PORT);
 
     assert!(
         released_lease_ids(&runner).is_empty(),
@@ -906,7 +953,7 @@ fn startup_sweep_tolerates_duplicate_reaped_records() {
         "",
     );
 
-    let report = gozer::startup_sweep(&runner, &sweep_capability());
+    let report = gozer::startup_sweep(&runner, &sweep_capability(), SWEEP_SERVING_PORT);
 
     assert!(
         released_lease_ids(&runner).is_empty(),

@@ -598,7 +598,11 @@ const STARTUP_LEASE_SWEEP_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// Called AFTER the capability probe (it needs the probe's result) and
 /// before the bind, so a Mac connecting to a freshly-restarted agent sees a
 /// box whose lease state already matches what is actually running.
-async fn sweep_stale_leases_at_startup(capability: Option<&gozer::Capability>) {
+async fn sweep_stale_leases_at_startup(
+    capability: Option<&gozer::Capability>,
+    serving_port: u16,
+    backend: &dyn tt_station_agentd::serving::ServingBackend,
+) {
     let Some(capability) = capability.cloned() else {
         return;
     };
@@ -607,21 +611,56 @@ async fn sweep_stale_leases_at_startup(capability: Option<&gozer::Capability>) {
         STARTUP_LEASE_SWEEP_TIMEOUT,
         tokio::task::spawn_blocking(move || {
             let runner = RealCommandRunner;
-            gozer::startup_sweep(&runner, &capability)
+            gozer::startup_sweep(&runner, &capability, serving_port)
         }),
     )
     .await;
 
     match sweep {
         Ok(Ok(report)) => {
+            // ADOPT what the sweep KEPT on our own serving port. That is a
+            // lease a PREVIOUS process of this agent took for a serve that is
+            // still running: the freshly-built backend has no record of it,
+            // so without this the next `/stop` would stop the container and
+            // release nothing, leaving the lease to gozer's reap -- and a
+            // reaped lease is NEVER reset, handing the next tenant un-reset
+            // silicon with wedged ethernet cores. See
+            // `ServingBackend::adopt_lease`.
+            for lease in &report.adoptable {
+                if backend.adopt_lease(&lease.lease_id, &lease.who) {
+                    eprintln!(
+                        "tt-station-agentd: adopted lease '{}' ({}) from a previous agentd \
+                         process -- `/stop` will release it (and reset its chips). NOTE its \
+                         --owner-pid names the dead process, so gozer may reap it first; a \
+                         reaped lease is not reset.",
+                        lease.lease_id, lease.who
+                    );
+                } else {
+                    // Loudly, by id: an unowned lease on our own port is an
+                    // operator-visible problem and this line is what explains
+                    // it. Never silent.
+                    eprintln!(
+                        "tt-station-agentd: WARNING: UNOWNED LEASE '{}' ({}) -- it is on this \
+                         agent's own serving port, but this serving backend could not adopt \
+                         it, so nothing here will ever release it and its chips will not be \
+                         reset when the serve ends. Clear it by hand with `gozer release {}` \
+                         once the serve is stopped.",
+                        lease.lease_id, lease.who, lease.lease_id
+                    );
+                }
+            }
             // `startup_sweep` already logs each decision as it makes it; one
             // summary line here is what an operator greps for at boot.
-            if !report.released.is_empty() || !report.unresolved.is_empty() {
+            if !report.released.is_empty()
+                || !report.unresolved.is_empty()
+                || !report.adoptable.is_empty()
+            {
                 eprintln!(
-                    "tt-station-agentd: startup lease sweep released {} stale lease(s), kept {}, \
-                     could not resolve {}",
+                    "tt-station-agentd: startup lease sweep released {} stale lease(s), kept {} \
+                     ({} of ours, adopted), could not resolve {}",
                     report.released.len(),
                     report.kept.len(),
+                    report.adoptable.len(),
                     report.unresolved.len()
                 );
             }
@@ -914,7 +953,8 @@ async fn main() -> Result<()> {
     // socket bind below, so the first `/leases` a Mac ever asks for already
     // reflects reality. A no-op when gozer is absent. See
     // `sweep_stale_leases_at_startup` (bounded, never fatal).
-    sweep_stale_leases_at_startup(gozer_capability.as_ref()).await;
+    sweep_stale_leases_at_startup(gozer_capability.as_ref(), rc.serving_port, backend.as_ref())
+        .await;
 
     // Persist issued bearer tokens across restarts by default (see
     // `--token-store`'s doc comment) -- `--no-token-persistence` (folded into
