@@ -260,6 +260,262 @@ impl FakeRunner {
     }
 }
 
+/// A STATEFUL stand-in for the whole `gozer` CLI: a box with N boards that
+/// really are handed out, really are held, and really are given back.
+///
+/// `FakeRunner`'s canned `set_run_capturing("gozer acquire", ..)` answers
+/// every acquire with the SAME grant forever, which cannot express the one
+/// fact the swap/strand tests are about: whether a second `start` finds the
+/// first serve's board still held. So this models the gate itself --
+///
+/// * `acquire` grants the first FREE board (a fresh `lease-<n>` each time)
+///   or exits `12` with gozer's own `{"granted":false,"queued":false}`
+///   payload when every board is taken;
+/// * `release <id>` frees the board holding that id (exit `0`) or exits `13`
+///   ("no such lease"), exactly like the real CLI;
+/// * `status --json` reports each chip `CLAIMED`+`who` or `FREE`;
+/// * `history --json` replays the `granted`/`released` log the startup sweep
+///   reconstructs lease ids from.
+///
+/// Everything that is NOT `gozer` (docker, tt-smi, run.py, health, HTTP)
+/// delegates to an inner [`FakeRunner`], so a test still cans `docker ps`
+/// output and still reads one ordered `commands()` list covering both.
+///
+/// One board = two chips (one BDF per ASIC, which is how gozer counts and
+/// what `device::mesh_for` expects), so a single-board grant is 2 chips.
+#[allow(dead_code)]
+#[derive(Clone)]
+pub struct FakeGozerBox {
+    inner: FakeRunner,
+    state: Arc<Mutex<GozerBoxState>>,
+}
+
+/// One board's identity plus who (if anyone) currently holds it.
+struct FakeBoard {
+    serial: String,
+    /// PCI BDFs, one per ASIC -- what a grant's `chips` carries.
+    chips: Vec<String>,
+    /// `/dev/tenstorrent/<n>` indices, one per ASIC.
+    dev_indices: Vec<u32>,
+    /// `(lease_id, who)` while held; `None` when free.
+    holder: Option<(String, String)>,
+}
+
+struct GozerBoxState {
+    boards: Vec<FakeBoard>,
+    /// Monotonic lease-id counter -- ids are never reused within one test,
+    /// so an assertion can tell the first serve's lease from the second's.
+    next_lease: u32,
+    /// `(event, lease_id, who)` in order, as `gozer history --json` replays.
+    history: Vec<(String, String, String)>,
+}
+
+#[allow(dead_code)]
+impl FakeGozerBox {
+    /// A box with `boards` boards, all free, whose non-gozer commands are
+    /// served by a `FakeRunner::new(health_calls_before_ok)`.
+    pub fn with_boards(boards: usize, health_calls_before_ok: u32) -> Self {
+        let boards = (0..boards)
+            .map(|b| FakeBoard {
+                serial: format!("board-{b}"),
+                // Two ASICs per board, numbered so no two boards collide.
+                chips: vec![
+                    format!("0000:{:02x}:00.0", b * 2 + 1),
+                    format!("0000:{:02x}:00.0", b * 2 + 2),
+                ],
+                dev_indices: vec![(b * 2) as u32, (b * 2 + 1) as u32],
+                holder: None,
+            })
+            .collect();
+        FakeGozerBox {
+            inner: FakeRunner::new(health_calls_before_ok),
+            state: Arc::new(Mutex::new(GozerBoxState {
+                boards,
+                next_lease: 0,
+                history: Vec::new(),
+            })),
+        }
+    }
+
+    /// The inner `FakeRunner`, for canning non-gozer commands
+    /// (`set_run_output("docker ps", ..)`) and for reading the ordered
+    /// `commands()` list -- which records gozer invocations too.
+    pub fn runner(&self) -> FakeRunner {
+        self.inner.clone()
+    }
+
+    /// Every command recorded so far, gozer and non-gozer alike, in order.
+    pub fn commands(&self) -> Vec<Vec<String>> {
+        self.inner.commands()
+    }
+
+    /// The lease ids currently held on this box, in board order. THE
+    /// assertion for the strand bug: two leases here after two `start`s
+    /// means a board was stranded with no container behind it.
+    pub fn held_lease_ids(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("gozer box mutex poisoned")
+            .boards
+            .iter()
+            .filter_map(|b| b.holder.as_ref().map(|(id, _)| id.clone()))
+            .collect()
+    }
+
+    /// Pre-hold a board as if a PREVIOUS agentd process had leased it and
+    /// then died -- the state an `Restart=on-failure` restart wakes up to.
+    /// Returns the lease id.
+    pub fn preexisting_lease(&self, who: &str) -> String {
+        let mut state = self.state.lock().expect("gozer box mutex poisoned");
+        Self::grant_locked(&mut state, who).expect("a free board to pre-hold")
+    }
+
+    /// Grant the first free board to `who`, recording the history event.
+    /// `None` when every board is taken.
+    fn grant_locked(state: &mut GozerBoxState, who: &str) -> Option<String> {
+        let index = state.boards.iter().position(|b| b.holder.is_none())?;
+        state.next_lease += 1;
+        let lease_id = format!("lease-{}", state.next_lease);
+        state.boards[index].holder = Some((lease_id.clone(), who.to_string()));
+        state
+            .history
+            .push(("granted".to_string(), lease_id.clone(), who.to_string()));
+        Some(lease_id)
+    }
+
+    /// Service one `gozer <verb> ...` invocation.
+    fn gozer(&self, args: &[&str]) -> CapturedOutput {
+        let ok = |stdout: String| CapturedOutput {
+            code: 0,
+            stdout,
+            stderr: String::new(),
+        };
+        let flag = |name: &str| {
+            args.windows(2)
+                .find(|w| w[0] == name)
+                .map(|w| w[1].to_string())
+        };
+
+        let mut state = self.state.lock().expect("gozer box mutex poisoned");
+        match args.get(1).copied() {
+            Some("--version") => ok("gozer 0.1.0".to_string()),
+            Some("acquire") => {
+                let who = flag("--who").unwrap_or_default();
+                match Self::grant_locked(&mut state, &who) {
+                    Some(lease_id) => {
+                        let board = state
+                            .boards
+                            .iter()
+                            .find(|b| b.holder.as_ref().is_some_and(|(id, _)| *id == lease_id))
+                            .expect("the board just granted");
+                        ok(serde_json::json!({
+                            "granted": true,
+                            "lease_id": lease_id,
+                            "units": [board.serial],
+                            "chips": board.chips,
+                            "dev_indices": board.dev_indices,
+                            "env": {"TT_VISIBLE_DEVICES": board.chips.join(",")},
+                            "expanded": true,
+                        })
+                        .to_string())
+                    }
+                    // gozer's own "no chips, and I am not queuing you" exit.
+                    None => CapturedOutput {
+                        code: 12,
+                        stdout: r#"{"granted":false,"queued":false}"#.to_string(),
+                        stderr: String::new(),
+                    },
+                }
+            }
+            Some("release") => {
+                let lease_id = args.get(2).copied().unwrap_or_default();
+                match state
+                    .boards
+                    .iter_mut()
+                    .find(|b| b.holder.as_ref().is_some_and(|(id, _)| id == lease_id))
+                {
+                    Some(board) => {
+                        let who = board.holder.take().map(|(_, who)| who).unwrap_or_default();
+                        state.history.push((
+                            "released".to_string(),
+                            lease_id.to_string(),
+                            who,
+                        ));
+                        ok(r#"{"released":true,"message":"released"}"#.to_string())
+                    }
+                    // Exit 13: "no such lease" -- release's idempotent case.
+                    None => CapturedOutput {
+                        code: 13,
+                        stdout: r#"{"released":false,"message":"no such lease"}"#.to_string(),
+                        stderr: String::new(),
+                    },
+                }
+            }
+            Some("status") => {
+                let chips: Vec<serde_json::Value> = state
+                    .boards
+                    .iter()
+                    .flat_map(|board| {
+                        board.chips.iter().zip(&board.dev_indices).map(move |(bdf, index)| {
+                            match &board.holder {
+                                Some((_, who)) => serde_json::json!({
+                                    "dev_index": index, "bdf": bdf, "board": board.serial,
+                                    "state": "CLAIMED", "who": who, "reason": "serving",
+                                }),
+                                None => serde_json::json!({
+                                    "dev_index": index, "bdf": bdf, "board": board.serial,
+                                    "state": "FREE",
+                                }),
+                            }
+                        })
+                    })
+                    .collect();
+                ok(serde_json::json!({"grain": "board", "chips": chips, "queue": []}).to_string())
+            }
+            Some("history") => {
+                let records: Vec<serde_json::Value> = state
+                    .history
+                    .iter()
+                    .map(|(event, lease_id, who)| {
+                        serde_json::json!({"event": event, "lease_id": lease_id, "who": who})
+                    })
+                    .collect();
+                ok(serde_json::json!({"history": records}).to_string())
+            }
+            _ => CapturedOutput {
+                code: 2,
+                stdout: String::new(),
+                stderr: format!("fake gozer: unsupported verb: {args:?}"),
+            },
+        }
+    }
+}
+
+impl CommandRunner for FakeGozerBox {
+    fn run(&self, args: &[&str]) -> Result<String> {
+        self.inner.run(args)
+    }
+
+    fn run_capturing(&self, args: &[&str]) -> Result<CapturedOutput> {
+        // Record FIRST (and discard the inner's canned answer) so gozer
+        // invocations appear in the same ordered `commands()` list the
+        // docker/tt-smi ones do -- every ordering assertion depends on that.
+        let canned = self.inner.run_capturing(args)?;
+        if args.first().copied() != Some("gozer") {
+            return Ok(canned);
+        }
+        Ok(self.gozer(args))
+    }
+
+    fn health_ok(&self, url: &str) -> bool {
+        self.inner.health_ok(url)
+    }
+
+    fn http_get(&self, url: &str) -> Result<String> {
+        self.inner.http_get(url)
+    }
+}
+
 impl CommandRunner for FakeRunner {
     fn run(&self, args: &[&str]) -> Result<String> {
         self.commands
