@@ -7,21 +7,21 @@
 
 ## Goal
 
-A native SwiftUI **`MenuBarExtra`** app that is a *veneer* over the `tt` CLI: the
+A native SwiftUI **`MenuBarExtra`** app that is a *veneer* over the `tt-station` CLI: the
 "as your Mac sees it" surface from the microsite. Pick a box, run/stop a model, copy the
 OpenAI-compatible endpoint — all from the menu bar. **All logic lives in Rust**; the app
-shells out to `tt --json` and renders the result. No discovery, pairing, HTTP, or token
+shells out to `tt-station --json` and renders the result. No discovery, pairing, HTTP, or token
 handling is reimplemented in Swift.
 
 ### v1 scope — "discovery hero + full loop"
 
 The demo target (end of weekend): show the plug-and-play story end to end.
 
-- Box **auto-appears** via mDNS (`tt discover`), with a **manual host:port fallback** for
+- Box **auto-appears** via mDNS (`tt-station discover`), with a **manual host:port fallback** for
   LANs that block mDNS (corp LANs often do — see project CLAUDE.md).
 - Per-box **status dot** (green = serving, grey = idle) + chips (device inventory).
 - **Pair** flow: enter the 6-digit code the box prints on its console.
-- **Model picker** (from `tt models`, which is unauthed), **Run** / **Stop** with a
+- **Model picker** (from `tt-station models`, which is unauthed), **Run** / **Stop** with a
   spinner until the run returns an endpoint, and **Copy endpoint** (`base_url`).
 
 ### Explicitly deferred (v2)
@@ -29,7 +29,7 @@ The demo target (end of weekend): show the plug-and-play story end to end.
 - `UNUserNotification` on model-ready.
 - "Open Cloud Console" link.
 - Live background status polling (v1 refresh is **on-demand** only).
-- Bundling the `tt` binary inside the app (v1 resolves it from disk).
+- Bundling the `tt-station` binary inside the app (v1 resolves it from disk).
 - Tenstorrent tray icon art — when we add it, pull from `~/code/tt-vscode-toolkit` or
   `~/code/tt-local-generator` rather than recreating it.
 
@@ -61,15 +61,15 @@ protocol TTProcessRunner {
 - `RealProcessRunner` locates the binary via `TTBinaryLocator`, spawns it, captures streams.
 - `FakeProcessRunner` returns canned `(stdout, stderr, exitCode)` for tests.
 
-**`TTBinaryLocator`** resolves `tt` in order, because **GUI apps do not inherit the shell
-`PATH`** (launchd gives them a minimal one, so `~/.local/bin/tt` is not found automatically):
+**`TTBinaryLocator`** resolves `tt-station` in order, because **GUI apps do not inherit the shell
+`PATH`** (launchd gives them a minimal one, so `~/.local/bin/tt-station` is not found automatically):
 
 1. User override path (UserDefaults key `tt.binaryPath`) — the single knob for any
-   non-standard location, including a dev `target/release/tt`.
-2. `~/.local/bin/tt` (where this repo installs it).
-3. `/opt/homebrew/bin/tt`, `/usr/local/bin/tt`.
+   non-standard location, including a dev `target/release/tt-station`.
+2. `~/.local/bin/tt-station` (where this repo installs it).
+3. `/opt/homebrew/bin/tt-station`, `/usr/local/bin/tt-station`.
 4. None found → a typed error listing every path tried (surfaced as a banner), with a hint
-   to `cargo build --release -p tt` or set the override path.
+   to `cargo build --release -p tt-station` or set the override path.
 
 ### 2. `TTClient`
 
@@ -79,20 +79,20 @@ non-zero exit code to `TTError(command, exitCode, stderr)`.
 
 | Method | Command | Returns |
 |---|---|---|
-| `discover(manualHosts:noMdns:)` | `tt --json discover [--host h:p]… [--no-mdns]` | `[BoxRecord]` |
-| `models(host:)` | `tt --json models --host h:p` | `[ModelInfo]` (unauthed) |
-| `pair(host:code:)` | `tt --json pair h:p --code NNNNNN` | `PairResult` |
-| `run(host:model:)` | `tt --json run <model> --host h:p` | `Endpoint` |
-| `stop(host:)` | `tt --json stop --host h:p` | `Void` |
-| `status(host:)` | `tt --json status --host h:p` | `ServingStatus` (unauthed) |
-| `endpoint(host:)` | `tt --json endpoint --host h:p` | `Endpoint` |
+| `discover(manualHosts:noMdns:)` | `tt-station --json discover [--host h:p]… [--no-mdns]` | `[BoxRecord]` |
+| `models(host:)` | `tt-station --json models --host h:p` | `[ModelInfo]` (unauthed) |
+| `pair(host:code:)` | `tt-station --json pair h:p --code NNNNNN` | `PairResult` |
+| `run(host:model:)` | `tt-station --json run <model> --host h:p` | `Endpoint` |
+| `stop(host:)` | `tt-station --json stop --host h:p` | `Void` |
+| `status(host:)` | `tt-station --json status --host h:p` | `ServingStatus` (unauthed) |
+| `endpoint(host:)` | `tt-station --json endpoint --host h:p` | `Endpoint` |
 
 The `--code` flag lets a SwiftUI text field feed the pairing code directly — no stdin
 wrestling with the CLI's interactive prompt.
 
 ### 3. Domain models (`Codable` mirrors of the CLI JSON contract)
 
-Ground truth is `crates/tt/src/main.rs` (print functions) and
+Ground truth is `crates/tt-station/src/main.rs` (print functions) and
 `crates/libttstation/src/model.rs`. Verified shapes:
 
 - **`BoxRecord`** — `{ name, host, ctrl_port, chips, status, apiver }`. `status` is the
@@ -121,7 +121,7 @@ Ground truth is `crates/tt/src/main.rs` (print functions) and
   `inFlight`, `error`, and `pairedState`. Exposes `refresh()`, `pair(code:)`, `run(model:)`,
   `stop()`, `loadModels()`.
 
-**Paired-state tracking** (the app never touches Keychain): after a successful `tt pair`,
+**Paired-state tracking** (the app never touches Keychain): after a successful `tt-station pair`,
 record the host in a UserDefaults `paired-hosts` set. On launch, hosts in that set are
 assumed paired. If an authed call (`run`/`stop`/`endpoint`) returns an auth error, flip that
 host back to unpaired and re-prompt for the code.
@@ -146,11 +146,11 @@ hero flourishes in the menu bar.
 2. `DiscoveryService.scan()` → mDNS hits merged with manual hosts, deduped by `host:port`.
 3. Each `BoxViewModel.refresh()` fires the **unauthed** `status` + `models` → rows render
    dots and are ready to act on.
-4. User selects a box. Unpaired → 6-digit code field → `tt pair --code` → on success, mark
+4. User selects a box. Unpaired → 6-digit code field → `tt-station pair --code` → on success, mark
    paired and load models.
-5. Pick a model → **Run** → `tt run` with a spinner until the `Endpoint` returns → show
+5. Pick a model → **Run** → `tt-station run` with a spinner until the `Endpoint` returns → show
    `base_url` + **Copy**.
-6. **Stop** → `tt stop`. All refresh is on-demand (menu-open + after each action).
+6. **Stop** → `tt-station stop`. All refresh is on-demand (menu-open + after each action).
 
 ## Error handling
 
@@ -158,13 +158,13 @@ hero flourishes in the menu bar.
   catches and sets an inline `error` string that shows the CLI's **stderr verbatim** — per
   the README, surface it, don't swallow it.
 - Binary-not-found → a prominent banner listing every path `TTBinaryLocator` tried, with a
-  hint to `cargo build --release -p tt` and/or set the override path.
+  hint to `cargo build --release -p tt-station` and/or set the override path.
 - Empty scan → "No boxes found — Add manually."
 - Auth error on an authed call → flip host to unpaired + re-prompt (see paired-state above).
 
 ## Testing (TDD)
 
-- **`TTClient`** against `FakeProcessRunner` using **real captured `tt --json` fixtures**
+- **`TTClient`** against `FakeProcessRunner` using **real captured `tt-station --json` fixtures**
   (recorded from actual CLI output / mock-box) — argv construction, decoding, and
   non-zero-exit → `TTError` mapping.
 - **Domain decoding** — `ServingStatus` idle/serving parsing, snake_case CodingKeys,
@@ -179,7 +179,7 @@ hero flourishes in the menu bar.
 ## Interfaces summary (what depends on what)
 
 ```
-Views ──▶ AppModel / BoxViewModel ──▶ DiscoveryService + TTClient ──▶ TTProcessRunner ──▶ `tt` binary
+Views ──▶ AppModel / BoxViewModel ──▶ DiscoveryService + TTClient ──▶ TTProcessRunner ──▶ `tt-station` binary
                                           │                              │
                                           └─ domain models (Codable) ◀───┘
 ```

@@ -18,7 +18,7 @@ tt-station can discover, pair, run, and monitor a box, but there is no way to
 - **Suspend / Reboot / Shut Down** — take the box down (sleep / restart / off).
 - **Wake** — bring a suspended/off box back from the Mac.
 
-These span every layer: the agent (execute on the box), the CLI (`tt`), the
+These span every layer: the agent (execute on the box), the CLI (`tt-station`), the
 macOS app (the toolbar), the Linux panel (the box's own screen), and packaging
 (the privilege to power the box).
 
@@ -103,23 +103,23 @@ carries the box's LAN IP) and reports it:
 - in `GET /status` as `mac` (nullable — omitted if undetectable), and
 - in the mDNS `_tenstorrent._tcp` TXT record (same mechanism as `device_mesh`).
 
-`tt --json discover`/`status` therefore carry `mac`, and the macOS app persists
+`tt-station --json discover`/`status` therefore carry `mac`, and the macOS app persists
 it into `HostRegistry` at discovery/pair so Wake works when the box is off.
 Detection is best-effort; a box whose MAC can't be read simply has Wake
 disabled (documented), never a crash.
 
-### 3. CLI (`tt`)
+### 3. CLI (`tt-station`)
 
-- **`tt power <reset-chips|suspend|reboot|shutdown>`** (authed) → `POST /power`.
+- **`tt-station power <reset-chips|suspend|reboot|shutdown>`** (authed) → `POST /power`.
   Honors global `--json` (prints the JSON response) and the standard
   host/token resolution. Human output: a one-line confirmation
   ("Rebooting tsingletaryTT-quietbox — the box will disconnect shortly.").
-- **`tt wake [--mac <addr>] [--host <name>]`** — purely client-side. Resolves
+- **`tt-station wake [--mac <addr>] [--host <name>]`** — purely client-side. Resolves
   the target MAC from `--mac`, else the discovery cache / registry entry for
   `--host` (or the default box), then broadcasts a Wake-on-LAN **magic packet**
   (6× `0xFF` + 16× the MAC) as a UDP datagram to the broadcast address on port
   `9`. No box contact required. Errors clearly if no MAC is known
-  ("run `tt discover` while the box is up, or pass --mac").
+  ("run `tt-station discover` while the box is up, or pass --mac").
 
 The magic-packet builder is a pure function (`libttstation`) unit-tested against
 a known MAC → 102-byte payload; the socket send is thin glue.
@@ -142,9 +142,9 @@ a known MAC → 102-byte payload; the socket send is thin glue.
     Mac, and powers the box off. Only Wake-on-LAN can bring it back."
   - Suspend: "Suspend <box>? This stops the serving model and sleeps the box;
     use Wake to resume."
-- **Commands** — `TTClient` gains `power(action:)` (→ `tt power …`) and
-  `wake(mac:)` (→ `tt wake --mac …`). Consistent with "all control through
-  `tt --json`."
+- **Commands** — `TTClient` gains `power(action:)` (→ `tt-station power …`) and
+  `wake(mac:)` (→ `tt-station wake --mac …`). Consistent with "all control through
+  `tt-station --json`."
 - **Expected-disconnect handling** — `BoxViewModel` gains a transient
   `powerState: PowerState?` (`.suspending`, `.rebooting`, `.poweredOff`,
   `.waking`), set when a power op is issued. While set:
@@ -203,11 +203,11 @@ polkit.addRule(function(action, subject) {
 
 - Installed to `/etc/polkit-1/rules.d/49-tt-station-power.rules` by the
   **`tt-station` `.deb` postinst** (root). Removed on purge.
-- For non-`.deb` installs, `tt console` detects the rule's absence (checks the
+- For non-`.deb` installs, `tt-station console` detects the rule's absence (checks the
   path) and prints the one-line manual install; the agent's `403` on a denied
   power op also points here.
-- Documented in `docs/reference/power-controls.md` (the routes, the `tt power` /
-  `tt wake` CLI, the polkit rule + manual install, the `sudo`-group default and
+- Documented in `docs/reference/power-controls.md` (the routes, the `tt-station power` /
+  `tt-station wake` CLI, the polkit rule + manual install, the `sudo`-group default and
   how to retarget it).
 
 ### Safety summary
@@ -225,12 +225,12 @@ polkit.addRule(function(action, subject) {
 ## Data flow
 
 ```
-Reset chips:   app/panel → tt power reset-chips → POST /power → tt-smi -r (pairing kept) → 200
-Reboot:        app → confirm → tt power reboot → POST /power → stop container → systemctl reboot → 202
+Reset chips:   app/panel → tt-station power reset-chips → POST /power → tt-smi -r (pairing kept) → 200
+Reboot:        app → confirm → tt-station power reboot → POST /power → stop container → systemctl reboot → 202
                  app sets powerState=.rebooting → telemetry drop is "expected" → discovery poll
                  → box returns in /status → powerState cleared
 Shut Down:     … → systemctl poweroff → 202 → powerState=.poweredOff (Wake enabled)
-Wake:          app → tt wake --mac <box mac from registry> → UDP magic packet (broadcast:9)
+Wake:          app → tt-station wake --mac <box mac from registry> → UDP magic packet (broadcast:9)
                  → box powers on → reappears in discovery → powerState cleared
 Panel (on box):Power row → confirm → local systemctl suspend|reboot|poweroff (polkit-permitted)
 ```
@@ -246,8 +246,8 @@ Panel (on box):Power row → confirm → local systemctl suspend|reboot|poweroff
 - **Rust (libttstation):** magic-packet builder → exact 102-byte payload for a
   known MAC; MAC parse/validation (accepts `aa:bb:…`/`aa-bb-…`, rejects
   garbage).
-- **Rust (CLI):** `tt power`/`tt wake` argument wiring and `--json` output via
-  the mock-box e2e (no hardware); `tt wake` builds+sends to a loopback capture.
+- **Rust (CLI):** `tt-station power`/`tt-station wake` argument wiring and `--json` output via
+  the mock-box e2e (no hardware); `tt-station wake` builds+sends to a loopback capture.
 - **Swift (TTStationKit):** the `PowerState` transition function (issued action
   + reachability → state/cleared); `TTClient.power/wake` command construction.
   The menu views and confirm dialogs are owner-verified (SwiftUI/AppKit glue),
@@ -255,7 +255,7 @@ Panel (on box):Power row → confirm → local systemctl suspend|reboot|poweroff
 - **Python (panel):** `power_command(action)` argv-builder unit tests; the GTK
   glue is owner-verified.
 - **Manual:** on the live box — reset-chips keeps pairing; reboot returns paired
-  and the app clears `.rebooting`; shutdown → `.poweredOff` → `tt wake` powers
+  and the app clears `.rebooting`; shutdown → `.poweredOff` → `tt-station wake` powers
   it back; polkit rule present so no auth prompt; panel power row works locally.
 
 ## Risks / open items
@@ -275,4 +275,4 @@ Panel (on box):Power row → confirm → local systemctl suspend|reboot|poweroff
   races the flush, the caller simply sees a dropped connection, which
   `powerState` already treats as expected — no wrong success/failure claim.
 - **`.deb`-only polkit install.** Source/DMG-less Linux installs must run the
-  documented manual step; `tt console` warns when the rule is missing.
+  documented manual step; `tt-station console` warns when the rule is missing.

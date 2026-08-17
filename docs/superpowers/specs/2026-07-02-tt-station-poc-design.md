@@ -46,7 +46,7 @@ Three components. All logic lives in the Rust core; the SwiftUI shell is a dumb 
 │      (thin veneer)    │         │   • advertises _tenstorrent._tcp     │
 │          │ JSON       │         │   • 6-digit pairing → bearer token   │
 │          ▼            │  LAN    │   • ServingBackend trait:            │
-│   tt  (Rust CLI/core) │◄──────► │       DockerBackend  (now)           │
+│   tt-station  (Rust CLI/core) │◄──────► │       DockerBackend  (now)           │
 │   • discover          │  HTTP   │       DstackBackend  (later, stub)   │
 │   • pair → Keychain   │  +JSON  │   • reports vLLM /v1 URL             │
 │   • run/stop/endpoint │         └──────────────────────────────────────┘
@@ -56,7 +56,7 @@ Three components. All logic lives in the Rust core; the SwiftUI shell is a dumb 
                                     OpenAI-compatible /v1
 ```
 
-### Component 1 — Rust core (`libttstation` + `tt` CLI)
+### Component 1 — Rust core (`libttstation` + `tt-station` CLI)
 
 A single Cargo workspace.
 
@@ -68,19 +68,19 @@ A single Cargo workspace.
     plus a file-backed impl for Linux/dev/testing.
   - `agent_client` — typed HTTP+JSON client for the box agent's control API.
   - `config` — known boxes and current default endpoint (small TOML/JSON in a config dir).
-- **`tt`** (binary crate): a thin CLI over the library. Global `--json` flag so the
+- **`tt-station`** (binary crate): a thin CLI over the library. Global `--json` flag so the
   SwiftUI shell consumes the exact same commands as a human would.
 
 CLI surface:
 
 | Command | Behavior |
 |---|---|
-| `tt discover` | List reachable boxes (all discovery providers), with status |
-| `tt pair [host]` | Pair with a box (mDNS-selected or explicit host); store token in Keychain |
-| `tt run <model>` | Ask the box to start serving `<model>`; wait until `/v1` is healthy |
-| `tt stop` | Ask the box to stop the current model |
-| `tt status` | Authenticated status of the paired box (idle / serving:<model>) |
-| `tt endpoint` | Print shell exports for `OPENAI_BASE_URL` (+ key); `--json` for the shell |
+| `tt-station discover` | List reachable boxes (all discovery providers), with status |
+| `tt-station pair [host]` | Pair with a box (mDNS-selected or explicit host); store token in Keychain |
+| `tt-station run <model>` | Ask the box to start serving `<model>`; wait until `/v1` is healthy |
+| `tt-station stop` | Ask the box to stop the current model |
+| `tt-station status` | Authenticated status of the paired box (idle / serving:<model>) |
+| `tt-station endpoint` | Print shell exports for `OPENAI_BASE_URL` (+ key); `--json` for the shell |
 
 ### Component 2 — Box-side agent (`tt-station-agentd`, Rust)
 
@@ -97,7 +97,7 @@ Runs on the QuietBox 2 (Ubuntu 22.04). Responsibilities:
 
 ### Component 3 — SwiftUI menu-bar veneer (macOS)
 
-`MenuBarExtra` app that shells out to `tt --json`. Shows discovered boxes with status
+`MenuBarExtra` app that shells out to `tt-station --json`. Shows discovered boxes with status
 dots, a model picker, Run/Stop, "Copy endpoint," and "Open Cloud Console." Native
 niceties: Keychain access and a `UNUserNotification` when a model reaches ready.
 Deliberately contains no business logic.
@@ -115,7 +115,7 @@ trait DiscoveryProvider { fn discover(&self) -> Vec<Box>; }
 ```
 
 1. **mDNS/Bonjour** — primary; the AirPlay-like freebie on macOS.
-2. **Manual** — `tt pair <host-or-ip>`; always works, zero network magic.
+2. **Manual** — `tt-station pair <host-or-ip>`; always works, zero network magic.
 3. **Tailscale MagicDNS** — the beyond-LAN / corporate-network escape hatch.
 
 ### `ServingBackend` (Docker now, dstack later)
@@ -141,11 +141,11 @@ The agent picks a backend from config; the Mac only ever sees
 
 ## Data flow (happy path)
 
-1. Mac runs `tt discover` (or the menu-bar refreshes) → `DiscoveryProvider`s return the QB2.
-2. `tt pair` → agent prints a 6-digit code → user enters it → agent issues a token →
+1. Mac runs `tt-station discover` (or the menu-bar refreshes) → `DiscoveryProvider`s return the QB2.
+2. `tt-station pair` → agent prints a 6-digit code → user enters it → agent issues a token →
    stored in Keychain, scoped to that box.
-3. `tt run <model>` → agent's `ServingBackend.start(model)` → container up → `/v1` healthy.
-4. Agent returns the `Endpoint`; `tt endpoint` prints `export OPENAI_BASE_URL=...`
+3. `tt-station run <model>` → agent's `ServingBackend.start(model)` → container up → `/v1` healthy.
+4. Agent returns the `Endpoint`; `tt-station endpoint` prints `export OPENAI_BASE_URL=...`
    (and key if needed). The menu-bar's "Copy endpoint" does the same.
 5. User points Cursor / `curl` / any OpenAI client at the endpoint. **Box is usable.**
 
@@ -154,7 +154,7 @@ The agent picks a backend from config; the Mac only ever sees
 - mDNS service type: `_tenstorrent._tcp`. TXT keys: `name`, `apiver`, `chips`,
   `status`, `ctrl`.
 - Pairing handshake:
-  1. `tt pair` (or menu-bar) calls the agent's pair-init.
+  1. `tt-station pair` (or menu-bar) calls the agent's pair-init.
   2. Agent generates a 6-digit code, displays it on the box (stdout/journal), and holds
      it briefly with a short TTL.
   3. User enters the code on the Mac; agent verifies and returns a bearer token.
@@ -177,11 +177,11 @@ changing the CLI/menu-bar surface.
 
 ## Milestones
 
-- **M0 — Discovery.** Agent advertises `_tenstorrent._tcp`; `tt discover` lists the QB2.
-- **M1 — Pairing.** 6-digit handshake works; token in Keychain; `tt status` authenticated.
-- **M2 — Serve (the "it works" moment).** `tt run <model>` → `DockerBackend` serves →
-  `tt endpoint` yields a `/v1` that answers a real `curl` chat completion on the QB2.
-- **M3 — Veneer.** SwiftUI `MenuBarExtra` wraps M0–M2 via `tt --json`.
+- **M0 — Discovery.** Agent advertises `_tenstorrent._tcp`; `tt-station discover` lists the QB2.
+- **M1 — Pairing.** 6-digit handshake works; token in Keychain; `tt-station status` authenticated.
+- **M2 — Serve (the "it works" moment).** `tt-station run <model>` → `DockerBackend` serves →
+  `tt-station endpoint` yields a `/v1` that answers a real `curl` chat completion on the QB2.
+- **M3 — Veneer.** SwiftUI `MenuBarExtra` wraps M0–M2 via `tt-station --json`.
 - **M4 — (stretch)** `DstackBackend` behind the same trait. Cloud-burst router is a
   separate follow-on spec.
 
@@ -192,7 +192,7 @@ changing the CLI/menu-bar surface.
 - **Mock box** (a dev fixture): a process that advertises `_tenstorrent._tcp` and fakes
   a `/v1` + control API, so the CLI and menu-bar can be developed/tested without the box.
 - **Integration (M2 gate):** an actual OpenAI chat completion against the QB2's `/v1`,
-  driven end-to-end from `tt run` → `tt endpoint` → `curl`.
+  driven end-to-end from `tt-station run` → `tt-station endpoint` → `curl`.
 - Follow test-driven-development for each unit; each milestone is only "done" when its
   gate behavior is demonstrated (evidence before assertion).
 
@@ -203,18 +203,18 @@ tt-station/
   Cargo.toml                 # workspace
   crates/
     libttstation/            # discovery, pairing, secrets, agent_client, config
-    tt/                      # the CLI binary
+    tt-station/                      # the CLI binary
     tt-station-agentd/       # the box-side agent
     mock-box/                # dev fixture: mDNS advertiser + fake /v1 + control API
   macos/
-    TTStation/               # SwiftUI MenuBarExtra shell (shells out to `tt --json`)
+    TTStation/               # SwiftUI MenuBarExtra shell (shells out to `tt-station --json`)
   docs/superpowers/specs/    # this spec + follow-ons
 ```
 
 ## Out of scope (this spec)
 
 - llama.cpp integration.
-- Cloud-burst / local-first placement policy / `tt budget` guardrails.
+- Cloud-burst / local-first placement policy / `tt-station budget` guardrails.
 - dstack orchestration as the *primary* backend (stub only; real in M4).
 - Cross-box Ethernet fabric ("TT/IP"), device remoting.
 - Multi-user authz, TLS/mTLS hardening.

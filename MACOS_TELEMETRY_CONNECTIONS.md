@@ -38,8 +38,8 @@ few percent now — but closing the double-open is still good hygiene (and halve
 ## Unrelated fmt reminder (recurring)
 
 `cargo fmt --all --check` currently fails on `crates/libttstation/src/catalog.rs`,
-`crates/libttstation/tests/agent_client.rs`, `crates/tt/src/catalog.rs`, and
-`crates/tt/tests/e2e_mock.rs` — the catalog work landed without running `rustfmt` under the pinned
+`crates/libttstation/tests/agent_client.rs`, `crates/tt-station/src/catalog.rs`, and
+`crates/tt-station/tests/e2e_mock.rs` — the catalog work landed without running `rustfmt` under the pinned
 toolchain. The repo pins **1.96.0** via `rust-toolchain.toml`, so `cargo fmt` on your machine now
 produces byte-identical output to the box. Please run **`cargo fmt`** before committing so the
 workspace fmt gate stays green — otherwise the box side keeps having to reformat your files (or

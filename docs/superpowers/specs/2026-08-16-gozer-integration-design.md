@@ -8,7 +8,7 @@ authority on leasing semantics — this document is the authority on how tt-stat
 
 tt-station serves **one model across the whole box**. Several Claude Code agents work on the
 same box directly, and tt-gozer now arbitrates chips between them. The two systems do not
-know about each other, so a Mac user running `tt run` can start a container on chips a local
+know about each other, so a Mac user running `tt-station run` can start a container on chips a local
 agent is mid-bringup on, and a local agent is told those chips are free.
 
 The goal: from a Mac, **stop, start and swap sessions** on a remote QuietBox, with the chips
@@ -144,7 +144,7 @@ Before the backend launches:
 ```
 gozer acquire --chips all --owner-pid <agentd pid> \
               --who "tt-station:<service-port>:<model>" \
-              --reason "<client> via tt run" --json
+              --reason "<client> via tt-station run" --json
 ```
 
 *(`--chips all` as of 2026-08-17 — see "Ownership: an advisory model". The first version asked for
@@ -194,7 +194,7 @@ them. The existing `run` keeps its behaviour so nothing else changes.
 
 `POST /stop` releases the lease, which resets exactly those chips. **Swap** therefore needs no
 dedicated verb: stop, then start on the same board, and the incoming model gets clean silicon
-without a separate `tt reset`.
+without a separate `tt-station reset`.
 
 ### Ownership: an advisory model
 
@@ -219,7 +219,7 @@ Three consequences, and they are the whole model:
 2. **Every refusal made on somebody else's behalf is overridable.** `POST /reset`, `POST /power
    reset-chips` and `POST /run` still refuse by default when a lease this request does not own is
    held — the polite thing, and the thing that stops tt-station stomping a neighbour *silently* —
-   but each takes a `force` flag (`tt reset|power|run --force`) that proceeds anyway. The refusal
+   but each takes a `force` flag (`tt-station reset|power|run --force`) that proceeds anyway. The refusal
    messages name `--force`; the forced paths log what they stepped on (the holder's `who` and the
    chips), because once the refusal is skipped that journal line is the only remaining record.
    "Could not be determined" — an unreadable `gozer status` — is overridable on the same terms:
@@ -303,12 +303,12 @@ does not expose one and agentd must not invent it.
 | `POST /stop` | releases the lease (which resets the chips) |
 | `GET /leases` | **new, the only new endpoint** — proxies `gozer status --json` |
 
-`tt` CLI:
+`tt-station` CLI:
 
 ```
-tt leases                 # every tenant, including agents that never serve anything
-tt run qwen3-8b           # fails clearly if no board is free, naming the holder
-tt stop qwen3-8b          # releases + resets
+tt-station leases                 # every tenant, including agents that never serve anything
+tt-station run qwen3-8b           # fails clearly if no board is free, naming the holder
+tt-station stop qwen3-8b          # releases + resets
 ```
 
 All behind the existing pairing auth.
@@ -344,7 +344,7 @@ No hardware required.
 
 An earlier draft of this design included an eviction endpoint with a three-tier grace/SIGKILL
 policy, a history proxy, queue surfacing, docker labels, three-way reconciliation, and board
-selection on `tt run`. All were cut for a first version that is roughly a quarter of the work
+selection on `tt-station run`. All were cut for a first version that is roughly a quarter of the work
 and still delivers stop, start, swap, two concurrent sessions, and visibility from the Mac.
 
 **Preemption is still omitted — but the gap it left has been closed differently.** The stated
@@ -361,7 +361,7 @@ the holder and the chips.
 
 **True preemption — release the holder's lease, stop their process, then acquire — remains future
 work**, and remains the right shape for the day a second person or a long-running agent makes it
-real: a flag on `tt run`, not a separate endpoint. Whatever form it takes, every preemption must
+real: a flag on `tt-station run`, not a separate endpoint. Whatever form it takes, every preemption must
 write an `evicted` event to gozer's history naming who ordered it and why, so an agent whose work
 was killed can find out from the box without asking anyone. That history record is the thing
 `--force`'s local journal line approximates and cannot replace: it lives where the *victim* can
@@ -369,6 +369,6 @@ read it. Adding `evicted` to gozer's history is the natural next step even befor
 a forced tt-station action could write one today if gozer exposed the verb.
 
 Also out of scope: multi-box scheduling; moving a running session between boards (a container is
-pinned at launch); GUI work in the macOS app or GTK panel beyond what `tt` exposes; and any
+pinned at launch); GUI work in the macOS app or GTK panel beyond what `tt-station` exposes; and any
 change to gozer's leasing semantics beyond the `--owner-pid` prerequisite — if this integration
 wants different behaviour from gozer, that is a change to gozer's spec, made there.

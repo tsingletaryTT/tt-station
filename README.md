@@ -5,7 +5,7 @@
 # tt-station
 
 **Plug-and-play Tenstorrent from your Mac.** Discover a QuietBox on the LAN like an
-AirPlay device, pair once, `tt run <model>`, and point *any* OpenAI client at one
+AirPlay device, pair once, `tt-station run <model>`, and point *any* OpenAI client at one
 `/v1` endpoint — no drivers, no SSH gymnastics, **no llama.cpp**. A native macOS
 control room rides on top for the days you'd rather click than type.
 
@@ -40,17 +40,17 @@ cargo build --release -p tt-station-agentd
 shows. Add `--enable-ssh` to also install your Mac's public key for keyless access:
 
 ```bash
-cargo build --release -p tt
-tt discover
-tt pair qb2-lab.local:8765 --enable-ssh   # enter the code shown on the box
+cargo build --release -p tt-station
+tt-station discover
+tt-station pair qb2-lab.local:8765 --enable-ssh   # enter the code shown on the box
 ```
 
-**Run a model and grab the endpoint** — `tt run` waits until the box reports healthy
+**Run a model and grab the endpoint** — `tt-station run` waits until the box reports healthy
 (gated on `/v1/models` actually listing the model, not just `/health`):
 
 ```bash
-tt run Qwen3-8B --host qb2-lab.local:8765
-eval "$(tt endpoint --host qb2-lab.local:8765)"
+tt-station run Qwen3-8B --host qb2-lab.local:8765
+eval "$(tt-station endpoint --host qb2-lab.local:8765)"
 echo "$OPENAI_BASE_URL"                     # → http://qb2-lab.local:8002/v1
 ```
 
@@ -64,14 +64,14 @@ curl "$OPENAI_BASE_URL/chat/completions" \
 
 > **No hardware handy?** Everything above works against a built-in mock box:
 > `cargo run -p mock-box -- serve --ctrl-port 8899`, then
-> `tt discover --no-mdns --host 127.0.0.1:8899`. The full
+> `tt-station discover --no-mdns --host 127.0.0.1:8899`. The full
 > discover → pair → run → completion path is exercised end-to-end in CI, no chips needed.
 
 ## Two sides, one workflow
 
 Both halves ship independently but are designed as one product: everything the agent
 learns about the box surfaces natively in the Mac app, and everything the app does is
-just `tt --json` underneath.
+just `tt-station --json` underneath.
 
 ### The box side — `crates/tt-station-agentd` (Rust, on the QuietBox)
 
@@ -82,7 +82,7 @@ A box-side daemon (default backend `runpy`) that serves via `tt-inference-server
 - **Pairing that persists.** A 6-digit code (TTL + lockout) exchanges for a bearer
   token; tokens are persisted so pairing survives agent restarts.
 - **Keyless SSH on pairing.** The same handshake can install your Mac's public key on
-  the box (`POST /ssh/authorize`, `tt ssh-authorize`) — no password prompts for the
+  the box (`POST /ssh/authorize`, `tt-station ssh-authorize`) — no password prompts for the
   workbench. The PIN handshake is the trust anchor; the private key is never transmitted.
 - **Readiness that means something.** Resets the board, pins a compatible serving
   image, and only reports "serving" once `/v1/models` actually lists the model.
@@ -102,7 +102,7 @@ A native control room: a fast `MenuBarExtra` popover for glance and quick action
 backed by a resizable card-based window.
 
 - **Hardware-aware model browser.** Models are classified into *Runs on this box* /
-  *Experimental* / *Needs other hardware* from `tt catalog` (the box's live `/models`
+  *Experimental* / *Needs other hardware* from `tt-station catalog` (the box's live `/models`
   merged with a public compatibility catalog); the smart default is compatible-first.
 - **Live device telemetry.** Per-device temp/power/aiclk streamed straight from the
   agent's `/telemetry` WebSocket — the one read-only Swift I/O path.
@@ -110,7 +110,7 @@ backed by a resizable card-based window.
   deps via Homebrew), plus Terminal/SSH, remote `tt-toplike`, and VS Code Remote-SSH
   (with the `Tenstorrent.tt-vscode-toolkit` extension).
 - **A veneer, not a brain.** No discovery, pairing, or HTTP logic lives in Swift — the
-  app shells out to `tt --json` and renders the result. See [`macos/README.md`](macos/README.md).
+  app shells out to `tt-station --json` and renders the result. See [`macos/README.md`](macos/README.md).
 
 ## See it running
 
@@ -125,11 +125,11 @@ Mac over the LAN.
 
 ## One endpoint
 
-Once `tt endpoint` sets `OPENAI_BASE_URL`, the QuietBox is a drop-in for anything that
+Once `tt-station endpoint` sets `OPENAI_BASE_URL`, the QuietBox is a drop-in for anything that
 speaks the OpenAI API — curl, the `openai` SDK, Cursor, Continue, Zed, opencode, Open
 WebUI. Same code you'd point at a cloud provider, pointed at the box on your desk.
 
-## The `tt` CLI
+## The `tt-station` CLI
 
 `discover` · `pair` / `pair-init` / `pair-complete` · `run` · `stop` · `status` ·
 `endpoint` · `models` · `serving` · `catalog` · `config` · `reset` · `ssh-authorize` ·
@@ -141,7 +141,7 @@ live in the macOS Keychain (or a file store); `TT_CONFIG_DIR` is respected.
 ```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p tt --test e2e_mock -- --ignored   # CLI end-to-end against the mock box, no hardware
+cargo test -p tt-station --test e2e_mock -- --ignored   # CLI end-to-end against the mock box, no hardware
 ```
 
 ## Repo layout
@@ -149,11 +149,11 @@ cargo test -p tt --test e2e_mock -- --ignored   # CLI end-to-end against the moc
 | Path | What |
 | --- | --- |
 | `crates/tt-station-agentd` | Box-side daemon: discovery, pairing, serving, telemetry |
-| `crates/tt` | The `tt` CLI (and `tt console` operator TUI) |
+| `crates/tt-station` | The `tt-station` CLI (and `tt-station console` operator TUI) |
 | `crates/mock-box` | Dev fixture: mDNS advertise + fake control API + `/v1` |
 | `macos/TTStation` | Native macOS app (menu bar + control room) |
 | `box-panel/` | GTK panel for the QuietBox's own screen |
-| `docs/reference/` | Config schema, `tt console`, chip leasing, power controls, the real run.py launch |
+| `docs/reference/` | Config schema, `tt-station console`, chip leasing, power controls, the real run.py launch |
 | `site/` | Project landing page (`index.html`) and assets |
 
 ## Status

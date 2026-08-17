@@ -3,7 +3,7 @@
 *Analysis + design only. No code changes are proposed as merged; this doc specs
 what to build. Researched 2026-07-03 against the local checkouts of `tt-studio`
 (`/home/ttuser/code/tt-studio`, with `/home/ttuser/code/tt-studio-fresh` cross-checked),
-`tt-station-agentd`, the `tt` CLI, and the macOS `TTStation` app. All citations are
+`tt-station-agentd`, the `tt-station` CLI, and the macOS `TTStation` app. All citations are
 `path:line` into those repos.*
 
 ---
@@ -221,9 +221,9 @@ agent didn't launch them. Achieve it by having the agent detect **any** running
 
 ### 3.1 Why this is the right seam
 
-- The toolbar is a veneer over `tt --json` (`macos/README.md:63-88`); `tt`
+- The toolbar is a veneer over `tt-station --json` (`macos/README.md:63-88`); `tt-station`
   fetches box state over HTTP from the agent. So "make it appear in the toolbar"
-  = "make the agent report it" = a new agent route + a new `tt` subcommand.
+  = "make the agent report it" = a new agent route + a new `tt-station` subcommand.
 - Today the agent only knows models **it** launched: `AppState` holds a single
   `status: Mutex<ServingStatus>` and one `endpoint` (`routes.rs:105-111`), flipped
   by `set_serving`/`set_idle` on `/run`/`/stop` (`routes.rs:341-364`).
@@ -300,7 +300,7 @@ regardless of launcher, each tagged with a `source`.
   during handoff — more" and avoids reshaping if multi-tenant ever lands). Empty
   array when idle.
 - Reuses `Endpoint` fields (`model`, `base_url`, `requires_key`,
-  `libttstation/src/model.rs:53-56`) so the Mac/`tt` decode path barely changes.
+  `libttstation/src/model.rs:53-56`) so the Mac/`tt-station` decode path barely changes.
 - `source` ∈ `{"agent","external"}` — see reconciliation below.
 
 ### 3.4 Reconciling with the agent's own in-memory state
@@ -325,12 +325,12 @@ others (`routes.rs:1122-1134`).
 
 ### 3.5 Toolbar / CLI surface
 
-- New `tt --json serving --host <h:p>` subcommand (mirrors `models`/`status`,
-  `crates/tt/src/main.rs:7-13`), decoding the §3.3 JSON into a `Vec<Endpoint>` +
+- New `tt-station --json serving --host <h:p>` subcommand (mirrors `models`/`status`,
+  `crates/tt-station/src/main.rs:7-13`), decoding the §3.3 JSON into a `Vec<Endpoint>` +
   `source`.
 - The macOS app adds these to the model list under the box, each with the same
   status dot + **Copy endpoint** it already offers (`macos/README.md:89-96`).
-  Because it's just more `Endpoint`s over `tt --json`, the "veneer, not a brain"
+  Because it's just more `Endpoint`s over `tt-station --json`, the "veneer, not a brain"
   rule holds (`macos/README.md:63-67`).
 
 ---
@@ -401,7 +401,7 @@ the agent unless a passwordless sudoers entry exists for that exact command.
 
 ## 6. Recommended first slice
 
-**Ship `GET /serving` (§3) + `tt --json serving` + the toolbar list entry.**
+**Ship `GET /serving` (§3) + `tt-station --json serving` + the toolbar list entry.**
 
 Why this first:
 - It delivers the owner's concrete ask (Q2b: tt-studio's models in the toolbar)

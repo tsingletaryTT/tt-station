@@ -12,7 +12,7 @@ Core thesis: **~80% already exists** (dstack + tt-inference-server + console.ten
 
 | File | What it is |
 |------|-----------|
-| `quietbox-happy-path.md` | The original happy-path tutorial: discover → pair → `tt run` → routed `/v1` → self-healing, each step flagged real-vs-shim. |
+| `quietbox-happy-path.md` | The original happy-path tutorial: discover → pair → `tt-station run` → routed `/v1` → self-healing, each step flagged real-vs-shim. |
 | `quietbox-from-the-future.md` | Expanded "blog post from a possible future" — quick version + detailed "how it works" + cloud-sync section + fact-checked **counter-point** section. |
 | `desk-is-a-datacenter.pptx` | One-slide infographic of the concept (Mac → QuietBox → Cloud behind one `/v1`). |
 | `QuietBox2-Datasheet.pdf` | Two-page datasheet, "QuietBox 2 — as your Mac sees it," with a macOS menu-bar mockup hero + real Blackhole specs. |
@@ -30,14 +30,14 @@ Core thesis: **~80% already exists** (dstack + tt-inference-server + console.ten
 ## Maturity split (honest)
 
 - **Ships today:** dstack Blackhole support; tt-inference-server (vLLM) `/v1`; console.tenstorrent.com `/v1` + keys; macOS Bonjour/`.local`.
-- **The thin shim (unbuilt):** `tt-station` discovery + 6-digit pairing daemon; menu-bar app & `tt` CLI; `OPENAI_BASE_URL` auto-export; local-first burst policy with budget guardrails.
+- **The thin shim (unbuilt):** `tt-station` discovery + 6-digit pairing daemon; menu-bar app & `tt-station` CLI; `OPENAI_BASE_URL` auto-export; local-first burst policy with budget guardrails.
 - **Reality check:** tt-operator DRA is v0.1 beta; mDNS is often blocked on corporate LANs; single-owner daemon is a new SPOF/authz surface; cross-box Ethernet fabric for one model and device remoting ("TT/IP") remain moonshots.
 
 ## Open threads / next steps discussed (not yet done)
 
 1. Spec the `tt-station` discovery/pairing: the `_tenstorrent._tcp` Bonjour TXT record format + the 6-digit pairing → Keychain-token handshake.
-2. Design the `tt login` OAuth **device-authorization** flow that turns a console.tenstorrent.com sign-in into a registered dstack backend; define the local-first `--anywhere` placement policy + `tt budget` guardrails.
-3. Scrappy PoC: a `tt` CLI that discovers a mock box (mDNS) and calls dstack's HTTP API.
+2. Design the `tt-station login` OAuth **device-authorization** flow that turns a console.tenstorrent.com sign-in into a registered dstack backend; define the local-first `--anywhere` placement policy + `tt-station budget` guardrails.
+3. Scrappy PoC: a `tt-station` CLI that discovers a mock box (mDNS) and calls dstack's HTTP API.
 4. "TT/IP" moonshot: what a remote-UMD shim would have to intercept at the luwen/UMD boundary to make a Mac believe it has local chips.
 5. Cross-box fabric: extend the intra-box QSFP-DD Ethernet mesh across the LAN so one model spans multiple boxes.
 6. Doc polish: light-print datasheet variant; fold the menu-bar mockup into the blog post as its hero image.

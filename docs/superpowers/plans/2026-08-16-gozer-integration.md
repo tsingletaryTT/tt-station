@@ -46,8 +46,8 @@ If it is wrong, the container serves happily on **someone else's chips** and not
 | `crates/tt-station-agentd/src/routes.rs` | `AppState` gozer field + `with_*` builder, `GET /leases`, `leasing` on `/status` |
 | `crates/libttstation/src/model.rs` | `LeaseEntry` / `LeaseList` wire types |
 | `crates/libttstation/src/agent_client.rs` | `list_leases` |
-| `crates/tt/src/main.rs` | `Leases` subcommand, dispatch arm, `cmd_leases`, `print_leases` |
-| `crates/mock-box/src/main.rs` | canned `/leases` so `tt leases` has e2e coverage |
+| `crates/tt-station/src/main.rs` | `Leases` subcommand, dispatch arm, `cmd_leases`, `print_leases` |
+| `crates/mock-box/src/main.rs` | canned `/leases` so `tt-station leases` has e2e coverage |
 
 ---
 
@@ -184,9 +184,9 @@ Reuse `LeaseGuard`. `DstackBackend` (`serving/dstack.rs`, a 42-line stub) gets a
 
 ---
 
-### Task 4: `/leases`, the wire type, and `tt leases`
+### Task 4: `/leases`, the wire type, and `tt-station leases`
 
-**Files:** `routes.rs`, `libttstation/src/model.rs`, `libttstation/src/agent_client.rs`, `tt/src/main.rs`, `mock-box/src/main.rs`
+**Files:** `routes.rs`, `libttstation/src/model.rs`, `libttstation/src/agent_client.rs`, `tt-station/src/main.rs`, `mock-box/src/main.rs`
 
 - [ ] **Step 1: Failing tests**
 
@@ -208,9 +208,9 @@ Authed (`_auth: BearerAuth`, per `get_endpoint` at `routes.rs:1588`). Shells out
 
 - [ ] **Step 5: Client, CLI, mock-box**
 
-`list_leases` in `agent_client.rs` (authed, so on `AgentClient`, per `endpoint` at `:290`). `Leases` variant + dispatch arm + `cmd_leases` + `print_leases` in `tt/src/main.rs`, modelled on `Serving` (`:243`, `:431`, `:836`, `:1457`).
+`list_leases` in `agent_client.rs` (authed, so on `AgentClient`, per `endpoint` at `:290`). `Leases` variant + dispatch arm + `cmd_leases` + `print_leases` in `tt-station/src/main.rs`, modelled on `Serving` (`:243`, `:431`, `:836`, `:1457`).
 
-`mock-box` duplicates the router by hand (`mock-box/src/main.rs:657-676`) — add a canned `/leases` or `tt leases` has no e2e coverage.
+`mock-box` duplicates the router by hand (`mock-box/src/main.rs:657-676`) — add a canned `/leases` or `tt-station leases` has no e2e coverage.
 
 - [ ] **Step 6: Green, clippy, commit**
 

@@ -4,7 +4,7 @@
 
 **Goal:** Give the on-box GTK panel one-click Connect launchers — Open WebUI (local docker), opencode (local terminal), and Copy/Open endpoint — for the model the box is serving.
 
-**Architecture:** Pure, importable builder functions live in a new `box-panel/panel_launchers.py` (unit-tested with stdlib `unittest`); the panel imports them and adds a "Connect" row whose button handlers do the side effects (docker, terminal spawn, `xdg-open`, clipboard) in worker threads, marshaling status back with `GLib.idle_add`. Endpoint + model come from the `serving` list the panel already polls via `tt console --snapshot`.
+**Architecture:** Pure, importable builder functions live in a new `box-panel/panel_launchers.py` (unit-tested with stdlib `unittest`); the panel imports them and adds a "Connect" row whose button handlers do the side effects (docker, terminal spawn, `xdg-open`, clipboard) in worker threads, marshaling status back with `GLib.idle_add`. Endpoint + model come from the `serving` list the panel already polls via `tt-station console --snapshot`.
 
 **Tech Stack:** Python 3, PyGObject/GTK4, docker CLI, `xdg-open`, stdlib `unittest`.
 
@@ -523,7 +523,7 @@ Expected: panel opens; if a model is serving, the "Connect" row is visible (hidd
 
 - [ ] **Step 2: Serve a model, then exercise each launcher**
 
-With a model serving (via the panel's Start / a `tt run`):
+With a model serving (via the panel's Start / a `tt-station run`):
 - Click **Copy /v1** → status shows `copied: http://…/v1`; paste to confirm.
 - Click **Open endpoint** → browser opens the `/v1` URL.
 - Click **opencode** → a terminal opens running opencode pointed at the box (a per-endpoint `opencode.json` exists under `~/.local/share/tt-station/opencode/`).

@@ -1,7 +1,7 @@
 # Box power controls (reset chips / suspend / reboot / shutdown / wake)
 
-tt-station can power-manage a QuietBox from the agent's `POST /power` route, the `tt
-power`/`tt wake` CLI, the macOS app's power menu, and the Linux box panel's local power row —
+tt-station can power-manage a QuietBox from the agent's `POST /power` route, the `tt-station
+power`/`tt-station wake` CLI, the macOS app's power menu, and the Linux box panel's local power row —
 all backed by the same design
 (`docs/superpowers/specs/2026-07-15-box-power-controls-design.md`). This doc is the reference
 for operators wiring up or troubleshooting any of those surfaces, and for the polkit rule that
@@ -53,7 +53,7 @@ match it.
   costs a neighbour their running model while they get no say, so silence is not consent. The
   refusal says gozer's state could not be read (fix gozer, or force it), never that a lease
   exists. See `crates/tt-station-agentd/src/gozer.rs`'s `foreign_leases`.
-  **Both refusals are advisory, and `"force": true` (`tt power reset-chips --force`) overrides
+  **Both refusals are advisory, and `"force": true` (`tt-station power reset-chips --force`) overrides
   either.** A lease communicates; it does not lock the owner out of their own box. Forced, the
   reset runs and the agent logs what it stepped on — the holder's `who` and the chips (or, for
   the undetermined case, that occupancy was unknown). That journal line is the only record left,
@@ -87,15 +87,15 @@ tests inject a harmless stub (e.g. a script that just touches a marker file) and
 power.
 
 **Reset-chips vs. `POST /reset`, one more time:** if you want "forget this box, wipe pairing,
-board reset" — that's the existing `/reset` (and `tt reset --host …`). If you want "clear a
-wedged mesh without losing pairing" — that's `POST /power {"action":"reset-chips"}` (`tt power
+board reset" — that's the existing `/reset` (and `tt-station reset --host …`). If you want "clear a
+wedged mesh without losing pairing" — that's `POST /power {"action":"reset-chips"}` (`tt-station power
 reset-chips --host …`). They both ultimately run the same `tt-smi -r`; only the token/SSH/pairing
 side effects differ — and both refuse with `409` while another tenant holds a gozer lease, for
 the same reason, and both take the same `--force` to override it (see above, and the design doc's
 "Ownership: an advisory model").
 
-**Everything else about leasing** — `tt leases`, `/status`'s `leasing` object, `--gozer-path` /
-`[global].gozer_path`, what a leased `tt run` does differently, and how a lease survives an agentd
+**Everything else about leasing** — `tt-station leases`, `/status`'s `leasing` object, `--gozer-path` /
+`[global].gozer_path`, what a leased `tt-station run` does differently, and how a lease survives an agentd
 restart — is in [`chip-leasing.md`](chip-leasing.md). The one fact to carry over here: a refusal
 naming a `STALE` or `HELD-FOREIGN` holder means the tenant is already gone, and `gozer status`
 reports no lease id to pass to `gozer release`, so the remedy is `gozer reconcile` on the box (or
@@ -113,7 +113,7 @@ The agent detects its primary LAN interface's MAC address once at startup
   `device_mesh` key).
 
 Detection failing (interface not found, permissions, etc.) simply omits the field — `mac: null`
-over HTTP, no `mac` key in the TXT record — never a startup failure. `tt --json discover` and `tt
+over HTTP, no `mac` key in the TXT record — never a startup failure. `tt-station --json discover` and `tt-station
 --json status` therefore surface `mac` when known; the macOS app persists it into its box
 registry at discovery/pair time so Wake still works after the box goes to sleep or powers off
 (the box obviously can't answer `/status` once it's down, so the MAC must have been captured
@@ -121,38 +121,38 @@ while it was still up).
 
 ---
 
-## 3. CLI: `tt power` / `tt wake`
+## 3. CLI: `tt-station power` / `tt-station wake`
 
-### `tt power <reset-chips|suspend|reboot|shutdown> --host <host:port>`
+### `tt-station power <reset-chips|suspend|reboot|shutdown> --host <host:port>`
 
-Authed — resolves a stored bearer token for `--host` from the same token store `tt pair`/`tt
+Authed — resolves a stored bearer token for `--host` from the same token store `tt-station pair`/`tt-station
 reset` use, and calls `POST /power`.
 
-- `--host` is **required**. Unlike `tt wake`, this isn't a stopgap — the CLI has no default/
+- `--host` is **required**. Unlike `tt-station wake`, this isn't a stopgap — the CLI has no default/
   only-paired-box resolution today (there's no persisted discovery cache to draw a default from),
   so every invocation must name the target box explicitly.
 - The action string is validated against the known set client-side, before any network call —
   an unknown action fails fast with the list of valid actions rather than round-tripping to the
   agent first.
-- A missing token for `--host` is a **hard error** ("no token stored for `<host>`; run `tt pair
-  <host>` first") — unlike `tt reset`, there's no "clear local state anyway" fallback path for a
+- A missing token for `--host` is a **hard error** ("no token stored for `<host>`; run `tt-station pair
+  <host>` first") — unlike `tt-station reset`, there's no "clear local state anyway" fallback path for a
   box that was never paired.
 - `--json` output: `{"action": "<action>", "ok": true}`. Human output: `power action '<action>'
   sent` — deliberately "sent," not "completed," since machine ops tend to drop the connection
   right after the agent accepts the request.
 
-### `tt wake [--mac <aa:bb:cc:dd:ee:ff>] [--host <name>]`
+### `tt-station wake [--mac <aa:bb:cc:dd:ee:ff>] [--host <name>]`
 
 Purely client-side — **no network call to the box at all**. Broadcasts a Wake-on-LAN magic
 packet (`libttstation::wol::magic_packet`: 6× `0xFF` followed by the target MAC repeated 16
 times, 102 bytes total) as a UDP datagram to `255.255.255.255:9` (port 9, the conventional WoL
 target).
 
-- `--mac` is **required** today. `--host` is accepted but currently informational only — `tt`
+- `--mac` is **required** today. `--host` is accepted but currently informational only — `tt-station`
   doesn't persist a discovery cache between invocations, so there's no stored MAC to resolve
   `--host` against, and the box can't be asked live (it may be powered off, which is the entire
   point of Wake-on-LAN). A future discovery cache could let `--host` resolve this automatically;
-  until then, get the MAC from a live `tt discover`/`tt status --json` run before the box goes to
+  until then, get the MAC from a live `tt-station discover`/`tt-station status --json` run before the box goes to
   sleep.
 - `--json` output: `{"mac": "<mac>", "sent": true}`. Human output: `Wake-on-LAN packet sent to
   <mac>` — "sent," never "woke," since a UDP broadcast has no delivery confirmation.
@@ -175,8 +175,8 @@ target).
 - Suspend/Reboot/Shut Down are `role: .destructive` and each opens a `.confirmationDialog` naming
   the concrete consequence before it fires (e.g. Reboot: "This stops the serving model and
   disconnects this Mac until the box is back.").
-- `TTClient.power(action:)` / `.wake(mac:)` shell out to `tt --json power …` / `tt --json wake
-  --mac …` — consistent with the app's "all control through `tt --json`" convention.
+- `TTClient.power(action:)` / `.wake(mac:)` shell out to `tt-station --json power …` / `tt-station --json wake
+  --mac …` — consistent with the app's "all control through `tt-station --json`" convention.
 - **Expected-disconnect handling:** `BoxViewModel.powerState` (`PowerState`: `.suspending`,
   `.rebooting`, `.poweredOff`, `.waking`) is set the moment a power op is issued. While set, the
   telemetry/status connection dropping renders as the expected state ("Suspending…", "Rebooting…",
@@ -312,7 +312,7 @@ the same way (`sudo rm /etc/polkit-1/rules.d/49-tt-station-power.rules`) if you 
   shaped error from `systemctl`, which the route maps to **`403`** with a message pointing back
   at this doc (see §1's status-code table). `reset-chips` is unaffected — it doesn't need polkit
   at all.
-- **`tt console`:** the operator TUI (and its `--snapshot` JSON) checks whether
+- **`tt-station console`:** the operator TUI (and its `--snapshot` JSON) checks whether
   `/etc/polkit-1/rules.d/49-tt-station-power.rules` exists on every snapshot collection
   (`console::env::collect_snapshot`, via `LifecycleEnv::polkit_power_rule_present` —
   `RealLifecycleEnv`'s default implementation is a plain `Path::exists()` check). When absent, a
@@ -325,10 +325,10 @@ the same way (`sudo rm /etc/polkit-1/rules.d/49-tt-station-power.rules`) if you 
   -- see docs/reference/power-controls.md or install the tt-station .deb
   ```
 
-  This is purely informational: it never blocks any `tt console` action, and every route/CLI
+  This is purely informational: it never blocks any `tt-station console` action, and every route/CLI
   command other than the three machine-power ops works identically whether the rule is present
   or not.
-- **The Linux panel's Power row / `tt power suspend|reboot|shutdown`:** the underlying
+- **The Linux panel's Power row / `tt-station power suspend|reboot|shutdown`:** the underlying
   `systemctl` call fails the same way as above; the panel surfaces it via its normal inline
-  `_log` message, `tt power` surfaces the agent's `403` (with the same doc pointer) as a CLI
+  `_log` message, `tt-station power` surfaces the agent's `403` (with the same doc pointer) as a CLI
   error.

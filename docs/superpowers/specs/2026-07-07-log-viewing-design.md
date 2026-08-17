@@ -35,7 +35,7 @@ Three parts, shipped together:
 - **A. `GET /logs` on the agent** — expose the serving logs over HTTP (bounded tail) and
   a WebSocket live-follow, unauthed-read (consistent with `/telemetry`, `/serving`,
   `/status`, `/models`, `/config`).
-- **B. `tt logs` CLI + a log pane in `tt console`** — consume the route from the CLI, and
+- **B. `tt-station logs` CLI + a log pane in `tt-station console`** — consume the route from the CLI, and
   give the operator TUI a live view of THIS box's serving log.
 - **C. Journal surfacing in `runpy.rs`** — when the agent launches run.py / the container,
   emit the run.py log path, container log path, container ID, and the `docker logs -f`
@@ -91,15 +91,15 @@ and consistent.
 `origin: null` (not an error — "nothing serving"); repo dir unknown / backend not runpy
 (`source=run`) → `409`/clear JSON error. Never 500 on "no logs yet".
 
-### B. `tt logs` CLI + `tt console` pane
+### B. `tt-station logs` CLI + `tt-station console` pane
 
-- `tt logs [--source container|run] [--tail N] [--follow] [--host H]`, respects global
+- `tt-station logs [--source container|run] [--tail N] [--follow] [--host H]`, respects global
   `--json`.
   - no `--follow`: GET `/logs`, print the tail (plain lines, or the JSON object under
     `--json`).
   - `--follow`: connect `/logs/stream`, print lines as they arrive until Ctrl-C.
   - host/port resolution identical to existing subcommands (`--host`, `TT_CONFIG_DIR`).
-- `tt console` log pane: the operator TUI (for THIS box) adds a scrollable, auto-tailing
+- `tt-station console` log pane: the operator TUI (for THIS box) adds a scrollable, auto-tailing
   pane showing the newest container log file (box-local file tail — no HTTP needed, since
   console operates the local agent). Toggle/scroll via keybindings consistent with the
   existing UI. Non-invasive: if no serving log exists yet, the pane shows a friendly
@@ -129,7 +129,7 @@ leaves an explanation in `journalctl` instead of silence.
   route tests / mock-box) for: `source=container` with no container → `lines: []`,
   `origin: null`; `source=run` with a temp repo dir containing fixture log files → returns
   the newest file's tail; `source=run` when backend isn't runpy → clear error.
-- **B:** CLI tested against mock-box (mirror `crates/tt/tests/e2e_mock.rs`): `tt logs`
+- **B:** CLI tested against mock-box (mirror `crates/tt-station/tests/e2e_mock.rs`): `tt-station logs`
   prints the tail; `--json` emits the object; unknown host errors cleanly. Console pane:
   unit-test the pure tail/scroll-state helper; the ratatui draw + event loop stays
   owner-verified (consistent with the rest of console).
@@ -138,9 +138,9 @@ leaves an explanation in `journalctl` instead of silence.
 
 ## Naming / consistency constraints
 
-- CLI tool names must stay configurable — never hardcode `tt` / `tt-station-agentd` /
+- CLI tool names must stay configurable — never hardcode `tt-station` / `tt-station-agentd` /
   service names in more than one place (see the configurable-cli-tool-names memory and
-  `crates/tt/src/console/names.rs`).
+  `crates/tt-station/src/console/names.rs`).
 - New unauthed routes join the same unauthed group as `/telemetry`/`/serving`; do not add
   auth to reads.
 - Reuse the existing command-runner abstraction for `docker logs` (don't hand-roll a new

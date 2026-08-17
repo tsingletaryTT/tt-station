@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship the tt-station Linux side as two Ubuntu `.deb` packages (`tt-station` = `tt` CLI + `tt-station-agentd` + systemd user unit; `tt-station-panel` = the GTK4 on-box GUI), built like tt-toplike.
+**Goal:** Ship the tt-station Linux side as two Ubuntu `.deb` packages (`tt-station` = `tt-station` CLI + `tt-station-agentd` + systemd user unit; `tt-station-panel` = the GTK4 on-box GUI), built like tt-toplike.
 
 **Architecture:** A new `debian/` tree drives `debhelper` (compat 13) via `dpkg-buildpackage`, orchestrated by a repo-local `build-deb.sh` that vendors crates for offline builds. Two binary packages are produced from one source. A `release.yml` builds both per Ubuntu suite (noble/jammy) on `v*` tags and publishes to GitHub Releases. Version is unified across the workspace `Cargo.toml`, `debian/changelog`, and the panel via `scripts/bump-version.sh`.
 
@@ -18,7 +18,7 @@
 - Offline builds: crates vendored under `vendor/`, `.cargo/config.toml` redirects to it, `cargo build --frozen`, `CARGO_NET_OFFLINE=true`. Neither `vendor/` nor `.cargo/config.toml` is committed.
 - Package version starts at **0.9.0** (aligns with the shipped macOS app).
 - Rust MSRV/build-dep: `rustc (>= 1.93), cargo`.
-- Never hardcode tool names in more than one place where avoidable — `tt`, `tt-station-agentd`, `tt-station-agentd.service` already have canonical defaults on the Rust and panel sides; reuse them.
+- Never hardcode tool names in more than one place where avoidable — `tt-station`, `tt-station-agentd`, `tt-station-agentd.service` already have canonical defaults on the Rust and panel sides; reuse them.
 - `mock-box` and `libttstation` are NOT packaged.
 
 ---
@@ -27,7 +27,7 @@
 
 **Files:**
 - Modify: `Cargo.toml` (root workspace — add `[workspace.package]`)
-- Modify: `crates/tt/Cargo.toml`, `crates/tt-station-agentd/Cargo.toml`, `crates/libttstation/Cargo.toml`, `crates/mock-box/Cargo.toml` (inherit version)
+- Modify: `crates/tt-station/Cargo.toml`, `crates/tt-station-agentd/Cargo.toml`, `crates/libttstation/Cargo.toml`, `crates/mock-box/Cargo.toml` (inherit version)
 - Modify: `box-panel/tt-station-panel.py` (add `__version__`)
 - Create: `scripts/bump-version.sh`
 
@@ -46,11 +46,11 @@ edition = "2021"
 
 - [ ] **Step 2: Make each crate inherit the workspace version**
 
-In each of `crates/tt/Cargo.toml`, `crates/tt-station-agentd/Cargo.toml`, `crates/libttstation/Cargo.toml`, `crates/mock-box/Cargo.toml`, replace the `[package]` `version = "0.0.1"` line (and `edition = "2021"` if present) with inheritance:
+In each of `crates/tt-station/Cargo.toml`, `crates/tt-station-agentd/Cargo.toml`, `crates/libttstation/Cargo.toml`, `crates/mock-box/Cargo.toml`, replace the `[package]` `version = "0.0.1"` line (and `edition = "2021"` if present) with inheritance:
 
 ```toml
 [package]
-name = "tt"           # keep each crate's own name
+name = "tt-station"           # keep each crate's own name
 version.workspace = true
 edition.workspace = true
 ```
@@ -135,11 +135,11 @@ git commit -m "build: unify workspace version at 0.9.0 + add bump-version.sh"
 
 **Interfaces:**
 - Consumes: the unified `0.9.0` version from Task 1.
-- Produces: `../tt-station_0.9.0_amd64.deb` containing `/usr/bin/tt`, `/usr/bin/tt-station-agentd`, `/usr/lib/systemd/user/tt-station-agentd.service`, docs. The `tt-station-panel` stanza is added in Task 3.
+- Produces: `../tt-station_0.9.0_amd64.deb` containing `/usr/bin/tt-station`, `/usr/bin/tt-station-agentd`, `/usr/lib/systemd/user/tt-station-agentd.service`, docs. The `tt-station-panel` stanza is added in Task 3.
 
 - [ ] **Step 1: Create the packaged systemd unit**
 
-The from-source unit (`deploy/tt-station-agentd.service`) has `{{AGENT_BIN}}`/`{{PATH_ENV}}` placeholders filled by `tt console --install-service`. The packaged install has a fixed binary path, so ship a resolved variant. Create `deploy/tt-station-agentd.package.service`:
+The from-source unit (`deploy/tt-station-agentd.service`) has `{{AGENT_BIN}}`/`{{PATH_ENV}}` placeholders filled by `tt-station console --install-service`. The packaged install has a fixed binary path, so ship a resolved variant. Create `deploy/tt-station-agentd.package.service`:
 
 ```ini
 [Unit]
@@ -173,7 +173,7 @@ WantedBy=default.target
 ```
 tt-station (0.9.0) noble; urgency=medium
 
-  * Initial Debian packaging: tt-station (tt CLI + tt-station-agentd + systemd
+  * Initial Debian packaging: tt-station (tt-station CLI + tt-station-agentd + systemd
     user unit) and tt-station-panel (GTK4 on-box control panel).
 
  -- Tenstorrent <software@tenstorrent.com>  Fri, 10 Jul 2026 00:00:00 +0000
@@ -227,7 +227,7 @@ Description: Tenstorrent QuietBox control plane (CLI + box agent)
  box, pair once, run a model, and get one OpenAI-compatible /v1 endpoint served
  by tt-inference-server (vLLM).
  .
- This package ships the `tt` CLI and the box-side agent `tt-station-agentd`
+ This package ships the `tt-station` CLI and the box-side agent `tt-station-agentd`
  (installed as a systemd --user service, not auto-enabled). Enable it per-user
  with: systemctl --user enable --now tt-station-agentd
 
@@ -248,7 +248,7 @@ Description: On-box GTK control panel for tt-station
 #!/usr/bin/make -f
 # debian/rules — debhelper build rules for tt-station.
 #
-# Rust workspace: builds two release binaries (tt, tt-station-agentd) with safe
+# Rust workspace: builds two release binaries (tt-station, tt-station-agentd) with safe
 # default features. Crates are vendored under vendor/ and .cargo/config.toml
 # redirects cargo there; --frozen enforces no network fetches. Run build-deb.sh
 # to vendor first.
@@ -277,15 +277,15 @@ override_dh_clean:
 
 # ── Compile ────────────────────────────────────────────────────────────────
 override_dh_auto_build:
-	cargo build --release --frozen -p tt
+	cargo build --release --frozen -p tt-station
 	cargo build --release --frozen -p tt-station-agentd
 
 # ── Install ────────────────────────────────────────────────────────────────
 override_dh_auto_install:
 	# ── tt-station (CLI + agent + systemd user unit) ──
 	install -d debian/tt-station/usr/bin
-	install -m 755 debian/target/release/tt \
-	    debian/tt-station/usr/bin/tt
+	install -m 755 debian/target/release/tt-station \
+	    debian/tt-station/usr/bin/tt-station
 	install -m 755 debian/target/release/tt-station-agentd \
 	    debian/tt-station/usr/bin/tt-station-agentd
 	install -d debian/tt-station/usr/lib/systemd/user
@@ -416,7 +416,7 @@ Expected: succeeds; `../tt-station_0.9.0_amd64.deb` exists.
 Then inspect:
 
 Run: `dpkg-deb --contents ../tt-station_0.9.0_amd64.deb`
-Expected: lists `./usr/bin/tt`, `./usr/bin/tt-station-agentd`, `./usr/lib/systemd/user/tt-station-agentd.service`, `./usr/share/doc/tt-station/README.md`.
+Expected: lists `./usr/bin/tt-station`, `./usr/bin/tt-station-agentd`, `./usr/lib/systemd/user/tt-station-agentd.service`, `./usr/share/doc/tt-station/README.md`.
 
 Run: `dpkg-deb --info ../tt-station_0.9.0_amd64.deb`
 Expected: `Package: tt-station`, `Version: 0.9.0`, the Recommends line.

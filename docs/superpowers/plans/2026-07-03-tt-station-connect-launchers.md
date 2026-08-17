@@ -4,14 +4,14 @@
 
 **Goal:** Add one-click "Open Web UI" and "Open in opencode" launchers to the TTStation menu-bar app that connect a local front-end to the model the box is serving, using its OpenAI-compatible endpoint.
 
-**Architecture:** Pure, unit-tested builders in the `TTStationKit` package (opencode config text; the `uvx open-webui` argv/env/URL); thin side-effecting glue in the `AppShell` app target (`LaunchController`: writes the config, spawns `uvx`, polls health, opens Terminal/the browser). The launchers only orchestrate *local* Mac tools with the endpoint the app already holds — the box conversation stays in `tt`.
+**Architecture:** Pure, unit-tested builders in the `TTStationKit` package (opencode config text; the `uvx open-webui` argv/env/URL); thin side-effecting glue in the `AppShell` app target (`LaunchController`: writes the config, spawns `uvx`, polls health, opens Terminal/the browser). The launchers only orchestrate *local* Mac tools with the endpoint the app already holds — the box conversation stays in `tt-station`.
 
 **Tech Stack:** Swift 5, SwiftUI/Observation, Foundation `Process`/`URLSession`, `osascript` (Terminal.app), `NSWorkspace`, `uvx` (open-webui), `opencode`.
 
 ## Global Constraints
 
 - macOS 14; Swift 5 language mode; code under `macos/TTStation/`.
-- The app is a veneer: launchers use the `Endpoint` the app already obtained via `tt`; they must NOT re-implement box discovery/HTTP/pairing.
+- The app is a veneer: launchers use the `Endpoint` the app already obtained via `tt-station`; they must NOT re-implement box discovery/HTTP/pairing.
 - Open WebUI runs locally via `uvx open-webui serve --port 8080`, env `OPENAI_API_BASE_URL=<base>`, `OPENAI_API_KEY=sk-none`, `WEBUI_AUTH=false`; opened at `http://localhost:8080`.
 - opencode launches in a dedicated scratch dir `~/Library/Application Support/TTStation/opencode/<sanitized-hostPort>/` via Terminal.app running `cd '<dir>' && opencode`.
 - Connect actions appear ONLY when `box.endpoint != nil` (serving).
@@ -57,11 +57,11 @@ final class LaunchersTests: XCTestCase {
         let obj = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
         XCTAssertEqual(obj["model"] as? String, "ttstation/meta-llama/Llama-3.3-70B-Instruct")
         let provider = obj["provider"] as! [String: Any]
-        let tt = provider["ttstation"] as! [String: Any]
-        XCTAssertEqual(tt["npm"] as? String, "@ai-sdk/openai-compatible")
-        let options = tt["options"] as! [String: Any]
+        let tt-station = provider["ttstation"] as! [String: Any]
+        XCTAssertEqual(tt-station["npm"] as? String, "@ai-sdk/openai-compatible")
+        let options = tt-station["options"] as! [String: Any]
         XCTAssertEqual(options["baseURL"] as? String, "http://qb2-lab.local:8003/v1")
-        let models = tt["models"] as! [String: Any]
+        let models = tt-station["models"] as! [String: Any]
         XCTAssertNotNil(models["meta-llama/Llama-3.3-70B-Instruct"])
     }
 
@@ -419,7 +419,7 @@ Expected: whole suite passes (the Launchers unit tests plus all prior).
 
 - [ ] **Step 4: Manual end-to-end (owner-run, box must be serving)**
 
-Ensure the box is serving a model (`tt --json run <model> --host qb2-lab.local:8765`). Launch the app, open the box's panel, and:
+Ensure the box is serving a model (`tt-station --json run <model> --host qb2-lab.local:8765`). Launch the app, open the box's panel, and:
 - Click **Open in opencode** → a Terminal window opens running `opencode` in the scratch dir; confirm it can talk to the model (the `ttstation` provider is preselected).
 - Click **Open Web UI** → (first time may take a bit while `uvx` resolves) a browser opens `localhost:8080`; send a message and confirm a completion from the box's model.
 Capture any error text the buttons surface and fix in Task 3 if the invocation shape is wrong.

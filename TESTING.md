@@ -58,7 +58,7 @@ journalctl --user -u tt-station-agentd -e --no-pager
    open /Applications/TTStation.app
    ```
 
-   (First launch also installs a `~/.local/bin/tt` symlink so the CLI is on PATH.)
+   (First launch also installs a `~/.local/bin/tt-station` symlink so the CLI is on PATH.)
 
 ## The test loop
 

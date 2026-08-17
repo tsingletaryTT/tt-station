@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make a QuietBox 2 on the LAN discoverable and usable from a Mac — discover, pair once, `tt run <model>`, get a live OpenAI-compatible `/v1` endpoint — with no llama.cpp.
+**Goal:** Make a QuietBox 2 on the LAN discoverable and usable from a Mac — discover, pair once, `tt-station run <model>`, get a live OpenAI-compatible `/v1` endpoint — with no llama.cpp.
 
-**Architecture:** A Rust core (`libttstation` + `tt` CLI) on the Mac talks over LAN HTTP+JSON to a Rust box-side agent (`tt-station-agentd`) that advertises mDNS, does 6-digit pairing, and controls serving through a `ServingBackend` trait (Docker now, dstack later). A `mock-box` dev crate advertises the same service and fakes `/v1` + control so the whole flow is testable without hardware. A SwiftUI `MenuBarExtra` shell (macOS-only) is a thin veneer over `tt --json`.
+**Architecture:** A Rust core (`libttstation` + `tt-station` CLI) on the Mac talks over LAN HTTP+JSON to a Rust box-side agent (`tt-station-agentd`) that advertises mDNS, does 6-digit pairing, and controls serving through a `ServingBackend` trait (Docker now, dstack later). A `mock-box` dev crate advertises the same service and fakes `/v1` + control so the whole flow is testable without hardware. A SwiftUI `MenuBarExtra` shell (macOS-only) is a thin veneer over `tt-station --json`.
 
 **Tech Stack:** Rust (Cargo workspace), `mdns-sd` (discovery/advertise), `axum` + `tokio` (agent HTTP), `reqwest` (client), `serde`/`serde_json`, `clap` (CLI), `security-framework` (macOS Keychain), SwiftUI (`MenuBarExtra`).
 
@@ -12,7 +12,7 @@
 
 - **No llama.cpp.** Usability is delivered only through the OpenAI-compatible `/v1` from `tt-inference-server` (vLLM).
 - **Cloud-burst is out of scope.** No console.tenstorrent.com routing in this plan (follow-on spec).
-- **All logic lives in Rust.** The SwiftUI shell must contain no business logic — it only shells out to `tt --json`.
+- **All logic lives in Rust.** The SwiftUI shell must contain no business logic — it only shells out to `tt-station --json`.
 - **Discovery is an interface** with three providers: mDNS (primary), Manual (always works), Tailscale MagicDNS (escape hatch). All return the same `BoxRecord`.
 - **Serving is an interface** (`ServingBackend`): `DockerBackend` real now, `DstackBackend` stub now.
 - **mDNS service type:** `_tenstorrent._tcp`. **TXT keys:** `name`, `apiver`, `chips`, `status`, `ctrl`.
@@ -40,7 +40,7 @@ tt-station/
       src/pairing.rs                  # pairing client: init + complete
       src/agent_client.rs            # AgentClient: status/run/stop/endpoint (bearer)
       src/config.rs                   # KnownBoxes config (TOML)
-    tt/
+    tt-station/
       Cargo.toml
       src/main.rs                     # clap CLI over libttstation, global --json
     tt-station-agentd/
@@ -66,7 +66,7 @@ tt-station/
 ### Task 0: Workspace scaffolding
 
 **Files:**
-- Create: `Cargo.toml` (workspace), `crates/libttstation/Cargo.toml`, `crates/libttstation/src/lib.rs`, `crates/tt/Cargo.toml`, `crates/tt/src/main.rs`, `crates/tt-station-agentd/Cargo.toml`, `crates/tt-station-agentd/src/main.rs`, `crates/mock-box/Cargo.toml`, `crates/mock-box/src/main.rs`
+- Create: `Cargo.toml` (workspace), `crates/libttstation/Cargo.toml`, `crates/libttstation/src/lib.rs`, `crates/tt-station/Cargo.toml`, `crates/tt-station/src/main.rs`, `crates/tt-station-agentd/Cargo.toml`, `crates/tt-station-agentd/src/main.rs`, `crates/mock-box/Cargo.toml`, `crates/mock-box/src/main.rs`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -77,7 +77,7 @@ tt-station/
 ```toml
 [workspace]
 resolver = "2"
-members = ["crates/libttstation", "crates/tt", "crates/tt-station-agentd", "crates/mock-box"]
+members = ["crates/libttstation", "crates/tt-station", "crates/tt-station-agentd", "crates/mock-box"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -334,7 +334,7 @@ fn aggregate_dedups_by_name() {
 
 ---
 
-### Task 8: Pairing client (libttstation) + tt pair wiring later
+### Task 8: Pairing client (libttstation) + tt-station pair wiring later
 
 **Files:**
 - Create: `crates/libttstation/src/pairing.rs`
@@ -423,33 +423,33 @@ fn aggregate_dedups_by_name() {
 
 ---
 
-### Task 12: `tt` CLI wiring + end-to-end against mock-box
+### Task 12: `tt-station` CLI wiring + end-to-end against mock-box
 
 **Files:**
-- Modify: `crates/tt/Cargo.toml` (clap, tokio, libttstation, serde_json, anyhow), `crates/tt/src/main.rs`
+- Modify: `crates/tt-station/Cargo.toml` (clap, tokio, libttstation, serde_json, anyhow), `crates/tt-station/src/main.rs`
 - Modify: `crates/mock-box/src/main.rs` (add a `serve` subcommand: fake `/status`, `/pair/*`, `/run`, `/stop`, `/endpoint`, and a fake `/v1/chat/completions`)
-- Test: `crates/tt/tests/e2e_mock.rs`
+- Test: `crates/tt-station/tests/e2e_mock.rs`
 
 **Interfaces:**
 - Consumes: everything in `libttstation`.
 - Produces: the CLI surface from the spec, with global `--json`:
-  `tt discover`, `tt pair [host]`, `tt run <model>`, `tt stop`, `tt status`, `tt endpoint`.
+  `tt-station discover`, `tt-station pair [host]`, `tt-station run <model>`, `tt-station stop`, `tt-station status`, `tt-station endpoint`.
 
 - [ ] **Step 1:** Extend `mock-box` with `serve --ctrl-port <p>` implementing the agent's control API + a fake `/v1/chat/completions` returning a canned completion; `/pair/complete` accepts any code and returns a fixed token; `/pair/init` prints a code.
-- [ ] **Step 2:** Write `tests/e2e_mock.rs` (`#[ignore]`, needs mock-box): start `mock-box serve`, run the `tt` binary via `assert_cmd`:
-  - `tt --json discover` (Manual provider pointed at the mock) lists the box;
-  - `tt --json pair 127.0.0.1:<p> --code 000000` stores a token (FileStore under a temp `TT_CONFIG_DIR`);
-  - `tt --json run llama3` returns an endpoint JSON;
+- [ ] **Step 2:** Write `tests/e2e_mock.rs` (`#[ignore]`, needs mock-box): start `mock-box serve`, run the `tt-station` binary via `assert_cmd`:
+  - `tt-station --json discover` (Manual provider pointed at the mock) lists the box;
+  - `tt-station --json pair 127.0.0.1:<p> --code 000000` stores a token (FileStore under a temp `TT_CONFIG_DIR`);
+  - `tt-station --json run llama3` returns an endpoint JSON;
   - `curl` the returned `base_url` `/chat/completions` → canned completion (assert via reqwest in the test).
-- [ ] **Step 3:** Implement `tt` commands: build providers, run `aggregate`, drive `pairing` + `SecretStore`, `AgentClient` for run/stop/status/endpoint; `--json` prints machine JSON, otherwise human text; `tt endpoint` (no `--json`) prints `export OPENAI_BASE_URL=<base_url>`.
+- [ ] **Step 3:** Implement `tt-station` commands: build providers, run `aggregate`, drive `pairing` + `SecretStore`, `AgentClient` for run/stop/status/endpoint; `--json` prints machine JSON, otherwise human text; `tt-station endpoint` (no `--json`) prints `export OPENAI_BASE_URL=<base_url>`.
 - [ ] **Step 4:** Run:
   ```bash
   cargo run -p mock-box -- serve --ctrl-port 8899 &
-  TT_CONFIG_DIR=$(mktemp -d) cargo test -p tt --test e2e_mock -- --ignored
+  TT_CONFIG_DIR=$(mktemp -d) cargo test -p tt-station --test e2e_mock -- --ignored
   kill %1
   ```
   Expected: PASS — full discover→pair→run→endpoint→completion against the mock.
-- [ ] **Step 5: Commit** — `git commit -am "feat(cli): tt commands + end-to-end mock-box test"`
+- [ ] **Step 5: Commit** — `git commit -am "feat(cli): tt-station commands + end-to-end mock-box test"`
 
 **This task is the CI stand-in for M2.** It proves the entire flow with no hardware.
 
@@ -460,16 +460,16 @@ fn aggregate_dedups_by_name() {
 **Precondition:** QB2 reachable; `tt-inference-server` image available; Docker on the box.
 
 - [ ] **Step 1:** Cross-build / copy `tt-station-agentd` to the QB2; run `tt-station-agentd --name qb2-lab --ctrl-port 8765 --backend docker`. Confirm it prints "advertising _tenstorrent._tcp".
-- [ ] **Step 2:** On the Mac, build `tt`; run `tt discover` — confirm `qb2-lab` appears via mDNS.
-- [ ] **Step 3:** `tt pair` — enter the 6-digit code the agent printed on the box; confirm token lands in Keychain (`security find-generic-password -s tt-station`).
-- [ ] **Step 4:** `tt run <model>` — DockerBackend starts real `tt-inference-server`; wait for ready.
-- [ ] **Step 5:** `eval "$(tt endpoint)"` then:
+- [ ] **Step 2:** On the Mac, build `tt-station`; run `tt-station discover` — confirm `qb2-lab` appears via mDNS.
+- [ ] **Step 3:** `tt-station pair` — enter the 6-digit code the agent printed on the box; confirm token lands in Keychain (`security find-generic-password -s tt-station`).
+- [ ] **Step 4:** `tt-station run <model>` — DockerBackend starts real `tt-inference-server`; wait for ready.
+- [ ] **Step 5:** `eval "$(tt-station endpoint)"` then:
   ```bash
   curl "$OPENAI_BASE_URL/chat/completions" -H "Content-Type: application/json" \
     -d '{"model":"<model>","messages":[{"role":"user","content":"hi from my Mac"}]}'
   ```
   Expected: a real completion from the QB2. **This is the M2 "it works" gate.**
-- [ ] **Step 6:** `tt stop`; confirm status returns to idle. Commit any fixups discovered on hardware.
+- [ ] **Step 6:** `tt-station stop`; confirm status returns to idle. Commit any fixups discovered on hardware.
 
 ---
 
@@ -477,11 +477,11 @@ fn aggregate_dedups_by_name() {
 
 **Files:** `macos/TTStation/` (Xcode project).
 
-**Interfaces:** shells out to `tt --json`; no business logic in Swift.
+**Interfaces:** shells out to `tt-station --json`; no business logic in Swift.
 
-- [ ] **Step 1:** Create a SwiftUI macOS app with `MenuBarExtra`. On open, run `tt --json discover`; render boxes with status dots.
-- [ ] **Step 2:** Add a model text field + Run/Stop buttons calling `tt --json run <model>` / `tt --json stop`; show a spinner until endpoint is ready.
-- [ ] **Step 3:** "Copy endpoint" copies `base_url` from `tt --json endpoint`; add "Open Cloud Console" → `https://console.tenstorrent.com`.
+- [ ] **Step 1:** Create a SwiftUI macOS app with `MenuBarExtra`. On open, run `tt-station --json discover`; render boxes with status dots.
+- [ ] **Step 2:** Add a model text field + Run/Stop buttons calling `tt-station --json run <model>` / `tt-station --json stop`; show a spinner until endpoint is ready.
+- [ ] **Step 3:** "Copy endpoint" copies `base_url` from `tt-station --json endpoint`; add "Open Cloud Console" → `https://console.tenstorrent.com`.
 - [ ] **Step 4:** Post a `UNUserNotification` when a model reaches ready.
 - [ ] **Step 5:** Manual verification against the QB2 (or `mock-box serve` on localhost); commit the Xcode project.
 
@@ -489,14 +489,14 @@ fn aggregate_dedups_by_name() {
 
 ### Task 15 (DEFERRED — M4 stretch): Real DstackBackend
 
-- [ ] Replace the `DstackBackend` stub with a real implementation that submits a dstack serving task to the box's SSH fleet, keeping the `ServingBackend` interface identical so neither `tt` nor the menu-bar changes. Separate spec/plan recommended before starting; cloud-burst also lives beyond this line.
+- [ ] Replace the `DstackBackend` stub with a real implementation that submits a dstack serving task to the box's SSH fleet, keeping the `ServingBackend` interface identical so neither `tt-station` nor the menu-bar changes. Separate spec/plan recommended before starting; cloud-burst also lives beyond this line.
 
 ---
 
 ## Self-Review
 
 **Spec coverage:**
-- Rust core (`libttstation` + `tt`) → Tasks 1,2,4,5,8,11,12. ✓
+- Rust core (`libttstation` + `tt-station`) → Tasks 1,2,4,5,8,11,12. ✓
 - Box agent (advertise, pair, control, serving) → Tasks 6,7,9,10. ✓
 - Discovery interface w/ 3 providers → Task 2 (Manual + aggregate), Task 4 (mDNS). *Tailscale provider listed in file structure but is lowest priority; folded as an optional add in Task 2's file (`tailscale.rs`) — **add explicitly:*** implement `TailscaleProvider` parsing `tailscale status --json` as a small extension of Task 2 if time permits; it is not gating any milestone. (Noted so it isn't silently dropped.)
 - ServingBackend seam (Docker now, dstack later) → Task 9. ✓

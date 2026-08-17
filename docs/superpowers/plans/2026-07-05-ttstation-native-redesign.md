@@ -4,13 +4,13 @@
 
 **Goal:** Turn the TTStation macOS app into a native, hardware-aware control room that ranks models by the connected box's device mesh, streams live device telemetry, elevates the box-connected workbench, and brings opencode / Open WebUI up fast (installing deps as needed).
 
-**Architecture:** Rust remains the source of truth for all control and for the box's detected device mesh (exposed via `tt --json`). Swift adds exactly one read-only I/O path — a telemetry WebSocket mirror — plus pure, unit-tested presentation logic (ranking, mesh matching, telemetry decode, install-command builders). SwiftUI views are refactored into focused per-card files composed by a thin workspace view.
+**Architecture:** Rust remains the source of truth for all control and for the box's detected device mesh (exposed via `tt-station --json`). Swift adds exactly one read-only I/O path — a telemetry WebSocket mirror — plus pure, unit-tested presentation logic (ranking, mesh matching, telemetry decode, install-command builders). SwiftUI views are refactored into focused per-card files composed by a thin workspace view.
 
 **Tech Stack:** Rust (axum agent, clap CLI, mock-box), Swift 5 / SwiftUI (`@Observable`, `MenuBarExtra`, `NavigationSplitView`, `URLSessionWebSocketTask`), XcodeGen, `swift test`.
 
 ## Global Constraints
 
-- **Veneer rule:** all *control* (discover/pair/run/stop/status/endpoint/serving) goes through `tt --json` via `TTClient`. The ONLY new Swift I/O path permitted is the read-only, unauthed telemetry WebSocket. No discovery/pairing/HTTP-control reimplemented in Swift.
+- **Veneer rule:** all *control* (discover/pair/run/stop/status/endpoint/serving) goes through `tt-station --json` via `TTClient`. The ONLY new Swift I/O path permitted is the read-only, unauthed telemetry WebSocket. No discovery/pairing/HTTP-control reimplemented in Swift.
 - **App version:** bump `MARKETING_VERSION` to `0.3.0` in `macos/TTStation/AppShell/project.yml`.
 - **Target OS:** macOS 14.
 - **Device mesh vocabulary:** model `devices` use upper-case mesh labels (`P300X2`, `T3K`, `GALAXY`); the box's detected mesh is lower-case (`p300x2`). All matching is case-insensitive.
@@ -182,30 +182,30 @@ git commit -m "feat(agent): report detected device_mesh in /status"
 
 ---
 
-## Task 3: CLI `tt` exposes `device_mesh` in status/discover JSON
+## Task 3: CLI `tt-station` exposes `device_mesh` in status/discover JSON
 
 **Files:**
-- Modify: `crates/tt/src/main.rs` (status ~line 336-355 + discover ~line 598; the box record struct)
+- Modify: `crates/tt-station/src/main.rs` (status ~line 336-355 + discover ~line 598; the box record struct)
 
 **Interfaces:**
 - Consumes: agent `/status` `device_mesh` (Task 2).
-- Produces: `tt --json status` and `tt --json discover` records carry `"device_mesh": <string|null>`.
+- Produces: `tt-station --json status` and `tt-station --json discover` records carry `"device_mesh": <string|null>`.
 
-- [ ] **Step 1: Read the CLI's status + discover JSON shaping.** In `crates/tt/src/main.rs`, find the status response struct (~336) and the discover record shaping (~598) and the `chips` plumbing.
+- [ ] **Step 1: Read the CLI's status + discover JSON shaping.** In `crates/tt-station/src/main.rs`, find the status response struct (~336) and the discover record shaping (~598) and the `chips` plumbing.
 
 - [ ] **Step 2: Thread the field through.** Add `device_mesh: Option<String>` to the CLI's status/box-record serialization structs, decode it from the agent `/status` payload, and include it in both the `status` and `discover` `--json` output. Where discover synthesizes records, populate `device_mesh` from the per-box status probe if available, else `None`.
 
-- [ ] **Step 3: Update the mock fixture default.** At `crates/tt/src/main.rs:815` (the `chips: "4xBH".into()` test/mock record) add `device_mesh: Some("p300x2".into())` (or `None` if that record is a pure fixture — match its intent).
+- [ ] **Step 3: Update the mock fixture default.** At `crates/tt-station/src/main.rs:815` (the `chips: "4xBH".into()` test/mock record) add `device_mesh: Some("p300x2".into())` (or `None` if that record is a pure fixture — match its intent).
 
 - [ ] **Step 4: Build + run CLI tests**
 
-Run: `cargo test -p tt && cargo build -p tt`
+Run: `cargo test -p tt-station && cargo build -p tt-station`
 Expected: PASS + compiles.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tt/src/main.rs
+git add crates/tt-station/src/main.rs
 git commit -m "feat(cli): surface device_mesh in status/discover --json"
 ```
 
@@ -213,7 +213,7 @@ git commit -m "feat(cli): surface device_mesh in status/discover --json"
 
 ## Task 3.5: Advertise `device_mesh` in mDNS TXT (inserted post-Task-3)
 
-**Why (discovered during Task 3):** Task 2 added `device_mesh` only to the HTTP `/status` body, so `tt --json discover` populates it *only* for manually-probed hosts. mDNS-discovered boxes (the live QB2, the common case) get `device_mesh: null`, which blunts the app's hardware-aware ranking for the primary use case. Fix: make `device_mesh` a uniform property of a discovered box by carrying it in the mDNS TXT record, exactly like `chips`.
+**Why (discovered during Task 3):** Task 2 added `device_mesh` only to the HTTP `/status` body, so `tt-station --json discover` populates it *only* for manually-probed hosts. mDNS-discovered boxes (the live QB2, the common case) get `device_mesh: null`, which blunts the app's hardware-aware ranking for the primary use case. Fix: make `device_mesh` a uniform property of a discovered box by carrying it in the mDNS TXT record, exactly like `chips`.
 
 **Files:**
 - Modify: `crates/libttstation/src/model.rs` (`txt_encode` ~line 172, `txt_decode` ~line 182, tests)
@@ -239,7 +239,7 @@ Expected: PASS.
 
 - [ ] **Step 6: Build all three crates + full test, expect PASS.**
 
-Run: `cargo test -p libttstation -p tt-station-agentd && cargo build -p tt-station-agentd -p mock-box -p tt`
+Run: `cargo test -p libttstation -p tt-station-agentd && cargo build -p tt-station-agentd -p mock-box -p tt-station`
 Expected: PASS + clean build.
 
 - [ ] **Step 7: Commit**
@@ -277,7 +277,7 @@ git commit -m "feat(mdns): advertise device_mesh in TXT so discover carries it"
 
 - [ ] **Step 4: Build + smoke**
 
-Run: `cargo build -p mock-box && cargo test -p tt --test e2e_mock -- --ignored`
+Run: `cargo build -p mock-box && cargo test -p tt-station --test e2e_mock -- --ignored`
 Expected: builds; the existing e2e still passes (device_mesh is additive, decoders ignore unknowns).
 
 - [ ] **Step 5: Commit**
@@ -297,7 +297,7 @@ git commit -m "feat(mock-box): emit device_mesh + canned telemetry frame"
 - Test: `macos/TTStation/Tests/TTStationKitTests/ModelsTests.swift`
 
 **Interfaces:**
-- Consumes: `tt --json discover/status` `device_mesh` (Task 3).
+- Consumes: `tt-station --json discover/status` `device_mesh` (Task 3).
 - Produces: `BoxRecord.deviceMesh: String?` (CodingKey `device_mesh`), included in the public `init`.
 
 - [ ] **Step 1: Write the failing test** in `ModelsTests.swift`:
@@ -334,7 +334,7 @@ Expected: PASS.
 
 ```bash
 git add macos/TTStation/Sources/TTStationKit/Models.swift macos/TTStation/Tests/TTStationKitTests/ModelsTests.swift macos/TTStation/Tests/TTStationKitTests/Fixtures/discover.json
-git commit -m "feat(macos): BoxRecord.deviceMesh from tt --json"
+git commit -m "feat(macos): BoxRecord.deviceMesh from tt-station --json"
 ```
 
 ---
@@ -848,7 +848,7 @@ git commit -m "feat(macos): compose control-room window, trim popover, TT theme 
 
 - [ ] **Step 2: Update docs.** `macos/README.md`: new window control-room, hardware-aware ranking, live telemetry, fast Connect, workbench+toolkit. `CLAUDE.md`: refresh the "Current state" macOS bullet to 0.3.0 and note the agent `device_mesh` addition.
 
-- [ ] **Step 3: Live verification against QB2** (`qb2-lab.local:8765`, currently connected). Rebuild the agent (`cargo build --release -p tt-station-agentd`) and restart it via the box panel so `/status` carries `device_mesh`; rebuild `tt` (and clear quarantine / ad-hoc sign the `~/.local/bin` copy per memory `tt-cli-install-gatekeeper`). Then, in the app: confirm the mesh badge shows `P300X2`, models split into "Runs on this box" vs "Needs other hardware", the device strip shows live temps, and each workbench + Connect action launches (installing deps as needed).
+- [ ] **Step 3: Live verification against QB2** (`qb2-lab.local:8765`, currently connected). Rebuild the agent (`cargo build --release -p tt-station-agentd`) and restart it via the box panel so `/status` carries `device_mesh`; rebuild `tt-station` (and clear quarantine / ad-hoc sign the `~/.local/bin` copy per memory `tt-cli-install-gatekeeper`). Then, in the app: confirm the mesh badge shows `P300X2`, models split into "Runs on this box" vs "Needs other hardware", the device strip shows live temps, and each workbench + Connect action launches (installing deps as needed).
 
 - [ ] **Step 4: Commit**
 

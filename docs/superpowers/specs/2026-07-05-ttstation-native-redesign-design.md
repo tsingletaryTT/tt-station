@@ -3,14 +3,14 @@
 **Date:** 2026-07-05
 **Status:** approved design, ready for implementation plan
 **Scope:** `macos/TTStation` (Swift app + TTStationKit), plus small enrichments to
-`crates/tt-station-agentd`, `crates/tt`, and `crates/mock-box`.
+`crates/tt-station-agentd`, `crates/tt-station`, and `crates/mock-box`.
 
 ---
 
 ## Problem
 
 The current macOS app (v0.2.0) is a functional but plain SwiftUI veneer over
-`tt --json`. Three weaknesses drove this redesign:
+`tt-station --json`. Three weaknesses drove this redesign:
 
 1. **It doesn't feel native.** The window and popover are stacks of `.caption`
    `Text` and small controls with weak hierarchy and no brand identity.
@@ -41,7 +41,7 @@ The current macOS app (v0.2.0) is a functional but plain SwiftUI veneer over
 ## Non-goals
 
 - No reimplementation of discovery / pairing / HTTP control in Swift. The veneer
-  rule holds: **control logic lives in Rust**, the app shells out to `tt --json`.
+  rule holds: **control logic lives in Rust**, the app shells out to `tt-station --json`.
   The single sanctioned exception is the read-only telemetry WebSocket (below).
 - No changes to how models are actually served (`run.py` path is untouched).
 - No App Intents / deep links (still deferred).
@@ -53,7 +53,7 @@ The current macOS app (v0.2.0) is a functional but plain SwiftUI veneer over
 ### The veneer rule, restated
 
 All *control* (discover, pair, run, stop, status, endpoint, serving) continues to
-go through `tt --json` via `TTClient`. The redesign adds exactly one new I/O path
+go through `tt-station --json` via `TTClient`. The redesign adds exactly one new I/O path
 in Swift — a **read-only** telemetry WebSocket mirror — and one new piece of data
 sourced from Rust (the box's detected device mesh). Everything else is pure Swift
 presentation logic, unit-tested.
@@ -61,9 +61,9 @@ presentation logic, unit-tested.
 ### Data flow additions
 
 ```
-agent /status  ──(device_mesh)──▶  tt --json status/discover  ──▶  BoxRecord.deviceMesh
+agent /status  ──(device_mesh)──▶  tt-station --json status/discover  ──▶  BoxRecord.deviceMesh
 agent /telemetry (ws, tt-smi -s) ──────────────────────────────▶  TelemetryService ──▶ TelemetrySnapshot
-model_spec.json ──(devices per model)──▶ tt --json models ──▶ ModelInfo.devices
+model_spec.json ──(devices per model)──▶ tt-station --json models ──▶ ModelInfo.devices
                                                               └─▶ ModelRanking.rankForHardware(models, deviceMesh)
 ```
 
@@ -85,9 +85,9 @@ model_spec.json ──(devices per model)──▶ tt --json models ──▶ Mo
 - The agent runs mesh detection **once at startup** (via the existing
   `tt-smi -s` seam) and stores the result on `AppState` (`Option<String>`).
 - Add `device_mesh: Option<String>` to the `/status` response and to whatever
-  the discover/status payload carries into `tt`. `None` when detection fails
+  the discover/status payload carries into `tt-station`. `None` when detection fails
   (mixed fleet, no `tt-smi`, etc.) — never fatal, ranking degrades gracefully.
-- `crates/tt`: decode and expose `device_mesh` in `status` and `discover`
+- `crates/tt-station`: decode and expose `device_mesh` in `status` and `discover`
   `--json` output.
 - `crates/mock-box`: emit a fixed `device_mesh` (e.g. `"p300x2"`) so the app's
   ranking is verifiable with no hardware.
@@ -264,7 +264,7 @@ Changed:
 
 - `tt-station-agentd`: shared `detect_device_mesh`, startup detection on
   `AppState`, `device_mesh` in `/status`.
-- `tt`: decode + expose `device_mesh` in `status`/`discover` JSON.
+- `tt-station`: decode + expose `device_mesh` in `status`/`discover` JSON.
 - `mock-box`: emit `device_mesh` + a telemetry frame.
 
 ---

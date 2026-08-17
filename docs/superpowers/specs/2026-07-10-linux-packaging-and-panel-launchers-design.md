@@ -2,9 +2,9 @@
 
 **Date:** 2026-07-10
 **Status:** approved (brainstorming), pending implementation plan
-**Builds on:** the Rust workspace (`crates/tt`, `crates/tt-station-agentd`), the GTK box
+**Builds on:** the Rust workspace (`crates/tt-station`, `crates/tt-station-agentd`), the GTK box
 panel (`box-panel/tt-station-panel.py`), the systemd-user lifecycle model
-(`deploy/tt-station-agentd.service`, `tt console --install-service`), and the macOS
+(`deploy/tt-station-agentd.service`, `tt-station console --install-service`), and the macOS
 Connect launchers (`macos/TTStation/…/OpenWebUILauncher.swift`,
 `OpenCodeLauncher.swift`, `LaunchController.swift`).
 **Reference for packaging:** `~/code/tt-toplike` (debhelper + `build-deb.sh` + vendored
@@ -30,16 +30,16 @@ Two cohesive but independent deliverables, each with its own implementation plan
 Mirrors tt-toplike's TUI/app split so headless boxes install only the core.
 
 **`tt-station`** — the headless control plane (`Architecture: amd64`):
-- `/usr/bin/tt` — the CLI (Rust `crates/tt`).
+- `/usr/bin/tt-station` — the CLI (Rust `crates/tt-station`).
 - `/usr/bin/tt-station-agentd` — the box agent (Rust `crates/tt-station-agentd`).
 - `/usr/lib/systemd/user/tt-station-agentd.service` — the **user** unit, installed but
   **not auto-enabled / not auto-started** (`dh_installsystemd --user --no-enable
   --no-start`). `ExecStart=/usr/bin/tt-station-agentd` and `Environment=PATH=…` are
   resolved at package-build time (the `{{AGENT_BIN}}`/`{{PATH_ENV}}` placeholders that
-  `tt console --install-service` fills are dropped for the packaged unit, since the
+  `tt-station console --install-service` fills are dropped for the packaged unit, since the
   installed path is fixed). The operator enables it per-user:
   `systemctl --user enable --now tt-station-agentd` (and `loginctl enable-linger <user>`
-  to survive reboot). `tt console --install-service` continues to work unchanged for the
+  to survive reboot). `tt-station console --install-service` continues to work unchanged for the
   from-source / non-packaged flow.
 - `/usr/share/doc/tt-station/` — README + selected `docs/reference/*.md`.
 - `Depends: ${shlibs:Depends}, ${misc:Depends}`
@@ -71,7 +71,7 @@ New `debian/` tree at the repo root:
   `Build-Depends: debhelper-compat (= 13), rustc (>= 1.93), cargo`.
   `Rules-Requires-Root: no`. `Maintainer: Tenstorrent <software@tenstorrent.com>`.
 - `debian/rules` — `dh $@` with:
-  - `override_dh_auto_build`: `cargo build --release --frozen -p tt` and
+  - `override_dh_auto_build`: `cargo build --release --frozen -p tt-station` and
     `-p tt-station-agentd` (safe default features).
   - `override_dh_auto_install`: `install` the two binaries into
     `debian/tt-station/usr/bin/`, the resolved systemd unit into
@@ -139,7 +139,7 @@ resolution dance).
 The launchers need `base_url` + `model`. Both come from the snapshot's agent-source
 `ServingEntry` (`crates/libttstation/src/model.rs`: `model`, `base_url`, `host_port`,
 `source`). The panel already receives the `serving` list in every
-`tt console --snapshot` poll, so:
+`tt-station console --snapshot` poll, so:
 - Pick the entry with `source == "agent"`; fall back to the first entry if none is tagged
   agent (an external run.py the operator wants to connect to is still connectable).
 - `base_url` → the full `http://<host>:<port>/v1`. `servingPort` for the docker command is

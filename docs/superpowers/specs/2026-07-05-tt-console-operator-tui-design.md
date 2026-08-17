@@ -1,4 +1,4 @@
-# tt console — operator TUI + shared agent-lifecycle state machine — design
+# tt-station console — operator TUI + shared agent-lifecycle state machine — design
 
 **Date:** 2026-07-05
 **Status:** Approved (self-approved per owner delegation — "self-approve and keep going")
@@ -8,7 +8,7 @@
 
 Give box operators working over SSH a polished terminal experience for loading,
 unloading, and monitoring the box agent — the SSH-native sibling of the GTK panel.
-`tt console` is a ratatui TUI showing the live pairing code, service state, and
+`tt-station console` is a ratatui TUI showing the live pairing code, service state, and
 serving status, with Start/Stop/Restart/Reset. The agent runs as a **`systemctl --user`
 service** (survives SSH disconnect and reboot). The GTK panel and the TUI **share one
 agent-lifecycle state machine** so they behave identically, and **all CLI tool names
@@ -19,11 +19,11 @@ stay renameable** from a single place.
 1. **systemd user service model.** Start/Stop/Restart = `systemctl --user
    start|stop|restart <unit>`; agent survives SSH/reboot (with `loginctl enable-linger`).
    Reset via the HTTP API. Pairing code read from the journal (no agent change).
-2. **`tt console` — Rust/ratatui subcommand of the `tt` crate.** One binary already on
+2. **`tt-station console` — Rust/ratatui subcommand of the `tt-station` crate.** One binary already on
    the box, no runtime deps, reuses `libttstation`. Matches tt-toplike's ratatui.
 3. **Shared state machine across the GTK panel and the TUI.** One definition of states,
    data sources, and actions. Single source of truth: a Rust `BoxLifecycleSnapshot`
-   exposed as JSON (`tt console --snapshot`) that both front-ends consume; the panel
+   exposed as JSON (`tt-station console --snapshot`) that both front-ends consume; the panel
    migrates from child-supervision to the systemd model.
 4. **Configurable tool names (global constraint).** No tool/binary/service name hardcoded
    in more than one place — see [[configurable-cli-tool-names]].
@@ -51,18 +51,18 @@ stay renameable** from a single place.
 
 ## Configurable tool names
 
-A single `ToolNames` source of truth (in the `tt` crate, `console::names`), resolved from
+A single `ToolNames` source of truth (in the `tt-station` crate, `console::names`), resolved from
 env with defaults, threaded everywhere a tool/service name is referenced:
 
 | Field | Env override | Default |
 |---|---|---|
-| `tt_bin` (CLI binary, for `pair`/`reset` shell-outs + docs) | `TTS_TT_BIN` | `tt` |
+| `tt_bin` (CLI binary, for `pair`/`reset` shell-outs + docs) | `TTS_TT_BIN` | `tt-station` |
 | `agent_bin` (agent binary/path, for the unit's `ExecStart`) | `TTS_AGENT_BIN` | `tt-station-agentd` |
 | `service_name` (systemd unit) | `TTS_SERVICE_NAME` | `tt-station-agentd.service` |
 
 `ToolNames::from_env()` is the ONLY place these strings are decided. `systemctl`,
 `journalctl -u`, the unit template, and the panel all read from it (the panel via its
-existing `TTS_*` env, kept in sync). Renaming `tt` → `tt-cli` is a one-env-var / one-default
+existing `TTS_*` env, kept in sync). Renaming the CLI binary is a one-env-var / one-default
 change.
 
 ## Architecture
@@ -140,17 +140,17 @@ pub trait LifecycleEnv {
 - `install_service(agent_bin_path)` → render the unit template into
   `~/.config/systemd/user/<unit>`, `daemon-reload`; optionally `enable-linger`.
 
-All actions live in `crates/tt/src/console/` and are the ONLY place `systemctl`/journal/
+All actions live in `crates/tt-station/src/console/` and are the ONLY place `systemctl`/journal/
 reset are invoked, so both front-ends share exactly one implementation path.
 
-### 2. `tt console` TUI (ratatui + crossterm)
+### 2. `tt-station console` TUI (ratatui + crossterm)
 
-- `Command::Console { snapshot: bool, install_service: bool }` in `crates/tt`.
-- `tt console` → interactive TUI: polls `collect_snapshot` every ~1s, tails the journal for
+- `Command::Console { snapshot: bool, install_service: bool }` in `crates/tt-station`.
+- `tt-station console` → interactive TUI: polls `collect_snapshot` every ~1s, tails the journal for
   the code, renders the layout below, dispatches keybindings to `LifecycleActions`.
-- `tt console --snapshot` → prints one `BoxLifecycleSnapshot` as JSON and exits (respects
+- `tt-station console --snapshot` → prints one `BoxLifecycleSnapshot` as JSON and exits (respects
   global `--json`; always JSON here). This is what the GTK panel consumes.
-- `tt console --install-service` → runs `install_service` non-interactively and exits.
+- `tt-station console --install-service` → runs `install_service` non-interactively and exits.
 
 **Layout** (left/bottom bars only, per the owner's terminal-UI rule):
 ```
@@ -205,13 +205,13 @@ The panel adopts the shared state machine so both UIs match:
 - **Lifecycle:** replace `Popen`/`SIGINT` child-supervision (`start_agent`/`stop_agent`/
   `restart_agent`) with `systemctl --user start|stop|restart <service_name>`. Closing the
   panel no longer kills the agent.
-- **State:** replace child-stdout parsing with `tt console --snapshot` (JSON) polled on the
+- **State:** replace child-stdout parsing with `tt-station console --snapshot` (JSON) polled on the
   existing timer — the panel now renders the SAME snapshot the TUI does (single source of
   truth for service state, pairing code+TTL, status/endpoint/serving/profile).
 - **Profile dropdown:** switching a profile calls the shared drop-in path (via
-  `tt console`… or directly writing the drop-in + `systemctl --user restart`), preserving
+  `tt-station console`… or directly writing the drop-in + `systemctl --user restart`), preserving
   today's capability under systemd.
-- **Reset / autostart / tooltips / branding icon:** unchanged (reset already shells `tt`).
+- **Reset / autostart / tooltips / branding icon:** unchanged (reset already shells `tt-station`).
   `TTS_AUTOSTART` becomes "ensure the service is started" rather than spawning a child.
 - Config it reads (`TTS_*`) stays; `TTS_SERVICE_NAME` is added and kept consistent with
   `ToolNames`.
@@ -220,8 +220,8 @@ The panel adopts the shared state machine so both UIs match:
 
 ```
 systemctl --user show ─┐
-journalctl --user -u  ─┼─► collect_snapshot ─► BoxLifecycleSnapshot ─┬─► tt console TUI (render + keys → actions)
-GET /status,/serving, ─┘        (LifecycleEnv)                        └─► `tt console --snapshot` (JSON) ─► GTK panel
+journalctl --user -u  ─┼─► collect_snapshot ─► BoxLifecycleSnapshot ─┬─► tt-station console TUI (render + keys → actions)
+GET /status,/serving, ─┘        (LifecycleEnv)                        └─► `tt-station console --snapshot` (JSON) ─► GTK panel
     /config (localhost)
 ```
 Actions (both UIs) → `LifecycleActions` → systemctl / drop-in / HTTP reset.
@@ -249,16 +249,16 @@ Actions (both UIs) → `LifecycleActions` → systemctl / drop-in / HTTP reset.
 - **Names:** `ToolNames::from_env` precedence (env override vs default) for all three.
 - **TUI render:** ratatui `TestBackend` buffer assertions for Inactive / Idle / Serving /
   Pairing / agent-unreachable states.
-- **Snapshot JSON:** `tt console --snapshot` round-trips to `BoxLifecycleSnapshot`
+- **Snapshot JSON:** `tt-station console --snapshot` round-trips to `BoxLifecycleSnapshot`
   (extend the mock-box e2e where practical).
 - **Panel:** `read` helpers (snapshot JSON parse) unit-checkable in Python; systemctl/GUI
   paths are owner-verified live over SSH (like the Mac app's LaunchController).
-- Manual: SSH into the box, `tt console`, exercise start/stop/restart/reset/pair, confirm
+- Manual: SSH into the box, `tt-station console`, exercise start/stop/restart/reset/pair, confirm
   the agent survives disconnect; confirm the panel shows the identical state.
 
 ## Rollout
 
-1. Land the lifecycle core + `tt console` + unit + install (additive; nothing else changes).
+1. Land the lifecycle core + `tt-station console` + unit + install (additive; nothing else changes).
 2. Install the user service on the box; verify TUI over SSH.
 3. Migrate the GTK panel to the shared snapshot + systemd model (its own task, independently
    reviewable) — the one behavior change (panel no longer owns the agent child).

@@ -1,8 +1,8 @@
-# `/logs`, `/logs/stream`, and `tt logs` (reference)
+# `/logs`, `/logs/stream`, and `tt-station logs` (reference)
 
 *Documents the shipped behavior of `crates/tt-station-agentd/src/logs.rs` and the
 `GET /logs`/`GET /logs/stream` handlers in `crates/tt-station-agentd/src/routes.rs`, plus
-the `tt logs` subcommand in `crates/tt/src/main.rs`. Design history:
+the `tt-station logs` subcommand in `crates/tt-station/src/main.rs`. Design history:
 `docs/superpowers/specs/2026-07-07-log-viewing-design.md`.*
 
 ## Why this exists
@@ -129,14 +129,14 @@ the real HF token (it logs `✅ HF_TOKEN is valid` and passes secrets to `docker
 redactor exists because `/logs`/`/logs/stream` are unauthed reads on a LAN-trust surface,
 and cheap insurance costs nothing.
 
-## `tt logs`
+## `tt-station logs`
 
 ```
-tt logs --host <host:port> [--source container|run] [--tail N] [--follow]
+tt-station logs --host <host:port> [--source container|run] [--tail N] [--follow]
 ```
 
-Unauthed on the agent side, so — like `tt status`/`tt models`/`tt serving`/`tt config` —
-this works against a box you've never `tt pair`ed with.
+Unauthed on the agent side, so — like `tt-station status`/`tt-station models`/`tt-station serving`/`tt-station config` —
+this works against a box you've never `tt-station pair`ed with.
 
 - No `--follow` (default): one `GET /logs` call, printed as plain lines (`origin` header
   line, then one line per log line) — or the whole `LogsInfo` object as JSON under the
@@ -151,25 +151,25 @@ Examples:
 
 ```bash
 # Last 200 lines of the serving container's log (the default) — where failures live
-tt logs --host qb2-lab.local:8765
+tt-station logs --host qb2-lab.local:8765
 
 # The last 50 lines of run.py's own launch log
-tt logs --host qb2-lab.local:8765 --source run --tail 50
+tt-station logs --host qb2-lab.local:8765 --source run --tail 50
 
 # Live-follow the container log while a model is starting
-tt logs --host qb2-lab.local:8765 --follow
+tt-station logs --host qb2-lab.local:8765 --follow
 
 # JSON, for scripting (one-shot only, not with --follow)
-tt --json logs --host qb2-lab.local:8765 --tail 20
+tt-station --json logs --host qb2-lab.local:8765 --tail 20
 ```
 
-(`tt`/`tt-station-agentd` are this project's default binary/service names — every name is
+(`tt-station`/`tt-station-agentd` are this project's default binary/service names — every name is
 independently configurable; see the "Configurable tool names" section of
 `docs/reference/tt-console.md`.)
 
-## The `tt console` log pane
+## The `tt-station console` log pane
 
-`tt console` — the SSH operator TUI for the box's own agent — has an auto-tailing pane
+`tt-station console` — the SSH operator TUI for the box's own agent — has an auto-tailing pane
 that shows the newest container log (`GET /logs?source=container&tail=20`) below the
 serving panel, refreshed on the same ~1s tick as the rest of the snapshot. This is
 **already documented in `docs/reference/tt-console.md`** ("Log pane" section) — see that
@@ -192,7 +192,7 @@ deliberate scope cuts:
   "option D" from the design spec).
 - **A macOS "View logs" button.** The Mac app has no UI for this yet — see
   `macos/README.md` for the pointer; wiring it up is future work for that codebase.
-- **Console manual scroll.** The `tt console` pane is auto-tail-only (see above); adding
+- **Console manual scroll.** The `tt-station console` pane is auto-tail-only (see above); adding
   scrollback/history is a documented follow-up there.
 - **Configurable `tail=20` default for the console/snapshot fetch.** The
   `BoxLifecycleSnapshot.logs` fetch is hardcoded to `tail=20`; making that configurable

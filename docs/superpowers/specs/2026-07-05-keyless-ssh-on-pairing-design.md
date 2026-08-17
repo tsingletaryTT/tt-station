@@ -3,7 +3,7 @@
 **Date:** 2026-07-05
 **Status:** approved design (concept approved in-session), ready for implementation plan
 **Scope:** `crates/tt-station-agentd` (new authed route + authorized_keys writer),
-`crates/libttstation` (client call), `crates/tt` (CLI command + Mac-side key read/gen +
+`crates/libttstation` (client call), `crates/tt-station` (CLI command + Mac-side key read/gen +
 default SSH user), `macos/TTStation` (opt-in toggle + default SSH user), `crates/mock-box`.
 
 ---
@@ -85,7 +85,7 @@ documents that they must match.
   `ssh_revoke(base, token, ...)` — authed POST/DELETE to the route above, mirroring the
   existing `agent_client` call style. `SshAuthorizeResult { authorized, ssh_user, already_present }`.
 
-### Component 3 — tt CLI
+### Component 3 — tt-station CLI
 
 - **Default SSH user → `ttuser`.** Introduce a single source of truth
   `DEFAULT_SSH_USER = "ttuser"`. Any place the CLI resolves an SSH user uses
@@ -95,11 +95,11 @@ documents that they must match.
   - If none exists, **generate** an ed25519 keypair non-interactively:
     `ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519 -C "ttstation:<mac-hostname>"`.
   - Read the `.pub` and send it; never read/transmit the private key.
-- **New command `tt ssh-authorize --host <h>`** (authed): resolves/gens the key, computes a
+- **New command `tt-station ssh-authorize --host <h>`** (authed): resolves/gens the key, computes a
   label `ttstation:<mac-hostname>:<YYYY-MM-DD>` (date passed in / stamped by caller since the
   binary has no wall-clock in tests), calls the route, and prints the `ssh_user` to connect as.
   `--revoke` flag calls the delete route.
-- **`tt pair … --enable-ssh`**: after a successful `pair-complete`, runs the ssh-authorize flow
+- **`tt-station pair … --enable-ssh`**: after a successful `pair-complete`, runs the ssh-authorize flow
   (opt-in; the app drives this).
 - `--json` output includes `{ authorized, ssh_user, already_present, public_key_path }`.
 
@@ -111,7 +111,7 @@ documents that they must match.
   "VS Code opens but SSH auth fails" symptom.
 - **Opt-in toggle in the pair flow.** After the code-entry step, a checkbox **"Also enable
   Terminal / SSH access (installs this Mac's key as `ttuser`)"**, default **on**. On a
-  successful pair, if enabled, the app calls `tt ssh-authorize --host <h> --json` and surfaces
+  successful pair, if enabled, the app calls `tt-station ssh-authorize --host <h> --json` and surfaces
   a one-line result ("SSH enabled as ttuser") or a non-fatal error. Pairing itself succeeds
   regardless of the SSH step.
 - Pure, testable: the "which key file / generate?" decision and the label format live in
@@ -135,7 +135,7 @@ documents that they must match.
 - **No privilege escalation.** The agent writes only its own run-user's `authorized_keys`; it
   does not accept an arbitrary target account.
 - **Opt-in + honest.** The toggle names exactly what it does (installs a key as `ttuser`);
-  revocation is available (`tt ssh-authorize --revoke`, and optionally on unpair).
+  revocation is available (`tt-station ssh-authorize --revoke`, and optionally on unpair).
 
 ## Testing
 

@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-05
 **Status:** approved design (in-session), ready for implementation plan
-**Scope:** `crates/tt` (fetch + cache + merge + classify + `tt catalog` command),
+**Scope:** `crates/tt-station` (fetch + cache + merge + classify + `tt-station catalog` command),
 `crates/libttstation` (catalog model types + HW_MAP), `crates/tt-station-agentd`
 (`detect_device_mesh` P150 x1–x4), `macos/TTStation` (3-tier browser + workbench
 messaging), `crates/mock-box`/fixtures (no-hardware test path).
@@ -31,7 +31,7 @@ other hardware") by the detected mesh. Three gaps:
 - **P150 x1–x4** mesh detection + ranking.
 - **"Unlock more with the tools"** messaging on the Experimental / other-hardware tiers,
   linking to the Workbench.
-- Keep the veneer: **all fetch/merge/classify lives in Rust (`tt`)**; the app renders.
+- Keep the veneer: **all fetch/merge/classify lives in Rust (`tt-station`)**; the app renders.
 
 ## Non-goals
 
@@ -84,16 +84,16 @@ Unauthenticated, ~1 MB, ~222 models, refreshed upstream ~daily. Shape:
 
 ---
 
-## Component 1 — catalog fetch + cache (`tt`, Rust)
+## Component 1 — catalog fetch + cache (`tt-station`, Rust)
 
-- `tt` fetches `compatibility.json` and caches it at
+- `tt-station` fetches `compatibility.json` and caches it at
   `~/.cache/tt-station/compatibility.json` with a **24 h TTL** (mirrors tt-model-runner:
   read fresh cache → else fetch → write cache). `TT_CONFIG_DIR`/an env override for the
   cache dir is honored if the crate already has that convention.
 - **Offline-tolerant:** on fetch failure, fall back to a stale cache if present; if no
   cache at all, degrade to "catalog unavailable" (the command still returns the box's live
   `/models` as the runs-here tier — see Component 3).
-- A `--refresh` flag on `tt catalog` bypasses the TTL. A `--catalog-file <path>` flag (or
+- A `--refresh` flag on `tt-station catalog` bypasses the TTL. A `--catalog-file <path>` flag (or
   `TT_CATALOG_FILE` env) points at a local fixture — used by tests and offline dev.
 - Fetch is `reqwest::blocking` (the crate already uses it for `manual_status_fetch`), no new
   async surface.
@@ -113,7 +113,7 @@ Unauthenticated, ~1 MB, ~222 models, refreshed upstream ~daily. Shape:
   "2 x galaxy"→GALAXY, "4 x galaxy"→GALAXY, quad_galaxy→GALAXY`. Unmapped hardware →
   passthrough of the uppercased raw string (so nothing is silently dropped). Pure + tested.
 
-## Component 3 — merge + classify (`tt`, pure core)
+## Component 3 — merge + classify (`tt-station`, pure core)
 
 Pure function `classify(catalog, live_models, box_mesh) -> BoxCatalog`:
 
@@ -137,7 +137,7 @@ Pure function `classify(catalog, live_models, box_mesh) -> BoxCatalog`:
 - Result carries `catalog_available: bool` and `catalog_stale: bool` so the app can show a
   quiet "catalog offline / cached" note.
 
-`BoxCatalog` (the `tt catalog --json` output):
+`BoxCatalog` (the `tt-station catalog --json` output):
 ```jsonc
 { "box_mesh": "p300x2",           // or null
   "catalog_available": true, "catalog_stale": false,
@@ -149,10 +149,10 @@ Pure function `classify(catalog, live_models, box_mesh) -> BoxCatalog`:
 meshes: [String] /* mapped meshes it runs on */, needed_hardware: [String] /* for other tier */,
 available_now: bool /* in live /models */, status_here: "supported"|"experimental"|"other" }`.
 
-## Component 4 — `tt catalog` CLI command
+## Component 4 — `tt-station catalog` CLI command
 
-- `tt --json catalog --host <h> [--refresh] [--catalog-file <p>]` → the `BoxCatalog` JSON.
-  Resolves the box mesh from `tt status`/discover (`device_mesh`), fetches the box's live
+- `tt-station --json catalog --host <h> [--refresh] [--catalog-file <p>]` → the `BoxCatalog` JSON.
+  Resolves the box mesh from `tt-station status`/discover (`device_mesh`), fetches the box's live
   `/models`, fetches/loads the compat catalog, runs `classify`, prints.
 - Human (non-`--json`) form: a readable three-section list.
 - Reuses the existing unauthed `/models` + `/status` paths; no auth needed (catalog is public,
@@ -167,12 +167,12 @@ Extend `detect_device_mesh`'s table:
 ("p150"|"p150c", 3) => "p150x3"
 ("p150"|"p150c", 4) => "p150x4"   // unchanged
 ```
-Add unit tests for each count. Everything downstream (`/status`, mDNS TXT, `tt`) already
+Add unit tests for each count. Everything downstream (`/status`, mDNS TXT, `tt-station`) already
 carries `device_mesh` unchanged.
 
 ## Component 6 — Swift 3-tier browser + toolchain messaging
 
-- `TTClient.catalog(host:) async throws -> BoxCatalog` (shells `tt --json catalog --host <h>`),
+- `TTClient.catalog(host:) async throws -> BoxCatalog` (shells `tt-station --json catalog --host <h>`),
   decoded into Swift `BoxCatalog`/`CatalogEntry` (Codable). Added to `TTCommands` + FakeTTClient.
 - `BoxViewModel` loads it (unauthed, non-fatal, in `refresh()`), exposes the three tiers.
 - `ModelBrowserView` renders three sections:
@@ -198,14 +198,14 @@ carries `device_mesh` unchanged.
 - **Rust (owner-verified):** the fetch/cache path (fixture fast-path via `--catalog-file`);
   `detect_device_mesh` P150 x1–x4 (pure, TDD).
 - **Swift (TDD/decode):** `BoxCatalog` decode; tier rendering is owner-verified (build).
-- **No-hardware e2e:** `tt catalog --host <mock> --catalog-file <fixture>` against mock-box's
+- **No-hardware e2e:** `tt-station catalog --host <mock> --catalog-file <fixture>` against mock-box's
   `/models` — full tiering without hardware or network.
 
 ## Versioning & docs
 
 - App version bump (0.5.0 — a substantial browser change).
 - `macos/README.md` + `CLAUDE.md`: the catalog source, the three tiers, P150 configs, the
-  `tt catalog` command + `tt --json` contract row, and the offline/stale behavior.
+  `tt-station catalog` command + `tt-station --json` contract row, and the offline/stale behavior.
 
 ## Risks / open questions
 

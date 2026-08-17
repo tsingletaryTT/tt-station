@@ -1,18 +1,18 @@
-# tt console — Operator TUI + Shared Lifecycle State Machine — Implementation Plan
+# tt-station console — Operator TUI + Shared Lifecycle State Machine — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `tt console`, a ratatui operator TUI for loading/unloading/monitoring the box agent as a `systemctl --user` service over SSH, backed by a shared agent-lifecycle state machine that the GTK panel also consumes.
+**Goal:** Add `tt-station console`, a ratatui operator TUI for loading/unloading/monitoring the box agent as a `systemctl --user` service over SSH, backed by a shared agent-lifecycle state machine that the GTK panel also consumes.
 
-**Architecture:** A lifecycle core in the `tt` crate collects a `BoxLifecycleSnapshot` (service state from `systemctl`, pairing code from the journal, status/serving/config from the agent's HTTP) behind a fakeable `LifecycleEnv` trait, and exposes typed actions (start/stop/restart/reset/pair/install). `tt console` renders that snapshot as a TUI; `tt console --snapshot` prints it as JSON for the GTK panel, which migrates from child-supervision to the same systemd model. All tool/service names come from one `ToolNames` source.
+**Architecture:** A lifecycle core in the `tt-station` crate collects a `BoxLifecycleSnapshot` (service state from `systemctl`, pairing code from the journal, status/serving/config from the agent's HTTP) behind a fakeable `LifecycleEnv` trait, and exposes typed actions (start/stop/restart/reset/pair/install). `tt-station console` renders that snapshot as a TUI; `tt-station console --snapshot` prints it as JSON for the GTK panel, which migrates from child-supervision to the same systemd model. All tool/service names come from one `ToolNames` source.
 
 **Tech Stack:** Rust (clap, ratatui, crossterm, tokio, reqwest, serde), `libttstation`, systemd user units, Python/GTK4 (panel).
 
 ## Global Constraints
 
-- **Configurable tool names:** no tool/binary/service name hardcoded in more than one place. `ToolNames::from_env()` is the single source — `tt_bin` (`TTS_TT_BIN`, default `tt`), `agent_bin` (`TTS_AGENT_BIN`, default `tt-station-agentd`), `service_name` (`TTS_SERVICE_NAME`, default `tt-station-agentd.service`). Every `systemctl`/`journalctl -u`/unit-template/panel reference reads from it.
+- **Configurable tool names:** no tool/binary/service name hardcoded in more than one place. `ToolNames::from_env()` is the single source — `tt_bin` (`TTS_TT_BIN`, default `tt-station`), `agent_bin` (`TTS_AGENT_BIN`, default `tt-station-agentd`), `service_name` (`TTS_SERVICE_NAME`, default `tt-station-agentd.service`). Every `systemctl`/`journalctl -u`/unit-template/panel reference reads from it.
 - **systemd user service model:** Start/Stop/Restart = `systemctl --user start|stop|restart <service_name>`. The agent survives SSH/reboot. Monitoring works even when the service is down.
-- **Single source of truth:** both the TUI and the GTK panel render the same `BoxLifecycleSnapshot`; the panel gets it via `tt console --snapshot` (JSON). Actions live once in `LifecycleActions`.
+- **Single source of truth:** both the TUI and the GTK panel render the same `BoxLifecycleSnapshot`; the panel gets it via `tt-station console --snapshot` (JSON). Actions live once in `LifecycleActions`.
 - **Auth touchpoints centralized:** reset (bearer token) and `pair_localhost` are the only auth-bearing actions — kept behind `LifecycleActions` so the forthcoming SSH-key handshake is a contained swap.
 - **Graceful degradation:** agent unreachable → snapshot HTTP fields `None`, `reachable=false`, UI still renders service state. `systemctl` unavailable → `ServiceState::Unknown`, actions error with a clear message, monitoring still works.
 - **Reset requires a localhost bearer token** (`/reset` is `BearerAuth`); with none, the action returns a typed error and the UI offers `pair_localhost`.
@@ -45,21 +45,21 @@ pub enum ServiceState { Active, Inactive, Activating, Deactivating, Failed, Unkn
 pub struct PairingState { pub code: String, pub expires_in_secs: u64 }
 ```
 
-In `crates/tt/src/console/state.rs`:
+In `crates/tt-station/src/console/state.rs`:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LifecycleState { Inactive, Starting, Idle, Serving(String), Stopping, Failed }
 ```
 
-In `crates/tt/src/console/names.rs`:
+In `crates/tt-station/src/console/names.rs`:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolNames { pub tt_bin: String, pub agent_bin: String, pub service_name: String }
 ```
 
-`LifecycleEnv` trait (in `crates/tt/src/console/env.rs`):
+`LifecycleEnv` trait (in `crates/tt-station/src/console/env.rs`):
 
 ```rust
 pub trait LifecycleEnv {
@@ -83,9 +83,9 @@ pub trait LifecycleEnv {
 ### Task 1: `ToolNames` — configurable tool/service names
 
 **Files:**
-- Create: `crates/tt/src/console/mod.rs` (module root: `pub mod names;` for now)
-- Create: `crates/tt/src/console/names.rs`
-- Modify: `crates/tt/src/main.rs` (add `mod console;`)
+- Create: `crates/tt-station/src/console/mod.rs` (module root: `pub mod names;` for now)
+- Create: `crates/tt-station/src/console/names.rs`
+- Modify: `crates/tt-station/src/main.rs` (add `mod console;`)
 
 **Interfaces:**
 - Produces: `ToolNames { tt_bin, agent_bin, service_name }`; `ToolNames::from_env() -> ToolNames`.
@@ -104,16 +104,16 @@ mod tests {
         std::env::remove_var("TTS_AGENT_BIN");
         std::env::remove_var("TTS_SERVICE_NAME");
         let n = ToolNames::from_env();
-        assert_eq!(n.tt_bin, "tt");
+        assert_eq!(n.tt_bin, "tt-station");
         assert_eq!(n.agent_bin, "tt-station-agentd");
         assert_eq!(n.service_name, "tt-station-agentd.service");
     }
     #[test]
     fn env_overrides_win() {
-        std::env::set_var("TTS_TT_BIN", "tt-cli");
+        std::env::set_var("TTS_TT_BIN", "tt-station-nightly");
         std::env::set_var("TTS_SERVICE_NAME", "quietbox-agent.service");
         let n = ToolNames::from_env();
-        assert_eq!(n.tt_bin, "tt-cli");
+        assert_eq!(n.tt_bin, "tt-station-nightly");
         assert_eq!(n.service_name, "quietbox-agent.service");
         std::env::remove_var("TTS_TT_BIN");
         std::env::remove_var("TTS_SERVICE_NAME");
@@ -123,7 +123,7 @@ mod tests {
 
 - [ ] **Step 2: Run → FAIL**
 
-Run: `cargo test -p tt --lib console::names`
+Run: `cargo test -p tt-station --lib console::names`
 Expected: FAIL (module/type missing).
 
 - [ ] **Step 3: Implement**
@@ -131,7 +131,7 @@ Expected: FAIL (module/type missing).
 `main.rs`: add `mod console;` beside the other top-level items. `console/mod.rs`: `pub mod names;`. `names.rs`:
 ```rust
 //! Single source of truth for the project's CLI tool + service names, so a
-//! future rename (`tt` → `tt-cli`, etc.) is a one-place change. Every
+//! rename is a one-place change. Every
 //! systemctl/journalctl/unit-template reference resolves names from here.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,7 +147,7 @@ impl ToolNames {
             std::env::var(key).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
         }
         ToolNames {
-            tt_bin: env_or("TTS_TT_BIN", "tt"),
+            tt_bin: env_or("TTS_TT_BIN", "tt-station"),
             agent_bin: env_or("TTS_AGENT_BIN", "tt-station-agentd"),
             service_name: env_or("TTS_SERVICE_NAME", "tt-station-agentd.service"),
         }
@@ -157,14 +157,14 @@ impl ToolNames {
 
 - [ ] **Step 4: Run → PASS**
 
-Run: `cargo test -p tt --lib console::names`
+Run: `cargo test -p tt-station --lib console::names`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tt/src/console crates/tt/src/main.rs
-git commit -m "feat(tt): console::names ToolNames (configurable tool/service names)"
+git add crates/tt-station/src/console crates/tt-station/src/main.rs
+git commit -m "feat(tt-station): console::names ToolNames (configurable tool/service names)"
 ```
 
 ---
@@ -228,8 +228,8 @@ git commit -m "feat(lib): BoxLifecycleSnapshot / ServiceState / PairingState typ
 ### Task 3: Pure parsers + `derive_state`
 
 **Files:**
-- Create: `crates/tt/src/console/state.rs`
-- Modify: `crates/tt/src/console/mod.rs` (`pub mod state;`)
+- Create: `crates/tt-station/src/console/state.rs`
+- Modify: `crates/tt-station/src/console/mod.rs` (`pub mod state;`)
 
 **Interfaces:**
 - Consumes: `ServiceState`, `PairingState`, `BoxLifecycleSnapshot` (Task 2).
@@ -296,7 +296,7 @@ mod tests {
 
 - [ ] **Step 3: Run → FAIL**
 
-Run: `cargo test -p tt --lib console::state`
+Run: `cargo test -p tt-station --lib console::state`
 Expected: FAIL.
 
 - [ ] **Step 4: Implement**
@@ -371,14 +371,14 @@ pub fn derive_state(s: &BoxLifecycleSnapshot) -> LifecycleState {
 
 - [ ] **Step 5: Run → PASS; clippy**
 
-Run: `cargo test -p tt --lib console::state && cargo clippy -p tt --all-targets -- -D warnings`
+Run: `cargo test -p tt-station --lib console::state && cargo clippy -p tt-station --all-targets -- -D warnings`
 Expected: PASS + clean.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/tt/src/console
-git commit -m "feat(tt): lifecycle parsers + derive_state (pure)"
+git add crates/tt-station/src/console
+git commit -m "feat(tt-station): lifecycle parsers + derive_state (pure)"
 ```
 
 ---
@@ -386,8 +386,8 @@ git commit -m "feat(tt): lifecycle parsers + derive_state (pure)"
 ### Task 4: `LifecycleEnv` + `collect_snapshot`
 
 **Files:**
-- Create: `crates/tt/src/console/env.rs`
-- Modify: `crates/tt/src/console/mod.rs` (`pub mod env;`)
+- Create: `crates/tt-station/src/console/env.rs`
+- Modify: `crates/tt-station/src/console/mod.rs` (`pub mod env;`)
 
 **Interfaces:**
 - Consumes: `ToolNames` (T1), parsers (T3), snapshot types (T2).
@@ -442,7 +442,7 @@ mod tests {
 
 - [ ] **Step 2: Run → FAIL**
 
-Run: `cargo test -p tt --lib console::env`
+Run: `cargo test -p tt-station --lib console::env`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement**
@@ -509,13 +509,13 @@ pub fn collect_snapshot(env: &dyn LifecycleEnv, names: &ToolNames) -> BoxLifecyc
 
 - [ ] **Step 4: Run → PASS; clippy**
 
-Run: `cargo test -p tt --lib console::env && cargo clippy -p tt --all-targets -- -D warnings`
+Run: `cargo test -p tt-station --lib console::env && cargo clippy -p tt-station --all-targets -- -D warnings`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tt/src/console
-git commit -m "feat(tt): LifecycleEnv + collect_snapshot (fakeable, degrades on agent-down)"
+git add crates/tt-station/src/console
+git commit -m "feat(tt-station): LifecycleEnv + collect_snapshot (fakeable, degrades on agent-down)"
 ```
 
 ---
@@ -523,13 +523,13 @@ git commit -m "feat(tt): LifecycleEnv + collect_snapshot (fakeable, degrades on 
 ### Task 5: `LifecycleActions` + systemd unit template
 
 **Files:**
-- Create: `crates/tt/src/console/actions.rs`
+- Create: `crates/tt-station/src/console/actions.rs`
 - Create: `deploy/tt-station-agentd.service`
-- Modify: `crates/tt/src/console/mod.rs` (`pub mod actions;`)
+- Modify: `crates/tt-station/src/console/mod.rs` (`pub mod actions;`)
 
 **Interfaces:**
 - Consumes: `LifecycleEnv` (T4), `ToolNames` (T1), `BoxLifecycleSnapshot`/`PairingState` (T2), `libttstation` reset/pairing client + `SecretStore`.
-- Produces: `LifecycleActions<'a>` with `start/stop/restart(&self)`, `set_profile(&self, &str)`, `install_service(&self, agent_bin_path: &str)`, and the argv/drop-in helpers below. Reset + pair_localhost may reuse existing `tt` command fns (`cmd_reset`, `cmd_pair`) — call those rather than duplicating.
+- Produces: `LifecycleActions<'a>` with `start/stop/restart(&self)`, `set_profile(&self, &str)`, `install_service(&self, agent_bin_path: &str)`, and the argv/drop-in helpers below. Reset + pair_localhost may reuse existing `tt-station` command fns (`cmd_reset`, `cmd_pair`) — call those rather than duplicating.
 
 - [ ] **Step 1: Write failing tests (fake env asserts argv + drop-in content)**
 
@@ -546,7 +546,7 @@ mod tests {
         fn run(&self, argv:&[&str])->anyhow::Result<()>{ self.calls.borrow_mut().push(argv.iter().map(|s|s.to_string()).collect()); Ok(()) }
         fn now_unix(&self)->u64{0}
     }
-    fn names() -> ToolNames { ToolNames { tt_bin:"tt".into(), agent_bin:"tt-station-agentd".into(), service_name:"svc.service".into() } }
+    fn names() -> ToolNames { ToolNames { tt_bin:"tt-station".into(), agent_bin:"tt-station-agentd".into(), service_name:"svc.service".into() } }
 
     #[test]
     fn start_uses_systemctl_user() {
@@ -574,7 +574,7 @@ mod tests {
 
 - [ ] **Step 2: Run → FAIL**
 
-Run: `cargo test -p tt --lib console::actions`
+Run: `cargo test -p tt-station --lib console::actions`
 Expected: FAIL.
 
 - [ ] **Step 3: Create the unit template + implement actions**
@@ -644,26 +644,26 @@ fn dirs_config_systemd_user() -> std::path::PathBuf {
     base.join("systemd").join("user")
 }
 ```
-Reset + pair-localhost: reuse the existing `tt` async command fns. Add thin wrappers in `console/mod.rs` (Task 6) that call `cmd_reset(Some("127.0.0.1:<port>"))` and the pairing flow with the code from the snapshot, rather than duplicating HTTP.
+Reset + pair-localhost: reuse the existing `tt-station` async command fns. Add thin wrappers in `console/mod.rs` (Task 6) that call `cmd_reset(Some("127.0.0.1:<port>"))` and the pairing flow with the code from the snapshot, rather than duplicating HTTP.
 
 - [ ] **Step 4: Run → PASS; clippy; fmt**
 
-Run: `cargo test -p tt --lib console::actions && cargo clippy -p tt --all-targets -- -D warnings && cargo fmt -p tt`
+Run: `cargo test -p tt-station --lib console::actions && cargo clippy -p tt-station --all-targets -- -D warnings && cargo fmt -p tt-station`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tt/src/console deploy/tt-station-agentd.service
-git commit -m "feat(tt): LifecycleActions (systemctl/drop-in/install) + systemd unit template"
+git add crates/tt-station/src/console deploy/tt-station-agentd.service
+git commit -m "feat(tt-station): LifecycleActions (systemctl/drop-in/install) + systemd unit template"
 ```
 
 ---
 
-### Task 6: `tt console` command wiring + `--snapshot` JSON + `--install-service`
+### Task 6: `tt-station console` command wiring + `--snapshot` JSON + `--install-service`
 
 **Files:**
-- Modify: `crates/tt/src/main.rs` (add `Command::Console`, dispatch)
-- Modify: `crates/tt/src/console/mod.rs`
+- Modify: `crates/tt-station/src/main.rs` (add `Command::Console`, dispatch)
+- Modify: `crates/tt-station/src/console/mod.rs`
 
 **Interfaces:**
 - Consumes: everything from T1–T5.
@@ -719,34 +719,34 @@ fn which_agent(agent_bin: &str) -> String {
     if std::path::Path::new(&candidate).exists() { candidate } else { agent_bin.to_string() }
 }
 ```
-Add `which = "4"` to `crates/tt/Cargo.toml` (and workspace deps) for PATH resolution, OR implement a tiny PATH scan to avoid the dep — implementer's choice; prefer no new dep if trivial.
+Add `which = "4"` to `crates/tt-station/Cargo.toml` (and workspace deps) for PATH resolution, OR implement a tiny PATH scan to avoid the dep — implementer's choice; prefer no new dep if trivial.
 
 - [ ] **Step 3: Test `--snapshot` shape**
 
-Add an e2e-ish/unit test that `tt console --snapshot` (with the agent down) prints valid JSON deserializing to `BoxLifecycleSnapshot` with `reachable=false`. If a live agent/systemd isn't available in CI, gate with `#[ignore]` like the other e2e tests and assert via `assert_cmd`.
+Add an e2e-ish/unit test that `tt-station console --snapshot` (with the agent down) prints valid JSON deserializing to `BoxLifecycleSnapshot` with `reachable=false`. If a live agent/systemd isn't available in CI, gate with `#[ignore]` like the other e2e tests and assert via `assert_cmd`.
 
 - [ ] **Step 4: Build + smoke**
 
 ```bash
-cargo build -p tt
-./target/debug/tt console --snapshot --ctrl-port 8765   # prints JSON snapshot
+cargo build -p tt-station
+./target/debug/tt-station console --snapshot --ctrl-port 8765   # prints JSON snapshot
 ```
 Expected: JSON with a `service` field and `reachable` bool.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tt
-git commit -m "feat(tt): tt console command — --snapshot JSON + --install-service"
+git add crates/tt-station
+git commit -m "feat(tt-station): tt-station console command — --snapshot JSON + --install-service"
 ```
 
 ---
 
-### Task 7: `tt console` ratatui TUI
+### Task 7: `tt-station console` ratatui TUI
 
 **Files:**
-- Create: `crates/tt/src/console/ui.rs`
-- Modify: `crates/tt/src/console/mod.rs` (`pub mod ui;`), `crates/tt/Cargo.toml` (add `ratatui`, `crossterm`)
+- Create: `crates/tt-station/src/console/ui.rs`
+- Modify: `crates/tt-station/src/console/mod.rs` (`pub mod ui;`), `crates/tt-station/Cargo.toml` (add `ratatui`, `crossterm`)
 
 **Interfaces:**
 - Consumes: `collect_snapshot` (T4), `LifecycleActions` (T5), `derive_state` (T3), snapshot types (T2).
@@ -754,7 +754,7 @@ git commit -m "feat(tt): tt console command — --snapshot JSON + --install-serv
 
 - [ ] **Step 1: Add deps**
 
-`crates/tt/Cargo.toml`: `ratatui = "0.28"`, `crossterm = "0.28"` (and to workspace `[workspace.dependencies]`; match tt-toplike's versions if pinned there — check `~/code/tt-toplike/Cargo.toml`).
+`crates/tt-station/Cargo.toml`: `ratatui = "0.28"`, `crossterm = "0.28"` (and to workspace `[workspace.dependencies]`; match tt-toplike's versions if pinned there — check `~/code/tt-toplike/Cargo.toml`).
 
 - [ ] **Step 2: Write failing tests (pure builders + TestBackend render)**
 
@@ -829,13 +829,13 @@ Always restore the terminal (raw mode off, leave alt screen) on exit AND on erro
 
 - [ ] **Step 4: Run → PASS; clippy; fmt**
 
-Run: `cargo test -p tt --lib console::ui && cargo clippy -p tt --all-targets -- -D warnings && cargo fmt -p tt`
+Run: `cargo test -p tt-station --lib console::ui && cargo clippy -p tt-station --all-targets -- -D warnings && cargo fmt -p tt-station`
 
 - [ ] **Step 5: Manual smoke (owner-run over SSH later) + commit**
 
 ```bash
-git add crates/tt
-git commit -m "feat(tt): tt console ratatui TUI (monitor + lifecycle keybindings)"
+git add crates/tt-station
+git commit -m "feat(tt-station): tt-station console ratatui TUI (monitor + lifecycle keybindings)"
 ```
 
 ---
@@ -846,7 +846,7 @@ git commit -m "feat(tt): tt console ratatui TUI (monitor + lifecycle keybindings
 - Modify: `box-panel/tt-station-panel.py`, `box-panel/README.md`
 
 **Interfaces:**
-- Consumes: `tt console --snapshot` (JSON `BoxLifecycleSnapshot`, T6); `systemctl --user`; the drop-in profile switch.
+- Consumes: `tt-station console --snapshot` (JSON `BoxLifecycleSnapshot`, T6); `systemctl --user`; the drop-in profile switch.
 
 - [ ] **Step 1: Replace child-supervision with systemctl**
 
@@ -857,7 +857,7 @@ def _systemctl(verb): subprocess.run(["systemctl", "--user", verb, SERVICE], che
 ```
 `start`→`_systemctl("start")`, etc. Remove the child `self.proc` bookkeeping and the `close-request→stop_agent` handler (closing the panel must NOT stop the service now). `TTS_AUTOSTART=1` → `_systemctl("start")`.
 
-- [ ] **Step 2: Consume `tt console --snapshot` for all state**
+- [ ] **Step 2: Consume `tt-station console --snapshot` for all state**
 
 Replace the child-stdout code parsing and per-endpoint polls with a single poll of:
 ```python
@@ -869,7 +869,7 @@ Render service state, pairing code+TTL (`snap["pairing"]`), status/endpoint/serv
 
 - [ ] **Step 3: Profile switch via drop-in**
 
-The dropdown's "apply" now calls (either) `tt` helper or writes the drop-in + `systemctl --user restart`. Simplest: shell `systemctl --user` after writing `~/.config/systemd/user/<SERVICE>.d/profile.conf` (same content as `render_profile_dropin`), OR call a `tt console --set-profile <name>` if that flag is added. For v1, writing the drop-in from Python + `daemon-reload` + `restart` is acceptable and mirrors `render_profile_dropin` exactly (keep the format identical).
+The dropdown's "apply" now calls (either) `tt-station` helper or writes the drop-in + `systemctl --user restart`. Simplest: shell `systemctl --user` after writing `~/.config/systemd/user/<SERVICE>.d/profile.conf` (same content as `render_profile_dropin`), OR call a `tt-station console --set-profile <name>` if that flag is added. For v1, writing the drop-in from Python + `daemon-reload` + `restart` is acceptable and mirrors `render_profile_dropin` exactly (keep the format identical).
 
 - [ ] **Step 4: Verify (panel is GUI — not unit-tested)**
 
@@ -882,7 +882,7 @@ The dropdown's "apply" now calls (either) `tt` helper or writes the drop-in + `s
 Document the systemd model + `TTS_SERVICE_NAME` in `box-panel/README.md`. Then:
 ```bash
 git add box-panel/tt-station-panel.py box-panel/README.md
-git commit -m "feat(panel): migrate to systemd model + shared tt console --snapshot state"
+git commit -m "feat(panel): migrate to systemd model + shared tt-station console --snapshot state"
 ```
 
 ---
@@ -895,17 +895,17 @@ git commit -m "feat(panel): migrate to systemd model + shared tt console --snaps
 
 - [ ] **Step 1: Write `docs/reference/tt-console.md`**
 
-Cover: what `tt console` is (SSH operator TUI), the systemd user-service model (`install-service`, `enable-linger` for boot survival), keybindings, `--snapshot` JSON contract (the `BoxLifecycleSnapshot` shape), configurable tool names (`TTS_TT_BIN`/`TTS_AGENT_BIN`/`TTS_SERVICE_NAME`), and the reset-needs-localhost-token precondition + `pair-localhost`.
+Cover: what `tt-station console` is (SSH operator TUI), the systemd user-service model (`install-service`, `enable-linger` for boot survival), keybindings, `--snapshot` JSON contract (the `BoxLifecycleSnapshot` shape), configurable tool names (`TTS_TT_BIN`/`TTS_AGENT_BIN`/`TTS_SERVICE_NAME`), and the reset-needs-localhost-token precondition + `pair-localhost`.
 
 - [ ] **Step 2: Update CLAUDE.md**
 
-Add `tt console` to the CLI section and note the panel now shares its state machine + runs the agent under `systemctl --user`. Note the `deploy/tt-station-agentd.service` unit.
+Add `tt-station console` to the CLI section and note the panel now shares its state machine + runs the agent under `systemctl --user`. Note the `deploy/tt-station-agentd.service` unit.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add docs/reference/tt-console.md CLAUDE.md
-git commit -m "docs: tt console operator TUI reference + project-doc updates"
+git commit -m "docs: tt-station console operator TUI reference + project-doc updates"
 ```
 
 ---
@@ -919,4 +919,4 @@ git commit -m "docs: tt console operator TUI reference + project-doc updates"
 - **Spec coverage:** ToolNames/configurable names (T1), snapshot types (T2), parsers+derive (T3), collector+degradation (T4), actions+unit (T5), command+snapshot-JSON+install (T6), TUI (T7), panel migration (T8), docs (T9). All spec sections map to a task.
 - **Grep-first placeholders:** three spots require confirming real values before coding — `PAIRING_TTL_SECS` (agent routes), the code-issued journal log wording (agent), and `ServingStatus`/`StatusResponse`/`ServingList` field+variant names (libttstation). Each step says to grep first; these are lookups, not guesses.
 - **Type consistency:** `BoxLifecycleSnapshot`/`ServiceState`/`PairingState`/`LifecycleState`/`ToolNames`/`LifecycleEnv` are defined once in Shared Types and referenced identically in T3–T8.
-- **Auth centralization:** reset + pair-localhost reuse existing `tt` fns via `LifecycleActions`/`console/mod.rs`, not duplicated — the single touchpoint the SSH-key handshake will later swap.
+- **Auth centralization:** reset + pair-localhost reuse existing `tt-station` fns via `LifecycleActions`/`console/mod.rs`, not duplicated — the single touchpoint the SSH-key handshake will later swap.

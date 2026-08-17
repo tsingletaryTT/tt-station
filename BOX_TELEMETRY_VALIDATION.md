@@ -75,7 +75,7 @@ manual `docker stop` of the serving container on the host did NOT make the in-fl
 return — the agent kept churning until (presumably) its ~40-min health-poll ceiling.
 
 **App side is now fixed** (macOS `BoxViewModel`, commit 4e0b5c1 + stop()-gen-bump): Cancel now
-decouples from the un-cancellable `tt run` via a run-generation guard — the UI returns to idle
+decouples from the un-cancellable `tt-station run` via a run-generation guard — the UI returns to idle
 instantly and fires `/stop` best-effort in the background. So the operator is no longer stuck.
 
 **But the box still needs a fix to actually free the board promptly on cancel/stop:** the
@@ -87,6 +87,6 @@ an aborted load until the poll ceiling. Suggested: have `/stop` signal the in-fl
 container gone. This is box-side (your `serving/runpy.rs` + `routes.rs::run_model`/`stop_model`);
 flagging, not changing.
 
-Also confirmed on the macOS side: `tt reset` now revokes the installed keyless-SSH keys
+Also confirmed on the macOS side: `tt-station reset` now revokes the installed keyless-SSH keys
 (`authkeys::revoke_all_ttstation` wired into `POST /reset`, commit d40bf9e), and the GTK panel's
 `reset_fresh` strips them locally too — so a reset forgets SSH access along with pairings.

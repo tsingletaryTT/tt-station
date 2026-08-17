@@ -1058,24 +1058,24 @@ git commit -m "feat(agentd): GET /config route + AppState config summary"
 
 ---
 
-### Task 6: `tt config` CLI subcommand + mock-box `/config` + e2e
+### Task 6: `tt-station config` CLI subcommand + mock-box `/config` + e2e
 
 **Files:**
-- Modify: `crates/tt/src/main.rs` (or the CLI's command module — match its structure)
+- Modify: `crates/tt-station/src/main.rs` (or the CLI's command module — match its structure)
 - Modify: `crates/mock-box/src/*` (add a `/config` handler to the fake control API)
-- Modify/Test: `crates/tt/tests/e2e_mock.rs`
+- Modify/Test: `crates/tt-station/tests/e2e_mock.rs`
 
 **Interfaces:**
 - Consumes: `libttstation::agent_client::get_config` (Task 4); `ConfigSummary` (Task 4).
-- Produces: `tt config` (respects global `--json`), mock-box `/config` returning a `ConfigSummary`.
+- Produces: `tt-station config` (respects global `--json`), mock-box `/config` returning a `ConfigSummary`.
 
 - [ ] **Step 1: Add a `/config` handler to mock-box**
 
 Find mock-box's control-API router (it already fakes `/status`, `/models`, `/serving`). Add a `/config` route returning a fixed `ConfigSummary` JSON, e.g. `active_profile: Some("mock"), available_profiles: ["mock"], backend: "runpy", serving_host: "127.0.0.1", serving_port: 8000, serving_image: None, tt_inference_repo: None, tt_device: None`.
 
-- [ ] **Step 2: Add the `tt config` subcommand**
+- [ ] **Step 2: Add the `tt-station config` subcommand**
 
-Mirror the existing `tt status` subcommand. Human output: print active profile, available profiles, backend, and `host:port`. With global `--json`: print `serde_json::to_string_pretty(&summary)`.
+Mirror the existing `tt-station status` subcommand. Human output: print active profile, available profiles, backend, and `host:port`. With global `--json`: print `serde_json::to_string_pretty(&summary)`.
 ```rust
 // subcommand enum:
 /// Show the box's resolved serving config (active/available profiles, backend, endpoint).
@@ -1097,12 +1097,12 @@ Match the crate's actual host-resolution and `--json` plumbing.
 
 - [ ] **Step 3: Write the failing e2e test**
 
-Add to `crates/tt/tests/e2e_mock.rs` (mirror the existing `tt status`/`tt serving` e2e that spins up mock-box):
+Add to `crates/tt-station/tests/e2e_mock.rs` (mirror the existing `tt-station status`/`tt-station serving` e2e that spins up mock-box):
 ```rust
 #[test]
 #[ignore] // hardware-free but network/process — run with --ignored like the others
 fn tt_config_json_round_trips_from_mock_box() {
-    // start mock-box `serve`, then run `tt config --json --host 127.0.0.1:<port>`
+    // start mock-box `serve`, then run `tt-station config --json --host 127.0.0.1:<port>`
     // assert the JSON parses to ConfigSummary and active_profile == "mock".
 }
 ```
@@ -1110,14 +1110,14 @@ Fill in using the exact harness the other e2e tests in this file use.
 
 - [ ] **Step 4: Run to verify failure, implement, verify pass**
 
-Run: `cargo test -p tt --test e2e_mock -- --ignored tt_config_json_round_trips_from_mock_box`
+Run: `cargo test -p tt-station --test e2e_mock -- --ignored tt_config_json_round_trips_from_mock_box`
 Expected: FAIL → implement Steps 1–2 → PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tt crates/mock-box
-git commit -m "feat(tt): tt config subcommand + mock-box /config + e2e"
+git add crates/tt-station crates/mock-box
+git commit -m "feat(tt-station): tt-station config subcommand + mock-box /config + e2e"
 ```
 
 ---
@@ -1186,7 +1186,7 @@ git commit -m "feat(panel): profile dropdown reading agentd.toml; show active pr
 
 - [ ] **Step 1: Write `docs/reference/agentd-config.md`**
 
-Document: file location + `--config`, the full schema (every `[global]` + `[profile.*]` key with type and meaning), the precedence chain (verbatim from Global Constraints), profile selection rules, `~/` expansion, `--print-config`, `GET /config`/`tt config`, and the error table. Use the spec's example TOML.
+Document: file location + `--config`, the full schema (every `[global]` + `[profile.*]` key with type and meaning), the precedence chain (verbatim from Global Constraints), profile selection rules, `~/` expansion, `--print-config`, `GET /config`/`tt-station config`, and the error table. Use the spec's example TOML.
 
 - [ ] **Step 2: Ship `box-panel/agentd.example.toml`**
 
@@ -1194,7 +1194,7 @@ A copy-paste starting point with a `stable` profile matching this box's confirme
 
 - [ ] **Step 3: Update `CLAUDE.md` and `macos/README.md`**
 
-In `CLAUDE.md` "Current state": note the config file + profiles, `--config`/`--profile`/`--print-config`, and `GET /config` (unauthed) / `tt config`. In `macos/README.md`'s `tt --json` contract table add a `config` row (`tt config --json` → `ConfigSummary`).
+In `CLAUDE.md` "Current state": note the config file + profiles, `--config`/`--profile`/`--print-config`, and `GET /config` (unauthed) / `tt-station config`. In `macos/README.md`'s `tt-station --json` contract table add a `config` row (`tt-station config --json` → `ConfigSummary`).
 
 - [ ] **Step 4: Commit**
 
@@ -1211,6 +1211,6 @@ Because Task 3 (main wiring) references `ConfigSummary` (Task 4) and `with_confi
 
 ## Self-review notes
 
-- **Spec coverage:** config file (T1), precedence resolver (T2), profile selection + errors (T2), `--config`/`--profile`/`--print-config` (T3), back-compat implicit-default profile (T2/T3), `ConfigSummary` + secret redaction (T4/T5), `GET /config` (T5), `tt config` (T6), panel dropdown (T7), docs + example TOML (T8). All spec sections map to a task.
+- **Spec coverage:** config file (T1), precedence resolver (T2), profile selection + errors (T2), `--config`/`--profile`/`--print-config` (T3), back-compat implicit-default profile (T2/T3), `ConfigSummary` + secret redaction (T4/T5), `GET /config` (T5), `tt-station config` (T6), panel dropdown (T7), docs + example TOML (T8). All spec sections map to a task.
 - **Back-compat** is enforced by `resolve`'s built-in defaults matching today's clap defaults exactly (see Shared Types default list) and verified by `implicit_default_profile_when_no_file` (T2) + the `--print-config` back-compat smoke (T3) + the existing e2e suite staying green.
 - **Secrets:** `ConfigSummary` has no `hf_token` field by construction; asserted in T4 and T5.

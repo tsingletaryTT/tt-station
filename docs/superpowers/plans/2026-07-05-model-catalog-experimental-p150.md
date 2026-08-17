@@ -2,15 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Merge the public Tenstorrent compatibility catalog with a box's live `/models` in `tt` (Rust), classify every model for the box's mesh into Runs-here / Experimental / Needs-other-hardware, add P150 x1–x4 mesh detection, and render the three tiers in the macOS app with "bring more up with the workbench" messaging.
+**Goal:** Merge the public Tenstorrent compatibility catalog with a box's live `/models` in `tt-station` (Rust), classify every model for the box's mesh into Runs-here / Experimental / Needs-other-hardware, add P150 x1–x4 mesh detection, and render the three tiers in the macOS app with "bring more up with the workbench" messaging.
 
-**Architecture:** All fetch/merge/classify lives in Rust — `libttstation` gets pure catalog types + `HW_MAP` + a `classify()` function; `tt` gets fetch+cache + a `tt catalog` command. The app is a veneer: `TTClient.catalog(host:)` shells `tt --json catalog` and renders. The agent's `detect_device_mesh` gains P150 counts.
+**Architecture:** All fetch/merge/classify lives in Rust — `libttstation` gets pure catalog types + `HW_MAP` + a `classify()` function; `tt-station` gets fetch+cache + a `tt-station catalog` command. The app is a veneer: `TTClient.catalog(host:)` shells `tt-station --json catalog` and renders. The agent's `detect_device_mesh` gains P150 counts.
 
 **Tech Stack:** Rust (`reqwest::blocking`, serde, clap), Swift 5 / SwiftUI, XcodeGen, `cargo test` / `swift test`.
 
 ## Global Constraints
 
-- **Veneer rule:** fetch/merge/classify live in Rust (`tt`/`libttstation`); the app shells out to `tt --json catalog`. NO new Swift network I/O (telemetry WebSocket stays the only exception).
+- **Veneer rule:** fetch/merge/classify live in Rust (`tt-station`/`libttstation`); the app shells out to `tt-station --json catalog`. NO new Swift network I/O (telemetry WebSocket stays the only exception).
 - **Catalog source:** `https://d1oi7xemha0dsy.cloudfront.net/data/compatibility.json` (public, unauthenticated). Cache at `~/.cache/tt-station/compatibility.json`, **24 h TTL**. Offline-tolerant: stale cache → then "unavailable" (never crash).
 - **`status` values:** `Supported` | `Experimental` | `Not Supported` (tolerant of unknown → `Other`).
 - **HW_MAP (verbatim seed, lowercased keys → mesh):** `n150→N150, n300→N300, p100→P100, p150→P150, p300→P300, galaxy→T3K, quietbox→P150X4, "quietbox 2"→P300X2, loudbox→P300X2, "2 x quietbox"→P150X8, "2 x galaxy"→GALAXY, "4 x galaxy"→GALAXY, quad_galaxy→GALAXY`. Unmapped → uppercased passthrough.
@@ -187,11 +187,11 @@ git commit -m "feat(lib): classify() + BoxCatalog (3-tier merge of catalog + liv
 
 ---
 
-## Task 3: Catalog fetch + cache (`tt`, owner-verified + pure freshness)
+## Task 3: Catalog fetch + cache (`tt-station`, owner-verified + pure freshness)
 
 **Files:**
-- Create: `crates/tt/src/catalog.rs`
-- Modify: `crates/tt/src/main.rs` (`mod catalog;`)
+- Create: `crates/tt-station/src/catalog.rs`
+- Modify: `crates/tt-station/src/main.rs` (`mod catalog;`)
 
 **Interfaces:**
 - Consumes: `libttstation::catalog::CompatCatalog` (Task 1).
@@ -212,7 +212,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run, expect FAIL** — `cargo test -p tt catalog::tests::freshness_ttl`.
+- [ ] **Step 2: Run, expect FAIL** — `cargo test -p tt-station catalog::tests::freshness_ttl`.
 
 - [ ] **Step 3: Implement.**
   - `const URL: &str = "https://d1oi7xemha0dsy.cloudfront.net/data/compatibility.json";`
@@ -226,27 +226,27 @@ mod tests {
     - On fetch failure: if a cache file exists (even stale), parse it → `(Some, true)` (stale); else `(None, false)`.
     - Any parse error → treat as unavailable for that source.
 
-- [ ] **Step 4: Run freshness test, expect PASS** — `cargo test -p tt catalog::tests::freshness_ttl`. Build: `cargo build -p tt`.
+- [ ] **Step 4: Run freshness test, expect PASS** — `cargo test -p tt-station catalog::tests::freshness_ttl`. Build: `cargo build -p tt-station`.
 
-- [ ] **Step 5: Owner-verify the fetch** (manual, note in report): `TT_CATALOG_FILE`-style `--catalog-file` fast path is exercised by Task 4's e2e; a real network fetch is owner-verified. Confirm `cargo build -p tt` clean.
+- [ ] **Step 5: Owner-verify the fetch** (manual, note in report): `TT_CATALOG_FILE`-style `--catalog-file` fast path is exercised by Task 4's e2e; a real network fetch is owner-verified. Confirm `cargo build -p tt-station` clean.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/tt/src/catalog.rs crates/tt/src/main.rs
-git commit -m "feat(tt): compatibility.json fetch + 24h cache (offline-tolerant)"
+git add crates/tt-station/src/catalog.rs crates/tt-station/src/main.rs
+git commit -m "feat(tt-station): compatibility.json fetch + 24h cache (offline-tolerant)"
 ```
 
 ---
 
-## Task 4: `tt catalog` command
+## Task 4: `tt-station catalog` command
 
 **Files:**
-- Modify: `crates/tt/src/main.rs` (Command enum + handler)
+- Modify: `crates/tt-station/src/main.rs` (Command enum + handler)
 
 **Interfaces:**
 - Consumes: `catalog::load_catalog` (Task 3), `libttstation::catalog::classify` (Task 2), `agent_client::{get_status, list_models}` (existing).
-- Produces: `tt --json catalog --host <h> [--refresh] [--catalog-file <p>]` → `BoxCatalog` JSON; human form prints the three tiers.
+- Produces: `tt-station --json catalog --host <h> [--refresh] [--catalog-file <p>]` → `BoxCatalog` JSON; human form prints the three tiers.
 
 - [ ] **Step 1: Study** the existing `Config`/`Models` command handlers in `main.rs` (arg parsing, `--json` vs human print, host resolution, `agent_client` calls). Add a `Catalog { host, refresh, catalog_file }` variant matching that style.
 
@@ -257,15 +257,15 @@ git commit -m "feat(tt): compatibility.json fetch + 24h cache (offline-tolerant)
   - `let bc = classify(catalog.as_ref(), &live_models, box_mesh.as_deref(), stale);`
   - `--json`: print `serde_json::to_string(&bc)`. Human: print three sections (Runs on this box / Experimental / Needs other hardware) with model names + `needed_hardware` where relevant + a "catalog offline/cached" note when `!catalog_available`/`catalog_stale`.
 
-- [ ] **Step 3: No-hardware e2e** — extend/add to `crates/tt/tests/e2e_mock.rs` (or a manual smoke noted in the report): with a fixture `compatibility.json` and mock-box's `/models`+`/status`, run `tt --json catalog --host 127.0.0.1:<port> --catalog-file <fixture>` and assert the JSON has `runs_here`/`experimental`/`other_hardware` and `box_mesh`. Add a fixture `crates/tt/tests/fixtures/compatibility.json` (a trimmed 3–4 model sample covering Supported/Experimental/other-mesh).
+- [ ] **Step 3: No-hardware e2e** — extend/add to `crates/tt-station/tests/e2e_mock.rs` (or a manual smoke noted in the report): with a fixture `compatibility.json` and mock-box's `/models`+`/status`, run `tt-station --json catalog --host 127.0.0.1:<port> --catalog-file <fixture>` and assert the JSON has `runs_here`/`experimental`/`other_hardware` and `box_mesh`. Add a fixture `crates/tt-station/tests/fixtures/compatibility.json` (a trimmed 3–4 model sample covering Supported/Experimental/other-mesh).
 
-- [ ] **Step 4: Run tests + build** — `cargo test -p tt && cargo build -p tt`.
+- [ ] **Step 4: Run tests + build** — `cargo test -p tt-station && cargo build -p tt-station`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tt/src/main.rs crates/tt/tests/
-git commit -m "feat(tt): tt catalog command (merged 3-tier model catalog --json)"
+git add crates/tt-station/src/main.rs crates/tt-station/tests/
+git commit -m "feat(tt-station): tt-station catalog command (merged 3-tier model catalog --json)"
 ```
 
 ---
@@ -383,20 +383,20 @@ git commit -m "feat(macos): 3-tier catalog browser (experimental + other-hw) + w
 
 **Files:** `macos/README.md`, `CLAUDE.md`
 
-- [ ] **Step 1: Document** the catalog source (CloudFront `compatibility.json`, 24h cache in `tt`, offline-tolerant), the three tiers + Experimental (status-driven), P150 x1–x4, the `tt catalog` command + a `tt --json` contract row, and the "go beyond with the workbench" framing. Bump the version mention to 0.5.0.
+- [ ] **Step 1: Document** the catalog source (CloudFront `compatibility.json`, 24h cache in `tt-station`, offline-tolerant), the three tiers + Experimental (status-driven), P150 x1–x4, the `tt-station catalog` command + a `tt-station --json` contract row, and the "go beyond with the workbench" framing. Bump the version mention to 0.5.0.
 
 - [ ] **Step 2: Commit**
 
 ```bash
 git add macos/README.md CLAUDE.md
-git commit -m "docs: hardware-aware model catalog (experimental + P150 + tt catalog)"
+git commit -m "docs: hardware-aware model catalog (experimental + P150 + tt-station catalog)"
 ```
 
 ---
 
 ## Self-review notes
 
-- **Spec coverage:** source/fetch/cache → Tasks 1,3; classify/tiers → Task 2; `tt catalog` → Task 4; P150 → Task 5; Swift decode/VM → Task 6; 3-tier UI + messaging + version → Task 7; docs → Task 8.
-- **Type consistency:** `CompatCatalog`/`CompatModel`/`HardwareCompat`/`CompatStatus`/`hw_to_mesh` (Task 1) → `classify`/`BoxCatalog`/`CatalogEntry`/`normalize_key` (Task 2) → consumed by `tt catalog` (Task 4) → mirrored by Swift `BoxCatalog`/`CatalogEntry` (Task 6) → rendered (Task 7). Wire keys snake_case on both sides.
+- **Spec coverage:** source/fetch/cache → Tasks 1,3; classify/tiers → Task 2; `tt-station catalog` → Task 4; P150 → Task 5; Swift decode/VM → Task 6; 3-tier UI + messaging + version → Task 7; docs → Task 8.
+- **Type consistency:** `CompatCatalog`/`CompatModel`/`HardwareCompat`/`CompatStatus`/`hw_to_mesh` (Task 1) → `classify`/`BoxCatalog`/`CatalogEntry`/`normalize_key` (Task 2) → consumed by `tt-station catalog` (Task 4) → mirrored by Swift `BoxCatalog`/`CatalogEntry` (Task 6) → rendered (Task 7). Wire keys snake_case on both sides.
 - **TDD vs owner-verified:** pure (Tasks 1,2,5, freshness in 3, decode in 6) TDD; fetch/network (3), CLI wiring (4), SwiftUI (7) owner-verified with fixture fast-paths.
-- **Veneer preserved:** all fetch/merge/classify in Rust; the app only decodes `tt --json catalog`.
+- **Veneer preserved:** all fetch/merge/classify in Rust; the app only decodes `tt-station --json catalog`.

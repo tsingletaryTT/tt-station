@@ -28,14 +28,14 @@ do {
 ```
 
 But **`GET /status` is UNAUTHED** on the agent (it's the one endpoint that works without pairing —
-that's by design, so `tt status`/discovery work pre-pair). It returns `200` for *any* reachable box
+that's by design, so `tt-station status`/discovery work pre-pair). It returns `200` for *any* reachable box
 regardless of tokens. So `commands.status()` never throws an auth error → `isPaired` is set to
 `true` on every refresh and the `isAuthError` branch is dead code. The doc comment above it
 ("a successful **authed** status call means the CLI holds a valid bearer token") is factually wrong —
 `/status` carries no auth.
 
 **Evidence:** with the box holding **zero** tokens (`~/.config/tt-station/agentd-tokens.json` absent —
-confirmed) and `tt status` returning 200, the app still reports paired.
+confirmed) and `tt-station status` returning 200, the app still reports paired.
 
 ## Fix (Mac-side)
 
@@ -72,8 +72,8 @@ distinct "idle" error you can key off; if not, add one. Also fix the misleading 
 
 - The box's **Reset now actually clears the box's tokens**: the GTK panel's Reset does a hard local
   reset (stop agent → stop serving container → **delete the agent token store** → `tt-smi -r` →
-  restart), commit `07e299b`. Previously it shelled `tt reset --host 127.0.0.1` which no-op'd
-  (no operator token). `tt console`'s Reset still uses the authed path (shows a "pair first" hint).
+  restart), commit `07e299b`. Previously it shelled `tt-station reset --host 127.0.0.1` which no-op'd
+  (no operator token). `tt-station console`'s Reset still uses the authed path (shows a "pair first" hint).
 - So once this Mac-side probe is authed: box Reset clears the token → the Mac's next `endpoint()`
   probe gets `401` → app flips to unpaired. The two fixes compose.
 

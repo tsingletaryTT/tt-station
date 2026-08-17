@@ -168,7 +168,7 @@ In `LaunchController.swift`, add these observable fields alongside the existing 
     var vscodeError: String?
 ```
 
-Extend the binary lookup to include `~/.local/bin` (where `tt-toplike-tui`/`tt` live). Replace the body of the existing `resolveBrewBinary(_:)` so it also checks the user's `~/.local/bin`:
+Extend the binary lookup to include `~/.local/bin` (where `tt-toplike-tui`/`tt-station` live). Replace the body of the existing `resolveBrewBinary(_:)` so it also checks the user's `~/.local/bin`:
 ```swift
     static func resolveBrewBinary(_ name: String) -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path

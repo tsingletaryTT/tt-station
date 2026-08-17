@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build `TTStation`, a native SwiftUI `MenuBarExtra` app that veneers the `tt` CLI so a user can discover a QuietBox, pair, run/stop a model, and copy its OpenAI endpoint — entirely from the menu bar.
+**Goal:** Build `TTStation`, a native SwiftUI `MenuBarExtra` app that veneers the `tt-station` CLI so a user can discover a QuietBox, pair, run/stop a model, and copy its OpenAI endpoint — entirely from the menu bar.
 
-**Architecture:** Approach 3 (MVVM, five layers). Layers 1–4 (process runner, `tt` client, domain models, discovery + view-models) live in a **Swift package `TTStationKit`** that is unit-tested via `swift test` with no Xcode UI. Layer 5 (SwiftUI views + the `MenuBarExtra` app entry) is a **thin XcodeGen-generated app target** that imports the package. All logic shells out to `tt --json`; no discovery/pairing/HTTP is reimplemented in Swift.
+**Architecture:** Approach 3 (MVVM, five layers). Layers 1–4 (process runner, `tt-station` client, domain models, discovery + view-models) live in a **Swift package `TTStationKit`** that is unit-tested via `swift test` with no Xcode UI. Layer 5 (SwiftUI views + the `MenuBarExtra` app entry) is a **thin XcodeGen-generated app target** that imports the package. All logic shells out to `tt-station --json`; no discovery/pairing/HTTP is reimplemented in Swift.
 
 **Tech Stack:** Swift 5 language mode, SwiftUI + Observation (`@Observable`), Foundation `Process`, SwiftPM for the library + tests, XcodeGen + `xcodebuild` for the app target, `mock-box` (existing Rust dev fixture) as the pre-hardware end-to-end target.
 
@@ -14,9 +14,9 @@
 - Language mode: **Swift 5** (not Swift 6 strict concurrency).
 - The app is an **agent app**: Info.plist `LSUIElement = true`, no Dock icon.
 - `MenuBarExtra` uses **`.menuBarExtraStyle(.window)`** (popover panel, not `NSMenu`).
-- The app **never** touches the Keychain, spawns HTTP, or parses mDNS itself — only `tt --json`.
-- Every `tt` invocation puts the global flag first: `["--json", <subcommand>, …]`.
-- CLI JSON wire shapes (ground truth: `crates/tt/src/main.rs`, `crates/libttstation/src/model.rs`):
+- The app **never** touches the Keychain, spawns HTTP, or parses mDNS itself — only `tt-station --json`.
+- Every `tt-station` invocation puts the global flag first: `["--json", <subcommand>, …]`.
+- CLI JSON wire shapes (ground truth: `crates/tt-station/src/main.rs`, `crates/libttstation/src/model.rs`):
   - discover → `[{ "name","host","ctrl_port","chips","status","apiver" }]`, `status` string is `"idle"` or `"serving:<model>"`.
   - status → `{ "status": "idle" | "serving:<model>" }`.
   - endpoint / run → `{ "base_url","model","requires_key" }`.
@@ -53,7 +53,7 @@ macos/TTStation/
     Support/FakeProcessRunner.swift          # test double
     Support/FakeTTClient.swift               # test double
     Support/InMemoryStore.swift              # test double for persistence
-    Fixtures/*.json                          # captured/authored tt --json outputs
+    Fixtures/*.json                          # captured/authored tt-station --json outputs
   AppShell/
     project.yml                              # XcodeGen: TTStation app target -> package
     Sources/
@@ -337,7 +337,7 @@ public struct BoxRecord: Codable, Equatable {
         case statusRaw = "status"
     }
 
-    /// `host:port` — the identity string every `tt` command keys off of.
+    /// `host:port` — the identity string every `tt-station` command keys off of.
     public var hostPort: String { "\(host):\(ctrlPort)" }
 
     public var status: ServingStatus? { try? ServingStatus(raw: statusRaw) }
@@ -472,7 +472,7 @@ public struct ProcessResult: Equatable {
     }
 }
 
-/// The only abstraction that runs `tt`. Real impl added in Task 6.
+/// The only abstraction that runs `tt-station`. Real impl added in Task 6.
 public protocol TTProcessRunner {
     func run(_ args: [String]) async throws -> ProcessResult
 }
@@ -520,7 +520,7 @@ git commit -m "feat(macos): TTError, process-runner protocol, fake runner"
 
 **Interfaces:**
 - Consumes: `TTError`.
-- Produces: `struct TTBinaryLocator { init(override:String?, candidates:[String], fileExists:(String)->Bool); func locate() throws -> String }`. Returns first existing path in order [override?] + candidates; throws `TTError.binaryNotFound(triedPaths:)` listing all tried. `fileExists` is injected for testability; a `default` static builds real candidates (`~/.local/bin/tt`, `/opt/homebrew/bin/tt`, `/usr/local/bin/tt`) using `FileManager`.
+- Produces: `struct TTBinaryLocator { init(override:String?, candidates:[String], fileExists:(String)->Bool); func locate() throws -> String }`. Returns first existing path in order [override?] + candidates; throws `TTError.binaryNotFound(triedPaths:)` listing all tried. `fileExists` is injected for testability; a `default` static builds real candidates (`~/.local/bin/tt-station`, `/opt/homebrew/bin/tt-station`, `/usr/local/bin/tt-station`) using `FileManager`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -562,7 +562,7 @@ Expected: FAIL — `TTBinaryLocator` undefined.
 ```swift
 import Foundation
 
-/// Resolves the `tt` binary. GUI apps do NOT inherit the shell PATH, so we
+/// Resolves the `tt-station` binary. GUI apps do NOT inherit the shell PATH, so we
 /// probe explicit locations in order and report every one we tried on failure.
 public struct TTBinaryLocator {
     private let override: String?
@@ -590,7 +590,7 @@ public struct TTBinaryLocator {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return TTBinaryLocator(
             override: override,
-            candidates: ["\(home)/.local/bin/tt", "/opt/homebrew/bin/tt", "/usr/local/bin/tt"],
+            candidates: ["\(home)/.local/bin/tt-station", "/opt/homebrew/bin/tt-station", "/usr/local/bin/tt-station"],
             fileExists: { FileManager.default.isExecutableFile(atPath: $0) }
         )
     }
@@ -626,7 +626,7 @@ git commit -m "feat(macos): TTBinaryLocator with injectable existence check"
 Append to `macos/TTStation/Tests/TTStationKitTests/ProcessRunnerTests.swift`:
 ```swift
 extension ProcessRunnerTests {
-    // Uses /bin/echo as a deterministic stand-in for `tt` to prove spawn/capture.
+    // Uses /bin/echo as a deterministic stand-in for `tt-station` to prove spawn/capture.
     func testRealRunnerCapturesStdoutAndExit() async throws {
         let locator = TTBinaryLocator(override: "/bin/echo", candidates: []) { _ in true }
         let runner = RealProcessRunner(locator: locator)
@@ -657,7 +657,7 @@ Expected: FAIL — `RealProcessRunner` undefined.
 
 Append to `macos/TTStation/Sources/TTStationKit/ProcessRunner.swift`:
 ```swift
-/// Spawns the real `tt` binary. The only type in the package that touches
+/// Spawns the real `tt-station` binary. The only type in the package that touches
 /// `Process` or the filesystem.
 public final class RealProcessRunner: TTProcessRunner {
     private let locator: TTBinaryLocator
@@ -697,7 +697,7 @@ Expected: PASS (4 tests total in this file).
 
 ```bash
 git add macos/TTStation/Sources/TTStationKit/ProcessRunner.swift macos/TTStation/Tests/TTStationKitTests/ProcessRunnerTests.swift
-git commit -m "feat(macos): RealProcessRunner spawns tt and captures output"
+git commit -m "feat(macos): RealProcessRunner spawns tt-station and captures output"
 ```
 
 ---
@@ -780,7 +780,7 @@ Expected: FAIL — `TTClient` undefined.
 ```swift
 import Foundation
 
-/// Typed façade over `tt --json`. One method per subcommand; the only place
+/// Typed façade over `tt-station --json`. One method per subcommand; the only place
 /// argv is assembled and stdout is decoded.
 public final class TTClient {
     private let runner: TTProcessRunner
@@ -884,7 +884,7 @@ extension TTClientTests {
 
     func testIsAuthError() {
         let client = TTClient(runner: FakeProcessRunner())
-        XCTAssertTrue(client.isAuthError(.commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080; run `tt pair`")))
+        XCTAssertTrue(client.isAuthError(.commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080; run `tt-station pair`")))
         XCTAssertFalse(client.isAuthError(.commandFailed(command: [], exitCode: 1, stderr: "connection refused")))
     }
 }
@@ -1320,13 +1320,13 @@ public final class BoxViewModel: Identifiable {
     }
 
     private func record(_ error: Error) {
-        if let tt = error as? TTError {
-            if commands.isAuthError(tt) {
+        if let tt-station = error as? TTError {
+            if commands.isAuthError(tt-station) {
                 isPaired = false
                 registry.markUnpaired(record.hostPort)
             }
-            if case let .commandFailed(_, _, stderr) = tt { errorText = stderr.isEmpty ? "Command failed." : stderr }
-            else { errorText = String(describing: tt) }
+            if case let .commandFailed(_, _, stderr) = tt-station { errorText = stderr.isEmpty ? "Command failed." : stderr }
+            else { errorText = String(describing: tt-station) }
         } else {
             errorText = error.localizedDescription
         }
@@ -1721,17 +1721,17 @@ git commit -m "feat(macos): wire full MenuBarExtra UI (discover/pair/run/stop/co
 - Modify: `macos/README.md` (replace the "not built yet" status with build/run instructions)
 
 **Interfaces:**
-- Consumes: the built `TTStation.app`, the `tt` binary, and `mock-box` (`crates/mock-box`).
+- Consumes: the built `TTStation.app`, the `tt-station` binary, and `mock-box` (`crates/mock-box`).
 - Produces: a verified end-to-end run and updated docs. No code.
 
 - [ ] **Step 1: Build the CLI and mock-box**
 
 Run:
 ```bash
-cd /Users/tsingletary/code/tt-station && cargo build --release -p tt -p mock-box && \
-cp target/release/tt ~/.local/bin/tt
+cd /Users/tsingletary/code/tt-station && cargo build --release -p tt-station -p mock-box && \
+cp target/release/tt-station ~/.local/bin/tt-station
 ```
-Expected: both build; `~/.local/bin/tt` refreshed.
+Expected: both build; `~/.local/bin/tt-station` refreshed.
 
 - [ ] **Step 2: Start mock-box advertising over mDNS**
 
@@ -1740,8 +1740,8 @@ Expected: it prints that it is advertising + serving the control API. (Check `mo
 
 - [ ] **Step 3: Sanity-check the CLI sees it**
 
-Run: `tt --json discover`
-Expected: JSON array containing the mock box (name `quietbox-mock`). If mDNS is blocked, use `tt --json discover --host 127.0.0.1:18899`.
+Run: `tt-station --json discover`
+Expected: JSON array containing the mock box (name `quietbox-mock`). If mDNS is blocked, use `tt-station --json discover --host 127.0.0.1:18899`.
 
 - [ ] **Step 4: Launch the app and drive the loop**
 

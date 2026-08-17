@@ -4,9 +4,9 @@
 
 **Goal:** Add reset-chips / suspend / reboot / shut-down (box-side, authed) and wake (Wake-on-LAN from the Mac) controls, surfaced tastefully in the macOS app and the Linux box panel.
 
-**Architecture:** A new authed `POST /power` route on the agent runs configurable, fakeable commands (`tt-smi -r` for reset-chips; `systemctl suspend|reboot|poweroff` for the rest, best-effort stopping any serving container first) and returns before the box tears down. The agent advertises its NIC MAC (in `/status` + mDNS TXT, mirroring `device_mesh`) so the Mac can send a WoL magic packet when the box is off. The CLI (`tt power`/`tt wake`), the macOS power menu, and the Linux panel's power row all sit on top; a polkit rule shipped by the `.deb` grants the box permission to power itself.
+**Architecture:** A new authed `POST /power` route on the agent runs configurable, fakeable commands (`tt-smi -r` for reset-chips; `systemctl suspend|reboot|poweroff` for the rest, best-effort stopping any serving container first) and returns before the box tears down. The agent advertises its NIC MAC (in `/status` + mDNS TXT, mirroring `device_mesh`) so the Mac can send a WoL magic packet when the box is off. The CLI (`tt-station power`/`tt-station wake`), the macOS power menu, and the Linux panel's power row all sit on top; a polkit rule shipped by the `.deb` grants the box permission to power itself.
 
-**Tech Stack:** Rust (agent `tt-station-agentd`, CLI `tt`, lib `libttstation`, `mock-box`), axum, tokio; Swift 5.9 / SwiftUI (`TTStationKit` + `AppShell`), XCTest; Python 3 / GTK4 (`box-panel`), stdlib unittest; polkit; debhelper.
+**Tech Stack:** Rust (agent `tt-station-agentd`, CLI `tt-station`, lib `libttstation`, `mock-box`), axum, tokio; Swift 5.9 / SwiftUI (`TTStationKit` + `AppShell`), XCTest; Python 3 / GTK4 (`box-panel`), stdlib unittest; polkit; debhelper.
 
 ## Global Constraints
 
@@ -339,7 +339,7 @@ git commit -m "feat(agentd): authed POST /power route (200 reset-chips, 202 mach
 
 ### Task 3: Agent — advertise NIC MAC in `/status` + mDNS TXT
 
-Mirror the `device_mesh` path so `tt --json status`/`discover` carry the box MAC for Wake-on-LAN.
+Mirror the `device_mesh` path so `tt-station --json status`/`discover` carry the box MAC for Wake-on-LAN.
 
 **Files:**
 - Create: `crates/tt-station-agentd/src/net.rs` (pure-ish primary-MAC detection helper + a pure formatter tested on fixture input)
@@ -505,7 +505,7 @@ Expected: FAIL — `wol` module not defined.
 Create `crates/libttstation/src/wol.rs`:
 
 ```rust
-//! Wake-on-LAN magic-packet construction (client-side; `tt wake` sends it).
+//! Wake-on-LAN magic-packet construction (client-side; `tt-station wake` sends it).
 
 /// Parse a MAC address (`:` or `-` separated hex) into 6 bytes.
 pub fn parse_mac(s: &str) -> Option<[u8; 6]> {
@@ -569,40 +569,40 @@ git commit -m "feat(lib): agent_client power() + Wake-on-LAN magic-packet builde
 
 ---
 
-### Task 5: CLI — `tt power` and `tt wake` + mock-box `/power`
+### Task 5: CLI — `tt-station power` and `tt-station wake` + mock-box `/power`
 
 **Files:**
-- Modify: `crates/tt/src/main.rs` (two `Command` variants + dispatch)
-- Modify: `crates/mock-box/src/main.rs` (a no-op `/power` route so e2e can exercise `tt power`)
-- Test: `crates/tt/tests/e2e_mock.rs` (or the existing e2e test file) — a `tt power reset-chips --host <mock>` case
+- Modify: `crates/tt-station/src/main.rs` (two `Command` variants + dispatch)
+- Modify: `crates/mock-box/src/main.rs` (a no-op `/power` route so e2e can exercise `tt-station power`)
+- Test: `crates/tt-station/tests/e2e_mock.rs` (or the existing e2e test file) — a `tt-station power reset-chips --host <mock>` case
 
 **Interfaces:**
-- Consumes: `libttstation::agent_client::power` and `libttstation::wol` (Task 4); the token store (`build_store()`) and host/base convention from `cmd_reset` (`main.rs:915`); the discovery cache / `BoxRecord.mac` (Task 3) for `tt wake`.
+- Consumes: `libttstation::agent_client::power` and `libttstation::wol` (Task 4); the token store (`build_store()`) and host/base convention from `cmd_reset` (`main.rs:915`); the discovery cache / `BoxRecord.mac` (Task 3) for `tt-station wake`.
 - Produces: `Command::Power { action: String, host: Option<String> }` and `Command::Wake { mac: Option<String>, host: Option<String> }`; a `wol` UDP send to `255.255.255.255:9`.
 
 - [ ] **Step 1: Write the failing e2e test**
 
-Add to the mock e2e (follow the existing `--ignored` mock-box e2e pattern; it starts `mock-box serve`, pairs, and runs `tt` subcommands):
+Add to the mock e2e (follow the existing `--ignored` mock-box e2e pattern; it starts `mock-box serve`, pairs, and runs `tt-station` subcommands):
 
 ```rust
-// tt power reset-chips against the mock box returns success (mock runs a no-op).
+// tt-station power reset-chips against the mock box returns success (mock runs a no-op).
 #[test]
 #[ignore]
 fn tt_power_reset_chips_against_mock_box() {
     // (Use the harness helpers this file already has to boot mock-box, pair,
-    // and invoke the `tt` binary via CARGO_BIN_EXE_tt with `power reset-chips
+    // and invoke the `tt-station` binary via CARGO_BIN_EXE_tt with `power reset-chips
     // --host <addr> --json`; assert exit 0 and JSON success.)
 }
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `cargo test -p tt --test e2e_mock -- --ignored tt_power_reset_chips`
+Run: `cargo test -p tt-station --test e2e_mock -- --ignored tt_power_reset_chips`
 Expected: FAIL — `power` subcommand unknown.
 
 - [ ] **Step 3: Implement**
 
-In `crates/tt/src/main.rs`, add to the `Command` enum:
+In `crates/tt-station/src/main.rs`, add to the `Command` enum:
 
 ```rust
     /// Power-manage a box: reset its chips (tt-smi -r, keeps pairing) or take
@@ -636,14 +636,14 @@ In `crates/mock-box/src/main.rs`, add `.route("/power", post(power_mock))` where
 
 - [ ] **Step 4: Run the e2e + build**
 
-Run: `cargo build -p tt -p mock-box` then `cargo test -p tt --test e2e_mock -- --ignored tt_power_reset_chips`
+Run: `cargo build -p tt-station -p mock-box` then `cargo test -p tt-station --test e2e_mock -- --ignored tt_power_reset_chips`
 Expected: builds; test PASSES. `cargo clippy --workspace --all-targets -- -D warnings` clean.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/tt/src/main.rs crates/mock-box/src/main.rs crates/tt/tests
-git commit -m "feat(tt): tt power + tt wake subcommands; mock-box serves /power"
+git add crates/tt-station/src/main.rs crates/mock-box/src/main.rs crates/tt-station/tests
+git commit -m "feat(tt-station): tt-station power + tt-station wake subcommands; mock-box serves /power"
 ```
 
 ---
@@ -656,12 +656,12 @@ git commit -m "feat(tt): tt power + tt wake subcommands; mock-box serves /power"
 - Test: `macos/TTStation/Tests/TTStationKitTests/PowerControlsTests.swift`
 
 **Interfaces:**
-- Consumes: the existing `TTClient` command-run pattern (how `reset`/`run`/`stop` shell `tt --json`).
+- Consumes: the existing `TTClient` command-run pattern (how `reset`/`run`/`stop` shell `tt-station --json`).
 - Produces:
   - `public enum PowerAction: String { case resetChips = "reset-chips", suspend, reboot, shutdown }` with `var isMachineOp: Bool` and `var confirms: Bool` (true for suspend/reboot/shutdown).
   - `public enum PowerState: Equatable { case suspending, rebooting, poweredOff, waking }`.
   - `public enum PowerTransition { static func next(issued: PowerAction, reachable: Bool) -> PowerState?; static func onReachabilityChange(_ current: PowerState?, reachable: Bool) -> PowerState? }` — issuing a machine op sets the matching state; when the box becomes reachable again, `.suspending`/`.rebooting`/`.waking` clear (→ `nil`); `.poweredOff` clears only on reachability (a wake). reset-chips returns `nil` (no transient state).
-  - On `TTClient`: `func power(_ action: PowerAction, host: String?) async throws` (→ `tt power <action> [--host]`) and `func wake(mac: String?, host: String?) async throws` (→ `tt wake [--mac][--host]`).
+  - On `TTClient`: `func power(_ action: PowerAction, host: String?) async throws` (→ `tt-station power <action> [--host]`) and `func wake(mac: String?, host: String?) async throws` (→ `tt-station wake [--mac][--host]`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -756,14 +756,14 @@ public enum PowerTransition {
 Add to `TTClient.swift`, matching the existing `reset`/`run` command builders (resolve args the same way, append `--host` when non-nil):
 
 ```swift
-    /// `tt power <action> [--host]` — authed on the CLI side.
+    /// `tt-station power <action> [--host]` — authed on the CLI side.
     public func power(_ action: PowerAction, host: String?) async throws {
         var args = ["power", action.rawValue]
         if let host { args += ["--host", host] }
         _ = try await run(args)   // match TTClient's existing run/reset helper
     }
 
-    /// `tt wake [--mac] [--host]` — client-side WoL, no box contact.
+    /// `tt-station wake [--mac] [--host]` — client-side WoL, no box contact.
     public func wake(mac: String?, host: String?) async throws {
         var args = ["wake"]
         if let mac { args += ["--mac", mac] }
@@ -986,10 +986,10 @@ git commit -m "feat(panel): local power row (reset-chips/suspend/reboot/shutdown
 - Create: `deploy/tt-station-power.rules` (the polkit rule)
 - Modify: `debian/` (postinst installs the rule to `/etc/polkit-1/rules.d/49-tt-station-power.rules`; postrm removes it on purge; add to the `tt-station` package's install list)
 - Create: `docs/reference/power-controls.md`
-- Modify: `crates/tt/src/console/…` (the `tt console` snapshot/TUI) — detect the rule's absence and surface a one-line warning + manual-install hint
+- Modify: `crates/tt-station/src/console/…` (the `tt-station console` snapshot/TUI) — detect the rule's absence and surface a one-line warning + manual-install hint
 
 **Interfaces:**
-- Consumes: the existing `debian/` layout (how the `tt-station` package installs files + its maintainer scripts) and the `tt console` snapshot rendering.
+- Consumes: the existing `debian/` layout (how the `tt-station` package installs files + its maintainer scripts) and the `tt-station console` snapshot rendering.
 - Produces: the installed polkit rule; `docs/reference/power-controls.md`.
 
 - [ ] **Step 1: Create the polkit rule**
@@ -1019,22 +1019,22 @@ polkit.addRule(function(action, subject) {
 
 Install `deploy/tt-station-power.rules` to `/etc/polkit-1/rules.d/49-tt-station-power.rules` as part of the `tt-station` package (via the package's `.install`/`dh` mechanism or an explicit postinst copy), and remove it in postrm on `purge`. Keep it in the **`tt-station`** package (not the panel package), since both the agent and panel rely on it.
 
-- [ ] **Step 3: `tt console` absence warning**
+- [ ] **Step 3: `tt-station console` absence warning**
 
-In the `tt console` snapshot/TUI, check whether `/etc/polkit-1/rules.d/49-tt-station-power.rules` exists; when absent, include a one-line advisory ("power controls need the polkit rule; see docs/reference/power-controls.md or install the tt-station .deb") in the snapshot output and the TUI status area. Keep it non-fatal and informational.
+In the `tt-station console` snapshot/TUI, check whether `/etc/polkit-1/rules.d/49-tt-station-power.rules` exists; when absent, include a one-line advisory ("power controls need the polkit rule; see docs/reference/power-controls.md or install the tt-station .deb") in the snapshot output and the TUI status area. Keep it non-fatal and informational.
 
 - [ ] **Step 4: Write the doc**
 
-`docs/reference/power-controls.md` documenting: the `POST /power` route (actions, status codes, auth, pairing-preservation, reset-chips vs `/reset`), `mac` in `/status`+TXT, `tt power`/`tt wake`, the macOS power menu, the panel power row, and the polkit rule (what it grants, where it installs, the `sudo`-group default + how to retarget, and the manual install command for non-`.deb` setups).
+`docs/reference/power-controls.md` documenting: the `POST /power` route (actions, status codes, auth, pairing-preservation, reset-chips vs `/reset`), `mac` in `/status`+TXT, `tt-station power`/`tt-station wake`, the macOS power menu, the panel power row, and the polkit rule (what it grants, where it installs, the `sudo`-group default + how to retarget, and the manual install command for non-`.deb` setups).
 
 - [ ] **Step 5: Verify + commit**
 
 Run: `ls deploy/tt-station-power.rules && grep -n "power-controls" docs/reference/power-controls.md >/dev/null && echo OK`
-Also confirm the workspace still builds: `cargo build -p tt`.
+Also confirm the workspace still builds: `cargo build -p tt-station`.
 Expected: `OK`, builds.
 
 ```bash
-git add deploy/tt-station-power.rules debian docs/reference/power-controls.md crates/tt/src/console
+git add deploy/tt-station-power.rules debian docs/reference/power-controls.md crates/tt-station/src/console
 git commit -m "feat(packaging): polkit rule for box power + power-controls reference doc"
 ```
 
@@ -1045,10 +1045,10 @@ git commit -m "feat(packaging): polkit rule for box power + power-controls refer
 **Spec coverage:**
 - §1 `POST /power` → Tasks 1 (executor) + 2 (route/status codes/auth/flags).
 - §2 MAC in `/status`+TXT → Task 3.
-- §3 CLI `tt power`/`tt wake` → Tasks 4 (lib) + 5 (CLI + mock-box).
+- §3 CLI `tt-station power`/`tt-station wake` → Tasks 4 (lib) + 5 (CLI + mock-box).
 - §4 macOS power menu + `powerState` → Tasks 6 (logic) + 7 (UI).
 - §5 Linux panel power row → Task 8.
-- §6 polkit rule + doc + `tt console` warning → Task 9.
+- §6 polkit rule + doc + `tt-station console` warning → Task 9.
 - Reset-chips-keeps-pairing vs `/reset`-unpairs → enforced in Task 1 (`run_power_command` never touches tokens/SSH/status) and Task 2 (reset-chips returns 200, no `clear_tokens`); the existing `/reset` is untouched.
 - Confirmation on the destructive three → Task 6 (`confirms` flag) + Task 7 (`.confirmationDialog`) + Task 8 (GTK dialog).
 - Response-before-teardown (202) → Task 2 (`power_success_status`) + Task 4 (`power()` tolerates a dropped connection).

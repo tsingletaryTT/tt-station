@@ -17,7 +17,7 @@ requirement — every table says what happens in both cases.
 enforcement against the box's owner. Two rules follow, and everything in §4 is an application of
 them:
 
-- **A lease is the default request, not a permission slip.** `tt run` asks for the WHOLE box
+- **A lease is the default request, not a permission slip.** `tt-station run` asks for the WHOLE box
   (`--chips all`), so on an idle machine — the overwhelmingly common case — there is no
   contention, no `409`, and nothing to negotiate. Sharing a box board-by-board is the deliberate
   case, not the default one.
@@ -46,14 +46,14 @@ BDFs as part of handing them back, which is why:
 
 ---
 
-## 2. `tt leases` — who holds what
+## 2. `tt-station leases` — who holds what
 
 ```
-tt leases --host <host:port>            # one chip per line
-tt leases --host <host:port> --json     # the whole LeaseList object
+tt-station leases --host <host:port>            # one chip per line
+tt-station leases --host <host:port> --json     # the whole LeaseList object
 ```
 
-**Authed**, unlike `tt status`/`tt serving`/`tt models`: `GET /leases` is bearer-guarded, so the
+**Authed**, unlike `tt-station status`/`tt-station serving`/`tt-station models`: `GET /leases` is bearer-guarded, so the
 box must be paired.
 
 Human output is one line per chip, tab-separated:
@@ -87,12 +87,12 @@ does not invent one — anywhere.
 
 ---
 
-## 3. `GET /status`'s `leasing` object, and `tt status`
+## 3. `GET /status`'s `leasing` object, and `tt-station status`
 
-`/status` gains a `leasing` object, and `tt status` prints it:
+`/status` gains a `leasing` object, and `tt-station status` prints it:
 
 ```
-$ tt status --host qb2-lab.local:8765
+$ tt-station status --host qb2-lab.local:8765
 idle
 leasing:        gozer 0.1.0 (2 board(s), up to 2 concurrent session(s))
 ```
@@ -110,7 +110,7 @@ The answer is **three-way**, and a client must treat it as such:
 
 | `leasing` | Means |
 |---|---|
-| absent / `null` | that agent is too old to report it. `tt status` prints no leasing line at all rather than inventing "no leasing". |
+| absent / `null` | that agent is too old to report it. `tt-station status` prints no leasing line at all rather than inventing "no leasing". |
 | `{"available": false, ...}` (every other field `null`) | gozer is not installed on that box (or its startup probe failed). Never a guessed version or a fabricated board count. |
 | `{"available": true, ...}` | version plus board/concurrency counts. |
 
@@ -121,7 +121,7 @@ so asking for `/status` right after (or before) `/leases` costs no extra shell-o
 
 ## 4. What changes on a leasing box
 
-### `tt run` / `POST /run`
+### `tt-station run` / `POST /run`
 
 | | Without gozer | With gozer |
 |---|---|---|
@@ -140,7 +140,7 @@ The `409` is the contention outcome: a contended box is the box's *state* confli
 request, not a failure, so it is retriable and distinguishable from a `500`. Its message names the
 board and the holder — and no duration, per §2 — and says `--force` overrides it.
 
-**`tt run --force`** serves anyway. The mechanism matters, because it is what keeps `gozer status`
+**`tt-station run --force`** serves anyway. The mechanism matters, because it is what keeps `gozer status`
 honest: the box does **not** take the holder's lease away, it serves **without a lease** — the
 pre-gozer path, whole-box selectors and an unscoped `tt-smi -r`. So `gozer status` afterwards shows
 the holder's lease still held (true) and this serve's chips as `BUSY-UNTRACKED` (also true: a
@@ -149,7 +149,7 @@ The trade is stated plainly: a forced run **will** disrupt the holder, and the b
 override — the holder's `who` and the chips — because that journal line is the only remaining
 record of it.
 
-**Swapping models needs no explicit stop.** `tt run B` while A serves hands A's board back
+**Swapping models needs no explicit stop.** `tt-station run B` while A serves hands A's board back
 (resetting it) before asking gozer for chips again, so a swap does not strand a board. The exact
 sequence differs by backend:
 
@@ -158,16 +158,16 @@ sequence differs by backend:
 | `runpy` (default) | note the held lease → sweep whatever publishes `serving_port` → release that lease → acquire → **scoped** `tt-smi -r <bdf>,<bdf>` → launch |
 | `docker` | note the held lease → stop *its recorded container* → release that lease → acquire → launch (**no** stale-container sweep and **no** board reset — this backend has never run one) |
 
-`tt stop` first is still the clearer thing to do, and on a single-board box it is the same
+`tt-station stop` first is still the clearer thing to do, and on a single-board box it is the same
 sequence either way.
 
 Only the lease this agent observed at the top of `start` is released. If a concurrent `POST /run`
 records its own lease in the meantime, the swap declines to release, logs the supersession, and
 leaves the newer lease alone — releasing it would reset the chips under a live container. Two
 overlapping `/run`s are not otherwise serialised, so one can still leave a board stranded (wasted,
-not reset); prefer one `tt run` at a time.
+not reset); prefer one `tt-station run` at a time.
 
-### `POST /reset` (`tt reset --host …`) and `power reset-chips` (`tt power reset-chips --host …`)
+### `POST /reset` (`tt-station reset --host …`) and `power reset-chips` (`tt-station power reset-chips --host …`)
 
 Both run a **whole-box** `tt-smi -r`, which on a shared box resets a neighbour mid-run. So both
 **refuse with `409` by default** while gozer reports a lease held by anyone other than this agent's
@@ -176,13 +176,13 @@ to override that. Full behaviour, including the "could not be determined" case, 
 [`power-controls.md` §1](power-controls.md#1-agent-post-power).
 
 ```
-tt reset --host <h> --force               # reset even though someone holds chips
-tt power reset-chips --host <h> --force    # same, but keeps pairing
+tt-station reset --host <h> --force               # reset even though someone holds chips
+tt-station power reset-chips --host <h> --force    # same, but keeps pairing
 ```
 
 Four things worth knowing at the CLI:
 
-- **A refusal is not a failure.** `tt reset --host X` normally clears local pairing even when the
+- **A refusal is not a failure.** `tt-station reset --host X` normally clears local pairing even when the
   box is unreachable. On a refusal it does **not**: the box reset nothing and deliberately kept
   your token, so clearing it would destroy the only credential that can reach the box in exchange
   for nothing. The command errors out with the box's own message instead.
@@ -216,7 +216,7 @@ A neighbour's lease is never touched, and a lease whose id cannot be resolved is
 journal and left alone rather than guessed at.
 
 A lease whose port **is** still serving is kept — and, if that port is this agent's own, **adopted**,
-so the next `tt stop` releases it explicitly (resetting its chips) instead of leaving it to gozer's
+so the next `tt-station stop` releases it explicitly (resetting its chips) instead of leaving it to gozer's
 reap, which would not. The journal says which:
 
 ```
@@ -266,7 +266,7 @@ refusal message says both.
   and returns, rather than waiting in line. No ticket is left on disk to cancel.
 - **No eviction.** Nothing in tt-station releases another tenant's lease or kills their process.
   `--force` gets the owner *past* a lease; it does not take one away, and it never writes to
-  another tenant's state. (That is also why a forced `tt run` serves unleased rather than
+  another tenant's state. (That is also why a forced `tt-station run` serves unleased rather than
   re-acquiring: the alternative would leave `gozer status` describing chips as ours while the
   neighbour's container still drove them.)
 - **No leasing on the `dstack` backend.** The stub runs nothing and owns no command seam, so it

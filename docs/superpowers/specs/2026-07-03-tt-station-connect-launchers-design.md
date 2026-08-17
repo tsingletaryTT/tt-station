@@ -3,7 +3,7 @@
 **Date:** 2026-07-03
 **Status:** approved (brainstorming), pending implementation plan
 **Depends on:** the TTStation menu-bar app (`macos/TTStation/`) and its live `Endpoint`
-(`base_url`, `model`, `requires_key`) obtained via `tt endpoint`/`tt run`.
+(`base_url`, `model`, `requires_key`) obtained via `tt-station endpoint`/`tt-station run`.
 
 ## Goal
 
@@ -15,7 +15,7 @@ OpenAI-compatible `/v1`.** Two launchers ship today:
 
 The app already holds the one artifact both need — the running model's `base_url` — so each
 launcher just hands that to a *local* Mac tool and launches it. The box conversation stays in
-`tt` (veneer preserved); the launchers only orchestrate local apps.
+`tt-station` (veneer preserved); the launchers only orchestrate local apps.
 
 ### Decisions (from brainstorming)
 - Open WebUI runs **locally on this Mac via `uvx`** (no Docker; `uv` is present), pointed at the

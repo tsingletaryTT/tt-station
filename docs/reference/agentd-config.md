@@ -15,7 +15,7 @@ always has (built-in defaults).
 
 Default path: `$TT_CONFIG_DIR/agentd.toml` if `TT_CONFIG_DIR` is set in the
 environment, else `$HOME/.config/tt-station/agentd.toml` — the same
-`TT_CONFIG_DIR` convention the `tt` CLI already uses.
+`TT_CONFIG_DIR` convention the `tt-station` CLI already uses.
 
 Override with `--config <PATH>`:
 
@@ -189,7 +189,7 @@ without standing up the daemon:
 tt-station-agentd --config ~/.config/tt-station/agentd.toml --profile stable --print-config
 ```
 
-## `GET /config` and `tt config`
+## `GET /config` and `tt-station config`
 
 `GET /config` is **unauthed** (like `/status`, `/models`, `/serving`) and
 returns the same redacted summary as `--print-config`, reflecting whatever
@@ -217,14 +217,14 @@ token-store field by construction** — there is nothing for the route to
 redact at request time; secrets never make it into the struct in the first
 place.
 
-The `tt` CLI exposes the same data:
+The `tt-station` CLI exposes the same data:
 
 ```
-tt config --host <host:port>            # human-readable: active profile, available, backend, serving host:port
-tt config --host <host:port> --json     # pretty-printed ConfigSummary
+tt-station config --host <host:port>            # human-readable: active profile, available, backend, serving host:port
+tt-station config --host <host:port> --json     # pretty-printed ConfigSummary
 ```
 
-`tt config` is unauthed, same as `tt status`/`tt models`/`tt serving` — it
+`tt-station config` is unauthed, same as `tt-station status`/`tt-station models`/`tt-station serving` — it
 works against a box you've never paired with.
 
 The GTK box panel (`box-panel/tt-station-panel.py`) reads the profile list

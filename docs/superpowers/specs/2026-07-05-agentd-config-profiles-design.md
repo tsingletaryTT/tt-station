@@ -51,7 +51,7 @@ two build on how the box is configured.
 
 **Format:** TOML (adds a `toml` crate dep; `serde` is already in the workspace).
 **Location:** `~/.config/tt-station/agentd.toml`, overridable with `--config <path>`.
-Respects `TT_CONFIG_DIR` if set (same convention the `tt` CLI already uses), i.e. the
+Respects `TT_CONFIG_DIR` if set (same convention the `tt-station` CLI already uses), i.e. the
 default is `$TT_CONFIG_DIR/agentd.toml` when that env is set, else
 `$HOME/.config/tt-station/agentd.toml`.
 
@@ -220,11 +220,11 @@ pub struct ConfigSummary {
 }
 ```
 
-### Modified: `crates/libttstation/src/agent_client.rs` + `crates/tt/…`
+### Modified: `crates/libttstation/src/agent_client.rs` + `crates/tt-station/…`
 
 - `get_config(host) -> Result<ConfigSummary>` free fn (unauthed GET, parallels
   `get_status`).
-- `tt config` subcommand (global `--json`), parallels `tt status` — prints active
+- `tt-station config` subcommand (global `--json`), parallels `tt-station status` — prints active
   profile, available profiles, and the serving summary.
 
 ### Modified: `box-panel/tt-station-panel.py`
@@ -241,8 +241,8 @@ pub struct ConfigSummary {
 - `docs/reference/agentd-config.md` — the config file reference (schema, precedence,
   profile selection, examples).
 - Ship `box-panel/agentd.example.toml` (or `docs/…`) as a copy-paste starting point.
-- Update `CLAUDE.md`, `box-panel/README.md`, and `macos/README.md`'s `tt --json`
-  contract table (add the `/config` + `tt config` rows).
+- Update `CLAUDE.md`, `box-panel/README.md`, and `macos/README.md`'s `tt-station --json`
+  contract table (add the `/config` + `tt-station config` rows).
 
 ## Error handling
 
@@ -279,7 +279,7 @@ only `[global]` and no profiles; malformed → Err.
 **Route test (`routes.rs`):** `GET /config` returns the expected `ConfigSummary` and
 **omits secrets** (assert no `hf_token`/token material in the serialized body).
 
-**CLI:** extend the mock-box e2e so `tt config --json` round-trips a `ConfigSummary`
+**CLI:** extend the mock-box e2e so `tt-station config --json` round-trips a `ConfigSummary`
 (add a `/config` handler to `mock-box`).
 
 ## Rollout / migration

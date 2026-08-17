@@ -13,9 +13,9 @@ Developer license.
 "The macOS side" is **two binaries that must travel together**:
 
 1. `TTStation.app` — the SwiftUI control-room app.
-2. `tt` — the Rust CLI the app shells out to for *all* control
-   (`TTBinaryLocator` probes `~/.local/bin/tt`, `/opt/homebrew/bin/tt`,
-   `/usr/local/bin/tt`; the app only does read-only telemetry I/O itself).
+2. `tt-station` — the Rust CLI the app shells out to for *all* control
+   (`TTBinaryLocator` probes `~/.local/bin/tt-station`, `/opt/homebrew/bin/tt-station`,
+   `/usr/local/bin/tt-station`; the app only does read-only telemetry I/O itself).
 
 Today `macos/install.sh` builds **both from source** — it needs the repo, the
 Swift/Xcode toolchain, and the Rust toolchain. That is fine for the developer,
@@ -34,7 +34,7 @@ as the clean future upgrade.
 | Distribution channel | **GitHub Release download** (drag-to-install DMG) |
 | Build automation | **Both** — a local `make-release.sh` is the source of truth; CI calls the same script |
 | Architectures | **Apple Silicon only (arm64)**; Intel/universal deferred |
-| CLI delivery | **Bundle `tt` inside the app**, symlink into `~/.local/bin` on first run, **detect and work around a collision** with a foreign `tt` |
+| CLI delivery | **Bundle `tt-station` inside the app**, symlink into `~/.local/bin` on first run, **detect and refuse to clobber** anything already at that path |
 
 **Out of v1 (deferred, non-blocking):**
 - Bundling the ~80 MB `tt-vscode-toolkit.vsix` into the app. The Workbench's
@@ -51,9 +51,9 @@ Six components. Each is independently understandable and testable.
 
 ### 1. Self-contained DMG (arm64)
 
-- `tt` is embedded **inside** the app bundle at
-  `TTStation.app/Contents/Resources/bin/tt`. Consequences:
-  - The app always resolves a working `tt` even with an empty `$PATH`.
+- `tt-station` is embedded **inside** the app bundle at
+  `TTStation.app/Contents/Resources/bin/tt-station`. Consequences:
+  - The app always resolves a working `tt-station` even with an empty `$PATH`.
   - The CLI is **version-locked** to the app it shipped in — no drift.
 - DMG contents:
   - `TTStation.app`
@@ -68,16 +68,16 @@ Six components. Each is independently understandable and testable.
 
 ### 2. App-side Swift changes (small, TDD-able)
 
-**2a. Bundled-`tt` resolution.** `TTBinaryLocator.standard()` gains the app
+**2a. Bundled-`tt-station` resolution.** `TTBinaryLocator.standard()` gains the app
 bundle's resource path as a candidate:
 
 ```
-Bundle.main.resourceURL?.appendingPathComponent("bin/tt").path
+Bundle.main.resourceURL?.appendingPathComponent("bin/tt-station").path
 ```
 
 Placement in the candidate list: the **bundled path is the reliable fallback**,
 tried *after* the user override (`tt.binaryPath` UserDefault) and the three
-PATH locations. Rationale: if the user has intentionally installed a `tt`
+PATH locations. Rationale: if the user has intentionally installed a `tt-station`
 (including our own symlink) on PATH, honor it; only fall back to the in-bundle
 copy when nothing else is found. This keeps the app working out-of-the-box on a
 fresh machine while respecting an explicit user install.
@@ -88,22 +88,22 @@ path; with a PATH candidate present, it wins over the bundled path.
 
 **2b. First-run CLI symlink with collision handling.** Guarded by a
 `hasOfferedCLIInstall` (Bool) UserDefault so it runs once. On first launch, if
-the app decides `tt` is not yet conveniently on the user's shell PATH, it offers
-to symlink the bundled `tt` into `~/.local/bin/tt`. The **collision decision**
+the app decides `tt-station` is not yet conveniently on the user's shell PATH, it offers
+to symlink the bundled `tt-station` into `~/.local/bin/tt-station`. The **collision decision**
 is pure logic and lives in `TTStationKit` so it is unit-tested without touching
 the filesystem in tests (inject a small filesystem probe):
 
-Given the intended link path `~/.local/bin/tt`:
+Given the intended link path `~/.local/bin/tt-station`:
 
-| Existing state at `~/.local/bin/tt` | Action |
+| Existing state at `~/.local/bin/tt-station` | Action |
 |---|---|
-| Nothing there | Create the symlink → bundled `tt`. |
-| Symlink whose target contains `/TTStation.app/` (i.e. **ours**) | Repoint it to *this* app's bundled `tt` (idempotent update). |
-| A real file, or a symlink pointing elsewhere (**foreign `tt`**) | **Do not overwrite.** Leave it intact. Inform the user; offer to install ours as **`tt-station`** in the same dir instead, and surface the in-bundle path. |
+| Nothing there | Create the symlink → bundled `tt-station`. |
+| Symlink whose target contains `/TTStation.app/` (i.e. **ours**) | Repoint it to *this* app's bundled `tt-station` (idempotent update). |
+| A real file, or a symlink pointing elsewhere (**foreign**) | **Do not overwrite.** Leave it intact. Inform the user and surface the in-bundle path so they can link it themselves. (As originally specified this branch offered **`tt-station`** as an alternative name, because the link path was then `~/.local/bin/tt` and a foreign `tt` was most likely Tenstorrent's official CLI. The 2026-08-17 rename made `tt-station` the only name we claim, leaving no fallback name to offer.) |
 
 "Ours" is detected by the **symlink target path containing `/TTStation.app/`** —
 cheap, no process launch, no ambiguity. (We deliberately do *not* shell out to
-`tt --version` to classify, which would be slower and could execute a foreign
+`tt-station --version` to classify, which would be slower and could execute a foreign
 binary.)
 
 Because the app already works via the in-bundle copy (§2a), **every branch above
@@ -123,13 +123,13 @@ before symlinking (mirrors how the CLI install already expects that dir).
 Ordered steps (all idempotent, `set -euo pipefail`):
 
 1. Resolve version from `AppShell/project.yml`'s `MARKETING_VERSION`.
-2. `cargo build --release -p tt` for `aarch64-apple-darwin`; capture the binary.
+2. `cargo build --release -p tt-station` for `aarch64-apple-darwin`; capture the binary.
 3. `xcodegen generate` + `xcodebuild ... -configuration Release build`
    (reuse the existing invocation from `install.sh`).
-4. Copy the built `TTStation.app` into a clean staging dir; embed `tt` at
-   `Contents/Resources/bin/tt` and `chmod +x`.
+4. Copy the built `TTStation.app` into a clean staging dir; embed `tt-station` at
+   `Contents/Resources/bin/tt-station` and `chmod +x`.
 5. `codesign --force --deep --sign - "TTStation.app"` — ad-hoc sign the **whole
-   bundle after embedding** so the embedded `tt` is covered by the signature
+   bundle after embedding** so the embedded `tt-station` is covered by the signature
    (an unsigned nested executable would break the seal).
 6. Build the DMG staging folder (app + `/Applications` alias + `FIRST-RUN.txt`
    + optional `.command`); `hdiutil create -volname "TTStation <ver>"
@@ -193,15 +193,15 @@ Apple Developer credentials.
 
 ```
 release build (make-release.sh / CI)
-  cargo build tt (arm64) ─┐
-  xcodebuild app  ────────┤→ embed tt in .app → ad-hoc codesign → hdiutil → DMG → GitHub Release
+  cargo build tt-station (arm64) ─┐
+  xcodebuild app  ────────┤→ embed tt-station in .app → ad-hoc codesign → hdiutil → DMG → GitHub Release
                                                                                    │
 user
   download DMG → open → drag TTStation.app to /Applications
   xattr -dr com.apple.quarantine /Applications/TTStation.app   (FIRST-RUN.txt)
   launch app
-     ├─ TTBinaryLocator finds tt: override? PATH? → else Contents/Resources/bin/tt  (always works)
-     └─ first run: offer ~/.local/bin/tt symlink
+     ├─ TTBinaryLocator finds tt-station: override? PATH? → else Contents/Resources/bin/tt-station  (always works)
+     └─ first run: offer ~/.local/bin/tt-station symlink
             ├─ empty  → create symlink
             ├─ ours   → repoint
             └─ foreign→ keep theirs; offer `tt-station`; app still works via bundle
@@ -218,7 +218,7 @@ user
   symlink creation, the first-run alert, and the `~/.local/bin` mkdir.
 - **Manual release smoke:** run `make-release.sh` on this Mac → mount the DMG →
   drag-install on a *second* account/machine (or after clearing UserDefaults)
-  → confirm the Gatekeeper one-liner works, the app launches, `tt` resolves
+  → confirm the Gatekeeper one-liner works, the app launches, `tt-station` resolves
   from the bundle, and the first-run prompt behaves in all three collision
   states.
 

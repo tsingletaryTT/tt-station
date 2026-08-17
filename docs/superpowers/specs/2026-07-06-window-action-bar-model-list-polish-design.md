@@ -114,7 +114,7 @@ serving/endpoint display.
 ## Data flow
 
 ```
-classify (Rust, TIS-focused) → tt catalog --json → BoxCatalog.runsHere (TIS only)
+classify (Rust, TIS-focused) → tt-station catalog --json → BoxCatalog.runsHere (TIS only)
                                                   → .experimental (+ demoted tt-forge/metal)
 BoxViewModel {selectedModel, endpoint, status, starting, cancelling}
    → RunStopBar (pinned, always visible)   ← single serving/endpoint owner
@@ -130,7 +130,7 @@ BoxViewModel {selectedModel, endpoint, status, starting, cancelling}
 - **Swift:** `RunStopBar` state logic is drawn from `BoxViewModel` (already unit-tested:
   run/stop/cancel/canStopOrCancel) — the bar is owner-verified (builds, renders). The browser
   changes are visual (owner-verified via xcodebuild). No new pure logic beyond what exists.
-- **No-hardware:** mock-box `/models` + a fixture catalog with mixed software → `tt catalog`
+- **No-hardware:** mock-box `/models` + a fixture catalog with mixed software → `tt-station catalog`
   shows the TIS-focused runs_here; click-through the window shows the pinned bar.
 
 ## Versioning & docs

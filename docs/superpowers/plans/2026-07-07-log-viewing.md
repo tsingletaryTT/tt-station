@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Surface the tt-inference-server serving logs (where remote model-start failures actually live) to the operator and the Mac, via an agent `GET /logs` route (+ WS follow), a `tt logs` CLI command, a `tt console` log pane, and journal breadcrumbs on serve.
+**Goal:** Surface the tt-inference-server serving logs (where remote model-start failures actually live) to the operator and the Mac, via an agent `GET /logs` route (+ WS follow), a `tt-station logs` CLI command, a `tt-station console` log pane, and journal breadcrumbs on serve.
 
 **Architecture:** Both log sources are already **files** under `<repo>/workflow_logs/` — run.py streams the container's stdout/stderr to `docker_server/vllm_*.log` (persists after container death) and writes its own `run_logs/*.log`. So the whole feature is "resolve newest `*.log` in a dir, tail last N lines, follow by byte offset" — no `docker logs` subprocess. A new pure `logs` module in the agent holds the file logic; a new unauthed `/logs` route + `/logs/stream` WS expose it (mirroring `/serving` and `/telemetry`); the CLI and console consume the route; `runpy.rs` parses run.py's captured stdout for journal breadcrumbs.
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **CLI tool names stay configurable** — never hardcode `tt` / `tt-station-agentd` / service names in more than one place; reuse `crates/tt/src/console/names.rs::ToolNames` where a name is needed. (See the `configurable-cli-tool-names` memory.)
+- **CLI tool names stay configurable** — never hardcode `tt-station` / `tt-station-agentd` / service names in more than one place; reuse `crates/tt-station/src/console/names.rs::ToolNames` where a name is needed. (See the `configurable-cli-tool-names` memory.)
 - **Reads are unauthed** — `/logs` and `/logs/stream` join the same unauthed group as `/telemetry`, `/serving`, `/status`, `/models`, `/config` (omit the `BearerAuth` extractor). Do NOT add auth to reads.
 - **No right-side borders** in any TUI panel — `Borders::LEFT | Borders::BOTTOM` only (project rule, enforced in `ui.rs`).
 - **Agent logging** is `eprintln!("tt-station-agentd: ...")` to stderr (→ journald). No `log`/`tracing` crate.
@@ -754,13 +754,13 @@ git commit -m "feat(agentd): GET /logs/stream WebSocket follow (replay tail + of
 
 ---
 
-### Task 4: `tt logs` CLI command (+ mock-box `/logs`)
+### Task 4: `tt-station logs` CLI command (+ mock-box `/logs`)
 
 **Files:**
-- Modify: `crates/tt/src/main.rs` (`Command::Logs` variant, dispatch arm, `cmd_logs`, `print_logs`)
+- Modify: `crates/tt-station/src/main.rs` (`Command::Logs` variant, dispatch arm, `cmd_logs`, `print_logs`)
 - Modify: `crates/libttstation/src/agent_client.rs` (add `get_logs(base, source, tail) -> LogsInfo` unauthed helper; add `LogsInfo` model — locate the existing `get_status`/`get_serving` helpers and mirror)
 - Modify: `crates/mock-box/src/...` (serve `GET /logs` returning canned lines, so the CLI e2e can exercise it)
-- Test: `crates/tt/tests/e2e_mock.rs` (extend), inline unit test for `print_logs`
+- Test: `crates/tt-station/tests/e2e_mock.rs` (extend), inline unit test for `print_logs`
 
 **Interfaces:**
 - Consumes: `/logs` route (Task 2). CLI patterns: `Cli`/`Command` (`main.rs:67-187`), dispatch `match &cli.command` (`main.rs:307-420`), `cmd_status` unauthed GET (`main.rs:683-686`), `run_async` (`main.rs:426-430`), `--json` global.
@@ -825,7 +825,7 @@ async fn cmd_logs(host: &str, source: &str, tail: usize) -> Result<LogsInfo> {
 
 `print_logs`: with `--json`, print `serde_json::to_string(&logs)`; else print `origin` as a header line (or "(no log yet)") then each line.
 
-`cmd_logs_follow`: connect `ws://{host}/logs/stream?source={source}&tail={tail}` with `tokio_tungstenite::connect_async`, print each text frame until the stream ends / Ctrl-C. Add `tokio-tungstenite` + `futures-util` to `crates/tt/Cargo.toml` deps (they're already dev-deps in agentd; confirm/add to `tt`).
+`cmd_logs_follow`: connect `ws://{host}/logs/stream?source={source}&tail={tail}` with `tokio_tungstenite::connect_async`, print each text frame until the stream ends / Ctrl-C. Add `tokio-tungstenite` + `futures-util` to `crates/tt-station/Cargo.toml` deps (they're already dev-deps in agentd; confirm/add to `tt-station`).
 
 - [ ] **Step 3: Add `/logs` to mock-box**
 
@@ -833,10 +833,10 @@ In mock-box's request router, handle `GET /logs` → return `{"source":"containe
 
 - [ ] **Step 4: Write the failing e2e + unit tests**
 
-Extend `crates/tt/tests/e2e_mock.rs` (mirror the discover/models pattern, `e2e_mock.rs:105-124`):
+Extend `crates/tt-station/tests/e2e_mock.rs` (mirror the discover/models pattern, `e2e_mock.rs:105-124`):
 
 ```rust
-    let logs_stdout = AssertCommand::cargo_bin("tt").unwrap()
+    let logs_stdout = AssertCommand::cargo_bin("tt-station").unwrap()
         .env("TT_CONFIG_DIR", &config_dir.0)
         .args(["--json", "logs", "--host", &host, "--source", "container", "--tail", "50"])
         .assert().success().get_output().stdout.clone();
@@ -849,7 +849,7 @@ Inline unit test for `print_logs` formatting (JSON branch emits valid JSON; text
 
 - [ ] **Step 5: Run tests, verify fail then pass**
 
-Run: `cargo test -p tt print_logs` then `cargo test -p tt --test e2e_mock -- --ignored`
+Run: `cargo test -p tt-station print_logs` then `cargo test -p tt-station --test e2e_mock -- --ignored`
 Expected: unit fails→passes; e2e (with the new `/logs` mock) passes.
 
 - [ ] **Step 6: fmt + commit**
@@ -857,8 +857,8 @@ Expected: unit fails→passes; e2e (with the new `/logs` mock) passes.
 Run: `cargo fmt`
 
 ```bash
-git add crates/tt/src/main.rs crates/libttstation/src/agent_client.rs crates/mock-box crates/tt/tests/e2e_mock.rs crates/tt/Cargo.toml
-git commit -m "feat(tt): tt logs [--source --tail --follow] over /logs (+ mock-box /logs)"
+git add crates/tt-station/src/main.rs crates/libttstation/src/agent_client.rs crates/mock-box crates/tt-station/tests/e2e_mock.rs crates/tt-station/Cargo.toml
+git commit -m "feat(tt-station): tt-station logs [--source --tail --follow] over /logs (+ mock-box /logs)"
 ```
 
 ---
@@ -978,12 +978,12 @@ git commit -m "feat(agentd): journal breadcrumbs (container id + log paths) and 
 
 ---
 
-### Task 6: `tt console` log pane (Part B)
+### Task 6: `tt-station console` log pane (Part B)
 
 **Files:**
-- Modify: the definition of `BoxLifecycleSnapshot` (grep for `struct BoxLifecycleSnapshot` — likely `crates/tt/src/console/state.rs` or `crates/libttstation`) — add `logs: Vec<String>` (default empty; `#[serde(default)]`)
-- Modify: `crates/tt/src/console/env.rs` (`collect_snapshot` fetches `/logs?source=container&tail=<N>` via `env.http_get`, parses `LogsInfo`, fills `logs`; degrade to `vec![]` on any failure)
-- Modify: `crates/tt/src/console/ui.rs` (add `log_lines(snap) -> Vec<String>` builder, a `Constraint`, and a `render_panel(frame, chunks[N], "logs", &log_lines(snap))` call in `draw`)
+- Modify: the definition of `BoxLifecycleSnapshot` (grep for `struct BoxLifecycleSnapshot` — likely `crates/tt-station/src/console/state.rs` or `crates/libttstation`) — add `logs: Vec<String>` (default empty; `#[serde(default)]`)
+- Modify: `crates/tt-station/src/console/env.rs` (`collect_snapshot` fetches `/logs?source=container&tail=<N>` via `env.http_get`, parses `LogsInfo`, fills `logs`; degrade to `vec![]` on any failure)
+- Modify: `crates/tt-station/src/console/ui.rs` (add `log_lines(snap) -> Vec<String>` builder, a `Constraint`, and a `render_panel(frame, chunks[N], "logs", &log_lines(snap))` call in `draw`)
 - Modify: `docs/reference/tt-console.md` (document the new `logs` field in the `--snapshot` JSON contract + the log pane)
 - Test: inline in `ui.rs` (`log_lines` pure test + the `TestBackend` render test already covers the new pane) and `env.rs` (`FakeEnv` canned `/logs`)
 
@@ -993,11 +993,11 @@ git commit -m "feat(agentd): journal breadcrumbs (container id + log paths) and 
 
 - [ ] **Step 1: Add `logs` field + failing snapshot test**
 
-Add `#[serde(default)] pub logs: Vec<String>,` to `BoxLifecycleSnapshot`; set `logs: vec![]` in every constructor/test fixture (grep for the struct literal). Add to `crates/tt/tests/console_snapshot.rs` (or the inline env test) an assertion that a `FakeEnv` returning a canned `/logs` body populates `snap.logs`.
+Add `#[serde(default)] pub logs: Vec<String>,` to `BoxLifecycleSnapshot`; set `logs: vec![]` in every constructor/test fixture (grep for the struct literal). Add to `crates/tt-station/tests/console_snapshot.rs` (or the inline env test) an assertion that a `FakeEnv` returning a canned `/logs` body populates `snap.logs`.
 
 - [ ] **Step 2: Run test, verify it fails**
 
-Run: `cargo test -p tt console`
+Run: `cargo test -p tt-station console`
 Expected: FAIL (field missing / not populated).
 
 - [ ] **Step 3: Populate `logs` in `collect_snapshot`**
@@ -1042,13 +1042,13 @@ In `docs/reference/tt-console.md`, add the `logs: string[]` field to the `BoxLif
 
 - [ ] **Step 6: Run tests, verify pass; fmt; commit**
 
-Run: `cargo test -p tt console && cargo fmt`
+Run: `cargo test -p tt-station console && cargo fmt`
 Expected: green (incl. the `TestBackend` render test now drawing the log pane).
 
 ```bash
-git add crates/tt/src/console crates/tt/tests/console_snapshot.rs docs/reference/tt-console.md
+git add crates/tt-station/src/console crates/tt-station/tests/console_snapshot.rs docs/reference/tt-console.md
 # also the BoxLifecycleSnapshot definition file if it lives elsewhere
-git commit -m "feat(tt console): serving-log pane sourced from /logs; logs[] added to snapshot"
+git commit -m "feat(tt-station console): serving-log pane sourced from /logs; logs[] added to snapshot"
 ```
 
 ---
@@ -1056,7 +1056,7 @@ git commit -m "feat(tt console): serving-log pane sourced from /logs; logs[] add
 ### Task 7: Docs + agent route reference + CLAUDE.md
 
 **Files:**
-- Create: `docs/reference/logs.md` (the `/logs` + `/logs/stream` contract, `tt logs`, the console pane, and the "why" — the container-log visibility gap)
+- Create: `docs/reference/logs.md` (the `/logs` + `/logs/stream` contract, `tt-station logs`, the console pane, and the "why" — the container-log visibility gap)
 - Modify: `docs/reference/agentd-config.md` or the agent route list doc (add `/logs`, `/logs/stream` to the unauthed-reads list)
 - Modify: `CLAUDE.md` (add log-viewing to the shipped-state map under Agent + CLI)
 - Modify: `macos/README.md` (a short "View logs" note pointing at the fast-follow brief — option E)
@@ -1065,7 +1065,7 @@ git commit -m "feat(tt console): serving-log pane sourced from /logs; logs[] add
 
 - [ ] **Step 1: Write `docs/reference/logs.md`**
 
-Cover: the two sources (container = `docker_server/*.log`, run = `run_logs/*.log`) and why container is where failures live; the routes (`GET /logs?source=&tail=`, `GET /logs/stream?...`, unauthed, `LogsResponse` shape, `409` when non-runpy); `tt logs [--source --tail --follow]`; the console pane; redaction note; and the fast-follow list (external-container `docker logs` fallback, structured serve-phase in `/status`, macOS "View logs" button, console manual scroll).
+Cover: the two sources (container = `docker_server/*.log`, run = `run_logs/*.log`) and why container is where failures live; the routes (`GET /logs?source=&tail=`, `GET /logs/stream?...`, unauthed, `LogsResponse` shape, `409` when non-runpy); `tt-station logs [--source --tail --follow]`; the console pane; redaction note; and the fast-follow list (external-container `docker logs` fallback, structured serve-phase in `/status`, macOS "View logs" button, console manual scroll).
 
 - [ ] **Step 2: Update the route list + CLAUDE.md + macOS README**
 
@@ -1075,14 +1075,14 @@ Add `/logs` + `/logs/stream` to the agent's documented unauthed routes; add a on
 
 ```bash
 git add docs/reference/logs.md docs/reference/agentd-config.md CLAUDE.md macos/README.md
-git commit -m "docs: log-viewing (/logs, tt logs, console pane) reference + state map"
+git commit -m "docs: log-viewing (/logs, tt-station logs, console pane) reference + state map"
 ```
 
 ---
 
 ## Self-Review
 
-**Spec coverage:** A (`/logs` plain) → Task 2; A (WS follow) → Task 3; B (`tt logs`) → Task 4; B (console pane) → Task 6; C (journal breadcrumbs) → Task 5; redaction → Task 1 (`redact_line`) used in Tasks 2/3/5; docs → Task 7. All spec sections covered.
+**Spec coverage:** A (`/logs` plain) → Task 2; A (WS follow) → Task 3; B (`tt-station logs`) → Task 4; B (console pane) → Task 6; C (journal breadcrumbs) → Task 5; redaction → Task 1 (`redact_line`) used in Tasks 2/3/5; docs → Task 7. All spec sections covered.
 
 **Placeholder scan:** every code step carries real code; test steps carry real assertions; commands are concrete. The one soft spot — the exact file/symbol paths for `DstackBackend` import (Task 2/3 tests), the `BoxLifecycleSnapshot` definition location (Task 6), and the `main.rs` `AppState`-construction site (Task 2 Step 6) — are called out explicitly as "grep/locate" because they weren't pinned in the interface map; the implementer resolves them from the named neighbors.
 

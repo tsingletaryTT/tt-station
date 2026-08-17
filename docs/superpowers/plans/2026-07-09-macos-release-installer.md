@@ -2,27 +2,27 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a prebuilt, drag-to-install macOS DMG on a GitHub Release so people without the repo, Xcode, or Rust can install TTStation, with the `tt` CLI bundled inside the app.
+**Goal:** Ship a prebuilt, drag-to-install macOS DMG on a GitHub Release so people without the repo, Xcode, or Rust can install TTStation, with the `tt-station` CLI bundled inside the app.
 
-**Architecture:** The `tt` Rust CLI is embedded inside `TTStation.app/Contents/Resources/bin/tt` so the app always has a version-locked CLI. The app's binary locator falls back to that bundled copy, and a first-run prompt symlinks it into `~/.local/bin` with collision handling that never clobbers a foreign `tt`. A local `macos/make-release.sh` builds and packages the arm64 DMG (ad-hoc signed, no notarization); a `v*`-tag GitHub Actions workflow calls the same script.
+**Architecture:** The `tt-station` Rust CLI is embedded inside `TTStation.app/Contents/Resources/bin/tt-station` so the app always has a version-locked CLI. The app's binary locator falls back to that bundled copy, and a first-run prompt symlinks it into `~/.local/bin` with collision handling that never clobbers a foreign `tt-station`. A local `macos/make-release.sh` builds and packages the arm64 DMG (ad-hoc signed, no notarization); a `v*`-tag GitHub Actions workflow calls the same script.
 
-**Tech Stack:** Swift 5.9 / SwiftUI (`TTStationKit` package + `AppShell` app), XCTest, Rust (cargo, `tt` crate), bash, `hdiutil`, `xcodegen`, `xcodebuild`, GitHub Actions (`macos-14`), `gh` CLI.
+**Tech Stack:** Swift 5.9 / SwiftUI (`TTStationKit` package + `AppShell` app), XCTest, Rust (cargo, `tt-station` crate), bash, `hdiutil`, `xcodegen`, `xcodebuild`, GitHub Actions (`macos-14`), `gh` CLI.
 
 ## Global Constraints
 
 - Target: **macOS 14.0**, **arm64 only** (`aarch64-apple-darwin`). No universal/Intel build.
 - **No Apple Developer license** — ad-hoc signing only (`codesign --sign -`), no notarization. Gatekeeper friction is expected; the documented remedy is `xattr -dr com.apple.quarantine /Applications/TTStation.app`.
 - Swift logic under test lives in **`TTStationKit`** (`macos/TTStation/Sources/TTStationKit/`); tests in `macos/TTStation/Tests/TTStationKitTests/`. App-shell wiring (`AppShell/Sources/`) is owner-verified, not unit-tested (matches the existing `LaunchController` convention).
-- `tt` is embedded at exactly `Contents/Resources/bin/tt` and referenced by that relative path everywhere.
+- `tt-station` is embedded at exactly `Contents/Resources/bin/tt-station` and referenced by that relative path everywhere.
 - Version is the single source of truth in `macos/TTStation/AppShell/project.yml` → `MARKETING_VERSION` (currently `0.8.2`); flows into `Info.plist` via `$(MARKETING_VERSION)`. Bump it as part of this work (Task 7).
 - Follow existing test style: `XCTest`, `@testable import TTStationKit`, dependency injection via closures/protocols (see `BinaryLocatorTests.swift`, `InMemoryStore`).
 - All Swift-side unit tests run with: `cd macos/TTStation && swift test`.
 
 ---
 
-### Task 1: Bundled `tt` in the locator candidate list
+### Task 1: Bundled `tt-station` in the locator candidate list
 
-Add the in-bundle `tt` as the last-resort candidate so the app resolves a working CLI even with an empty `$PATH`, while any real PATH install (or the `tt.binaryPath` override) still wins.
+Add the in-bundle `tt-station` as the last-resort candidate so the app resolves a working CLI even with an empty `$PATH`, while any real PATH install (or the `tt.binaryPath` override) still wins.
 
 **Files:**
 - Modify: `macos/TTStation/Sources/TTStationKit/BinaryLocator.swift`
@@ -40,21 +40,21 @@ Add to `BinaryLocatorTests.swift`:
 
 ```swift
 func testStandardCandidatesAppendsBundledPathLast() {
-    let c = TTBinaryLocator.standardCandidates(home: "/Users/x", bundledPath: "/App/TTStation.app/Contents/Resources/bin/tt")
+    let c = TTBinaryLocator.standardCandidates(home: "/Users/x", bundledPath: "/App/TTStation.app/Contents/Resources/bin/tt-station")
     XCTAssertEqual(c, [
-        "/Users/x/.local/bin/tt",
-        "/opt/homebrew/bin/tt",
-        "/usr/local/bin/tt",
-        "/App/TTStation.app/Contents/Resources/bin/tt",
+        "/Users/x/.local/bin/tt-station",
+        "/opt/homebrew/bin/tt-station",
+        "/usr/local/bin/tt-station",
+        "/App/TTStation.app/Contents/Resources/bin/tt-station",
     ])
 }
 
 func testStandardCandidatesOmitsBundledPathWhenNil() {
     let c = TTBinaryLocator.standardCandidates(home: "/Users/x", bundledPath: nil)
     XCTAssertEqual(c, [
-        "/Users/x/.local/bin/tt",
-        "/opt/homebrew/bin/tt",
-        "/usr/local/bin/tt",
+        "/Users/x/.local/bin/tt-station",
+        "/opt/homebrew/bin/tt-station",
+        "/usr/local/bin/tt-station",
     ])
 }
 
@@ -64,8 +64,8 @@ func testBundledPathUsedOnlyWhenPATHCandidatesAbsent() throws {
     let onlyBundled = TTBinaryLocator(override: nil, candidates: candidates) { $0 == "/App/tt" }
     XCTAssertEqual(try onlyBundled.locate(), "/App/tt")
     // A PATH candidate exists → it wins over the bundled path.
-    let pathWins = TTBinaryLocator(override: nil, candidates: candidates) { $0 == "/opt/homebrew/bin/tt" }
-    XCTAssertEqual(try pathWins.locate(), "/opt/homebrew/bin/tt")
+    let pathWins = TTBinaryLocator(override: nil, candidates: candidates) { $0 == "/opt/homebrew/bin/tt-station" }
+    XCTAssertEqual(try pathWins.locate(), "/opt/homebrew/bin/tt-station")
 }
 ```
 
@@ -79,21 +79,21 @@ Expected: FAIL — `standardCandidates` is not a member of `TTBinaryLocator`.
 In `BinaryLocator.swift`, replace the `standard(...)` function with:
 
 ```swift
-    /// The ordered `tt` search path: the three shell-install locations, then
+    /// The ordered `tt-station` search path: the three shell-install locations, then
     /// the in-bundle copy as a last-resort fallback. Pure so it is unit-tested
     /// without touching `Bundle.main` or the filesystem.
     public static func standardCandidates(home: String, bundledPath: String?) -> [String] {
-        ["\(home)/.local/bin/tt", "/opt/homebrew/bin/tt", "/usr/local/bin/tt"]
+        ["\(home)/.local/bin/tt-station", "/opt/homebrew/bin/tt-station", "/usr/local/bin/tt-station"]
             + [bundledPath].compactMap { $0 }
     }
 
     /// Real-world locator: user override (UserDefaults key `tt.binaryPath`),
     /// then the standard install locations, then the copy embedded in the app
-    /// bundle at `Contents/Resources/bin/tt` (so the app works with an empty
+    /// bundle at `Contents/Resources/bin/tt-station` (so the app works with an empty
     /// `$PATH` on a fresh machine).
     public static func standard(
         override: String? = UserDefaults.standard.string(forKey: "tt.binaryPath"),
-        bundledPath: String? = Bundle.main.resourceURL?.appendingPathComponent("bin/tt").path
+        bundledPath: String? = Bundle.main.resourceURL?.appendingPathComponent("bin/tt-station").path
     ) -> TTBinaryLocator {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return TTBinaryLocator(
@@ -113,14 +113,19 @@ Expected: PASS (all cases, including the pre-existing four).
 
 ```bash
 git add macos/TTStation/Sources/TTStationKit/BinaryLocator.swift macos/TTStation/Tests/TTStationKitTests/BinaryLocatorTests.swift
-git commit -m "feat(macos): locator falls back to bundled tt in app resources"
+git commit -m "feat(macos): locator falls back to bundled tt-station in app resources"
 ```
 
 ---
 
 ### Task 2: CLI-symlink collision planner (pure logic)
 
-The decision that first-run makes: given the state of `~/.local/bin/tt`, decide whether to create the symlink, repoint our own stale symlink, or leave a foreign `tt` untouched and offer `tt-station` instead.
+The decision that first-run makes: given the state of `~/.local/bin/tt-station`, decide whether to create the symlink, repoint our own stale symlink, or leave a foreign file at that path untouched and report it.
+
+(Historical note: as originally built, the link path was `~/.local/bin/tt` and the foreign
+branch offered `tt-station` as an alternative name, because a foreign `tt` was most likely
+Tenstorrent's official CLI. The 2026-08-17 rename made `tt-station` the only name this app
+claims, so the foreign branch lost its fallback and became purely defensive.)
 
 **Files:**
 - Create: `macos/TTStation/Sources/TTStationKit/CLILinkPlanner.swift`
@@ -142,8 +147,8 @@ import XCTest
 @testable import TTStationKit
 
 final class CLILinkPlannerTests: XCTestCase {
-    let link = "/Users/x/.local/bin/tt"
-    let bundled = "/App/TTStation.app/Contents/Resources/bin/tt"
+    let link = "/Users/x/.local/bin/tt-station"
+    let bundled = "/App/TTStation.app/Contents/Resources/bin/tt-station"
 
     func testAbsentCreatesSymlink() {
         let action = CLILinkPlanner.plan(linkPath: link, bundledTT: bundled, state: .absent)
@@ -154,7 +159,7 @@ final class CLILinkPlannerTests: XCTestCase {
         // A symlink pointing into some (possibly older) TTStation.app is ours.
         let action = CLILinkPlanner.plan(
             linkPath: link, bundledTT: bundled,
-            state: .symlink(target: "/Applications/TTStation.app/Contents/Resources/bin/tt"))
+            state: .symlink(target: "/Applications/TTStation.app/Contents/Resources/bin/tt-station"))
         XCTAssertEqual(action, .repoint(link: link, target: bundled))
     }
 
@@ -184,7 +189,7 @@ Create `CLILinkPlanner.swift`:
 ```swift
 import Foundation
 
-/// The observed state of the intended `~/.local/bin/tt` link path.
+/// The observed state of the intended `~/.local/bin/tt-station` link path.
 public enum CLILinkTarget: Equatable {
     case absent
     case symlink(target: String)
@@ -196,11 +201,11 @@ public enum CLILinkAction: Equatable {
     /// Nothing there — create the symlink.
     case create(link: String, target: String)
     /// A symlink we previously installed (points into a `*/TTStation.app/`) —
-    /// repoint it at this app's bundled `tt`.
+    /// repoint it at this app's bundled `tt-station`.
     case repoint(link: String, target: String)
-    /// A foreign `tt` (a real file, or a symlink elsewhere). Never overwrite
-    /// it; offer to install ours as `alternative` (a `tt-station` sibling).
-    case foreign(existing: String, alternative: String)
+    /// Something we did not install (a real file, or a symlink elsewhere).
+    /// Never overwrite it; report what is in the way.
+    case foreign(existing: String)
 }
 
 /// Pure decision for the first-run CLI symlink. No filesystem access — the
@@ -209,7 +214,6 @@ public enum CLILinkAction: Equatable {
 /// which is cheap and avoids executing a foreign binary to classify it.
 public enum CLILinkPlanner {
     public static func plan(linkPath: String, bundledTT: String, state: CLILinkTarget) -> CLILinkAction {
-        let alternative = (linkPath as NSString).deletingLastPathComponent + "/tt-station"
         switch state {
         case .absent:
             return .create(link: linkPath, target: bundledTT)
@@ -241,14 +245,14 @@ git commit -m "feat(macos): CLI-symlink collision planner (create/repoint/foreig
 
 ### Task 3: First-run CLI-install wiring (owner-verified)
 
-Wire the planner into the app shell: on first launch, probe `~/.local/bin/tt`, run the planner, apply the action (creating `~/.local/bin` if needed), and show a one-time prompt. Guarded by a `hasOfferedCLIInstall` UserDefault so it runs once. This is app-shell I/O — no unit test (matches `LaunchController`), verified by build + manual run.
+Wire the planner into the app shell: on first launch, probe `~/.local/bin/tt-station`, run the planner, apply the action (creating `~/.local/bin` if needed), and show a one-time prompt. Guarded by a `hasOfferedCLIInstall` UserDefault so it runs once. This is app-shell I/O — no unit test (matches `LaunchController`), verified by build + manual run.
 
 **Files:**
 - Create: `macos/TTStation/AppShell/Sources/CLIInstaller.swift`
 - Modify: `macos/TTStation/AppShell/Sources/TTStationApp.swift` (call the installer once at startup)
 
 **Interfaces:**
-- Consumes: `CLILinkPlanner.plan(linkPath:bundledTT:state:)`, `CLILinkTarget`, `CLILinkAction` (Task 2); `Bundle.main.resourceURL` for the bundled `tt` path (matches Task 1).
+- Consumes: `CLILinkPlanner.plan(linkPath:bundledTT:state:)`, `CLILinkTarget`, `CLILinkAction` (Task 2); `Bundle.main.resourceURL` for the bundled `tt-station` path (matches Task 1).
 - Produces: `enum CLIInstaller { static func runFirstRunIfNeeded(defaults: UserDefaults = .standard) }`.
 
 - [ ] **Step 1: Create the installer**
@@ -260,8 +264,8 @@ import AppKit
 import Foundation
 import TTStationKit
 
-/// First-run convenience: symlink the bundled `tt` into `~/.local/bin` so the
-/// user gets `tt` in their own terminal. The app itself never depends on this
+/// First-run convenience: symlink the bundled `tt-station` into `~/.local/bin` so the
+/// user gets `tt-station` in their own terminal. The app itself never depends on this
 /// — `TTBinaryLocator` already falls back to the in-bundle copy — so every
 /// branch here is best-effort and non-fatal.
 enum CLIInstaller {
@@ -271,11 +275,11 @@ enum CLIInstaller {
         guard !defaults.bool(forKey: offeredKey) else { return }
         defaults.set(true, forKey: offeredKey)
 
-        guard let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/tt").path,
+        guard let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/tt-station").path,
               FileManager.default.isExecutableFile(atPath: bundled) else { return }
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let linkPath = "\(home)/.local/bin/tt"
+        let linkPath = "\(home)/.local/bin/tt-station"
         let action = CLILinkPlanner.plan(linkPath: linkPath, bundledTT: bundled, state: probe(linkPath))
 
         switch action {
@@ -310,8 +314,8 @@ enum CLIInstaller {
 
     private static func offerInstall(link: String, target: String, replacing: Bool) {
         let alert = NSAlert()
-        alert.messageText = "Install the tt command-line tool?"
-        alert.informativeText = "TTStation can add `tt` to \(link) so you can use it in Terminal. The app works either way."
+        alert.messageText = "Install the tt-station command-line tool?"
+        alert.informativeText = "TTStation can add `tt-station` to \(link) so you can use it in Terminal. The app works either way."
         alert.addButton(withTitle: "Install")
         alert.addButton(withTitle: "Not Now")
         if alert.runModal() == .alertFirstButtonReturn {
@@ -319,15 +323,12 @@ enum CLIInstaller {
         }
     }
 
-    private static func offerForeign(existing: String, alternative: String, bundled: String) {
+    private static func reportForeign(existing: String, bundled: String) {
         let alert = NSAlert()
-        alert.messageText = "Another `tt` is already installed"
-        alert.informativeText = "Found an existing `tt` at \(existing). TTStation won't replace it. Install this version as `tt-station` instead?"
-        alert.addButton(withTitle: "Install as tt-station")
-        alert.addButton(withTitle: "Not Now")
-        if alert.runModal() == .alertFirstButtonReturn {
-            try? applyLink(link: alternative, target: bundled, replaceExisting: true)
-        }
+        alert.messageText = "Something else is already at `tt-station`"
+        alert.informativeText = "Found \(existing) where TTStation would install its `tt-station` command. TTStation won't replace it. The bundled copy is at \(bundled) if you want to link it yourself."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 }
 ```
@@ -361,20 +362,20 @@ Reset the guard and launch to see the prompt path (do once):
 ```bash
 defaults delete com.tenstorrent.ttstation hasOfferedCLIInstall 2>/dev/null || true
 ```
-Then run the built app; confirm the "Install the tt command-line tool?" prompt appears on first launch and `~/.local/bin/tt` is created on Install. Re-launch → no prompt.
+Then run the built app; confirm the "Install the tt-station command-line tool?" prompt appears on first launch and `~/.local/bin/tt-station` is created on Install. Re-launch → no prompt.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add macos/TTStation/AppShell/Sources/CLIInstaller.swift macos/TTStation/AppShell/Sources/TTStationApp.swift
-git commit -m "feat(macos): first-run offer to symlink bundled tt into ~/.local/bin"
+git commit -m "feat(macos): first-run offer to symlink bundled tt-station into ~/.local/bin"
 ```
 
 ---
 
 ### Task 4: `macos/make-release.sh` packaging script
 
-The local source of truth: build arm64 `tt` + the Release app, embed `tt`, ad-hoc sign, and produce `dist/TTStation-<ver>-arm64.dmg`. `--publish` uploads to a GitHub Release.
+The local source of truth: build arm64 `tt-station` + the Release app, embed `tt-station`, ad-hoc sign, and produce `dist/TTStation-<ver>-arm64.dmg`. `--publish` uploads to a GitHub Release.
 
 **Files:**
 - Create: `macos/make-release.sh` (executable)
@@ -390,7 +391,7 @@ Create `macos/make-release.sh`:
 
 ```bash
 #!/usr/bin/env bash
-# Build a distributable, arm64 TTStation DMG with the `tt` CLI embedded inside
+# Build a distributable, arm64 TTStation DMG with the `tt-station` CLI embedded inside
 # the app bundle. Ad-hoc signed only (no Apple Developer license / no
 # notarization) — downloaders must strip quarantine once; see FIRST-RUN.txt.
 #
@@ -411,11 +412,11 @@ ver="$(awk -F'"' '/MARKETING_VERSION:/{print $2}' "$proj/project.yml")"
 dmg="$dist/TTStation-$ver-arm64.dmg"
 echo "==> Building TTStation $ver (arm64)"
 
-# 1. Build the arm64 tt CLI.
-echo "==> cargo build --release -p tt (aarch64-apple-darwin)"
-( cd "$repo_root" && cargo build --release -p tt --target aarch64-apple-darwin )
-tt_bin="$repo_root/target/aarch64-apple-darwin/release/tt"
-[[ -x "$tt_bin" ]] || { echo "error: tt binary not found at $tt_bin"; exit 1; }
+# 1. Build the arm64 tt-station CLI.
+echo "==> cargo build --release -p tt-station (aarch64-apple-darwin)"
+( cd "$repo_root" && cargo build --release -p tt-station --target aarch64-apple-darwin )
+tt_bin="$repo_root/target/aarch64-apple-darwin/release/tt-station"
+[[ -x "$tt_bin" ]] || { echo "error: tt-station binary not found at $tt_bin"; exit 1; }
 
 # 2. Build the Release app.
 echo "==> xcodegen + xcodebuild (Release)"
@@ -428,15 +429,15 @@ app_src="$(xcodebuild -project "$proj/TTStation.xcodeproj" -scheme TTStation \
   | awk '/ BUILT_PRODUCTS_DIR /{d=$3} /FULL_PRODUCT_NAME/{p=$3} END{print d"/"p}')"
 [[ -d "$app_src" ]] || { echo "error: built app not found ($app_src)"; exit 1; }
 
-# 3. Stage a clean copy and embed tt.
-echo "==> Embedding tt into app bundle + ad-hoc signing"
+# 3. Stage a clean copy and embed tt-station.
+echo "==> Embedding tt-station into app bundle + ad-hoc signing"
 rm -rf "$stage" && mkdir -p "$stage"
 cp -R "$app_src" "$stage/TTStation.app"
 mkdir -p "$stage/TTStation.app/Contents/Resources/bin"
-cp "$tt_bin" "$stage/TTStation.app/Contents/Resources/bin/tt"
-chmod +x "$stage/TTStation.app/Contents/Resources/bin/tt"
+cp "$tt_bin" "$stage/TTStation.app/Contents/Resources/bin/tt-station"
+chmod +x "$stage/TTStation.app/Contents/Resources/bin/tt-station"
 
-# 4. Ad-hoc sign the whole bundle AFTER embedding so the nested tt is covered.
+# 4. Ad-hoc sign the whole bundle AFTER embedding so the nested tt-station is covered.
 codesign --force --deep --sign - "$stage/TTStation.app"
 codesign --verify --deep --strict "$stage/TTStation.app" || {
   echo "error: codesign verification failed"; exit 1; }
@@ -455,7 +456,7 @@ TTStation $ver — first run
 
        xattr -dr com.apple.quarantine /Applications/TTStation.app
 
-3. Launch TTStation from Applications. On first run it offers to add the \`tt\`
+3. Launch TTStation from Applications. On first run it offers to add the \`tt-station\`
    command to ~/.local/bin. The app works whether or not you accept.
 
 TTStation lives in the menu bar (no Dock icon). Look for its icon up top.
@@ -508,16 +509,16 @@ Run: `macos/make-release.sh`
 Expected: `dist/TTStation-<ver>-arm64.dmg` exists; mounting it shows `TTStation.app`, the `Applications` alias, and `FIRST-RUN.txt`. Verify the embedded CLI:
 ```bash
 hdiutil attach dist/TTStation-*-arm64.dmg -mountpoint /tmp/ttmnt -nobrowse
-/tmp/ttmnt/TTStation.app/Contents/Resources/bin/tt --help >/dev/null && echo "embedded tt OK"
+/tmp/ttmnt/TTStation.app/Contents/Resources/bin/tt-station --help >/dev/null && echo "embedded tt-station OK"
 hdiutil detach /tmp/ttmnt
 ```
-Expected: `embedded tt OK`.
+Expected: `embedded tt-station OK`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add macos/make-release.sh macos/dist/.gitignore
-git commit -m "feat(macos): make-release.sh builds arm64 DMG with embedded tt CLI"
+git commit -m "feat(macos): make-release.sh builds arm64 DMG with embedded tt-station CLI"
 ```
 
 ---
@@ -619,10 +620,10 @@ TTStation ships as a prebuilt **Apple Silicon** DMG on the repo's
    ```
 
 4. Launch TTStation from Applications — it lives in the **menu bar**, not the
-   Dock. On first run it offers to add the `tt` CLI to `~/.local/bin`
-   (skippable; the app bundles its own copy and works either way). If you
-   already have a different `tt` on your PATH, TTStation leaves it alone and
-   offers to install as `tt-station` instead.
+   Dock. On first run it offers to add the `tt-station` CLI to `~/.local/bin`
+   (skippable; the app bundles its own copy and works either way). If something
+   else already occupies `~/.local/bin/tt-station`, TTStation leaves it alone and
+   tells you where its bundled copy lives.
 
 > Building from source instead? See `macos/install.sh` (needs Xcode + Rust).
 > Notarizing to remove the quarantine step is a future upgrade once an Apple
@@ -662,7 +663,7 @@ In `macos/README.md`, update the `**Status:** v0.6.2 built ...` line to `v0.9.0`
 
 - [ ] **Step 3: Note it in CLAUDE.md**
 
-Add to the macOS app bullet in `CLAUDE.md` (under "Current state"): a sentence that the app now bundles the `tt` CLI in `Contents/Resources/bin/tt`, ships as an arm64 DMG via `macos/make-release.sh` (local, also called by `.github/workflows/macos-release.yml` on `v*` tags), and that the first-run prompt installs the `~/.local/bin/tt` symlink with foreign-`tt` collision handling. Point to the spec (`docs/superpowers/specs/2026-07-09-macos-release-installer-design.md`).
+Add to the macOS app bullet in `CLAUDE.md` (under "Current state"): a sentence that the app now bundles the `tt-station` CLI in `Contents/Resources/bin/tt-station`, ships as an arm64 DMG via `macos/make-release.sh` (local, also called by `.github/workflows/macos-release.yml` on `v*` tags), and that the first-run prompt installs the `~/.local/bin/tt-station` symlink, never clobbering a foreign file at that path. Point to the spec (`docs/superpowers/specs/2026-07-09-macos-release-installer-design.md`).
 
 - [ ] **Step 4: Verify the version is consistent**
 
@@ -681,7 +682,7 @@ git commit -m "chore(macos): bump to 0.9.0; document release-installer flow"
 ## Self-Review
 
 **Spec coverage:**
-- §1 self-contained DMG → Task 4 (hdiutil, embedded tt, `/Applications` alias, FIRST-RUN.txt).
+- §1 self-contained DMG → Task 4 (hdiutil, embedded tt-station, `/Applications` alias, FIRST-RUN.txt).
 - §2a bundled-tt resolution → Task 1.
 - §2b first-run symlink + collision → Task 2 (planner) + Task 3 (wiring).
 - §2c `~/.local/bin` creation → Task 3 (`applyLink` `createDirectory`).
@@ -693,4 +694,4 @@ git commit -m "chore(macos): bump to 0.9.0; document release-installer flow"
 
 **Placeholder scan:** No TBD/TODO; every code and shell step is complete and copy-pasteable.
 
-**Type consistency:** `standardCandidates(home:bundledPath:)` and `standard(override:bundledPath:)` used consistently (Tasks 1, 3). `CLILinkTarget` / `CLILinkAction` / `CLILinkPlanner.plan(linkPath:bundledTT:state:)` identical across Tasks 2 and 3. DMG name `TTStation-<ver>-arm64.dmg` consistent across Tasks 4, 6. Bundled path `Contents/Resources/bin/tt` consistent across Tasks 1, 3, 4.
+**Type consistency:** `standardCandidates(home:bundledPath:)` and `standard(override:bundledPath:)` used consistently (Tasks 1, 3). `CLILinkTarget` / `CLILinkAction` / `CLILinkPlanner.plan(linkPath:bundledTT:state:)` identical across Tasks 2 and 3. DMG name `TTStation-<ver>-arm64.dmg` consistent across Tasks 4, 6. Bundled path `Contents/Resources/bin/tt-station` consistent across Tasks 1, 3, 4.

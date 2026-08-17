@@ -29,7 +29,7 @@ flowchart LR
 
     subgraph lan["🏠 Your LAN (trusted — home / lab, behind your router)"]
         direction TB
-        mac["Your Mac / laptop<br/>TTStation app · tt CLI · tt-toplike"]
+        mac["Your Mac / laptop<br/>TTStation app · tt-station CLI · tt-toplike"]
 
         subgraph box["🖥️ QuietBox"]
             direction TB
@@ -65,13 +65,13 @@ There are two layers of "getting in": **pairing** (to control the agent) and, op
 ```mermaid
 sequenceDiagram
     participant You as You (at the box)
-    participant Mac as Mac (app / tt CLI)
+    participant Mac as Mac (app / tt-station CLI)
     participant Box as tt-station-agentd
 
     Note over Mac,Box: 1. Pairing — exchange a short-lived code for a bearer token
     Mac->>Box: POST /pair/init
     Box-->>Mac: pair_id
-    Box-->>You: shows a 6-digit code on its screen<br/>(GTK panel / tt console), valid 120s
+    Box-->>You: shows a 6-digit code on its screen<br/>(GTK panel / tt-station console), valid 120s
     You->>Mac: read the code, type it in
     Mac->>Box: POST /pair/complete { pair_id, code }
     Box-->>Mac: 256-bit bearer token (stored in your Keychain)
@@ -81,12 +81,12 @@ sequenceDiagram
     Box-->>Mac: ✅ (401 without a valid token)
 
     Note over Mac,Box: 3. OPTIONAL — grant SSH (only if you ask for it)
-    Mac->>Box: tt pair --enable-ssh → POST /ssh/authorize (your public key)
+    Mac->>Box: tt-station pair --enable-ssh → POST /ssh/authorize (your public key)
     Box-->>Box: append your key to ttuser's ~/.ssh/authorized_keys<br/>(tagged ttstation:<label>)
 ```
 
 **The pairing code is a "read it off the box" secret.** It only appears on the box's own
-screen (the GTK panel or `tt console`), lives 120 seconds, and a given attempt allows only
+screen (the GTK panel or `tt-station console`), lives 120 seconds, and a given attempt allows only
 5 wrong guesses before it's discarded. So to pair, you generally need to be *looking at the
 box*. The result is a **256-bit random bearer token** — that's the real credential; the
 code is just how you bootstrap it.
@@ -140,19 +140,19 @@ time). That's the friendly default for a personal box. Start the agent with `--r
 if you want the served API to require a key.
 
 **What does "pair with SSH" actually grant?**
-`tt pair --enable-ssh` (and the `/ssh/authorize` route) appends **your** SSH public key to
+`tt-station pair --enable-ssh` (and the `/ssh/authorize` route) appends **your** SSH public key to
 the box user's (`ttuser`) `~/.ssh/authorized_keys`, tagged with a `ttstation:<label>`
 marker. That's a **full login shell** as that user — the same access as if you'd run
 `ssh-copy-id` yourself. It's **opt-in** (nothing installs a key unless you ask), the key is
 validated (only well-formed `ssh-ed25519`/`ssh-rsa` keys, label sanitized against injection),
 and `.ssh`/`authorized_keys` permissions are enforced (`0700`/`0600`). Revoke any time with
-`tt ssh-authorize --revoke` (removes only the `ttstation:`-tagged line) — it won't touch
+`tt-station ssh-authorize --revoke` (removes only the `ttstation:`-tagged line) — it won't touch
 keys you added by hand.
 
 **Where are the secrets stored?**
 - On the **box**: issued bearer tokens live in `~/.config/tt-station/agentd-tokens.json`,
   written `0600` (owner-only). No passwords; the tokens are the credentials.
-- On your **Mac**: the `tt` CLI stores its token in the macOS Keychain (file store as
+- On your **Mac**: the `tt-station` CLI stores its token in the macOS Keychain (file store as
   fallback). The app tracks *which* hosts are paired locally.
 
 **What privileges does the agent run with?**
@@ -164,7 +164,7 @@ machine.
 **How do I revoke access or wipe pairings?**
 - **Reset** (GTK panel button, or clear the box's token store): forgets **all** pairings,
   stops the serving model, resets the board — a clean slate. Clients must pair again.
-- **Revoke SSH**: `tt ssh-authorize --revoke` removes the tt-station-added key.
+- **Revoke SSH**: `tt-station ssh-authorize --revoke` removes the tt-station-added key.
 - **Stop it entirely**: `systemctl --user stop tt-station-agentd` — the control plane goes
   offline; a running model container keeps serving until you stop it.
 

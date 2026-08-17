@@ -4,13 +4,13 @@
 
 **Goal:** During (opt-in) pairing, install the Mac's SSH public key on the box so Terminal / tt-toplike / VS Code Remote-SSH work with no manual setup, defaulting the SSH user to `ttuser`.
 
-**Architecture:** A new **authed** agent route appends a client-supplied SSH *public* key to the agent run-user's `~/.ssh/authorized_keys` (idempotent, tagged, revocable). The `tt` CLI reads/generates the Mac keypair and calls the route; the app drives it as an opt-in step after pair-complete. The SSH-user default moves from the Mac login name to `ttuser` across CLI + app. Logic stays in Rust; the app is a veneer.
+**Architecture:** A new **authed** agent route appends a client-supplied SSH *public* key to the agent run-user's `~/.ssh/authorized_keys` (idempotent, tagged, revocable). The `tt-station` CLI reads/generates the Mac keypair and calls the route; the app drives it as an opt-in step after pair-complete. The SSH-user default moves from the Mac login name to `ttuser` across CLI + app. Logic stays in Rust; the app is a veneer.
 
 **Tech Stack:** Rust (axum agent, clap CLI, mock-box, libttstation), Swift 5 / SwiftUI, `ssh-keygen`, `swift test`, `cargo test`.
 
 ## Global Constraints
 
-- **Veneer rule:** control + key handling live in Rust (`tt`/agent); the app shells out to `tt --json`. No new HTTP in Swift.
+- **Veneer rule:** control + key handling live in Rust (`tt-station`/agent); the app shells out to `tt-station --json`. No new HTTP in Swift.
 - **Public key only:** the private key NEVER leaves the Mac; the agent route rejects private-key material and anything not a well-formed single-line SSH public key.
 - **Default SSH user = `ttuser`** (QuietBox 2 default), overridable via the app's `tt.sshUser` UserDefaults and the CLI's user override. Single source of truth constant `DEFAULT_SSH_USER = "ttuser"`.
 - **Authed:** `/ssh/authorize` (POST + DELETE) requires the pairing bearer token, same auth as `/run`/`/stop`.
@@ -164,17 +164,17 @@ mod tests {
 
 ---
 
-## Task 5: tt CLI — default SSH user `ttuser`
+## Task 5: tt-station CLI — default SSH user `ttuser`
 
-> **SKIPPED (intentional, during execution).** The `tt` CLI never opens an SSH
-> connection itself — `tt ssh-authorize` talks HTTP to the agent, which installs the key
+> **SKIPPED (intentional, during execution).** The `tt-station` CLI never opens an SSH
+> connection itself — `tt-station ssh-authorize` talks HTTP to the agent, which installs the key
 > into its own run-user's `authorized_keys` and reports the `ssh_user` back. So a CLI-side
 > `DEFAULT_SSH_USER` constant has no consumer. The `ttuser` default lives where SSH is
 > actually initiated: the Swift launchers (`SSHTarget.defaultUser`, Task 8) and the agent's
 > run-user (Task 2). No functional gap — the `ttuser` literals across the codebase agree.
 
 **Files:**
-- Modify: `crates/tt/src/main.rs` (or wherever SSH-user is resolved)
+- Modify: `crates/tt-station/src/main.rs` (or wherever SSH-user is resolved)
 
 **Interfaces:**
 - Produces: `const DEFAULT_SSH_USER: &str = "ttuser";` used wherever the CLI resolves an SSH user (`override.unwrap_or(DEFAULT_SSH_USER)`), replacing any `current_login` default.
@@ -187,34 +187,34 @@ mod tests {
 
 ---
 
-## Task 6: tt CLI — key selection/gen + `tt ssh-authorize [--revoke]`
+## Task 6: tt-station CLI — key selection/gen + `tt-station ssh-authorize [--revoke]`
 
 **Files:**
-- Modify: `crates/tt/src/main.rs` (+ a pure helper module for key-file selection/label)
+- Modify: `crates/tt-station/src/main.rs` (+ a pure helper module for key-file selection/label)
 
 **Interfaces:**
-- Produces: pure `select_public_key_path(home: &Path) -> Option<PathBuf>` (prefers `id_ed25519.pub`, then `id_rsa.pub`); pure `ssh_label(host: &str, date: &str) -> String` → `"ttstation:<host>:<date>"`; `tt ssh-authorize --host <h> [--revoke] [--user <u>]` command that reads/gens the key (owner-verified gen) and calls `AgentClient::ssh_authorize`/`ssh_revoke`, printing `ssh_user`. `--json` → `{authorized, ssh_user, already_present, public_key_path}`.
+- Produces: pure `select_public_key_path(home: &Path) -> Option<PathBuf>` (prefers `id_ed25519.pub`, then `id_rsa.pub`); pure `ssh_label(host: &str, date: &str) -> String` → `"ttstation:<host>:<date>"`; `tt-station ssh-authorize --host <h> [--revoke] [--user <u>]` command that reads/gens the key (owner-verified gen) and calls `AgentClient::ssh_authorize`/`ssh_revoke`, printing `ssh_user`. `--json` → `{authorized, ssh_user, already_present, public_key_path}`.
 
 - [ ] **Step 1: Write pure-helper tests** — `select_public_key_path` order (ed25519 before rsa; None when neither exists — use a temp home with fixture files); `ssh_label` format.
 - [ ] **Step 2: Run, expect FAIL.**
 - [ ] **Step 3: Implement helpers** + the `ssh-authorize` subcommand: resolve key via `select_public_key_path($HOME/.ssh)`; if `None`, run `ssh-keygen -t ed25519 -N "" -f $HOME/.ssh/id_ed25519 -C "ttstation:<mac-hostname>"` (owner-verified branch), then re-select; read the `.pub`, `validate` it locally too, call the client with `ssh_label(host, today)` (today passed by the caller/`chrono`-free: format via the CLI's existing time source or a `--date`); print/JSON the result. `--revoke` calls `ssh_revoke(Label(...))`.
 - [ ] **Step 4: Run + build, expect PASS.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(cli): tt ssh-authorize (read/gen key, --revoke, --json)"`
+- [ ] **Step 5: Commit** — `git commit -m "feat(cli): tt-station ssh-authorize (read/gen key, --revoke, --json)"`
 
 ---
 
-## Task 7: tt CLI — `tt pair … --enable-ssh`
+## Task 7: tt-station CLI — `tt-station pair … --enable-ssh`
 
 **Files:**
-- Modify: `crates/tt/src/main.rs` (pair command)
+- Modify: `crates/tt-station/src/main.rs` (pair command)
 
 **Interfaces:**
-- Produces: `--enable-ssh` flag on `tt pair`/`pair-complete`; after a successful pair, runs the Task 6 ssh-authorize flow and includes its result in the pair `--json` output (`ssh: {authorized, ssh_user, ...}` or `ssh: null` when the flag is off / it failed non-fatally).
+- Produces: `--enable-ssh` flag on `tt-station pair`/`pair-complete`; after a successful pair, runs the Task 6 ssh-authorize flow and includes its result in the pair `--json` output (`ssh: {authorized, ssh_user, ...}` or `ssh: null` when the flag is off / it failed non-fatally).
 
 - [ ] **Step 1: Study the pair/pair-complete command.** Add `--enable-ssh`; on success, call the shared ssh-authorize routine (extracted from Task 6 so it's reused, not duplicated). SSH failure is non-fatal — pair still reports success, with `ssh.error` set.
 - [ ] **Step 2: Build + a test** (if the pair command has testable JSON assembly) asserting `ssh` present when `--enable-ssh`, absent/null otherwise.
 - [ ] **Step 3: Run + build, expect PASS.**
-- [ ] **Step 4: Commit** — `git commit -m "feat(cli): tt pair --enable-ssh installs the Mac key post-pair"`
+- [ ] **Step 4: Commit** — `git commit -m "feat(cli): tt-station pair --enable-ssh installs the Mac key post-pair"`
 
 ---
 
@@ -256,10 +256,10 @@ func testSSHTargetOverrideWins() {
 - Modify: `macos/TTStation/AppShell/project.yml` (version bump)
 
 **Interfaces:**
-- Consumes: `tt ssh-authorize --host <h> --json` (Task 6).
+- Consumes: `tt-station ssh-authorize --host <h> --json` (Task 6).
 - Produces: `TTCommands.sshAuthorize(host:) async throws -> SshAuthorizeInfo`; `BoxViewModel.enableSSH: Bool` + a post-pair `authorizeSSH()` that runs when the toggle is on; a one-line result/error surfaced in the pair UI.
 
-- [ ] **Step 1: Add `sshAuthorize` to the `TTCommands` protocol + `TTClient`** (shells out to `tt --json ssh-authorize --host …`, decodes `{authorized, ssh_user, already_present}`) + `FakeTTClient` stub returning a canned success. Add a `BoxViewModel` test (using `FakeTTClient`) that `completePairing` with `enableSSH == true` triggers `sshAuthorize` and sets a success message; with `false` it does not.
+- [ ] **Step 1: Add `sshAuthorize` to the `TTCommands` protocol + `TTClient`** (shells out to `tt-station --json ssh-authorize --host …`, decodes `{authorized, ssh_user, already_present}`) + `FakeTTClient` stub returning a canned success. Add a `BoxViewModel` test (using `FakeTTClient`) that `completePairing` with `enableSSH == true` triggers `sshAuthorize` and sets a success message; with `false` it does not.
 - [ ] **Step 2: Run, expect FAIL; implement; expect PASS** (`swift test`).
 - [ ] **Step 3: Wire the toggle** into the pair UI (`BoxWorkspaceView`/`BoxDetailView`): a `Toggle("Also enable Terminal / SSH access (installs this Mac's key as ttuser)", isOn:)` bound to `box.enableSSH` (default true), shown at the code-entry step. On successful pair with it on, show "SSH enabled as ttuser" or the non-fatal error.
 - [ ] **Step 4: Bump `MARKETING_VERSION`** (e.g. 0.4.0).
@@ -272,7 +272,7 @@ func testSSHTargetOverrideWins() {
 
 **Files:** `macos/README.md`, `CLAUDE.md`
 
-- [ ] **Step 1: Document** the keyless-SSH-on-pair flow, the `ttuser` default (override via `tt.sshUser` / `--user`), the authed `/ssh/authorize` route, and revocation (`tt ssh-authorize --revoke`). Note the agent-run-user alignment requirement.
+- [ ] **Step 1: Document** the keyless-SSH-on-pair flow, the `ttuser` default (override via `tt.sshUser` / `--user`), the authed `/ssh/authorize` route, and revocation (`tt-station ssh-authorize --revoke`). Note the agent-run-user alignment requirement.
 - [ ] **Step 2: Commit** — `git commit -m "docs: keyless SSH on pairing + ttuser default"`
 
 ---

@@ -29,7 +29,7 @@
 
 2. **`runSSHCommand` doesn't offer the authorized key and can't fail fast.**
    It runs `ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 ttuser@host <cmd>` with **no `-i <key>`** and
-   **no `BatchMode`**. The box authorizes the key `tt ssh-authorize` installs (prefers `~/.ssh/id_ed25519.pub`), but
+   **no `BatchMode`**. The box authorizes the key `tt-station ssh-authorize` installs (prefers `~/.ssh/id_ed25519.pub`), but
    plain `ssh` relies on default identity/agent resolution — and when pubkey isn't accepted it **falls to password**
    (no TTY → the `Failed password` we see) instead of erroring clearly.
    **Fix:** add `-o BatchMode=yes` (never prompt/fall to password — fail fast with a real error), `-o PreferredAuthentications=publickey`,

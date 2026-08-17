@@ -1,7 +1,7 @@
-# `tt console` — operator TUI (reference)
+# `tt-station console` — operator TUI (reference)
 
-*Sourced from the shipped code: `crates/tt/src/console/{names,state,env,actions,ui,mod}.rs`,
-`crates/tt/src/main.rs` (`Command::Console`), `deploy/tt-station-agentd.service`,
+*Sourced from the shipped code: `crates/tt-station/src/console/{names,state,env,actions,ui,mod}.rs`,
+`crates/tt-station/src/main.rs` (`Command::Console`), `deploy/tt-station-agentd.service`,
 `crates/libttstation/src/model.rs` (`BoxLifecycleSnapshot`), and `box-panel/tt-station-panel.py`.
 Live SSH click-through of the interactive TUI is **owner-verified, not automated** — the
 test suite covers the pure line-builders and a `ratatui::TestBackend` render, plus unit
@@ -10,17 +10,17 @@ HTTP in CI).*
 
 ## What it is
 
-`tt console` is a ratatui/crossterm terminal UI for loading, unloading, and monitoring
+`tt-station console` is a ratatui/crossterm terminal UI for loading, unloading, and monitoring
 **this box's own agent** (`tt-station-agentd`) — the SSH-native sibling of the GTK box
 panel. Run it directly on the box (over SSH or on its own console); it always talks to
 `127.0.0.1:<ctrl-port>` and to the local `systemctl --user`/`journalctl --user`, never a
-remote box. There is no `--host` flag, unlike every other `tt` subcommand.
+remote box. There is no `--host` flag, unlike every other `tt-station` subcommand.
 
 ```
-tt console                                  # launch the interactive TUI
-tt console --snapshot                       # print one BoxLifecycleSnapshot as JSON and exit
-tt console --install-service                # install/refresh the systemd user unit and exit
-tt console --ctrl-port 8765                 # agent control port on 127.0.0.1 (default 8765)
+tt-station console                                  # launch the interactive TUI
+tt-station console --snapshot                       # print one BoxLifecycleSnapshot as JSON and exit
+tt-station console --install-service                # install/refresh the systemd user unit and exit
+tt-station console --ctrl-port 8765                 # agent control port on 127.0.0.1 (default 8765)
 ```
 
 `--install-service` takes priority over `--snapshot` if both are passed (an odd
@@ -29,12 +29,12 @@ combination, but not rejected); with neither flag, the interactive TUI launches.
 ## The systemd user-service model
 
 The agent runs as a `systemctl --user` service so it survives an SSH disconnect (and, with
-`loginctl enable-linger` — see below, reboot). Start/Stop/Restart in `tt console` are
+`loginctl enable-linger` — see below, reboot). Start/Stop/Restart in `tt-station console` are
 literally `systemctl --user start|stop|restart <unit>` — there is no child-process
 supervision anymore; closing the TUI (or an SSH session) does **not** stop the agent.
 
-- **Install:** `tt console --install-service` renders `deploy/tt-station-agentd.service`
-  (baked into the `tt` binary at compile time via `include_str!`, so the binary needs no
+- **Install:** `tt-station console --install-service` renders `deploy/tt-station-agentd.service`
+  (baked into the `tt-station` binary at compile time via `include_str!`, so the binary needs no
   copy of `deploy/` on the target box) into
   `~/.config/systemd/user/<service_name>` (or `$XDG_CONFIG_HOME/systemd/user/...` if that's
   set), filling in the `{{AGENT_BIN}}` placeholder with the resolved absolute path to the
@@ -45,7 +45,7 @@ supervision anymore; closing the TUI (or an SSH session) does **not** stop the a
   then the bare name unresolved as a last resort (a systemd unit with an unresolved
   `ExecStart=` will simply fail to start until fixed — a clearer failure mode than refusing
   to install).
-- **Boot survival:** `tt console --install-service` does **not** run `loginctl
+- **Boot survival:** `tt-station console --install-service` does **not** run `loginctl
   enable-linger` itself — that's a one-time manual step the operator runs once per user so
   the systemd `--user` instance (and this unit) keeps running after logout / across reboots
   without an active login session:
@@ -84,7 +84,7 @@ supervision anymore; closing the TUI (or an SSH session) does **not** stop the a
 
 ## Keybindings
 
-From `crates/tt/src/console/ui.rs` (`footer_lines`/`event_loop`) — this is the literal
+From `crates/tt-station/src/console/ui.rs` (`footer_lines`/`event_loop`) — this is the literal
 footer text the TUI renders:
 
 ```
@@ -112,9 +112,9 @@ panic — so a bug can't leave an operator's SSH session stuck in raw mode.
 
 ## `--snapshot` JSON contract
 
-`tt console --snapshot` prints one `BoxLifecycleSnapshot` (from
+`tt-station console --snapshot` prints one `BoxLifecycleSnapshot` (from
 `libttstation::model`) as pretty JSON and exits. This is the **single shared wire
-contract** — the interactive TUI, `--snapshot`, and the GTK box panel (which polls `tt
+contract** — the interactive TUI, `--snapshot`, and the GTK box panel (which polls `tt-station
 console --snapshot --ctrl-port <port>` as a subprocess instead of re-implementing the
 systemctl/journalctl/HTTP collection logic in Python) all consume exactly this shape, so
 all three surfaces can never disagree about what state the box is in.
@@ -210,19 +210,19 @@ both panels grow together rather than one starving the other).
 
 This is **auto-tail only**: each ~1s snapshot refresh re-fetches the newest 20 lines and
 the pane shows however many of those fit in its `Rect`. There is no scrollback/history and
-no scroll keybinding in v1 — reviewing older log output is a documented follow-up (use `tt
+no scroll keybinding in v1 — reviewing older log output is a documented follow-up (use `tt-station
 logs` directly, or `GET /logs/stream` for a live follow, until the pane grows scroll
 support).
 
 ## Configurable tool names
 
-Every tool/service name `tt console` shells out to is resolved once, from
-`crates/tt/src/console/names.rs::ToolNames::from_env()` — a single source of truth so a
+Every tool/service name `tt-station console` shells out to is resolved once, from
+`crates/tt-station/src/console/names.rs::ToolNames::from_env()` — a single source of truth so a
 future rename is a one-place change:
 
 | Field | Env override | Default |
 |---|---|---|
-| `tt_bin` (the `tt` CLI binary, used for the `reset`/`pair` shell-outs below) | `TTS_TT_BIN` | `tt` |
+| `tt_bin` (the `tt-station` CLI binary, used for the `reset`/`pair` shell-outs below) | `TTS_TT_BIN` | `tt-station` |
 | `agent_bin` (agent binary name/path, used to build the unit's `ExecStart=`) | `TTS_AGENT_BIN` | `tt-station-agentd` |
 | `service_name` (the systemd unit name) | `TTS_SERVICE_NAME` | `tt-station-agentd.service` |
 
@@ -234,16 +234,16 @@ both processes read from (each resolves its own copy of `ToolNames`/`TTS_*` at s
 ## Reset precondition: localhost pairing
 
 `POST /reset` on the agent is bearer-guarded — the same auth as `/run`/`/stop`/`/endpoint`.
-`tt console` does not duplicate the agent's HTTP client or auth logic: pressing `R` (after
-confirming) and `p` both shell out to the `tt` binary itself
-(`tt reset --host 127.0.0.1:<ctrl-port> --yes` and `tt pair 127.0.0.1:<ctrl-port> --code
+`tt-station console` does not duplicate the agent's HTTP client or auth logic: pressing `R` (after
+confirming) and `p` both shell out to the `tt-station` binary itself
+(`tt-station reset --host 127.0.0.1:<ctrl-port> --yes` and `tt-station pair 127.0.0.1:<ctrl-port> --code
 <code>` respectively), reusing the CLI's own token store as the one auth touchpoint.
 
-- If `tt console` (or the underlying `tt` CLI) has **no bearer token stored for
+- If `tt-station console` (or the underlying `tt-station` CLI) has **no bearer token stored for
   `127.0.0.1:<ctrl-port>`**, `R`eset fails with a message hinting at the fix:
   `reset failed: <error> (no token for this box? press 'p' to pair)`.
 - Press `p` to **pair-localhost** first: this uses the pairing code the collector already
-  found in the agent's journal (`snap.pairing`) and runs `tt pair` against
+  found in the agent's journal (`snap.pairing`) and runs `tt-station pair` against
   `127.0.0.1:<ctrl-port>` with that code, storing a token locally. If no pairing code is
   currently active, `p` reports `no pairing code available -- start a pairing on the box
   first` instead of attempting anything (a pairing must be initiated on the box — or the
@@ -252,15 +252,15 @@ confirming) and `p` both shell out to the `tt` binary itself
   clears ALL issued bearer tokens** (in-memory + the persisted token store — invalidating
   every paired client, including the one that just requested the reset), and **resets the
   board** (`tt-smi -r`, via the serving backend's own reset path). This is the same
-  `cmd_reset`/`POST /reset` semantics as `tt reset` everywhere else in the CLI — `tt
+  `cmd_reset`/`POST /reset` semantics as `tt-station reset` everywhere else in the CLI — `tt-station
   console` doesn't reimplement it, just triggers it.
 
 ## Related
 
-- The GTK box panel (`box-panel/tt-station-panel.py`) shares this exact model: it polls `tt
+- The GTK box panel (`box-panel/tt-station-panel.py`) shares this exact model: it polls `tt-station
   console --snapshot --ctrl-port <port>` on a timer instead of parsing child-process
   stdout, and its Start/Stop/Restart buttons shell the same `systemctl --user <verb>
-  <service_name>` commands `tt console` uses. The panel and the TUI can never disagree
+  <service_name>` commands `tt-station console` uses. The panel and the TUI can never disagree
   about box state.
-- `docs/reference/agentd-config.md` — the `GET /config` / `tt config` contract that feeds
+- `docs/reference/agentd-config.md` — the `GET /config` / `tt-station config` contract that feeds
   `BoxLifecycleSnapshot.config`.
