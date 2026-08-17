@@ -248,7 +248,7 @@ does not expose one and agentd must not invent it.
 |---|---|
 | `GET /status` | gains `leasing: {available, version, boards, max_concurrent}` |
 | `GET /serving` | entries gain `lease_id`, `board`, `chips`, `held_since` |
-| `POST /run` | on contention, returns the holder and since-when rather than a generic failure |
+| `POST /run` | on contention, returns the holder rather than a generic failure (no duration — gozer exposes none) |
 | `POST /stop` | releases the lease (which resets the chips) |
 | `GET /leases` | **new, the only new endpoint** — proxies `gozer status --json` |
 
