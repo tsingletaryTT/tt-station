@@ -1854,6 +1854,79 @@ fn runpy_start_stops_by_port_when_timing_out_without_a_container_id() {
     );
 }
 
+/// The cancel path is the fourth stop site, and it had the same defect the
+/// other three were fixed for: it stopped only when a container id had been
+/// parsed, which `parse_run_artifacts` documents as an outcome that may
+/// simply be absent. With no id it stopped NOTHING, and the guard's release
+/// then reset chips under a container the cancelled bring-up had left
+/// running.
+///
+/// Discriminating this one takes a count as well as an order, because the
+/// concurrent `/stop` that trips the cancel ALSO sweeps the serving port, so
+/// its own `docker stop` is indistinguishable in the recorded argv from the
+/// one `start` must issue. Broken: exactly ONE post-launch stop (the
+/// `/stop`'s). Fixed: TWO -- the `/stop`'s and `start`'s own.
+#[test]
+fn runpy_start_stops_by_port_when_cancelled_without_a_container_id() {
+    let runner = leasing_runner(u32::MAX); // never healthy
+    // run.py prints NOTHING parseable -- no container id captured -- but a
+    // container IS publishing the serving port.
+    runner.set_run_output("docker ps", "orphan99\n");
+    let backend = std::sync::Arc::new(
+        RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+            .with_gozer(Some(gozer_capability()))
+            .with_health_poll(2_000, Duration::from_millis(1)),
+    );
+
+    let backend_stopper = std::sync::Arc::clone(&backend);
+    let runner_probe = runner.clone();
+    let stopper = std::thread::spawn(move || {
+        // Health probes only happen after run.py, so waiting on one puts
+        // this `/stop` strictly post-launch. Bounded, so a regression that
+        // never reaches the poll loop fails rather than hangs.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while runner_probe.health_calls() == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        backend_stopper.stop("").expect("stop should succeed");
+    });
+
+    backend
+        .start("llama3")
+        .expect_err("start must abort once /stop trips the cancel flag");
+    stopper.join().expect("stopper thread panicked");
+
+    let commands = runner.commands();
+    let release_index = gozer_index(&commands, "release")
+        .unwrap_or_else(|| panic!("a cancelled start must release its lease: {commands:?}"));
+    let runpy_index = commands
+        .iter()
+        .position(|cmd| cmd.first().map(String::as_str) == Some("python3"))
+        .expect("run.py was invoked");
+    let post_launch_stops = commands
+        .iter()
+        .enumerate()
+        .filter(|(i, cmd)| {
+            *i > runpy_index
+                && cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")
+        })
+        .count();
+    assert_eq!(
+        post_launch_stops, 2,
+        "expected the concurrent /stop's sweep AND start's own cancel-branch \
+         sweep; only one means start stopped nothing because no container id \
+         was captured: {commands:?}"
+    );
+    let stop_index = last_post_launch_docker_stop(&commands)
+        .unwrap_or_else(|| panic!("a cancelled start must sweep the port: {commands:?}"));
+    assert!(
+        stop_index < release_index,
+        "the sweep ({stop_index}) must precede the release ({release_index}) \
+         -- release resets those chips: {commands:?}"
+    );
+}
+
 /// A liveness-probe ERROR is not proof the container died. `docker inspect`
 /// failing (a daemon hiccup) currently returns the same "exited during
 /// startup" error as an inspect that reports `false` -- but in the error

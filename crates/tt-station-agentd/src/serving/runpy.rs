@@ -1170,9 +1170,24 @@ impl ServingBackend for RunPyBackend {
             //     we launched so a cancelled run doesn't leave one holding the
             //     chips.
             if self.cancel.load(Ordering::SeqCst) {
-                if let Some(id) = &artifacts.container_id {
-                    let _ = self.runner.run(&["docker", "stop", id]);
-                }
+                // Same helper as every other error exit: it falls back to
+                // the published-port sweep when no container id was captured
+                // (a NORMAL outcome per `parse_run_artifacts`, and the case
+                // an id-only stop silently misses) and logs any failure
+                // rather than swallowing it -- because returning from here
+                // drops the lease guard, and `gozer release` RESETS the
+                // released chips.
+                //
+                // NOT gated on `lease.is_some()`, unlike the other three
+                // sites -- deliberately. Those gates exist so that adding a
+                // stop where there was none doesn't change unleased
+                // behaviour; here a stop ALREADY existed and ran unleased,
+                // so gating it would DELETE protection from the no-gozer
+                // path ("a cancelled run doesn't leave one holding the
+                // chips"). The helper is a superset of what this line did
+                // before, so unleased behaviour only gains the fallback and
+                // the log line.
+                self.stop_launched_container(artifacts.container_id.as_deref());
                 return Err(anyhow::anyhow!(
                     "runpy backend: serve of '{model}' aborted by stop request"
                 ));
