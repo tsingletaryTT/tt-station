@@ -787,9 +787,13 @@ fn foreign_leases_names_everyone_but_our_own_service_port() {
         panic!("a foreign lease is held");
     };
     assert_eq!(
-        holders, "board board-b is held by claude:ttm-optimize",
-        "our own lease and the FREE board must not appear, and one board must \
-         yield one clause however many of its chips are held"
+        holders,
+        "board board-b is held by claude:ttm-optimize (CLAIMED)",
+        "our own lease and the FREE board must not appear, one board must \
+         yield one clause however many of its chips are held, and the STATE \
+         must be carried verbatim -- `refusal_reason` needs the operator to \
+         tell a live holder from a STALE/HELD-FOREIGN one, whose remedy is \
+         `gozer reconcile` rather than stopping a session that is already gone"
     );
 
     // Same payload, a DIFFERENT service port: now the `tt-station:8080:`
@@ -898,10 +902,24 @@ fn foreign_leases_is_none_when_chips_is_present_and_empty() {
 /// from a broken one.
 #[test]
 fn foreign_leases_refusal_reason_distinguishes_held_from_undetermined() {
-    let held = ForeignLeases::Held("board b1 is held by claude:x".to_string())
+    let held = ForeignLeases::Held("board b1 is held by claude:x (STALE)".to_string())
         .refusal_reason()
         .expect("Held must refuse");
     assert!(held.contains("claude:x"), "{held}");
+    // "Stop that session" is the whole answer only for a LIVE holder. A STALE
+    // or HELD-FOREIGN lease has no tenant left to ask, and `gozer status`
+    // reports no lease id to pass to `gozer release` -- so without
+    // `gozer reconcile` in the remedy, the guard blocks the reset exactly when
+    // the box is wedged and nobody is there to unblock it.
+    assert!(
+        held.contains("STALE") && held.contains("HELD-FOREIGN"),
+        "the reason must name the states whose tenant is already gone: {held}"
+    );
+    assert!(
+        held.contains("gozer reconcile"),
+        "and it must point at the one command that clears such a lease \
+         without a lease id: {held}"
+    );
 
     let unknown = ForeignLeases::Undetermined
         .refusal_reason()

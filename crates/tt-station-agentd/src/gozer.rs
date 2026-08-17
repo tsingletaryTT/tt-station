@@ -1086,9 +1086,15 @@ pub enum ForeignLeases {
     /// session. The reset may proceed exactly as it always did.
     None,
     /// gozer answered, and someone else holds chips. Carries a
-    /// human-readable clause per board (`"board <serial> is held by <who>"`,
-    /// joined with `"; "`), and NO duration -- gozer reports no lease start
-    /// time (see `StatusChip`).
+    /// human-readable clause per board
+    /// (`"board <serial> is held by <who> (<state>)"`, joined with `"; "`),
+    /// and NO duration -- gozer reports no lease start time (see
+    /// `StatusChip`).
+    ///
+    /// **The STATE is part of the clause, not decoration.** `HELD`/`CLAIMED`
+    /// means a tenant is there to ask; `STALE`/`HELD-FOREIGN` means they are
+    /// already gone, and the remedy is completely different -- see
+    /// [`ForeignLeases::refusal_reason`].
     Held(String),
     /// gozer's lease state could not be read at all (the command failed to
     /// run, exited non-zero -- 14 topology unreadable, 16 mutex stuck -- or
@@ -1109,12 +1115,25 @@ impl ForeignLeases {
     /// broken, fix it or reset by hand". A refusal that reported the wrong
     /// one would be worse than a generic failure, because it would send them
     /// looking for a tenant who isn't there.
+    ///
+    /// **`Held` is itself two situations, which is why the STATE is in the
+    /// clause and `gozer reconcile` is in the remedy.** "Stop that session"
+    /// is the whole answer only for a LIVE holder. For a `STALE` or
+    /// `HELD-FOREIGN` lease the tenant is already gone: there is no session to
+    /// stop, and the operator cannot fall back to `gozer release` either,
+    /// because `gozer status` reports `who` but no lease id (see the module
+    /// doc's known limitations). Naming only "stop that session" left the
+    /// guard blocking a reset exactly when the box was wedged and nobody was
+    /// there to unblock it.
     pub fn refusal_reason(&self) -> Option<String> {
         match self {
             ForeignLeases::None => None,
             ForeignLeases::Held(holders) => Some(format!(
-                "another tenant holds chips -- {holders}. Stop that session (or `gozer release` \
-                 its lease) first."
+                "another tenant holds chips -- {holders}. If that session is live, stop it (or \
+                 `gozer release` its lease) first. If its state is STALE or HELD-FOREIGN the \
+                 tenant is already GONE -- and `gozer status` reports no lease id, so there is \
+                 nothing to pass to `gozer release`: run `gozer reconcile` to clear it, then \
+                 retry."
             )),
             ForeignLeases::Undetermined => Some(
                 "`gozer status` could not be read, so whether another tenant holds chips cannot \
@@ -1201,7 +1220,12 @@ pub fn foreign_leases(
         } else {
             lease.board.as_str()
         };
-        let clause = format!("board {board} is held by {who}");
+        // The STATE is carried verbatim, in gozer's own vocabulary (`HELD`,
+        // `HELD-FOREIGN`, `CLAIMED`, `STALE`, ...) -- see `LeaseEntry::state`,
+        // which forbids renaming or restyling these strings, and
+        // `ForeignLeases::refusal_reason`, which needs the operator to be able
+        // to tell a live tenant from a departed one.
+        let clause = format!("board {board} is held by {who} ({})", lease.state);
         if !clauses.contains(&clause) {
             clauses.push(clause);
         }
