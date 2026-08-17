@@ -1,30 +1,75 @@
 # tt-station — project CLAUDE.md
 
 Plug-and-play Tenstorrent from a Mac: discover a QuietBox on the LAN, pair once,
-`tt run <model>`, get one OpenAI-compatible `/v1`. **No llama.cpp** — usability rides
+`tt-station run <model>`, get one OpenAI-compatible `/v1`. **No llama.cpp** — usability rides
 on the `/v1` that `tt-inference-server` (vLLM, via `run.py`) exposes.
 
 Repo: github.com/tsingletaryTT/tt-station (private). Work happens on `main`.
 This box (`tsingletaryTT-quietbox`) IS a real QuietBox: 4× Blackhole (`p300c`),
 `tt-smi`, docker, `~/code/tt-inference-server`. Real serving has been proven here.
 
+## Naming: `tt` is not ours
+
+`tt` is Tenstorrent's **official** CLI, from `tenstorrent/tt-cli` — "Unified CLI for
+Tenstorrent AI accelerators — device management, model serving, and ML workflows". It is
+installed on this box at `~/.tenstorrent-venv/bin/tt`.
+
+* **Never name anything in this repo `tt`** — no binary, no symlink, no alias, no shim.
+  Our CLI is `tt-station`.
+* When the official CLI grows a capability we currently roll our own, **prefer delegating
+  to it** over maintaining a parallel implementation.
+
 ---
 
 ## ▶ PICK UP HERE
 
+**CLI renamed `tt` → `tt-station` (2026-08-17, branch `refactor/cli-name`, stacks on
+`feat/gozer-integration`).** Our CLI was named `tt`, which is the name Tenstorrent's official
+CLI (`tenstorrent/tt-cli`) owns — and that CLI already has `run`, `serve`, `stop`, `logs`,
+`status`, `device`, `model`, a near-total verb collision with ours. On this box `which -a tt`
+listed *our* `~/.local/bin/tt` first, so we were shadowing the official tool; worse,
+`CLIInstaller.swift` re-created that shadowing symlink on first run of every Mac install. So
+this was a live bug, not future-proofing.
+
+What changed: crate `crates/tt` → `crates/tt-station` (package + binary + workspace member),
+`clap` `command(name)`, `ToolNames::tt_bin`'s default, `debian/rules` (`/usr/bin/tt-station`),
+`macos/make-release.sh` (builds `-p tt-station`, embeds `Resources/bin/tt-station`),
+`TTBinaryLocator`'s search path, and `CLIInstaller`'s link path (`~/.local/bin/tt-station`).
+**No `tt` alias, shim, or compatibility symlink was shipped** — not shadowing the official CLI
+is the whole point, so a compat shim would have preserved the bug. `CLILinkPlanner`'s
+`.foreign` branch lost its `alternative:` payload: at `~/.local/bin/tt` a foreign file was
+probably the official CLI and offering `tt-station` instead was the right move, but
+`tt-station` is now the only name we claim, so a foreign file there is genuinely unexpected and
+the branch is purely defensive (report, never overwrite).
+
+Deliberately **not** renamed: `tt-smi`/`tt-topology`/`tt-metal`/`tt-inference-server`/
+`tt-toplike`/`tt-gozer`, `tt-station-agentd`, `TTStation*`/`ttstation` identifiers, the `tt.*`
+UserDefaults keys (`tt.sshUser`, `tt.binaryPath`, `tt.manualHosts`, … — renaming those would
+silently discard existing user settings), the `TTS_TT_BIN` env override, and bare `tt` used as
+an ordinary local variable in Swift.
+
+**Historical docs were rewritten too**, including the July `docs/superpowers/specs/` and
+`docs/superpowers/plans/`. Those documents get read by agents as instructions, so a stale
+command name in them is an active hazard — archival fidelity is preserved by *this* entry
+rather than by leaving the old `tt <verb>` spellings in a plan. Where a doc's prose *reasoned
+about* the old name
+(the foreign-`tt` collision fallback; "renaming `tt` → `tt-cli` is a one-env-var change"), the
+reasoning was rewritten to match the new meaning, with a dated note, instead of being
+find-and-replaced into nonsense.
+
 **Box power & hardware controls shipped (v0.10.0, merge `dd42c9a`, 2026-07-15):** the box
 can now be power-managed end to end — agent `POST /power` (authed: `reset-chips` via `tt-smi -r`
 keeps pairing → 200; `suspend`/`reboot`/`shutdown` machine ops → 202 then disconnect; polkit
-denial → 403), the NIC MAC is advertised in `/status` + mDNS TXT for **Wake-on-LAN**, `tt power`
-/ `tt wake` CLI subcommands, `libttstation` WoL magic-packet builder, GTK panel local power row
+denial → 403), the NIC MAC is advertised in `/status` + mDNS TXT for **Wake-on-LAN**, `tt-station power`
+/ `tt-station wake` CLI subcommands, `libttstation` WoL magic-packet builder, GTK panel local power row
 (with confirm), macOS PowerMenu in the header + popover, and a polkit rule packaged as a conffile
 (`deploy/tt-station-power.rules`). Reference: `docs/reference/power-controls.md`.
 
 **Box-side is built, installed, and verified live on this box (2026-07-15):** `cargo build/test/
 clippy` all green (fixed a pre-existing clippy `doc_lazy_continuation` in `catalog.rs`, commit
-`876ffd3`); fresh `tt` + `tt-station-agentd` copied into `~/.local/bin` and the systemd `--user`
+`876ffd3`); fresh `tt-station` + `tt-station-agentd` copied into `~/.local/bin` and the systemd `--user`
 agent restarted. Confirmed live: `/status` carries `mac`, `POST /power` → 401 unauthed (route
-exists), `tt power`/`tt wake` in `--help`. **Still owner-gated:** macOS click-through of the new
+exists), `tt-station power`/`tt-station wake` in `--help`. **Still owner-gated:** macOS click-through of the new
 PowerMenu on a real Mac, and a `.deb` install-test that exercises the polkit rule on a box.
 
 ### macOS build/click-through
@@ -60,7 +105,7 @@ Per-feature reports (what each change did + assumptions) are in `.superpowers/sd
 the truth.
 
 **tt-toplike is a SEPARATE repo, owner-managed.** The remote-QuietBox work
-(`WsBackend`, `--remote HOST:PORT`, `--remote <name>` via `tt discover`, and the
+(`WsBackend`, `--remote HOST:PORT`, `--remote <name>` via `tt-station discover`, and the
 `/remote` slash command that hot-swaps to a box's live telemetry) has **shipped**: it's
 merged to tt-toplike's `main` (v0.8.0), no longer an unpushed branch. Design:
 `~/code/tt-toplike/docs/REMOTE_QUIETBOX_DESIGN.md`.
@@ -132,14 +177,14 @@ of it. #23 also reads tt-smi **6.x**'s top-level `processes[]`; this box is on t
   file at all = unchanged pre-feature behavior. Full schema/precedence/errors:
   `docs/reference/agentd-config.md`; copy-paste starter: `box-panel/agentd.example.toml`.
 
-**CLI (`crates/tt`):** `discover` (`--host`/`--no-mdns`), `pair`/`pair-init`/`pair-complete`,
+**CLI (`crates/tt-station`):** `discover` (`--host`/`--no-mdns`), `pair`/`pair-init`/`pair-complete`,
 `run`, `stop`, `status` (unauthed), `endpoint`, `models`, `serving`, `reset`,
 **`power`** (authed — `reset-chips`/`suspend`/`reboot`/`shutdown`) and **`wake`** (broadcasts a
 Wake-on-LAN magic packet from this machine using the MAC learned at discovery, or `--mac`; needs
 WoL enabled in the box BIOS/NIC — see `docs/reference/power-controls.md`),
 `config` (unauthed — active/available profiles + resolved backend + serving host/port, mirrors
 `GET /config`; see `docs/reference/agentd-config.md`), **`logs`** (unauthed —
-`tt logs [--source container|run] [--tail N] [--follow]`; one-shot tail respects global
+`tt-station logs [--source container|run] [--tail N] [--follow]`; one-shot tail respects global
 `--json`, `--follow` streams plain lines from `GET /logs/stream` until Ctrl-C; see
 `docs/reference/logs.md`), **`console`** (ratatui SSH operator TUI
 for THIS box's agent — start/stop/restart/reset/pair-localhost/profile-cycle/install-service;
@@ -151,7 +196,7 @@ Tokens in macOS Keychain / file store. Respects `TT_CONFIG_DIR`.
 **Agent as a `systemctl --user` service:** the agent can run under the user's systemd
 instance instead of ad-hoc `Popen` supervision — unit template at
 `deploy/tt-station-agentd.service` (`ExecStart={{AGENT_BIN}}`, `Restart=on-failure`),
-installed via `tt console --install-service` into `~/.config/systemd/user/`. Survives SSH
+installed via `tt-station console --install-service` into `~/.config/systemd/user/`. Survives SSH
 disconnect; survives reboot too once `loginctl enable-linger` is run for the user. Start/
 Stop/Restart under this model are just `systemctl --user start|stop|restart
 tt-station-agentd.service`.
@@ -162,9 +207,9 @@ a confirm dialog — pure builders in `panel_launchers.py`), **live 6-digit pair
 **profile dropdown** (reads `agentd.toml`'s profile list, passes `--profile` on Start/Restart;
 hidden when no config file exists). Config via `TTS_*` env (repo path, serving host/port,
 `TTS_IMAGE`, `TTS_AUTOSTART`, `TTS_CONFIG` for the profile dropdown's TOML path).
-**Shares `tt console`'s lifecycle state machine**: Start/Stop/Restart shell out to
+**Shares `tt-station console`'s lifecycle state machine**: Start/Stop/Restart shell out to
 `systemctl --user <verb>` (no more child-process supervision — closing the panel doesn't
-kill the agent), and status/pairing/serving/profile all come from a single poll of `tt
+kill the agent), and status/pairing/serving/profile all come from a single poll of `tt-station
 console --snapshot` (the same `BoxLifecycleSnapshot` JSON the TUI renders) — one source of
 truth the panel and the TUI can never disagree about. **Connect row** (shown only while
 serving): one-click **Open WebUI** (local `docker run` of `ghcr.io/open-webui/open-webui:main`
@@ -182,7 +227,7 @@ on the box.
 **Linux packaging (`debian/`, `build-deb.sh`, v0.10.0):** two Ubuntu `.deb`s, modeled on
 tt-toplike (debhelper compat 13 + `dpkg-buildpackage`, vendored offline crates via `cargo
 vendor` + `--frozen`; `vendor/`/`.cargo/config.toml` not committed). **`tt-station`** ships
-`/usr/bin/tt`, `/usr/bin/tt-station-agentd`, and the systemd **user** unit at
+`/usr/bin/tt-station`, `/usr/bin/tt-station-agentd`, and the systemd **user** unit at
 `/usr/lib/systemd/user/tt-station-agentd.service` **installed but not enabled/started**
 (`dh_installsystemduser --no-enable` — this box's debhelper lacks `dh_installsystemd --user`;
 operator runs `systemctl --user enable --now`). **`tt-station-panel`** ships the GTK panel to
@@ -200,7 +245,7 @@ design: `docs/superpowers/specs/2026-07-10-deb-prerelease-ci-design.md`). `ci.ym
 version-consistency. `mock-box`/`libttstation` not packaged. Design/plan:
 `docs/superpowers/{specs,plans}/2026-07-10-*`. **Deb install verified in a fresh QB2 container**
 (2026-07-15, `tt-developer-image`'s golden `tenstorrent/qb2-env:latest`, Ubuntu 24.04/noble): the
-core `tt-station` deb installs cleanly, `tt`/`tt-station-agentd` run, `tt power`/`tt wake` present,
+core `tt-station` deb installs cleanly, `tt-station`/`tt-station-agentd` run, `tt-station power`/`tt-station wake` present,
 the systemd user unit is valid, and the polkit rule lands at `/etc/polkit-1/rules.d/` (root-readable,
 correct). That test **caught + fixed a duplicate-conffile defect** — `debian/tt-station.conffiles`
 manually listed the /etc rule that debhelper already auto-registers, so dpkg registered it twice;
@@ -209,40 +254,40 @@ deb correctly refuses to configure without `gir1.2-gtk-4.0` (expected on a headl
 owner-gated: install on a **real** box + GTK click-through, and exercise the destructive power ops.
 
 **macOS app (`macos/TTStation`, v0.5.0 — native control room):** window-first veneer over
-`tt --json` with a fast MenuBarExtra popover for glance + quick actions (the menu-bar icon
+`tt-station --json` with a fast MenuBarExtra popover for glance + quick actions (the menu-bar icon
 badges + rows highlight currently-serving models). The resizable window is a card-based
 control room: **box header** with a detected **device-mesh badge** (`P300X2`) and a **power menu**
 (`PowerMenuView` — reset-chips/suspend/reboot/shutdown with a confirm sheet + expected-disconnect
 state; also mirrored in the MenuBarExtra popover, backed by `PowerControls`/`TTClient.power`); a **live
 device strip** (per-device temp/power/aiclk streamed from the agent's `/telemetry` WebSocket
 — the one read-only Swift I/O path); a **read-only Config card** (active/available profiles,
-backend, serving endpoint — from `tt config`); a **3-tier hardware-aware model browser**
-(Runs on this box / Experimental / Needs other hardware) built from `tt catalog` — which
-merges the box's live `/models` with the public compatibility catalog (24h-cached in `tt`)
+backend, serving endpoint — from `tt-station config`); a **3-tier hardware-aware model browser**
+(Runs on this box / Experimental / Needs other hardware) built from `tt-station catalog` — which
+merges the box's live `/models` with the public compatibility catalog (24h-cached in `tt-station`)
 classified for the box mesh; the Experimental/other tiers carry "bring these up with the
 tools" messaging that links to the workbench; **fast Connect** (Open WebUI / opencode that
 `brew install` missing deps as needed); and an elevated **workbench** (Terminal / tt-toplike /
 VS Code with the `Tenstorrent.tt-vscode-toolkit` extension). TT brand theme (teal `#4FD1C5`).
 Mesh detection covers **P150 x1–x4** + P300/N300/T3K/GALAXY.
 The device mesh is sourced from Rust: the agent detects it once at startup and reports it in
-`/status` + the mDNS TXT record (so `tt --json discover`/`status` carry `device_mesh`). See
+`/status` + the mDNS TXT record (so `tt-station --json discover`/`status` carry `device_mesh`). See
 `macos/README.md`.
 
-**Release installer (v0.9.0):** the app now bundles the `tt` CLI at `Contents/Resources/bin/tt`;
+**Release installer (v0.9.0):** the app now bundles the `tt-station` CLI at `Contents/Resources/bin/tt-station`;
 ships as an arm64 DMG built by `macos/make-release.sh` (local source of truth, also called by
 `.github/workflows/macos-release.yml` on `v*` tags); the first-run prompt installs a
-`~/.local/bin/tt` symlink with foreign-`tt` collision handling (leaves a foreign `tt` alone,
-offers `tt-station`); ad-hoc signed (no notarization) so users run
+`~/.local/bin/tt-station` symlink, repointing its own stale link and leaving any foreign file at
+that path strictly alone (reporting it rather than replacing it); ad-hoc signed (no notarization) so users run
 `xattr -dr com.apple.quarantine /Applications/TTStation.app` once. See
 `docs/superpowers/specs/2026-07-09-macos-release-installer-design.md`.
 
 **Keyless SSH on pairing (v0.4.0):** the workbench launchers SSH as **`ttuser`** (QuietBox 2
 default, override via the `tt.sshUser` UserDefault / agent `--ssh-user`). The pair flow has an
 opt-in toggle (default on) that, on a successful pair, installs this Mac's SSH **public** key on
-the box as `ttuser` — the PIN handshake is the trust anchor. Flow: `tt ssh-authorize` (reads or
+the box as `ttuser` — the PIN handshake is the trust anchor. Flow: `tt-station ssh-authorize` (reads or
 generates `~/.ssh/id_ed25519`, never transmits the private key) → authed `POST /ssh/authorize`
 on the agent → appended to the run-user's `~/.ssh/authorized_keys` (validated public-key-only,
-idempotent, tagged `ttstation:<host>:<date>`; `DELETE`/`tt ssh-authorize --revoke` removes it).
+idempotent, tagged `ttstation:<host>:<date>`; `DELETE`/`tt-station ssh-authorize --revoke` removes it).
 The SSH step is non-fatal to pairing. The `authkeys` module hardened against label
 newline-injection + unanchored-revoke; mock-box serves `/ssh/authorize` against a temp file.
 
@@ -250,9 +295,9 @@ newline-injection + unanchored-revoke; mock-box serves `/ssh/authorize` against 
 API + `/v1` (used by the CLI e2e, no hardware).
 
 **Docs:** `docs/reference/tt-inference-server-docker.md` (the real run.py launch),
-`docs/reference/tt-console.md` (the `tt console` operator TUI: systemd unit model,
+`docs/reference/tt-console.md` (the `tt-station console` operator TUI: systemd unit model,
 keybindings, `--snapshot` JSON contract, configurable tool names, reset/pair-localhost),
-`docs/reference/logs.md` (the `/logs`/`/logs/stream` contract, `tt logs`, the container-log
+`docs/reference/logs.md` (the `/logs`/`/logs/stream` contract, `tt-station logs`, the container-log
 visibility gap this closes), `docs/tt-studio-integration.md` (verdict: **no clean cache-share without modifying tt-studio**;
 `/serving` makes tt-studio's models visible), `docs/superpowers/{specs,plans}` (PoC, macOS
 menubar, connect launchers), `docs/superpowers/cleanup-analysis.md`.
@@ -271,7 +316,7 @@ agent is fine now — **persist-tokens** keeps the Mac paired across restarts.
 
 ## Run / test (Rust, on this box)
 - `cargo test --workspace` · `cargo clippy --workspace --all-targets -- -D warnings`.
-- CLI e2e (no hardware): `cargo test -p tt --test e2e_mock -- --ignored`.
+- CLI e2e (no hardware): `cargo test -p tt-station --test e2e_mock -- --ignored`.
 - Live remote-telemetry smoke: start the agent, `python3` WebSocket read of `ws://…/telemetry`.
 
 ## How this project is built
@@ -310,6 +355,6 @@ detailed log; this file is the current-state map.
 - Log viewing: an external-container (`docker logs`) fallback for containers with no
   `workflow_logs/` file; a structured serve-phase field in `/status` (so "downloading
   weights" vs "container crashed" are distinguishable without reading logs); a macOS
-  "View logs" button (`docs/reference/logs.md` has the pointer); `tt console`'s log pane
+  "View logs" button (`docs/reference/logs.md` has the pointer); `tt-station console`'s log pane
   is auto-tail-only — manual scroll is unimplemented; the console/snapshot log fetch's
   `tail=20` is hardcoded, not configurable.
