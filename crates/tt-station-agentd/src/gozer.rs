@@ -578,7 +578,18 @@ struct StatusReport {
 /// throughout: a `status` that fails to run, exits non-zero, or returns
 /// unparseable JSON yields `None`, and the caller reports the contention
 /// without a holder rather than failing twice.
-pub fn contention_detail(runner: &dyn CommandRunner, capability: &Capability) -> Option<String> {
+///
+/// **A lease this agent itself holds is worded differently.** `own_service_port`
+/// is the caller's own serving port, and any clause whose `who` is
+/// `tt-station:<that port>:<model>` is rewritten by [`own_lease_clause`] into
+/// "this box is already serving `<model>`; `tt stop` first". Naming our own
+/// `who` back at the operator as though it were a stranger sends them looking
+/// for a tenant who does not exist -- see that function's doc comment.
+pub fn contention_detail(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+    own_service_port: u16,
+) -> Option<String> {
     let captured = runner
         .run_capturing(&[capability.path.as_str(), "status", "--json"])
         .ok()?;
@@ -597,7 +608,11 @@ pub fn contention_detail(runner: &dyn CommandRunner, capability: &Capability) ->
         }
         let board = chip.board.as_deref().unwrap_or("(unknown board)");
         let clause = match (&chip.who, state) {
-            (Some(who), _) => format!("board {board} is held by {who}"),
+            // OUR OWN lease first -- see `own_lease_clause`.
+            (Some(who), _) => match own_lease_clause(who, own_service_port) {
+                Some(mine) => mine,
+                None => format!("board {board} is held by {who}"),
+            },
             // gozer's own term for "a process has the chip open with no
             // lease" -- there is no `who` to report, but saying so is more
             // actionable than silence.
@@ -723,6 +738,17 @@ pub const WHO_PREFIX: &str = "tt-station:";
 /// before launch and survives a container restart, which makes it the
 /// better key regardless (see the design doc's "One startup sweep").
 pub fn who_service_port(who: &str) -> Option<u16> {
+    Some(split_who(who)?.0)
+}
+
+/// `(service_port, model)` out of one of this agent's own `--who` strings
+/// (`tt-station:<service_port>:<model>`), or `None` for a `who` that isn't
+/// ours or doesn't carry a parseable port.
+///
+/// Splits into exactly THREE parts and reads the middle one as the port: a
+/// model id may itself contain colons (`ghcr.io/org/model:0.14`), so the
+/// model is "everything after the second colon", never "the last field".
+fn split_who(who: &str) -> Option<(u16, &str)> {
     let rest = who.strip_prefix(WHO_PREFIX)?;
     let (port, model) = rest.split_once(':')?;
     // A `who` with no model half is not one this agent wrote; refusing it
@@ -730,7 +756,33 @@ pub fn who_service_port(who: &str) -> Option<u16> {
     if model.is_empty() {
         return None;
     }
-    port.parse::<u16>().ok()
+    Some((port.parse::<u16>().ok()?, model))
+}
+
+/// The contention clause for a lease held by THIS agent's own serving port,
+/// or `None` when `who` names anybody else.
+///
+/// A contention message exists to tell an operator what to do next, and the
+/// two cases could not be further apart: a stranger's lease means "find that
+/// tenant"; our own means "you are already serving on this box -- stop it
+/// first". Reporting the second as the first (`board <serial> is held by
+/// tt-station:8080:Qwen3-32B`) names the operator's own session back at them
+/// in a shape that reads like somebody else's, and sends them hunting for a
+/// tenant who does not exist.
+///
+/// Reachable even after `start` learned to release its own lease before
+/// acquiring: two concurrent `POST /run`s are not serialised (`routes.rs`'s
+/// `run_model`), and an adopted lease from a previous process can be reaped
+/// out from under this one -- both leave a `tt-station:<own port>:` lease
+/// held that this backend has no in-memory record of.
+pub fn own_lease_clause(who: &str, own_service_port: u16) -> Option<String> {
+    let (port, model) = split_who(who)?;
+    if port != own_service_port {
+        return None;
+    }
+    Some(format!(
+        "this box is already serving {model} on port {port} -- stop it first (`tt stop`)"
+    ))
 }
 
 /// What one [`startup_sweep`] did, for the caller to log. Not consumed for
@@ -748,6 +800,7 @@ pub struct SweepReport {
     /// parseable service port in the `who`. Reported, never guessed at.
     pub unresolved: Vec<String>,
 }
+
 
 /// How many `gozer history` records the sweep reads. Bounded because this
 /// runs between the capability probe and the socket bind, where everything

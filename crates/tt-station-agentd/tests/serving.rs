@@ -1147,11 +1147,97 @@ fn dstack_ignores_a_gozer_capability() {
 }
 
 // ---------------------------------------------------------------------
-// A `stop` whose `docker stop` genuinely failed. Drives the STATEFUL
+// A SECOND `start` while this backend already holds a lease, and a `stop`
+// whose `docker stop` genuinely failed. Both drive the STATEFUL
 // `FakeGozerBox` rather than the canned `leasing_runner`, because the whole
-// question is what the GATE looks like afterwards -- whether the lease is
-// still held -- which a fixed `release` answer cannot express.
+// question is what the gate looks like the second time round -- something a
+// fixed `acquire` answer cannot express.
 // ---------------------------------------------------------------------
+
+/// Indices of every `gozer <verb>` invocation among `commands`.
+fn gozer_indices(commands: &[Vec<String>], verb: &str) -> Vec<usize> {
+    commands
+        .iter()
+        .enumerate()
+        .filter(|(_, cmd)| {
+            cmd.first().map(String::as_str) == Some("gozer")
+                && cmd.get(1).map(String::as_str) == Some(verb)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// CRITICAL, docker's half. `DockerBackend` is only ACCIDENTALLY immune to
+/// the strand today -- its `docker run --publish` would fail on the busy host
+/// port before the second lease could be stranded -- and an accident is not a
+/// guarantee of the branch's central invariant. A second `start` must stop
+/// the first serve's container and hand its lease back BEFORE asking gozer
+/// for chips again, so exactly one lease is ever held.
+#[test]
+fn docker_start_twice_releases_the_first_lease_before_acquiring_again() {
+    let gozer = FakeGozerBox::with_boards(2, 0);
+    let runner = gozer.runner();
+    runner.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    // The first serve's container IS running when the second start arrives.
+    runner.set_run_output("docker ps", "deadbeef\n");
+    let backend = DockerBackend::new(
+        config("some/image:tag", "127.0.0.1", 8080),
+        Box::new(gozer.clone()),
+    )
+    .with_gozer(Some(gozer_capability()));
+
+    backend.start("model-a").expect("the first start should succeed");
+    assert_eq!(gozer.held_lease_ids(), vec!["lease-1".to_string()]);
+
+    backend
+        .start("model-b")
+        .expect("a second start should succeed");
+
+    assert_eq!(
+        gozer.held_lease_ids(),
+        vec!["lease-2".to_string()],
+        "exactly ONE lease may be held after a swap -- keeping the first \
+         serve's lease strands a board with un-reset chips"
+    );
+
+    let commands = gozer.commands();
+    let acquires = gozer_indices(&commands, "acquire");
+    let releases = gozer_indices(&commands, "release");
+    assert_eq!(acquires.len(), 2, "one acquire per start: {commands:?}");
+    assert_eq!(releases.len(), 1, "one release, of the old lease: {commands:?}");
+    assert!(
+        commands[releases[0]].iter().any(|a| a == "lease-1"),
+        "the release must name the FIRST lease: {:?}",
+        commands[releases[0]]
+    );
+    assert!(
+        acquires[0] < releases[0] && releases[0] < acquires[1],
+        "the old lease must be released ({}) BEFORE the new one is acquired \
+         ({}): {commands:?}",
+        releases[0],
+        acquires[1]
+    );
+    // And the OLD serve's container -- named in the anchored ps probe, never
+    // derived from the incoming model argument -- must be stopped before its
+    // release, since the release resets exactly those chips.
+    let probe_index = docker_ps_name_probe_index(&commands, "tt-inference-model-a")
+        .unwrap_or_else(|| panic!("the swap must aim at the OLD container: {commands:?}"));
+    let stop_index = commands
+        .iter()
+        .enumerate()
+        .position(|(i, cmd)| {
+            i > probe_index
+                && cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")
+        })
+        .unwrap_or_else(|| panic!("the swap must stop the old container: {commands:?}"));
+    assert!(
+        stop_index < releases[0],
+        "the old container must be stopped ({stop_index}) before its lease is \
+         released ({}): {commands:?}",
+        releases[0]
+    );
+}
 
 /// IMPORTANT 3: `stop` discarded its `docker stop` result with `let _`, then
 /// released -- and `gozer release` RESETS those chips. The `let _` is right

@@ -490,9 +490,17 @@ impl RunPyBackend {
                 // `gozer status --json` who holds the boards. Deliberately
                 // NO duration: gozer's per-chip status carries `who` but no
                 // `since`, and agentd must not fabricate one (see
-                // `gozer::contention_detail`).
+                // `gozer::contention_detail`). Our OWN service port is passed
+                // so a lease this box already holds reads as "stop it first"
+                // rather than as a stranger's -- see `gozer::own_lease_clause`.
+                let port = self.config.service_port;
                 let detail = holder
-                    .or_else(|| crate::gozer::contention_detail(self.runner.as_ref(), capability))
+                    .map(|who| {
+                        crate::gozer::own_lease_clause(&who, port).unwrap_or(who)
+                    })
+                    .or_else(|| {
+                        crate::gozer::contention_detail(self.runner.as_ref(), capability, port)
+                    })
                     .unwrap_or_else(|| "gozer reports no free chips".to_string());
                 // A `Contention`, not a bare `anyhow!`: this is the box's
                 // state conflicting with the request, not a failure, and
@@ -595,6 +603,26 @@ impl RunPyBackend {
             return Err(err);
         }
         Ok(())
+    }
+
+    /// Hand back a lease held on behalf of a PREVIOUS serve, called by
+    /// `start` between the stale-container sweep and the fresh acquire.
+    ///
+    /// A thin, deliberately-named wrapper around `release_lease` (a no-op
+    /// when nothing is held, which covers the no-gozer path and the ordinary
+    /// "nothing was serving" case): the name is what makes `start`'s
+    /// sweep -> release -> acquire ordering readable, and what stops a later
+    /// reader from "simplifying" the release back out of `start` on the
+    /// grounds that `stop` already does one. `stop` only runs when a client
+    /// calls it; a `tt run` that swaps models without a preceding `tt stop`
+    /// never reaches it, which is precisely the case that stranded a board.
+    ///
+    /// The container that lease belonged to is ALREADY STOPPED by the time
+    /// this runs -- `start`'s sweep clears whatever publishes this agent's
+    /// `service_port`, which is exactly what a lease of ours is attached to
+    /// -- so the chip reset `gozer release` performs lands on an idle board.
+    fn release_held_lease(&self) -> Result<()> {
+        self.release_lease()
     }
 
     /// Resolve where `model_spec.json` lives: `config.model_spec_path` if
@@ -854,11 +882,58 @@ impl ServingBackend for RunPyBackend {
         // sets the flag again, see `stop`) will trip the poll-loop abort.
         self.cancel.store(false, Ordering::SeqCst);
 
-        // Lease the chips BEFORE touching anything on the box -- before the
-        // stale-container sweep, before the board reset, before run.py.
-        // Everything below then operates on exactly what gozer granted, and
-        // nothing operates on a neighbour's chips. On a box without gozer
-        // this yields `None` and every path below is unchanged.
+        // THE ORDER OF THE NEXT THREE STEPS IS THE SAFETY PROPERTY:
+        // sweep -> release what we already hold -> acquire. Getting it wrong
+        // is what stranded a board on every `tt run` that wasn't preceded by
+        // a `tt stop`; see each step's comment for the specific failure.
+
+        // (1) Stop any STALE serving container FIRST -- before the lease,
+        // before the board reset. Validated on real hardware: a
+        // leftover/crashed container that's still publishing `service_port`
+        // holds the chips, so run.py's own container-start check times out on
+        // the next launch. This is unconditional (NOT gated by
+        // `reset_before_serve`): a stale container is a problem regardless of
+        // whether the board also needs resetting, and clearing it before the
+        // reset means the reset itself isn't fighting a container that still
+        // has the mesh open.
+        //
+        // It runs BEFORE the acquire, and that is deliberate. The sweep only
+        // ever touches containers publishing THIS agent's own `service_port`
+        // -- ours by definition -- so it never needed a lease to be held. And
+        // while it ran under one, this `?` dropped the `LeaseGuard`, and
+        // `gozer release` RESETS the released chips: a sweep that failed to
+        // kill a container still driving those BDFs would reset them
+        // underneath it and then advertise them free.
+        self.stop_serving_containers()
+            .context("failed to stop stale serving container before launch")?;
+
+        // (2) SWAP: hand back any lease this backend is still holding before
+        // asking for chips again. The sweep above has already stopped that
+        // serve's container (same published port), so the release -- and the
+        // chip reset it performs -- lands on an idle board, which is exactly
+        // the ordering `stop` uses.
+        //
+        // Without this, `start` asked gozer for chips while its own previous
+        // lease was still held. On a multi-board box gozer answered with the
+        // OTHER board, the sweep above killed the first serve's container
+        // anyway, and the success handover below overwrote `self.lease` after
+        // only a warning -- stranding the first lease forever, with no
+        // container behind it and un-reset chips, in a way that even survived
+        // a restart (both leases carry `who = tt-station:<same port>:<model>`,
+        // so `startup_sweep` sees the port in use and keeps both). On a
+        // single-board box the same root cause surfaced as a refusal that
+        // named this box's own serve as if it were a stranger's.
+        //
+        // A refused release (gozer exit 15) FAILS the start rather than
+        // pressing on: the chips were not handed back and not reset, so
+        // acquiring anyway could only ever strand them again.
+        self.release_held_lease()
+            .context("failed to hand back the lease of the previous serve before starting a new one")?;
+
+        // (3) Lease the chips. Everything below operates on exactly what
+        // gozer granted, and nothing operates on a neighbour's chips. On a
+        // box without gozer this yields `None` and every path below is
+        // unchanged.
         //
         // The guard RELEASES ON DROP, which is the point: this function has
         // three failure exits after this line that `stop()` never sees (a
@@ -868,18 +943,6 @@ impl ServingBackend for RunPyBackend {
         // lease to `self.lease` for `stop` to release -- see the very end of
         // this function.
         let lease = self.acquire_lease(model)?;
-
-        // Stop any STALE serving container FIRST -- before even the board
-        // reset. Validated on real hardware: a leftover/crashed container
-        // that's still publishing `service_port` holds the chips, so
-        // run.py's own container-start check times out on the next launch.
-        // This is unconditional (NOT gated by `reset_before_serve`): a
-        // stale container is a problem regardless of whether the board also
-        // needs resetting, and clearing it before the reset means the
-        // reset itself isn't fighting a container that still has the mesh
-        // open.
-        self.stop_serving_containers()
-            .context("failed to stop stale serving container before launch")?;
 
         // Reset the board next -- validated on real hardware: stopping a
         // serving container leaves the p300x2 mesh's ethernet cores wedged,

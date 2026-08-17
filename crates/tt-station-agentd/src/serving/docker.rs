@@ -591,9 +591,16 @@ impl DockerBackend {
                 // `gozer status --json` who holds the boards. Deliberately
                 // NO duration: gozer's per-chip status carries `who` but no
                 // `since`, and agentd must not fabricate one (see
-                // `gozer::contention_detail`).
+                // `gozer::contention_detail`). Our OWN published port is
+                // passed so a lease this box already holds reads as "stop it
+                // first" rather than as a stranger's -- see
+                // `gozer::own_lease_clause`.
+                let port = self.config.host_port;
                 let detail = holder
-                    .or_else(|| crate::gozer::contention_detail(self.runner.as_ref(), capability))
+                    .map(|who| crate::gozer::own_lease_clause(&who, port).unwrap_or(who))
+                    .or_else(|| {
+                        crate::gozer::contention_detail(self.runner.as_ref(), capability, port)
+                    })
                     .unwrap_or_else(|| "gozer reports no free chips".to_string());
                 // A `Contention`, not a bare `anyhow!` -- same reasoning
                 // (and same wording) as `RunPyBackend::acquire_lease`:
@@ -760,6 +767,36 @@ impl DockerBackend {
         Ok(())
     }
 
+    /// Stop the container of a lease this backend is still holding and hand
+    /// that lease back, called by `start` before it acquires again.
+    ///
+    /// A no-op (`Ok(())`) when nothing is leased -- which is every unleased
+    /// serve, so a box without gozer runs the exact command sequence it
+    /// always did. When a lease IS held, the recorded container name is what
+    /// gets stopped (never one derived from the incoming `model` argument,
+    /// which names the serve being STARTED, not the one being replaced), and
+    /// a stop that fails aborts before the release, since the release resets
+    /// those chips.
+    fn stop_and_release_held_lease(&self) -> Result<()> {
+        let held = self
+            .lease
+            .lock()
+            .expect("lease mutex poisoned")
+            .as_ref()
+            .map(|held| held.container_name.clone());
+        let Some(container_name) = held else {
+            return Ok(());
+        };
+
+        self.stop_container(&container_name).with_context(|| {
+            format!(
+                "refusing to release the previous serve's lease: its container \
+                 {container_name} could not be stopped, and the release would reset chips it \
+                 may still be driving"
+            )
+        })?;
+        self.release_lease()
+    }
 
 
     /// Give back the lease this backend holds on behalf of a running serve,
@@ -847,6 +884,20 @@ impl ServingBackend for DockerBackend {
     /// failed bring-up leaves its container for the operator to inspect).
     fn start(&self, model: &str) -> Result<Endpoint> {
         let container_name = self.container_name(model);
+
+        // SWAP FIRST: stop the previous serve's container and hand its lease
+        // back BEFORE asking gozer for chips again. A no-op when nothing is
+        // leased, so an unleased box runs the exact sequence it always did.
+        //
+        // `DockerBackend` is only ACCIDENTALLY immune to the strand this
+        // prevents -- a second `docker run --publish` on the same host port
+        // fails, so the second lease never gets stranded in practice -- and
+        // an accident is not a guarantee of this branch's central invariant.
+        // Both backends now swap the same way. See
+        // `stop_and_release_held_lease` and `RunPyBackend::start`.
+        self.stop_and_release_held_lease().context(
+            "failed to hand back the lease of the previous serve before starting a new one",
+        )?;
 
         // Lease the chips BEFORE touching anything on the box -- before the
         // container is started, so it can only ever be launched against

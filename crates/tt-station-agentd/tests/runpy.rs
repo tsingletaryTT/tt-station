@@ -24,7 +24,7 @@ use tt_station_agentd::serving::runpy::{RunPyBackend, RunPyConfig, tool_call_par
 use tt_station_agentd::serving::ServingBackend;
 
 mod support;
-use support::{FakeRunner, TempModelSpec};
+use support::{FakeGozerBox, FakeRunner, TempModelSpec};
 
 /// Build a `RunPyConfig` with production-shaped defaults, overriding only
 /// `host`/`service_port` -- the two fields most tests in this file vary.
@@ -1370,8 +1370,16 @@ fn gozer_index(commands: &[Vec<String>], verb: &str) -> Option<usize> {
 }
 
 /// TEST 1: with leasing available, `start` must `gozer acquire` BEFORE it
-/// touches any chips -- before the stale-container sweep, before the board
-/// reset, and before run.py -- and must pass `--owner-pid <this pid>`.
+/// touches any CHIPS -- before the board reset and before run.py -- and must
+/// pass `--owner-pid <this pid>`.
+///
+/// The one thing that precedes the acquire is the stale-container port sweep
+/// (`docker ps`/`docker stop`), and that is deliberate: it only ever touches
+/// containers publishing this agent's own `service_port`, so it never needed
+/// a lease, and running it under one meant its failure path dropped the
+/// `LeaseGuard` -- resetting BDFs a container it had just failed to stop may
+/// still have been driving. See `start`'s "the order of the next three steps"
+/// comment and `runpy_start_sweeps_stale_containers_before_taking_a_lease`.
 ///
 /// `--owner-pid` is load-bearing, not cosmetic: agentd's serving containers
 /// run as root, so gozer (running unprivileged) can never see their fds and
@@ -1422,10 +1430,21 @@ fn runpy_start_acquires_lease_before_reset_and_launch() {
         .iter()
         .position(|cmd| cmd.first().map(String::as_str) == Some("python3"))
         .expect("expected a python3 run.py invocation");
+    let sweep_index = commands
+        .iter()
+        .position(|cmd| {
+            cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("ps")
+        })
+        .expect("expected the stale-container port sweep");
     assert_eq!(
-        acquire_index, 0,
-        "acquire must be the FIRST thing start does -- everything after it \
-         touches chips: {commands:?}"
+        sweep_index, 0,
+        "the port sweep is the only thing that may precede the acquire: {commands:?}"
+    );
+    assert_eq!(
+        acquire_index, 1,
+        "acquire must come immediately after the port sweep, and before \
+         anything that touches chips: {commands:?}"
     );
     assert!(
         acquire_index < reset_index && reset_index < runpy_index,
@@ -2553,5 +2572,225 @@ fn runpy_reset_refuses_when_lease_state_cannot_be_determined() {
                 && cmd.get(1).map(String::as_str) == Some("stop")
         }),
         "a refused reset must not stop containers either: {commands:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A SECOND `start` while this backend already holds a lease.
+//
+// These drive the STATEFUL `FakeGozerBox` rather than `leasing_runner`'s
+// canned grant, because the whole question is what the gate looks like the
+// second time round -- something a fixed `acquire` answer cannot express.
+// ---------------------------------------------------------------------------
+
+/// A `tt-smi -s` snapshot for a ONE-board box: two `p300c` ASICs, so a
+/// single-board grant of 2 chips maps to the `p300` mesh.
+const TT_SMI_TWO_P300C: &str = r#"{
+    "device_info": [
+        {"board_info": {"board_type": "p300c"}},
+        {"board_info": {"board_type": "p300c"}}
+    ]
+}"#;
+
+/// Indices of every `gozer <verb>` invocation among `commands`.
+fn gozer_indices(commands: &[Vec<String>], verb: &str) -> Vec<usize> {
+    commands
+        .iter()
+        .enumerate()
+        .filter(|(_, cmd)| {
+            cmd.first().map(String::as_str) == Some("gozer")
+                && cmd.get(1).map(String::as_str) == Some(verb)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// CRITICAL, the two-board strand. `POST /run B` while A is serving must not
+/// leave A's lease held with nothing behind it.
+///
+/// What the broken version does on a two-board box: `acquire` is the FIRST
+/// thing `start` does, so gozer -- seeing A's board held by our own `who` --
+/// grants the OTHER board. `stop_serving_containers()` then kills A's
+/// container (it publishes the same `service_port`, so it is ours by
+/// definition), and the success handover overwrites `self.lease` after only
+/// an `eprintln!`. A's lease is then held forever with no container and
+/// un-reset chips, and it survives a restart too: both leases carry
+/// `who = tt-station:<same port>:<model>`, so the startup sweep sees the port
+/// in use and KEEPS both. One `tt run` without a preceding `tt stop`
+/// permanently halves the box.
+///
+/// The fix is an ordering one -- sweep, release what we hold, THEN acquire --
+/// so the assertions are about order and about how many leases survive.
+#[test]
+fn runpy_start_twice_releases_the_first_lease_before_acquiring_again() {
+    let gozer = FakeGozerBox::with_boards(2, 0);
+    gozer.runner().set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend.start("model-a").expect("the first start should succeed");
+    assert_eq!(
+        gozer.held_lease_ids(),
+        vec!["lease-1".to_string()],
+        "the first serve should hold exactly one lease"
+    );
+
+    backend
+        .start("model-b")
+        .expect("a second start should succeed");
+
+    assert_eq!(
+        gozer.held_lease_ids(),
+        vec!["lease-2".to_string()],
+        "exactly ONE lease may be held after a swap -- the first serve's \
+         container was stopped by the second start's port sweep, so keeping \
+         its lease strands a board with un-reset chips and nothing running"
+    );
+
+    // ORDER is the assertion, not merely "a release happened": releasing
+    // after the second acquire would still have handed out the other board.
+    let commands = gozer.commands();
+    let acquires = gozer_indices(&commands, "acquire");
+    let releases = gozer_indices(&commands, "release");
+    assert_eq!(acquires.len(), 2, "one acquire per start: {commands:?}");
+    assert_eq!(
+        releases.len(),
+        1,
+        "the first serve's lease must be released exactly once: {commands:?}"
+    );
+    assert!(
+        commands[releases[0]].iter().any(|a| a == "lease-1"),
+        "the release must name the FIRST lease: {:?}",
+        commands[releases[0]]
+    );
+    assert!(
+        acquires[0] < releases[0] && releases[0] < acquires[1],
+        "the old lease must be released ({}) BEFORE the new one is acquired \
+         ({}): {commands:?}",
+        releases[0],
+        acquires[1]
+    );
+}
+
+/// CRITICAL, the single-board face of the same bug. Nothing can be granted
+/// while our own serve holds the only board, so the broken version's
+/// `acquire` comes back `Unavailable` and `contention_detail` reports OUR OWN
+/// lease back to us: `no chips are available: board <serial> is held by
+/// tt-station:8080:model-a`. The user is told a stranger holds the board they
+/// are already using, and `tt run` -- which worked before gozer -- now fails.
+#[test]
+fn runpy_start_twice_on_a_single_board_box_swaps_instead_of_self_contending() {
+    let gozer = FakeGozerBox::with_boards(1, 0);
+    gozer.runner().set_run_output("tt-smi -s", TT_SMI_TWO_P300C);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend.start("model-a").expect("the first start should succeed");
+    backend.start("model-b").expect(
+        "a second start on a one-board box must SWAP -- releasing our own \
+         lease first -- not report the box as contended against itself",
+    );
+
+    assert_eq!(
+        gozer.held_lease_ids(),
+        vec!["lease-2".to_string()],
+        "the swap must end holding exactly the new lease"
+    );
+}
+
+/// IMPORTANT 5: the pre-launch stale-container sweep must run BEFORE the
+/// lease is taken. It only ever touches containers publishing this agent's
+/// own `service_port` -- ours by definition -- so it never needed a lease;
+/// and while it ran under one, its `?` dropped the guard and RELEASED, which
+/// resets the leased BDFs while the stale container it just failed to kill
+/// may still be driving them.
+#[test]
+fn runpy_start_sweeps_stale_containers_before_taking_a_lease() {
+    let gozer = FakeGozerBox::with_boards(2, 0);
+    gozer.runner().set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = gozer.commands();
+    let sweep_index = commands
+        .iter()
+        .position(|cmd| {
+            cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("ps")
+        })
+        .unwrap_or_else(|| panic!("expected the stale-container sweep: {commands:?}"));
+    let acquire_index = gozer_indices(&commands, "acquire")
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("expected a gozer acquire: {commands:?}"));
+    assert!(
+        sweep_index < acquire_index,
+        "the port sweep ({sweep_index}) must precede the acquire \
+         ({acquire_index}): under a lease, its failure path releases and \
+         resets chips a container it could not stop may still be using: \
+         {commands:?}"
+    );
+}
+
+/// IMPORTANT 5, the failure half: when the stale-container sweep FAILS, no
+/// lease may have been taken (so nothing is released, so nothing is reset).
+#[test]
+fn runpy_start_takes_no_lease_when_the_stale_container_sweep_fails() {
+    let gozer = FakeGozerBox::with_boards(2, 0);
+    let runner = gozer.runner();
+    runner.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    runner.fail_run("docker ps", "docker daemon unreachable");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend
+        .start("llama3")
+        .expect_err("start must fail when the stale-container sweep cannot run");
+
+    assert!(
+        gozer.held_lease_ids().is_empty(),
+        "no lease may be held after a failed pre-launch sweep: {:?}",
+        gozer.held_lease_ids()
+    );
+    let commands = gozer.commands();
+    assert!(
+        gozer_indices(&commands, "acquire").is_empty(),
+        "nothing may be acquired once the sweep has failed -- the acquire \
+         would only be released again, and a release RESETS chips a container \
+         we could not stop may still be driving: {commands:?}"
+    );
+}
+
+/// The self-contention message, for the paths that can still reach it (two
+/// concurrent `POST /run`s -- nothing serialises `run_model` -- or a lease
+/// adopted from a dead process). Naming ourselves as if we were a stranger
+/// sends the operator looking for a tenant who does not exist.
+#[test]
+fn runpy_start_names_its_own_serve_rather_than_a_stranger_when_contended() {
+    let gozer = FakeGozerBox::with_boards(1, 0);
+    gozer.runner().set_run_output("tt-smi -s", TT_SMI_TWO_P300C);
+    // A lease left behind by a previous process of THIS agent, on THIS
+    // serving port -- the backend has no in-memory record of it, so `start`
+    // has nothing to release and the acquire genuinely cannot be granted.
+    gozer.preexisting_lease("tt-station:8080:model-a");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    let err = backend
+        .start("model-b")
+        .expect_err("nothing can be granted while the only board is held");
+    let message = err.to_string();
+    assert!(
+        message.contains("model-a") && message.contains("tt stop"),
+        "a lease held by this box's OWN serving port must read as 'this box \
+         is already serving <model>; tt stop first', not as a stranger \
+         holding the board: {message}"
+    );
+    assert!(
+        !message.contains("is held by tt-station:8080:"),
+        "it must not name this agent's own `who` back to the operator as if \
+         it were another tenant: {message}"
     );
 }
