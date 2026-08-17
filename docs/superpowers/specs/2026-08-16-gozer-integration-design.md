@@ -237,9 +237,10 @@ repo; it is not a blocker here, and agentd must not fabricate a duration it cann
 
 
 `gozer acquire` exits 10 (queued) or 12 (unavailable). agentd does **not** queue; it releases
-any ticket and returns a clear error naming the board, the holder's `who`, and how long they
-have held it. With two boards and a small number of tenants, "board ...4055 is held by
-claude:ttm-optimize since 14:02" is more actionable than a queue position.
+any ticket and returns a clear error naming the board and the holder's `who`. With two boards
+and a small number of tenants, "board ...4055 is held by claude:ttm-optimize" is more
+actionable than a queue position. No duration is reported — see the correction above; gozer
+does not expose one and agentd must not invent it.
 
 ## Mac side
 
