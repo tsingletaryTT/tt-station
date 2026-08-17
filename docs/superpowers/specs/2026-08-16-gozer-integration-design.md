@@ -150,7 +150,8 @@ gozer acquire --chips <N> --owner-pid <agentd pid> \
 Two details carry weight:
 
 * `--owner-pid` ties the lease's life to agentd's, per above.
-* `--who` embeds the **container name**, making that string the lease↔container binding. No
+* `--who` embeds the **service port** (`tt-station:<port>:<model>`), making that the
+  lease↔session binding. No
   docker labels are needed, because gozer already stores this and `docker ps` already reports
   it. It also makes a Mac user's session legible in `gozer status` and `gozer history` *on the
   box*, so a local agent can see the chips belong to someone's remote session rather than to an
@@ -192,10 +193,30 @@ them. The existing `run` keeps its behaviour so nothing else changes.
 dedicated verb: stop, then start on the same board, and the incoming model gets clean silicon
 without a separate `tt reset`.
 
+### `POST /reset` refuses rather than resetting a neighbour
+
+*Added after implementation surfaced it.* `RunPyBackend::reset` (the `POST /reset` path) still
+issues a **whole-box** `tt-smi -r`. With two tenants that resets the other one's chips.
+
+`/reset` is not an eviction command, and this version has no implicit preemption. So: **if any
+lease is held that this request does not own, refuse and name the holder.** Otherwise reset the
+whole box exactly as today.
+
+Refusing is the honest option. Silently resetting a neighbour's running model to fix your own
+box is the collision this integration exists to prevent, and the operator can always stop the
+other session deliberately first.
+
 ### One startup sweep
 
-On startup agentd lists gozer leases whose `who` begins `tt-station:`, extracts the container
-name, and releases any whose container is not in `docker ps`.
+On startup agentd lists gozer leases whose `who` begins `tt-station:`, extracts the **service
+port**, and releases any lease with nothing serving on that port.
+
+*Corrected during implementation:* the first draft matched on container name. `run.py` names the
+container itself and only reveals the id after launch, so agentd cannot know it at acquire time.
+`--who` is therefore `tt-station:<service_port>:<model>`, and the port is the binding. This is
+the better key anyway — the port is known before launch and stable across a container restart.
+`discover_serving` already parses published host ports (`parse_published_host_port`), so the
+sweep reuses it.
 
 That is the whole reconciliation — one rule, one direction. The reverse case (a container with
 no lease) can only arise if agentd died between `acquire` and `docker run`, and `--owner-pid`
