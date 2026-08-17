@@ -27,7 +27,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use libttstation::model::{ConfigSummary, Endpoint, ModelsResponse, ServingList, ServingStatus};
+use libttstation::model::{
+    ConfigSummary, Endpoint, LeaseList, ModelsResponse, ServingList, ServingStatus,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::authkeys;
@@ -56,6 +58,16 @@ const DEFAULT_SERVING_HOST: &str = "127.0.0.1";
 /// `AppState` isn't told otherwise. Mirrors `main.rs`'s `--serving-port`
 /// default.
 const DEFAULT_SERVING_PORT: u16 = 8000;
+
+/// TTL on the cached `gozer status --json` parse shared by `GET /leases`
+/// and `GET /status`'s `leasing` field (see `Inner::gozer_leases_cache`).
+/// `gozer status` is cheap (sysfs + `/proc`, never a device -- see the
+/// design doc), so this is short: long enough to collapse a burst of
+/// near-simultaneous callers (a Mac polling `/leases` and `/status` at
+/// roughly the same cadence) into one subprocess, short enough that a real
+/// lease change on the box (someone else's `gozer acquire`/`release`) shows
+/// up well within a human noticing it.
+const GOZER_LEASE_CACHE_TTL: Duration = Duration::from_millis(300);
 
 /// How long a pairing code stays valid after `/pair/init` mints it. Short
 /// enough that a code seen once (e.g. shoulder-surfed, or left in shell
@@ -268,6 +280,18 @@ struct Inner {
     /// Purely additive: nothing outside a future leasing-aware route reads
     /// it yet -- Task 1 only stores it.
     gozer: Option<crate::gozer::Capability>,
+    /// Short-TTL cache of the last `gozer status --json` parse (see
+    /// [`crate::gozer::snapshot_leases`]), shared by `GET /leases` and
+    /// `GET /status`'s `leasing` field -- same "collapse a thundering herd
+    /// of near-simultaneous callers into one shell-out" reasoning as
+    /// `tt_smi_cache`, but for gozer's status instead of `tt-smi`'s. Unlike
+    /// `tt_smi_cache` (whose TTL tracks the configurable telemetry
+    /// interval), this uses the fixed `GOZER_LEASE_CACHE_TTL`: there's no
+    /// per-client polling interval to key off here, just "don't let an
+    /// unthrottled `/leases` poller (or `/status`, which is unauthed and
+    /// polled far more casually) spawn a `gozer status` subprocess on every
+    /// single request." `None` until the first call populates it.
+    gozer_leases_cache: tokio::sync::Mutex<Option<(Instant, crate::gozer::LeaseSnapshot)>>,
 }
 
 impl AppState {
@@ -353,6 +377,7 @@ impl AppState {
                 power_reboot_cmd: vec!["systemctl".to_string(), "reboot".to_string()],
                 power_shutdown_cmd: vec!["systemctl".to_string(), "poweroff".to_string()],
                 gozer: None,
+                gozer_leases_cache: tokio::sync::Mutex::new(None),
             }),
         }
     }
@@ -643,6 +668,44 @@ impl AppState {
         let json = collect_snapshot(self.tt_smi_bin().to_string()).await?;
         *cache = Some((Instant::now(), json.clone()));
         Ok(json)
+    }
+
+    /// The cached [`crate::gozer::LeaseSnapshot`] behind `GET /leases` and
+    /// `GET /status`'s `leasing` field -- see `Inner::gozer_leases_cache`'s
+    /// doc comment for the caching rationale (mirrors `cached_snapshot`'s
+    /// shape exactly, one level up: TTL'd cache, hold the lock across the
+    /// `spawn_blocking` shell-out so a thundering herd collapses to one
+    /// `gozer status` run).
+    ///
+    /// Returns [`crate::gozer::LeaseSnapshot::default`] (empty leases, 0
+    /// boards, 0 max_concurrent) whenever gozer isn't installed on this box
+    /// -- callers combine this with `self.gozer().is_some()` to distinguish
+    /// "gozer absent" from "gozer present and genuinely reports zero
+    /// boards," per `LeaseList`'s `available` marker. Also degrades to that
+    /// same default (never a panic, never propagated as an error) if the
+    /// shell-out itself fails, exits non-zero, or the `spawn_blocking` task
+    /// panics -- `snapshot_leases` is already best-effort for all of those;
+    /// this just extends the same contract through the cache and the join.
+    async fn gozer_snapshot(&self) -> crate::gozer::LeaseSnapshot {
+        let Some(capability) = self.inner.gozer.clone() else {
+            return crate::gozer::LeaseSnapshot::default();
+        };
+
+        let mut cache = self.inner.gozer_leases_cache.lock().await;
+        if let Some((at, snapshot)) = cache.as_ref() {
+            if at.elapsed() < GOZER_LEASE_CACHE_TTL {
+                return snapshot.clone();
+            }
+        }
+
+        let snapshot = tokio::task::spawn_blocking(move || {
+            let runner = RealCommandRunner;
+            crate::gozer::snapshot_leases(&runner, &capability).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        *cache = Some((Instant::now(), snapshot.clone()));
+        snapshot
     }
 
     /// Serving host baked into `GET /serving` `base_url`s (see `with_serving_config`).
@@ -1236,6 +1299,31 @@ struct StatusResponse {
     /// client (the Mac app) send a Wake-on-LAN magic packet to this box when
     /// it's off.
     mac: Option<String>,
+    /// Whether/how this box can lease chips out via `gozer` -- see the
+    /// design doc's `GET /status` row. `available: false` (gozer never
+    /// probed successfully at startup) means every other field is `null`:
+    /// never a guessed version or a fabricated board count for hardware
+    /// this agent never actually asked gozer about.
+    leasing: LeasingInfo,
+}
+
+/// The `leasing` object on `GET /status` -- see [`StatusResponse::leasing`].
+#[derive(Serialize)]
+struct LeasingInfo {
+    available: bool,
+    /// `gozer --version`'s output verbatim (e.g. `"gozer 0.1.0"`), from the
+    /// startup probe -- see `crate::gozer::Capability::version`. `None`
+    /// whenever `available` is `false`.
+    version: Option<String>,
+    /// Distinct board count, derived from the same `gozer status --json`
+    /// payload `GET /leases` reads (see `crate::gozer::snapshot_leases`).
+    /// `None` whenever `available` is `false`.
+    boards: Option<u32>,
+    /// How many tenants this box's current leasing grain can serve at once
+    /// -- the chip count when gozer's grain is `"chip"`, else (today, always
+    /// `"board"` on this hardware) the same as `boards`. `None` whenever
+    /// `available` is `false`.
+    max_concurrent: Option<u32>,
 }
 
 async fn get_status(
@@ -1245,13 +1333,65 @@ async fn get_status(
     // `docker stop`, crash) isn't reported as still serving. Self-heals the
     // stored state as a side effect -- see `AppState::reconciled_status`.
     let status = state.reconciled_status().await;
+    let leasing = leasing_info(&state).await;
     Json(StatusResponse {
         name: state.name().to_string(),
         chips: state.chips().to_string(),
         status: status.to_txt(),
         device_mesh: state.device_mesh().map(str::to_string),
         mac: state.mac().map(str::to_string),
+        leasing,
     })
+}
+
+/// Build `GET /status`'s `leasing` field: `available`/`version` come
+/// straight from the startup-probed `Capability` (no shell-out); `boards`/
+/// `max_concurrent` come from `AppState::gozer_snapshot`'s cached parse of
+/// `gozer status --json` (the SAME cache `GET /leases` fills -- see
+/// `GOZER_LEASE_CACHE_TTL`'s doc comment), so calling `/status` right after
+/// (or right before) `/leases` costs no extra shell-out either way.
+async fn leasing_info(state: &AppState) -> LeasingInfo {
+    let Some(capability) = state.gozer() else {
+        return LeasingInfo {
+            available: false,
+            version: None,
+            boards: None,
+            max_concurrent: None,
+        };
+    };
+    let version = capability.version.clone();
+    let snapshot = state.gozer_snapshot().await;
+    LeasingInfo {
+        available: true,
+        version: Some(version),
+        boards: Some(snapshot.boards),
+        max_concurrent: Some(snapshot.max_concurrent),
+    }
+}
+
+/// `GET /leases` (bearer-guarded, per `get_endpoint`'s `_auth: BearerAuth`
+/// pattern): every chip's lease state as gozer reports it, or an explicit
+/// `available: false` marker -- never an error -- when gozer isn't
+/// installed on this box. See [`LeaseList`]'s doc comment for why this is a
+/// struct with an explicit flag rather than just an (ambiguous) empty list.
+///
+/// The actual `gozer status --json` shell-out happens inside
+/// `AppState::gozer_snapshot`, cached with a short TTL (`GOZER_LEASE_CACHE_TTL`)
+/// -- `gozer status` is cheap (sysfs + `/proc`, never a device -- see the
+/// design doc), but an unthrottled endpoint still invites a Mac polling
+/// every second, exactly the contention `tt_smi_cache` exists to prevent for
+/// `/telemetry`.
+async fn get_leases(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Json<LeaseList> {
+    let available = state.gozer().is_some();
+    let leases = if available {
+        state.gozer_snapshot().await.leases
+    } else {
+        Vec::new()
+    };
+    Json(LeaseList { available, leases })
 }
 
 /// `GET /config` (UNAUTHED, like `GET /status`): the agent's redacted
@@ -2288,6 +2428,7 @@ pub fn app(state: AppState) -> Router {
         .route("/reset", post(reset))
         .route("/power", post(power))
         .route("/endpoint", get(get_endpoint))
+        .route("/leases", get(get_leases))
         .route("/ssh/authorize", post(ssh_authorize).delete(ssh_revoke))
         .with_state(state)
 }

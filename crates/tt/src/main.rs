@@ -58,8 +58,8 @@ use libttstation::discovery::{
     aggregate, manual::ManualProvider, mdns::MdnsProvider, DiscoveryProvider,
 };
 use libttstation::model::{
-    BoxRecord, ConfigSummary, Endpoint, LogsInfo, ModelsResponse, ServingList, ServingStatus,
-    StatusInfo,
+    BoxRecord, ConfigSummary, Endpoint, LeaseList, LogsInfo, ModelsResponse, ServingList,
+    ServingStatus, StatusInfo,
 };
 use libttstation::pairing::{pair_complete, pair_init};
 use libttstation::secrets::{default_store, FileStore, SecretStore};
@@ -242,6 +242,20 @@ enum Command {
     /// works even against a box `tt pair` was never run against.
     Serving {
         /// The box's control-plane address, as `host:port`.
+        #[arg(long)]
+        host: String,
+    },
+
+    /// List every chip's lease state as `gozer` reports it on a paired box
+    /// -- who holds what, and whether it's `HELD`/`HELD-FOREIGN`/`CLAIMED`/
+    /// `STALE`/`BUSY-UNTRACKED`/`FREE`. AUTHED, unlike `serving`/`status`/
+    /// `models` above -- the agent's `GET /leases` is bearer-guarded (Task 4
+    /// of the tt-station x tt-gozer integration), so this needs `tt pair`
+    /// first. Reports leasing as unavailable (not an error) on a box
+    /// without gozer installed.
+    Leases {
+        /// The box's control-plane address, as `host:port`. Must already be
+        /// paired (see `tt pair`).
         #[arg(long)]
         host: String,
     },
@@ -431,6 +445,10 @@ fn main() -> Result<()> {
         Command::Serving { host } => {
             let list = run_async(cmd_serving(host))?;
             print_serving(&list, cli.json);
+        }
+        Command::Leases { host } => {
+            let list = run_async(cmd_leases(host))?;
+            print_leases(&list, cli.json);
         }
         Command::Logs {
             host,
@@ -836,6 +854,14 @@ async fn cmd_endpoint(host: &str) -> Result<Endpoint> {
 async fn cmd_serving(host: &str) -> Result<ServingList> {
     let base = format!("http://{host}");
     libttstation::agent_client::list_serving(&base).await
+}
+
+/// `tt leases --host <host:port>`: AUTHED, unlike `cmd_serving`/`cmd_status`/
+/// `cmd_models` above -- the agent's `GET /leases` has a `BearerAuth`
+/// extractor (Task 4), so this goes through `authed_client()` exactly like
+/// `cmd_run`/`cmd_stop`/`cmd_endpoint`.
+async fn cmd_leases(host: &str) -> Result<LeaseList> {
+    authed_client(host)?.list_leases().await
 }
 
 /// `tt logs --host <host:port> [--source <source>] [--tail <n>]`: UNAUTHED,
@@ -1465,6 +1491,41 @@ fn print_serving(list: &ServingList, json: bool) {
     } else {
         for entry in &list.serving {
             println!("{}\t{}\t{}", entry.model, entry.base_url, entry.source);
+        }
+    }
+}
+
+/// `tt leases`'s output: JSON prints the whole `LeaseList` object (`available`
+/// plus every `LeaseEntry`); human mode prints one chip per line as
+/// `<chip>\t<bdf>\t<board>\t<state>\t<who>` (`who` shown as `-` when nobody
+/// holds it), or a one-line "leasing unavailable" note when `available` is
+/// `false` -- never an error, mirroring the route's own "unavailable is a
+/// value, not a failure" contract. `state` prints EXACTLY as gozer reports
+/// it (`HELD`/`HELD-FOREIGN`/`CLAIMED`/`STALE`/`BUSY-UNTRACKED`/`FREE`) --
+/// this must never be renamed, lowercased, or otherwise restyled, since
+/// these exact strings already appear verbatim in the `gozer-gatekeeper`/
+/// `gozer-keymaster` skills a human reads (same constraint documented on
+/// `LeaseEntry` itself).
+fn print_leases(list: &LeaseList, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(list).expect("LeaseList always serializes")
+        );
+    } else if !list.available {
+        println!("leasing unavailable on this box (gozer not installed)");
+    } else if list.leases.is_empty() {
+        println!("no chips reported");
+    } else {
+        for lease in &list.leases {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                lease.chip,
+                lease.bdf,
+                lease.board,
+                lease.state,
+                lease.who.as_deref().unwrap_or("-"),
+            );
         }
     }
 }

@@ -28,8 +28,8 @@ use axum::{
 use clap::{Parser, Subcommand};
 use libttstation::discovery::SERVICE_TYPE;
 use libttstation::model::{
-    txt_encode, BoxRecord, ConfigSummary, Endpoint, LogsInfo, ModelInfo, ModelsResponse,
-    ServingStatus,
+    txt_encode, BoxRecord, ConfigSummary, Endpoint, LeaseEntry, LeaseList, LogsInfo, ModelInfo,
+    ModelsResponse, ServingStatus,
 };
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use rand::Rng;
@@ -428,6 +428,42 @@ async fn get_endpoint(State(state): State<MockState>) -> Result<Json<Endpoint>, 
         .ok_or(StatusCode::CONFLICT)
 }
 
+/// `GET /leases` (Task 4 of the tt-station x tt-gozer integration): a
+/// canned two-chip `LeaseList` -- one board `HELD` by a fake tenant, one
+/// `FREE` -- standing in for a real `gozer status --json` proxy, so `tt
+/// leases` has SOME end-to-end coverage (`crates/tt/tests/e2e_mock.rs`)
+/// without a real `gozer` binary or hardware anywhere in this mock. No auth
+/// check, matching every other authed-in-reality route on this mock (see
+/// the module doc / `ssh_authorize_mock`'s comment) -- and, like the real
+/// agent's `LeaseEntry`, `since` is always `null`: gozer's own status never
+/// reports a lease-start time, so this canned fixture doesn't invent one
+/// either.
+async fn get_leases() -> Json<LeaseList> {
+    Json(LeaseList {
+        available: true,
+        leases: vec![
+            LeaseEntry {
+                chip: 0,
+                bdf: "0000:01:00.0".to_string(),
+                board: "0100014311601055".to_string(),
+                state: "HELD".to_string(),
+                who: Some("mock-tenant".to_string()),
+                since: None,
+                reason: Some("mock lease".to_string()),
+            },
+            LeaseEntry {
+                chip: 1,
+                bdf: "0000:02:00.0".to_string(),
+                board: "0100014311601048".to_string(),
+                state: "FREE".to_string(),
+                who: None,
+                since: None,
+                reason: None,
+            },
+        ],
+    })
+}
+
 /// `POST /v1/chat/completions`: a canned OpenAI-style chat completion. The
 /// request body is intentionally not validated or even inspected -- the
 /// point of this mock is proving `tt`'s discover -> pair -> run -> endpoint
@@ -665,6 +701,7 @@ fn app(state: MockState) -> Router {
         .route("/run", post(run_model))
         .route("/stop", post(stop_model))
         .route("/endpoint", get(get_endpoint))
+        .route("/leases", get(get_leases))
         .route("/power", post(power_mock))
         .route(
             "/ssh/authorize",

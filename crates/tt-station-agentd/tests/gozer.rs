@@ -13,8 +13,9 @@
 
 mod support;
 
+use libttstation::model::LeaseEntry;
 use support::FakeRunner;
-use tt_station_agentd::gozer::{self, Capability, Grant, Outcome};
+use tt_station_agentd::gozer::{self, Capability, Grant, LeaseSnapshot, Outcome};
 use tt_station_agentd::serving::docker::CapturedOutput;
 
 /// `probe` runs `<path> --version` and, on a clean exit-0 response, reports
@@ -219,4 +220,188 @@ fn reset_target_refuses_an_empty_grant() {
         err.to_string().contains("WHOLE BOX"),
         "the error should name the hazard it is avoiding: {err}"
     );
+}
+
+// ---------------------------------------------------------------------
+// `snapshot_leases` -- the parse behind `GET /leases` and `/status`'s
+// `leasing` field. Both routes shell out to `gozer status --json` exactly
+// once and share this one parse of the payload (see the module's doc
+// comment on `LeaseSnapshot`).
+// ---------------------------------------------------------------------
+
+/// A realistic two-board, four-chip `gozer status --json` payload: one
+/// board fully `CLAIMED` by a remote agent, one board `FREE`. Mirrors the
+/// shape already used in `tests/runpy.rs`'s `STATUS_JSON_HELD` /
+/// `tests/serving.rs`'s fixtures, extended with a second board so the
+/// board-count / max_concurrent math has something to count.
+const STATUS_JSON_TWO_BOARDS: &str = r#"{"grain":"board","chips":[
+    {"dev_index":0,"bdf":"0000:01:00.0","board":"0100014311601055","card":"p300",
+     "state":"CLAIMED","who":"claude:ttm-optimize","pid":9001,
+     "reason":"bringup","pids_holding":[9001],"overstayed":false},
+    {"dev_index":1,"bdf":"0000:02:00.0","board":"0100014311601055","card":"p300",
+     "state":"CLAIMED","who":"claude:ttm-optimize","pid":9001,
+     "reason":"bringup","pids_holding":[9001],"overstayed":false},
+    {"dev_index":2,"bdf":"0000:03:00.0","board":"0100014311601048","card":"p300",
+     "state":"FREE","who":null,"pid":null,
+     "reason":null,"pids_holding":[],"overstayed":false},
+    {"dev_index":3,"bdf":"0000:04:00.0","board":"0100014311601048","card":"p300",
+     "state":"FREE","who":null,"pid":null,
+     "reason":null,"pids_holding":[],"overstayed":false}],
+    "queue":[]}"#;
+
+/// The happy path: every chip becomes one `LeaseEntry`, `chip`/`bdf`/`board`
+/// carried through from gozer's `dev_index`/`bdf`/`board`, `state` preserved
+/// VERBATIM (including the hyphenated `HELD-FOREIGN` form -- this must never
+/// be renamed/restyled, see `LeaseEntry`'s doc comment), `who`/`reason`
+/// passed through as-is, and -- the fact this whole task hinges on --
+/// `since` is ALWAYS `None`, because gozer's per-chip status never carries
+/// one. `boards` counts the 2 distinct board serials; with `"grain":
+/// "board"`, `max_concurrent` equals that same count.
+#[test]
+fn snapshot_leases_maps_every_chip_and_never_invents_since() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("status", 0, STATUS_JSON_TWO_BOARDS, "");
+    let capability = Capability {
+        path: "gozer".to_string(),
+        version: "gozer 0.1.0".to_string(),
+    };
+
+    let snapshot = gozer::snapshot_leases(&runner, &capability)
+        .expect("a clean exit-0 status payload must parse");
+
+    assert_eq!(
+        snapshot,
+        LeaseSnapshot {
+            leases: vec![
+                LeaseEntry {
+                    chip: 0,
+                    bdf: "0000:01:00.0".to_string(),
+                    board: "0100014311601055".to_string(),
+                    state: "CLAIMED".to_string(),
+                    who: Some("claude:ttm-optimize".to_string()),
+                    since: None,
+                    reason: Some("bringup".to_string()),
+                },
+                LeaseEntry {
+                    chip: 1,
+                    bdf: "0000:02:00.0".to_string(),
+                    board: "0100014311601055".to_string(),
+                    state: "CLAIMED".to_string(),
+                    who: Some("claude:ttm-optimize".to_string()),
+                    since: None,
+                    reason: Some("bringup".to_string()),
+                },
+                LeaseEntry {
+                    chip: 2,
+                    bdf: "0000:03:00.0".to_string(),
+                    board: "0100014311601048".to_string(),
+                    state: "FREE".to_string(),
+                    who: None,
+                    since: None,
+                    reason: None,
+                },
+                LeaseEntry {
+                    chip: 3,
+                    bdf: "0000:04:00.0".to_string(),
+                    board: "0100014311601048".to_string(),
+                    state: "FREE".to_string(),
+                    who: None,
+                    since: None,
+                    reason: None,
+                },
+            ],
+            boards: 2,
+            max_concurrent: 2,
+        }
+    );
+}
+
+/// Gozer's own six-value state vocabulary must survive completely unchanged
+/// -- including the hyphenated forms -- because these exact strings appear
+/// verbatim in the `gozer-gatekeeper`/`gozer-keymaster` skills a human reads.
+#[test]
+fn snapshot_leases_preserves_every_state_string_verbatim() {
+    let runner = FakeRunner::new(0);
+    let payload = r#"{"grain":"board","chips":[
+        {"dev_index":0,"bdf":"0000:01:00.0","board":"b1","state":"HELD","who":"a","reason":null},
+        {"dev_index":1,"bdf":"0000:02:00.0","board":"b1","state":"HELD-FOREIGN","who":"b","reason":null},
+        {"dev_index":2,"bdf":"0000:03:00.0","board":"b2","state":"STALE","who":"c","reason":null},
+        {"dev_index":3,"bdf":"0000:04:00.0","board":"b2","state":"BUSY-UNTRACKED","who":null,"reason":null}],
+        "queue":[]}"#;
+    runner.set_run_capturing("status", 0, payload, "");
+    let capability = Capability {
+        path: "gozer".to_string(),
+        version: "gozer 0.1.0".to_string(),
+    };
+
+    let snapshot = gozer::snapshot_leases(&runner, &capability).expect("must parse");
+    let states: Vec<&str> = snapshot
+        .leases
+        .iter()
+        .map(|l| l.state.as_str())
+        .collect();
+    assert_eq!(states, vec!["HELD", "HELD-FOREIGN", "STALE", "BUSY-UNTRACKED"]);
+}
+
+/// When gozer's grain is `"chip"` (not this box's `"board"`), each chip is
+/// its own leasable unit, so `max_concurrent` must count CHIPS, not distinct
+/// boards -- `boards` still reports the (lower) board count either way,
+/// since that's a hardware fact independent of the leasing grain.
+#[test]
+fn snapshot_leases_counts_max_concurrent_by_chip_when_grain_is_chip() {
+    let runner = FakeRunner::new(0);
+    let payload = r#"{"grain":"chip","chips":[
+        {"dev_index":0,"bdf":"0000:01:00.0","board":"b1","state":"FREE","who":null,"reason":null},
+        {"dev_index":1,"bdf":"0000:02:00.0","board":"b1","state":"FREE","who":null,"reason":null}],
+        "queue":[]}"#;
+    runner.set_run_capturing("status", 0, payload, "");
+    let capability = Capability {
+        path: "gozer".to_string(),
+        version: "gozer 0.1.0".to_string(),
+    };
+
+    let snapshot = gozer::snapshot_leases(&runner, &capability).expect("must parse");
+    assert_eq!(snapshot.boards, 1, "1 distinct board serial");
+    assert_eq!(snapshot.max_concurrent, 2, "2 chips, chip-grain");
+}
+
+/// A `status` call that can't even run degrades to `None`, never a panic --
+/// same "gozer misbehaving is never fatal" contract as `probe`/`acquire`.
+#[test]
+fn snapshot_leases_returns_none_when_status_command_fails_to_run() {
+    let runner = FakeRunner::new(0);
+    runner.fail_run_capturing("status", "No such file or directory");
+    let capability = Capability {
+        path: "gozer".to_string(),
+        version: "gozer 0.1.0".to_string(),
+    };
+
+    assert_eq!(gozer::snapshot_leases(&runner, &capability), None);
+}
+
+/// A non-zero exit from `gozer status` (its own health signal -- e.g. a
+/// stuck mutex) also yields `None` rather than a stale/partial snapshot.
+#[test]
+fn snapshot_leases_returns_none_when_status_exits_nonzero() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("status", 16, "", "mutex stuck");
+    let capability = Capability {
+        path: "gozer".to_string(),
+        version: "gozer 0.1.0".to_string(),
+    };
+
+    assert_eq!(gozer::snapshot_leases(&runner, &capability), None);
+}
+
+/// Malformed JSON on an exit-0 response is also `None`, not a panic.
+#[test]
+fn snapshot_leases_returns_none_on_malformed_json() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("status", 0, "not json {", "");
+    let capability = Capability {
+        path: "gozer".to_string(),
+        version: "gozer 0.1.0".to_string(),
+    };
+
+    assert_eq!(gozer::snapshot_leases(&runner, &capability), None);
 }

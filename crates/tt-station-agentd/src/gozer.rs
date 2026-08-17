@@ -6,8 +6,9 @@
 //! **Scope of this module today:** capability probing (`probe`), the
 //! leasing verbs a serving backend needs (`acquire`, `release`,
 //! `contention_detail`), grant/outcome parsing (`Outcome::from_captured`),
-//! and the release-on-drop `LeaseGuard`. The startup reconciliation sweep
-//! is separate follow-up work.
+//! the release-on-drop `LeaseGuard`, and (Task 4) the read-only
+//! `snapshot_leases` behind `GET /leases`/`GET /status`'s `leasing` field.
+//! The startup reconciliation sweep is separate follow-up work.
 //!
 //! **gozer is OPTIONAL.** Its absence is a normal outcome (logged once, at
 //! info, via `eprintln!` -- this crate doesn't pull in a logging framework
@@ -36,6 +37,7 @@
 //! always passes the flag.
 
 use anyhow::{Context, Result};
+use libttstation::model::LeaseEntry;
 use serde::Deserialize;
 
 use crate::serving::docker::{CapturedOutput, CommandRunner};
@@ -434,15 +436,23 @@ struct ReleaseReport {
     message: Option<String>,
 }
 
-/// One chip's record in `gozer status --json`'s `chips` array. Only the
-/// fields needed to name a holder are declared -- `serde` ignores the rest
-/// (`dev_index`, `card`, `pid`, `pids_holding`, `overstayed`) so a gozer
-/// that grows a field doesn't break parsing here.
+/// One chip's record in `gozer status --json`'s `chips` array.
+///
+/// Started (Task 1) declaring only `board`/`state`/`who` -- enough to name a
+/// contention holder (see `contention_detail`). Task 4's `snapshot_leases`
+/// needs the rest of a chip's identity to build a full `LeaseEntry`, so
+/// `bdf`/`dev_index`/`reason` were added here rather than in a second,
+/// near-duplicate deserialization struct -- both consumers share one parse
+/// of one payload shape. `card`/`pid`/`pids_holding`/`overstayed` are still
+/// left undeclared: `serde` ignores unknown fields by default, so a gozer
+/// that grows a field (or one this codebase doesn't surface yet) never
+/// breaks parsing here.
 ///
 /// Note what is NOT here: a `since`. gozer's per-chip status carries `who`,
 /// `reason` and `state` but records no start time, so agentd can name a
 /// holder and CANNOT say how long they have held the board. It must not
-/// invent one.
+/// invent one -- see `LeaseEntry::since`'s doc comment for where that
+/// constraint surfaces on the wire.
 #[derive(Debug, Deserialize)]
 struct StatusChip {
     #[serde(default)]
@@ -451,13 +461,25 @@ struct StatusChip {
     state: Option<String>,
     #[serde(default)]
     who: Option<String>,
+    #[serde(default)]
+    bdf: Option<String>,
+    #[serde(default)]
+    dev_index: Option<u32>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
-/// `gozer status --json`'s top-level payload.
+/// `gozer status --json`'s top-level payload. `grain` (`"board"` or
+/// `"chip"`) is gozer's own term for its allocation unit on this box (see
+/// `gozer topology --json`, which reports the identical value) -- read here
+/// too so `snapshot_leases` can compute `max_concurrent` without a second
+/// shell-out to `gozer topology`.
 #[derive(Debug, Default, Deserialize)]
 struct StatusReport {
     #[serde(default)]
     chips: Vec<StatusChip>,
+    #[serde(default)]
+    grain: Option<String>,
 }
 
 /// Human-readable "who has the chips" detail for a contention error, built
@@ -513,6 +535,89 @@ pub fn contention_detail(runner: &dyn CommandRunner, capability: &Capability) ->
     } else {
         Some(clauses.join("; "))
     }
+}
+
+/// Everything `GET /leases` and `GET /status`'s `leasing` field need, from
+/// ONE `gozer status --json` call: every chip's lease record (see
+/// [`LeaseEntry`]) plus the two topology facts derivable from that same
+/// payload -- `boards` (distinct board serials seen) and `max_concurrent`
+/// (how many tenants this box's current grain can serve at once).
+///
+/// Deliberately built from `status`, not a second call to `gozer topology`:
+/// `status`'s own payload already carries `grain` and each chip's `board`
+/// serial (see `StatusReport`/`StatusChip`), so `boards`/`max_concurrent`
+/// fall out of the same parse `snapshot_leases` does for `leases` -- one
+/// shell-out, one cache entry (see `routes.rs`'s `AppState::gozer_snapshot`),
+/// serving both routes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LeaseSnapshot {
+    pub leases: Vec<LeaseEntry>,
+    pub boards: u32,
+    pub max_concurrent: u32,
+}
+
+/// Build a [`LeaseSnapshot`] from `gozer status --json`.
+///
+/// Best-effort throughout, mirroring `contention_detail`: a `status` that
+/// fails to run, exits non-zero (including `16` mutex-stuck -- see the
+/// design doc's failure-modes table), or returns unparseable JSON all yield
+/// `None`. The caller (`routes.rs`'s `GET /leases` and `/status`'s
+/// `leasing` field) treats `None` as "nothing to report right now" rather
+/// than an error -- gozer misbehaving must never turn either route into a
+/// 5xx.
+///
+/// `max_concurrent` depends on gozer's reported `grain`: `"chip"` means
+/// every chip is independently leasable, so it equals the chip count;
+/// anything else (today, only `"board"`) means a whole board is the unit,
+/// so it equals the distinct board count. `boards` always reports the
+/// distinct-board-serial count regardless of grain -- that's a hardware
+/// fact, not a leasing-unit fact.
+///
+/// **`since` is never populated.** See [`LeaseEntry`]'s doc comment and
+/// `StatusChip`'s: gozer's per-chip status has no lease-start timestamp, so
+/// inventing one here would be exactly the fabricated-duration hazard the
+/// design doc calls out. Every `LeaseEntry` this function builds carries
+/// `since: None`.
+pub fn snapshot_leases(runner: &dyn CommandRunner, capability: &Capability) -> Option<LeaseSnapshot> {
+    let captured = runner
+        .run_capturing(&[capability.path.as_str(), "status", "--json"])
+        .ok()?;
+    if captured.code != 0 {
+        return None;
+    }
+    let report: StatusReport = serde_json::from_str(&captured.stdout).ok()?;
+
+    let mut board_order: Vec<String> = Vec::new();
+    let mut leases = Vec::with_capacity(report.chips.len());
+    for chip in &report.chips {
+        let board = chip.board.clone().unwrap_or_default();
+        if !board.is_empty() && !board_order.contains(&board) {
+            board_order.push(board.clone());
+        }
+        leases.push(LeaseEntry {
+            chip: chip.dev_index.unwrap_or_default(),
+            bdf: chip.bdf.clone().unwrap_or_default(),
+            board,
+            state: chip.state.clone().unwrap_or_default(),
+            who: chip.who.clone(),
+            // NEVER populated -- see this function's doc comment.
+            since: None,
+            reason: chip.reason.clone(),
+        });
+    }
+
+    let boards = board_order.len() as u32;
+    let max_concurrent = if report.grain.as_deref() == Some("chip") {
+        report.chips.len() as u32
+    } else {
+        boards
+    };
+
+    Some(LeaseSnapshot {
+        leases,
+        boards,
+        max_concurrent,
+    })
 }
 
 /// A held lease, released on `Drop`.

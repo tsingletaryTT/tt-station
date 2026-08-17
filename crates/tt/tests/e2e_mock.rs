@@ -466,6 +466,61 @@ fn tt_power_reset_chips_against_mock_box() {
     assert_eq!(result["ok"], true);
 }
 
+/// `tt leases --host <mock> --json` round-trips against mock-box's canned
+/// `/leases` route (Task 4 of the tt-station x tt-gozer integration -- see
+/// `mock-box/src/main.rs`'s `get_leases`), so `tt leases` has SOME
+/// end-to-end coverage even with no real `gozer` binary or hardware
+/// anywhere in the loop. `/leases` is bearer-guarded on the real agent, so
+/// this pairs first -- same harness as `tt_power_reset_chips_against_mock_box`
+/// above (mock-box itself doesn't validate the bearer, but the CLI still
+/// needs a stored token to send one at all).
+#[test]
+#[ignore] // hardware-free but network/process -- run with --ignored like the others
+fn tt_leases_json_round_trips_from_mock_box() {
+    let port: u16 = 18905;
+    let host = format!("127.0.0.1:{port}");
+
+    let _mock_box = spawn_mock_box(port);
+    wait_for_port(port);
+
+    let config_dir = TempConfigDir::new();
+
+    AssertCommand::cargo_bin("tt")
+        .unwrap()
+        .env("TT_CONFIG_DIR", &config_dir.0)
+        .args(["--json", "pair", &host, "--code", "000000"])
+        .assert()
+        .success();
+
+    let leases_stdout = AssertCommand::cargo_bin("tt")
+        .unwrap()
+        .env("TT_CONFIG_DIR", &config_dir.0)
+        .args(["--json", "leases", "--host", &host])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let list: serde_json::Value =
+        serde_json::from_slice(&leases_stdout).expect("leases output is valid JSON");
+    assert_eq!(list["available"], true);
+    let leases = list["leases"].as_array().expect("leases must be an array");
+    assert!(
+        !leases.is_empty(),
+        "expected mock-box's canned leases to be non-empty, got {list:?}"
+    );
+    // Every field `LeaseEntry` declares must round-trip, and `since` must be
+    // null -- gozer never reports one, so nothing in this path may invent
+    // one (see `LeaseEntry`'s doc comment in libttstation).
+    let first = &leases[0];
+    assert!(first["chip"].is_number());
+    assert!(first["bdf"].is_string());
+    assert!(first["board"].is_string());
+    assert!(first["state"].is_string());
+    assert_eq!(first["since"], serde_json::Value::Null);
+}
+
 /// Unknown `tt power` actions must be rejected BEFORE any HTTP call -- the
 /// four valid literals (`reset-chips`/`suspend`/`reboot`/`shutdown`) are
 /// checked client-side in the `Command::Power` dispatch arm. No mock-box and

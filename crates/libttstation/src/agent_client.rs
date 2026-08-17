@@ -10,7 +10,8 @@
 //! header anyway costs nothing and keeps all four calls uniform.
 
 use crate::model::{
-    ConfigSummary, Endpoint, LogsInfo, ModelsResponse, ServingList, ServingStatus, StatusInfo,
+    ConfigSummary, Endpoint, LeaseList, LogsInfo, ModelsResponse, ServingList, ServingStatus,
+    StatusInfo,
 };
 use crate::pairing::join;
 use serde::{Deserialize, Serialize};
@@ -307,6 +308,22 @@ impl AgentClient {
             .error_for_status()
             .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
 
+        Ok(resp.json().await?)
+    }
+
+    /// `GET /leases` (bearer-guarded, per `tt-station-agentd::routes::get_leases`
+    /// -- the same `_auth: BearerAuth` gate as `run`/`stop`/`endpoint`, hence
+    /// this is an `AgentClient` method rather than a free function like
+    /// [`list_serving`]/[`list_models`], which mirror UNAUTHED routes): every
+    /// chip's lease state as the agent's `gozer status --json` reports it,
+    /// or `LeaseList { available: false, .. }` -- not an error -- when gozer
+    /// isn't installed on the box. A well-formed, reachable agent always
+    /// returns `200` here; there is no analog to `/endpoint`'s `409` because
+    /// "gozer absent" is a normal, decodable value on this route, not a
+    /// conflict.
+    pub async fn list_leases(&self) -> anyhow::Result<LeaseList> {
+        let url = join(&self.base, "leases");
+        let resp = self.send(reqwest::Client::new().get(&url), &url).await?;
         Ok(resp.json().await?)
     }
 

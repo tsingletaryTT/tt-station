@@ -112,6 +112,67 @@ pub struct ServingList {
     pub serving: Vec<ServingEntry>,
 }
 
+/// One chip-lease record as `GET /leases` reports it, sourced from `gozer
+/// status --json` (see `tt-station-agentd::gozer::snapshot_leases`, which
+/// builds these). Field names mostly mirror gozer's own per-chip status
+/// entry directly:
+///
+/// * `chip` -- gozer's `dev_index`, the box-local numeric ASIC identifier
+///   (distinct from `bdf`, the PCI address, and `board`, the board serial --
+///   same three-way split `gozer::Grant` already draws between `chips`
+///   (BDFs) and `dev_indices`).
+/// * `bdf` -- the PCI BDF (e.g. `"0000:01:00.0"`).
+/// * `board` -- the board serial this chip belongs to (e.g.
+///   `"0100014311601055"`).
+/// * `state` -- carried VERBATIM as gozer's own six-value vocabulary --
+///   `HELD`, `HELD-FOREIGN`, `CLAIMED`, `STALE`, `BUSY-UNTRACKED`, `FREE` --
+///   because these exact strings already appear in user-facing skills
+///   (`gozer-gatekeeper`/`gozer-keymaster`). Never rename, lowercase, or
+///   otherwise restyle them here or in any printer that consumes this type.
+/// * `who` / `reason` -- gozer's own holder identity/justification, `None`
+///   on a `FREE` chip (and sometimes on other states gozer itself doesn't
+///   attach one to).
+///
+/// **No duration.** gozer's per-chip status record carries `who`, `reason`,
+/// and `state`, but no lease-start timestamp -- so this type cannot honestly
+/// report how long a chip has been held. `since` is kept as a forward-
+/// compatible `Option<String>` (always `None` against every gozer version
+/// today) rather than omitted outright, so a client's wire shape doesn't
+/// have to change if a future gozer starts reporting one -- but nothing in
+/// this codebase may ever populate it with an invented value. See
+/// `tt-station-agentd::gozer::snapshot_leases`'s doc comment for the fuller
+/// rationale (the same one `Outcome::Unavailable`'s `since` field and
+/// `contention_detail`'s doc comment already document for the acquire path).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeaseEntry {
+    pub chip: u32,
+    pub bdf: String,
+    pub board: String,
+    pub state: String,
+    pub who: Option<String>,
+    pub since: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// `GET /leases`'s response body -- the only new route in the tt-station x
+/// tt-gozer integration (see
+/// `docs/superpowers/specs/2026-08-16-gozer-integration-design.md`).
+///
+/// `available` is an explicit marker, not folded into an empty `leases`
+/// list: `available: false` means gozer isn't installed on this box (or the
+/// startup probe failed), so `leases` is trivially empty and tells a client
+/// nothing about actual chip contention. `available: true, leases: []`
+/// means gozer IS installed and genuinely reports every chip free. A client
+/// (the Mac app, `tt leases`) needs to tell those two apart, which is why
+/// this is a struct with an explicit flag rather than just
+/// `Vec<LeaseEntry>` -- and why the route returns this (200 OK) rather than
+/// a 4xx/5xx when gozer is absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeaseList {
+    pub available: bool,
+    pub leases: Vec<LeaseEntry>,
+}
+
 /// One model a box's serving backend can run, per its `model_spec.json` --
 /// the model id (the top-level key under `model_specs`) plus the device
 /// meshes it supports (that entry's own keys, e.g. `GALAXY`, `T3K`,
