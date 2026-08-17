@@ -20,8 +20,8 @@
 use std::time::Duration;
 
 use libttstation::model::ServingStatus;
-use tt_station_agentd::serving::runpy::{tool_call_parser_for, RunPyBackend, RunPyConfig};
 use tt_station_agentd::serving::ServingBackend;
+use tt_station_agentd::serving::runpy::{RunPyBackend, RunPyConfig, tool_call_parser_for};
 
 mod support;
 use support::{FakeRunner, TempModelSpec};
@@ -1215,7 +1215,7 @@ fn start_aborts_promptly_when_cancel_set() {
 #[test]
 fn start_bails_when_container_dies() {
     let runner = FakeRunner::new(u32::MAX); // /health never comes up...
-                                            // run.py stdout carries the launched container id (parsed into artifacts).
+    // run.py stdout carries the launched container id (parsed into artifacts).
     runner.set_run_output("run.py", "INFO: Created Docker container ID: deadbeef\n");
     // ...and the liveness probe reports the container is NOT running.
     runner.set_run_output("docker inspect", "false\n");
@@ -1335,8 +1335,14 @@ fn gozer_capability() -> tt_station_agentd::gozer::Capability {
 /// A `FakeRunner` whose `gozer` verbs all answer successfully: `acquire`
 /// grants `GRANT_JSON`, `release` reports released. NOTHING here spawns a
 /// real gozer -- the whole point of the `CommandRunner` seam.
+///
+/// Also cans `tt-smi -s` with this box's real four-`p300c` snapshot, because
+/// a leased serve DERIVES `--tt-device` from the grant against that snapshot
+/// and fails closed without it (see `leased_tt_device`). The 2-chip
+/// `GRANT_JSON` against a 4-chip box therefore yields `p300` -- one board.
 fn leasing_runner(health_calls_before_ok: u32) -> FakeRunner {
     let runner = FakeRunner::new(health_calls_before_ok);
+    runner.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
     runner.set_run_capturing("gozer acquire", 0, GRANT_JSON, "");
     runner.set_run_capturing(
         "gozer release",
@@ -1604,7 +1610,12 @@ fn runpy_start_releases_lease_when_cancelled_in_flight() {
     let backend_stopper = std::sync::Arc::clone(&backend);
     let runner_probe = runner.clone();
     let stopper = std::thread::spawn(move || {
-        while runner_probe.health_calls() == 0 {
+        // BOUNDED wait, unlike the older cancel test's bare spin: if a
+        // regression makes `start` fail before it ever reaches the poll loop
+        // (leasing fails closed in several places now), an unbounded spin
+        // would hang the whole test binary instead of failing it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while runner_probe.health_calls() == 0 && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
         backend_stopper.stop("").expect("stop should succeed");
@@ -1729,6 +1740,173 @@ fn runpy_stop_releases_the_lease() {
         "a second stop must not re-release a lease that may already belong to \
          another tenant: {:?}",
         runner.commands()
+    );
+}
+
+/// A `gozer acquire` grant of THREE chips -- a shape the `(board_type,
+/// count)` mesh table has no entry for on a p300c box.
+const GRANT_JSON_THREE_CHIPS: &str = r#"{"granted":true,"lease_id":"lease-abc123",
+    "units":["0100014311601055"],
+    "chips":["0000:01:00.0","0000:02:00.0","0000:03:00.0"],
+    "dev_indices":[1,2,3],"expanded":false}"#;
+
+/// CRITICAL: the health-poll timeout must STOP the container it launched
+/// before the lease guard releases. The container is alive by construction
+/// on that path (the liveness probe passed every iteration), and `gozer
+/// release` RESETS the released chips -- so releasing first lands a real
+/// `tt-smi -r` on BDFs a live container is driving, and then advertises
+/// those chips as FREE while the orphan keeps using them. gozer cannot
+/// catch this: its `still_open` check reads `/proc/<pid>/fd` unprivileged
+/// and the serving container is root-owned -- the same fd blindness that
+/// makes `--owner-pid` mandatory.
+///
+/// ORDER is the whole assertion. A test that merely checked both commands
+/// happened would pass against the broken version.
+#[test]
+fn runpy_start_stops_the_container_before_releasing_on_health_timeout() {
+    let runner = leasing_runner(0); // /health is up...
+    runner.set_run_output("run.py", "INFO: Created Docker container ID: deadbeef\n");
+    runner.set_run_output("docker inspect", "true\n"); // ...and the container is ALIVE
+    runner.set_http_get(r#"{"data":[]}"#); // ...but never lists a model
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()))
+        .with_health_poll(3, Duration::from_millis(1));
+
+    backend
+        .start("llama3")
+        .expect_err("start must fail when the model never becomes queryable");
+
+    let commands = runner.commands();
+    let stop_index = commands
+        .iter()
+        .position(|cmd| {
+            cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")
+                && cmd.iter().any(|a| a == "deadbeef")
+        })
+        .unwrap_or_else(|| {
+            panic!("a timed-out start must stop the container it launched: {commands:?}")
+        });
+    let release_index = gozer_index(&commands, "release")
+        .unwrap_or_else(|| panic!("a timed-out start must release its lease: {commands:?}"));
+    assert!(
+        stop_index < release_index,
+        "the container must be stopped ({stop_index}) BEFORE the lease is \
+         released ({release_index}) -- release resets those chips underneath \
+         it: {commands:?}"
+    );
+}
+
+/// Same hazard at the launch failure: `run.py` can start a container and
+/// then fail, and its stdout (which carries the container id) is lost with
+/// the error -- so the only handle left is the published-port sweep `stop`
+/// itself uses. It must run before the guard releases.
+#[test]
+fn runpy_start_sweeps_containers_before_releasing_when_runpy_fails() {
+    let runner = leasing_runner(0);
+    runner.fail_run("run.py", "run.py exited 1");
+    // A container IS publishing the serving port when the sweep looks.
+    runner.set_run_output("docker ps", "orphan99\n");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend
+        .start("llama3")
+        .expect_err("start must fail when run.py fails");
+
+    let commands = runner.commands();
+    let release_index = gozer_index(&commands, "release")
+        .unwrap_or_else(|| panic!("a failed launch must release its lease: {commands:?}"));
+    let stop_index = commands
+        .iter()
+        .enumerate()
+        .filter(|(i, cmd)| {
+            *i > 0 // not the PRE-launch stale sweep at index 1-2
+                && cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")
+        })
+        .map(|(i, _)| i)
+        .next_back()
+        .unwrap_or_else(|| {
+            panic!("a failed launch must sweep the serving port before releasing: {commands:?}")
+        });
+    assert!(
+        stop_index < release_index,
+        "whatever run.py may have left running must be stopped ({stop_index}) \
+         before the lease is released ({release_index}): {commands:?}"
+    );
+    // And the sweep must have happened AFTER run.py failed, not just at the
+    // pre-launch stale check.
+    let runpy_index = commands
+        .iter()
+        .position(|cmd| cmd.first().map(String::as_str) == Some("python3"))
+        .expect("run.py was invoked");
+    assert!(
+        stop_index > runpy_index,
+        "the sweep must run after the failed launch ({runpy_index}), not only \
+         before it: {commands:?}"
+    );
+}
+
+/// IMPORTANT: `--tt-device` must describe the LEASED shape, not the whole
+/// box. `resolve_tt_device` reads `tt-smi -s` across every board present, so
+/// on this 2-board box an unleased serve maps to `p300x2` -- handing that to
+/// run.py alongside `--device-id 2,3` (half the box) describes a mesh the
+/// tenant does not own. If `--tt-device` wins inside run.py or vLLM, the
+/// container opens the neighbour's board.
+#[test]
+fn runpy_start_leased_tt_device_is_derived_from_the_grant() {
+    let runner = leasing_runner(0);
+    // The BOX has 4x p300c (= p300x2). The GRANT is 2 chips (= one p300).
+    runner.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        cmd.windows(2)
+            .any(|w| w[0] == "--tt-device" && w[1] == "p300"),
+        "a 2-chip lease on a 4-chip box must yield the one-board mesh: {cmd:?}"
+    );
+    assert!(
+        !cmd.iter().any(|a| a == "p300x2"),
+        "a leased serve must NEVER be handed the whole-box mesh: {cmd:?}"
+    );
+}
+
+/// Fail closed, exactly like `Grant::reset_target`: if the `(board_type,
+/// count)` table has no mesh for the granted shape, refuse the serve rather
+/// than guessing a mesh name or falling back to the whole-box one.
+#[test]
+fn runpy_start_refuses_a_grant_shape_with_no_known_mesh() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("gozer acquire", 0, GRANT_JSON_THREE_CHIPS, "");
+    runner.set_run_capturing("gozer release", 0, r#"{"released":true}"#, "");
+    runner.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    let err = backend
+        .start("llama3")
+        .expect_err("an unmappable granted shape must refuse the serve");
+    assert!(
+        err.to_string().contains("tt-device"),
+        "the error should name the selector it could not derive: {err}"
+    );
+
+    let commands = runner.commands();
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("python3")),
+        "run.py must not launch with an unknown mesh: {commands:?}"
+    );
+    assert!(
+        find_gozer_cmd(&commands, "release").is_some(),
+        "the unusable lease must be handed straight back: {commands:?}"
     );
 }
 

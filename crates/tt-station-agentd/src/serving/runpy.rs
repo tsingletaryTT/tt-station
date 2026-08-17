@@ -67,8 +67,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 
-use super::docker::CommandRunner;
 use super::ServingBackend;
+use super::docker::CommandRunner;
 
 /// How many times `start` polls the health endpoint before giving up.
 ///
@@ -606,6 +606,76 @@ impl RunPyBackend {
         resolved
     }
 
+    /// Resolve `--tt-device` for a LEASED serve: the mesh label for the
+    /// shape gozer actually granted, not for the whole box.
+    ///
+    /// `resolve_tt_device` (above) reads `tt-smi -s` across every board
+    /// present and maps the lot, so on a two-board box it answers `p300x2`
+    /// -- the WHOLE box -- even when the lease covers one board. Handing
+    /// that to run.py next to a `--device-id` naming half of it describes a
+    /// mesh this tenant does not own, and if `--tt-device` is what run.py or
+    /// vLLM ultimately acts on, the container opens the neighbour's board:
+    /// the same silent cross-tenant failure the `--device-id` comment in
+    /// `start` warns about, arriving through a selector nobody scoped.
+    ///
+    /// So: take the board TYPE from `tt-smi -s` (the box is the only thing
+    /// that knows it) and the COUNT from the grant (`chips` is one BDF per
+    /// ASIC, which is exactly what `device::mesh_for` counts -- see its doc
+    /// comment), and look the pair up in the same single table
+    /// `resolve_tt_device` uses.
+    ///
+    /// **Fails closed**, like `gozer::Grant::reset_target`: an unreadable
+    /// `tt-smi -s`, a mixed fleet, or a (type, count) pair with no confirmed
+    /// mesh all refuse the serve. Omitting the flag and letting run.py
+    /// auto-detect is NOT a safe fallback here -- run.py's own detection
+    /// looks at the whole box too, which is the very thing being avoided.
+    ///
+    /// An explicitly configured `config.tt_device` is deliberately
+    /// OVERRIDDEN (and logged), for the same reason a configured
+    /// `device_id` is: it was chosen without knowing what gozer would grant.
+    fn leased_tt_device(&self, grant: &crate::gozer::Grant) -> Result<String> {
+        if let Some(configured) = &self.config.tt_device {
+            eprintln!(
+                "tt-station-agentd: ignoring configured --tt-device {configured} in favour of \
+                 the leased device shape"
+            );
+        }
+
+        let snapshot = self.runner.run(&["tt-smi", "-s"]).with_context(|| {
+            format!(
+                "cannot derive --tt-device for lease '{}': `tt-smi -s` failed, and guessing a \
+                 mesh could hand the serve a board this lease does not cover",
+                grant.lease_id
+            )
+        })?;
+        let board_types = crate::device::board_types(&snapshot).unwrap_or_default();
+        let Some(board_type) = board_types.first() else {
+            return Err(anyhow::anyhow!(
+                "cannot derive --tt-device for lease '{}': `tt-smi -s` reported no boards",
+                grant.lease_id
+            ));
+        };
+        if !board_types.windows(2).all(|pair| pair[0] == pair[1]) {
+            return Err(anyhow::anyhow!(
+                "cannot derive --tt-device for lease '{}': this box has a mixed fleet \
+                 ({board_types:?}), so a chip count doesn't identify a mesh",
+                grant.lease_id
+            ));
+        }
+
+        let granted = grant.chips.len();
+        crate::device::mesh_for(board_type, granted)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot derive --tt-device for lease '{}': no known mesh for {granted}x \
+                     {board_type}; refusing to serve rather than name a mesh wider than the \
+                     lease",
+                    grant.lease_id
+                )
+            })
+    }
+
     /// Resolve the `--override-docker-image` value: `config.image` if the
     /// caller explicitly set one (an explicit override always wins, and
     /// skips shelling out to `docker` entirely); else, ONLY when
@@ -809,7 +879,15 @@ impl ServingBackend for RunPyBackend {
         // doesn't race a `tt-smi -s` probe) and reused below when building
         // argv; an explicit `config.tt_device`/`config.image` always wins
         // over auto-resolution.
-        let device = self.resolve_tt_device();
+        //
+        // WITH A LEASE, `--tt-device` is derived from the GRANT instead --
+        // `resolve_tt_device` describes the whole box, which is a wider mesh
+        // than the lease covers. Fails closed rather than falling back; see
+        // `leased_tt_device`. `?` drops `lease`, handing it straight back.
+        let device = match &lease {
+            Some(guard) => Some(self.leased_tt_device(guard.grant())?),
+            None => self.resolve_tt_device(),
+        };
         let image = self.resolve_image();
 
         // Built as owned `String`s (several pieces are computed at
@@ -940,11 +1018,34 @@ impl ServingBackend for RunPyBackend {
         // their point of view -- exactly why tests only need to assert on
         // the argv, not the environment.
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let run_stdout = self.runner.run_in_dir_with_env(
-            &self.config.repo_dir,
-            &arg_refs,
-            &[("MODEL_SOURCE", self.config.model_source.as_str())],
-        )?;
+        let run_stdout = self
+            .runner
+            .run_in_dir_with_env(
+                &self.config.repo_dir,
+                &arg_refs,
+                &[("MODEL_SOURCE", self.config.model_source.as_str())],
+            )
+            .inspect_err(|_| {
+                // run.py can start a container and THEN fail, and the error
+                // path loses the stdout that carries its id -- so the only
+                // handle left is the published-port sweep `stop` itself
+                // uses. It must run BEFORE this error unwinds, because
+                // unwinding drops the lease guard, and `gozer release`
+                // RESETS the released chips: resetting them under a
+                // container that survived the failure is exactly the hazard
+                // this integration is about (and gozer can't refuse it --
+                // its fd check can't see a root-owned container's fds).
+                // Best-effort: a sweep that itself fails must not replace
+                // the launch error being reported.
+                if self.gozer.is_some() {
+                    if let Err(err) = self.stop_serving_containers() {
+                        eprintln!(
+                            "tt-station-agentd: could not sweep the serving port after a failed \
+                             run.py launch: {err:#} -- a container may survive the lease release"
+                        );
+                    }
+                }
+            })?;
 
         // `run.py`'s captured stdout carries the underlying container id and
         // both log file paths on a successful launch (see
@@ -1101,6 +1202,31 @@ impl ServingBackend for RunPyBackend {
                 // On failure, surface the container's own tail so
                 // `journalctl` explains why (see `tail_container_log`).
                 tail_container_log();
+                // Then STOP it. On this path the container is alive by
+                // construction -- the liveness probe above passed on every
+                // iteration -- and returning from here drops the lease
+                // guard, whose `gozer release` RESETS the released chips.
+                // Releasing first would land a real `tt-smi -r` on BDFs a
+                // live container is driving and then advertise them FREE
+                // while the orphan keeps using them, so the next tenant
+                // collides. gozer cannot catch that: its `still_open` check
+                // reads `/proc/<pid>/fd` unprivileged and the serving
+                // container is root-owned -- the same fd blindness that
+                // makes `--owner-pid` mandatory. Best-effort, mirroring the
+                // cancel branch above.
+                //
+                // Gated on holding a lease ON PURPOSE: this stop exists to
+                // protect the release, and without gozer the unleased
+                // behaviour must stay byte-identical to what it has always
+                // been (a timed-out bring-up leaves its container for the
+                // operator to inspect, and the next `start`'s stale sweep
+                // clears it). Whether the unleased path SHOULD stop it too
+                // is a separate question, not a side effect of this fix.
+                if self.gozer.is_some() {
+                    if let Some(id) = &artifacts.container_id {
+                        let _ = self.runner.run(&["docker", "stop", id]);
+                    }
+                }
                 return Err(anyhow::anyhow!(
                     "runpy backend: model '{model}' did not become queryable on \
                      {models_url} within {} attempts",
@@ -1455,16 +1581,18 @@ mod runpy_artifact_tests {
 2026-07-07 13:52:50 - run.py:731 - INFO: This log file is saved on local machine at: /home/ttuser/code/tt-inference-server/workflow_logs/run_logs/run_x.log";
         let a = parse_run_artifacts(out);
         assert_eq!(a.container_id.as_deref(), Some("5d2dd4b5c9d9"));
-        assert!(a
-            .container_log
-            .as_deref()
-            .unwrap()
-            .ends_with("docker_server/vllm_x.log"));
-        assert!(a
-            .run_log
-            .as_deref()
-            .unwrap()
-            .ends_with("run_logs/run_x.log"));
+        assert!(
+            a.container_log
+                .as_deref()
+                .unwrap()
+                .ends_with("docker_server/vllm_x.log")
+        );
+        assert!(
+            a.run_log
+                .as_deref()
+                .unwrap()
+                .ends_with("run_logs/run_x.log")
+        );
     }
 
     #[test]
