@@ -4,7 +4,7 @@ import TTStationKit
 /// Hardware-aware model browser for the window's detail pane.
 ///
 /// Two rendering modes, chosen by whether `box.catalog` (Task 6's curated
-/// three-tier catalog, from `tt catalog`) is present:
+/// three-tier catalog, from `tt-station catalog`) is present:
 ///
 /// - **Catalog present** — the common case once a box has a compatibility
 ///   catalog to classify against: three tiers straight off `BoxCatalog`.
@@ -17,7 +17,7 @@ import TTStationKit
 ///   beyond the paved path — a "Set up in Workbench →" affordance sits next
 ///   to the Experimental header.
 /// - **No catalog** (`box.catalog == nil` — an older agent that predates
-///   `tt catalog`, or a fetch that failed) — falls back to the original
+///   `tt-station catalog`, or a fetch that failed) — falls back to the original
 ///   two-tier `ModelRanking.rankForHardware` view over the live `/models`
 ///   list, unchanged from before this feature existed.
 ///

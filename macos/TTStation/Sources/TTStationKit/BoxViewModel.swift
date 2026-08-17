@@ -16,16 +16,16 @@ public final class BoxViewModel: Identifiable {
     public var endpoint: Endpoint?
     public var models: [ModelInfo] = []
     /// Every `/v1` endpoint currently serving on this box, from the unauthed
-    /// `tt serving` read — including containers this box's agent did not
+    /// `tt-station serving` read — including containers this box's agent did not
     /// launch (e.g. tt-studio), which carry `source == "external"`. Empty
     /// when nothing is serving or the read fails (never fatal).
     public var serving: [ServingEntry] = []
-    /// The box's resolved serving configuration, from the unauthed `tt config`
+    /// The box's resolved serving configuration, from the unauthed `tt-station config`
     /// read — works regardless of pairing. `nil` when the read fails (never
     /// fatal) or hasn't completed yet.
     public var config: BoxConfig?
     /// The box's curated model catalog (runs-here / experimental / other-
-    /// hardware tiers), from the unauthed `tt catalog` read — works regardless
+    /// hardware tiers), from the unauthed `tt-station catalog` read — works regardless
     /// of pairing. `nil` when the read fails (never fatal) or hasn't completed
     /// yet.
     public var catalog: BoxCatalog?
@@ -53,7 +53,7 @@ public final class BoxViewModel: Identifiable {
     public var pairId: String?
     /// Opt-in toggle shown at the code-entry step of the pair flow: when on
     /// (the default), a successful `completePairing` follows up with
-    /// `tt ssh-authorize` to install this Mac's key on the box as `ttuser`,
+    /// `tt-station ssh-authorize` to install this Mac's key on the box as `ttuser`,
     /// so Terminal/tt-toplike/VS Code work keylessly right after pairing.
     public var enableSSH: Bool = true
     /// Result of the post-pair SSH-authorize step, success or non-fatal
@@ -143,7 +143,7 @@ public final class BoxViewModel: Identifiable {
     public func refresh() async {
         // `GET /status`, `/serving`, `/config`, `/catalog` are all UNAUTHED
         // on the agent — every one of them answers 200 for any reachable box
-        // regardless of pairing, by design (so `tt status`/discovery work
+        // regardless of pairing, by design (so `tt-station status`/discovery work
         // pre-pair). That means a successful call to any of them proves
         // *nothing* about whether this Mac holds a valid bearer token for
         // this box — they're display-only reads, fetched below with `try?`
@@ -279,7 +279,7 @@ public final class BoxViewModel: Identifiable {
     }
 
     /// Installs this Mac's SSH public key on the box as `ttuser` via
-    /// `tt ssh-authorize`. Only ever called right after a successful pair
+    /// `tt-station ssh-authorize`. Only ever called right after a successful pair
     /// (see `completePairing`) and deliberately non-fatal to it: any failure
     /// here is captured as a one-line note in `sshMessage`, not thrown, so a
     /// box that paired fine but couldn't set up SSH (e.g. no local key, box
@@ -322,7 +322,7 @@ public final class BoxViewModel: Identifiable {
         runGeneration += 1
         let myGen = runGeneration
         inFlight = true; starting = true; cancelling = false
-        // Deliberately NO `defer` here: `commands.run` wraps `tt run`, which
+        // Deliberately NO `defer` here: `commands.run` wraps `tt-station run`, which
         // can block for up to its 600s timeout (the agent's `/run` health-
         // poll does not abort promptly just because `stop` killed the
         // container underneath it). A `defer` would unconditionally clobber
@@ -365,11 +365,11 @@ public final class BoxViewModel: Identifiable {
 
     /// Cancel an in-progress model load. Returns the UI to a usable idle
     /// state IMMEDIATELY — it does NOT wait for the (un-cancellable, up-to-
-    /// 600s) `tt run` to return. Bumping `runGeneration` abandons that
+    /// 600s) `tt-station run` to return. Bumping `runGeneration` abandons that
     /// in-flight `run()` so its late completion is ignored (see `run()`'s
     /// guard). The agent-side `stop` (which actually tears the load down) is
     /// fired best-effort in the background so the UI is never coupled to it
-    /// -- `tt stop` can itself block behind the agent's in-flight `/run`.
+    /// -- `tt-station stop` can itself block behind the agent's in-flight `/run`.
     /// No-op unless a load is actually starting (there's nothing to cancel
     /// otherwise).
     public func cancelStart() async {

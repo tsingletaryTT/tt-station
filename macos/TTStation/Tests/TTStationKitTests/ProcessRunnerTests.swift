@@ -23,7 +23,7 @@ final class ProcessRunnerTests: XCTestCase {
 }
 
 extension ProcessRunnerTests {
-    // Uses /bin/echo as a deterministic stand-in for `tt` to prove spawn/capture.
+    // Uses /bin/echo as a deterministic stand-in for `tt-station` to prove spawn/capture.
     func testRealRunnerCapturesStdoutAndExit() async throws {
         let locator = TTBinaryLocator(override: "/bin/echo", candidates: []) { _ in true }
         let runner = RealProcessRunner(locator: locator)

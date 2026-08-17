@@ -2,25 +2,29 @@ import AppKit
 import Foundation
 import TTStationKit
 
-/// First-run convenience: symlink the bundled `tt` into `~/.local/bin` so the
-/// user gets `tt` in their own terminal. The app itself never depends on this
-/// — `TTBinaryLocator` already falls back to the in-bundle copy — so every
-/// branch here is best-effort and non-fatal.
+/// First-run convenience: symlink the bundled `tt-station` into `~/.local/bin`
+/// so the user gets `tt-station` in their own terminal. The app itself never
+/// depends on this — `TTBinaryLocator` already falls back to the in-bundle
+/// copy — so every branch here is best-effort and non-fatal.
+///
+/// The link is deliberately named `tt-station`, never `tt`: `tt` belongs to
+/// Tenstorrent's official CLI (`tenstorrent/tt-cli`), and an earlier version
+/// of this installer shadowed it on every Mac it ran on.
 enum CLIInstaller {
     private static let offeredKey = "hasOfferedCLIInstall"
 
     static func runFirstRunIfNeeded(defaults: UserDefaults = .standard) {
         guard !defaults.bool(forKey: offeredKey) else { return }
 
-        guard let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/tt").path,
+        guard let bundled = Bundle.main.resourceURL?.appendingPathComponent("bin/tt-station").path,
               FileManager.default.isExecutableFile(atPath: bundled) else { return }
         // Record the one-time offer only once we actually have something to
-        // offer: a dev/source build with no embedded tt must not consume it,
+        // offer: a dev/source build with no embedded CLI must not consume it,
         // since it shares this UserDefaults domain with a later real install.
         defaults.set(true, forKey: offeredKey)
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let linkPath = "\(home)/.local/bin/tt"
+        let linkPath = "\(home)/.local/bin/tt-station"
         let action = CLILinkPlanner.plan(linkPath: linkPath, bundledTT: bundled, state: probe(linkPath))
 
         switch action {
@@ -29,8 +33,8 @@ enum CLIInstaller {
         case let .repoint(link, target):
             // Silent, idempotent update of our own stale link — no prompt.
             try? applyLink(link: link, target: target, replaceExisting: true)
-        case let .foreign(existing, alternative):
-            offerForeign(existing: existing, alternative: alternative, bundled: bundled)
+        case let .foreign(existing):
+            reportForeign(existing: existing, bundled: bundled)
         }
     }
 
@@ -58,8 +62,8 @@ enum CLIInstaller {
 
     private static func offerInstall(link: String, target: String, replacing: Bool) {
         let alert = NSAlert()
-        alert.messageText = "Install the tt command-line tool?"
-        alert.informativeText = "TTStation can add `tt` to \(link) so you can use it in Terminal. The app works either way."
+        alert.messageText = "Install the tt-station command-line tool?"
+        alert.informativeText = "TTStation can add `tt-station` to \(link) so you can use it in Terminal. The app works either way."
         alert.addButton(withTitle: "Install")
         alert.addButton(withTitle: "Not Now")
         if alert.runModal() == .alertFirstButtonReturn {
@@ -67,14 +71,19 @@ enum CLIInstaller {
         }
     }
 
-    private static func offerForeign(existing: String, alternative: String, bundled: String) {
+    /// Something we did not install occupies `~/.local/bin/tt-station`.
+    ///
+    /// There is nothing safe left to do here, so this is a report, not an
+    /// offer: we never overwrite a file we did not create, and `tt-station` is
+    /// the only name this app claims (the previous `~/.local/bin/tt` link path
+    /// had a fallback precisely because a foreign `tt` was probably
+    /// Tenstorrent's official CLI; that no longer applies). Point the operator
+    /// at the in-bundle copy so they can wire it up however they like.
+    private static func reportForeign(existing: String, bundled: String) {
         let alert = NSAlert()
-        alert.messageText = "Another `tt` is already installed"
-        alert.informativeText = "Found an existing `tt` at \(existing). TTStation won't replace it. Install this version as `tt-station` instead?"
-        alert.addButton(withTitle: "Install as tt-station")
-        alert.addButton(withTitle: "Not Now")
-        if alert.runModal() == .alertFirstButtonReturn {
-            try? applyLink(link: alternative, target: bundled, replaceExisting: true)
-        }
+        alert.messageText = "Something else is already at `tt-station`"
+        alert.informativeText = "Found \(existing) where TTStation would install its `tt-station` command. TTStation won't replace it. The bundled copy is at \(bundled) if you want to link it yourself."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 }

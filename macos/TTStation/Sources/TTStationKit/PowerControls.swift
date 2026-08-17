@@ -1,8 +1,8 @@
 import Foundation
 
 /// A box power action, matching the agent's `POST /power` wire values (and
-/// the CLI's `tt power <action>` positional argument -- see `POWER_ACTIONS`
-/// in `crates/tt/src/main.rs`).
+/// the CLI's `tt-station power <action>` positional argument -- see `POWER_ACTIONS`
+/// in `crates/tt-station/src/main.rs`).
 public enum PowerAction: String, CaseIterable {
     case resetChips = "reset-chips"
     case suspend

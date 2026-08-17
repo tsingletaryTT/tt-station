@@ -359,7 +359,7 @@ final class LaunchController {
     /// `waitUntilExit`, mirroring `runBrewInstall`).
     ///
     /// Auth is pinned to the exact key the pair flow authorizes on the box
-    /// (`tt ssh-authorize` installs `~/.ssh/id_ed25519.pub`):
+    /// (`tt-station ssh-authorize` installs `~/.ssh/id_ed25519.pub`):
     /// - `-i ~/.ssh/id_ed25519` + `IdentitiesOnly=yes` offer only that key
     ///   (not whatever an agent happens to hold);
     /// - `PreferredAuthentications=publickey` + `BatchMode=yes` never fall back

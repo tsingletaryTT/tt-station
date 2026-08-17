@@ -21,7 +21,7 @@ public protocol TTCommands {
     func isIdleConflict(_ error: TTError) -> Bool
 }
 
-/// Typed façade over `tt --json`. One method per subcommand; the only place
+/// Typed façade over `tt-station --json`. One method per subcommand; the only place
 /// argv is assembled and stdout is decoded.
 public final class TTClient {
     private let runner: TTProcessRunner
@@ -118,11 +118,11 @@ extension TTClient {
         }
     }
 
-    /// `tt power <action> [--host]` -- authed on the CLI side (the agent must
+    /// `tt-station power <action> [--host]` -- authed on the CLI side (the agent must
     /// already be paired). `host` is optional here to mirror the CLI's own
-    /// `--host: Option<String>` (see `Command::Power` in `crates/tt/src/
+    /// `--host: Option<String>` (see `Command::Power` in `crates/tt-station/src/
     /// main.rs`), even though the CLI hard-errors without one -- that
-    /// validation belongs to `tt`, not this thin façade. Success output
+    /// validation belongs to `tt-station`, not this thin façade. Success output
     /// (`{"action":...,"ok":true}`) carries nothing beyond what the exit code
     /// already tells us, so this ignores the body like `stop` does.
     public func power(_ action: PowerAction, host: String?) async throws {
@@ -134,7 +134,7 @@ extension TTClient {
         }
     }
 
-    /// `tt wake [--mac] [--host]` -- client-side Wake-on-LAN broadcast, no
+    /// `tt-station wake [--mac] [--host]` -- client-side Wake-on-LAN broadcast, no
     /// contact with the (presumably powered-off/suspended) box at all. Same
     /// ignore-the-body shape as `power`/`stop`: the JSON success body
     /// (`{"mac":...,"sent":true}`) adds nothing the exit code doesn't.

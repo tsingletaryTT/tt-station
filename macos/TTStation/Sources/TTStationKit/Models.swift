@@ -14,7 +14,7 @@ public struct BoxRecord: Codable, Equatable {
     /// This box's detected primary NIC MAC (`"aa:bb:cc:dd:ee:ff"`), passed
     /// through verbatim from the agent's `/status`/mDNS TXT `mac` field —
     /// mirrors `libttstation::model::BoxRecord.mac` on the Rust side (Task
-    /// 3), which the CLI's `tt --json discover`/`status` output already
+    /// 3), which the CLI's `tt-station --json discover`/`status` output already
     /// carries. `nil` when detection failed/didn't run, or for an agent that
     /// predates this field — same back-compat shape as `deviceMesh`. This is
     /// the Wake-on-LAN target `PowerMenuView`/`BoxViewModel.wakeBox()` send.
@@ -34,10 +34,10 @@ public struct BoxRecord: Codable, Equatable {
         self.mac = mac
     }
 
-    /// `host:port` — the identity string every `tt` command keys off of.
+    /// `host:port` — the identity string every `tt-station` command keys off of.
     ///
     /// mDNS resolvers hand back hostnames as FQDNs with a trailing `.`
-    /// (e.g. `qb2-lab.local.`), but the `tt` CLI keys its stored bearer
+    /// (e.g. `qb2-lab.local.`), but the `tt-station` CLI keys its stored bearer
     /// token by the exact `--host` string used at pair time, which never
     /// has the dot (`qb2-lab.local:8765`). Stripping a single trailing dot
     /// here keeps mDNS-discovered and manually-entered hosts canonical and
@@ -73,7 +73,7 @@ public struct Endpoint: Codable, Equatable {
     }
 }
 
-/// One currently-serving `/v1` endpoint discovered by `tt --json serving`.
+/// One currently-serving `/v1` endpoint discovered by `tt-station --json serving`.
 ///
 /// Unlike `Endpoint` (the single endpoint the agent itself last launched),
 /// a `ServingEntry` can describe a container this box's agent did *not*
@@ -103,7 +103,7 @@ public struct ServingEntry: Codable, Equatable {
     }
 }
 
-/// Response from `tt --json serving --host <host:port>` — the list of every
+/// Response from `tt-station --json serving --host <host:port>` — the list of every
 /// currently-serving `/v1` endpoint on a box. Empty when nothing is serving.
 public struct ServingList: Codable, Equatable {
     public let serving: [ServingEntry]
@@ -155,7 +155,7 @@ public struct PairResult: Codable, Equatable {
     public init(host: String, paired: Bool) { self.host = host; self.paired = paired }
 }
 
-/// Response from `tt --json pair-init <host>`. The agent may also send back
+/// Response from `tt-station --json pair-init <host>`. The agent may also send back
 /// `host` in the same payload, but we only need `pair_id` here — the extra
 /// key is simply ignored by `JSONDecoder`.
 public struct PairInitResult: Codable, Equatable {
@@ -172,7 +172,7 @@ public struct StatusResponse: Codable, Equatable {
     public let status: String
 }
 
-/// Response from `tt --json config --host <host:port>` — the box's resolved
+/// Response from `tt-station --json config --host <host:port>` — the box's resolved
 /// serving configuration (profile-derived where applicable). Unauthed, like
 /// `models`/`status`/`serving`, so it's safe to fetch regardless of pairing.
 public struct BoxConfig: Codable, Equatable {
@@ -220,7 +220,7 @@ public struct BoxConfig: Codable, Equatable {
     }
 }
 
-/// Response from `tt --json ssh-authorize --host <host:port>`. The CLI also
+/// Response from `tt-station --json ssh-authorize --host <host:port>`. The CLI also
 /// emits `public_key_path`, but we only surface the fields the pair-flow UI
 /// needs — the extra key is simply ignored by `JSONDecoder`, same as
 /// `PairInitResult` ignoring an echoed `host`.
@@ -296,7 +296,7 @@ public struct CatalogEntry: Codable, Equatable {
         self.statusHere = statusHere
     }
 
-    // Custom decode so an older `tt catalog` payload without `downloaded`
+    // Custom decode so an older `tt-station catalog` payload without `downloaded`
     // still decodes (defaulting to `false`), matching the Rust
     // `#[serde(default)]` on the wire type.
     public init(from decoder: Decoder) throws {
@@ -314,7 +314,7 @@ public struct CatalogEntry: Codable, Equatable {
     }
 }
 
-/// Response from `tt --json catalog --host <host:port>` — the box's curated
+/// Response from `tt-station --json catalog --host <host:port>` — the box's curated
 /// model catalog, split into three tiers for the model browser:
 ///   - `runsHere`: models that run on this box's actual mesh right now.
 ///   - `experimental`: models that might run here but aren't fully verified.

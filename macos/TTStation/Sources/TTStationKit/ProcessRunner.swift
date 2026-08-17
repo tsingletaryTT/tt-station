@@ -9,7 +9,7 @@ public struct ProcessResult: Equatable {
     }
 }
 
-/// The only abstraction that runs `tt`. Real impl added in Task 6.
+/// The only abstraction that runs `tt-station`. Real impl added in Task 6.
 ///
 /// The timeout is a protocol requirement (not a default-parameterized method)
 /// so every conformer — real and fake — has to at least accept one. The
@@ -26,7 +26,7 @@ extension TTProcessRunner {
     public func run(_ args: [String]) async throws -> ProcessResult { try await run(args, timeout: 30) }
 }
 
-/// Spawns the real `tt` binary. The only type in the package that touches
+/// Spawns the real `tt-station` binary. The only type in the package that touches
 /// `Process` or the filesystem.
 public final class RealProcessRunner: TTProcessRunner {
     private let locator: TTBinaryLocator

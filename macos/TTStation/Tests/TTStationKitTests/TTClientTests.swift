@@ -149,7 +149,7 @@ extension TTClientTests {
 
     func testIsAuthError() {
         let client = TTClient(runner: FakeProcessRunner())
-        XCTAssertTrue(client.isAuthError(.commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080; run `tt pair`")))
+        XCTAssertTrue(client.isAuthError(.commandFailed(command: [], exitCode: 1, stderr: "no token stored for h:8080; run `tt-station pair`")))
         XCTAssertFalse(client.isAuthError(.commandFailed(command: [], exitCode: 1, stderr: "connection refused")))
     }
 

@@ -6,7 +6,7 @@ import Foundation
 /// long-lived, read-only socket that decodes verbatim `tt-smi -s` frames via
 /// `TelemetrySnapshot.decode` (Task 8/8.5) and republishes them as
 /// `@Observable` state for `DeviceStripView` (Task 13) to draw. All *control*
-/// (pair/run/stop/reset/status) still goes through `tt --json` — this class
+/// (pair/run/stop/reset/status) still goes through `tt-station --json` — this class
 /// never sends anything, it only opens the socket and reads.
 @Observable
 @MainActor

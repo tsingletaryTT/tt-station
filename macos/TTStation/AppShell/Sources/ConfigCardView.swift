@@ -3,7 +3,7 @@ import TTStationKit
 
 /// Read-only display of the box's resolved serving configuration — profile,
 /// backend, `serving_host:serving_port`, image, device — sourced from the
-/// unauthed `tt --json config` read (`BoxViewModel.config`, refreshed
+/// unauthed `tt-station --json config` read (`BoxViewModel.config`, refreshed
 /// alongside `serving`/`status` in `BoxViewModel.refresh()`).
 ///
 /// **Deliberately read-only:** per the agentd-config-profiles spec, the box

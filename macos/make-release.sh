@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a distributable, arm64 TTStation DMG with the `tt` CLI embedded inside
+# Build a distributable, arm64 TTStation DMG with the `tt-station` CLI embedded inside
 # the app bundle. Ad-hoc signed only (no Apple Developer license / no
 # notarization) — downloaders must strip quarantine once; see FIRST-RUN.txt.
 #
@@ -20,11 +20,11 @@ ver="$(awk -F'"' '/MARKETING_VERSION:/{print $2; exit}' "$proj/project.yml")"
 dmg="$dist/TTStation-$ver-arm64.dmg"
 echo "==> Building TTStation $ver (arm64)"
 
-# 1. Build the arm64 tt CLI.
-echo "==> cargo build --release -p tt (aarch64-apple-darwin)"
-( cd "$repo_root" && cargo build --release -p tt --target aarch64-apple-darwin )
-tt_bin="$repo_root/target/aarch64-apple-darwin/release/tt"
-[[ -x "$tt_bin" ]] || { echo "error: tt binary not found at $tt_bin"; exit 1; }
+# 1. Build the arm64 tt-station CLI.
+echo "==> cargo build --release -p tt-station (aarch64-apple-darwin)"
+( cd "$repo_root" && cargo build --release -p tt-station --target aarch64-apple-darwin )
+tt_bin="$repo_root/target/aarch64-apple-darwin/release/tt-station"
+[[ -x "$tt_bin" ]] || { echo "error: tt-station binary not found at $tt_bin"; exit 1; }
 
 # 2. Build the Release app.
 echo "==> xcodegen + xcodebuild (Release)"
@@ -37,23 +37,23 @@ app_src="$(xcodebuild -project "$proj/TTStation.xcodeproj" -scheme TTStation \
   | awk '/ BUILT_PRODUCTS_DIR /{d=$3} /FULL_PRODUCT_NAME/{p=$3} END{print d"/"p}')"
 [[ -d "$app_src" ]] || { echo "error: built app not found ($app_src)"; exit 1; }
 
-# 3. Stage a clean copy and embed tt.
-echo "==> Embedding tt into app bundle + ad-hoc signing"
+# 3. Stage a clean copy and embed tt-station.
+echo "==> Embedding tt-station into app bundle + ad-hoc signing"
 rm -rf "$stage" && mkdir -p "$stage"
 cp -R "$app_src" "$stage/TTStation.app"
 mkdir -p "$stage/TTStation.app/Contents/Resources/bin"
-cp "$tt_bin" "$stage/TTStation.app/Contents/Resources/bin/tt"
-chmod +x "$stage/TTStation.app/Contents/Resources/bin/tt"
+cp "$tt_bin" "$stage/TTStation.app/Contents/Resources/bin/tt-station"
+chmod +x "$stage/TTStation.app/Contents/Resources/bin/tt-station"
 
-# 4. Ad-hoc sign the whole bundle AFTER embedding so the nested tt is covered.
+# 4. Ad-hoc sign the whole bundle AFTER embedding so the nested tt-station is covered.
 codesign --force --deep --sign - "$stage/TTStation.app"
 codesign --verify --deep --strict "$stage/TTStation.app" || {
   echo "error: codesign verification failed"; exit 1; }
 
 # Enforce the arm64-only constraint on the app executable and the embedded
-# tt (catches a toolchain/target regression before it ships).
+# tt-station (catches a toolchain/target regression before it ships).
 for macho in "$stage/TTStation.app/Contents/MacOS/TTStation" \
-             "$stage/TTStation.app/Contents/Resources/bin/tt"; do
+             "$stage/TTStation.app/Contents/Resources/bin/tt-station"; do
   archs="$(lipo -archs "$macho" 2>/dev/null || true)"
   [[ "$archs" == "arm64" ]] || { echo "error: $macho is not arm64-only (archs: ${archs:-none})"; exit 1; }
 done
@@ -72,7 +72,7 @@ TTStation $ver — first run
 
        xattr -dr com.apple.quarantine /Applications/TTStation.app
 
-3. Launch TTStation from Applications. On first run it offers to add the \`tt\`
+3. Launch TTStation from Applications. On first run it offers to add the \`tt-station\`
    command to ~/.local/bin. The app works whether or not you accept.
 
 TTStation lives in the menu bar (no Dock icon). Look for its icon up top.

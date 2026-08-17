@@ -334,7 +334,7 @@ final class BoxViewModelTests: XCTestCase {
     // MARK: - Cancel-a-load
     //
     // Cancel must return the UI to a usable idle state INSTANTLY -- it must
-    // NEVER block on the in-flight `run()`, which wraps `tt run` (up to a
+    // NEVER block on the in-flight `run()`, which wraps `tt-station run` (up to a
     // 600s timeout gated on the agent's health-poll, which does not abort
     // promptly just because the container died). The fix is a run-generation
     // guard: `cancelStart()` bumps `runGeneration`, snaps the VM back to idle
