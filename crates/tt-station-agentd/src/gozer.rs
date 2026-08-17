@@ -9,7 +9,7 @@
 //! the release-on-drop `LeaseGuard`, (Task 4) the read-only
 //! `snapshot_leases` behind `GET /leases`/`GET /status`'s `leasing` field,
 //! and (Task 5) the `startup_sweep` that reclaims this agent's own abandoned
-//! leases plus the `foreign_lease_holders` guard both whole-box reset paths
+//! leases plus the `foreign_leases` guard both whole-box reset paths
 //! refuse on.
 //!
 //! **gozer is OPTIONAL.** Its absence is a normal outcome (logged once, at
@@ -71,13 +71,22 @@
 //!    another tenant a moment ago may not be visible yet. It is a status
 //!    view, never an interlock; nothing may decide whether to reset chips
 //!    from `/leases`. (The two reset refusals deliberately call
-//!    `foreign_lease_holders` fresh instead of reading that cache.)
-//! 4. **The startup sweep resolves lease ids from `gozer history`**,
-//!    because `gozer status --json` reports `who` but no `lease_id` while
-//!    `gozer release` takes an id. A live lease whose id history cannot
-//!    account for is reported and left alone, never guessed at. Exposing
-//!    `lease_id` in gozer's own `status --json` would delete that whole step
-//!    and is the clean fix -- a small change, in that repo.
+//!    `foreign_leases` fresh instead of reading that cache.)
+//! 4. **A GAP IN GOZER, worked around here: `gozer status --json` carries no
+//!    `lease_id`.** `gozer release` takes an id, and `status` reports `who`
+//!    but never the id of the lease that `who` holds (verified against the
+//!    real `gozer 0.1.0`). So the startup sweep has to make a SECOND
+//!    round-trip -- `gozer history --json` -- to map a live `who` back to an
+//!    id, and a live lease that history cannot account for is reported and
+//!    left alone rather than guessed at (gozer reuses ids; guessing could
+//!    reset a different tenant's chips).
+//!    **The fix belongs in tt-gozer, and it is small: add `lease_id` to each
+//!    chip's entry in `cmd_status`'s payload.** That deletes the history
+//!    round-trip, `open_leases_from_history`, and the whole "id could not be
+//!    resolved" branch outright. Someone should do it. It must NOT be
+//!    quietly absorbed here as permanent complexity -- every further
+//!    workaround built on the history log makes the real fix harder to
+//!    justify.
 //! 5. **`HeldLease.container_name` (docker backend) is recorded only at
 //!    successful handover**; the failing exits inside `start` stop the
 //!    container through an in-scope local instead. The two agree today
@@ -793,6 +802,20 @@ pub fn startup_sweep(runner: &dyn CommandRunner, capability: &Capability) -> Swe
 
     // 1. Docker first: without it there is no question to answer, and no
     //    reason to spawn a single gozer subprocess.
+    //
+    // !!! DO NOT "SIMPLIFY" THIS TO `discover_serving` !!!
+    // It is the obvious reuse -- same module, same `docker ps`, and it even
+    // returns the ports -- and it is WRONG here. `discover_serving` only
+    // reports a container once its `/v1/models` answers with a loaded model.
+    // A container still loading a 70B publishes its port for many minutes
+    // before that happens, so under that gate this sweep would read a live
+    // bring-up as "nothing serving", release its lease, and `gozer release`
+    // would reset the chips out from under it mid-load. That is exactly the
+    // collision this whole integration exists to prevent, arriving through
+    // the sweep meant to prevent it. `running_published_ports` asks the
+    // narrower, safer question -- "is anything at all holding this port?" --
+    // and shares the `docker ps` format and port parser with
+    // `discover_serving` so there is still only one of each.
     let Some(ports_in_use) = crate::serving::discovery::running_published_ports(runner) else {
         eprintln!(
             "tt-station-agentd: skipping the startup lease sweep -- `docker ps` could not be \
@@ -938,9 +961,64 @@ fn open_leases_from_history(
     open
 }
 
-/// Every lease currently held by someone OTHER than this agent's own
-/// session on `own_service_port`, as a human-readable clause per board --
-/// or `None` when nothing foreign is held (or gozer's state can't be read).
+/// What [`foreign_leases`] found: the three-way answer both whole-box reset
+/// guards need.
+///
+/// **The third variant is the point.** "Nobody else is on this box" and "I
+/// cannot tell whether anybody else is on this box" are different facts, and
+/// an `Option` would collapse them into the same `None` -- which is exactly
+/// how a guard ends up resetting a neighbour's chips while believing it
+/// checked. They are separate variants so the caller is forced to decide
+/// what to do about the second, and so a test can tell them apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForeignLeases {
+    /// gozer answered, and nothing is held by anyone but this agent's own
+    /// session. The reset may proceed exactly as it always did.
+    None,
+    /// gozer answered, and someone else holds chips. Carries a
+    /// human-readable clause per board (`"board <serial> is held by <who>"`,
+    /// joined with `"; "`), and NO duration -- gozer reports no lease start
+    /// time (see `StatusChip`).
+    Held(String),
+    /// gozer's lease state could not be read at all (the command failed to
+    /// run, exited non-zero -- 14 topology unreadable, 16 mutex stuck -- or
+    /// returned unparseable JSON). Nothing is known about who holds what.
+    Undetermined,
+}
+
+impl ForeignLeases {
+    /// Why a whole-box reset must be refused, or `None` when it may proceed.
+    ///
+    /// Each caller prefixes the ACTION it is refusing (`"refusing to reset
+    /// this box"` / `"refusing reset-chips"`); this supplies the reason and
+    /// the remedy, so both guards word the same situation the same way.
+    ///
+    /// **`Held` and `Undetermined` must never read alike.** An operator
+    /// staring at a wedged box has to know which of the two they are in:
+    /// one means "stop the other session", the other means "gozer itself is
+    /// broken, fix it or reset by hand". A refusal that reported the wrong
+    /// one would be worse than a generic failure, because it would send them
+    /// looking for a tenant who isn't there.
+    pub fn refusal_reason(&self) -> Option<String> {
+        match self {
+            ForeignLeases::None => None,
+            ForeignLeases::Held(holders) => Some(format!(
+                "another tenant holds chips -- {holders}. Stop that session (or `gozer release` \
+                 its lease) first."
+            )),
+            ForeignLeases::Undetermined => Some(
+                "`gozer status` could not be read, so whether another tenant holds chips cannot \
+                 be determined -- and a whole-box reset would take theirs down with yours. Fix \
+                 gozer first (`gozer status` should answer; `gozer reconcile` clears a stuck \
+                 gate), or reset the box by hand once you know it is yours."
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// Whether anyone OTHER than this agent's own session on `own_service_port`
+/// holds chips -- see [`ForeignLeases`] for the three-way answer.
 ///
 /// This is the guard on both whole-box `tt-smi -r` paths: `POST /reset`
 /// (`RunPyBackend::reset`) and `POST /power {"action":"reset-chips"}`
@@ -960,26 +1038,38 @@ fn open_leases_from_history(
 /// the main reasons an operator reaches for a reset in the first place, so
 /// refusing on it would disable the tool exactly when it is most needed.
 ///
-/// **Fails OPEN**, unlike most of this module: an unreadable `gozer status`
-/// yields `None`, so the reset proceeds. That is deliberate and follows the
-/// design doc's failure-modes table, whose rule for a `status` that cannot
-/// read the box (exit 14, topology unreadable) is "leasing disabled for this
-/// call" -- i.e. degrade to the pre-integration behaviour, not refuse. It is
-/// also the honest reading of the situation: a box whose topology gozer
-/// cannot read is a box gozer is not handing to anyone either, and it is
-/// exactly the wedged state an operator reaches for a reset to clear.
-/// Refusing there would disable the tool at the moment it is needed, on the
-/// strength of a signal that says nothing about who holds what.
+/// **FAILS CLOSED.** An unreadable `gozer status` is
+/// [`ForeignLeases::Undetermined`], and both callers refuse on it.
 ///
-/// The pre-serve reset in `start` is the fail-CLOSED path (it refuses
-/// without a grant, because it can simply not serve); this one guards a
-/// deliberate operator action on a box they are already sitting at.
-pub fn foreign_lease_holders(
+/// An earlier version of this function failed open, reasoning from the
+/// design doc's failure-modes table ("14 topology unreadable → leasing
+/// disabled for this call"). That row is about the SERVING path, where
+/// degrading means the serve proceeds unleased and only the serving tenant
+/// is affected; it does not transfer to a guard whose entire job is
+/// protecting somebody else's hardware. Failing open here says *"I cannot
+/// tell whether anyone else is on this box, so I will reset it anyway"*.
+///
+/// The asymmetry decides it: refusing costs the operator an inconvenience
+/// they can route around (ssh in, fix gozer, or run `tt-smi -r` by hand);
+/// proceeding costs a neighbour their running model, and the neighbour gets
+/// no say in it. So `Undetermined` refuses -- with a message that says the
+/// state could not be READ, never that a lease exists (see
+/// [`ForeignLeases::refusal_reason`]), because those send an operator to two
+/// different places.
+///
+/// This now matches the rest of the module: `Grant::reset_target` and
+/// `leased_tt_device` also refuse rather than guess whenever guessing could
+/// touch a chip nobody granted.
+pub fn foreign_leases(
     runner: &dyn CommandRunner,
     capability: &Capability,
     own_service_port: u16,
-) -> Option<String> {
-    let snapshot = snapshot_leases(runner, capability)?;
+) -> ForeignLeases {
+    // No snapshot -> nothing is KNOWN, which is not the same as nothing
+    // being held. See `ForeignLeases::Undetermined`.
+    let Some(snapshot) = snapshot_leases(runner, capability) else {
+        return ForeignLeases::Undetermined;
+    };
     let own_prefix = format!("{WHO_PREFIX}{own_service_port}:");
 
     let mut clauses: Vec<String> = Vec::new();
@@ -1006,9 +1096,9 @@ pub fn foreign_lease_holders(
     }
 
     if clauses.is_empty() {
-        None
+        ForeignLeases::None
     } else {
-        Some(clauses.join("; "))
+        ForeignLeases::Held(clauses.join("; "))
     }
 }
 

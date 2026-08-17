@@ -2507,27 +2507,51 @@ fn runpy_reset_proceeds_when_a_chip_is_busy_untracked() {
 }
 
 /// An UNREADABLE `gozer status` (exit 16, a stuck mutex -- or exit 14, an
-/// unreadable topology) must NOT block `/reset`. This is the one place in
-/// the leasing code that fails OPEN, and it is deliberate: the design doc's
-/// failure-modes table degrades a `status` that cannot read the box to
-/// "leasing disabled for this call", and a wedged box is exactly what an
-/// operator reaches for `/reset` to clear.
+/// unreadable topology) must REFUSE `/reset`, and say that it could not
+/// determine the answer rather than that somebody holds a lease.
+///
+/// This guard FAILS CLOSED, and the asymmetry is what decides it: refusing
+/// costs an operator an inconvenience they can route around over ssh;
+/// proceeding costs a neighbour their running model, and the neighbour gets
+/// no say. "I cannot tell whether anyone else is on this box, so I will
+/// reset it anyway" is not a defensible position for a whole-box
+/// `tt-smi -r`.
+///
+/// The MESSAGE is half the test: a refusal that reported the wrong reason
+/// would leave an operator unable to tell a contended box from a broken
+/// one, and a test asserting only `is_err()` would pass on that version.
 #[test]
-fn runpy_reset_proceeds_when_gozer_status_is_unreadable() {
+fn runpy_reset_refuses_when_lease_state_cannot_be_determined() {
     let runner = FakeRunner::new(0);
     runner.set_run_capturing("gozer status", 16, "", "mutex stuck");
     let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
         .with_gozer(Some(gozer_capability()));
 
-    backend
+    let err = backend
         .reset()
-        .expect("an unreadable gozer must not disable /reset");
+        .expect_err("an undeterminable lease state must refuse a whole-box reset");
+    let message = err.to_string();
     assert!(
-        runner
-            .commands()
+        message.contains("gozer status") && message.contains("could not be read"),
+        "the refusal must name the real cause -- gozer's state was unreadable: {message}"
+    );
+    assert!(
+        !message.contains("is held by"),
+        "it must NOT claim someone holds chips; nobody was determined to: {message}"
+    );
+
+    let commands = runner.commands();
+    assert!(
+        !commands
             .iter()
-            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-r".to_string()]),
-        "{:?}",
-        runner.commands()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("tt-smi")),
+        "a refused reset must not reset anything: {commands:?}"
+    );
+    assert!(
+        !commands.iter().any(|cmd| {
+            cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")
+        }),
+        "a refused reset must not stop containers either: {commands:?}"
     );
 }

@@ -148,6 +148,22 @@ fn write_stub_gozer(dir: &std::path::Path, status_json: &str) -> std::path::Path
     script_path
 }
 
+/// Write an executable stand-in for `gozer` that FAILS every invocation
+/// (exit 16, gozer's stuck-mutex code) -- the "lease state cannot be read"
+/// case both reset guards must refuse on.
+fn write_failing_stub_gozer(dir: &std::path::Path) -> std::path::PathBuf {
+    let script_path = dir.join("gozer-broken-stub.sh");
+    std::fs::write(&script_path, "#!/bin/sh\necho 'mutex stuck' >&2\nexit 16\n")
+        .expect("write failing stub gozer script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod +x failing stub gozer script");
+    }
+    script_path
+}
+
 /// Write an executable stand-in for the configured `reset-chips` command
 /// that TOUCHES `marker` when run. The marker file is the side channel: a
 /// test can prove the board reset did or did not actually fire, rather than
@@ -404,4 +420,95 @@ async fn power_reset_chips_without_gozer_is_unchanged() {
 
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     assert!(marker.exists(), "the configured command must have run");
+}
+
+/// `POST /reset` must also refuse when the lease state cannot be READ at
+/// all -- and must say so. Failing open here would mean "I cannot tell
+/// whether anyone else is on this box, so I will reset it anyway", which
+/// costs a neighbour their running model while they get no say; failing
+/// closed costs the operator an ssh they can route around.
+#[tokio::test]
+async fn reset_refuses_when_lease_state_cannot_be_determined() {
+    let runner = FakeRunner::new(0);
+    // gozer's stuck-mutex exit. `snapshot_leases` cannot answer, so neither
+    // can the guard.
+    runner.set_run_capturing("gozer status", 16, "", "mutex stuck");
+
+    let state = state_with(runner.clone());
+    let base = serve(state.clone()).await;
+    let client = reqwest::Client::new();
+    let token = pair(&client, &state, &base).await;
+
+    let resp = client
+        .post(format!("{base}/reset"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("POST /reset failed");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = resp.json().await.expect("response was not valid JSON");
+    let error = body["error"].as_str().expect("error field missing");
+    assert!(
+        error.contains("gozer status") && error.contains("could not be read"),
+        "the refusal must distinguish 'could not determine' from 'someone holds it': {error}"
+    );
+    assert!(
+        !error.contains("is held by"),
+        "nobody was determined to hold anything -- the message must not imply one: {error}"
+    );
+
+    assert!(
+        !runner
+            .commands()
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("tt-smi")),
+        "a refused reset must not reset anything: {:?}",
+        runner.commands()
+    );
+}
+
+/// The same fail-closed rule on the OTHER whole-box reset path. The marker
+/// file is the side channel: it proves the configured board-reset command
+/// never ran, which a status-code assertion alone would not.
+#[tokio::test]
+async fn power_reset_chips_refuses_when_lease_state_cannot_be_determined() {
+    let dir = temp_dir("power-undetermined");
+    let marker = dir.join("reset-ran");
+    let reset_cmd = write_marker_command(&dir, &marker);
+    let stub = write_failing_stub_gozer(&dir);
+
+    let runner = FakeRunner::new(0);
+    let state = state_with(runner)
+        .with_gozer(Some(capability(&stub.to_string_lossy())))
+        .with_power_config(
+            vec![reset_cmd.to_string_lossy().into_owned()],
+            vec!["/bin/true".to_string()],
+            vec!["/bin/true".to_string()],
+            vec!["/bin/true".to_string()],
+        );
+    let base = serve(state.clone()).await;
+    let client = reqwest::Client::new();
+    let token = pair(&client, &state, &base).await;
+
+    let resp = client
+        .post(format!("{base}/power"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "action": "reset-chips" }))
+        .send()
+        .await
+        .expect("POST /power failed");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = resp.json().await.expect("response was not valid JSON");
+    let error = body["error"].as_str().expect("error field missing");
+    assert!(
+        error.contains("could not be read"),
+        "the refusal must name the real cause: {error}"
+    );
+    assert!(
+        !marker.exists(),
+        "the configured reset-chips command must NOT have run while the box's \
+         lease state was unknown"
+    );
 }

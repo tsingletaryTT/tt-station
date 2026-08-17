@@ -1457,15 +1457,18 @@ impl ServingBackend for RunPyBackend {
         // Refuse FIRST, act second: a reset that stopped containers and then
         // refused would be worse than either outcome on its own.
         if let Some(capability) = &self.gozer {
-            if let Some(holders) = crate::gozer::foreign_lease_holders(
+            let verdict = crate::gozer::foreign_leases(
                 self.runner.as_ref(),
                 capability,
                 self.config.service_port,
-            ) {
+            );
+            // Refuses on BOTH "someone else holds chips" and "I could not
+            // find out" -- see `gozer::foreign_leases`, which fails closed,
+            // and `refusal_reason`, which words the two differently so an
+            // operator knows whether to stop a session or fix gozer.
+            if let Some(reason) = verdict.refusal_reason() {
                 return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
-                    "refusing to reset this box: it would run a WHOLE-BOX `tt-smi -r` while \
-                     another tenant holds chips -- {holders}. Stop that session (or `gozer \
-                     release` its lease) first."
+                    "refusing to reset this box: it would run a WHOLE-BOX `tt-smi -r` -- {reason}"
                 ))));
             }
         }

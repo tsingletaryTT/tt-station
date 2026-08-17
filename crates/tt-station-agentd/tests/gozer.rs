@@ -15,7 +15,7 @@ mod support;
 
 use libttstation::model::LeaseEntry;
 use support::FakeRunner;
-use tt_station_agentd::gozer::{self, Capability, Grant, LeaseSnapshot, Outcome};
+use tt_station_agentd::gozer::{self, Capability, ForeignLeases, Grant, LeaseSnapshot, Outcome};
 use tt_station_agentd::serving::docker::CapturedOutput;
 
 /// `probe` runs `<path> --version` and, on a clean exit-0 response, reports
@@ -706,7 +706,7 @@ fn service_port_is_parsed_from_the_second_who_field() {
 }
 
 // ---------------------------------------------------------------------
-// `foreign_lease_holders` -- the guard both whole-box `tt-smi -r` paths
+// `foreign_leases` -- the guard both whole-box `tt-smi -r` paths
 // (`POST /reset` and `POST /power reset-chips`) refuse on. Ownership is
 // decided by the `who` prefix `tt-station:<our service port>:`.
 // ---------------------------------------------------------------------
@@ -716,7 +716,7 @@ fn service_port_is_parsed_from_the_second_who_field() {
 /// anyone else entirely, is foreign and must be named. `FREE` chips are
 /// never holders, and two chips of one board yield ONE clause.
 #[test]
-fn foreign_lease_holders_names_everyone_but_our_own_service_port() {
+fn foreign_leases_names_everyone_but_our_own_service_port() {
     let runner = FakeRunner::new(0);
     runner.set_run_capturing(
         "gozer status",
@@ -735,8 +735,10 @@ fn foreign_lease_holders_names_everyone_but_our_own_service_port() {
         "",
     );
 
-    let holders = gozer::foreign_lease_holders(&runner, &sweep_capability(), 8080)
-        .expect("a foreign lease is held");
+    let ForeignLeases::Held(holders) = gozer::foreign_leases(&runner, &sweep_capability(), 8080)
+    else {
+        panic!("a foreign lease is held");
+    };
     assert_eq!(
         holders, "board board-b is held by claude:ttm-optimize",
         "our own lease and the FREE board must not appear, and one board must \
@@ -745,8 +747,10 @@ fn foreign_lease_holders_names_everyone_but_our_own_service_port() {
 
     // Same payload, a DIFFERENT service port: now the `tt-station:8080:`
     // lease is somebody else's too.
-    let holders = gozer::foreign_lease_holders(&runner, &sweep_capability(), 9999)
-        .expect("both leases are foreign to port 9999");
+    let ForeignLeases::Held(holders) = gozer::foreign_leases(&runner, &sweep_capability(), 9999)
+    else {
+        panic!("both leases are foreign to port 9999");
+    };
     assert!(holders.contains("tt-station:8080:llama3"), "{holders}");
     assert!(holders.contains("claude:ttm-optimize"), "{holders}");
 }
@@ -755,7 +759,7 @@ fn foreign_lease_holders_names_everyone_but_our_own_service_port() {
 /// it must not read as a foreign holder. Untracked work wedging the box is
 /// one of the main reasons an operator resets it.
 #[test]
-fn foreign_lease_holders_ignores_busy_untracked_chips() {
+fn foreign_leases_ignores_busy_untracked_chips() {
     let runner = FakeRunner::new(0);
     runner.set_run_capturing(
         "gozer status",
@@ -767,21 +771,54 @@ fn foreign_lease_holders_ignores_busy_untracked_chips() {
     );
 
     assert_eq!(
-        gozer::foreign_lease_holders(&runner, &sweep_capability(), 8080),
-        None
+        gozer::foreign_leases(&runner, &sweep_capability(), 8080),
+        ForeignLeases::None
     );
 }
 
-/// FAILS OPEN: an unreadable `gozer status` yields `None` (the reset
-/// proceeds), per the design doc's failure-modes table -- see the function's
-/// doc comment for why this one place is not fail-closed.
+/// FAILS CLOSED: an unreadable `gozer status` is `Undetermined`, which is a
+/// THIRD outcome and not `None`. "Nobody else is on this box" and "I cannot
+/// tell whether anybody else is on this box" must never collapse into the
+/// same value -- the caller refuses on the second, and can only do that if
+/// the two are distinguishable here.
 #[test]
-fn foreign_lease_holders_fails_open_when_status_is_unreadable() {
+fn foreign_leases_is_undetermined_when_status_is_unreadable() {
     let runner = FakeRunner::new(0);
     runner.set_run_capturing("gozer status", 16, "", "mutex stuck");
     assert_eq!(
-        gozer::foreign_lease_holders(&runner, &sweep_capability(), 8080),
-        None
+        gozer::foreign_leases(&runner, &sweep_capability(), 8080),
+        ForeignLeases::Undetermined
+    );
+}
+
+/// The refusal REASON differs by outcome, and says which situation the
+/// operator is in: someone holds chips (stop them), or gozer could not be
+/// read (fix gozer / reset by hand). A guard that refused with the same
+/// words for both would leave an operator unable to tell a contended box
+/// from a broken one.
+#[test]
+fn foreign_leases_refusal_reason_distinguishes_held_from_undetermined() {
+    let held = ForeignLeases::Held("board b1 is held by claude:x".to_string())
+        .refusal_reason()
+        .expect("Held must refuse");
+    assert!(held.contains("claude:x"), "{held}");
+
+    let unknown = ForeignLeases::Undetermined
+        .refusal_reason()
+        .expect("Undetermined must refuse");
+    assert!(
+        unknown.contains("gozer status") && unknown.contains("could not be read"),
+        "the reason must say gozer could not be read, not that a lease exists: {unknown}"
+    );
+    assert!(
+        !unknown.contains("is held by"),
+        "an undetermined guard must not imply anyone holds anything: {unknown}"
+    );
+
+    assert_eq!(
+        ForeignLeases::None.refusal_reason(),
+        None,
+        "nothing foreign held -> nothing to refuse"
     );
 }
 

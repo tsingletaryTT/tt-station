@@ -72,7 +72,7 @@ const DEFAULT_SERVING_PORT: u16 = 8000;
 /// doc): because it is cached, `/leases` can lag reality by up to this TTL.
 /// That makes it a status VIEW, never an interlock -- nothing may decide
 /// whether to touch chips from it. The two reset refusals deliberately call
-/// `gozer::foreign_lease_holders` fresh rather than reading this cache.
+/// `gozer::foreign_leases` fresh rather than reading this cache.
 const GOZER_LEASE_CACHE_TTL: Duration = Duration::from_millis(300);
 
 /// How long a pairing code stays valid after `/pair/init` mints it. Short
@@ -767,7 +767,8 @@ impl AppState {
     /// no scoping of any kind. It is the second of the two whole-box reset
     /// paths (`POST /reset` is the other) and gets the identical treatment:
     /// a lease held by anyone other than this agent's own session refuses the
-    /// call and names the holder (see `gozer::foreign_lease_holders`). The
+    /// call and names the holder (see `gozer::foreign_leases`, which also
+    /// refuses when that could not be determined at all). The
     /// other three actions are untouched -- suspend/reboot/shutdown take the
     /// whole machine down, where a lease check would be theatre.
     ///
@@ -786,15 +787,15 @@ impl AppState {
         if matches!(action, PowerAction::ResetChips) {
             if let Some(capability) = &self.inner.gozer {
                 let runner = RealCommandRunner;
-                if let Some(holders) = crate::gozer::foreign_lease_holders(
-                    &runner,
-                    capability,
-                    self.inner.serving_port,
-                ) {
+                let verdict =
+                    crate::gozer::foreign_leases(&runner, capability, self.inner.serving_port);
+                // Same fail-closed guard as `RunPyBackend::reset`, worded by
+                // the same `refusal_reason` so the two paths cannot drift:
+                // refuse when someone else holds chips, AND when that could
+                // not be determined at all.
+                if let Some(reason) = verdict.refusal_reason() {
                     return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
-                        "refusing reset-chips: it would run a WHOLE-BOX board reset while \
-                         another tenant holds chips -- {holders}. Stop that session (or \
-                         `gozer release` its lease) first."
+                        "refusing reset-chips: it would run a WHOLE-BOX board reset -- {reason}"
                     ))));
                 }
             }

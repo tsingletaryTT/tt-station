@@ -44,7 +44,11 @@ match it.
   the call is refused and the holder is named. A `BUSY-UNTRACKED` chip is *not* a refusal — it is
   not a lease, there is nobody to name, and untracked work wedging the box is one of the main
   reasons to reach for a chip reset. With no gozer installed, behaviour is exactly as before.
-  See `crates/tt-station-agentd/src/gozer.rs`'s `foreign_lease_holders`.
+  **It also refuses (`409`) when that cannot be determined** — an unreadable `gozer status`
+  means "I cannot tell whether anyone else is on this box", and a whole-box reset on that basis
+  costs a neighbour their running model while they get no say. The refusal says gozer's state
+  could not be read (fix gozer, or reset by hand), never that a lease exists. See
+  `crates/tt-station-agentd/src/gozer.rs`'s `foreign_leases`.
 - **`suspend` / `reboot` / `shutdown`** (the "machine ops",
   `PowerAction::is_machine_op() == true` for everything but `reset-chips`) —
   1. Best-effort stop any serving container first (reuses the backend's normal `stop` path) so a
