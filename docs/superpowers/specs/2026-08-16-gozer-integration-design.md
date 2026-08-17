@@ -85,9 +85,61 @@ inspecting the gate stops mutating it), so `gozer status --json` is a clean read
 
 ## Box side
 
+### Which backend, and what a grant actually pins
+
+*Revised after mapping the code; the first draft assumed the wrong backend.*
+
+`make_backend` (`serving/mod.rs:153`) dispatches `runpy` | `docker` | `dstack`, and the
+default is **`runpy`** (`config.rs:269`), not `docker`. On that default path agentd never
+builds a `docker run` at all — `run.py` does, internally — so `--device` is unreachable and
+the only device selector agentd controls is `--device-id` (`runpy.rs:706-709`), which takes
+run.py's **logical index list** (`"0,1"`), not PCI BDFs.
+
+So a grant is applied as follows:
+
+| Backend | Selector | Value from the grant |
+|---|---|---|
+| `runpy` (default) | `--device-id` | the grant's `dev_indices`, comma-joined |
+| `docker` | one `--device /dev/tenstorrent/<n>` per chip | one per `dev_index` |
+| `dstack` | none — no-op, leasing skipped | — |
+
+gozer's grant JSON already carries `dev_indices` alongside `chips` (BDFs), so no mapping
+needs inventing. **`DockerConfig::device_path` is a single `String` and is emitted once
+(`docker.rs:288`, `:448`); pinning N chips needs a `Vec` and N flags.** That is a required
+change to the docker backend, not a configuration choice.
+
+> **Open question, must be answered before implementation.** `tt-smi` treats *UMD logical ID*
+> and `/dev/tenstorrent/<id>` as **different namespaces** (`tt_smi/device_input.py`), and
+> gozer's `dev_index` is the latter. Whether `run.py`'s `--device-id` means the same thing is
+> not established by reading either codebase. Getting it wrong pins the wrong chip **silently**
+> — the container starts, serves, and quietly uses a neighbour's hardware. Resolve it by
+> launching a single-chip serve with `--device-id` set and confirming which
+> `/dev/tenstorrent/N` the container actually opens, before trusting the mapping. If the
+> namespaces differ, the mapping belongs in gozer (which owns topology) and is exposed in the
+> grant, not reconstructed in agentd.
+
+### The pre-serve whole-box reset must become lease-scoped
+
+`RunPyBackend::start` runs `tt-smi -r` with no targets — a **whole-box** reset — before every
+serve (`runpy.rs:622-629`), gated by `reset_before_serve`.
+
+With one tenant that is protective: it clears the wedged ethernet cores documented at
+`runpy.rs:251-263`, validated on real hardware. With two tenants it is **actively hostile** —
+starting session B resets session A's chips mid-run, which is precisely the collision this
+integration exists to prevent, caused by tt-station itself.
+
+Simply disabling it trades one failure for another: the wedged-core protection is real.
+
+**Required change:** when a lease is held, pass the leased BDFs to the reset instead of
+resetting everything — `tt-smi -r <bdf>,<bdf>`. That is per-ASIC, verified in gozer's own
+`reset.py`, and it keeps the protection for your own chips while leaving a neighbour's alone.
+When leasing is unavailable, behaviour is unchanged.
+
+This is a prerequisite for concurrent tenants, not an enhancement.
+
 ### Lease before launch
 
-Before `docker run`:
+Before the backend launches:
 
 ```
 gozer acquire --chips <N> --owner-pid <agentd pid> \
@@ -104,10 +156,37 @@ Two details carry weight:
   box*, so a local agent can see the chips belong to someone's remote session rather than to an
   anonymous container.
 
-The granted BDFs feed the existing `--device` / `--device-id` plumbing, replacing today's
-whole-box `--tt-device`.
+### Release on every exit, not just `stop`
 
-### Release on stop
+`ServingBackend::stop` is the obvious release point, and it is not sufficient. A lease taken
+at the top of `start` leaks on **five** paths:
+
+| Path | Location |
+|---|---|
+| in-flight cancel | `runpy.rs:826-832` |
+| container died during health poll | `runpy.rs:847-853` |
+| health poll timed out | `runpy.rs:897-906` |
+| `/stop` | `runpy.rs:924` (the only one `stop()` covers) |
+| power command's best-effort stop | `routes.rs:657` |
+
+Every one must release. Because Rust runs `Drop` on unwind and early return, the release
+belongs in a **guard type** holding the lease id and released on drop, rather than five
+hand-written call sites that a sixth exit path will silently escape. `stop()` and the power
+path take the lease explicitly; the three in-`start` failures are exactly what a guard is for.
+
+Note `stop_serving_containers()` (`runpy.rs:426`) looks like the natural choke point and is
+not: it is also called by `start`'s pre-launch stale-container sweep and by `reset`, so
+releasing there would drop a lease the caller is about to use.
+
+### Reading gozer's exit codes
+
+`run_and_capture` (`docker.rs:224-238`) turns any non-zero exit into a stringified-stderr
+error, discarding both the exit code and stdout. gozer's contract is carried *in* those codes
+— 10 queued, 12 unavailable, 14 topology unreadable, 15 release refused, 16 mutex stuck — and
+its `--json` payload arrives on stdout even when the code is non-zero.
+
+Add a `CommandRunner` method that returns code plus stdout plus stderr rather than collapsing
+them. The existing `run` keeps its behaviour so nothing else changes.
 
 `POST /stop` releases the lease, which resets exactly those chips. **Swap** therefore needs no
 dedicated verb: stop, then start on the same board, and the incoming model gets clean silicon
@@ -138,12 +217,12 @@ claude:ttm-optimize since 14:02" is more actionable than a queue position.
 | `GET /serving` | entries gain `lease_id`, `board`, `chips`, `held_since` |
 | `POST /run` | on contention, returns the holder and since-when rather than a generic failure |
 | `POST /stop` | releases the lease (which resets the chips) |
-| `GET /chips` | **new, the only new endpoint** — proxies `gozer status --json` |
+| `GET /leases` | **new, the only new endpoint** — proxies `gozer status --json` |
 
 `tt` CLI:
 
 ```
-tt chips                  # every tenant, including agents that never serve anything
+tt leases                 # every tenant, including agents that never serve anything
 tt run qwen3-8b           # fails clearly if no board is free, naming the holder
 tt stop qwen3-8b          # releases + resets
 ```
