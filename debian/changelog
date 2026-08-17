@@ -1,6 +1,10 @@
 tt-station (0.11.0) noble; urgency=medium
 
   * Release 0.11.0.
+  * CLI renamed: /usr/bin/tt is now /usr/bin/tt-station. The old name belongs
+    to Tenstorrent's official CLI (tenstorrent/tt-cli) and this package was
+    shadowing it. No `tt` alias or compatibility symlink is shipped -- update
+    any scripts that invoked `tt <verb>`.
   * telemetry: report media/diffusion workloads (tt-media-inference-server)
     in the tt_toplike.inference stream as a `media` object, alongside the
     existing vLLM `serving` object.

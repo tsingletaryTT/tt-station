@@ -9,13 +9,13 @@ standing at the box actually needs:
   • Start / Stop / Restart the agent, and Reset-to-fresh
 
 The agent (`tt-station-agentd`) runs as a `systemctl --user` service
-(`tt-station-agentd.service`) — the SAME lifecycle model `tt console` (the
+(`tt-station-agentd.service`) — the SAME lifecycle model `tt-station console` (the
 operator TUI) uses. This panel does not spawn or supervise a child process
 itself: Start/Stop/Restart just shell `systemctl --user <verb>`, and ALL
 state (service state, pairing code + TTL, serving status/endpoint, active
-profile) comes from a single poll of `tt console --snapshot` — the exact
+profile) comes from a single poll of `tt-station console --snapshot` — the exact
 same `BoxLifecycleSnapshot` JSON the TUI renders. One source of truth: the
-panel and `tt console` can never disagree about what state the box is in.
+panel and `tt-station console` can never disagree about what state the box is in.
 Closing this window does NOT stop the service — it just stops watching it.
 
 Deliberately small — "enough to know hey, it's working," not a dashboard.
@@ -36,9 +36,9 @@ any box:
                      --user can't resolve a bare name there
                      (see C1 in the final-review report), so a
                      bare TTS_AGENT_BIN alone is not enough.
-  TTS_TT_BIN        path to tt (for --snapshot and Reset)  (default: ./target/release/tt)
+  TTS_TT_BIN        path to tt-station (for --snapshot and Reset)  (default: ./target/release/tt-station)
   TTS_NAME          box name, shown in the window title    (default: qb2-lab)
-  TTS_CTRL_PORT     --ctrl-port passed to `tt console`     (default: 8765)
+  TTS_CTRL_PORT     --ctrl-port passed to `tt-station console`     (default: 8765)
   TTS_SERVING_HOST  fallback endpoint host, used only if   (default: <hostname>.local)
                      the snapshot doesn't carry one yet
   TTS_SERVING_PORT  fallback endpoint port (see above)     (default: 8003)
@@ -76,13 +76,13 @@ HOSTNAME = socket.gethostname()
 # to an ABSOLUTE path by `which_agent()` (below) before it's ever written --
 # it is NOT used to launch a child process directly. Default matches the Rust
 # side's `console::names::ToolNames::agent_bin` default exactly, so a box
-# with no override agrees with `tt console` about what the unit actually
+# with no override agrees with `tt-station console` about what the unit actually
 # execs.
 AGENT_BIN = os.environ.get("TTS_AGENT_BIN", "tt-station-agentd")
 # The systemd --user unit this panel controls and polls. Default matches the
 # Rust side's `console::names::ToolNames::service_name` default exactly.
 SERVICE_NAME = os.environ.get("TTS_SERVICE_NAME", "tt-station-agentd.service")
-TT_BIN = os.environ.get("TTS_TT_BIN", "./target/release/tt")
+TT_BIN = os.environ.get("TTS_TT_BIN", "./target/release/tt-station")
 NAME = os.environ.get("TTS_NAME", "qb2-lab")
 CTRL_PORT = os.environ.get("TTS_CTRL_PORT", "8765")
 SERVING_HOST = os.environ.get("TTS_SERVING_HOST", f"{NAME}.local")
@@ -168,7 +168,7 @@ def _systemctl(verb: str) -> None:
 
     `check=False` deliberately: a failing `systemctl` call (e.g. the unit
     isn't installed yet, or the user session bus isn't up) must never crash
-    the panel — the next `tt console --snapshot` poll will simply keep
+    the panel — the next `tt-station console --snapshot` poll will simply keep
     reporting whatever state actually resulted (see `_service_state_of`).
     """
     subprocess.run(["systemctl", "--user", verb, SERVICE_NAME], check=False)
@@ -177,8 +177,8 @@ def _systemctl(verb: str) -> None:
 def which_agent(agent_bin: str) -> str:
     """Resolve `agent_bin` to an ABSOLUTE path, exactly mirroring the Rust
     side's `console::which_agent`/`scan_path_for`
-    (`crates/tt/src/console/mod.rs`) so a profile drop-in this panel writes
-    and one `tt console` writes bake in byte-identical `ExecStart=` lines.
+    (`crates/tt-station/src/console/mod.rs`) so a profile drop-in this panel writes
+    and one `tt-station console` writes bake in byte-identical `ExecStart=` lines.
 
     C1 (final-review): systemd `--user` resolves a non-absolute
     `ExecStart=` against a fixed compiled-in search path that does NOT
@@ -216,7 +216,7 @@ def render_profile_dropin(agent_bin: str, profile: str) -> str:
     """Systemd drop-in content that pins the service to `--profile <profile>`.
 
     Must be EXACTLY the format the Rust side emits
-    (`crates/tt/src/console/actions.rs::render_profile_dropin`) — the blank
+    (`crates/tt-station/src/console/actions.rs::render_profile_dropin`) — the blank
     `ExecStart=` line first clears the unit's original `ExecStart=` before
     the real one is set (systemd accumulates multiple `ExecStart=` values
     across drop-ins otherwise), then the real one pins the profile.
@@ -244,8 +244,8 @@ def derive_view(snap, profile_names, selected_profile, serving_host, serving_por
     Deliberately split out of `Panel._render_snapshot` so it's testable with
     a plain function call (see the throwaway check run for this task) rather
     than needing a live GTK application/display. `snap` is either a decoded
-    `BoxLifecycleSnapshot` dict (from `tt console --snapshot`) or `None`
-    (the `tt` invocation itself failed/couldn't be parsed — the agent AND
+    `BoxLifecycleSnapshot` dict (from `tt-station console --snapshot`) or `None`
+    (the `tt-station` invocation itself failed/couldn't be parsed — the agent AND
     systemd are both unreachable). Every field on `snap` may independently
     be null per the wire contract (`libttstation::model::BoxLifecycleSnapshot`)
     — this function must never raise regardless of which fields are missing.
@@ -258,7 +258,7 @@ def derive_view(snap, profile_names, selected_profile, serving_host, serving_por
         return {
             "pill_text": "unknown",
             "pill_class": "pill-off",
-            "status_text": "unable to read box state (tt console --snapshot failed)",
+            "status_text": "unable to read box state (tt-station console --snapshot failed)",
             "endpoint_text": "",
             "profile_text": "",
             "serving_text": "",  # offline: nothing to summarize, don't render
@@ -288,7 +288,7 @@ def derive_view(snap, profile_names, selected_profile, serving_host, serving_por
         pill_text, pill_class = "serving", "pill-serve"
         status_text = f"serving  {model}  ·  {chips}"
         # `/endpoint` collection is v1-unimplemented on the Rust side (it's
-        # an authed route; `tt console`'s collector only probes unauthed
+        # an authed route; `tt-station console`'s collector only probes unauthed
         # endpoints today — see `console::env::collect_snapshot`), so
         # `endpoint` is `None` in practice. Fall back to the configured
         # serving host/port, same as the panel did pre-migration.
@@ -365,7 +365,7 @@ class Panel(Gtk.ApplicationWindow):
         self.set_default_size(440, 420)
 
         # The full last-polled snapshot (a `BoxLifecycleSnapshot` dict, or
-        # `None` before the first poll / when `tt console --snapshot` itself
+        # `None` before the first poll / when `tt-station console --snapshot` itself
         # fails) — the single source of truth for button sensitivity and
         # every rendered field. There is deliberately no child-process
         # handle here anymore: the agent's lifecycle is systemd's problem.
@@ -630,7 +630,7 @@ class Panel(Gtk.ApplicationWindow):
 
         We deliberately do NOT use the agent's authed HTTP `/reset` here: it
         requires a client bearer token the box operator doesn't have (nobody
-        pairs the box to itself), so `tt reset --host 127.0.0.1` silently
+        pairs the box to itself), so `tt-station reset --host 127.0.0.1` silently
         SKIPPED the box-side reset ("no token stored ... clearing local state
         anyway") and the existing association survived. A reset from the box's
         OWN screen is inherently privileged, so we do it locally: stop the
@@ -846,14 +846,14 @@ class Panel(Gtk.ApplicationWindow):
                 self.code_hint.set_text(f"enter this on your Mac · expires in {left}s")
         return True
 
-    # ── snapshot polling — the single source of truth, shared with `tt console` ──
+    # ── snapshot polling — the single source of truth, shared with `tt-station console` ──
     def _poll_status(self):
         threading.Thread(target=self._fetch_snapshot, daemon=True).start()
         return True
 
     def _fetch_snapshot(self):
-        """Run `tt console --snapshot --ctrl-port <CTRL_PORT>` and decode its
-        JSON. Never raises out of this method: any failure (missing `tt`
+        """Run `tt-station console --snapshot --ctrl-port <CTRL_PORT>` and decode its
+        JSON. Never raises out of this method: any failure (missing `tt-station`
         binary, non-zero exit, non-JSON stdout) degrades to `snap = None`,
         which `derive_view` renders as a safe "unknown/offline" state — the
         agent AND the systemd unit being completely absent must never crash

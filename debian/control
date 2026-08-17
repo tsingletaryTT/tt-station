@@ -17,7 +17,7 @@ Description: Tenstorrent QuietBox control plane (CLI + box agent)
  box, pair once, run a model, and get one OpenAI-compatible /v1 endpoint served
  by tt-inference-server (vLLM).
  .
- This package ships the `tt` CLI and the box-side agent `tt-station-agentd`
+ This package ships the `tt-station` CLI and the box-side agent `tt-station-agentd`
  (installed as a systemd --user service, not auto-enabled). Enable it per-user
  with: systemctl --user enable --now tt-station-agentd
 

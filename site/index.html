@@ -451,21 +451,21 @@
     <div class="window" aria-label="Terminal showing the tt-station happy path">
       <div class="window-bar">
         <span class="win-dot r"></span><span class="win-dot y"></span><span class="win-dot g"></span>
-        <span class="window-title">taylor@macbook — tt</span>
+        <span class="window-title">taylor@macbook — tt-station</span>
       </div>
-<div class="term"><span class="p">$</span> <span class="c">tt discover</span>
+<div class="term"><span class="p">$</span> <span class="c">tt-station discover</span>
 <span class="o">Scanning the LAN for Tenstorrent boxes…</span>
 <span class="ok">●</span> <span class="c">qb2-lab.local:8765</span>  <span class="o">4×BH · idle</span>
 
-<span class="p">$</span> <span class="c">tt pair qb2-lab.local:8765</span>
+<span class="p">$</span> <span class="c">tt-station pair qb2-lab.local:8765</span>
 <span class="o">Enter the 6-digit code shown on the box:</span> <span class="hi">418 902</span>
 <span class="ok">✓ paired</span> <span class="o">— token stored in Keychain</span>
 
-<span class="p">$</span> <span class="c">tt run Qwen3-8B --host qb2-lab.local:8765</span>
+<span class="p">$</span> <span class="c">tt-station run Qwen3-8B --host qb2-lab.local:8765</span>
 <span class="o">Starting model on the box (vLLM)…</span>
 <span class="ok">✓ serving</span> <span class="o">→</span> <span class="bl">http://qb2-lab.local:8002/v1</span>
 
-<span class="p">$</span> <span class="c">eval "$(tt endpoint --host qb2-lab.local:8765)"</span>
+<span class="p">$</span> <span class="c">eval "$(tt-station endpoint --host qb2-lab.local:8765)"</span>
 <span class="p">$</span> <span class="c">curl "$OPENAI_BASE_URL/chat/completions" \</span>
 <span class="c">   -d '{"model":"Qwen3-8B","messages":[…]}'</span>
 <span class="pk">{ "choices": [{ "message":</span>
@@ -522,7 +522,7 @@
   <div class="flow">
     <div class="node mac">
       <span class="node-eyebrow">Your Mac</span>
-      <span class="node-title">tt CLI &amp; TTStation.app</span>
+      <span class="node-title">tt-station CLI &amp; TTStation.app</span>
       <ul>
         <li>Browse, rank &amp; pick a box/model</li>
         <li>Token in Keychain</li>
@@ -559,7 +559,7 @@
   <p class="section-sub">
     The two halves of tt-station ship independently but are designed as one product: everything
     the agent learns about the box — its device mesh, its temperatures, what's serving — surfaces
-    natively in the Mac app, and everything the app does is just <code>tt --json</code> underneath.
+    natively in the Mac app, and everything the app does is just <code>tt-station --json</code> underneath.
   </p>
   <div class="sides-grid">
     <div class="side-card">
@@ -572,8 +572,8 @@
       </div>
       <ul class="side-list">
         <li><strong>Device-mesh aware.</strong> Detects the chip layout from <code>tt-smi</code> (e.g. <code>p300x2</code>) at startup and advertises it over mDNS — no manual device flags.</li>
-        <li><strong>Named serving profiles.</strong> An optional <code>agentd.toml</code> defines profiles like <code>stable</code>/<code>bleeding</code> — different repo checkouts or images, picked with <code>tt config</code> / <code>--profile</code>.</li>
-        <li><strong>Keyless SSH on pairing.</strong> The same 6-digit handshake can install your Mac's public key on the box (<code>/ssh/authorize</code>, <code>tt ssh-authorize</code>) — no password prompts for the workbench.</li>
+        <li><strong>Named serving profiles.</strong> An optional <code>agentd.toml</code> defines profiles like <code>stable</code>/<code>bleeding</code> — different repo checkouts or images, picked with <code>tt-station config</code> / <code>--profile</code>.</li>
+        <li><strong>Keyless SSH on pairing.</strong> The same 6-digit handshake can install your Mac's public key on the box (<code>/ssh/authorize</code>, <code>tt-station ssh-authorize</code>) — no password prompts for the workbench.</li>
         <li><strong>Readiness that means something.</strong> Resets the board, pins a compatible serving image, and only reports "serving" once <code>/v1/models</code> actually lists the model.</li>
         <li><strong>Operable two ways.</strong> A GTK <strong>box panel</strong> on the QuietBox's own screen (start/stop/reset, live pairing code, profile picker), or headless as a systemd-style daemon driven entirely by the CLI/app.</li>
       </ul>
@@ -595,7 +595,7 @@
         <li><strong>Hardware-aware model browser.</strong> Models that run on this box's mesh rank first ("Runs on this box" vs. a dimmed "Needs other hardware"); the smart default is compatible-first.</li>
         <li><strong>Live device telemetry.</strong> Per-device temp/power/aiclk streamed straight from the agent's <code>/telemetry</code> WebSocket, color-ramped, with a jump to the deeper <code>tt-toplike</code> view.</li>
         <li><strong>Fast Connect + Workbench.</strong> One-click Open WebUI / opencode (installing missing deps via Homebrew), plus Terminal/SSH, remote <code>tt-toplike</code>, and VS Code Remote-SSH launchers.</li>
-        <li><strong>A veneer, not a brain.</strong> No discovery, pairing, or HTTP logic lives in Swift — the app shells out to <code>tt --json</code> and renders the result, so the CLI's behavior is always the truth.</li>
+        <li><strong>A veneer, not a brain.</strong> No discovery, pairing, or HTTP logic lives in Swift — the app shells out to <code>tt-station --json</code> and renders the result, so the CLI's behavior is always the truth.</li>
       </ul>
       <div class="figure shot">
         <img src="assets/tt-station-macos-app-models.png" alt="The TTStation control-room window: box header with a P300X2 device-mesh badge, a live per-device telemetry strip, a config card, and a hardware-aware model browser" loading="lazy">
@@ -637,7 +637,7 @@
     <div class="feature-card">
       <div class="feature-icon">📡</div>
       <div class="feature-title">Discover like AirPlay</div>
-      <div class="feature-desc">Boxes advertise <code>_tenstorrent._tcp</code> over Bonjour/mDNS. <code>tt discover</code> lists them by name — no IPs to memorize. On locked-down networks, add a host manually or over Tailscale.</div>
+      <div class="feature-desc">Boxes advertise <code>_tenstorrent._tcp</code> over Bonjour/mDNS. <code>tt-station discover</code> lists them by name — no IPs to memorize. On locked-down networks, add a host manually or over Tailscale.</div>
     </div>
     <div class="feature-card">
       <div class="feature-icon">🔑</div>
@@ -647,12 +647,12 @@
     <div class="feature-card">
       <div class="feature-icon">🔌</div>
       <div class="feature-title">One <code>/v1</code> endpoint</div>
-      <div class="feature-desc">Serving speaks the OpenAI API. <code>tt endpoint</code> hands you a working <code>OPENAI_BASE_URL</code> — point curl, Cursor, or the <code>openai</code> SDK straight at it.</div>
+      <div class="feature-desc">Serving speaks the OpenAI API. <code>tt-station endpoint</code> hands you a working <code>OPENAI_BASE_URL</code> — point curl, Cursor, or the <code>openai</code> SDK straight at it.</div>
     </div>
     <div class="feature-card">
       <div class="feature-icon">🗂️</div>
       <div class="feature-title">Named serving profiles</div>
-      <div class="feature-desc">An optional <code>agentd.toml</code> defines profiles like <code>stable</code>/<code>bleeding</code> — different repo checkouts or images. Switch with <code>tt config</code> / <code>--profile</code>; no file at all means unchanged flag-only behavior.</div>
+      <div class="feature-desc">An optional <code>agentd.toml</code> defines profiles like <code>stable</code>/<code>bleeding</code> — different repo checkouts or images. Switch with <code>tt-station config</code> / <code>--profile</code>; no file at all means unchanged flag-only behavior.</div>
     </div>
     <div class="feature-card">
       <div class="feature-icon">🚫</div>
@@ -677,7 +677,7 @@
   <p class="section-label">The payoff</p>
   <h2 class="section-heading">If it speaks OpenAI, it works</h2>
   <p class="section-sub">
-    Once <code>tt endpoint</code> sets <code>OPENAI_BASE_URL</code>, your QuietBox is a drop-in for
+    Once <code>tt-station endpoint</code> sets <code>OPENAI_BASE_URL</code>, your QuietBox is a drop-in for
     anything that talks to the OpenAI API. Same code you'd point at a cloud provider — pointed at
     the box on your desk.
   </p>
@@ -741,7 +741,7 @@ c.chat.completions.<span class="f">create</span>(
           <code class="cmd" id="cmddl1">xattr -dr com.apple.quarantine /Applications/TTStation.app</code>
           <button class="cmd-copy" data-target="cmddl1">Copy</button>
         </div>
-        <p style="margin-top:0.85rem;">Launch it from Applications — it lives in the menu bar. The DMG bundles the <code>tt</code> CLI and offers to add it to <code>~/.local/bin</code> on first run, so the CLI steps below work too.</p>
+        <p style="margin-top:0.85rem;">Launch it from Applications — it lives in the menu bar. The DMG bundles the <code>tt-station</code> CLI and offers to add it to <code>~/.local/bin</code> on first run, so the CLI steps below work too.</p>
       </div>
     </div>
     <div class="install-row">
@@ -793,9 +793,9 @@ systemctl --user enable --now tt-station-agentd</code>
         <p class="where">On your Mac</p>
         <p>Build the CLI, then discover the box and pair with the 6-digit code it prints. Add <code>--enable-ssh</code> to also install your Mac's key for keyless access.</p>
         <div class="cmd-wrap">
-          <code class="cmd" id="cmd2">cargo build --release -p tt
-tt discover
-tt pair qb2-lab.local:8765 --enable-ssh   # enter the code shown on the box</code>
+          <code class="cmd" id="cmd2">cargo build --release -p tt-station
+tt-station discover
+tt-station pair qb2-lab.local:8765 --enable-ssh   # enter the code shown on the box</code>
           <button class="cmd-copy" data-target="cmd2">Copy</button>
         </div>
         <p style="margin-top:0.85rem;">Or install <code>TTStation.app</code> — it drives this same CLI from a menu bar popover and control-room window; see <a href="https://github.com/tsingletaryTT/tt-station/blob/main/macos/README.md" target="_blank" rel="noopener"><code>macos/README.md</code></a>.</p>
@@ -805,10 +805,10 @@ tt pair qb2-lab.local:8765 --enable-ssh   # enter the code shown on the box</cod
       <span class="install-num">3</span>
       <div class="install-body">
         <p class="where">On your Mac</p>
-        <p>Run a model and grab the endpoint. <code>tt run</code> waits until the box reports healthy.</p>
+        <p>Run a model and grab the endpoint. <code>tt-station run</code> waits until the box reports healthy.</p>
         <div class="cmd-wrap">
-          <code class="cmd" id="cmd3">tt run Qwen3-8B --host qb2-lab.local:8765
-eval "$(tt endpoint --host qb2-lab.local:8765)"
+          <code class="cmd" id="cmd3">tt-station run Qwen3-8B --host qb2-lab.local:8765
+eval "$(tt-station endpoint --host qb2-lab.local:8765)"
 echo "$OPENAI_BASE_URL"           # → http://qb2-lab.local:8002/v1</code>
           <button class="cmd-copy" data-target="cmd3">Copy</button>
         </div>
@@ -834,7 +834,7 @@ echo "$OPENAI_BASE_URL"           # → http://qb2-lab.local:8002/v1</code>
     <div>
       <strong>No hardware handy?</strong> Everything above works against a built-in mock box —
       <code>cargo run -p mock-box -- serve --ctrl-port 8899</code>, then
-      <code>tt discover --no-mdns --host 127.0.0.1:8899</code>. The full
+      <code>tt-station discover --no-mdns --host 127.0.0.1:8899</code>. The full
       discover → pair → run → completion path is exercised end-to-end in CI, no chips needed.
     </div>
   </div>

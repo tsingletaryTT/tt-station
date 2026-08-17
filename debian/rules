@@ -1,7 +1,7 @@
 #!/usr/bin/make -f
 # debian/rules — debhelper build rules for tt-station.
 #
-# Rust workspace: builds two release binaries (tt, tt-station-agentd) with safe
+# Rust workspace: builds two release binaries (tt-station, tt-station-agentd) with safe
 # default features. Crates are vendored under vendor/ and .cargo/config.toml
 # redirects cargo there; --frozen enforces no network fetches. Run build-deb.sh
 # to vendor first.
@@ -30,15 +30,15 @@ override_dh_clean:
 
 # ── Compile ────────────────────────────────────────────────────────────────
 override_dh_auto_build:
-	cargo build --release --frozen -p tt
+	cargo build --release --frozen -p tt-station
 	cargo build --release --frozen -p tt-station-agentd
 
 # ── Install ────────────────────────────────────────────────────────────────
 override_dh_auto_install:
 	# ── tt-station (CLI + agent + systemd user unit) ──
 	install -d debian/tt-station/usr/bin
-	install -m 755 debian/target/release/tt \
-	    debian/tt-station/usr/bin/tt
+	install -m 755 debian/target/release/tt-station \
+	    debian/tt-station/usr/bin/tt-station
 	install -m 755 debian/target/release/tt-station-agentd \
 	    debian/tt-station/usr/bin/tt-station-agentd
 	install -d debian/tt-station/usr/lib/systemd/user
