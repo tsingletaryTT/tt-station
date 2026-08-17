@@ -760,17 +760,20 @@ impl AppState {
     /// every power action here -- including `reset-chips` -- preserves
     /// pairing.
     ///
-    /// **`reset-chips` REFUSES while another tenant holds a lease.** It runs
-    /// `power_reset_chips_cmd` -- `["tt-smi", "-r"]` by default, a WHOLE-BOX
-    /// reset -- and, because `is_machine_op()` is false for it, it skips the
-    /// backend entirely: no serving stop, no lease release, and (before this)
-    /// no scoping of any kind. It is the second of the two whole-box reset
-    /// paths (`POST /reset` is the other) and gets the identical treatment:
-    /// a lease held by anyone other than this agent's own session refuses the
-    /// call and names the holder (see `gozer::foreign_leases`, which also
-    /// refuses when that could not be determined at all). The
-    /// other three actions are untouched -- suspend/reboot/shutdown take the
-    /// whole machine down, where a lease check would be theatre.
+    /// **`reset-chips` REFUSES while another tenant holds a lease, unless
+    /// `force`.** It runs `power_reset_chips_cmd` -- `["tt-smi", "-r"]` by
+    /// default, a WHOLE-BOX reset -- and, because `is_machine_op()` is false
+    /// for it, it skips the backend entirely: no serving stop, no lease
+    /// release, and (before this) no scoping of any kind. It is the second of
+    /// the two whole-box reset paths (`POST /reset` is the other) and gets the
+    /// identical treatment, through the identical `ForeignLeases::resolve`
+    /// call: a lease held by anyone other than this agent's own session
+    /// refuses the call and names the holder (as does a lease state that could
+    /// not be determined at all), and `force` -- the operator's
+    /// `tt power reset-chips --force` -- overrides either refusal and logs what
+    /// it stepped on. The other three actions are untouched:
+    /// suspend/reboot/shutdown take the whole machine down, where a lease
+    /// check would be theatre, so `force` is meaningless for them and ignored.
     ///
     /// Ownership is matched against `Inner::serving_port`, which `main.rs`
     /// fills from the same `--serving-port` it gives the backend as its
@@ -781,7 +784,11 @@ impl AppState {
     /// Shells out through `RealCommandRunner`, like `gozer_snapshot` and
     /// `get_serving` -- NOT through the backend's injected runner, since the
     /// power path deliberately doesn't go near the backend.
-    pub fn run_power_command(&self, action: crate::power::PowerAction) -> anyhow::Result<()> {
+    pub fn run_power_command(
+        &self,
+        action: crate::power::PowerAction,
+        force: bool,
+    ) -> anyhow::Result<()> {
         use crate::power::PowerAction;
 
         if matches!(action, PowerAction::ResetChips) {
@@ -789,14 +796,21 @@ impl AppState {
                 let runner = RealCommandRunner;
                 let verdict =
                     crate::gozer::foreign_leases(&runner, capability, self.inner.serving_port);
-                // Same fail-closed guard as `RunPyBackend::reset`, worded by
-                // the same `refusal_reason` so the two paths cannot drift:
-                // refuse when someone else holds chips, AND when that could
-                // not be determined at all.
-                if let Some(reason) = verdict.refusal_reason() {
-                    return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
-                        "refusing reset-chips: it would run a WHOLE-BOX board reset -- {reason}"
-                    ))));
+                // The SAME decision `RunPyBackend::reset_forcing` makes, made
+                // by the same `ForeignLeases::resolve` so the two paths cannot
+                // drift: refuse when someone else holds chips AND when that
+                // could not be determined at all -- unless the operator forced
+                // it, in which case proceed and log the override, which is the
+                // only trace a deliberate stomp leaves behind.
+                match verdict.resolve(force) {
+                    Ok(None) => {}
+                    Ok(Some(note)) => eprintln!("tt-station-agentd: reset-chips: {note}"),
+                    Err(reason) => {
+                        return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
+                            "refusing reset-chips: it would run a WHOLE-BOX board reset -- \
+                             {reason}"
+                        ))));
+                    }
                 }
             }
         }
@@ -1559,6 +1573,15 @@ impl FromRequestParts<AppState> for BearerAuth {
 #[derive(Deserialize)]
 struct RunRequest {
     model: String,
+    /// `tt run --force`: serve even though gozer will not grant the chips,
+    /// because another tenant holds them (or because gozer cannot be asked).
+    /// See `ServingBackend::start_forcing`.
+    ///
+    /// `#[serde(default)]` so every pre-`--force` client -- which sends
+    /// `{"model": ".."}` and nothing else -- keeps working and gets the
+    /// polite, refusing behaviour.
+    #[serde(default)]
+    force: bool,
 }
 
 /// JSON body returned by `POST /run` on success.
@@ -1614,8 +1637,15 @@ fn contention_aware_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse
     backend_error(err)
 }
 
-/// `POST /run { "model": "..." }` (bearer-guarded): ask the backend to start
-/// serving `model`.
+/// `POST /run { "model": "...", "force": <bool> }` (bearer-guarded): ask the
+/// backend to start serving `model`.
+///
+/// `force` (default `false`, so an older client is unaffected) is
+/// `tt run --force`: serve even though the box's chips are held by somebody
+/// else. It answers a `409` that would otherwise stand -- see
+/// `ServingBackend::start_forcing` and `RunPyBackend::acquire_lease`'s `force`
+/// section for what it does (serve unleased) and does not (take the holder's
+/// lease away) do.
 ///
 /// `backend.start` is sync and, for the real Docker backend, blocks on a
 /// `reqwest::blocking` health probe -- calling it directly here would panic
@@ -1632,10 +1662,20 @@ async fn run_model(
 ) -> Result<Json<RunResponse>, (StatusCode, Json<ErrorResponse>)> {
     let backend = state.backend();
     let model = req.model;
+    let force = req.force;
 
-    let result = tokio::task::spawn_blocking(move || backend.start(&model))
-        .await
-        .map_err(|join_err| backend_error(anyhow::anyhow!("run task panicked: {join_err}")))?;
+    // `start`/`start_forced` rather than one call with a bool, so the
+    // unforced path through this route is exactly the call every pre-`--force`
+    // caller (and every argv pin) already makes.
+    let result = tokio::task::spawn_blocking(move || {
+        if force {
+            backend.start_forced(&model)
+        } else {
+            backend.start(&model)
+        }
+    })
+    .await
+    .map_err(|join_err| backend_error(anyhow::anyhow!("run task panicked: {join_err}")))?;
 
     // A contended box answers 409 (naming the board and the holder), not
     // 500 -- see `contention_aware_error`.
@@ -1707,16 +1747,33 @@ async fn stop_model(
 /// expected for a reset, and harmless here: auth was already checked at
 /// entry (the `BearerAuth` extractor), so this handler still runs to
 /// completion and returns `200 {}`.
+///
+/// The body is OPTIONAL: `{"force": true}` is `tt reset --force`, which
+/// overrides the foreign-lease refusal (see `RunPyBackend::reset_forcing`).
+/// Every existing client posts `/reset` with no body and no content-type at
+/// all, which `Option<Json<..>>` reads as `None` -> unforced, so the polite
+/// default is what an older `tt` still gets.
 async fn reset(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
+    body: Option<Json<ResetRequest>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let backend = state.backend();
+    let force = body.map(|Json(req)| req.force).unwrap_or(false);
 
     // Backend reset shells out (docker/tt-smi) -- never on the async runtime.
-    tokio::task::spawn_blocking(move || backend.reset())
-        .await
-        .map_err(|join_err| backend_error(anyhow::anyhow!("reset task panicked: {join_err}")))?
+    // `reset`/`reset_forced` rather than one call with a bool, for the same
+    // reason `/run` splits: the unforced path is byte-for-byte the call it
+    // always was.
+    tokio::task::spawn_blocking(move || {
+        if force {
+            backend.reset_forced()
+        } else {
+            backend.reset()
+        }
+    })
+    .await
+    .map_err(|join_err| backend_error(anyhow::anyhow!("reset task panicked: {join_err}")))?
         // A reset REFUSED because another tenant holds chips is a 409, and
         // (note the `?`) it aborts the route before the token clearing
         // below: a refusal must leave the box, and the pairing, untouched.
@@ -1756,11 +1813,28 @@ fn power_success_status(action: crate::power::PowerAction) -> StatusCode {
 #[derive(Deserialize)]
 struct PowerRequest {
     action: String,
+    /// `tt power reset-chips --force`: run the whole-box board reset even
+    /// though another tenant holds chips (or gozer cannot be asked). Ignored
+    /// for suspend/reboot/shutdown, which have no lease check to override.
+    /// `#[serde(default)]` keeps every pre-`--force` client working.
+    #[serde(default)]
+    force: bool,
 }
 
-/// `POST /power { "action": "reset-chips" | "suspend" | "reboot" | "shutdown" }`
-/// (bearer-guarded, same `BearerAuth` gate as `/run`/`/stop`/`/reset`): run
-/// the configured command for `action` via `AppState::run_power_command`.
+/// JSON body OPTIONALLY accepted by `POST /reset` -- see the `reset` handler.
+#[derive(Deserialize)]
+struct ResetRequest {
+    /// `tt reset --force`: run the whole-box `tt-smi -r` even though another
+    /// tenant holds chips (or gozer cannot be asked).
+    #[serde(default)]
+    force: bool,
+}
+
+/// `POST /power { "action": "reset-chips" | "suspend" | "reboot" | "shutdown",
+/// "force": <bool> }` (bearer-guarded, same `BearerAuth` gate as
+/// `/run`/`/stop`/`/reset`): run the configured command for `action` via
+/// `AppState::run_power_command`. `force` (default `false`) overrides
+/// `reset-chips`'s foreign-lease refusal and is ignored for the machine ops.
 ///
 /// Status codes:
 ///   - `400` if `action` doesn't parse (`PowerAction::parse`) -- caller error,
@@ -1792,7 +1866,8 @@ async fn power(
     })?;
 
     let s = state.clone();
-    tokio::task::spawn_blocking(move || s.run_power_command(action))
+    let force = req.force;
+    tokio::task::spawn_blocking(move || s.run_power_command(action, force))
         .await
         .map_err(|join_err| backend_error(anyhow::anyhow!("power task panicked: {join_err}")))?
         .map_err(|e| {
@@ -2603,7 +2678,7 @@ mod telemetry_inference_tests {
         .with_power_config(cmd.clone(), cmd.clone(), cmd.clone(), cmd.clone());
 
         state
-            .run_power_command(crate::power::PowerAction::Reboot)
+            .run_power_command(crate::power::PowerAction::Reboot, false)
             .expect("power command runs");
         assert!(marker.exists(), "configured power command was executed");
         let _ = std::fs::remove_dir_all(&dir);

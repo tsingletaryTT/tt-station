@@ -785,7 +785,8 @@ fn foreign_leases_names_everyone_but_our_own_service_port() {
         "",
     );
 
-    let ForeignLeases::Held(holders) = gozer::foreign_leases(&runner, &sweep_capability(), 8080)
+    let ForeignLeases::Held { holders, chips } =
+        gozer::foreign_leases(&runner, &sweep_capability(), 8080)
     else {
         panic!("a foreign lease is held");
     };
@@ -798,10 +799,22 @@ fn foreign_leases_names_everyone_but_our_own_service_port() {
          tell a live holder from a STALE/HELD-FOREIGN one, whose remedy is \
          `gozer reconcile` rather than stopping a session that is already gone"
     );
+    // The chips are carried per CHIP (not deduped per board like the clause)
+    // and cover ONLY the foreign holder -- they are what a `--force`d
+    // whole-box reset steps on, and the forced log line is the only record
+    // left once the refusal is skipped. Our own board's BDFs and the FREE
+    // board's must not appear: naming them would overstate the damage.
+    assert_eq!(
+        chips,
+        vec!["0000:03:00.0".to_string(), "0000:04:00.0".to_string()],
+        "the forced-override chip list must be exactly the foreign holder's, \
+         one entry per chip"
+    );
 
     // Same payload, a DIFFERENT service port: now the `tt-station:8080:`
     // lease is somebody else's too.
-    let ForeignLeases::Held(holders) = gozer::foreign_leases(&runner, &sweep_capability(), 9999)
+    let ForeignLeases::Held { holders, .. } =
+        gozer::foreign_leases(&runner, &sweep_capability(), 9999)
     else {
         panic!("both leases are foreign to port 9999");
     };
@@ -905,9 +918,12 @@ fn foreign_leases_is_none_when_chips_is_present_and_empty() {
 /// from a broken one.
 #[test]
 fn foreign_leases_refusal_reason_distinguishes_held_from_undetermined() {
-    let held = ForeignLeases::Held("board b1 is held by claude:x (STALE)".to_string())
-        .refusal_reason()
-        .expect("Held must refuse");
+    let held = ForeignLeases::Held {
+        holders: "board b1 is held by claude:x (STALE)".to_string(),
+        chips: vec!["0000:01:00.0".to_string()],
+    }
+    .refusal_reason()
+    .expect("Held must refuse");
     assert!(held.contains("claude:x"), "{held}");
     // "Stop that session" is the whole answer only for a LIVE holder. A STALE
     // or HELD-FOREIGN lease has no tenant left to ask, and `gozer status`

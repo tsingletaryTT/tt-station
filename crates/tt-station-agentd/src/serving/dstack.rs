@@ -49,7 +49,11 @@ impl ServingBackend for DstackBackend {
     /// mistake a stub for a working backend -- e.g. accidentally shipping
     /// `--backend dstack` and having it look like serving started when it
     /// didn't.
-    fn start(&self, _model: &str) -> Result<Endpoint> {
+    ///
+    /// `force` is ignored: it only ever overrides a LEASING refusal, and this
+    /// backend never leases (see this module's "leasing is a deliberate
+    /// no-op" note). There is nothing here for an operator to overrule.
+    fn start_forcing(&self, _model: &str, _force: bool) -> Result<Endpoint> {
         Err(anyhow::anyhow!("dstack backend not implemented (M4)"))
     }
 

@@ -7,7 +7,7 @@
 //!   tt [--json] discover [--host <h:p>]... [--no-mdns] [--timeout-ms <ms>]
 //!   tt [--json] pair <host:port> [--code <code>] [--enable-ssh]
 //!   tt [--json] models --host <host:port>
-//!   tt [--json] run <model> --host <host:port>
+//!   tt [--json] run <model> --host <host:port> [--force]
 //!   tt [--json] stop --host <host:port>
 //!   tt [--json] status --host <host:port>
 //!   tt [--json] config --host <host:port>
@@ -15,7 +15,7 @@
 //!   tt [--json] serving --host <host:port>
 //!   tt [--json] catalog --host <host:port> [--refresh] [--catalog-file <path>]
 //!   tt [--json] ssh-authorize --host <host:port> [--revoke] [--date <YYYY-MM-DD>]
-//!   tt [--json] power <reset-chips|suspend|reboot|shutdown> --host <host:port>
+//!   tt [--json] power <reset-chips|suspend|reboot|shutdown> --host <host:port> [--force]
 //!   tt [--json] wake --mac <aa:bb:cc:dd:ee:ff>
 //!   tt console [--snapshot] [--install-service] [--ctrl-port <port>]
 //!
@@ -181,6 +181,15 @@ enum Command {
         /// paired (see `tt pair`).
         #[arg(long)]
         host: String,
+
+        /// Serve even though another tenant holds the box's chips (or the box
+        /// cannot read `gozer` to find out) -- the box normally answers `409`
+        /// and names the holder. Chip leases are a courtesy between tenants,
+        /// not a lock on your own hardware; this says you mean it. The serve
+        /// then runs UNLEASED and whole-box, so it takes over the holder's
+        /// chips, and the box logs the override.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Ask a paired box to stop serving.
@@ -328,6 +337,15 @@ enum Command {
         /// Skip the confirmation prompt.
         #[arg(long)]
         yes: bool,
+
+        /// Let the box reset itself even though another tenant holds its chips
+        /// (or it cannot read `gozer` to find out) -- it normally refuses with
+        /// `409` and names the holder. The reset is a WHOLE-BOX `tt-smi -r`, so
+        /// forcing it takes the holder's work down with yours; the box logs
+        /// whose chips it stepped on. Only affects the `--host` half of this
+        /// command.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Power-manage a box: reset its chips (tt-smi -r, keeps pairing) or take
@@ -341,6 +359,13 @@ enum Command {
         /// (see `Command::Wake`'s doc for the same gap on the MAC side).
         #[arg(long)]
         host: Option<String>,
+
+        /// For `reset-chips` only: run the whole-box board reset even though
+        /// another tenant holds chips (or the box cannot read `gozer`). The box
+        /// normally refuses with `409` and names the holder. Ignored by the
+        /// machine ops, which have no lease check to override.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Wake a suspended/powered-off box by broadcasting a Wake-on-LAN magic
@@ -422,8 +447,8 @@ fn main() -> Result<()> {
             let resp = run_async(cmd_models(host))?;
             print_models(&resp, cli.json);
         }
-        Command::Run { model, host } => {
-            let endpoint = run_async(cmd_run(host, model))?;
+        Command::Run { model, host, force } => {
+            let endpoint = run_async(cmd_run(host, model, *force))?;
             print_endpoint_result(&endpoint, cli.json);
         }
         Command::Stop { host } => {
@@ -493,7 +518,7 @@ fn main() -> Result<()> {
                 print_ssh_authorize(host, &outcome, cli.json);
             }
         }
-        Command::Reset { host, yes } => {
+        Command::Reset { host, yes, force } => {
             // Confirm BEFORE spinning up a runtime or clearing anything:
             // unless `--yes`, spell out exactly what will be cleared and
             // require the operator to type `y`. A declined prompt aborts
@@ -502,10 +527,14 @@ fn main() -> Result<()> {
                 print_reset_aborted(cli.json);
                 return Ok(());
             }
-            let summary = run_async(cmd_reset(host.as_deref()))?;
+            let summary = run_async(cmd_reset(host.as_deref(), *force))?;
             print_reset(&summary, cli.json);
         }
-        Command::Power { action, host } => {
+        Command::Power {
+            action,
+            host,
+            force,
+        } => {
             // Validate BEFORE resolving a host/token or making any network
             // call -- an unknown action is a pure client-side mistake and
             // should fail fast/clearly rather than after a round trip (or,
@@ -523,7 +552,7 @@ fn main() -> Result<()> {
                      resolution yet (no persisted discovery cache to draw from)"
                 )
             })?;
-            run_async(cmd_power(host, action))?;
+            run_async(cmd_power(host, action, *force))?;
             print_power(action, cli.json);
         }
         Command::Wake { mac, host } => {
@@ -805,11 +834,15 @@ async fn cmd_models(host: &str) -> Result<ModelsResponse> {
     libttstation::agent_client::list_models(&base).await
 }
 
-/// `tt run <model> --host <host:port>`: load the stored token for `host` and
-/// ask the agent to start serving `model`.
-async fn cmd_run(host: &str, model: &str) -> Result<Endpoint> {
+/// `tt run <model> --host <host:port> [--force]`: load the stored token for
+/// `host` and ask the agent to start serving `model`.
+///
+/// `force` passes `{"force": true}`, which turns the box's contention `409`
+/// (another tenant holds the chips, or gozer could not be read) into an
+/// UNLEASED whole-box serve on the box's side. See `AgentClient::run`.
+async fn cmd_run(host: &str, model: &str, force: bool) -> Result<Endpoint> {
     let client = authed_client(host)?;
-    client.run(model).await
+    client.run(model, force).await
 }
 
 /// `tt stop --host <host:port>`.
@@ -1015,8 +1048,14 @@ struct ResetSummary {
     box_reset: bool,
 }
 
-/// `tt reset [--host <h>] [--yes]`: return this machine (and optionally one
-/// box) to a fresh-install state.
+/// `tt reset [--host <h>] [--yes] [--force]`: return this machine (and
+/// optionally one box) to a fresh-install state.
+///
+/// `force` tells the box to reset even while another tenant holds its chips
+/// (or while it cannot read gozer) -- a lease is a courtesy between tenants,
+/// not a lock on the owner's own hardware -- so the refusal handled below does
+/// not arise and the local clear proceeds as usual. It affects only the
+/// `--host` half; the local "forget every box" half has nothing to force.
 ///
 /// When `host` is given, the box is reset FIRST -- while its token is still
 /// stored locally -- via `agent_client::reset`. A missing token or a failed
@@ -1039,7 +1078,7 @@ struct ResetSummary {
 /// known-hosts file to purge). The confirmation prompt is handled by the
 /// caller (`main`) before this runs, so by the time we're here the operator
 /// has already consented (or passed `--yes`).
-async fn cmd_reset(host: Option<&str>) -> Result<ResetSummary> {
+async fn cmd_reset(host: Option<&str>, force: bool) -> Result<ResetSummary> {
     let mut box_reset = false;
 
     if let Some(host) = host {
@@ -1047,7 +1086,7 @@ async fn cmd_reset(host: Option<&str>) -> Result<ResetSummary> {
         match build_store()?.get(host)? {
             Some(token) => {
                 let base = format!("http://{host}");
-                match libttstation::agent_client::reset(&base, &token).await {
+                match libttstation::agent_client::reset(&base, &token, force).await {
                     Ok(()) => box_reset = true,
                     // A REFUSAL (409) is not a failed call -- the box is
                     // healthy, it declined, and it reset NOTHING (it also
@@ -1087,8 +1126,10 @@ async fn cmd_reset(host: Option<&str>) -> Result<ResetSummary> {
     })
 }
 
-/// `tt power <action> --host <host:port>`: ask the box to run a power
-/// action (reset-chips/suspend/reboot/shutdown). Mirrors `cmd_reset`'s own
+/// `tt power <action> --host <host:port> [--force]`: ask the box to run a power
+/// action (reset-chips/suspend/reboot/shutdown). `force` overrides
+/// `reset-chips`'s foreign-lease refusal and is ignored for the machine ops
+/// (see `agent_client::power`). Mirrors `cmd_reset`'s own
 /// token lookup rather than going through `authed_client` -- like
 /// `agent_client::reset`, `agent_client::power` is a free function (base +
 /// token passed separately), not an `AgentClient` method, since it's a
@@ -1099,12 +1140,12 @@ async fn cmd_reset(host: Option<&str>) -> Result<ResetSummary> {
 /// "clear local state anyway" local half of the job for `tt power` to fall
 /// back to; if the box was never paired, there's nothing this command can
 /// usefully do.
-async fn cmd_power(host: &str, action: &str) -> Result<()> {
+async fn cmd_power(host: &str, action: &str, force: bool) -> Result<()> {
     let token = build_store()?.get(host)?.ok_or_else(|| {
         anyhow::anyhow!("no token stored for {host}; run `tt pair {host}` first")
     })?;
     let base = format!("http://{host}");
-    libttstation::agent_client::power(&base, &token, action).await
+    libttstation::agent_client::power(&base, &token, action, force).await
 }
 
 /// `tt wake --mac <mac>`: broadcast a Wake-on-LAN magic packet to the LAN

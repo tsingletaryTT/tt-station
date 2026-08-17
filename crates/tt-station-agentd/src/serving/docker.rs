@@ -577,7 +577,18 @@ impl DockerBackend {
     /// sweep would read a container name where it expects a port -- so a
     /// docker-backend lease left behind by a crashed agent would never be
     /// reclaimed. One format, one sweep, either backend.
-    fn acquire_lease(&self, model: &str) -> Result<Option<crate::gozer::LeaseGuard<'_>>> {
+    ///
+    /// `force` behaves exactly as it does in `RunPyBackend::acquire_lease`
+    /// (see that method's `force` section for the full reasoning): a refusal
+    /// caused by another tenant, or by gozer being unreadable, degrades to an
+    /// UNLEASED serve rather than taking the holder's lease away -- which
+    /// would leave `gozer status` describing chips as ours while the
+    /// neighbour's container still drove them.
+    fn acquire_lease(
+        &self,
+        model: &str,
+        force: bool,
+    ) -> Result<Option<crate::gozer::LeaseGuard<'_>>> {
         let Some(capability) = &self.gozer else {
             return Ok(None);
         };
@@ -620,16 +631,40 @@ impl DockerBackend {
                         crate::gozer::contention_detail(self.runner.as_ref(), capability, port)
                     })
                     .unwrap_or_else(|| "gozer reports no free chips".to_string());
+                if force {
+                    eprintln!(
+                        "tt-station-agentd: --force given: serving '{model}' WITHOUT a lease \
+                         even though {detail}. This serve is whole-box and unscoped, so that \
+                         holder's chips are being taken over; `gozer status` will show them \
+                         still leased and ours BUSY-UNTRACKED, which is the truth. Deliberate \
+                         override, not a fault."
+                    );
+                    return Ok(None);
+                }
                 // A `Contention`, not a bare `anyhow!` -- same reasoning
                 // (and same wording) as `RunPyBackend::acquire_lease`:
                 // `POST /run` answers 409 for a contended box, not 500.
                 Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
-                    "docker backend: cannot serve '{model}' -- no chips are available: {detail}"
+                    "docker backend: cannot serve '{model}' -- no chips are available: {detail}. \
+                     Pass `--force` to serve anyway (`tt run --force`) -- it is your box, and \
+                     the override is logged."
                 ))))
             }
-            crate::gozer::Outcome::Failed(message) => Err(anyhow::anyhow!(
-                "docker backend: cannot serve '{model}' -- gozer acquire failed: {message}"
-            )),
+            crate::gozer::Outcome::Failed(message) => {
+                if force {
+                    eprintln!(
+                        "tt-station-agentd: --force given: serving '{model}' WITHOUT a lease \
+                         even though gozer could not be asked ({message}). Whether another \
+                         tenant holds chips is UNKNOWN; if one did, this serve is now on top of \
+                         them. Deliberate override, not a fault."
+                    );
+                    return Ok(None);
+                }
+                Err(anyhow::anyhow!(
+                    "docker backend: cannot serve '{model}' -- gozer acquire failed: {message}. \
+                     Pass `--force` to serve anyway, without a lease."
+                ))
+            }
         }
     }
 
@@ -1043,7 +1078,13 @@ impl ServingBackend for DockerBackend {
     /// `stop_launched_container`. Those stops are gated on `lease.is_some()`
     /// so that a box without gozer keeps its exact previous behaviour (a
     /// failed bring-up leaves its container for the operator to inspect).
-    fn start(&self, model: &str) -> Result<Endpoint> {
+    ///
+    /// `force` reaches exactly one decision, `acquire_lease`'s -- see its
+    /// `force` section. Every accident-prevention guard below (the swap's
+    /// stop-then-release, the stops that precede a guard drop, the fail-closed
+    /// `leased_device_paths`/`leased_tt_device`) behaves identically either
+    /// way.
+    fn start_forcing(&self, model: &str, force: bool) -> Result<Endpoint> {
         let container_name = self.container_name(model);
 
         // SWAP FIRST: stop the previous serve's container and hand its lease
@@ -1062,9 +1103,10 @@ impl ServingBackend for DockerBackend {
 
         // Lease the chips BEFORE touching anything on the box -- before the
         // container is started, so it can only ever be launched against
-        // chips gozer granted. On a box without gozer this yields `None` and
-        // every path below is unchanged.
-        let lease = self.acquire_lease(model)?;
+        // chips gozer granted. On a box without gozer -- or under `--force` on
+        // a contended box -- this yields `None` and every path below is
+        // unchanged (whole-box `--device`, configured `--tt-device`).
+        let lease = self.acquire_lease(model, force)?;
 
         // With a lease, `--device` names the granted device nodes and
         // nothing else; the configured path is overridden. Fails closed

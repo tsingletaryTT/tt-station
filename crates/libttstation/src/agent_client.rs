@@ -187,13 +187,24 @@ pub async fn get_logs(base: &str, source: &str, tail: usize) -> anyhow::Result<L
 /// [`is_refusal`], which is how `tt reset` tells this apart from an
 /// unreachable box (a refusal means the box is fine and said no, so local
 /// pairing must be left alone; the server deliberately preserved it).
-pub async fn reset(base: &str, token: &str) -> anyhow::Result<()> {
+///
+/// `force` is `tt reset --force`: it overrides that refusal, because a lease
+/// is a courtesy between tenants and not a lock on the owner's own box. The
+/// agent proceeds and logs whose chips it stepped on.
+///
+/// **Unforced, this sends the byte-identical request it always did** -- no
+/// body, no content-type. The `{"force": true}` body appears only when forced,
+/// which is also what lets the agent read a bodyless `/reset` as unforced (see
+/// its handler's `Option<Json<..>>`).
+pub async fn reset(base: &str, token: &str, force: bool) -> anyhow::Result<()> {
     let url = join(base, "reset");
-    let resp = reqwest::Client::new()
-        .post(&url)
-        .bearer_auth(token)
-        .send()
-        .await?;
+    let request = reqwest::Client::new().post(&url).bearer_auth(token);
+    let request = if force {
+        request.json(&serde_json::json!({ "force": true }))
+    } else {
+        request
+    };
+    let resp = request.send().await?;
 
     if resp.status() == reqwest::StatusCode::CONFLICT {
         anyhow::bail!("the box refused the reset {}: {}", REFUSAL_MARKER, refusal_detail(resp).await);
@@ -267,12 +278,19 @@ async fn refusal_detail(resp: reqwest::Response) -> String {
 /// declines it while another tenant holds chips -- or while it cannot tell.
 /// The body's reason is what tells the operator which of the two they are
 /// in, so it is passed through rather than discarded.
-pub async fn power(base: &str, token: &str, action: &str) -> anyhow::Result<()> {
+///
+/// `force` overrides that refusal, exactly as in [`reset`]. It is meaningful
+/// only for `reset-chips`; the agent ignores it for the machine ops, which
+/// have no lease check to overrule. Sent unconditionally (unlike [`reset`]'s
+/// body-only-when-forced) because this route always had a JSON body, so one
+/// more field changes nothing about the shape -- and an agent too old to know
+/// the field simply ignores it.
+pub async fn power(base: &str, token: &str, action: &str, force: bool) -> anyhow::Result<()> {
     let url = join(base, "power");
     let resp = reqwest::Client::new()
         .post(&url)
         .bearer_auth(token)
-        .json(&serde_json::json!({ "action": action }))
+        .json(&serde_json::json!({ "action": action, "force": force }))
         .send()
         .await?;
 
@@ -340,17 +358,24 @@ impl AgentClient {
         }
     }
 
-    /// `POST /run { "model": "..." }`: ask the agent to start serving
-    /// `model`, returning the resulting [`Endpoint`].
+    /// `POST /run { "model": "...", "force": <bool> }`: ask the agent to start
+    /// serving `model`, returning the resulting [`Endpoint`].
     ///
     /// A `409 Conflict` means the box's chips are held by another tenant;
     /// the agent's own message (which names the board and the holder) is
     /// passed through rather than collapsed into a generic HTTP-status
     /// error -- see the special case in the body.
-    pub async fn run(&self, model: &str) -> anyhow::Result<Endpoint> {
+    ///
+    /// `force` is `tt run --force`: serve anyway. The agent then serves
+    /// WITHOUT a lease rather than taking the holder's away (which would make
+    /// `gozer status` describe those chips as ours while the neighbour's
+    /// container still drove them) -- see the agent's
+    /// `RunPyBackend::acquire_lease`. There is no `409` on that path.
+    pub async fn run(&self, model: &str, force: bool) -> anyhow::Result<Endpoint> {
         #[derive(Serialize)]
         struct RunRequest<'a> {
             model: &'a str,
+            force: bool,
         }
 
         #[derive(Deserialize)]
@@ -362,7 +387,7 @@ impl AgentClient {
         let resp = reqwest::Client::new()
             .post(&url)
             .bearer_auth(&self.token)
-            .json(&RunRequest { model })
+            .json(&RunRequest { model, force })
             .send()
             .await?;
 

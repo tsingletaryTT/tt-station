@@ -527,3 +527,180 @@ async fn power_reset_chips_refuses_when_lease_state_cannot_be_determined() {
          lease state was unknown"
     );
 }
+
+// ---------------------------------------------------------------------
+// `--force`, at the ROUTE level. Each of the three refusals above is a
+// POLITENESS refusal -- it protects a neighbour, not the caller -- so the
+// owner can overrule it from the wire. Every test here asserts the ACTION
+// happened (a `tt-smi` invocation, a run.py launch, the marker file), not
+// merely that a status code changed: a handler that answered `200` and did
+// nothing would pass a status-only test while leaving the operator's box
+// exactly as wedged.
+// ---------------------------------------------------------------------
+
+/// `POST /reset {"force": true}` while a foreign lease is held must go through
+/// and actually reset. The `tt-smi` invocation is the assertion.
+#[tokio::test]
+async fn reset_forced_resets_despite_a_foreign_lease() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("gozer status", 0, STATUS_JSON_FOREIGN_HOLD, "");
+
+    let state = state_with(runner.clone());
+    let base = serve(state.clone()).await;
+    let client = reqwest::Client::new();
+    let token = pair(&client, &state, &base).await;
+
+    let resp = client
+        .post(format!("{base}/reset"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .expect("POST /reset failed");
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "a forced reset is not a conflict -- the operator resolved it"
+    );
+    assert!(
+        runner
+            .commands()
+            .iter()
+            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-r".to_string()]),
+        "the forced reset must actually run the whole-box `tt-smi -r`: {:?}",
+        runner.commands()
+    );
+}
+
+/// The same override on the OTHER whole-box reset path, `POST /power`. The
+/// marker file is the side channel that proves the configured board-reset
+/// command really ran -- a `200` alone would not.
+#[tokio::test]
+async fn power_reset_chips_forced_runs_despite_a_foreign_lease() {
+    let dir = temp_dir("power-forced");
+    let marker = dir.join("reset-ran");
+    let reset_cmd = write_marker_command(&dir, &marker);
+    let stub = write_stub_gozer(&dir, STATUS_JSON_FOREIGN_HOLD);
+
+    let runner = FakeRunner::new(0);
+    let state = state_with(runner)
+        .with_gozer(Some(capability(&stub.to_string_lossy())))
+        .with_power_config(
+            vec![reset_cmd.to_string_lossy().into_owned()],
+            vec!["/bin/true".to_string()],
+            vec!["/bin/true".to_string()],
+            vec!["/bin/true".to_string()],
+        );
+    let base = serve(state.clone()).await;
+    let client = reqwest::Client::new();
+    let token = pair(&client, &state, &base).await;
+
+    let resp = client
+        .post(format!("{base}/power"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "action": "reset-chips", "force": true }))
+        .send()
+        .await
+        .expect("POST /power failed");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert!(
+        marker.exists(),
+        "the forced reset-chips must have run the configured board-reset command"
+    );
+}
+
+/// And the case that most needed an override: an UNREADABLE gozer. Before
+/// this, a wedged gozer left the owner unable to reset their own box from
+/// anywhere but an ssh session.
+#[tokio::test]
+async fn power_reset_chips_forced_runs_when_lease_state_cannot_be_determined() {
+    let dir = temp_dir("power-forced-undetermined");
+    let marker = dir.join("reset-ran");
+    let reset_cmd = write_marker_command(&dir, &marker);
+    let stub = write_failing_stub_gozer(&dir);
+
+    let runner = FakeRunner::new(0);
+    let state = state_with(runner)
+        .with_gozer(Some(capability(&stub.to_string_lossy())))
+        .with_power_config(
+            vec![reset_cmd.to_string_lossy().into_owned()],
+            vec!["/bin/true".to_string()],
+            vec!["/bin/true".to_string()],
+            vec!["/bin/true".to_string()],
+        );
+    let base = serve(state.clone()).await;
+    let client = reqwest::Client::new();
+    let token = pair(&client, &state, &base).await;
+
+    let resp = client
+        .post(format!("{base}/power"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "action": "reset-chips", "force": true }))
+        .send()
+        .await
+        .expect("POST /power failed");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert!(
+        marker.exists(),
+        "an operator who cannot read gozer must still be able to reset their own \
+         box over the wire"
+    );
+}
+
+/// `POST /run {"force": true}` on a fully-leased box must SERVE, not `409`.
+/// The run.py launch is the assertion -- and the response must carry a real
+/// endpoint, since that is what the caller acts on.
+#[tokio::test]
+async fn run_forced_serves_despite_contention() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing(
+        "gozer acquire",
+        12,
+        r#"{"granted":false,"queued":false}"#,
+        "",
+    );
+    runner.set_run_capturing("gozer status", 0, STATUS_JSON_FOREIGN_HOLD, "");
+
+    let state = state_with(runner.clone());
+    let base = serve(state.clone()).await;
+    let client = reqwest::Client::new();
+    let token = pair(&client, &state, &base).await;
+
+    let resp = client
+        .post(format!("{base}/run"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "model": "llama3", "force": true }))
+        .send()
+        .await
+        .expect("POST /run failed");
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "a forced run is not a conflict -- the operator resolved it"
+    );
+    let body: serde_json::Value = resp.json().await.expect("response was not valid JSON");
+    assert!(
+        body["endpoint"]["base_url"].is_string(),
+        "a forced run must hand back a real endpoint: {body}"
+    );
+
+    let commands = runner.commands();
+    assert!(
+        commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("python3")),
+        "the forced run must actually launch run.py: {commands:?}"
+    );
+    assert!(
+        !commands.iter().any(|cmd| {
+            cmd.first().map(String::as_str) == Some("gozer")
+                && cmd.get(1).map(String::as_str) == Some("release")
+        }),
+        "it holds no lease, so nothing may be released -- `gozer status` must \
+         not be told a story about this serve: {commands:?}"
+    );
+}

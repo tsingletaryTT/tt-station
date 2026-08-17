@@ -474,7 +474,35 @@ impl RunPyBackend {
     /// Format: `tt-station:<service_port>:<model>`. The `tt-station:` prefix
     /// is what a startup sweep filters gozer's leases on; the port is what
     /// such a sweep must match against `docker ps`, NOT a container name.
-    fn acquire_lease(&self, model: &str) -> Result<Option<crate::gozer::LeaseGuard<'_>>> {
+    ///
+    /// ## `force`
+    ///
+    /// `force` is the operator's `tt run --force`, and its effect is narrow
+    /// and deliberate: **when gozer will not grant chips, serve WITHOUT a
+    /// lease** (`Ok(None)`) instead of returning a `Contention`. The
+    /// alternative -- releasing the holder's lease and acquiring it ourselves
+    /// -- is rejected because it makes `gozer status` lie: the neighbour's
+    /// container keeps driving those chips while the gate reports them as
+    /// ours. Serving unleased keeps the gate honest: the holder's lease is
+    /// still shown held (true), and this serve's own chips show as
+    /// `BUSY-UNTRACKED` (also true -- a process is holding chips with no
+    /// lease). Nothing in `gozer status` claims anything that is not the case.
+    ///
+    /// The consequence, stated plainly because it is the point of `--force`:
+    /// an unleased serve takes the pre-leasing path, so `--tt-device`/
+    /// `--device-id` come from config (the whole box) and the pre-serve
+    /// `tt-smi -r` is unscoped. That WILL disrupt the holder. `--force` is how
+    /// an owner says they mean it, and the log line below is the record that
+    /// they did.
+    ///
+    /// `force` does NOT touch anything protecting this call from an accident:
+    /// the stale-container sweep, the swap's compare-and-take release, and
+    /// `Grant::reset_target`'s BDF check all behave identically either way.
+    fn acquire_lease(
+        &self,
+        model: &str,
+        force: bool,
+    ) -> Result<Option<crate::gozer::LeaseGuard<'_>>> {
         let Some(capability) = &self.gozer else {
             return Ok(None);
         };
@@ -518,18 +546,49 @@ impl RunPyBackend {
                         crate::gozer::contention_detail(self.runner.as_ref(), capability, port)
                     })
                     .unwrap_or_else(|| "gozer reports no free chips".to_string());
+                if force {
+                    // The one surviving trace of a deliberate stomp -- see
+                    // this method's `force` section.
+                    eprintln!(
+                        "tt-station-agentd: --force given: serving '{model}' WITHOUT a lease \
+                         even though {detail}. This serve is whole-box and unscoped, so that \
+                         holder's chips are being taken over; `gozer status` will show them \
+                         still leased and ours BUSY-UNTRACKED, which is the truth. Deliberate \
+                         override, not a fault."
+                    );
+                    return Ok(None);
+                }
                 // A `Contention`, not a bare `anyhow!`: this is the box's
                 // state conflicting with the request, not a failure, and
                 // `POST /run` answers 409 rather than 500 for it (see
                 // `routes::contention_aware_error`). The message itself is
-                // unchanged.
+                // unchanged, plus the pointer at the override.
                 Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
-                    "runpy backend: cannot serve '{model}' -- no chips are available: {detail}"
+                    "runpy backend: cannot serve '{model}' -- no chips are available: {detail}. \
+                     Pass `--force` to serve anyway (`tt run --force`) -- it is your box, and \
+                     the override is logged."
                 ))))
             }
-            crate::gozer::Outcome::Failed(message) => Err(anyhow::anyhow!(
-                "runpy backend: cannot serve '{model}' -- gozer acquire failed: {message}"
-            )),
+            crate::gozer::Outcome::Failed(message) => {
+                if force {
+                    // "gozer could not tell us who holds what" is the other
+                    // politeness refusal, and it is overridable for the same
+                    // reason `ForeignLeases::Undetermined` is: an operator
+                    // whose gozer is broken must not need an ssh session to
+                    // use their own hardware.
+                    eprintln!(
+                        "tt-station-agentd: --force given: serving '{model}' WITHOUT a lease \
+                         even though gozer could not be asked ({message}). Whether another \
+                         tenant holds chips is UNKNOWN; if one did, this serve is now on top of \
+                         them. Deliberate override, not a fault."
+                    );
+                    return Ok(None);
+                }
+                Err(anyhow::anyhow!(
+                    "runpy backend: cannot serve '{model}' -- gozer acquire failed: {message}. \
+                     Pass `--force` to serve anyway, without a lease."
+                ))
+            }
         }
     }
 
@@ -981,7 +1040,15 @@ impl RunPyBackend {
 }
 
 impl ServingBackend for RunPyBackend {
-    fn start(&self, model: &str) -> Result<Endpoint> {
+    /// See `ServingBackend::start_forcing`. `force` reaches exactly one
+    /// decision in this whole function -- `acquire_lease`'s -- and that
+    /// method's doc explains what it licenses. Every other guard below
+    /// (the stale-container sweep, the compare-and-take release of a
+    /// superseded lease, `Grant::reset_target`'s BDF check, the
+    /// stop-before-unwind calls) behaves identically forced or not: those
+    /// protect this call from an ACCIDENT, and an accident is not something an
+    /// operator can consent to in advance.
+    fn start_forcing(&self, model: &str, force: bool) -> Result<Endpoint> {
         // Clear any stale cancel request at ENTRY -- before even the
         // stale-container stop below. A `/stop` from a PREVIOUS run may have
         // left the flag set; a fresh `/run` must not be killed by it. From
@@ -1049,7 +1116,11 @@ impl ServingBackend for RunPyBackend {
         // (3) Lease the chips. Everything below operates on exactly what
         // gozer granted, and nothing operates on a neighbour's chips. On a
         // box without gozer this yields `None` and every path below is
-        // unchanged.
+        // unchanged -- and so it is UNDER `--force` on a contended box, which
+        // is how a forced run proceeds at all (see `acquire_lease`'s `force`
+        // section: it degrades to the unleased, whole-box path rather than
+        // taking the holder's lease off them, which would make `gozer status`
+        // lie).
         //
         // The guard RELEASES ON DROP, which is the point: this function has
         // three failure exits after this line that `stop()` never sees (a
@@ -1058,7 +1129,7 @@ impl ServingBackend for RunPyBackend {
         // someone adds later. Only the SUCCESS path disarms it, handing the
         // lease to `self.lease` for `stop` to release -- see the very end of
         // this function.
-        let lease = self.acquire_lease(model)?;
+        let lease = self.acquire_lease(model, force)?;
 
         // Reset the board next -- validated on real hardware: stopping a
         // serving container leaves the p300x2 mesh's ethernet cores wedged,
@@ -1648,19 +1719,25 @@ impl ServingBackend for RunPyBackend {
     /// the same reason `start` gates its reset: a box configured with
     /// `--no-device-reset` doesn't want `tt-smi -r` run at all.
     ///
-    /// **It REFUSES outright while another tenant holds a lease.** The board
-    /// reset below is the whole-box `reset_cmd` (`tt-smi -r` with no
-    /// targets), unlike `start`'s now lease-scoped one, and it cannot be
-    /// scoped the same way: `/reset` has no grant in hand, and the whole
-    /// point of the untargeted form here is to clear a box the operator has
-    /// declared dirty. On a two-tenant box that resets the neighbour's chips
-    /// mid-run. `/reset` is not an eviction command and this version has no
-    /// implicit preemption (see the design doc's "`POST /reset` refuses
-    /// rather than resetting a neighbour"), so a foreign lease refuses the
-    /// whole call and names the holder -- BEFORE anything is stopped or
-    /// reset, so a refusal leaves the box exactly as it found it. The
-    /// operator can always stop the other session deliberately first.
-    fn reset(&self) -> Result<()> {
+    /// **It REFUSES BY DEFAULT while another tenant holds a lease, and
+    /// `force` overrides that.** The board reset below is the whole-box
+    /// `reset_cmd` (`tt-smi -r` with no targets), unlike `start`'s
+    /// lease-scoped one, and it cannot be scoped the same way: `/reset` has no
+    /// grant in hand, and the whole point of the untargeted form here is to
+    /// clear a box the operator has declared dirty. On a two-tenant box that
+    /// resets the neighbour's chips mid-run, so by default a foreign lease
+    /// refuses the whole call and names the holder -- BEFORE anything is
+    /// stopped or reset, so a refusal leaves the box exactly as it found it.
+    ///
+    /// That refusal is a COURTESY, not a lock. It exists so the tool never
+    /// stomps a neighbour silently; it must not leave the owner unable to
+    /// reset their own box. With `force` the call proceeds and logs what it
+    /// stepped on (`ForeignLeases::forced_override_note`) -- the holder and
+    /// the chips -- because once the refusal is skipped that log line is the
+    /// only surviving record. The unforced remedies (stop the other session,
+    /// `gozer reconcile` a STALE one) are still the better first move and the
+    /// refusal still names them.
+    fn reset_forcing(&self, force: bool) -> Result<()> {
         // Refuse FIRST, act second: a reset that stopped containers and then
         // refused would be worse than either outcome on its own.
         if let Some(capability) = &self.gozer {
@@ -1669,14 +1746,19 @@ impl ServingBackend for RunPyBackend {
                 capability,
                 self.config.service_port,
             );
-            // Refuses on BOTH "someone else holds chips" and "I could not
-            // find out" -- see `gozer::foreign_leases`, which fails closed,
-            // and `refusal_reason`, which words the two differently so an
-            // operator knows whether to stop a session or fix gozer.
-            if let Some(reason) = verdict.refusal_reason() {
-                return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
-                    "refusing to reset this box: it would run a WHOLE-BOX `tt-smi -r` -- {reason}"
-                ))));
+            // One decision, made in `ForeignLeases::resolve` so this path and
+            // `routes.rs`'s `reset-chips` cannot drift: refuse on BOTH
+            // "someone else holds chips" and "I could not find out" -- unless
+            // forced, in which case proceed and log the override.
+            match verdict.resolve(force) {
+                Ok(None) => {}
+                Ok(Some(note)) => eprintln!("tt-station-agentd: /reset: {note}"),
+                Err(reason) => {
+                    return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
+                        "refusing to reset this box: it would run a WHOLE-BOX `tt-smi -r` -- \
+                         {reason}"
+                    ))));
+                }
             }
         }
 
@@ -1706,9 +1788,10 @@ impl ServingBackend for RunPyBackend {
         // unlike `start`'s (now lease-scoped) one. `/reset` is an explicit
         // operator "return this box to a fresh state" action that also
         // unpairs, so its blast radius is deliberately unchanged -- what
-        // guards it instead is the foreign-lease refusal at the TOP of this
-        // method, which means the whole-box form can only ever run when no
-        // other tenant holds chips.
+        // guards it instead is the foreign-lease check at the TOP of this
+        // method, which means the whole-box form runs either when no other
+        // tenant holds chips, or when the operator explicitly forced it
+        // (in which case the override is in the journal).
         if let Err(err) = self.release_lease() {
             eprintln!("releasing chip lease during reset failed: {err:#} -- continuing");
         }

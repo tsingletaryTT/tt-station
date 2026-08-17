@@ -56,7 +56,7 @@ async fn run_posts_model_and_returns_nested_endpoint() {
 
     let client = AgentClient::new(server.uri(), TOKEN);
     let endpoint = client
-        .run("llama3")
+        .run("llama3", false)
         .await
         .expect("run() should succeed against a mocked 200 response");
 
@@ -102,7 +102,7 @@ async fn reset_posts_to_reset_with_bearer_and_succeeds_on_empty_body() {
         .mount(&server)
         .await;
 
-    reset(&server.uri(), TOKEN)
+    reset(&server.uri(), TOKEN, false)
         .await
         .expect("reset() should succeed against a mocked 200 response");
 }
@@ -163,7 +163,7 @@ async fn run_maps_409_to_the_agents_contention_message() {
 
     let client = AgentClient::new(server.uri(), TOKEN);
     let err = client
-        .run("llama3")
+        .run("llama3", false)
         .await
         .expect_err("run() should fail on 409");
 
@@ -201,7 +201,7 @@ async fn reset_maps_409_to_the_agents_refusal_message() {
         .mount(&server)
         .await;
 
-    let err = reset(&server.uri(), TOKEN)
+    let err = reset(&server.uri(), TOKEN, false)
         .await
         .expect_err("reset() should fail on 409");
 
@@ -275,7 +275,7 @@ async fn power_maps_409_to_the_agents_refusal_message() {
         .mount(&server)
         .await;
 
-    let err = power(&server.uri(), TOKEN, "reset-chips")
+    let err = power(&server.uri(), TOKEN, "reset-chips", false)
         .await
         .expect_err("power() should fail on 409");
 
@@ -705,4 +705,70 @@ async fn ssh_revoke_by_public_key_sends_delete_with_public_key_body() {
         ))
         .await
         .expect("ssh_revoke() should succeed against a mocked 200 response");
+}
+
+/// The `--force` wire contract, all three surfaces at once.
+///
+/// `--force` is only meaningful if it survives the client. These pin the exact
+/// bodies, because a flag the CLI parses and then drops on the floor would
+/// leave an owner staring at the same refusal with no idea why their override
+/// did nothing -- and every other assertion in this change lives on the agent
+/// side of the wire, where such a bug is invisible.
+///
+/// `reset` unforced is the one asymmetry, and it is deliberate: it sends NO
+/// body at all (pinned by `reset_posts_to_reset_with_bearer_and_succeeds_on_
+/// empty_body` above), which is what lets the agent read a bodyless `/reset`
+/// from an older `tt` as unforced.
+#[tokio::test]
+async fn force_reaches_the_wire_on_run_reset_and_power() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/run"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .and(wiremock::matchers::body_json(serde_json::json!({
+            "model": "llama3",
+            "force": true
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "endpoint": {
+                "base_url": "http://localhost:9999",
+                "model": "llama3",
+                "requires_key": false
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/reset"))
+        .and(wiremock::matchers::body_json(
+            serde_json::json!({ "force": true }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/power"))
+        .and(wiremock::matchers::body_json(serde_json::json!({
+            "action": "reset-chips",
+            "force": true
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&server)
+        .await;
+
+    // Each call only succeeds if its body matched the mock above -- an
+    // unmatched request gets wiremock's 404 and these all fail.
+    AgentClient::new(server.uri(), TOKEN)
+        .run("llama3", true)
+        .await
+        .expect("a forced run must send {\"model\":..,\"force\":true}");
+    reset(&server.uri(), TOKEN, true)
+        .await
+        .expect("a forced reset must send {\"force\":true}");
+    power(&server.uri(), TOKEN, "reset-chips", true)
+        .await
+        .expect("a forced power action must send force alongside the action");
 }

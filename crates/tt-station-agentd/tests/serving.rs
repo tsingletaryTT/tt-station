@@ -686,6 +686,63 @@ fn docker_start_fails_without_running_a_container_when_chips_are_unavailable() {
         docker_index(&commands, "run").is_none(),
         "no container may be started when the lease was refused: {commands:?}"
     );
+    assert!(
+        err.to_string().contains("--force"),
+        "the refusal must name the override -- a lease is a courtesy, not a lock \
+         on the owner's own box: {err}"
+    );
+}
+
+/// The positive half of the test above: `--force` must actually SERVE through
+/// the same contention, unleased.
+///
+/// The `docker run` argv is the assertion, not the return value. Unleased
+/// means the pre-gozer form -- the configured whole-box `--device` and
+/// `--tt-device` -- which is precisely what taking the box over looks like,
+/// and it must also be visible that NO lease was recorded, so a later `stop`
+/// cannot release one gozer never granted.
+#[test]
+fn docker_start_forced_serves_without_a_lease_when_chips_are_unavailable() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing(
+        "gozer acquire",
+        12,
+        r#"{"granted":false,"queued":false}"#,
+        "",
+    );
+    runner.set_run_capturing("gozer status", 0, STATUS_JSON_HELD, "");
+    runner.set_run_output("docker ps", "deadbeef\n");
+    let backend = DockerBackend::new(
+        config("some/image:tag", "127.0.0.1", 8080),
+        Box::new(runner.clone()),
+    )
+    .with_gozer(Some(gozer_capability()));
+
+    backend
+        .start_forced("llama3")
+        .expect("--force must serve through contention");
+
+    let commands = runner.commands();
+    let run_cmd = &commands[docker_index(&commands, "run")
+        .unwrap_or_else(|| panic!("the forced serve must run a container: {commands:?}"))];
+    assert!(
+        run_cmd
+            .windows(2)
+            .any(|w| w[0] == "--device" && w[1] == "/dev/tenstorrent"),
+        "an unleased serve pins from config -- the whole device directory -- \
+         because there is no grant to pin to: {run_cmd:?}"
+    );
+    assert!(
+        gozer_index(&commands, "release").is_none(),
+        "a forced serve holds no lease, so nothing may be released: {commands:?}"
+    );
+    backend.stop("llama3").expect("stop should succeed");
+    assert!(
+        gozer_index(&runner.commands(), "release").is_none(),
+        "and the stop afterwards must not release a lease it never held -- \
+         `gozer status` must not be told a story about this serve: {:?}",
+        runner.commands()
+    );
 }
 
 /// THE DANGEROUS ONE. When the health poll times out, the container this

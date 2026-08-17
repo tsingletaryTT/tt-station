@@ -34,7 +34,31 @@ pub trait ServingBackend: Send + Sync {
     /// Start serving `model`, blocking until it's confirmed healthy (or the
     /// implementation gives up and returns an error). On success, returns
     /// the `Endpoint` clients should send inference requests to.
-    fn start(&self, model: &str) -> Result<Endpoint>;
+    ///
+    /// `force` is the operator's `tt run --force`: it overrides a refusal
+    /// caused by ANOTHER TENANT holding chips, or by gozer being unreadable.
+    /// It never overrides anything protecting the caller from an accident
+    /// (see `RunPyBackend::acquire_lease` for exactly what it does and does
+    /// not license). A backend that does not lease ignores it.
+    ///
+    /// **THIS is the method a backend implements**; [`ServingBackend::start`]
+    /// and [`ServingBackend::start_forced`] are thin provided wrappers so
+    /// existing callers (and the argv pins that protect boxes without gozer)
+    /// keep the one-argument form. Overriding either of those instead would
+    /// silently discard `force`.
+    fn start_forcing(&self, model: &str, force: bool) -> Result<Endpoint>;
+
+    /// [`ServingBackend::start_forcing`] with no override -- the ordinary
+    /// `POST /run`, and the form every pre-`--force` caller already uses.
+    fn start(&self, model: &str) -> Result<Endpoint> {
+        self.start_forcing(model, false)
+    }
+
+    /// [`ServingBackend::start_forcing`] WITH the override -- `POST /run
+    /// {"force": true}`.
+    fn start_forced(&self, model: &str) -> Result<Endpoint> {
+        self.start_forcing(model, true)
+    }
 
     /// Stop serving `model`. Idempotent where the underlying tooling allows
     /// it -- e.g. `docker stop` on an already-stopped/missing container is
@@ -145,8 +169,32 @@ pub trait ServingBackend: Send + Sync {
     /// Sync like every other method on this trait (see the trait doc): a
     /// caller in async context must hop off the runtime (e.g.
     /// `tokio::task::spawn_blocking`) before calling it.
-    fn reset(&self) -> Result<()> {
+    ///
+    /// `force` is the operator's `tt reset --force`: it overrides the
+    /// foreign-lease refusal (and the "gozer could not be read" refusal) that
+    /// `RunPyBackend::reset_forcing` applies by default. It overrides nothing
+    /// else -- notably not the stop-before-release ordering, which exists to
+    /// stop this tool resetting chips under its own live container.
+    ///
+    /// **THIS is the method a backend overrides**; [`ServingBackend::reset`]
+    /// and [`ServingBackend::reset_forced`] are provided wrappers, so the
+    /// zero-argument form every existing caller and argv pin uses still
+    /// works. Overriding `reset` instead would silently discard `force`.
+    fn reset_forcing(&self, force: bool) -> Result<()> {
+        let _ = force;
         Ok(())
+    }
+
+    /// [`ServingBackend::reset_forcing`] with no override -- the ordinary
+    /// `POST /reset`.
+    fn reset(&self) -> Result<()> {
+        self.reset_forcing(false)
+    }
+
+    /// [`ServingBackend::reset_forcing`] WITH the override -- `POST /reset
+    /// {"force": true}`.
+    fn reset_forced(&self) -> Result<()> {
+        self.reset_forcing(true)
     }
 
     /// Enumerate the models this backend can serve, so a caller (`GET

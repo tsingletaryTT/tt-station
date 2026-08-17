@@ -1635,6 +1635,126 @@ fn runpy_start_fails_without_touching_chips_when_unavailable() {
         find_gozer_cmd(&commands, "release").is_none(),
         "there is no lease to release when acquire refused: {commands:?}"
     );
+    assert!(
+        err.to_string().contains("--force"),
+        "the refusal must say how to overrule it -- a lease is a courtesy, not a \
+         lock on the owner's own box: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// `--force` on `tt run`: the contention refusal above is a POLITENESS
+// refusal, so the owner can overrule it. The mechanism is deliberate --
+// serve WITHOUT a lease rather than take the holder's lease off them, which
+// would leave `gozer status` describing chips as ours while the neighbour's
+// container still drove them. See `RunPyBackend::acquire_lease`'s `force`
+// section.
+// ---------------------------------------------------------------------
+
+/// The positive half of TEST 5. Same contended box, same canned exit 12 --
+/// but forced, so the serve must actually HAPPEN.
+///
+/// The assertions are about what was invoked, not the return value: run.py
+/// really launched, and no lease was recorded (so nothing later releases one
+/// and `gozer status` is never told this serve holds chips it does not).
+#[test]
+fn runpy_start_forced_serves_without_a_lease_when_chips_are_unavailable() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing(
+        "gozer acquire",
+        12,
+        r#"{"granted":false,"queued":false}"#,
+        "",
+    );
+    runner.set_run_capturing("gozer status", 0, STATUS_JSON_HELD, "");
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.device_id = Some("0,1".to_string());
+    let backend =
+        RunPyBackend::new(cfg, Box::new(runner.clone())).with_gozer(Some(gozer_capability()));
+
+    backend
+        .start_forced("llama3")
+        .expect("--force must serve through contention");
+
+    let commands = runner.commands();
+    let run_cmd = find_runpy_cmd(&commands);
+    assert!(
+        run_cmd.windows(2).any(|w| w[0] == "--model" && w[1] == "llama3"),
+        "the forced serve must actually launch run.py for the model: {run_cmd:?}"
+    );
+    // Unleased means the pre-gozer path: config's own `--device-id`, and the
+    // whole-box `tt-smi -r`. That is what taking the box over looks like, and
+    // it is the point of `--force`.
+    assert!(
+        run_cmd.windows(2).any(|w| w[0] == "--device-id" && w[1] == "0,1"),
+        "a forced (unleased) serve pins from config, not from a grant that \
+         never happened: {run_cmd:?}"
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-r".to_string()]),
+        "the forced serve runs the unscoped whole-box reset -- there is no grant \
+         to scope it to: {commands:?}"
+    );
+
+    // THE HONESTY ASSERTION. No lease was taken, so none may be released --
+    // and, crucially, the backend must not have RECORDED one either, or a
+    // later `/stop` would release a lease id gozer never granted it. A `stop`
+    // right after the forced serve is the observable form of that.
+    assert!(
+        find_gozer_cmd(&commands, "release").is_none(),
+        "a forced serve holds no lease, so nothing may be released: {commands:?}"
+    );
+    backend.stop("llama3").expect("stop should succeed");
+    assert!(
+        find_gozer_cmd(&runner.commands(), "release").is_none(),
+        "and the stop after a forced serve must not release a lease it never \
+         held -- `gozer status` must never be told a story about this serve: {:?}",
+        runner.commands()
+    );
+}
+
+/// `--force` also overrides "gozer could not be asked at all" -- a spawn
+/// failure, i.e. a box whose gozer is broken or gone. Same reasoning as
+/// `ForeignLeases::Undetermined`: an operator who cannot read gozer must
+/// still be able to use their own hardware without an ssh session.
+#[test]
+fn runpy_start_forced_serves_when_gozer_cannot_be_asked() {
+    let runner = FakeRunner::new(0);
+    runner.fail_run_capturing("gozer acquire", "No such file or directory");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    // Unforced first: this must still be a hard failure, or the override
+    // below proves nothing.
+    let err = backend
+        .start("llama3")
+        .expect_err("an unreadable gozer must refuse by default");
+    assert!(
+        err.to_string().contains("--force"),
+        "and it must name the override: {err}"
+    );
+    assert!(
+        !runner
+            .commands()
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("python3")),
+        "the unforced attempt must not have launched anything: {:?}",
+        runner.commands()
+    );
+
+    backend
+        .start_forced("llama3")
+        .expect("--force must serve when gozer is unreadable");
+    assert!(
+        runner
+            .commands()
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("python3")),
+        "the forced serve must actually launch run.py: {:?}",
+        runner.commands()
+    );
 }
 
 /// TEST 6a: a lease taken at the top of `start` must be released when a
@@ -2659,6 +2779,72 @@ fn runpy_reset_refuses_when_lease_state_cannot_be_determined() {
                 && cmd.get(1).map(String::as_str) == Some("stop")
         }),
         "a refused reset must not stop containers either: {commands:?}"
+    );
+    assert!(
+        message.contains("--force"),
+        "an operator whose gozer is wedged must be told they can still reset \
+         their own box: {message}"
+    );
+}
+
+/// `--force` overrides the foreign-lease refusal: the whole-box `tt-smi -r`
+/// must actually RUN. The command vector is the assertion -- a version that
+/// returned `Ok(())` without resetting would satisfy an `is_ok()` check while
+/// leaving the operator's wedged box exactly as wedged.
+#[test]
+fn runpy_reset_forced_runs_the_whole_box_reset_despite_a_foreign_lease() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("gozer status", 0, STATUS_JSON_HELD, "");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    // Unforced first, on the same wiring: the refusal must still stand, or the
+    // override below is not overriding anything.
+    backend
+        .reset()
+        .expect_err("unforced, a foreign lease must still refuse");
+    assert!(
+        !runner
+            .commands()
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("tt-smi")),
+        "the unforced attempt must not have reset anything: {:?}",
+        runner.commands()
+    );
+
+    backend
+        .reset_forced()
+        .expect("--force must reset through a foreign lease");
+    assert!(
+        runner
+            .commands()
+            .iter()
+            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-r".to_string()]),
+        "the forced reset must actually run the whole-box `tt-smi -r`: {:?}",
+        runner.commands()
+    );
+}
+
+/// The same override on the OTHER refusal: gozer unreadable. This is the case
+/// that most needed it -- previously an operator whose gozer was wedged had
+/// ssh as the only route to resetting their own box.
+#[test]
+fn runpy_reset_forced_runs_when_lease_state_cannot_be_determined() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing("gozer status", 16, "", "mutex stuck");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend
+        .reset_forced()
+        .expect("--force must reset even when gozer's state is unreadable");
+    assert!(
+        runner
+            .commands()
+            .iter()
+            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-r".to_string()]),
+        "the forced reset must actually run the whole-box `tt-smi -r`: {:?}",
+        runner.commands()
     );
 }
 

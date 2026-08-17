@@ -1128,17 +1128,29 @@ pub enum ForeignLeases {
     /// gozer answered, and nothing is held by anyone but this agent's own
     /// session. The reset may proceed exactly as it always did.
     None,
-    /// gozer answered, and someone else holds chips. Carries a
-    /// human-readable clause per board
-    /// (`"board <serial> is held by <who> (<state>)"`, joined with `"; "`),
-    /// and NO duration -- gozer reports no lease start time (see
-    /// `StatusChip`).
+    /// gozer answered, and someone else holds chips.
     ///
     /// **The STATE is part of the clause, not decoration.** `HELD`/`CLAIMED`
     /// means a tenant is there to ask; `STALE`/`HELD-FOREIGN` means they are
     /// already gone, and the remedy is completely different -- see
     /// [`ForeignLeases::refusal_reason`].
-    Held(String),
+    Held {
+        /// A human-readable clause per board
+        /// (`"board <serial> is held by <who> (<state>)"`, joined with
+        /// `"; "`), and NO duration -- gozer reports no lease start time (see
+        /// `StatusChip`). This is what a refusal message quotes.
+        holders: String,
+        /// Every foreign-held chip's BDF, in gozer's own order.
+        ///
+        /// Carried separately from `holders` (rather than folded into that
+        /// prose) because it has one consumer with one job: the line a
+        /// `--force`d whole-box reset logs. When the owner deliberately steps
+        /// on a neighbour, that log line is the ONLY remaining record of what
+        /// was stepped on -- the refusal that would have named it never
+        /// happened -- so it names the chips as well as the holder. See
+        /// [`ForeignLeases::forced_override_note`].
+        chips: Vec<String>,
+    },
     /// gozer's lease state could not be read at all (the command failed to
     /// run, exited non-zero -- 14 topology unreadable, 16 mutex stuck -- or
     /// returned unparseable JSON). Nothing is known about who holds what.
@@ -1146,11 +1158,77 @@ pub enum ForeignLeases {
 }
 
 impl ForeignLeases {
-    /// Why a whole-box reset must be refused, or `None` when it may proceed.
+    /// Resolve this verdict for a caller that may have been handed a
+    /// `--force`, so the two whole-box reset paths cannot drift in either the
+    /// decision or the wording:
+    ///
+    /// * `Ok(None)` -- proceed; nothing foreign is held.
+    /// * `Ok(Some(note))` -- proceed, and LOG `note`. The caller was forced,
+    ///   and a deliberate stomp on a neighbour has to leave a trace (see
+    ///   [`ForeignLeases::forced_override_note`]).
+    /// * `Err(reason)` -- refuse; `reason` explains, names the holder, and
+    ///   says `--force` overrides it.
+    ///
+    /// **This is a POLITENESS gate, and that is why `force` is here at all.**
+    /// A lease communicates "someone is working on this board"; it does not
+    /// make the owner a trespasser on their own machine. Everything this
+    /// method guards is a refusal *on somebody else's behalf*, so somebody --
+    /// the owner, at a keyboard, typing `--force` -- can decide to overrule
+    /// it. The refusals that exist to stop this tool corrupting work *by
+    /// accident* (stop-before-release ordering, the swap's compare-and-take,
+    /// `Grant::reset_target`'s BDF check) take no `force` and must never grow
+    /// one: nobody is making a decision when those fire.
+    pub fn resolve(&self, force: bool) -> std::result::Result<Option<String>, String> {
+        match self.refusal_reason() {
+            None => Ok(None),
+            Some(_) if force => Ok(self.forced_override_note()),
+            Some(reason) => Err(reason),
+        }
+    }
+
+    /// The line a `--force`d caller must log, or `None` when there was
+    /// nothing to override.
+    ///
+    /// Names the HOLDER and (for `Held`) the exact chips, because once
+    /// `--force` is given the refusal never happens and this line is the only
+    /// surviving record that the owner took a board off somebody. An operator
+    /// reading the journal afterwards -- or the neighbour asking why their
+    /// model died -- has nothing else to go on.
+    pub fn forced_override_note(&self) -> Option<String> {
+        match self {
+            ForeignLeases::None => None,
+            ForeignLeases::Held { holders, chips } => Some(format!(
+                "--force given: proceeding with a WHOLE-BOX reset even though {holders}. \
+                 Chips reset out from under that holder: {}. This was a deliberate \
+                 override, not a fault.",
+                if chips.is_empty() {
+                    "(none reported)".to_string()
+                } else {
+                    chips.join(",")
+                }
+            )),
+            ForeignLeases::Undetermined => Some(
+                "--force given: proceeding with a WHOLE-BOX reset even though `gozer status` \
+                 could not be read, so whether another tenant holds chips is UNKNOWN. If one \
+                 did, their chips were just reset. This was a deliberate override, not a fault."
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// Why a whole-box reset is refused ABSENT a `--force`, or `None` when it
+    /// may proceed regardless. Prefer [`ForeignLeases::resolve`], which is
+    /// what both callers use; this is the reason-builder behind it.
     ///
     /// Each caller prefixes the ACTION it is refusing (`"refusing to reset
     /// this box"` / `"refusing reset-chips"`); this supplies the reason and
     /// the remedy, so both guards word the same situation the same way.
+    ///
+    /// **Every reason here ends by naming `--force`.** A refusal that does not
+    /// say how to overrule it reads as a hard rule, and these are not hard
+    /// rules -- they are courtesies. The one that most needed saying is
+    /// `Undetermined`: an operator whose gozer is wedged was previously left
+    /// with ssh as the only way to reset their own box.
     ///
     /// **`Held` and `Undetermined` must never read alike.** An operator
     /// staring at a wedged box has to know which of the two they are in:
@@ -1171,12 +1249,13 @@ impl ForeignLeases {
     pub fn refusal_reason(&self) -> Option<String> {
         match self {
             ForeignLeases::None => None,
-            ForeignLeases::Held(holders) => Some(format!(
+            ForeignLeases::Held { holders, .. } => Some(format!(
                 "another tenant holds chips -- {holders}. If that session is live, stop it (or \
                  `gozer release` its lease) first. If its state is STALE or HELD-FOREIGN the \
                  tenant is already GONE -- and `gozer status` reports no lease id, so there is \
                  nothing to pass to `gozer release`: run `gozer reconcile` to clear it, then \
-                 retry."
+                 retry. This is a courtesy, not a lock: pass `--force` to reset anyway (it is \
+                 your box) -- the holder's chips go down with yours, and the override is logged."
             )),
             ForeignLeases::Undetermined => Some(
                 "`gozer status` could not be read, so whether another tenant holds chips cannot \
@@ -1184,7 +1263,8 @@ impl ForeignLeases {
                  gozer first (`gozer status` should answer; `gozer reconcile` clears a stuck \
                  gate); if gozer was UNINSTALLED, restart tt-station-agentd -- it probes for \
                  gozer once at startup, so a live agent keeps trying to use one that is no \
-                 longer there. Otherwise reset the box by hand once you know it is yours."
+                 longer there. Or pass `--force` to reset anyway: an operator who cannot read \
+                 gozer must still be able to reset their own box without an ssh session."
                     .to_string(),
             ),
         }
@@ -1196,10 +1276,12 @@ impl ForeignLeases {
 ///
 /// This is the guard on both whole-box `tt-smi -r` paths: `POST /reset`
 /// (`RunPyBackend::reset`) and `POST /power {"action":"reset-chips"}`
-/// (`AppState::run_power_command`). Neither is an eviction command, and
-/// this version has no implicit preemption, so a lease held by anyone else
-/// means the reset is refused and the holder named (see the design doc's
-/// "`POST /reset` refuses rather than resetting a neighbour").
+/// (`AppState::run_power_command`). A lease held by anyone else means the
+/// reset is refused BY DEFAULT and the holder named -- and `--force`
+/// overrides that (see [`ForeignLeases::resolve`], which both callers route
+/// their decision through). Neither path evicts anybody implicitly; what
+/// `--force` does is let the owner say "yes, I mean it" instead of leaving
+/// them with ssh as the only route to their own hardware.
 ///
 /// **Ownership is decided by the `who` prefix**, `tt-station:<port>:` --
 /// the same string this agent writes at acquire time. A lease naming this
@@ -1212,28 +1294,35 @@ impl ForeignLeases {
 /// the main reasons an operator reaches for a reset in the first place, so
 /// refusing on it would disable the tool exactly when it is most needed.
 ///
-/// **FAILS CLOSED.** An unreadable `gozer status` is
-/// [`ForeignLeases::Undetermined`], and both callers refuse on it.
+/// **FAILS CLOSED BY DEFAULT, and that default is overridable.** An
+/// unreadable `gozer status` is [`ForeignLeases::Undetermined`], and both
+/// callers refuse on it unless `--force` was given.
 ///
-/// An earlier version of this function failed open, reasoning from the
+/// An earlier version of this function failed OPEN, reasoning from the
 /// design doc's failure-modes table ("14 topology unreadable → leasing
 /// disabled for this call"). That row is about the SERVING path, where
 /// degrading means the serve proceeds unleased and only the serving tenant
 /// is affected; it does not transfer to a guard whose entire job is
-/// protecting somebody else's hardware. Failing open here says *"I cannot
-/// tell whether anyone else is on this box, so I will reset it anyway"*.
+/// protecting somebody else's hardware. Failing open said *"I cannot tell
+/// whether anyone else is on this box, so I will reset it anyway"* -- with
+/// nobody having decided that.
 ///
-/// The asymmetry decides it: refusing costs the operator an inconvenience
-/// they can route around (ssh in, fix gozer, or run `tt-smi -r` by hand);
-/// proceeding costs a neighbour their running model, and the neighbour gets
-/// no say in it. So `Undetermined` refuses -- with a message that says the
-/// state could not be READ, never that a lease exists (see
-/// [`ForeignLeases::refusal_reason`]), because those send an operator to two
-/// different places.
+/// The asymmetry decides the DEFAULT: proceeding silently costs a neighbour
+/// their running model and they get no say in it, so silence must not be
+/// consent. But refusing with no way out was the other error: it cost the
+/// owner their own box whenever gozer itself was wedged, leaving ssh as the
+/// only route. `--force` is the way out, and it changes who is accountable
+/// rather than what is safe -- somebody typed it, and it is logged (see
+/// [`ForeignLeases::forced_override_note`]).
 ///
-/// This now matches the rest of the module: `Grant::reset_target` and
-/// `leased_tt_device` also refuse rather than guess whenever guessing could
-/// touch a chip nobody granted.
+/// Note the message still says the state could not be READ, never that a
+/// lease exists (see [`ForeignLeases::refusal_reason`]) -- those send an
+/// operator to two different places.
+///
+/// The rest of the module's fail-closed rules are NOT overridable and must
+/// not become so: `Grant::reset_target`'s BDF check and `leased_tt_device`
+/// refuse because a guess would touch a chip nobody granted *by accident*.
+/// There is no decision there to override.
 pub fn foreign_leases(
     runner: &dyn CommandRunner,
     capability: &Capability,
@@ -1247,6 +1336,10 @@ pub fn foreign_leases(
     let own_prefix = format!("{WHO_PREFIX}{own_service_port}:");
 
     let mut clauses: Vec<String> = Vec::new();
+    // Every foreign-held chip, for the `--force` log line only -- one entry
+    // per CHIP (unlike `clauses`, which dedupes to one per board), because
+    // what a forced `tt-smi -r` steps on is chips.
+    let mut chips: Vec<String> = Vec::new();
     for lease in &snapshot.leases {
         if lease.state == "FREE" {
             continue;
@@ -1257,6 +1350,9 @@ pub fn foreign_leases(
         };
         if who.starts_with(&own_prefix) {
             continue;
+        }
+        if !lease.bdf.is_empty() && !chips.contains(&lease.bdf) {
+            chips.push(lease.bdf.clone());
         }
         let board = if lease.board.is_empty() {
             "(unknown board)"
@@ -1277,7 +1373,10 @@ pub fn foreign_leases(
     if clauses.is_empty() {
         ForeignLeases::None
     } else {
-        ForeignLeases::Held(clauses.join("; "))
+        ForeignLeases::Held {
+            holders: clauses.join("; "),
+            chips,
+        }
     }
 }
 
