@@ -2631,11 +2631,12 @@ fn runpy_reset_without_gozer_is_unchanged() {
 }
 
 // ---------------------------------------------------------------------
-// `POST /reset` must not reset a neighbour's chips (Task 5). `/reset` is
-// NOT an eviction command and this version has no implicit preemption, so
-// a whole-box `tt-smi -r` while someone else holds a lease is refused and
-// the holder is named. Refusing is the honest option: the operator can
-// always stop the other session deliberately first.
+// `POST /reset` must not reset a neighbour's chips SILENTLY (Task 5).
+// `/reset` is not an eviction command, so a whole-box `tt-smi -r` while
+// someone else holds a lease is refused BY DEFAULT and the holder is named;
+// the operator can stop the other session deliberately first. The refusal is
+// a courtesy, not a lock -- `--force` overrides it (see the `*_forced_*`
+// tests below, and the design doc's "Ownership: an advisory model").
 // ---------------------------------------------------------------------
 
 /// A foreign lease is held (`claude:ttm-optimize`) -> `reset` must REFUSE,

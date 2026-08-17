@@ -142,10 +142,13 @@ This is a prerequisite for concurrent tenants, not an enhancement.
 Before the backend launches:
 
 ```
-gozer acquire --chips <N> --owner-pid <agentd pid> \
-              --who "tt-station:<container-name>" \
+gozer acquire --chips all --owner-pid <agentd pid> \
+              --who "tt-station:<service-port>:<model>" \
               --reason "<client> via tt run" --json
 ```
+
+*(`--chips all` as of 2026-08-17 — see "Ownership: an advisory model". The first version asked for
+`1`.)*
 
 Two details carry weight:
 
@@ -193,18 +196,66 @@ them. The existing `run` keeps its behaviour so nothing else changes.
 dedicated verb: stop, then start on the same board, and the incoming model gets clean silicon
 without a separate `tt reset`.
 
-### `POST /reset` refuses rather than resetting a neighbour
+### Ownership: an advisory model
 
-*Added after implementation surfaced it.* `RunPyBackend::reset` (the `POST /reset` path) still
-issues a **whole-box** `tt-smi -r`. With two tenants that resets the other one's chips.
+*Rewritten 2026-08-17, on the branch owner's instruction, superseding the "`POST /reset` refuses
+rather than resetting a neighbour" section this replaces and the preemption reasoning at the end of
+this document.*
 
-`/reset` is not an eviction command, and this version has no implicit preemption. So: **if any
-lease is held that this request does not own, refuse and name the holder.** Otherwise reset the
-whole box exactly as today.
+The owner's framing: *"I don't want tt-gozer to be a cop about things. Most common use cases will
+just be 'give me all my TT hardware' from a Mac. The goal of per-chip reservations is mostly about
+communication and politeness. Not about hard rules and prevention."*
 
-Refusing is the honest option. Silently resetting a neighbour's running model to fix your own
-box is the collision this integration exists to prevent, and the operator can always stop the
-other session deliberately first.
+**Leases communicate. `--force` overrides. The only hard rules left are the ones that prevent
+accidental corruption.**
+
+Three consequences, and they are the whole model:
+
+1. **The default request is the whole box.** `DEFAULT_LEASE_CHIPS` is `"all"`. A Mac user who asks
+   for nothing in particular gets their machine, exactly as they did before gozer existed, and the
+   common path is therefore contention-free. Board-grain sharing is the deliberate case; a
+   narrower request is one `--chips` argument away in `gozer::acquire`, and other tenants'
+   board-grain leases are untouched by this.
+2. **Every refusal made on somebody else's behalf is overridable.** `POST /reset`, `POST /power
+   reset-chips` and `POST /run` still refuse by default when a lease this request does not own is
+   held — the polite thing, and the thing that stops tt-station stomping a neighbour *silently* —
+   but each takes a `force` flag (`tt reset|power|run --force`) that proceeds anyway. The refusal
+   messages name `--force`; the forced paths log what they stepped on (the holder's `who` and the
+   chips), because once the refusal is skipped that journal line is the only remaining record.
+   "Could not be determined" — an unreadable `gozer status` — is overridable on the same terms:
+   fail-closed stays the default because silence must not read as consent, but an operator whose
+   gozer is wedged must not need an ssh session to reset their own box.
+3. **`--force` gets the owner PAST a lease; it never takes one away.** A forced `POST /run` serves
+   **without** a lease rather than releasing the holder's and re-acquiring. The alternative would
+   make `gozer status` lie: it would report those chips as ours while the neighbour's container
+   still drove them. Unleased, the gate stays true — their lease reads held, ours reads
+   `BUSY-UNTRACKED` — and nothing in tt-station ever writes to another tenant's state.
+
+#### Which rules are NOT overridable
+
+The distinction in one line: **`--force` lets the owner step on another tenant; it never lets the
+tool step on someone by accident.** These take no `force` flag and must not grow one — when they
+fire, nobody has made a decision, so there is nothing to overrule:
+
+| Rule | What it prevents |
+|---|---|
+| stop the container **before** releasing its lease | `gozer release` resets the released chips; releasing first lands a `tt-smi -r` on a live workload and then advertises those chips free |
+| `release_observed_lease`'s compare-and-take | a concurrent `POST /run` can record its own lease mid-swap; releasing whatever is in the slot would reset chips under a live container |
+| never reset chips under a container this backend launched and has not stopped | the same hazard on `start`'s in-flight failure exits |
+| `Grant::reset_target` refusing a non-BDF or empty grant | `tt-smi -r <int>` is a UMD logical id (different namespace) and `tt-smi -r` with no target is a whole-box reset — either resets chips nobody granted |
+
+#### What this reverses
+
+Two earlier rulings on this branch are deliberately overturned:
+
+* **"Both whole-box reset paths fail closed, with no override."** That was right about the default
+  and wrong to make it absolute. With preemption cut from v1 as well, the combination produced a
+  tool that would neither let the owner take the box nor let them reset it — the opposite of the
+  intent. The default is unchanged; the dead end is gone.
+* **"One board is the right default lease (`--chips 1`)."** That inverted the priority. It made
+  the rare case (two tenants deliberately sharing) the default and the common case (an owner
+  wanting their box) a negotiation, and on a two-board machine it handed a Mac user half their
+  hardware while their own local agents contended for the other half.
 
 ### One startup sweep
 
@@ -267,7 +318,7 @@ All behind the existing pairing auth.
 | gozer exit | agentd behaviour |
 |---|---|
 | 10 queued / 12 unavailable | cancel any ticket; report holder + since-when |
-| 14 topology unreadable | leasing disabled for this call, reported in `/status` |
+| 14 topology unreadable | on the SERVING path: leasing disabled for this call, reported in `/status`. On the two whole-box reset guards: refuse (`ForeignLeases::Undetermined`) — degrading there would reset a neighbour on the strength of a state nobody could read — unless `--force` |
 | 15 release refused | surfaced, **not** swallowed — the stop did not happen |
 | 16 mutex stuck | box health signal, with the path to clear |
 
@@ -296,18 +347,26 @@ policy, a history proxy, queue surfacing, docker labels, three-way reconciliatio
 selection on `tt run`. All were cut for a first version that is roughly a quarter of the work
 and still delivers stop, start, swap, two concurrent sessions, and visibility from the Mac.
 
-**The significant omission is preemption.** The stated principle is that someone connected via
-tt-station owns the hardware and is ultimately in command. This version does not express that:
-the owner can stop tt-station's own sessions, but taking a board from a local agent means an
-SSH and a `gozer release`.
+**Preemption is still omitted — but the gap it left has been closed differently.** The stated
+principle is that someone connected via tt-station owns the hardware and is ultimately in command.
+The first version did not express that at all: the owner could stop tt-station's own sessions, but
+getting past a local agent's lease meant an SSH and a `gozer release`.
 
-That is an accepted v1 limitation, not a rejection. It is acceptable only while the box has few
-tenants and the owner has shell access. **When a second person, or a long-running agent whose
-work you cannot casually interrupt, makes preemption real, the cheapest addition is a
-`tt run --take` flag** — release the holder's lease, stop its process, then acquire — rather
-than a separate endpoint. Whatever form it takes, every preemption must write an `evicted`
-event to gozer's history naming who ordered it and why, so an agent whose work was killed can
-find out why from the box without asking anyone.
+`--force` (see "Ownership: an advisory model") expresses the principle without preemption. It lets
+the owner reset the box or serve on it regardless of who holds a lease, and it does so without
+touching another tenant's state — no release on their behalf, no process killed, and no
+`gozer status` that describes their chips as somebody else's. The cost is that a forced serve runs
+unleased and the neighbour learns about it the hard way; the mitigation is the journal line naming
+the holder and the chips.
+
+**True preemption — release the holder's lease, stop their process, then acquire — remains future
+work**, and remains the right shape for the day a second person or a long-running agent makes it
+real: a flag on `tt run`, not a separate endpoint. Whatever form it takes, every preemption must
+write an `evicted` event to gozer's history naming who ordered it and why, so an agent whose work
+was killed can find out from the box without asking anyone. That history record is the thing
+`--force`'s local journal line approximates and cannot replace: it lives where the *victim* can
+read it. Adding `evicted` to gozer's history is the natural next step even before full preemption —
+a forced tt-station action could write one today if gozer exposed the verb.
 
 Also out of scope: multi-box scheduling; moving a running session between boards (a container is
 pinned at launch); GUI work in the macOS app or GTK panel beyond what `tt` exposes; and any

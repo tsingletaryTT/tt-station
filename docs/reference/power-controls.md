@@ -25,8 +25,11 @@ box must be paired first).
 **Request body:**
 
 ```json
-{ "action": "reset-chips" | "suspend" | "reboot" | "shutdown" }
+{ "action": "reset-chips" | "suspend" | "reboot" | "shutdown", "force": <bool> }
 ```
+
+`force` is optional (default `false`) and meaningful only for `reset-chips` — it overrides the
+lease refusals described below. The machine ops have no lease check, so it is ignored for them.
 
 `PowerAction::parse` (`crates/tt-station-agentd/src/power.rs`) is the single source of truth for
 these four wire values; the CLI, the macOS `PowerAction` enum, and the panel's action strings all
@@ -37,18 +40,25 @@ match it.
 - **`reset-chips`** — runs the configured board-reset command (`tt-smi -r` by default). Does
   **not** stop serving first (there's nothing to gracefully stop for a chip reset), does **not**
   clear tokens/SSH/pairing. Completes synchronously.
-  **Refused (`409`) while another tenant holds a gozer lease.** `tt-smi -r` with no targets is a
-  WHOLE-BOX reset, and on a box where `gozer` is arbitrating chips between tenants that resets
-  the neighbour's chips mid-run. So when `gozer` is installed and reports a lease held by anyone
-  other than this agent's own session (matched on the `tt-station:<serving_port>:` `who` prefix),
-  the call is refused and the holder is named. A `BUSY-UNTRACKED` chip is *not* a refusal — it is
-  not a lease, there is nobody to name, and untracked work wedging the box is one of the main
-  reasons to reach for a chip reset. With no gozer installed, behaviour is exactly as before.
+  **Refused (`409`) while another tenant holds a gozer lease — unless `--force`.** `tt-smi -r`
+  with no targets is a WHOLE-BOX reset, and on a box where `gozer` is arbitrating chips between
+  tenants that resets the neighbour's chips mid-run. So when `gozer` is installed and reports a
+  lease held by anyone other than this agent's own session (matched on the
+  `tt-station:<serving_port>:` `who` prefix), the call is refused and the holder is named. A
+  `BUSY-UNTRACKED` chip is *not* a refusal — it is not a lease, there is nobody to name, and
+  untracked work wedging the box is one of the main reasons to reach for a chip reset. With no
+  gozer installed, behaviour is exactly as before.
   **It also refuses (`409`) when that cannot be determined** — an unreadable `gozer status`
   means "I cannot tell whether anyone else is on this box", and a whole-box reset on that basis
-  costs a neighbour their running model while they get no say. The refusal says gozer's state
-  could not be read (fix gozer, or reset by hand), never that a lease exists. See
-  `crates/tt-station-agentd/src/gozer.rs`'s `foreign_leases`.
+  costs a neighbour their running model while they get no say, so silence is not consent. The
+  refusal says gozer's state could not be read (fix gozer, or force it), never that a lease
+  exists. See `crates/tt-station-agentd/src/gozer.rs`'s `foreign_leases`.
+  **Both refusals are advisory, and `"force": true` (`tt power reset-chips --force`) overrides
+  either.** A lease communicates; it does not lock the owner out of their own box. Forced, the
+  reset runs and the agent logs what it stepped on — the holder's `who` and the chips (or, for
+  the undetermined case, that occupancy was unknown). That journal line is the only record left,
+  because the refusal that would have named the holder never happened. Both refusal messages say
+  `--force` overrides them.
 - **`suspend` / `reboot` / `shutdown`** (the "machine ops",
   `PowerAction::is_machine_op() == true` for everything but `reset-chips`) —
   1. Best-effort stop any serving container first (reuses the backend's normal `stop` path) so a
@@ -65,7 +75,8 @@ match it.
 | Unknown `action` string | `400` | `{"error": "unknown power action: …"}"` — checked before any network/token/command work |
 | `reset-chips` succeeds | `200` | `{}` — completes synchronously, so the caller can trust the response |
 | `suspend`/`reboot`/`shutdown` succeeds | `202 Accepted` | `{"action": "...", "accepted": true}` — the command only *initiates* teardown; the box may go down before a `200` could ever be observed, so the response says "accepted," never "done" |
-| `reset-chips` refused because another tenant holds chips | `409 Conflict` | `{"error": "refusing reset-chips: … board <serial> is held by <who>. …"}` — the box's state conflicts with the request; nothing ran. No duration is reported: gozer exposes no lease start time |
+| `reset-chips` refused because another tenant holds chips (or occupancy could not be read), and `force` was not set | `409 Conflict` | `{"error": "refusing reset-chips: … board <serial> is held by <who>. … pass `--force` …"}` — the box's state conflicts with the request; nothing ran. No duration is reported: gozer exposes no lease start time |
+| `reset-chips` with `"force": true` on that same contended box | `200` | `{}` — the reset ran; the override (holder + chips) is in the agent's journal |
 | Command fails with a permission/polkit-shaped error (message contains "Interactive authentication required", "Access denied", or "not authorized") | `403` | Points at this doc — see §6 below |
 | Any other command failure (e.g. the binary itself is missing) | `500` | The generic `backend_error` fallback used by every other route |
 | No bearer token / bad token | `401` | Standard `BearerAuth` rejection |
@@ -79,16 +90,16 @@ power.
 board reset" — that's the existing `/reset` (and `tt reset --host …`). If you want "clear a
 wedged mesh without losing pairing" — that's `POST /power {"action":"reset-chips"}` (`tt power
 reset-chips --host …`). They both ultimately run the same `tt-smi -r`; only the token/SSH/pairing
-side effects differ — and both now refuse with `409` while another tenant holds a gozer lease,
-for the same reason (see above, and the design doc's "`POST /reset` refuses rather than resetting
-a neighbour").
+side effects differ — and both refuse with `409` while another tenant holds a gozer lease, for
+the same reason, and both take the same `--force` to override it (see above, and the design doc's
+"Ownership: an advisory model").
 
 **Everything else about leasing** — `tt leases`, `/status`'s `leasing` object, `--gozer-path` /
 `[global].gozer_path`, what a leased `tt run` does differently, and how a lease survives an agentd
 restart — is in [`chip-leasing.md`](chip-leasing.md). The one fact to carry over here: a refusal
 naming a `STALE` or `HELD-FOREIGN` holder means the tenant is already gone, and `gozer status`
-reports no lease id to pass to `gozer release`, so the remedy is `gozer reconcile` on the box. The
-refusal message says so and names the state.
+reports no lease id to pass to `gozer release`, so the remedy is `gozer reconcile` on the box (or
+`--force`). The refusal message says so and names the state.
 
 ---
 

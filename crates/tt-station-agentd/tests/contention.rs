@@ -9,6 +9,11 @@
 //!   lease this request does not own is held. Both are whole-box `tt-smi -r`
 //!   paths; with two tenants, each would reset the other's chips.
 //!
+//! Every one of those refusals is made on a NEIGHBOUR's behalf, which is why
+//! each is `--force`-able -- the last section of this file drives all three
+//! forced, and asserts the action actually happened rather than trusting a
+//! status code. See the design doc's "Ownership: an advisory model".
+//!
 //! Two different fakes, on purpose, because the two paths reach gozer
 //! differently:
 //!

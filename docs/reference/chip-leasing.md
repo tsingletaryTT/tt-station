@@ -13,6 +13,20 @@ of one implicitly owning everything.
 whole-box, no leasing, not a single `gozer` subprocess spawned. Nothing below is a new
 requirement — every table says what happens in both cases.
 
+**Leasing here is ADVISORY.** Its job is communication and politeness between tenants, not
+enforcement against the box's owner. Two rules follow, and everything in §4 is an application of
+them:
+
+- **A lease is the default request, not a permission slip.** `tt run` asks for the WHOLE box
+  (`--chips all`), so on an idle machine — the overwhelmingly common case — there is no
+  contention, no `409`, and nothing to negotiate. Sharing a box board-by-board is the deliberate
+  case, not the default one.
+- **Every refusal that protects a NEIGHBOUR is `--force`-able.** If tt-station declines because
+  someone else holds chips, or because it could not read `gozer` to find out, `--force` overrides
+  it and the box logs what was stepped on. The refusals that are *not* overridable are the ones
+  that stop tt-station corrupting work by accident (§7) — nobody is making a decision when those
+  fire, so there is nothing to overrule.
+
 ---
 
 ## 1. The one domain fact everything follows from
@@ -111,14 +125,29 @@ so asking for `/status` right after (or before) `/leases` costs no extra shell-o
 
 | | Without gozer | With gozer |
 |---|---|---|
-| chips used | the whole box | one board, whichever gozer grants |
-| pre-serve reset | `tt-smi -r` (whole box) | `tt-smi -r <bdf>,<bdf>` — **only the leased BDFs** |
+| chips used | the whole box | **the whole box** — `--chips all` — or whatever is left of it when a neighbour already holds a board |
+| pre-serve reset | `tt-smi -r` (whole box) | `tt-smi -r <bdf>,<bdf>` — **only the leased BDFs**, even when those are every BDF on the box |
 | device selector | `--device-id` from config; `--tt-device` auto-detected across the whole box | both derived from the grant; a configured value is overridden and the override is logged |
-| box fully occupied | n/a | **`409 Conflict`**, naming the board and the holder |
+| box fully occupied | n/a | **`409 Conflict`**, naming the board and the holder — or, with `--force`, an unleased serve |
 
-The `409` is the important new outcome: a contended box is the box's *state* conflicting with the
+On an idle box the two columns agree on the mesh: a whole-box grant derives the same `--tt-device`
+the unleased path auto-detects (pinned by
+`runpy_leased_whole_box_serve_passes_the_same_tt_device_as_an_unleased_one`). The lease still
+*scopes* the pre-serve reset by BDF, which is what keeps a neighbour's board out of it the moment
+one appears.
+
+The `409` is the contention outcome: a contended box is the box's *state* conflicting with the
 request, not a failure, so it is retriable and distinguishable from a `500`. Its message names the
-board and the holder — and no duration, per §2.
+board and the holder — and no duration, per §2 — and says `--force` overrides it.
+
+**`tt run --force`** serves anyway. The mechanism matters, because it is what keeps `gozer status`
+honest: the box does **not** take the holder's lease away, it serves **without a lease** — the
+pre-gozer path, whole-box selectors and an unscoped `tt-smi -r`. So `gozer status` afterwards shows
+the holder's lease still held (true) and this serve's chips as `BUSY-UNTRACKED` (also true: a
+process is holding chips with no lease). Nothing in the gate claims anything that is not the case.
+The trade is stated plainly: a forced run **will** disrupt the holder, and the box logs the
+override — the holder's `who` and the chips — because that journal line is the only remaining
+record of it.
 
 **Swapping models needs no explicit stop.** `tt run B` while A serves hands A's board back
 (resetting it) before asking gozer for chips again, so a swap does not strand a board. The exact
@@ -141,12 +170,17 @@ not reset); prefer one `tt run` at a time.
 ### `POST /reset` (`tt reset --host …`) and `power reset-chips` (`tt power reset-chips --host …`)
 
 Both run a **whole-box** `tt-smi -r`, which on a shared box resets a neighbour mid-run. So both
-now **refuse with `409`** while gozer reports a lease held by anyone other than this agent's own
-session (matched on the `tt-station:<serving_port>:` `who` prefix). Full behaviour, including the
-"could not be determined" refusal, is in
+**refuse with `409` by default** while gozer reports a lease held by anyone other than this agent's
+own session (matched on the `tt-station:<serving_port>:` `who` prefix), and both accept `--force`
+to override that. Full behaviour, including the "could not be determined" case, is in
 [`power-controls.md` §1](power-controls.md#1-agent-post-power).
 
-Two things worth knowing at the CLI:
+```
+tt reset --host <h> --force               # reset even though someone holds chips
+tt power reset-chips --host <h> --force    # same, but keeps pairing
+```
+
+Four things worth knowing at the CLI:
 
 - **A refusal is not a failure.** `tt reset --host X` normally clears local pairing even when the
   box is unreachable. On a refusal it does **not**: the box reset nothing and deliberately kept
@@ -154,10 +188,20 @@ Two things worth knowing at the CLI:
   for nothing. The command errors out with the box's own message instead.
 - **A `STALE` or `HELD-FOREIGN` holder is already gone.** "Stop that session" doesn't apply, and
   you cannot `gozer release` it either, because `gozer status` reports no lease id. Run
-  `gozer reconcile` on the box, then retry. The refusal message says so and names the state.
+  `gozer reconcile` on the box, then retry — or just `--force`. The refusal message says so and
+  names the state.
+- **"Could not be determined" is `--force`-able too.** An unreadable `gozer status` refuses by
+  default (silence must not read as "nobody is here"), but an operator whose gozer is wedged must
+  still be able to reset their own box without an ssh session. That was the sharpest symptom of
+  over-enforcement: the box was unresettable exactly when it most needed resetting.
+- **A forced override is logged, and that log is the whole audit trail.** The refusal that would
+  have named the holder never happens, so the agent's journal line — holder `who` plus the chips —
+  is the only place a neighbour can later find out why their model died. Prefer the polite route
+  (stop the other session, or `gozer reconcile` a stale one) when it is available.
 
-`BUSY-UNTRACKED` is deliberately **not** a refusal: it is not a lease, there is nobody to name, and
-untracked work wedging the box is one of the main reasons to reach for a reset in the first place.
+`BUSY-UNTRACKED` is deliberately **not** a refusal at all: it is not a lease, there is nobody to
+name, and untracked work wedging the box is one of the main reasons to reach for a reset in the
+first place.
 
 ---
 
@@ -211,7 +255,8 @@ failure. It is bounded (~5s) so a wedged binary cannot delay the socket bind by 
 
 **The probe runs once.** If you *uninstall* gozer under a running agentd, that agent keeps trying
 to use it — and the reset guards will refuse every whole-box reset with "gozer status could not be
-read". Restart agentd to re-probe and turn leasing back off. The refusal message says this too.
+read". Restart agentd to re-probe and turn leasing back off, or pass `--force` in the meantime. The
+refusal message says both.
 
 ---
 
@@ -219,12 +264,28 @@ read". Restart agentd to re-probe and turn leasing back off. The refusal message
 
 - **No queuing.** `acquire` is `--no-queue`: a contended `POST /run` reports who holds the chips
   and returns, rather than waiting in line. No ticket is left on disk to cancel.
-- **No preemption or eviction.** Nothing in tt-station takes chips from a live tenant. That is why
-  the reset paths refuse rather than proceed.
+- **No eviction.** Nothing in tt-station releases another tenant's lease or kills their process.
+  `--force` gets the owner *past* a lease; it does not take one away, and it never writes to
+  another tenant's state. (That is also why a forced `tt run` serves unleased rather than
+  re-acquiring: the alternative would leave `gozer status` describing chips as ours while the
+  neighbour's container still drove them.)
 - **No leasing on the `dstack` backend.** The stub runs nothing and owns no command seam, so it
   could neither pin a lease to a workload nor hand one back; taking chips it cannot use would
   strand them.
 - **No lease durations.** See §2.
+
+### The rules `--force` does not reach
+
+These exist to stop tt-station corrupting work *by accident*. Nobody is making a decision when they
+fire, so there is nothing for a flag to overrule — and none of them takes one:
+
+| Rule | What it prevents |
+|---|---|
+| stop the container **before** releasing its lease | `gozer release` resets the chips; releasing first lands a `tt-smi -r` on a live workload and then advertises those chips free |
+| the swap releases only the lease it **observed** (compare-and-take) | a concurrent `POST /run` recording its own lease meanwhile would otherwise have that newer lease released — resetting chips under a live container |
+| never reset chips under a container this agent launched and has not stopped | same hazard, on `start`'s in-flight failure exits |
+| reset by **BDF only**, never a bare index, and never an empty target | `tt-smi -r <int>` means a UMD logical id (a different namespace) and `tt-smi -r` with no target is a whole-box reset — either would touch chips nobody granted |
+| refuse a serve whose leased mesh cannot be derived | naming a mesh wider than the lease hands the serve hardware it was not given |
 
 ---
 
