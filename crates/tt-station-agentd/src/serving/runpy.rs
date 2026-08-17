@@ -1107,14 +1107,18 @@ impl ServingBackend for RunPyBackend {
         // the neighbour, until their workload corrupts or hangs. Treat the
         // mapping as unverified until someone runs that single-chip serve.
         //
-        // A CHEAPER EXPERIMENT THAN THAT SERVE: gozer's grant also carries
-        // `env: {"TT_VISIBLE_DEVICES": "<bdf>,<bdf>"}` -- BDFs, so no
-        // namespace question at all -- and this backend already hands env
-        // to the child (see `run_in_dir_with_env` below). Whether run.py
-        // forwards that variable into the container it builds is the thing
-        // to check first; if it does, the ambiguous index list stops being
-        // the only pin. Recorded in `crate::gozer`'s known-limitations
-        // section, which is where this whole list lives.
+        // PARTLY MITIGATED, and the mitigation is also the experiment: the
+        // grant carries `env: {"TT_VISIBLE_DEVICES": "<bdf>,<bdf>"}` -- BDFs,
+        // so no namespace question at all -- and this backend now forwards
+        // every entry of `Grant::env` to the child (see the `child_env` build
+        // just before `run_in_dir_with_env` below). The ambiguous index list
+        // is therefore no longer the only pin. It does NOT settle the
+        // question: whether run.py propagates the variable into the container
+        // it builds is still unverified, so if run.py drops it AND reads
+        // `--device-id` in the other namespace, the hazard above stands.
+        // `docker inspect --format '{{.Config.Env}}'` on a leased serve's
+        // container is what closes it. Recorded in `crate::gozer`'s
+        // known-limitations section, which is where this whole list lives.
         //
         // NOTE the DOCKER backend's `--device /dev/tenstorrent/<n>` mapping
         // is NOT in the same doubt -- gozer reads `dev_index` from the
@@ -1175,14 +1179,30 @@ impl ServingBackend for RunPyBackend {
         // never spawn a real process at all, so the env is a no-op from
         // their point of view -- exactly why tests only need to assert on
         // the argv, not the environment.
+        // Everything the GRANT says a leased workload should run with, then
+        // `MODEL_SOURCE` last so this backend's own variable always wins a
+        // (never-expected) collision. Today the grant carries exactly
+        // `TT_VISIBLE_DEVICES=<bdf>,<bdf>` -- BDFs, so no namespace question,
+        // unlike the `--device-id` indices above. Whether run.py forwards it
+        // into the container it builds is unverified; if it does, the
+        // ambiguity above stops being the only pin, and if it does not,
+        // nothing is worse. Empty (hence a no-op) without a lease, so the
+        // unleased child environment is unchanged. See `gozer::Grant::env`.
+        let mut child_env: Vec<(&str, &str)> = match &lease {
+            Some(guard) => guard
+                .grant()
+                .env
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect(),
+            None => Vec::new(),
+        };
+        child_env.push(("MODEL_SOURCE", self.config.model_source.as_str()));
+
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let run_stdout = self
             .runner
-            .run_in_dir_with_env(
-                &self.config.repo_dir,
-                &arg_refs,
-                &[("MODEL_SOURCE", self.config.model_source.as_str())],
-            )
+            .run_in_dir_with_env(&self.config.repo_dir, &arg_refs, &child_env)
             .inspect_err(|_| {
                 // run.py can start a container and THEN fail, and the error
                 // path loses the stdout that carries its id -- so the only

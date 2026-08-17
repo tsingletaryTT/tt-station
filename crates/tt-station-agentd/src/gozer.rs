@@ -56,11 +56,17 @@
 //!    in doubt** -- gozer reads `dev_index` from the kernel's own
 //!    `/sys/bus/pci/devices/<bdf>/tenstorrent/tenstorrent!N`, confirmed on
 //!    hardware. Only the runpy half is open; do not conflate the two.
-//!    *A cheaper way to close it than a single-chip serve:* gozer's grant
-//!    already carries `env: {"TT_VISIBLE_DEVICES": "<bdf>,<bdf>"}` -- BDFs,
-//!    no ambiguity -- and `RunPyBackend` already passes env to the child via
-//!    `CommandRunner::run_in_dir_with_env`. Whether run.py forwards it into
-//!    the container is the experiment worth running first.
+//!    *Partly mitigated, and the mitigation is the experiment:* gozer's grant
+//!    carries `env: {"TT_VISIBLE_DEVICES": "<bdf>,<bdf>"}` -- BDFs, no
+//!    ambiguity -- and `RunPyBackend::start` now FORWARDS every entry of
+//!    `Grant::env` to the run.py child alongside `MODEL_SOURCE`. That makes
+//!    the leased serve carry one ambiguous pin plus one unambiguous one. It
+//!    does NOT settle the question: whether run.py propagates the variable
+//!    into the container it builds is still unverified, so if run.py both
+//!    drops the variable AND reads `--device-id` in the other namespace, the
+//!    hazard above is unchanged. Checking `docker inspect --format
+//!    '{{.Config.Env}}'` on a leased serve's container is what closes it, and
+//!    is far cheaper than the single-chip serve.
 //! 2. **A lease REAPED rather than released never resets its chips**
 //!    (inherited from gozer: `--fresh` is the protected path). The next
 //!    plain `acquire` then gets un-reset silicon. So agentd prefers an
@@ -169,6 +175,24 @@ pub struct Grant {
     /// board (gozer's own term for this). Defaults to `false` when absent.
     #[serde(default)]
     pub expanded: bool,
+    /// Environment gozer says a leased workload should run with -- today
+    /// `{"TT_VISIBLE_DEVICES": "<bdf>,<bdf>"}`. Defaults to empty for a gozer
+    /// version whose payload omits it.
+    ///
+    /// **Why this is worth carrying:** it names the granted chips as BDFs, so
+    /// unlike `dev_indices` there is no namespace question about it at all
+    /// (see known limitation 1 in this module's doc). `RunPyBackend` forwards
+    /// it to the `run.py` child alongside `MODEL_SOURCE`, which turns one
+    /// ambiguous pin into one ambiguous plus one unambiguous: if run.py
+    /// forwards the variable into the container it builds, the namespace
+    /// hazard closes without a single-chip serve on real hardware; if it does
+    /// not, nothing is worse than before.
+    ///
+    /// A `BTreeMap` rather than a `HashMap` so the forwarded order is
+    /// deterministic, which keeps a test's view of the child environment
+    /// stable.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 impl Grant {

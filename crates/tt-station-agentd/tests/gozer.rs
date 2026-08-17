@@ -86,6 +86,8 @@ fn granted_outcome_parses_dev_indices() {
     assert_eq!(
         outcome,
         Outcome::Granted(Grant {
+            // Absent from this payload -- `#[serde(default)]`, see `Grant::env`.
+            env: Default::default(),
             lease_id: "lease-123".to_string(),
             chips: vec!["0000:01:00.0".to_string(), "0000:02:00.0".to_string()],
             dev_indices: vec![0, 1],
@@ -171,6 +173,7 @@ fn grant_over(chips: &[&str]) -> Grant {
         dev_indices: vec![0],
         units: vec![],
         expanded: false,
+        env: Default::default(),
     }
 }
 

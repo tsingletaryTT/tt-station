@@ -2871,3 +2871,57 @@ fn runpy_adopt_lease_refuses_without_gozer() {
         runner.commands()
     );
 }
+
+/// The grant's own `env` must reach the `run.py` child.
+///
+/// `--device-id` carries gozer's `dev_indices`, whose namespace is UNVERIFIED
+/// against run.py's (see `gozer`'s known limitation 1): if the two differ, the
+/// container pins another tenant's chips, comes up healthy, and nothing
+/// detects it. The grant ALSO carries `env.TT_VISIBLE_DEVICES` as BDFs, where
+/// there is no namespace question at all -- and this backend already hands env
+/// to the child. Forwarding it turns one ambiguous pin into one ambiguous plus
+/// one unambiguous: if run.py forwards the variable into the container, the
+/// hazard closes without a single-chip serve on real hardware; if it does not,
+/// nothing is worse than before.
+#[test]
+fn runpy_start_forwards_the_grants_visible_devices_env_to_run_py() {
+    let gozer = FakeGozerBox::with_boards(2, 0);
+    let runner = gozer.runner();
+    runner.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let envs = runner.child_envs();
+    let env = envs.last().expect("run.py must be launched with an env");
+    assert!(
+        env.contains(&(
+            "TT_VISIBLE_DEVICES".to_string(),
+            "0000:01:00.0,0000:02:00.0".to_string()
+        )),
+        "the grant's BDF-named env must reach the child: {env:?}"
+    );
+    assert!(
+        env.iter().any(|(k, _)| k == "MODEL_SOURCE"),
+        "and it must not displace MODEL_SOURCE, which run.py reads from the \
+         environment rather than argv: {env:?}"
+    );
+}
+
+/// The unleased child environment must be byte-identical to what it always
+/// was: `MODEL_SOURCE` and nothing else. A grant is the only source of extra
+/// variables, and a box without gozer has no grant.
+#[test]
+fn runpy_start_without_gozer_passes_only_model_source() {
+    let runner = FakeRunner::new(0);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    assert_eq!(
+        runner.child_envs(),
+        vec![vec![("MODEL_SOURCE".to_string(), "huggingface".to_string())]],
+        "an unleased serve's child environment must not change"
+    );
+}

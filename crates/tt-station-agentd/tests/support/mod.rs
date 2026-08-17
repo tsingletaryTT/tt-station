@@ -24,6 +24,12 @@ use tt_station_agentd::serving::docker::{CapturedOutput, CommandRunner};
 /// `type_complexity` lint.
 type RunCapturingCanned = (String, i32, String, String);
 
+/// One child process's environment, as `(key, value)` pairs in the order
+/// `RunPyBackend` handed them over. Named alias for the same reason
+/// `RunCapturingCanned` is one: the nested `Arc<Mutex<Vec<Vec<..>>>>` field it
+/// lives behind trips clippy's `type_complexity`.
+type ChildEnv = Vec<(String, String)>;
+
 /// A scratch `model_spec.json` fixture, unique per call and removed on drop.
 /// Was duplicated near-identically in `tests/models.rs` and `tests/runpy.rs`
 /// (both files' own doc comments admitted it); consolidated here now that
@@ -128,6 +134,12 @@ pub struct FakeRunner {
     /// same convention as `run_failures`; a match short-circuits
     /// `run_capturing` with `Err` before it consults `run_capturing_outputs`.
     run_capturing_failures: Arc<Mutex<Vec<(String, String)>>>,
+    /// The `env` pairs of every `run_in_dir_with_env` call, in order. The
+    /// default `CommandRunner::run_in_dir_with_env` throws the environment
+    /// away, so without this a test cannot see what a child was given -- and
+    /// `RunPyBackend` passes `MODEL_SOURCE` plus (under a lease) the grant's
+    /// own `TT_VISIBLE_DEVICES` that way rather than in argv.
+    child_envs: Arc<Mutex<Vec<ChildEnv>>>,
 }
 
 /// Default `http_get` body when nothing is configured: a non-empty `data`
@@ -153,7 +165,18 @@ impl FakeRunner {
             http_get_calls_seen: Arc::new(Mutex::new(0)),
             run_capturing_outputs: Arc::new(Mutex::new(Vec::new())),
             run_capturing_failures: Arc::new(Mutex::new(Vec::new())),
+            child_envs: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// The `env` pairs handed to each `run_in_dir_with_env` call, in order --
+    /// see the `child_envs` field.
+    #[allow(dead_code)]
+    pub fn child_envs(&self) -> Vec<ChildEnv> {
+        self.child_envs
+            .lock()
+            .expect("child_envs mutex poisoned")
+            .clone()
     }
 
     #[allow(dead_code)]
@@ -496,6 +519,17 @@ impl CommandRunner for FakeGozerBox {
         self.inner.run(args)
     }
 
+    /// Delegated rather than left to the default impl, which discards `env` --
+    /// the inner `FakeRunner` is what records it (see its `child_envs`).
+    fn run_in_dir_with_env(
+        &self,
+        dir: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<String> {
+        self.inner.run_in_dir_with_env(dir, args, env)
+    }
+
     fn run_capturing(&self, args: &[&str]) -> Result<CapturedOutput> {
         // Record FIRST (and discard the inner's canned answer) so gozer
         // invocations appear in the same ordered `commands()` list the
@@ -517,6 +551,23 @@ impl CommandRunner for FakeGozerBox {
 }
 
 impl CommandRunner for FakeRunner {
+    fn run_in_dir_with_env(
+        &self,
+        dir: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<String> {
+        self.child_envs
+            .lock()
+            .expect("child_envs mutex poisoned")
+            .push(
+                env.iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            );
+        self.run_in_dir(dir, args)
+    }
+
     fn run(&self, args: &[&str]) -> Result<String> {
         self.commands
             .lock()
