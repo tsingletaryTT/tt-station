@@ -1448,11 +1448,19 @@ fn print_wake(mac: &str, json: bool) {
     }
 }
 
-/// `tt status`'s output. JSON mode adds (Task 3) `device_mesh` alongside the
-/// existing `status` key so a caller (the macOS app, eventually) can read
-/// both from one call; human mode is unchanged -- still just the bare
-/// `idle`/`serving:<model>` txt line, since device-mesh isn't something an
-/// operator glancing at a terminal needs.
+/// `tt status`'s output. JSON mode adds (Task 3) `device_mesh` and (the gozer
+/// integration) `leasing` alongside the existing `status` key so a caller (the
+/// macOS app) can read them from one call; human mode prints the bare
+/// `idle`/`serving:<model>` txt line, plus a leasing line when the box has
+/// gozer -- how many tenants it can serve at once is the one leasing fact an
+/// operator glancing at a terminal actually acts on. Device-mesh stays
+/// JSON-only.
+///
+/// `leasing` is THREE-way and must print as such (see
+/// `StatusInfo::leasing`): absent entirely = the agent is too old to say
+/// (print nothing -- claiming "no leasing" would be an invention);
+/// `available: false` = gozer is not installed on that box; `available: true`
+/// = its version plus board/concurrency counts.
 fn print_status(info: &StatusInfo, json: bool) {
     if json {
         println!(
@@ -1460,10 +1468,32 @@ fn print_status(info: &StatusInfo, json: bool) {
             serde_json::json!({
                 "status": info.status.to_txt(),
                 "device_mesh": info.device_mesh,
+                // `null` when the agent didn't report the object at all --
+                // distinct from `{"available": false}`.
+                "leasing": info.leasing,
             })
         );
     } else {
         println!("{}", info.status.to_txt());
+        match &info.leasing {
+            // Too old to say. Print nothing rather than guessing either way.
+            None => {}
+            Some(leasing) if !leasing.available => {
+                println!("leasing:        unavailable (gozer not installed)");
+            }
+            Some(leasing) => {
+                let version = leasing.version.as_deref().unwrap_or("gozer");
+                match (leasing.boards, leasing.max_concurrent) {
+                    (Some(boards), Some(max)) => println!(
+                        "leasing:        {version} ({boards} board(s), up to {max} \
+                         concurrent session(s))"
+                    ),
+                    // `available` without counts means the `gozer status`
+                    // read failed; say the capability is there and stop.
+                    _ => println!("leasing:        {version}"),
+                }
+            }
+        }
     }
 }
 

@@ -28,7 +28,7 @@ use axum::{
     Json, Router,
 };
 use libttstation::model::{
-    ConfigSummary, Endpoint, LeaseList, ModelsResponse, ServingList, ServingStatus,
+    ConfigSummary, Endpoint, LeaseList, LeasingSummary, ModelsResponse, ServingList, ServingStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1349,26 +1349,7 @@ struct StatusResponse {
     /// probed successfully at startup) means every other field is `null`:
     /// never a guessed version or a fabricated board count for hardware
     /// this agent never actually asked gozer about.
-    leasing: LeasingInfo,
-}
-
-/// The `leasing` object on `GET /status` -- see [`StatusResponse::leasing`].
-#[derive(Serialize)]
-struct LeasingInfo {
-    available: bool,
-    /// `gozer --version`'s output verbatim (e.g. `"gozer 0.1.0"`), from the
-    /// startup probe -- see `crate::gozer::Capability::version`. `None`
-    /// whenever `available` is `false`.
-    version: Option<String>,
-    /// Distinct board count, derived from the same `gozer status --json`
-    /// payload `GET /leases` reads (see `crate::gozer::snapshot_leases`).
-    /// `None` whenever `available` is `false`.
-    boards: Option<u32>,
-    /// How many tenants this box's current leasing grain can serve at once
-    /// -- the chip count when gozer's grain is `"chip"`, else (today, always
-    /// `"board"` on this hardware) the same as `boards`. `None` whenever
-    /// `available` is `false`.
-    max_concurrent: Option<u32>,
+    leasing: LeasingSummary,
 }
 
 async fn get_status(
@@ -1395,9 +1376,14 @@ async fn get_status(
 /// `gozer status --json` (the SAME cache `GET /leases` fills -- see
 /// `GOZER_LEASE_CACHE_TTL`'s doc comment), so calling `/status` right after
 /// (or right before) `/leases` costs no extra shell-out either way.
-async fn leasing_info(state: &AppState) -> LeasingInfo {
+///
+/// The type is `libttstation::model::LeasingSummary`, the SAME struct
+/// `StatusInfo::leasing` decodes into -- one wire shape defined once, rather
+/// than a private serializer here and a private deserializer on the client
+/// that can drift apart field by field.
+async fn leasing_info(state: &AppState) -> LeasingSummary {
     let Some(capability) = state.gozer() else {
-        return LeasingInfo {
+        return LeasingSummary {
             available: false,
             version: None,
             boards: None,
@@ -1406,7 +1392,7 @@ async fn leasing_info(state: &AppState) -> LeasingInfo {
     };
     let version = capability.version.clone();
     let snapshot = state.gozer_snapshot().await;
-    LeasingInfo {
+    LeasingSummary {
         available: true,
         version: Some(version),
         boards: Some(snapshot.boards),

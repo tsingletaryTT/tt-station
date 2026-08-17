@@ -211,6 +211,32 @@ pub struct ModelsResponse {
     pub models: Vec<ModelInfo>,
 }
 
+/// The `leasing` object on `GET /status` -- whether/how this box can lease
+/// chips out via `gozer`, mirroring `tt-station-agentd::routes::LeasingInfo`
+/// field-for-field (that route builds this very type).
+///
+/// `available: false` means gozer never probed successfully at startup, and
+/// then EVERY other field is `None`: never a guessed version, never a
+/// fabricated board count for hardware this agent did not actually ask gozer
+/// about. That is the same "unavailable is a value, not a failure" contract
+/// [`LeaseList::available`] carries, and the reason this is a struct with an
+/// explicit flag rather than three bare `Option`s.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeasingSummary {
+    pub available: bool,
+    /// `gozer --version`'s output verbatim (e.g. `"gozer 0.1.0"`), from the
+    /// startup probe. `None` whenever `available` is `false`.
+    pub version: Option<String>,
+    /// Distinct board count, from the same `gozer status --json` payload
+    /// `GET /leases` reads. `None` whenever `available` is `false`.
+    pub boards: Option<u32>,
+    /// How many tenants this box's current leasing grain can serve at once --
+    /// the chip count when gozer's grain is `"chip"`, else (today, always
+    /// `"board"` on this hardware) the same as `boards`. `None` whenever
+    /// `available` is `false`.
+    pub max_concurrent: Option<u32>,
+}
+
 /// `GET /status`'s response body, as decoded by
 /// [`crate::agent_client::get_status`] and printed by `tt --json status`
 /// (Task 3). `status` is the already-parsed [`ServingStatus`] (via
@@ -235,6 +261,20 @@ pub struct StatusInfo {
     /// field on [`BoxRecord`] for the same concept surfaced via discovery
     /// instead of a direct status probe.
     pub mac: Option<String>,
+    /// Whether/how this box can lease chips out via `gozer` (see
+    /// [`LeasingSummary`]) -- passed through from the agent's `/status`
+    /// `leasing` object.
+    ///
+    /// `Option`, and `#[serde(default)]` on the field that decodes it, for a
+    /// specific reason: the agent has always SENT this object since the gozer
+    /// integration landed, but an OLDER agent does not, and a client must keep
+    /// working against one. `None` therefore means "this agent is too old to
+    /// say", which is not the same fact as
+    /// `Some(LeasingSummary { available: false, .. })` -- "gozer is not
+    /// installed here". Collapsing the two would let a client report a
+    /// leasing-capable box as unleased purely because it was running an older
+    /// agent.
+    pub leasing: Option<LeasingSummary>,
 }
 
 /// `GET /config`'s response body (see `tt-station-agentd::routes::get_config`,

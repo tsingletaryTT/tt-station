@@ -391,6 +391,87 @@ async fn get_status_parses_serving_status_with_no_auth_header() {
     // Task 2) -- confirm the missing key deserializes to `None` rather than
     // erroring.
     assert_eq!(info.device_mesh, None);
+    // Likewise `leasing`, which predates the gozer integration. `None` here
+    // means "this agent is too old to say", which a client must be able to
+    // tell apart from `available: false` ("gozer is not installed"). See
+    // `StatusInfo::leasing`.
+    assert_eq!(info.leasing, None);
+}
+
+/// `/status`'s `leasing` object must reach the client. It was on the wire from
+/// the moment the agent grew it, and invisible to `tt status`/`tt status
+/// --json` because `StatusInfo` had no field to decode it into -- so the
+/// gozer integration's own `GET /status` deliverable never actually arrived
+/// anywhere a user could see it.
+#[tokio::test]
+async fn get_status_decodes_the_leasing_object() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "qb2-lab",
+            "chips": "4xBH",
+            "status": "idle",
+            "leasing": {
+                "available": true,
+                "version": "gozer 0.1.0",
+                "boards": 2,
+                "max_concurrent": 2
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let info = get_status(&server.uri())
+        .await
+        .expect("get_status() should succeed");
+
+    let leasing = info
+        .leasing
+        .expect("an agent that reports `leasing` must decode into Some(..)");
+    assert!(leasing.available);
+    assert_eq!(leasing.version.as_deref(), Some("gozer 0.1.0"));
+    assert_eq!(leasing.boards, Some(2));
+    assert_eq!(leasing.max_concurrent, Some(2));
+}
+
+/// The gozer-absent half of the same three-way answer: `available: false` with
+/// every other field `null` must decode to `Some(..)`, NOT to `None`. Those
+/// are different facts -- "gozer is not installed on that box" versus "that
+/// agent is too old to say" -- and collapsing them would let a client report
+/// a leasing-capable box as unleased purely because of its agent version.
+#[tokio::test]
+async fn get_status_decodes_leasing_unavailable_as_some_not_none() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "qb2-lab",
+            "chips": "4xBH",
+            "status": "idle",
+            "leasing": {
+                "available": false,
+                "version": null,
+                "boards": null,
+                "max_concurrent": null
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let info = get_status(&server.uri())
+        .await
+        .expect("get_status() should succeed");
+
+    let leasing = info
+        .leasing
+        .expect("`available: false` is a REPORTED fact, not a missing field");
+    assert!(!leasing.available);
+    assert_eq!(leasing.version, None);
+    assert_eq!(leasing.boards, None);
+    assert_eq!(leasing.max_concurrent, None);
 }
 
 /// `get_status(base)` should also parse the `idle` case correctly, still

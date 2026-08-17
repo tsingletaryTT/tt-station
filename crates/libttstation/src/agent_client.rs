@@ -76,17 +76,30 @@ pub async fn list_serving(base: &str) -> anyhow::Result<ServingList> {
 /// going through `authed_client()`, so a `tt status` on an unpaired box
 /// works instead of failing with "no token stored".
 ///
-/// `device_mesh`/`mac` both deserialize to `None` when the agent's JSON
-/// omits the key entirely (serde's derive treats a missing `Option<T>`
+/// `device_mesh`/`mac`/`leasing` all deserialize to `None` when the agent's
+/// JSON omits the key entirely (serde's derive treats a missing `Option<T>`
 /// field as `None` rather than an error) -- lets this keep working
 /// unmodified against `mock-box`, whose `/status` fixture predates Task 2
-/// and doesn't send either key at all.
+/// and doesn't send them at all.
+///
+/// `leasing` (the gozer integration's `GET /status` deliverable) is the one
+/// that carries a THREE-way answer, so read it as such: `None` means the
+/// agent is too old to say, `Some(available: false)` means gozer is not
+/// installed on that box, and `Some(available: true)` carries its version,
+/// board count and how many tenants it can serve at once. See
+/// [`StatusInfo::leasing`].
 pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
     #[derive(Deserialize)]
     struct StatusResponse {
         status: String,
         device_mesh: Option<String>,
         mac: Option<String>,
+        /// `#[serde(default)]` so an OLDER agent -- one predating the gozer
+        /// integration, and `mock-box`'s `/status` fixture -- still
+        /// deserializes, reporting `None` ("too old to say") rather than
+        /// failing the whole call. See [`StatusInfo::leasing`].
+        #[serde(default)]
+        leasing: Option<crate::model::LeasingSummary>,
     }
 
     let url = join(base, "status");
@@ -102,6 +115,7 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
         status: ServingStatus::from_txt(&body.status)?,
         device_mesh: body.device_mesh,
         mac: body.mac,
+        leasing: body.leasing,
     })
 }
 
