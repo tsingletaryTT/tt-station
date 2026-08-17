@@ -360,6 +360,28 @@ pub struct RunPyBackend {
     /// another thread; `SeqCst` throughout since the ordering cost is
     /// irrelevant next to a 2s poll interval.
     cancel: Arc<AtomicBool>,
+    /// The `gozer` binary this backend leases chips through, or `None` when
+    /// gozer isn't installed on this box (see `crate::gozer`'s module doc --
+    /// gozer is OPTIONAL). `None` is the default and means EVERY path below
+    /// behaves exactly as it did before leasing existed: whole-box
+    /// `tt-smi -r`, `--device-id` straight from config, and no `gozer`
+    /// process ever spawned. Set via `with_gozer`.
+    gozer: Option<crate::gozer::Capability>,
+    /// The lease id this backend currently holds on behalf of a RUNNING
+    /// serve, or `None` when nothing is leased.
+    ///
+    /// Set exactly once, by `start`, at the moment the serve is confirmed
+    /// healthy: ownership of the lease transfers out of `start`'s
+    /// `LeaseGuard` (which would otherwise release it on the way out of the
+    /// function) and into the backend, where it outlives the call. Cleared
+    /// by `stop`/`reset` after a successful `gozer release`. Every FAILING
+    /// exit from `start` leaves this `None` and lets the guard's `Drop`
+    /// release instead -- see `start`'s doc comment.
+    ///
+    /// `Arc<Mutex<..>>` for the same reason `status` is one: `start` and
+    /// `stop` take `&self` and are reachable concurrently from
+    /// `spawn_blocking` tasks.
+    lease: Arc<Mutex<Option<String>>>,
 }
 
 impl RunPyBackend {
@@ -374,7 +396,29 @@ impl RunPyBackend {
             health_poll_attempts: DEFAULT_HEALTH_POLL_ATTEMPTS,
             health_poll_interval: DEFAULT_HEALTH_POLL_INTERVAL,
             cancel: Arc::new(AtomicBool::new(false)),
+            // Leasing OFF by default -- a backend built without an explicit
+            // `with_gozer` behaves exactly as it did before this integration
+            // existed. See the `gozer` field's doc comment.
+            gozer: None,
+            lease: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Attach the `gozer` capability this agent probed for at startup (see
+    /// `crate::gozer::probe`), turning leasing ON for every subsequent
+    /// `start`/`stop`.
+    ///
+    /// `None` (the default, and what a box without gozer installed yields)
+    /// leaves the backend in its pre-leasing behaviour, which is the whole
+    /// point of gozer being optional: no `gozer` subprocess, a whole-box
+    /// `tt-smi -r` before serving, and `--device-id` straight from config.
+    ///
+    /// Builder-style (`self` by value) to match `with_health_poll`, but
+    /// deliberately NOT `#[cfg]`-gated the way that one is: this is
+    /// production wiring, not a test hook.
+    pub fn with_gozer(mut self, gozer: Option<crate::gozer::Capability>) -> Self {
+        self.gozer = gozer;
+        self
     }
 
     /// Whether a cancel has been requested (`stop` was called) and not yet
@@ -394,6 +438,89 @@ impl RunPyBackend {
         self.health_poll_attempts = attempts;
         self.health_poll_interval = interval;
         self
+    }
+
+    /// Take a gozer lease for this serve, or `Ok(None)` when leasing isn't
+    /// available on this box (no `gozer` capability -- see the `gozer`
+    /// field). `Ok(None)` is the pre-integration behaviour and is not an
+    /// error: it means the caller serves whole-box exactly as it always did.
+    ///
+    /// The returned `LeaseGuard` releases on drop, which is what covers
+    /// `start`'s three in-flight failure exits (see `start`'s doc comment).
+    ///
+    /// **`--who` is the lease↔container binding.** The design doc specifies
+    /// embedding the *container name*, which the runpy path cannot do:
+    /// `run.py` names the container itself and only reveals its id in stdout
+    /// AFTER launch -- long after the lease has to exist. So `who` carries
+    /// the one identifier this backend can know up front and which IS how it
+    /// finds its own container later: the published service port (see
+    /// `stop_serving_containers`'s `docker ps --filter publish=<port>`).
+    /// Format: `tt-station:<service_port>:<model>`. The `tt-station:` prefix
+    /// is what a startup sweep filters gozer's leases on; the port is what
+    /// such a sweep must match against `docker ps`, NOT a container name.
+    fn acquire_lease(&self, model: &str) -> Result<Option<crate::gozer::LeaseGuard<'_>>> {
+        let Some(capability) = &self.gozer else {
+            return Ok(None);
+        };
+
+        let who = format!("tt-station:{}:{}", self.config.service_port, model);
+        let reason = format!("serving {model} via tt-station-agentd");
+        match crate::gozer::acquire(
+            self.runner.as_ref(),
+            capability,
+            crate::gozer::DEFAULT_LEASE_CHIPS,
+            &who,
+            &reason,
+        ) {
+            crate::gozer::Outcome::Granted(grant) => {
+                eprintln!(
+                    "tt-station-agentd: leased {} chip(s) [{}] as lease {} for '{model}'",
+                    grant.chips.len(),
+                    grant.chips.join(", "),
+                    grant.lease_id
+                );
+                Ok(Some(crate::gozer::LeaseGuard::new(
+                    self.runner.as_ref(),
+                    capability.clone(),
+                    grant,
+                )))
+            }
+            crate::gozer::Outcome::Unavailable { holder, .. } => {
+                // `acquire`'s own unavailable payload names nobody, so ask
+                // `gozer status --json` who holds the boards. Deliberately
+                // NO duration: gozer's per-chip status carries `who` but no
+                // `since`, and agentd must not fabricate one (see
+                // `gozer::contention_detail`).
+                let detail = holder
+                    .or_else(|| crate::gozer::contention_detail(self.runner.as_ref(), capability))
+                    .unwrap_or_else(|| "gozer reports no free chips".to_string());
+                Err(anyhow::anyhow!(
+                    "runpy backend: cannot serve '{model}' -- no chips are available: {detail}"
+                ))
+            }
+            crate::gozer::Outcome::Failed(message) => Err(anyhow::anyhow!(
+                "runpy backend: cannot serve '{model}' -- gozer acquire failed: {message}"
+            )),
+        }
+    }
+
+    /// Give back the lease this backend holds on behalf of a running serve,
+    /// if any, and forget it. A no-op (`Ok(())`) when nothing is leased --
+    /// which is both the no-gozer case and the already-released case, so
+    /// `stop`/`reset` stay idempotent.
+    ///
+    /// A REFUSED release (gozer exit 15) propagates: the chips were not
+    /// released and not reset, and the lease stays recorded so a later
+    /// `stop` can try again rather than the id being silently dropped on
+    /// the floor.
+    fn release_lease(&self) -> Result<()> {
+        let held = self.lease.lock().expect("lease mutex poisoned").clone();
+        let (Some(capability), Some(lease_id)) = (&self.gozer, held) else {
+            return Ok(());
+        };
+        crate::gozer::release(self.runner.as_ref(), capability, &lease_id)?;
+        *self.lease.lock().expect("lease mutex poisoned") = None;
+        Ok(())
     }
 
     /// Resolve where `model_spec.json` lives: `config.model_spec_path` if
@@ -596,6 +723,21 @@ impl ServingBackend for RunPyBackend {
         // sets the flag again, see `stop`) will trip the poll-loop abort.
         self.cancel.store(false, Ordering::SeqCst);
 
+        // Lease the chips BEFORE touching anything on the box -- before the
+        // stale-container sweep, before the board reset, before run.py.
+        // Everything below then operates on exactly what gozer granted, and
+        // nothing operates on a neighbour's chips. On a box without gozer
+        // this yields `None` and every path below is unchanged.
+        //
+        // The guard RELEASES ON DROP, which is the point: this function has
+        // three failure exits after this line that `stop()` never sees (a
+        // concurrent `/stop` cancelling the poll loop, the container dying
+        // during startup, the health poll timing out), plus whatever exit
+        // someone adds later. Only the SUCCESS path disarms it, handing the
+        // lease to `self.lease` for `stop` to release -- see the very end of
+        // this function.
+        let lease = self.acquire_lease(model)?;
+
         // Stop any STALE serving container FIRST -- before even the board
         // reset. Validated on real hardware: a leftover/crashed container
         // that's still publishing `service_port` holds the chips, so
@@ -619,10 +761,28 @@ impl ServingBackend for RunPyBackend {
         // certainly fail too (the mesh is still wedged), so surface the
         // error immediately rather than pressing on to a doomed `run.py`
         // invocation.
+        //
+        // WITH A LEASE the reset is SCOPED to the leased BDFs
+        // (`tt-smi -r <bdf>,<bdf>`, the per-ASIC form gozer's own reset.py
+        // uses). The unscoped form below is a WHOLE-BOX reset: harmless with
+        // one tenant, and actively hostile with two -- starting session B
+        // would reset session A's chips mid-run, tt-station itself causing
+        // exactly the collision this integration exists to prevent. Without
+        // a lease the command is byte-for-byte what it always was, because
+        // the wedged-ethernet-core protection above was validated on real
+        // hardware and single-tenant boxes still need it.
         if self.config.reset_before_serve {
-            let reset_cmd_str = self.config.reset_cmd.join(" ");
+            let mut reset_args = self.config.reset_cmd.clone();
+            if let Some(guard) = &lease {
+                // Refuses (rather than falling back to a whole-box reset) if
+                // the grant's chips aren't PCI BDFs -- see
+                // `gozer::Grant::reset_target`. `?` here drops `lease`,
+                // handing the unusable lease straight back.
+                reset_args.push(guard.grant().reset_target()?);
+            }
+            let reset_cmd_str = reset_args.join(" ");
             eprintln!("resetting board before serving: {reset_cmd_str}");
-            let reset_refs: Vec<&str> = self.config.reset_cmd.iter().map(String::as_str).collect();
+            let reset_refs: Vec<&str> = reset_args.iter().map(String::as_str).collect();
             self.runner
                 .run(&reset_refs)
                 .with_context(|| format!("board reset ({reset_cmd_str}) failed"))?;
@@ -703,7 +863,50 @@ impl ServingBackend for RunPyBackend {
             args.push("--engine".to_string());
             args.push(engine.clone());
         }
-        if let Some(ids) = self.config.device_id.as_ref().filter(|ids| !ids.is_empty()) {
+        // `--device-id` is the ONLY device selector this backend controls on
+        // the run.py path (run.py builds the `docker run` itself, so
+        // `--device` is unreachable from here). With a lease it must name
+        // the granted devices and nothing else -- a configured `device_id`
+        // is deliberately OVERRIDDEN, since it could name chips gozer just
+        // handed to somebody else.
+        //
+        // !!! UNVERIFIED ASSUMPTION, DELIBERATELY CARRIED !!!
+        // gozer's `dev_indices` are `/dev/tenstorrent/<n>` numbering.
+        // run.py's `--device-id` takes a "logical index list". `tt-smi`
+        // treats *UMD logical id* and `/dev/tenstorrent/<id>` as DIFFERENT
+        // namespaces (`tt_smi/device_input.py`), and nothing in run.py's or
+        // gozer's source establishes which one `--device-id` means. This
+        // line assumes they match, because settling it requires launching a
+        // real serve on a box with live hardware and checking which
+        // `/dev/tenstorrent/N` the container actually opens.
+        // IF THE ASSUMPTION IS WRONG: the container is pinned to ANOTHER
+        // TENANT'S CHIPS, the serve comes up healthy, and nothing detects
+        // it -- not gozer (its lease looks satisfied), not tt-station, not
+        // the neighbour, until their workload corrupts or hangs. Treat the
+        // mapping as unverified until someone runs that single-chip serve.
+        // Pinned by tests/runpy.rs's
+        // `runpy_start_device_id_comes_from_grant_dev_indices`.
+        let device_id: Option<String> = match &lease {
+            Some(guard) => Some(
+                guard
+                    .grant()
+                    .dev_indices
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            None => self.config.device_id.clone(),
+        };
+        if lease.is_some() {
+            if let Some(configured) = self.config.device_id.as_deref() {
+                eprintln!(
+                    "tt-station-agentd: ignoring configured --device-id {configured} in favour \
+                     of the leased devices"
+                );
+            }
+        }
+        if let Some(ids) = device_id.as_ref().filter(|ids| !ids.is_empty()) {
             args.push("--device-id".to_string());
             args.push(ids.clone());
         }
@@ -909,6 +1112,46 @@ impl ServingBackend for RunPyBackend {
         *self.status.lock().expect("status mutex poisoned") =
             ServingStatus::Serving(served_model.clone());
 
+        // The serve is up, so the lease must OUTLIVE this call: disarm the
+        // guard (it would otherwise release on the way out of this function,
+        // resetting the chips underneath the model that just came up) and
+        // hand the id to the backend, where `stop`/`reset` release it. This
+        // is the ONLY exit from `start` that doesn't release.
+        if let Some(guard) = lease {
+            let mut held = self.lease.lock().expect("lease mutex poisoned");
+            if let Some(previous) = held.as_deref() {
+                // Nothing should be able to reach here holding a lease --
+                // `stop` clears it and every failing `start` releases -- but
+                // silently overwriting one would strand chips until the
+                // agent exits, so say so.
+                eprintln!(
+                    "tt-station-agentd: WARNING: replacing still-held lease '{previous}' -- it \
+                     will not be released until this agent exits; check `gozer status`"
+                );
+            }
+            *held = Some(guard.into_lease_id());
+            drop(held);
+
+            // Narrow race, closed here: a `/stop` can land between the
+            // status flip above and the handover, read `self.lease` as
+            // `None`, release nothing, and leave the lease stranded once
+            // this line stores it. `start` CLEARS the cancel flag at entry,
+            // so a flag set now means a `/stop` did arrive during this
+            // bring-up -- and it has already stopped the container -- so the
+            // lease must go straight back. Best-effort: this path is
+            // reporting a successful serve that something else just killed,
+            // and a failed release is a log line, not a reason to turn that
+            // into an error.
+            if self.cancel.load(Ordering::SeqCst) {
+                if let Err(err) = self.release_lease() {
+                    eprintln!(
+                        "tt-station-agentd: releasing the lease of a serve that a concurrent \
+                         stop raced failed: {err:#}"
+                    );
+                }
+            }
+        }
+
         Ok(Endpoint {
             base_url: format!(
                 "http://{}:{}/v1",
@@ -932,7 +1175,23 @@ impl ServingBackend for RunPyBackend {
         self.cancel.store(true, Ordering::SeqCst);
         self.stop_serving_containers()?;
         *self.status.lock().expect("status mutex poisoned") = ServingStatus::Idle;
-        Ok(())
+
+        // Release LAST, after the container is actually stopped: gozer
+        // resets the released chips as part of the release, and resetting
+        // them under a still-running container would be the very hazard
+        // this integration is about. (This is also why `POST /stop` needs no
+        // separate reset: the release does it.)
+        //
+        // A refused release (gozer exit 15) fails the stop rather than being
+        // swallowed -- the chips were NOT handed back, and a caller told
+        // "stopped" would believe they were. Note the container IS already
+        // stopped at that point, and the lease stays recorded so a repeated
+        // `/stop` retries the release.
+        //
+        // NOTE: this also covers the power path (`routes.rs`'s
+        // `run_power_command` best-effort stop before suspend/reboot/
+        // shutdown), which goes through this exact method.
+        self.release_lease()
     }
 
     /// Return the box to a fresh state (`POST /reset`): stop any serving
@@ -967,6 +1226,22 @@ impl ServingBackend for RunPyBackend {
                     "board reset ({reset_cmd_str}) failed during reset: {err:#} -- continuing"
                 );
             }
+        }
+
+        // Hand back any lease this backend still holds. Best-effort and
+        // non-fatal, matching the board reset immediately above: `/reset`'s
+        // job is to leave the box clean, and a release that gozer refuses
+        // must not stop it from clearing serving state. Logged, and the
+        // lease stays recorded so a later `/stop` retries.
+        //
+        // NOTE the board reset above is still the WHOLE-BOX `reset_cmd`,
+        // unlike `start`'s (now lease-scoped) one. `/reset` is an explicit
+        // operator "return this box to a fresh state" action that also
+        // unpairs, so its blast radius is unchanged here deliberately;
+        // scoping it is a separate decision, not a side effect of this
+        // change.
+        if let Err(err) = self.release_lease() {
+            eprintln!("releasing chip lease during reset failed: {err:#} -- continuing");
         }
 
         *self.status.lock().expect("status mutex poisoned") = ServingStatus::Idle;

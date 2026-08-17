@@ -155,3 +155,68 @@ fn malformed_json_on_exit_zero_yields_failed_not_panic() {
         other => panic!("expected Outcome::Failed, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------
+// `Grant::reset_target` -- the argv value for a lease-scoped `tt-smi -r`.
+// This is the one place a wrong answer resets hardware someone else is
+// using, so it fails closed in every case it isn't certain about.
+// ---------------------------------------------------------------------
+
+/// Helper: a grant over `chips`, with the other fields irrelevant here.
+fn grant_over(chips: &[&str]) -> Grant {
+    Grant {
+        lease_id: "lease-abc123".to_string(),
+        chips: chips.iter().map(|c| c.to_string()).collect(),
+        dev_indices: vec![0],
+        units: vec![],
+        expanded: false,
+    }
+}
+
+/// The happy path: BDFs comma-joined into ONE argv value, exactly the form
+/// gozer's own `reset.py` builds (`[exe, "-r", ",".join(bdfs)]`).
+#[test]
+fn reset_target_joins_bdfs_with_commas() {
+    let grant = grant_over(&["0000:01:00.0", "0000:02:00.0"]);
+    assert_eq!(
+        grant.reset_target().expect("BDFs should be accepted"),
+        "0000:01:00.0,0000:02:00.0"
+    );
+}
+
+/// A non-BDF chip id must be REFUSED, not passed through: `tt-smi -r` would
+/// read a bare integer as a UMD logical id -- a different namespace -- and
+/// could reset a device nobody leased.
+#[test]
+fn reset_target_refuses_anything_that_is_not_a_bdf() {
+    for chips in [
+        vec!["0"],                 // a bare index
+        vec!["0000:01:00.0", "1"], // one good, one not
+        vec!["0000:01:00"],        // no function
+        vec!["00:01:00.0"],        // short domain
+        vec!["0000:01:00.8"],      // function out of range (0-7)
+        vec!["0000:zz:00.0"],      // not hex
+    ] {
+        let err = grant_over(&chips)
+            .reset_target()
+            .expect_err(&format!("{chips:?} must be refused"));
+        assert!(
+            err.to_string().contains("not a PCI BDF"),
+            "the error should say why: {err}"
+        );
+    }
+}
+
+/// An EMPTY grant must be refused too -- `tt-smi -r` with no target is a
+/// whole-box reset, so degrading to it would be the worst possible reading
+/// of "reset only what I leased".
+#[test]
+fn reset_target_refuses_an_empty_grant() {
+    let err = grant_over(&[])
+        .reset_target()
+        .expect_err("an empty grant must be refused");
+    assert!(
+        err.to_string().contains("WHOLE BOX"),
+        "the error should name the hazard it is avoiding: {err}"
+    );
+}

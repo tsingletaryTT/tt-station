@@ -1290,6 +1290,489 @@ fn stop_sets_cancel_flag() {
 }
 
 // ---------------------------------------------------------------------
+// gozer leasing: `start` takes a chip lease before it touches any chips,
+// pins run.py to the granted devices, scopes the pre-serve reset to the
+// leased BDFs, and releases on EVERY exit. With no gozer capability
+// attached (the default), every one of those paths must behave exactly as
+// it did before leasing existed. See
+// `docs/superpowers/specs/2026-08-16-gozer-integration-design.md`.
+// ---------------------------------------------------------------------
+
+/// A `gozer acquire --json` grant payload, shaped exactly like gozer's own
+/// `cmd_acquire` emits it: two chips of one expanded board, with BDFs in
+/// `chips` and the (assumed) run.py device indices in `dev_indices`.
+const GRANT_JSON: &str = r#"{"granted":true,"lease_id":"lease-abc123",
+    "units":["0100014311601055"],
+    "chips":["0000:01:00.0","0000:02:00.0"],
+    "dev_indices":[2,3],
+    "expanded":true,"requested":1,"neighbours":[],"owner_pid":4242}"#;
+
+/// A `gozer status --json` payload with one board fully CLAIMED by another
+/// tenant -- what agentd cross-references to name the holder when `acquire`
+/// comes back unavailable (that payload names nobody itself). NOTE: gozer's
+/// per-chip status records carry `who` but no `since`, so a holder can be
+/// named and a duration CANNOT.
+const STATUS_JSON_HELD: &str = r#"{"grain":"board","chips":[
+    {"dev_index":0,"bdf":"0000:01:00.0","board":"0100014311601055","card":"p300",
+     "state":"CLAIMED","who":"claude:ttm-optimize","pid":9001,
+     "reason":"bringup","pids_holding":[9001],"overstayed":false},
+    {"dev_index":1,"bdf":"0000:02:00.0","board":"0100014311601055","card":"p300",
+     "state":"CLAIMED","who":"claude:ttm-optimize","pid":9001,
+     "reason":"bringup","pids_holding":[9001],"overstayed":false}],
+    "queue":[]}"#;
+
+/// The capability a successful startup probe would have produced (see
+/// `gozer::probe`). Tests hand this to `RunPyBackend::with_gozer` directly
+/// -- the probe itself is Task 1's territory and is covered in
+/// `tests/gozer.rs`.
+fn gozer_capability() -> tt_station_agentd::gozer::Capability {
+    tt_station_agentd::gozer::Capability {
+        path: "gozer".to_string(),
+        version: "gozer 0.1.0".to_string(),
+    }
+}
+
+/// A `FakeRunner` whose `gozer` verbs all answer successfully: `acquire`
+/// grants `GRANT_JSON`, `release` reports released. NOTHING here spawns a
+/// real gozer -- the whole point of the `CommandRunner` seam.
+fn leasing_runner(health_calls_before_ok: u32) -> FakeRunner {
+    let runner = FakeRunner::new(health_calls_before_ok);
+    runner.set_run_capturing("gozer acquire", 0, GRANT_JSON, "");
+    runner.set_run_capturing(
+        "gozer release",
+        0,
+        r#"{"released":true,"message":"released lease-abc123"}"#,
+        "",
+    );
+    runner
+}
+
+/// Find the `gozer <verb> ...` invocation among `commands`.
+fn find_gozer_cmd<'a>(commands: &'a [Vec<String>], verb: &str) -> Option<&'a Vec<String>> {
+    commands.iter().find(|cmd| {
+        cmd.first().map(String::as_str) == Some("gozer")
+            && cmd.get(1).map(String::as_str) == Some(verb)
+    })
+}
+
+/// Position of the first `gozer <verb>` invocation among `commands`.
+fn gozer_index(commands: &[Vec<String>], verb: &str) -> Option<usize> {
+    commands.iter().position(|cmd| {
+        cmd.first().map(String::as_str) == Some("gozer")
+            && cmd.get(1).map(String::as_str) == Some(verb)
+    })
+}
+
+/// TEST 1: with leasing available, `start` must `gozer acquire` BEFORE it
+/// touches any chips -- before the stale-container sweep, before the board
+/// reset, and before run.py -- and must pass `--owner-pid <this pid>`.
+///
+/// `--owner-pid` is load-bearing, not cosmetic: agentd's serving containers
+/// run as root, so gozer (running unprivileged) can never see their fds and
+/// would reap a detached lease ~15 minutes into a perfectly healthy serve.
+/// Tying the lease to agentd's own pid is what stops that.
+#[test]
+fn runpy_start_acquires_lease_before_reset_and_launch() {
+    let runner = leasing_runner(0);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend
+        .start("Qwen/Qwen3-32B")
+        .expect("start should succeed");
+
+    let commands = runner.commands();
+    let acquire = find_gozer_cmd(&commands, "acquire")
+        .unwrap_or_else(|| panic!("expected a gozer acquire invocation: {commands:?}"));
+
+    let pid = std::process::id().to_string();
+    assert!(
+        acquire
+            .windows(2)
+            .any(|w| w[0] == "--owner-pid" && w[1] == pid),
+        "acquire must pass --owner-pid <agentd's own pid>, or gozer reaps the \
+         lease out from under a live serve: {acquire:?}"
+    );
+    assert!(
+        acquire.iter().any(|a| a == "--json"),
+        "acquire must ask for the machine-readable payload: {acquire:?}"
+    );
+    let who = acquire
+        .windows(2)
+        .find(|w| w[0] == "--who")
+        .map(|w| w[1].clone())
+        .expect("acquire must identify the lease holder with --who");
+    assert!(
+        who.starts_with("tt-station:"),
+        "--who must carry the tt-station: prefix the startup sweep filters on: {who}"
+    );
+
+    let acquire_index = gozer_index(&commands, "acquire").expect("acquire recorded");
+    let reset_index = commands
+        .iter()
+        .position(|cmd| cmd.first().map(String::as_str) == Some("tt-smi"))
+        .expect("expected a tt-smi reset among the recorded commands");
+    let runpy_index = commands
+        .iter()
+        .position(|cmd| cmd.first().map(String::as_str) == Some("python3"))
+        .expect("expected a python3 run.py invocation");
+    assert_eq!(
+        acquire_index, 0,
+        "acquire must be the FIRST thing start does -- everything after it \
+         touches chips: {commands:?}"
+    );
+    assert!(
+        acquire_index < reset_index && reset_index < runpy_index,
+        "order must be acquire ({acquire_index}) -> reset ({reset_index}) -> \
+         run.py ({runpy_index}): {commands:?}"
+    );
+}
+
+/// TEST 2: `--device-id` must carry the GRANT's `dev_indices`, comma-joined
+/// -- not the configured value, which could name another tenant's chips.
+///
+/// This test also PINS an unverified assumption, deliberately: gozer's
+/// `dev_index` is `/dev/tenstorrent/<n>` numbering, and `tt-smi` treats that
+/// as a DIFFERENT namespace from the UMD logical id. Whether run.py's
+/// `--device-id` means one or the other is not established by reading either
+/// codebase, and settling it needs a real serve on real hardware. If the
+/// namespaces differ, the container serves happily on someone else's chips
+/// and nothing detects it. This assertion exists so that a future change to
+/// the mapping fails loudly here rather than drifting silently.
+#[test]
+fn runpy_start_device_id_comes_from_grant_dev_indices() {
+    let runner = leasing_runner(0);
+    let mut cfg = config("127.0.0.1", 8080);
+    // A configured device-id that must LOSE to the grant.
+    cfg.device_id = Some("0,1".to_string());
+    let backend =
+        RunPyBackend::new(cfg, Box::new(runner.clone())).with_gozer(Some(gozer_capability()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        cmd.windows(2)
+            .any(|w| w[0] == "--device-id" && w[1] == "2,3"),
+        "argv must carry --device-id from the grant's dev_indices (2,3), not \
+         the configured 0,1: {cmd:?}"
+    );
+    assert!(
+        !cmd.iter().any(|a| a == "0,1"),
+        "the configured device-id must not survive alongside the grant: {cmd:?}"
+    );
+}
+
+/// TEST 3: THE DANGEROUS ONE. The pre-serve reset must target ONLY the
+/// leased BDFs (`tt-smi -r <bdf>,<bdf>`, the per-ASIC form gozer's own
+/// reset.py uses) and must never be the bare whole-box `tt-smi -r` -- that
+/// resets a concurrent tenant's chips mid-run, which is precisely the
+/// collision this integration exists to prevent.
+#[test]
+fn runpy_start_reset_targets_only_leased_bdfs() {
+    let runner = leasing_runner(0);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    let reset = commands
+        .iter()
+        .find(|cmd| {
+            cmd.first().map(String::as_str) == Some("tt-smi")
+                && cmd.get(1).map(String::as_str) == Some("-r")
+        })
+        .unwrap_or_else(|| panic!("expected a tt-smi -r reset: {commands:?}"));
+    assert_eq!(
+        reset,
+        &vec![
+            "tt-smi".to_string(),
+            "-r".to_string(),
+            "0000:01:00.0,0000:02:00.0".to_string()
+        ],
+        "a leased reset must name the leased BDFs, comma-joined: {reset:?}"
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-r".to_string()]),
+        "a bare whole-box `tt-smi -r` must NEVER be issued while a lease is \
+         held -- it would reset another tenant's chips: {commands:?}"
+    );
+}
+
+/// TEST 4: with NO gozer capability (the default, and what a box without
+/// gozer installed gets), the argv must be byte-identical to today: a
+/// whole-box `tt-smi -r`, `--device-id` from config, and not a single
+/// `gozer` subprocess. The pre-existing tests at `tests/runpy.rs`'s
+/// `runpy_start_includes_device_id_when_configured` and
+/// `runpy_start_resets_board_before_launching_runpy_by_default` assert the
+/// same two facts and must keep passing untouched; this one states the
+/// combined no-leasing contract in one place.
+#[test]
+fn runpy_start_without_gozer_is_unchanged() {
+    let runner = FakeRunner::new(0);
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.device_id = Some("0,1".to_string());
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("gozer")),
+        "no gozer capability means no gozer subprocess, ever: {commands:?}"
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-r".to_string()]),
+        "without a lease the reset stays the whole-box `tt-smi -r` that clears \
+         wedged ethernet cores on a single-tenant box: {commands:?}"
+    );
+    let cmd = find_runpy_cmd(&commands);
+    assert!(
+        cmd.windows(2)
+            .any(|w| w[0] == "--device-id" && w[1] == "0,1"),
+        "without a lease --device-id comes from config, unchanged: {cmd:?}"
+    );
+}
+
+/// TEST 5: when `acquire` reports the chips unavailable (exit 12), `start`
+/// must fail WITHOUT launching run.py and WITHOUT resetting anything, and
+/// the error must name the holder -- which acquire's own payload does NOT
+/// carry (`{"granted":false,"queued":false}`), so agentd cross-references
+/// `gozer status --json`. It must NOT claim a duration: gozer's per-chip
+/// status has `who` but no `since`.
+#[test]
+fn runpy_start_fails_without_touching_chips_when_unavailable() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing(
+        "gozer acquire",
+        12,
+        r#"{"granted":false,"queued":false}"#,
+        "",
+    );
+    runner.set_run_capturing("gozer status", 0, STATUS_JSON_HELD, "");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    let err = backend
+        .start("llama3")
+        .expect_err("start must fail when no chips are free");
+    assert!(
+        err.to_string().contains("claude:ttm-optimize"),
+        "the error must name the holder gozer status reports: {err}"
+    );
+
+    let commands = runner.commands();
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("python3")),
+        "run.py must never launch when the chips weren't granted: {commands:?}"
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("tt-smi")),
+        "nothing may be reset when the chips weren't granted -- they belong to \
+         someone else: {commands:?}"
+    );
+    assert!(
+        find_gozer_cmd(&commands, "release").is_none(),
+        "there is no lease to release when acquire refused: {commands:?}"
+    );
+}
+
+/// TEST 6a: a lease taken at the top of `start` must be released when a
+/// concurrent `/stop` cancels the in-flight bring-up (`runpy.rs`'s poll-loop
+/// cancel branch) -- one of three failure exits `stop()` never sees.
+#[test]
+fn runpy_start_releases_lease_when_cancelled_in_flight() {
+    let runner = leasing_runner(u32::MAX); // never healthy
+    let backend = std::sync::Arc::new(
+        RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+            .with_gozer(Some(gozer_capability()))
+            .with_health_poll(2_000, Duration::from_millis(1)),
+    );
+
+    let backend_stopper = std::sync::Arc::clone(&backend);
+    let runner_probe = runner.clone();
+    let stopper = std::thread::spawn(move || {
+        while runner_probe.health_calls() == 0 {
+            std::thread::yield_now();
+        }
+        backend_stopper.stop("").expect("stop should succeed");
+    });
+
+    backend
+        .start("llama3")
+        .expect_err("start must abort once /stop trips the cancel flag");
+    stopper.join().expect("stopper thread panicked");
+
+    let commands = runner.commands();
+    let release = find_gozer_cmd(&commands, "release")
+        .unwrap_or_else(|| panic!("a cancelled start must release its lease: {commands:?}"));
+    assert!(
+        release.iter().any(|a| a == "lease-abc123"),
+        "release must name the granted lease id: {release:?}"
+    );
+}
+
+/// TEST 6b: the lease must be released when the container run.py launched
+/// dies during startup (the poll loop's liveness-probe bail).
+#[test]
+fn runpy_start_releases_lease_when_container_dies() {
+    let runner = leasing_runner(u32::MAX);
+    runner.set_run_output("run.py", "INFO: Created Docker container ID: deadbeef\n");
+    runner.set_run_output("docker inspect", "false\n");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()))
+        .with_health_poll(2_000, Duration::from_millis(1));
+
+    backend
+        .start("llama3")
+        .expect_err("start must fail when the container dies during startup");
+
+    let commands = runner.commands();
+    assert!(
+        find_gozer_cmd(&commands, "release").is_some_and(|c| c.iter().any(|a| a == "lease-abc123")),
+        "a dead container must not strand the lease: {commands:?}"
+    );
+}
+
+/// TEST 6c: the lease must be released when the health poll times out
+/// without the model ever becoming queryable.
+#[test]
+fn runpy_start_releases_lease_when_health_poll_times_out() {
+    let runner = leasing_runner(0);
+    runner.set_http_get(r#"{"data":[]}"#); // up, but never lists a model
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()))
+        .with_health_poll(3, Duration::from_millis(1));
+
+    backend
+        .start("llama3")
+        .expect_err("start must fail when the model never becomes queryable");
+
+    let commands = runner.commands();
+    assert!(
+        find_gozer_cmd(&commands, "release").is_some_and(|c| c.iter().any(|a| a == "lease-abc123")),
+        "a timed-out bring-up must not strand the lease: {commands:?}"
+    );
+}
+
+/// TEST 7: `stop` releases the lease a SUCCESSFUL `start` handed to the
+/// backend -- and does it AFTER stopping the container, since gozer's
+/// release resets those chips. A second `stop` must not re-release (there's
+/// nothing left to release, and the lease id may since have been handed to
+/// another tenant).
+#[test]
+fn runpy_stop_releases_the_lease() {
+    let runner = leasing_runner(0);
+    runner.set_run_output("docker ps", "abc123\n");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    backend.start("llama3").expect("start should succeed");
+    assert!(
+        find_gozer_cmd(&runner.commands(), "release").is_none(),
+        "a HEALTHY serve must keep its lease -- the guard must be disarmed, \
+         not dropped armed: {:?}",
+        runner.commands()
+    );
+
+    backend.stop("llama3").expect("stop should succeed");
+
+    let commands = runner.commands();
+    let release_index = gozer_index(&commands, "release")
+        .unwrap_or_else(|| panic!("stop must release the lease: {commands:?}"));
+    assert!(
+        commands[release_index].iter().any(|a| a == "lease-abc123"),
+        "release must name the held lease id: {:?}",
+        commands[release_index]
+    );
+    let docker_stop_index = commands
+        .iter()
+        .enumerate()
+        .filter(|(_, cmd)| {
+            cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")
+        })
+        .map(|(i, _)| i)
+        .next_back()
+        .expect("stop should docker stop the serving container");
+    assert!(
+        docker_stop_index < release_index,
+        "the container must be stopped ({docker_stop_index}) BEFORE the lease \
+         is released ({release_index}) -- release resets those chips: {commands:?}"
+    );
+
+    // Idempotent: a second stop has no lease left to release.
+    backend.stop("llama3").expect("second stop should succeed");
+    let releases = runner
+        .commands()
+        .iter()
+        .filter(|cmd| {
+            cmd.first().map(String::as_str) == Some("gozer")
+                && cmd.get(1).map(String::as_str) == Some("release")
+        })
+        .count();
+    assert_eq!(
+        releases,
+        1,
+        "a second stop must not re-release a lease that may already belong to \
+         another tenant: {:?}",
+        runner.commands()
+    );
+}
+
+/// A grant whose `chips` are not PCI BDFs must NEVER reach `tt-smi -r`:
+/// tt-smi would read a bare integer as a UMD logical id -- a different
+/// namespace -- and reset a device nobody leased. gozer's own reset.py
+/// guards the same way ("gozer resets by BDF only, never by index"). `start`
+/// must fail instead, and the guard must give the lease straight back.
+#[test]
+fn runpy_start_refuses_to_reset_a_non_bdf_grant() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_capturing(
+        "gozer acquire",
+        0,
+        r#"{"granted":true,"lease_id":"lease-abc123","units":[],"chips":["0","1"],
+            "dev_indices":[0,1],"expanded":false}"#,
+        "",
+    );
+    runner.set_run_capturing("gozer release", 0, r#"{"released":true}"#, "");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()));
+
+    let err = backend
+        .start("llama3")
+        .expect_err("start must refuse to reset by anything but a BDF");
+    assert!(
+        err.to_string().contains("BDF"),
+        "the error should say why the reset was refused: {err}"
+    );
+
+    let commands = runner.commands();
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.first().map(String::as_str) == Some("tt-smi")),
+        "no reset may be attempted with a non-BDF target: {commands:?}"
+    );
+    assert!(
+        find_gozer_cmd(&commands, "release").is_some(),
+        "the unusable lease must be handed straight back: {commands:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
 // `list_models`: enumerate model_spec.json's catalog.
 // ---------------------------------------------------------------------
 
