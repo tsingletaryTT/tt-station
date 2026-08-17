@@ -20,8 +20,8 @@
 use std::time::Duration;
 
 use libttstation::model::ServingStatus;
-use tt_station_agentd::serving::ServingBackend;
 use tt_station_agentd::serving::runpy::{RunPyBackend, RunPyConfig, tool_call_parser_for};
+use tt_station_agentd::serving::ServingBackend;
 
 mod support;
 use support::{FakeRunner, TempModelSpec};
@@ -1526,25 +1526,48 @@ fn runpy_start_without_gozer_is_unchanged() {
 
     backend.start("llama3").expect("start should succeed");
 
+    // A WHOLE-VECTOR PIN, not a set of `contains` checks. This test is the
+    // guard protecting existing users from an argv regression, and three
+    // presence assertions are weaker than they read: they pass just as well
+    // when leasing has inserted a flag, dropped one, or reordered the
+    // sequence around them. Assert every command, in order, byte for byte.
     let commands = runner.commands();
-    assert!(
-        !commands
-            .iter()
-            .any(|cmd| cmd.first().map(String::as_str) == Some("gozer")),
-        "no gozer capability means no gozer subprocess, ever: {commands:?}"
-    );
-    assert!(
-        commands
-            .iter()
-            .any(|cmd| cmd == &vec!["tt-smi".to_string(), "-r".to_string()]),
-        "without a lease the reset stays the whole-box `tt-smi -r` that clears \
-         wedged ethernet cores on a single-tenant box: {commands:?}"
-    );
-    let cmd = find_runpy_cmd(&commands);
-    assert!(
-        cmd.windows(2)
-            .any(|w| w[0] == "--device-id" && w[1] == "0,1"),
-        "without a lease --device-id comes from config, unchanged: {cmd:?}"
+    let expected: Vec<Vec<String>> = vec![
+        // The stale-container sweep start does before anything else.
+        vec!["docker", "ps", "--filter", "publish=8080", "-q"],
+        // The whole-box reset that clears wedged ethernet cores on a
+        // single-tenant box -- bare, with no BDF targets, exactly as before
+        // leasing existed.
+        vec!["tt-smi", "-r"],
+        // `--tt-device` auto-resolution (the FakeRunner returns no snapshot,
+        // so nothing is resolved and no `--tt-device` flag is emitted below).
+        vec!["tt-smi", "-s"],
+        vec![
+            "python3",
+            "run.py",
+            "--model",
+            "llama3",
+            "--workflow",
+            "server",
+            "--docker-server",
+            "--service-port",
+            "8080",
+            "--no-auth",
+            "--host-hf-cache",
+            "~/.cache/huggingface",
+            // Straight from config, NOT from a grant.
+            "--device-id",
+            "0,1",
+        ],
+    ]
+    .into_iter()
+    .map(|cmd| cmd.into_iter().map(str::to_string).collect())
+    .collect();
+
+    assert_eq!(
+        commands, expected,
+        "the unleased command sequence must not change at all -- no gozer \
+         subprocess, a bare whole-box `tt-smi -r`, and `--device-id` from config"
     );
 }
 
@@ -1869,8 +1892,8 @@ fn runpy_start_stops_by_port_when_timing_out_without_a_container_id() {
 #[test]
 fn runpy_start_stops_by_port_when_cancelled_without_a_container_id() {
     let runner = leasing_runner(u32::MAX); // never healthy
-    // run.py prints NOTHING parseable -- no container id captured -- but a
-    // container IS publishing the serving port.
+                                           // run.py prints NOTHING parseable -- no container id captured -- but a
+                                           // container IS publishing the serving port.
     runner.set_run_output("docker ps", "orphan99\n");
     let backend = std::sync::Arc::new(
         RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))

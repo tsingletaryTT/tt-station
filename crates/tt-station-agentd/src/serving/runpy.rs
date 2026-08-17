@@ -554,17 +554,41 @@ impl RunPyBackend {
     /// which is both the no-gozer case and the already-released case, so
     /// `stop`/`reset` stay idempotent.
     ///
-    /// A REFUSED release (gozer exit 15) propagates: the chips were not
-    /// released and not reset, and the lease stays recorded so a later
-    /// `stop` can try again rather than the id being silently dropped on
-    /// the floor.
+    /// **`take()`, not read-then-clear.** Two concurrent `stop`s (a client
+    /// retrying after a timeout, `/stop` racing the power path's best-effort
+    /// stop, or `/reset` racing `/stop` -- all three reach this) would both
+    /// observe the same `Some(id)` if this cloned the id out and released
+    /// outside the lock. gozer's exit 13 ("no such lease") makes the loser
+    /// harmless only while the id is still unique -- and gozer reuses lease
+    /// ids, so the loser's release can land on somebody else's lease,
+    /// resetting THEIR chips. Taking the id out under a single lock means
+    /// exactly one caller can ever hold it.
+    ///
+    /// A REFUSED release (gozer exit 15) propagates AND puts the lease back:
+    /// the chips were not released and not reset, so a later `stop` must be
+    /// able to try again rather than the id being silently dropped on the
+    /// floor. It goes back only if the slot is still empty -- a `start` that
+    /// stored a fresh lease while this release was in flight owns the slot
+    /// now, and overwriting it would strand the newer lease.
     fn release_lease(&self) -> Result<()> {
-        let held = self.lease.lock().expect("lease mutex poisoned").clone();
-        let (Some(capability), Some(lease_id)) = (&self.gozer, held) else {
+        let Some(capability) = &self.gozer else {
             return Ok(());
         };
-        crate::gozer::release(self.runner.as_ref(), capability, &lease_id)?;
-        *self.lease.lock().expect("lease mutex poisoned") = None;
+        let Some(lease_id) = self.lease.lock().expect("lease mutex poisoned").take() else {
+            return Ok(());
+        };
+        if let Err(err) = crate::gozer::release(self.runner.as_ref(), capability, &lease_id) {
+            let mut slot = self.lease.lock().expect("lease mutex poisoned");
+            match slot.as_deref() {
+                None => *slot = Some(lease_id),
+                Some(newer) => eprintln!(
+                    "tt-station-agentd: lease '{lease_id}' was refused release and a newer lease \
+                     '{newer}' has since been recorded; the refused lease is NOT retried and \
+                     must be cleaned up by hand -- check `gozer status`"
+                ),
+            }
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -693,32 +717,19 @@ impl RunPyBackend {
                 grant.lease_id
             )
         })?;
-        let board_types = crate::device::board_types(&snapshot).unwrap_or_default();
-        let Some(board_type) = board_types.first() else {
-            return Err(anyhow::anyhow!(
-                "cannot derive --tt-device for lease '{}': `tt-smi -s` reported no boards",
-                grant.lease_id
-            ));
-        };
-        if !board_types.windows(2).all(|pair| pair[0] == pair[1]) {
-            return Err(anyhow::anyhow!(
-                "cannot derive --tt-device for lease '{}': this box has a mixed fleet \
-                 ({board_types:?}), so a chip count doesn't identify a mesh",
-                grant.lease_id
-            ));
-        }
-
-        let granted = grant.chips.len();
-        crate::device::mesh_for(board_type, granted)
-            .map(str::to_string)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "cannot derive --tt-device for lease '{}': no known mesh for {granted}x \
-                     {board_type}; refusing to serve rather than name a mesh wider than the \
-                     lease",
-                    grant.lease_id
-                )
-            })
+        // The snapshot parsing, the mixed-fleet check, the table lookup and
+        // the fail-closed policy all live in `device::leased_mesh` --
+        // `DockerBackend::leased_tt_device` needs the identical derivation
+        // (its `--tt-device` reaches the same tt-inference-server CLI), and
+        // two copies of a "refuse rather than widen the mesh" rule is one
+        // copy too many.
+        //
+        // The shared helper's message is backend-neutral ("a device mesh"),
+        // so each caller adds the SELECTOR it was deriving -- an operator
+        // reading a failed serve needs to know it was `--tt-device` that
+        // could not be resolved, not merely that some mesh could not be.
+        crate::device::leased_mesh(&snapshot, grant.chips.len(), &grant.lease_id)
+            .with_context(|| format!("cannot derive --tt-device for lease '{}'", grant.lease_id))
     }
 
     /// Resolve the `--override-docker-image` value: `config.image` if the
@@ -1659,18 +1670,16 @@ mod runpy_artifact_tests {
 2026-07-07 13:52:50 - run.py:731 - INFO: This log file is saved on local machine at: /home/ttuser/code/tt-inference-server/workflow_logs/run_logs/run_x.log";
         let a = parse_run_artifacts(out);
         assert_eq!(a.container_id.as_deref(), Some("5d2dd4b5c9d9"));
-        assert!(
-            a.container_log
-                .as_deref()
-                .unwrap()
-                .ends_with("docker_server/vllm_x.log")
-        );
-        assert!(
-            a.run_log
-                .as_deref()
-                .unwrap()
-                .ends_with("run_logs/run_x.log")
-        );
+        assert!(a
+            .container_log
+            .as_deref()
+            .unwrap()
+            .ends_with("docker_server/vllm_x.log"));
+        assert!(a
+            .run_log
+            .as_deref()
+            .unwrap()
+            .ends_with("run_logs/run_x.log"));
     }
 
     #[test]

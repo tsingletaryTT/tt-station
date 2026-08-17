@@ -371,6 +371,19 @@ const STATUS_JSON_HELD: &str = r#"{"grain":"board","chips":[
      "reason":"bringup","pids_holding":[9001],"overstayed":false}],
     "queue":[]}"#;
 
+/// `tt-smi -s` JSON fixture for THIS box: 4x `p300c` boards (one BDF per
+/// ASIC, two per physical p300 card), verified on real hardware to map to
+/// `p300x2`. Two of them -- what `GRANT_JSON` grants -- is one board,
+/// `p300`. Same fixture `tests/runpy.rs` uses.
+const TT_SMI_FOUR_P300C: &str = r#"{
+    "device_info": [
+        {"board_info": {"board_type": "p300c"}},
+        {"board_info": {"board_type": "p300c"}},
+        {"board_info": {"board_type": "p300c"}},
+        {"board_info": {"board_type": "p300c"}}
+    ]
+}"#;
+
 /// The capability a successful startup probe would have produced (see
 /// `gozer::probe`). Handed to `DockerBackend::with_gozer` directly -- the
 /// probe itself is covered in `tests/gozer.rs`, and the PRODUCTION wiring
@@ -389,6 +402,11 @@ fn gozer_capability() -> tt_station_agentd::gozer::Capability {
 /// real gozer -- the whole point of the `CommandRunner` seam.
 fn leasing_runner(health_calls_before_ok: u32) -> FakeRunner {
     let runner = FakeRunner::new(health_calls_before_ok);
+    // A leased serve DERIVES `--tt-device` from the grant against this box's
+    // real four-`p300c` snapshot, and fails closed without it (see
+    // `leased_tt_device`). The 2-chip `GRANT_JSON` against a 4-chip box
+    // therefore yields `p300` -- one board.
+    runner.set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
     runner.set_run_capturing("gozer acquire", 0, GRANT_JSON, "");
     runner.set_run_capturing(
         "gozer release",
@@ -622,7 +640,12 @@ fn docker_start_acquires_lease_before_docker_run() {
 #[test]
 fn docker_start_fails_without_running_a_container_when_chips_are_unavailable() {
     let runner = FakeRunner::new(0);
-    runner.set_run_capturing("gozer acquire", 12, r#"{"granted":false,"queued":false}"#, "");
+    runner.set_run_capturing(
+        "gozer acquire",
+        12,
+        r#"{"granted":false,"queued":false}"#,
+        "",
+    );
     runner.set_run_capturing("gozer status", 0, STATUS_JSON_HELD, "");
     let backend = DockerBackend::new(
         config("some/image:tag", "127.0.0.1", 8080),
@@ -713,6 +736,14 @@ fn docker_start_stops_the_container_before_releasing_when_docker_run_fails() {
         "the container stop ({stop_index}) must precede the release \
          ({release_index}), which resets the chips: {commands:?}"
     );
+    // A COUNT, like its sibling above: this path and `stop` emit a
+    // byte-identical `docker stop <name>`, so "a stop happened" cannot tell
+    // one from two.
+    assert_eq!(
+        docker_count(&commands, "stop"),
+        1,
+        "exactly one container stop on this path: {commands:?}"
+    );
 }
 
 /// The stop above is gated on actually HOLDING a lease, not on gozer merely
@@ -786,6 +817,133 @@ fn docker_stop_releases_the_lease_after_stopping_the_container() {
         docker_count(&after, "stop"),
         2,
         "both stops must still stop the container: {after:?}"
+    );
+}
+
+/// THE DANGEROUS ONE, PART TWO. `stop` must stop the container the LEASE
+/// BELONGS TO -- not whatever container name its `model` argument happens to
+/// derive -- before releasing.
+///
+/// `routes.rs::stop_model` passes `state.current_model().unwrap_or_default()`,
+/// i.e. **the empty string** whenever `AppState` has no recorded model. That
+/// is reachable with no race at all: `POST /run llama3` (container up, lease
+/// held), then `POST /reset` (which does NOT stop a `DockerBackend`
+/// container -- the trait's default `reset` is a no-op -- but DOES
+/// `set_idle()`), then `POST /stop`. With the model-derived name, `docker
+/// stop tt-inference-` fails, is swallowed as "nothing to stop", and the
+/// release then resets the chips `tt-inference-llama3` is still driving,
+/// advertising them FREE to the next tenant while an orphaned root-owned
+/// container keeps using them -- which gozer's `still_open` check cannot
+/// see.
+///
+/// `RunPyBackend` is immune by construction: its `stop` ignores the model
+/// and sweeps by published port, so its stop cannot miss. This backend has
+/// to record what it launched.
+#[test]
+fn docker_stop_stops_the_leases_own_container_even_when_given_no_model() {
+    let runner = leasing_runner(0);
+    let backend = DockerBackend::new(
+        config("some/image:tag", "127.0.0.1", 8080),
+        Box::new(runner.clone()),
+    )
+    .with_gozer(Some(gozer_capability()));
+
+    backend.start("llama3").expect("start should succeed");
+    // Exactly what routes.rs passes after a /reset cleared the model.
+    backend.stop("").expect("stop should succeed");
+
+    let commands = runner.commands();
+    let stop_index = commands
+        .iter()
+        .position(|cmd| {
+            cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")
+                && cmd.get(2).map(String::as_str) == Some("tt-inference-llama3")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "stop must stop the container the lease belongs to \
+                 (tt-inference-llama3), whatever model argument it was given: {commands:?}"
+            )
+        });
+    let release_index = gozer_index(&commands, "release")
+        .unwrap_or_else(|| panic!("expected the lease to be released: {commands:?}"));
+    assert!(
+        stop_index < release_index,
+        "the lease's own container must be stopped ({stop_index}) before the \
+         release ({release_index}) resets its chips: {commands:?}"
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|cmd| cmd.get(2).map(String::as_str) == Some("tt-inference-")),
+        "the empty model must not produce a bogus container name to stop: {commands:?}"
+    );
+}
+
+/// A leased serve must name the mesh it actually LEASED, not the whole box.
+///
+/// `DockerConfig::tt_device` is a plain `String` with a production default of
+/// `p300x2` (two boards) while `DEFAULT_LEASE_CHIPS` is `"1"` (one board), so
+/// passing it verbatim under a lease describes a mesh wider than the lease on
+/// every real box. The cgroup means the container physically cannot open the
+/// neighbour's board, so this is not a cross-tenant bug -- it is a serve that
+/// asks for hardware it was not given and then fails to come up, looking like
+/// a flaky bring-up rather than a misconfiguration.
+#[test]
+fn docker_start_tt_device_describes_the_lease_not_the_box() {
+    let runner = leasing_runner(0);
+    let mut cfg = config("some/image:tag", "127.0.0.1", 8080);
+    // A configured whole-box mesh that must LOSE to the leased shape.
+    cfg.tt_device = "p300x2".to_string();
+    let backend =
+        DockerBackend::new(cfg, Box::new(runner.clone())).with_gozer(Some(gozer_capability()));
+
+    backend.start("llama3").expect("start should succeed");
+
+    let commands = runner.commands();
+    let run_cmd = &commands[docker_index(&commands, "run").expect("expected a docker run")];
+    assert!(
+        run_cmd
+            .windows(2)
+            .any(|w| w[0] == "--tt-device" && w[1] == "p300"),
+        "a 2-chip grant on a 4x p300c box is ONE board (p300), not the \
+         configured whole-box p300x2: {run_cmd:?}"
+    );
+    assert!(
+        !run_cmd.iter().any(|a| a == "p300x2"),
+        "the configured whole-box mesh must not survive a lease: {run_cmd:?}"
+    );
+}
+
+/// Fails CLOSED, like `leased_device_paths` and `Grant::reset_target`: if the
+/// leased mesh can't be derived (unreadable `tt-smi -s`), refuse the serve
+/// rather than fall back to the configured whole-box value. Omitting the flag
+/// isn't a safe fallback either -- the container's own detection looks at
+/// what it can see, and naming a mesh wider than the lease is the thing being
+/// avoided.
+#[test]
+fn docker_start_refuses_to_serve_when_the_leased_mesh_cannot_be_derived() {
+    let runner = leasing_runner(0);
+    runner.fail_run("tt-smi -s", "tt-smi: command not found");
+    let backend = DockerBackend::new(
+        config("some/image:tag", "127.0.0.1", 8080),
+        Box::new(runner.clone()),
+    )
+    .with_gozer(Some(gozer_capability()));
+
+    backend
+        .start("llama3")
+        .expect_err("an underivable leased mesh must not serve");
+
+    let commands = runner.commands();
+    assert!(
+        docker_index(&commands, "run").is_none(),
+        "no container may be started when the leased mesh is unknown: {commands:?}"
+    );
+    assert!(
+        gozer_index(&commands, "release").is_some(),
+        "the unusable lease must be handed straight back: {commands:?}"
     );
 }
 

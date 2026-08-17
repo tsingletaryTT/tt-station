@@ -5,6 +5,7 @@
 //! the box's mesh so clients can rank models by hardware fit) call this, so the
 //! table lives in exactly one place.
 
+use anyhow::Result;
 use serde_json::Value;
 
 /// Map a verbatim `tt-smi -s` JSON snapshot to a device-mesh label
@@ -56,6 +57,54 @@ pub fn board_types(tt_smi_json: &str) -> Option<Vec<String>> {
 ///
 /// `None` for any combination this codebase has no CONFIRMED mapping for.
 /// Callers must treat that as "don't guess" -- see `resolve_tt_device`.
+/// The mesh label for the shape a gozer lease actually GRANTED, derived from
+/// a verbatim `tt-smi -s` snapshot plus the grant's chip count.
+///
+/// `detect_device_mesh` above answers for the WHOLE BOX, which on a two-board
+/// machine is `p300x2` even when the lease covers one board. Handing that to
+/// a serving backend next to a device selector naming half of it describes a
+/// mesh the tenant does not own. So: take the board TYPE from the snapshot
+/// (the box is the only thing that knows it) and the COUNT from the grant
+/// (`Grant::chips` is one BDF per ASIC, exactly what `mesh_for` counts), and
+/// look the pair up in the same single table.
+///
+/// **Fails closed**, like `gozer::Grant::reset_target`: an unparseable
+/// snapshot, an empty one, a mixed fleet, or a (type, count) pair with no
+/// confirmed mesh all return `Err`, and every caller is expected to refuse
+/// the serve rather than fall back. Omitting the flag and letting the
+/// launcher auto-detect is NOT a safe fallback -- its detection looks at the
+/// whole box too, which is the very thing being avoided.
+///
+/// Shared by `RunPyBackend::leased_tt_device` and
+/// `DockerBackend::leased_tt_device` so the fail-closed policy and the table
+/// lookup exist once rather than once per backend. `lease_id` appears only in
+/// the error messages, so an operator reading the journal can tell which
+/// lease was refused.
+pub fn leased_mesh(tt_smi_snapshot: &str, granted_chips: usize, lease_id: &str) -> Result<String> {
+    let board_types = board_types(tt_smi_snapshot).unwrap_or_default();
+    let Some(board_type) = board_types.first() else {
+        return Err(anyhow::anyhow!(
+            "cannot derive a device mesh for lease '{lease_id}': `tt-smi -s` reported no boards"
+        ));
+    };
+    if !board_types.windows(2).all(|pair| pair[0] == pair[1]) {
+        return Err(anyhow::anyhow!(
+            "cannot derive a device mesh for lease '{lease_id}': this box has a mixed fleet \
+             ({board_types:?}), so a chip count doesn't identify a mesh"
+        ));
+    }
+
+    mesh_for(board_type, granted_chips)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot derive a device mesh for lease '{lease_id}': no known mesh for \
+                 {granted_chips}x {board_type}; refusing to serve rather than name a mesh \
+                 wider than the lease"
+            )
+        })
+}
+
 pub fn mesh_for(board_type: &str, count: usize) -> Option<&'static str> {
     let mesh = match (board_type, count) {
         ("p300c", 4) => "p300x2",
