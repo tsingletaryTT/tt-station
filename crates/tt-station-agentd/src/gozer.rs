@@ -727,6 +727,14 @@ pub struct SweepReport {
 /// delays serving (see `main.rs`'s `detect_startup_device_mesh`); 200 is
 /// far more than the handful of events a box accumulates between agentd
 /// restarts, and `history.jsonl` is cleared with `/tmp` on every reboot.
+///
+/// **Truncating the window can only under-report, never over-report.**
+/// `gozer history -n N` returns the LAST N records, and a lease's
+/// `released`/`reaped` always follows its `granted` -- so a `granted` inside
+/// the window always has its closing record inside it too. The only thing
+/// falling off the front can do is hide a `granted` whose lease is still
+/// open, which makes that lease `unresolved` (left alone), not falsely
+/// released. Verified against the real `gozer 0.1.0` history payload.
 const HISTORY_SCAN_RECORDS: &str = "200";
 
 /// One `gozer history --json` record. Only the three fields the sweep needs

@@ -784,3 +784,34 @@ fn foreign_lease_holders_fails_open_when_status_is_unreadable() {
         None
     );
 }
+
+/// gozer logs a `reaped` record more than once for the same lease (seen in
+/// the real `history.jsonl` on this box: two identical `reaped` lines per
+/// lease). The bookkeeping must be idempotent about that -- and a `reaped`
+/// for a lease never seen `granted` in the window must not resurrect it.
+#[test]
+fn startup_sweep_tolerates_duplicate_reaped_records() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker ps", "");
+    runner.set_run_capturing("gozer status", 0, STATUS_JSON_TT_STATION_HELD, "");
+    runner.set_run_capturing(
+        "gozer history",
+        0,
+        r#"{"history":[
+            {"ts":"t0","event":"reaped","lease_id":"deadbe","who":"claude:x"},
+            {"ts":"t1","event":"granted","lease_id":"ab12ef",
+             "who":"tt-station:8080:meta-llama/Llama-3.3-70B-Instruct"},
+            {"ts":"t2","event":"reaped","lease_id":"ab12ef","who":"tt-station:8080:x"},
+            {"ts":"t3","event":"reaped","lease_id":"ab12ef","who":"tt-station:8080:x"}]}"#,
+        "",
+    );
+
+    let report = gozer::startup_sweep(&runner, &sweep_capability());
+
+    assert!(
+        released_lease_ids(&runner).is_empty(),
+        "a reaped lease stays closed however many times it is logged: {:?}",
+        runner.commands()
+    );
+    assert!(report.released.is_empty());
+}
