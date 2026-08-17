@@ -947,8 +947,9 @@ impl ServingBackend for RunPyBackend {
         // A refused release (gozer exit 15) FAILS the start rather than
         // pressing on: the chips were not handed back and not reset, so
         // acquiring anyway could only ever strand them again.
-        self.release_held_lease()
-            .context("failed to hand back the lease of the previous serve before starting a new one")?;
+        self.release_held_lease().context(
+            "failed to hand back the lease of the previous serve before starting a new one",
+        )?;
 
         // (3) Lease the chips. Everything below operates on exactly what
         // gozer granted, and nothing operates on a neighbour's chips. On a
