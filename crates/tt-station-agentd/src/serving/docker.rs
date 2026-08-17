@@ -715,13 +715,52 @@ impl DockerBackend {
     /// release that follows is about to reset a live container's chips, and
     /// the journal is the only place that can say so.
     fn stop_launched_container(&self, container_name: &str) {
-        if let Err(err) = self.runner.run(&["docker", "stop", container_name]) {
+        if let Err(err) = self.stop_container(container_name) {
             eprintln!(
                 "tt-station-agentd: could not stop container {container_name} before releasing \
                  its lease: {err:#} -- the release will reset chips that may still be in use"
             );
         }
     }
+
+    /// Stop `container_name` if it is running, and PROPAGATE a failure to do
+    /// so -- the shape `RunPyBackend::stop_serving_containers` has always had,
+    /// brought over here because `stop`'s `let _ = docker stop` could not tell
+    /// two very different outcomes apart.
+    ///
+    /// `docker stop` exits non-zero both when there was nothing to stop (the
+    /// idempotent case `stop` must swallow) and when a container that IS
+    /// running would not stop (a daemon that has gone away, a stop timeout).
+    /// Discarding the result swallowed the second along with the first -- and
+    /// `stop` then went on to `gozer release`, which RESETS exactly those
+    /// chips and advertises them free while a live container keeps driving
+    /// them. gozer cannot catch it: its `still_open` check reads
+    /// `/proc/<pid>/fd` unprivileged and the serving container is root-owned.
+    ///
+    /// Asking `docker ps` first separates the two: "nothing to stop" is an
+    /// EMPTY LOOP (unambiguously `Ok`), and every `docker stop` this does
+    /// issue is one against a container docker just said was running, so its
+    /// failure is real and must reach the caller before any release.
+    ///
+    /// The name filter is ANCHORED (`^name$`). `docker ps --filter name=` is
+    /// an unanchored Go regexp, so the bare form would also match
+    /// `tt-inference-llama3-scratch` when asked about `tt-inference-llama3`
+    /// -- and stopping a container this lease does not own is the mirror
+    /// image of the bug being fixed.
+    fn stop_container(&self, container_name: &str) -> Result<()> {
+        let name_filter = format!("name=^{container_name}$");
+        let ps_output = self
+            .runner
+            .run(&["docker", "ps", "--filter", &name_filter, "-q"])?;
+
+        for container_id in ps_output.split_whitespace() {
+            self.runner.run(&["docker", "stop", container_id])?;
+        }
+
+        Ok(())
+    }
+
+
 
     /// Give back the lease this backend holds on behalf of a running serve,
     /// if any, and forget it. A no-op (`Ok(())`) when nothing is leased --
@@ -1042,17 +1081,22 @@ impl ServingBackend for DockerBackend {
             .as_ref()
             .map(|held| held.container_name.clone())
             .unwrap_or_else(|| self.container_name(model));
-        // Deliberately NOT `?`-propagated: `docker stop` exits non-zero when
-        // the container is already stopped or doesn't exist at all, and per
-        // this trait's doc (`ServingBackend::stop`) that's not an error --
-        // `stop` must be idempotent. `routes.rs::stop_model` now calls
-        // `backend.stop` unconditionally (even while idle, so it can cancel
-        // an in-flight `/run`), so surfacing a "nothing to stop" failure here
-        // would turn a harmless no-op into a 500 at the routes layer. A
-        // container that IS actually present and running still gets stopped
-        // by this call; only the "there was nothing to stop" outcome is
-        // swallowed.
-        let _ = self.runner.run(&["docker", "stop", &container_name]);
+        // IDEMPOTENT, but no longer BLIND. This used to be
+        // `let _ = self.runner.run(&["docker", "stop", &container_name]);`,
+        // discarding the result so that stopping an already-stopped/missing
+        // container (which `docker stop` reports as a non-zero exit) stayed
+        // the no-op `ServingBackend::stop`'s contract requires -- `routes.rs`
+        // calls this unconditionally, even while idle, so a "nothing to stop"
+        // failure must not become a 500.
+        //
+        // But it swallowed the OTHER non-zero exit too: a container that is
+        // genuinely running and would not stop. The release below then reset
+        // that live container's chips and advertised them free. `stop_container`
+        // asks `docker ps` first, so "nothing to stop" is an empty loop and a
+        // real stop failure propagates HERE -- before the release, and with the
+        // lease left recorded so a later `/stop` can retry both halves.
+        self.stop_container(&container_name)
+            .context("failed to stop the serving container")?;
         *self.status.lock().expect("status mutex poisoned") = ServingStatus::Idle;
 
         // Release LAST, after the container is actually stopped: gozer
