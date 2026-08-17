@@ -574,6 +574,45 @@ async fn detect_startup_gozer(gozer_path: Option<&str>) -> Option<gozer::Capabil
     }
 }
 
+/// Build the serving backend this process will run on, PROBING FOR GOZER
+/// FIRST so the probed capability can be handed to the backend that is
+/// actually constructed.
+///
+/// **This ordering is the whole point of the function.** Until Task 3, `main`
+/// called `make_backend` first and `detect_startup_gozer` a hundred lines
+/// further down -- one already-constructed backend too late. The
+/// capability reached `AppState` (where nothing reads it) and never reached
+/// the backend (where every leasing code path lives), so on a real box
+/// `RunPyBackend::with_gozer` was called by tests and by nothing else:
+/// agentd still reset the whole box before every serve and still pinned
+/// nothing. Probing here, and returning BOTH the backend and the capability,
+/// makes it structurally impossible to build a backend without having
+/// decided what to do about leasing first.
+///
+/// Returns the capability alongside the backend because `AppState` wants it
+/// too (`with_gozer`, read back by `AppState::gozer()`); one probe, two
+/// consumers, no second `gozer --version` spawn.
+///
+/// Never fails on gozer's account: the probe degrades to `None` for every
+/// failure mode (absent binary, non-zero exit, hang -- see
+/// `detect_startup_gozer`), and a `None` capability means every backend
+/// behaves exactly as it did before leasing existed. The only error this can
+/// return is an unknown `--backend` kind, from `make_backend` itself.
+async fn build_serving_backend(
+    kind: &str,
+    gozer_path: Option<&str>,
+    docker_config: DockerConfig,
+    runpy_config: RunPyConfig,
+) -> Result<(
+    Box<dyn tt_station_agentd::serving::ServingBackend>,
+    Option<gozer::Capability>,
+)> {
+    let gozer_capability = detect_startup_gozer(gozer_path).await;
+    let backend = make_backend(kind, docker_config, runpy_config, gozer_capability.clone())
+        .context("failed to construct serving backend")?;
+    Ok((backend, gozer_capability))
+}
+
 /// Resolve the `(ssh_user, authorized_keys_path)` target for `POST`/`DELETE
 /// /ssh/authorize` (Task 2).
 ///
@@ -723,7 +762,13 @@ async fn main() -> Result<()> {
         hf_token: rc.hf_token.clone(),
         cache_volume: rc.cache_volume.clone(),
         no_auth: !rc.require_auth,
-        device_path: rc.device_path.clone(),
+        // `--device-path` is a single value on the CLI and stays that way:
+        // one `--device` flag is exactly the pre-leasing behaviour, and
+        // `DockerConfig::device_path` is a `Vec` only so a LEASE can replace
+        // it with one entry per granted chip (see `DockerBackend::start`).
+        // An operator has no reason to pin several device paths by hand --
+        // gozer is what decides which chips this agent may open.
+        device_path: vec![rc.device_path.clone()],
         hugepages_src: rc.hugepages_src.clone(),
     };
 
@@ -774,8 +819,17 @@ async fn main() -> Result<()> {
         enable_tool_calling: true,
     };
 
-    let backend = make_backend(&rc.backend, docker_config, runpy_config)
-        .context("failed to construct serving backend")?;
+    // Probe for gozer and build the backend TOGETHER, in that order -- see
+    // `build_serving_backend`'s doc comment for why the ordering is the
+    // point. `gozer_capability` is carried down to `AppState::with_gozer`
+    // below rather than re-probed there.
+    let (backend, gozer_capability) = build_serving_backend(
+        &rc.backend,
+        rc.gozer_path.as_deref(),
+        docker_config,
+        runpy_config,
+    )
+    .await?;
 
     // Persist issued bearer tokens across restarts by default (see
     // `--token-store`'s doc comment) -- `--no-token-persistence` (folded into
@@ -889,14 +943,13 @@ async fn main() -> Result<()> {
     let device_mesh = detect_startup_device_mesh(&rc.tt_smi_bin).await;
     let state = state.with_device_mesh(device_mesh.clone());
 
-    // Probe for `gozer` ONCE at startup (mirrors the device-mesh detection
-    // immediately above): bounded, degrades to `None`, and gozer's absence
-    // is a normal outcome, never a startup failure -- see the `gozer`
-    // module doc and `detect_startup_gozer`'s doc comment. Stored on
-    // `AppState` before any clone of it exists (same `Arc::get_mut`
-    // requirement every other `with_*` builder here relies on) so a later
-    // task can read it back via `AppState::gozer()` without a second probe.
-    let gozer_capability = detect_startup_gozer(rc.gozer_path.as_deref()).await;
+    // Record the `gozer` capability probed ONCE at startup, up in
+    // `build_serving_backend` -- the backend that actually leases already
+    // holds it; this stores the same value on `AppState` so `/status`-side
+    // readers (`AppState::gozer()`) can report it without a second
+    // `gozer --version` spawn. Applied before any clone of `state` exists
+    // (same `Arc::get_mut` requirement every other `with_*` builder here
+    // relies on).
     let state = state.with_gozer(gozer_capability);
 
     // Detect this box's primary NIC MAC ONCE at startup (mirrors the
@@ -1180,4 +1233,131 @@ fn advertise(
     };
 
     Ok((guard, status_advertiser))
+}
+
+#[cfg(test)]
+mod startup_wiring_tests {
+    use super::*;
+
+    /// Write an executable stand-in for the `gozer` binary into `dir` and
+    /// return its path.
+    ///
+    /// It answers `--version` (the ONLY verb `gozer::probe` ever runs) and
+    /// refuses everything else with a non-zero exit, so a regression that
+    /// made startup call `acquire`/`release`/`run`/`reconcile` would fail
+    /// this test rather than quietly touching the real gate. Nothing here
+    /// can reach real gozer, real chips, or another agent's lease: the path
+    /// handed to the probe is this script, in a temp dir, and `$PATH` is
+    /// never consulted because the hint is non-empty (see
+    /// `gozer::resolve_path`).
+    fn write_stub_gozer(dir: &std::path::Path) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("gozer");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then echo 'gozer 9.9.9-stub'; exit 0; fi\n\
+             echo \"stub gozer refuses to run: $*\" >&2\n\
+             exit 99\n",
+        )
+        .expect("write stub gozer");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub gozer");
+        path.to_string_lossy().into_owned()
+    }
+
+    /// THE PRODUCTION-WIRING TEST (both halves -- see the note mid-body for
+    /// why the absent-gozer case shares this function). Runs the exact
+    /// sequence `main` runs to
+    /// obtain a backend -- the real `detect_startup_gozer` probe against a
+    /// real (stub) binary, then the real `make_backend` -- and asserts the
+    /// backend that comes out is holding the capability that went in.
+    ///
+    /// How this fails if the wiring is removed:
+    ///
+    /// * Reorder `build_serving_backend` so `make_backend` runs before the
+    ///   probe: the only capability available to pass is `None`, so the
+    ///   backend reports `None` while `capability` is `Some` -- the
+    ///   `assert_eq!` on the last line fails.
+    /// * Drop the capability argument from `make_backend`'s call: the crate
+    ///   stops compiling (the parameter is required, not defaulted).
+    /// * Drop `.with_gozer(..)` inside `make_backend`: the backend reports
+    ///   `None` and this fails, as does
+    ///   `serving::mod`'s `make_backend_hands_the_capability_to_the_backend_it_builds`.
+    ///
+    /// What it does NOT cover, stated plainly: if `main` stopped calling
+    /// `build_serving_backend` altogether and built a backend some other
+    /// way, no test here would notice. `build_serving_backend` is the single
+    /// path in this file to a `Box<dyn ServingBackend>`, and
+    /// `make_backend`'s required capability parameter forces any alternative
+    /// to make the same decision explicitly -- but that is a structural
+    /// argument, not an assertion.
+    #[tokio::test]
+    async fn build_serving_backend_hands_the_probed_capability_to_the_backend() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = write_stub_gozer(dir.path());
+
+        for kind in ["runpy", "docker"] {
+            let (backend, capability) = build_serving_backend(
+                kind,
+                Some(&stub),
+                DockerConfig::default(),
+                RunPyConfig::default(),
+            )
+            .await
+            .expect("backend should construct");
+
+            assert_eq!(
+                capability.as_ref().map(|c| c.version.as_str()),
+                Some("gozer 9.9.9-stub"),
+                "the startup probe should have found the stub gozer"
+            );
+            assert_eq!(
+                backend.gozer_capability(),
+                capability.as_ref(),
+                "the {kind} backend main.rs actually builds must be holding the \
+                 probed capability -- otherwise leasing is wired to nothing and \
+                 the whole feature is inert on a real box"
+            );
+        }
+
+        // The ABSENT-gozer half of the same contract -- which is the normal
+        // case on a real box: a configured path that doesn't resolve makes
+        // the probe degrade to `None` (never an error), and the backend is
+        // built with leasing OFF, i.e. byte-identical pre-integration
+        // behaviour.
+        //
+        // Deliberately in this SAME test function rather than its own, and
+        // not for brevity: `#[test]`s in one binary run on parallel threads,
+        // and this crate already has a load-sensitive `ETXTBSY` flake from
+        // exactly that shape (`routes.rs`'s
+        // `run_power_command_runs_the_configured_command` writes an
+        // executable and spawns it). A sibling test that spawns anything
+        // concurrently with `write_stub_gozer` above can inherit the
+        // still-open write fd across its own fork, making the `exec` of the
+        // stub fail with "Text file busy" -- which `gozer::probe` correctly
+        // swallows as "gozer absent", turning a real race into a confusing
+        // assertion failure on the line above. One thread, no fork window.
+        //
+        // The path below is a non-existent ABSOLUTE path rather than `None`:
+        // `None` would send `gozer::probe` searching `$PATH`, where a
+        // developer box may well have a REAL gozer installed, and the test's
+        // outcome would depend on the machine it runs on.
+        let (backend, capability) = build_serving_backend(
+            "runpy",
+            Some("/nonexistent/tt-station-agentd-test/gozer"),
+            DockerConfig::default(),
+            RunPyConfig::default(),
+        )
+        .await
+        .expect("an absent gozer must not fail startup");
+
+        assert_eq!(capability, None, "an unresolvable path must probe to None");
+        assert_eq!(
+            backend.gozer_capability(),
+            None,
+            "without a capability the backend must be in its pre-leasing state"
+        );
+    }
 }

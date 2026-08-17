@@ -1451,6 +1451,11 @@ impl ServingBackend for RunPyBackend {
         Ok(self.status.lock().expect("status mutex poisoned").clone())
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
+    fn gozer_capability(&self) -> Option<&crate::gozer::Capability> {
+        self.gozer.as_ref()
+    }
+
     /// Reconcile the in-memory status against docker reality: if we think we're
     /// `Serving` but no live `tt-inference-server` endpoint on our serving port
     /// is actually answering `/v1/models` for that model, the container is gone

@@ -348,10 +348,19 @@ pub struct DockerConfig {
     /// is out of scope here. When `false`, `--no-auth` is omitted and the
     /// returned `Endpoint.requires_key` is `true`.
     pub no_auth: bool,
-    /// Host path passed to `--device`, e.g. `/dev/tenstorrent`. Configurable
-    /// (rather than hardcoded) so tests and non-standard hosts can override
-    /// it without touching this file.
-    pub device_path: String,
+    /// Host paths passed to `--device`, one flag per entry -- e.g.
+    /// `["/dev/tenstorrent"]` (the default: the whole directory, every chip
+    /// on the box) or `["/dev/tenstorrent/2", "/dev/tenstorrent/3"]` for a
+    /// two-chip pin. Configurable (rather than hardcoded) so tests and
+    /// non-standard hosts can override it without touching this file.
+    ///
+    /// A `Vec` rather than the single `String` this used to be because a
+    /// gozer lease pins N specific chips and docker takes one `--device` per
+    /// device node -- see `DockerBackend::start`. The CLI still exposes a
+    /// single `--device-path` and `main.rs` wraps it in a one-element `Vec`,
+    /// so the DEFAULT, unleased argv is unchanged: exactly one `--device`
+    /// flag with exactly the same value as before.
+    pub device_path: Vec<String>,
     /// Host path bind-mounted onto itself inside the container via `--mount
     /// type=bind,src=...,dst=...` -- tt-metal needs 1G hugepages for DMA,
     /// provisioned on the host ahead of time by `tt-installer`.
@@ -373,7 +382,9 @@ impl Default for DockerConfig {
             hf_token: None,
             cache_volume: "tt-station-cache".to_string(),
             no_auth: true,
-            device_path: "/dev/tenstorrent".to_string(),
+            // One entry: the whole `/dev/tenstorrent` directory, exactly the
+            // single `--device` flag this backend has always emitted.
+            device_path: vec!["/dev/tenstorrent".to_string()],
             hugepages_src: "/dev/hugepages-1G".to_string(),
         }
     }
@@ -403,6 +414,28 @@ pub struct DockerBackend {
     status: Arc<Mutex<ServingStatus>>,
     health_poll_attempts: u32,
     health_poll_interval: Duration,
+    /// The `gozer` binary this backend leases chips through, or `None` when
+    /// gozer isn't installed on this box (see `crate::gozer`'s module doc --
+    /// gozer is OPTIONAL). `None` is the default and means EVERY path below
+    /// behaves exactly as it did before leasing existed: one `--device`
+    /// straight from config, no container stop on a failed bring-up, and no
+    /// `gozer` process ever spawned. Set via `with_gozer`, which
+    /// `serving::make_backend` calls on the production path.
+    gozer: Option<crate::gozer::Capability>,
+    /// The lease id this backend currently holds on behalf of a RUNNING
+    /// serve, or `None` when nothing is leased.
+    ///
+    /// Set exactly once, by `start`, at the moment the serve is confirmed
+    /// healthy: ownership transfers out of `start`'s `LeaseGuard` (which
+    /// would otherwise release on the way out of the function) and into the
+    /// backend, where it outlives the call. Cleared by `stop` after a
+    /// successful `gozer release`. Every FAILING exit from `start` leaves
+    /// this `None` and lets the guard's `Drop` release instead.
+    ///
+    /// `Arc<Mutex<..>>` for the same reason `status` is one: `start` and
+    /// `stop` take `&self` and are reachable concurrently from
+    /// `spawn_blocking` tasks.
+    lease: Arc<Mutex<Option<String>>>,
 }
 
 impl DockerBackend {
@@ -417,7 +450,29 @@ impl DockerBackend {
             status: Arc::new(Mutex::new(ServingStatus::Idle)),
             health_poll_attempts: DEFAULT_HEALTH_POLL_ATTEMPTS,
             health_poll_interval: DEFAULT_HEALTH_POLL_INTERVAL,
+            // Leasing OFF by default -- a backend built without an explicit
+            // `with_gozer` behaves exactly as it did before this integration
+            // existed. See the `gozer` field's doc comment.
+            gozer: None,
+            lease: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Attach the `gozer` capability this agent probed for at startup (see
+    /// `crate::gozer::probe`), turning leasing ON for every subsequent
+    /// `start`/`stop`.
+    ///
+    /// `None` (the default, and what a box without gozer installed yields)
+    /// leaves the backend in its pre-leasing behaviour, which is the whole
+    /// point of gozer being optional: no `gozer` subprocess and one
+    /// `--device` straight from config.
+    ///
+    /// Builder-style (`self` by value) to match `with_health_poll`, but
+    /// deliberately NOT `#[cfg]`-gated the way that one is: this is
+    /// production wiring, called by `serving::make_backend`, not a test hook.
+    pub fn with_gozer(mut self, gozer: Option<crate::gozer::Capability>) -> Self {
+        self.gozer = gozer;
+        self
     }
 
     /// Override the health-poll bound used by `start`. Exposed so tests can
@@ -447,6 +502,166 @@ impl DockerBackend {
     fn container_name(&self, model: &str) -> String {
         format!("tt-inference-{}", sanitize_container_name(model))
     }
+
+    /// Take a gozer lease for this serve, or `Ok(None)` when leasing isn't
+    /// available on this box (no `gozer` capability -- see the `gozer`
+    /// field). `Ok(None)` is the pre-integration behaviour and is not an
+    /// error: it means the caller serves whole-box exactly as it always did.
+    ///
+    /// The returned `LeaseGuard` releases on drop, which is what covers
+    /// `start`'s failure exits -- including any added later. Mirrors
+    /// `RunPyBackend::acquire_lease`; the two differ only in what `--who`
+    /// carries.
+    ///
+    /// **`--who` is the lease↔container binding, and its FORMAT is a shared
+    /// contract**: `tt-station:<published_port>:<model>`, byte-identical to
+    /// what `RunPyBackend::acquire_lease` writes.
+    ///
+    /// This backend could do better on its own -- it passes `--name` itself,
+    /// so unlike the runpy path it knows its container's name before it
+    /// acquires, and could embed that. It deliberately does NOT. The design
+    /// doc's "One startup sweep" section specifies exactly one reconciliation
+    /// rule: list gozer leases whose `who` begins `tt-station:`, extract the
+    /// **service port**, and release any lease with nothing serving on that
+    /// port. A second `who` shape would make that one rule two, and the
+    /// sweep would read a container name where it expects a port -- so a
+    /// docker-backend lease left behind by a crashed agent would never be
+    /// reclaimed. One format, one sweep, either backend.
+    fn acquire_lease(&self, model: &str) -> Result<Option<crate::gozer::LeaseGuard<'_>>> {
+        let Some(capability) = &self.gozer else {
+            return Ok(None);
+        };
+
+        let who = format!("tt-station:{}:{}", self.config.host_port, model);
+        let reason = format!("serving {model} via tt-station-agentd (docker backend)");
+        match crate::gozer::acquire(
+            self.runner.as_ref(),
+            capability,
+            crate::gozer::DEFAULT_LEASE_CHIPS,
+            &who,
+            &reason,
+        ) {
+            crate::gozer::Outcome::Granted(grant) => {
+                eprintln!(
+                    "tt-station-agentd: leased {} chip(s) [{}] as lease {} for '{model}'",
+                    grant.chips.len(),
+                    grant.chips.join(", "),
+                    grant.lease_id
+                );
+                Ok(Some(crate::gozer::LeaseGuard::new(
+                    self.runner.as_ref(),
+                    capability.clone(),
+                    grant,
+                )))
+            }
+            crate::gozer::Outcome::Unavailable { holder, .. } => {
+                // `acquire`'s own unavailable payload names nobody, so ask
+                // `gozer status --json` who holds the boards. Deliberately
+                // NO duration: gozer's per-chip status carries `who` but no
+                // `since`, and agentd must not fabricate one (see
+                // `gozer::contention_detail`).
+                let detail = holder
+                    .or_else(|| crate::gozer::contention_detail(self.runner.as_ref(), capability))
+                    .unwrap_or_else(|| "gozer reports no free chips".to_string());
+                Err(anyhow::anyhow!(
+                    "docker backend: cannot serve '{model}' -- no chips are available: {detail}"
+                ))
+            }
+            crate::gozer::Outcome::Failed(message) => Err(anyhow::anyhow!(
+                "docker backend: cannot serve '{model}' -- gozer acquire failed: {message}"
+            )),
+        }
+    }
+
+    /// The `--device` values for a LEASED serve: one `/dev/tenstorrent/<n>`
+    /// node per granted device index, replacing the configured path
+    /// entirely.
+    ///
+    /// The configured `device_path` is deliberately OVERRIDDEN (and logged),
+    /// for the same reason `RunPyBackend` overrides a configured
+    /// `--device-id`: it was chosen without knowing what gozer would grant,
+    /// and its DEFAULT value is the whole `/dev/tenstorrent` directory --
+    /// i.e. every chip on the box, including the neighbour's.
+    ///
+    /// **Fails closed**, like `gozer::Grant::reset_target`: a grant with no
+    /// device indices refuses the serve rather than falling back to the
+    /// configured path. Falling back would mean a container that asked for a
+    /// lease and then opened the whole box anyway -- exactly the
+    /// silent cross-tenant failure this integration exists to prevent, and
+    /// the worst possible reading of "run only on what I leased".
+    fn leased_device_paths(&self, grant: &crate::gozer::Grant) -> Result<Vec<String>> {
+        if grant.dev_indices.is_empty() {
+            return Err(anyhow::anyhow!(
+                "lease '{}' granted no device indices; refusing to serve, because falling back \
+                 to the configured --device {:?} would hand the container chips this lease does \
+                 not cover",
+                grant.lease_id,
+                self.config.device_path
+            ));
+        }
+        let paths: Vec<String> = grant
+            .dev_indices
+            .iter()
+            .map(|index| format!("/dev/tenstorrent/{index}"))
+            .collect();
+        eprintln!(
+            "tt-station-agentd: pinning the container to the leased devices {paths:?} \
+             (the configured --device {:?} does not apply to a leased serve)",
+            self.config.device_path
+        );
+        Ok(paths)
+    }
+
+    /// Best-effort stop of the container this `start` launched, called on an
+    /// error path BEFORE a `LeaseGuard` drop releases the lease.
+    ///
+    /// It exists for one reason: `gozer release` RESETS the released chips.
+    /// Releasing while a container is still driving them lands a real
+    /// `tt-smi -r` on a live workload and then advertises those chips FREE,
+    /// so the next tenant collides. gozer cannot refuse it -- its
+    /// `still_open` check reads `/proc/<pid>/fd` unprivileged and the serving
+    /// container is root-owned, the same fd blindness that makes
+    /// `--owner-pid` mandatory.
+    ///
+    /// Unlike `RunPyBackend::stop_launched_container`, this needs NO
+    /// published-port fallback: that backend has to parse a container id out
+    /// of run.py's stdout and documents a missing id as normal, whereas this
+    /// backend passes `--name` itself and can always name its own container.
+    /// The `docker stop` may still find nothing (the container never got far
+    /// enough to exist) -- which is fine and is why the failure is logged
+    /// rather than propagated.
+    ///
+    /// Every failure is LOGGED, never silently swallowed: the caller is
+    /// already returning an error, but if this stop didn't happen the
+    /// release that follows is about to reset a live container's chips, and
+    /// the journal is the only place that can say so.
+    fn stop_launched_container(&self, container_name: &str) {
+        if let Err(err) = self.runner.run(&["docker", "stop", container_name]) {
+            eprintln!(
+                "tt-station-agentd: could not stop container {container_name} before releasing \
+                 its lease: {err:#} -- the release will reset chips that may still be in use"
+            );
+        }
+    }
+
+    /// Give back the lease this backend holds on behalf of a running serve,
+    /// if any, and forget it. A no-op (`Ok(())`) when nothing is leased --
+    /// which is both the no-gozer case and the already-released case, so
+    /// `stop` stays idempotent.
+    ///
+    /// A REFUSED release (gozer exit 15) propagates: the chips were not
+    /// released and not reset, and the lease stays recorded so a later
+    /// `stop` can try again rather than the id being silently dropped on
+    /// the floor.
+    fn release_lease(&self) -> Result<()> {
+        let held = self.lease.lock().expect("lease mutex poisoned").clone();
+        let (Some(capability), Some(lease_id)) = (&self.gozer, held) else {
+            return Ok(());
+        };
+        crate::gozer::release(self.runner.as_ref(), capability, &lease_id)?;
+        *self.lease.lock().expect("lease mutex poisoned") = None;
+        Ok(())
+    }
 }
 
 /// Replace every character not valid in a Docker `--name` value
@@ -474,8 +689,38 @@ fn sanitize_container_name(model: &str) -> String {
 }
 
 impl ServingBackend for DockerBackend {
+    /// Start a container serving `model`, taking a gozer chip lease first
+    /// when leasing is available.
+    ///
+    /// **The lease is released on EVERY exit but one.** `acquire_lease`
+    /// hands back a `LeaseGuard` that releases on drop, which covers the
+    /// `docker run` failure, the health timeout, an unusable grant, and
+    /// whatever exit someone adds later; only the success path disarms the
+    /// guard and hands the lease to `self.lease` for `stop` to release.
+    ///
+    /// **Every exit that could leave a container running stops it FIRST**,
+    /// because `gozer release` resets the released chips -- see
+    /// `stop_launched_container`. Those stops are gated on `lease.is_some()`
+    /// so that a box without gozer keeps its exact previous behaviour (a
+    /// failed bring-up leaves its container for the operator to inspect).
     fn start(&self, model: &str) -> Result<Endpoint> {
         let container_name = self.container_name(model);
+
+        // Lease the chips BEFORE touching anything on the box -- before the
+        // container is started, so it can only ever be launched against
+        // chips gozer granted. On a box without gozer this yields `None` and
+        // every path below is unchanged.
+        let lease = self.acquire_lease(model)?;
+
+        // With a lease, `--device` names the granted device nodes and
+        // nothing else; the configured path is overridden. Fails closed
+        // rather than falling back -- see `leased_device_paths`. `?` here
+        // drops `lease`, handing the unusable lease straight back before a
+        // single container exists.
+        let device_paths = match &lease {
+            Some(guard) => self.leased_device_paths(guard.grant())?,
+            None => self.config.device_path.clone(),
+        };
 
         // The container's serving port is fixed at `CONTAINER_PORT`; only
         // the host side of the `--publish` mapping is configurable.
@@ -508,16 +753,24 @@ impl ServingBackend for DockerBackend {
             "-d".to_string(),
             "--rm".to_string(),
             "--name".to_string(),
-            container_name,
+            container_name.clone(),
             "--ipc".to_string(),
             "host".to_string(),
-            "--device".to_string(),
-            self.config.device_path.clone(),
+        ];
+        // ONE `--device` flag per device node: docker has no multi-value
+        // form, so pinning N chips means N flags. Unleased, `device_paths`
+        // is the single configured entry and this loop emits exactly the one
+        // flag it always did.
+        for device in &device_paths {
+            args.push("--device".to_string());
+            args.push(device.clone());
+        }
+        args.extend([
             "--mount".to_string(),
             mount_spec,
             "--volume".to_string(),
             volume_spec,
-        ];
+        ]);
         if let Some(env) = hf_token_env {
             args.push("--env".to_string());
             args.push(env);
@@ -537,7 +790,23 @@ impl ServingBackend for DockerBackend {
         }
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.runner.run(&arg_refs)?;
+        self.runner.run(&arg_refs).inspect_err(|_| {
+            // `docker run -d` can create a container and still exit non-zero
+            // (it started and immediately died, or the daemon failed part
+            // way through), so this exit can leave one behind. It must be
+            // stopped BEFORE this error unwinds, because unwinding drops the
+            // lease guard and `gozer release` RESETS the released chips --
+            // see `stop_launched_container`.
+            //
+            // Gated on actually HOLDING a lease, not merely on gozer being
+            // installed: the stop exists to protect the release, so it
+            // should depend on the thing it protects. Without a lease the
+            // unleased behaviour stays byte-identical (no stop at all, as
+            // before).
+            if lease.is_some() {
+                self.stop_launched_container(&container_name);
+            }
+        })?;
 
         // `run.py` (and this backend) poll `/health`, not `/v1/models` --
         // see docs/reference/tt-inference-server-docker.md.
@@ -553,6 +822,27 @@ impl ServingBackend for DockerBackend {
         );
 
         if !healthy {
+            // The container is alive by construction on this path -- the
+            // poll simply never saw it answer -- and returning from here
+            // drops the lease guard, whose `gozer release` RESETS the
+            // released chips. Releasing first would land a real `tt-smi -r`
+            // on BDFs a live container is driving and then advertise them
+            // FREE while the orphan keeps using them, so the next tenant
+            // collides. gozer cannot catch that: its `still_open` check
+            // reads `/proc/<pid>/fd` unprivileged and the serving container
+            // is root-owned -- the same fd blindness that makes
+            // `--owner-pid` mandatory.
+            //
+            // Gated on actually HOLDING a lease ON PURPOSE: this stop exists
+            // to protect the release, so it depends on the thing it
+            // protects, and without a lease the unleased behaviour stays
+            // byte-identical to what it has always been (a timed-out
+            // bring-up leaves its container for the operator to inspect).
+            // Whether the unleased path SHOULD stop it too is a separate
+            // question, not a side effect of this change.
+            if lease.is_some() {
+                self.stop_launched_container(&container_name);
+            }
             return Err(anyhow::anyhow!(
                 "docker backend: model '{model}' did not become healthy at {health_url} \
                  within {} attempts",
@@ -563,6 +853,26 @@ impl ServingBackend for DockerBackend {
         *self.status.lock().expect("status mutex poisoned") =
             ServingStatus::Serving(model.to_string());
 
+        // The serve is up, so the lease must OUTLIVE this call: disarm the
+        // guard (it would otherwise release on the way out of this function,
+        // resetting the chips underneath the container that just came up)
+        // and hand the id to the backend, where `stop` releases it. This is
+        // the ONLY exit from `start` that doesn't release.
+        if let Some(guard) = lease {
+            let mut held = self.lease.lock().expect("lease mutex poisoned");
+            if let Some(previous) = held.as_deref() {
+                // Nothing should be able to reach here holding a lease --
+                // `stop` clears it and every failing `start` releases -- but
+                // silently overwriting one would strand chips until the
+                // agent exits, so say so.
+                eprintln!(
+                    "tt-station-agentd: WARNING: replacing still-held lease '{previous}' -- it \
+                     will not be released until this agent exits; check `gozer status`"
+                );
+            }
+            *held = Some(guard.into_lease_id());
+        }
+
         Ok(Endpoint {
             base_url: format!("http://{}:{}/v1", self.config.host, self.config.host_port),
             model: model.to_string(),
@@ -572,6 +882,21 @@ impl ServingBackend for DockerBackend {
         })
     }
 
+    /// Stop the container serving `model` and hand back any lease held on
+    /// its behalf, in that order.
+    ///
+    /// NOTE what this does NOT do, deliberately: `RunPyBackend` also carries
+    /// a cooperative `cancel` flag so a `/stop` arriving mid-`start` aborts
+    /// the bring-up and closes the narrow window where `start` stores a
+    /// lease just after `stop` looked for one. `DockerBackend` has never had
+    /// that flag (a concurrent `/stop` couldn't cancel an in-flight `docker`
+    /// bring-up before this change either), and adding one is a behaviour
+    /// change to the unleased path, not part of wiring leasing in. The
+    /// exposure it leaves is bounded: an in-flight `start` still owns its
+    /// lease through the `LeaseGuard`, so nothing is released twice and
+    /// nothing is reset under a live container -- the worst case is a lease
+    /// that outlives a raced bring-up until the next `/stop`, visible in
+    /// `gozer status`. Worth closing; not silently, as a side effect here.
     fn stop(&self, model: &str) -> Result<()> {
         let container_name = self.container_name(model);
         // Deliberately NOT `?`-propagated: `docker stop` exits non-zero when
@@ -586,11 +911,29 @@ impl ServingBackend for DockerBackend {
         // swallowed.
         let _ = self.runner.run(&["docker", "stop", &container_name]);
         *self.status.lock().expect("status mutex poisoned") = ServingStatus::Idle;
-        Ok(())
+
+        // Release LAST, after the container is actually stopped: gozer
+        // resets the released chips as part of the release, and resetting
+        // them under a still-running container would be the very hazard this
+        // integration is about. (This is also why `POST /stop` needs no
+        // separate reset: the release does it.)
+        //
+        // A refused release (gozer exit 15) fails the stop rather than being
+        // swallowed -- the chips were NOT handed back, and a caller told
+        // "stopped" would believe they were. The container IS already
+        // stopped at that point, and the lease stays recorded so a repeated
+        // `/stop` retries the release. A no-gozer/no-lease backend gets
+        // `Ok(())` here, so the idempotent-stop contract above is unchanged.
+        self.release_lease()
     }
 
     fn status(&self) -> Result<ServingStatus> {
         Ok(self.status.lock().expect("status mutex poisoned").clone())
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    fn gozer_capability(&self) -> Option<&crate::gozer::Capability> {
+        self.gozer.as_ref()
     }
 }
 
