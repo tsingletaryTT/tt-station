@@ -504,6 +504,51 @@ impl RunPyBackend {
         }
     }
 
+    /// Best-effort stop of whatever this `start` may have left running,
+    /// called on an error path BEFORE a `LeaseGuard` drop releases the lease.
+    ///
+    /// It exists for one reason: `gozer release` RESETS the released chips.
+    /// Releasing while a container is still driving them lands a real
+    /// `tt-smi -r` on a live workload and then advertises those chips FREE,
+    /// so the next tenant collides. gozer cannot refuse it -- its
+    /// `still_open` check reads `/proc/<pid>/fd` unprivileged and the serving
+    /// container is root-owned, the same fd blindness that makes
+    /// `--owner-pid` mandatory.
+    ///
+    /// `container_id` is what `parse_run_artifacts` captured, if anything.
+    /// **`None` is a NORMAL outcome** (that function's own doc says so:
+    /// run.py's output format may drift across versions, and a launch can
+    /// fail before the line is ever printed), so it must not mean "stop
+    /// nothing" -- it falls back to the published-port sweep `stop` itself
+    /// uses. A no-id path that silently skipped the stop would leave the
+    /// hazard above wide open through a case the code already expects.
+    ///
+    /// Every failure is LOGGED, never silently swallowed: the caller is
+    /// already returning an error, but if this stop didn't happen the
+    /// release that follows is about to reset a live container's chips, and
+    /// the journal is the only place that can say so.
+    fn stop_launched_container(&self, container_id: Option<&str>) {
+        match container_id {
+            Some(id) => {
+                if let Err(err) = self.runner.run(&["docker", "stop", id]) {
+                    eprintln!(
+                        "tt-station-agentd: could not stop container {id} before releasing its \
+                         lease: {err:#} -- the release will reset chips that may still be in use"
+                    );
+                }
+            }
+            None => {
+                if let Err(err) = self.stop_serving_containers() {
+                    eprintln!(
+                        "tt-station-agentd: could not sweep the serving port before releasing \
+                         the lease: {err:#} -- the release will reset chips that may still be \
+                         in use"
+                    );
+                }
+            }
+        }
+    }
+
     /// Give back the lease this backend holds on behalf of a running serve,
     /// if any, and forget it. A no-op (`Ok(())`) when nothing is leased --
     /// which is both the no-gozer case and the already-released case, so
@@ -1028,22 +1073,20 @@ impl ServingBackend for RunPyBackend {
             .inspect_err(|_| {
                 // run.py can start a container and THEN fail, and the error
                 // path loses the stdout that carries its id -- so the only
-                // handle left is the published-port sweep `stop` itself
-                // uses. It must run BEFORE this error unwinds, because
-                // unwinding drops the lease guard, and `gozer release`
-                // RESETS the released chips: resetting them under a
-                // container that survived the failure is exactly the hazard
-                // this integration is about (and gozer can't refuse it --
-                // its fd check can't see a root-owned container's fds).
-                // Best-effort: a sweep that itself fails must not replace
-                // the launch error being reported.
-                if self.gozer.is_some() {
-                    if let Err(err) = self.stop_serving_containers() {
-                        eprintln!(
-                            "tt-station-agentd: could not sweep the serving port after a failed \
-                             run.py launch: {err:#} -- a container may survive the lease release"
-                        );
-                    }
+                // handle left is the published-port sweep (`None` below).
+                // It must run BEFORE this error unwinds, because unwinding
+                // drops the lease guard and `gozer release` RESETS the
+                // released chips -- see `stop_launched_container`.
+                //
+                // Gated on actually HOLDING a lease, not merely on gozer
+                // being installed: the stop exists to protect the release,
+                // so it should depend on the thing it protects. (Those are
+                // equivalent today only because `acquire_lease` errors out
+                // rather than degrading to an unleased serve; gating on
+                // `lease` means this can't drift if that ever changes.)
+                // Without a lease the unleased behaviour stays byte-identical.
+                if lease.is_some() {
+                    self.stop_launched_container(None);
                 }
             })?;
 
@@ -1142,14 +1185,26 @@ impl ServingBackend for RunPyBackend {
             //     removes it), and any trimmed answer other than `"true"`
             //     means it's not running -- treat both as DEAD, tail its log,
             //     and bail instead of grinding the health poll to its ceiling.
+            //
+            //     The two cases DIVERGE in one respect, and only once a lease
+            //     is held: an inspect that ANSWERS "not running" is proof the
+            //     container is gone, but an inspect that ERRORS (a docker
+            //     daemon hiccup) is not -- it means we no longer know. Since
+            //     returning from here drops the lease guard, and the release
+            //     resets those chips, a false negative would reset under a
+            //     container that is still running. So on a probe error, stop
+            //     first. See `stop_launched_container`.
             if let Some(id) = &artifacts.container_id {
-                let running = self
+                let probe = self
                     .runner
-                    .run(&["docker", "inspect", "-f", "{{.State.Running}}", id])
-                    .map(|out| out.trim() == "true")
-                    .unwrap_or(false);
+                    .run(&["docker", "inspect", "-f", "{{.State.Running}}", id]);
+                let probe_errored = probe.is_err();
+                let running = probe.map(|out| out.trim() == "true").unwrap_or(false);
                 if !running {
                     tail_container_log();
+                    if probe_errored && lease.is_some() {
+                        self.stop_launched_container(Some(id));
+                    }
                     return Err(anyhow::anyhow!(
                         "runpy backend: serve of '{model}' failed -- container {id} \
                          exited during startup (see container log)"
@@ -1213,19 +1268,22 @@ impl ServingBackend for RunPyBackend {
                 // reads `/proc/<pid>/fd` unprivileged and the serving
                 // container is root-owned -- the same fd blindness that
                 // makes `--owner-pid` mandatory. Best-effort, mirroring the
-                // cancel branch above.
+                // cancel branch above -- but via `stop_launched_container`,
+                // which falls back to the published-port sweep when no
+                // container id was captured (a NORMAL outcome, per
+                // `parse_run_artifacts`) and logs any failure instead of
+                // swallowing it.
                 //
-                // Gated on holding a lease ON PURPOSE: this stop exists to
-                // protect the release, and without gozer the unleased
-                // behaviour must stay byte-identical to what it has always
-                // been (a timed-out bring-up leaves its container for the
-                // operator to inspect, and the next `start`'s stale sweep
-                // clears it). Whether the unleased path SHOULD stop it too
-                // is a separate question, not a side effect of this fix.
-                if self.gozer.is_some() {
-                    if let Some(id) = &artifacts.container_id {
-                        let _ = self.runner.run(&["docker", "stop", id]);
-                    }
+                // Gated on actually HOLDING a lease ON PURPOSE: this stop
+                // exists to protect the release, so it depends on the thing
+                // it protects, and without a lease the unleased behaviour
+                // stays byte-identical to what it has always been (a
+                // timed-out bring-up leaves its container for the operator
+                // to inspect, and the next `start`'s stale sweep clears it).
+                // Whether the unleased path SHOULD stop it too is a separate
+                // question, not a side effect of this fix.
+                if lease.is_some() {
+                    self.stop_launched_container(artifacts.container_id.as_deref());
                 }
                 return Err(anyhow::anyhow!(
                     "runpy backend: model '{model}' did not become queryable on \

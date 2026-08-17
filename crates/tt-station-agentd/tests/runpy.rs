@@ -1797,6 +1797,106 @@ fn runpy_start_stops_the_container_before_releasing_on_health_timeout() {
     );
 }
 
+/// Index of the LAST `docker stop` that happened strictly after the run.py
+/// invocation -- i.e. one of the error-path stops, never the pre-launch
+/// stale-container sweep, which would otherwise satisfy an ordering
+/// assertion by accident.
+fn last_post_launch_docker_stop(commands: &[Vec<String>]) -> Option<usize> {
+    let runpy_index = commands
+        .iter()
+        .position(|cmd| cmd.first().map(String::as_str) == Some("python3"))?;
+    commands
+        .iter()
+        .enumerate()
+        .filter(|(i, cmd)| {
+            *i > runpy_index
+                && cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")
+        })
+        .map(|(i, _)| i)
+        .next_back()
+}
+
+/// The timeout stop must NOT depend on having captured a container id.
+/// `parse_run_artifacts`' own doc calls a missing id a NORMAL outcome
+/// ("run.py's output format may drift across versions"), so the day that log
+/// line changes, an id-only stop silently stops nothing -- and the release
+/// then resets chips under a live container, the exact Critical hazard,
+/// through a path the code already documents as expected. Fall back to the
+/// published-port sweep, like the launch-failure path does.
+#[test]
+fn runpy_start_stops_by_port_when_timing_out_without_a_container_id() {
+    let runner = leasing_runner(0);
+    // run.py prints NOTHING parseable -- no container id captured.
+    runner.set_run_output("docker ps", "orphan99\n");
+    runner.set_http_get(r#"{"data":[]}"#); // never lists a model
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()))
+        .with_health_poll(3, Duration::from_millis(1));
+
+    backend
+        .start("llama3")
+        .expect_err("start must fail when the model never becomes queryable");
+
+    let commands = runner.commands();
+    let release_index = gozer_index(&commands, "release")
+        .unwrap_or_else(|| panic!("a timed-out start must release its lease: {commands:?}"));
+    let stop_index = last_post_launch_docker_stop(&commands).unwrap_or_else(|| {
+        panic!(
+            "with no container id, a timed-out start must still sweep the \
+             serving port: {commands:?}"
+        )
+    });
+    assert!(
+        stop_index < release_index,
+        "the sweep ({stop_index}) must precede the release ({release_index}) \
+         -- release resets those chips: {commands:?}"
+    );
+}
+
+/// A liveness-probe ERROR is not proof the container died. `docker inspect`
+/// failing (a daemon hiccup) currently returns the same "exited during
+/// startup" error as an inspect that reports `false` -- but in the error
+/// case the container may well still be running, and returning drops the
+/// lease guard, whose release RESETS those chips. So on a probe error, stop
+/// first; only an inspect that actually says "not running" may skip it.
+#[test]
+fn runpy_start_stops_the_container_when_the_liveness_probe_errors() {
+    let runner = leasing_runner(u32::MAX);
+    runner.set_run_output("run.py", "INFO: Created Docker container ID: deadbeef\n");
+    // The daemon is unreachable -- we do NOT know the container is dead.
+    runner.fail_run("docker inspect", "Cannot connect to the Docker daemon");
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
+        .with_gozer(Some(gozer_capability()))
+        .with_health_poll(2_000, Duration::from_millis(1));
+
+    backend
+        .start("llama3")
+        .expect_err("start must fail when the liveness probe can't answer");
+
+    let commands = runner.commands();
+    let release_index = gozer_index(&commands, "release")
+        .unwrap_or_else(|| panic!("the lease must be released: {commands:?}"));
+    let stop_index = commands
+        .iter()
+        .position(|cmd| {
+            cmd.first().map(String::as_str) == Some("docker")
+                && cmd.get(1).map(String::as_str) == Some("stop")
+                && cmd.iter().any(|a| a == "deadbeef")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "an inspect ERROR is not proof of death -- the container must \
+                 be stopped: {commands:?}"
+            )
+        });
+    assert!(
+        stop_index < release_index,
+        "the container must be stopped ({stop_index}) BEFORE the lease is \
+         released ({release_index}): {commands:?}"
+    );
+}
+
 /// Same hazard at the launch failure: `run.py` can start a container and
 /// then fail, and its stdout (which carries the container id) is lost with
 /// the error -- so the only handle left is the published-port sweep `stop`
