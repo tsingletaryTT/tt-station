@@ -5,6 +5,12 @@ tt-station (0.11.0) noble; urgency=medium
     to Tenstorrent's official CLI (tenstorrent/tt-cli) and this package was
     shadowing it. No `tt` alias or compatibility symlink is shipped -- update
     any scripts that invoked `tt <verb>`.
+  * agentd now leases its chips through gozer before running or resetting a
+    device: it acquires with --owner-pid so a live agentd is never reaped as
+    stale, adopts any lease left behind by a previous agentd process, and
+    refuses a reset/run/reset-chips that would hit a neighbour's chips. New
+    `GET /leases` route and `tt-station leases` (was `tt leases`) surface each
+    chip's gozer state to the Mac app and CLI.
   * telemetry: report media/diffusion workloads (tt-media-inference-server)
     in the tt_toplike.inference stream as a `media` object, alongside the
     existing vLLM `serving` object.
