@@ -1,0 +1,74 @@
+# xcodegen spec for the experimental Blackhole DriverKit driver.
+#   cd macos/TTStationDriver && xcodegen generate
+# Three targets:
+#   TTStationDriverExtension  the .dext (DriverKit SDK)          → com.tenstorrent.ttstation.driver
+#   TTStationDriver           headless host app that embeds + activates the dext
+#   tt-station-bh-probe       read-only userspace smoke test (spec milestone M1)
+# Design: docs/superpowers/specs/2026-09-28-macos-blackhole-dext-design.md
+name: TTStationDriver
+options:
+  bundleIdPrefix: com.tenstorrent
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Signing is done after the build by scripts/install-dev.sh (ad-hoc, dev entitlements).
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGN_IDENTITY: ""
+targets:
+  TTStationDriverExtension:
+    type: driver-extension
+    platform: macOS
+    sources:
+      - path: Driver
+      - path: Shared
+        buildPhase: none
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tenstorrent.ttstation.driver
+        PRODUCT_NAME: com.tenstorrent.ttstation.driver
+        SDKROOT: driverkit
+        SUPPORTED_PLATFORMS: driverkit
+        DRIVERKIT_DEPLOYMENT_TARGET: "22.0"
+        INFOPLIST_FILE: Driver/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: Driver/TTBlackholeDriver.Dev.entitlements
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+        HEADER_SEARCH_PATHS:
+          - "$(SDKROOT)/System/DriverKit/System/Library/Frameworks"
+    dependencies:
+      - sdk: DriverKit.framework
+      - sdk: PCIDriverKit.framework
+
+  TTStationDriver:
+    type: application
+    platform: macOS
+    sources:
+      - path: Host
+    dependencies:
+      - target: TTStationDriverExtension
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tenstorrent.ttstation.driverhost
+        INFOPLIST_FILE: Host/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: Host/TTStationDriver.entitlements
+        SWIFT_VERSION: "5.0"
+
+  tt-station-bh-probe:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Probe
+      - path: Shared
+        buildPhase: none
+    dependencies:
+      - sdk: IOKit.framework
+      - sdk: CoreFoundation.framework
+    settings:
+      base:
+        PRODUCT_NAME: tt-station-bh-probe
+        GCC_C_LANGUAGE_STANDARD: gnu17

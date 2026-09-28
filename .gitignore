@@ -32,3 +32,7 @@ debian/*.debhelper
 
 # CI artifact staging dir (release.yml workflow_dispatch)
 /dist/
+
+# Experimental DriverKit dext (macos/TTStationDriver) — generated project + build products
+macos/TTStationDriver/TTStationDriver.xcodeproj/
+macos/TTStationDriver/build/

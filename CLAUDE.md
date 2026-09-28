@@ -23,6 +23,18 @@ installed on this box at `~/.tenstorrent-venv/bin/tt`.
 
 ## ▶ PICK UP HERE
 
+**eGPU experiment — local P100 on a Mac (2026-09-28, branch `experiments/egpu`).** Prompt: owner
+put their own P100 in a Razer Core X V2 Thunderbolt enclosure on their MacBook Pro and asked for
+prior art on a Mac-side driver. Goal they stated: *tt-station detects the attached device and
+invokes the official `tt` CLI / tt-model-manager to deploy a model right-sized for it*,
+reached "in small steps". Findings: macOS already tunnels PCIe and enumerates the card
+(`pci1e52,b140`, Gen4 x4, BAR4 only 16 B, which is risk R1). Asahi can't, because it has no
+Thunderbolt PCIe tunnels, so an eGPU wouldn't have rescued the old Asahi bounty. The best
+template is tinygrad's TinyGPU dext. Built so far: `macos/TTStationDriver/` (dext + headless
+host app + read-only `tt-station-bh-probe`, xcodegen, **compiles and ad-hoc signs; not yet
+loaded**, which needs SIP off). Spec + milestones M0–M6:
+`docs/superpowers/specs/2026-09-28-macos-blackhole-dext-design.md`. **Journey log (append a dated entry every session, keep dead ends, quote real output — it will become a blog post):** `docs/journey/egpu-p100-on-a-mac.md`. Next: M1 on hardware.
+
 **CLI renamed `tt` → `tt-station` (2026-08-17, branch `refactor/cli-name`, stacks on
 `feat/gozer-integration`).** Our CLI was named `tt`, which is the name Tenstorrent's official
 CLI (`tenstorrent/tt-cli`) owns — and that CLI already has `run`, `serve`, `stop`, `logs`,
