@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TEAM (development-signed) entitlements: scripts/install-dev.sh --team <ID>. This is the path
+  that should load with SIP ENABLED. Apple DTS: DriverKit has "development" entitlement variants
+  that are "available on all paid developer accounts without any special approval" and "allow a
+  DEXT to match against any hardware". Xcode 16+ automatic signing covers the PCI family for
+  development (distribution signing of PCI/USB still needs Apple's grant; that is spec M6).
+  (developer.apple.com/forums/thread/809202)
+
+  The development grant is a wildcard (0xFFFFFFFF&0x00000000); we claim only the Tenstorrent
+  subset of it. There is no allow-any-userclient-access: clients get in through the host app's
+  userclient-access entitlement, which is why the probe is run as `TTStationDriver probe`.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.driverkit</key>
+	<true/>
+	<key>com.apple.developer.driverkit.transport.pci</key>
+	<array>
+		<dict>
+			<key>IOPCIPrimaryMatch</key>
+			<string>0x00001e52&amp;0x0000FFFF</string>
+		</dict>
+	</array>
+</dict>
+</plist>

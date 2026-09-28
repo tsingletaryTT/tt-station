@@ -171,3 +171,81 @@ exit=3
   unknown.
 - The next entry should be the first time macOS hands a Tenstorrent chip to our code, or the
   first reason it won't.
+
+---
+
+## 2026-09-28 (later): "…without booting into safe mode"
+
+Taylor's constraint: *"try ways to make this work that don't require me to boot into safe
+mode."* By safe mode they meant Recovery, where `csrutil disable` lives. So the question became
+**which routes let an unsigned or self-built dext load while SIP stays on?**
+
+### Dead end 1: developer mode
+
+`systemextensionsctl developer on` is the documented switch for testing system extensions. It
+turns you away at the door:
+
+```
+$ systemextensionsctl developer
+At this time, this tool cannot be used if System Integrity Protection is enabled.
+This limitation will be removed in the near future.
+Please remember to re-enable System Integrity Protection!
+```
+
+It is a nice irony that the tool for *developing* extensions needs you to switch off the
+system that makes extensions safe.
+
+### Dead end 2: ad-hoc signing
+
+We had already built an ad-hoc-signed app. Running it, even just `status`, was killed on the
+spot: exit 137, no output. The unified log says why:
+
+```
+amfid: ... not valid: Error Domain=AppleMobileFileIntegrityError Code=-424
+       "The file is adhoc signed but contains restricted entitlements"
+kernel: proc 8524: load code signature error 4 for file "TTStationDriver"
+```
+
+`com.apple.developer.system-extension.install` is a *restricted* entitlement. With SIP on,
+AMFI won't let an ad-hoc binary claim it at all, so we never even got as far as asking for the
+dext.
+
+(A side quest while reading that log: in zsh, `log` is a **shell builtin** that shadows
+`/usr/bin/log`, so `log show …` fails with "too many arguments". This week's whole project
+started with a name collision, `tt` versus our old CLI, and here was another one. The docs now
+say `/usr/bin/log`.)
+
+### What actually works with SIP on: a real team signature
+
+Apple's DriverKit engineers wrote a forum post on this
+([thread 809202](https://developer.apple.com/forums/thread/809202)). The old "disable SIP" advice
+dates from when DriverKit was new. DriverKit now has **development entitlement variants** that are
+*"available on all paid developer accounts without any special approval"* and that *"allow a DEXT
+to match against any hardware"*. Xcode 16+ automatic signing handles the PCI family for
+development. So the gate is not SIP: it's **a paid Apple Developer team**. This Mac has none
+(`security find-identity` found 0 identities).
+
+Getting ready for that meant one more design change. A development-signed dext shouldn't carry
+`allow-any-userclient-access`, so clients need their own `userclient-access` entitlement.
+That entitlement is restricted too, and a bare CLI tool can't embed a provisioning profile.
+So the probe now also lives *inside the host app*, as `TTStationDriver probe`, and
+`install-dev.sh --team <ID>` does the whole development-signed build in one pass.
+
+### Plan B that needs no driver at all
+
+tinygrad has a second eGPU trick:
+
+- `CustomASM24Controller` in `tinygrad/runtime/support/usb.py` sends raw PCIe config and memory
+  transactions through **libusb**, to a card sitting behind an **ASMedia ASM2464PD** USB-to-PCIe
+  bridge.
+- That needs no dext, no signing and no SIP change.
+- The catches: a different (cheaper) enclosure, patched bridge firmware, slow MMIO, and almost
+  no DMA.
+- It's good enough to poke Blackhole registers (M1/M2), not to run models.
+
+### Where it stands
+
+- The skeleton is committed (`3501330`).
+- The SIP-on route is ready to try the moment a paid team is signed in to Xcode.
+- The open question is whose team: Tenstorrent's (signing reportedly got approved last
+  week), or a personal $99 account to get moving.

@@ -99,9 +99,9 @@ over a TB tunnel are the riskiest operations and nothing needs them to prove M1.
   `Contents/Library/SystemExtensions/`. `install-dev.sh --build` ad-hoc signs with the dev
   entitlements. Verified without hardware: the probe reports "no service" and exits 1; the host
   app refuses to install from outside `/Applications`.
-- **M1 — dext attaches, BARs map (read-only):** install with SIP off (below); `systemextensionsctl
+- **M1 — dext attaches, BARs map (read-only):** install development-signed with SIP on (`install-dev.sh --team`, see Dev install); `systemextensionsctl
   list` shows `[activated enabled]`; `ioreg` shows our service under `pci1e52,b140`;
-  `tt-station-bh-probe` prints vendor/device, the three BAR sizes, and reads TLB register 0
+  `TTStationDriver probe` prints vendor/device, the three BAR sizes, and reads TLB register 0
   from BAR0 `+0x1FC00000`.
 - **M2 — first NOC read:** program one 2 MiB TLB window (as tt-kmd does with window 201) to
   ARC (8,0) at `0x80000000`, read `ARC_BOOT_STATUS` (`0x80030408`), expect bit0 = 1. That
@@ -123,13 +123,28 @@ over a TB tunnel are the riskiest operations and nothing needs them to prove M1.
   `IOPCIPrimaryMatch 0x00001e52&0x0000FFFF` + `driverkit.userclient-access` for the host
   app from Apple under Tenstorrent's developer account.
 
-## Dev install (SIP off)
+## Dev install
 
-Unsigned/ad-hoc dexts only load with **SIP disabled** (TinyGPU's `install_nosip.sh` refuses
-otherwise). Whether `systemextensionsctl developer on` alone suffices is **unverified** — try
-it first, fall back to `csrutil disable` from Recovery. Re-enable SIP when done.
-`macos/TTStationDriver/scripts/install-dev.sh` does build → ad-hoc sign with the dev
-entitlements → copy to `/Applications` → submit the activation request.
+Tested 2026-09-28 on this Mac, with SIP **on**:
+
+| Route | Result |
+|---|---|
+| `systemextensionsctl developer on` | **Dead.** "this tool cannot be used if System Integrity Protection is enabled" |
+| Ad-hoc sign (`install-dev.sh` / `--build`) | **Dead with SIP on.** AMFI kills the host app: `Code=-424 "adhoc signed but contains restricted entitlements"` (exit 137). |
+| Development signing from a **paid** team (`install-dev.sh --team ID`) | **Expected to work**; not yet tried because there's no team on this Mac (`security find-identity` found 0 identities). Apple DTS: DriverKit development entitlement variants are "available on all paid developer accounts without any special approval" and "allow a DEXT to match against any hardware". Xcode 16+ automatic signing covers PCI for development. ([forum thread 809202](https://developer.apple.com/forums/thread/809202)) |
+| SIP off + ad-hoc | Works per TinyGPU's `install_nosip.sh`; the owner prefers to avoid this. |
+
+With development signing, the dext carries `TTBlackholeDriver.Team.entitlements`: no
+`allow-any-userclient-access`, so clients get in through the host app's `userclient-access`.
+That is why the probe is also linked into the host app (`TTStationDriver probe`).
+
+**Fallback that needs no driver at all:** tinygrad's USB path
+(`tinygrad/runtime/support/usb.py`, `CustomASM24Controller`) sends raw PCIe config and memory
+TLPs to a device behind an **ASMedia ASM2464PD** USB4/USB3-to-PCIe bridge through libusb.
+There's no dext, no signing and no SIP change. The cost is a different enclosure (the Razer
+uses an Intel Thunderbolt controller, not an ASM2464), tinygrad's patched bridge firmware
+(`extra/usbgpu/patch.py`), slow MMIO, and DMA limited to the bridge's small internal buffer.
+That's enough for M1/M2 register pokes, not for M3+. Unverified against a Blackhole.
 
 ## Risks
 

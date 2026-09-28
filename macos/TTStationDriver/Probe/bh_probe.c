@@ -10,8 +10,13 @@
 // Everything is a READ. Nothing here reprograms a TLB or touches the NOC — that is M2.
 // A dead link shows up as 0xFFFFFFFF on MMIO reads; the probe flags it.
 //
-// Build: part of macos/TTStationDriver/project.yml (target tt-station-bh-probe), or
-//   clang -O2 -Wall -framework IOKit -framework CoreFoundation Probe/bh_probe.c -o tt-station-bh-probe
+// Two ways to run it:
+//   * standalone `tt-station-bh-probe` (target in project.yml) — works when the dext grants
+//     any client access (the SIP-off dev entitlements);
+//   * `TTStationDriver probe` — the same code linked into the host app, which carries the
+//     com.apple.developer.driverkit.userclient-access entitlement. This is the path that
+//     works with a development-signed (SIP-on) dext, because a bare CLI tool can't embed the
+//     provisioning profile that restricted entitlement needs. Built with TTBH_PROBE_NO_MAIN.
 
 #include <stdio.h>
 #include <stdint.h>
@@ -20,6 +25,7 @@
 #include <IOKit/IOKitLib.h>
 
 #include "../Shared/TTBlackholeABI.h"
+#include "bh_probe.h"
 
 static const char * bar_label(uint64_t size, char * buf, size_t n)
 {
@@ -48,7 +54,7 @@ static uint32_t mmio_read32(mach_vm_address_t base, uint64_t offset)
     return *(volatile uint32_t *)(uintptr_t)(base + offset);
 }
 
-int main(void)
+int ttbh_probe_run(void)
 {
     // ── 1. find + open ──────────────────────────────────────────────
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault,
@@ -128,3 +134,7 @@ int main(void)
     IOServiceClose(conn);
     return dead ? 2 : 0;
 }
+
+#ifndef TTBH_PROBE_NO_MAIN
+int main(void) { return ttbh_probe_run(); }
+#endif

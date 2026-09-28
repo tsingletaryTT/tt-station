@@ -2,7 +2,7 @@
 // (Contents/Library/SystemExtensions/) and ask macOS to activate or deactivate it.
 // macOS requires a dext to be installed by an app living in /Applications.
 //
-//   /Applications/TTStationDriver.app/Contents/MacOS/TTStationDriver install|uninstall|status
+//   /Applications/TTStationDriver.app/Contents/MacOS/TTStationDriver install|uninstall|status|probe
 //
 // Modeled on tinygrad's TinyGPUCLIRunner.swift (MIT), trimmed to a headless CLI.
 
@@ -92,6 +92,10 @@ switch args.count > 1 ? args[1] : "" {
 case "status":
     print("\(dextID): \(dextState())")
     exit(Exit.ok.rawValue)
+case "probe":
+    // Same read-only smoke test as tt-station-bh-probe, but run from inside this app so it
+    // carries our userclient-access entitlement (needed once the dext is development-signed).
+    exit(ttbh_probe_run())
 case "install", "uninstall":
     guard Bundle.main.bundlePath.hasPrefix("/Applications/") else {
         print("Run from /Applications/TTStationDriver.app — macOS refuses dexts from elsewhere.")
@@ -101,6 +105,6 @@ case "install", "uninstall":
     requester.submit()
     dispatchMain()  // delegate callbacks exit the process
 default:
-    print("usage: TTStationDriver install | uninstall | status")
+    print("usage: TTStationDriver install | uninstall | status | probe")
     exit(Exit.usage.rawValue)
 }

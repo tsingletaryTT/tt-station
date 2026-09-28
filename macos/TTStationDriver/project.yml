@@ -34,7 +34,10 @@ targets:
         DRIVERKIT_DEPLOYMENT_TARGET: "22.0"
         INFOPLIST_FILE: Driver/Info.plist
         GENERATE_INFOPLIST_FILE: NO
-        CODE_SIGN_ENTITLEMENTS: Driver/TTBlackholeDriver.Dev.entitlements
+        # Dev = ad-hoc/SIP-off (any client may connect); Team = development-signed/SIP-on.
+        # scripts/install-dev.sh --team passes TTBH_ENTITLEMENTS_FLAVOR=Team.
+        TTBH_ENTITLEMENTS_FLAVOR: Dev
+        CODE_SIGN_ENTITLEMENTS: Driver/TTBlackholeDriver.$(TTBH_ENTITLEMENTS_FLAVOR).entitlements
         CLANG_CXX_LANGUAGE_STANDARD: gnu++20
         HEADER_SEARCH_PATHS:
           - "$(SDKROOT)/System/DriverKit/System/Library/Frameworks"
@@ -47,9 +50,15 @@ targets:
     platform: macOS
     sources:
       - path: Host
+      # The probe is linked in too (`TTStationDriver probe`), so it runs under the app's
+      # userclient-access entitlement — see Probe/bh_probe.c header.
+      - path: Probe
+      - path: Shared
+        buildPhase: none
     dependencies:
       - target: TTStationDriverExtension
         embed: true
+      - sdk: IOKit.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.tenstorrent.ttstation.driverhost
@@ -57,6 +66,8 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_ENTITLEMENTS: Host/TTStationDriver.entitlements
         SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: Host/TTStationDriver-Bridging-Header.h
+        GCC_PREPROCESSOR_DEFINITIONS: ["$(inherited)", "TTBH_PROBE_NO_MAIN=1"]
 
   tt-station-bh-probe:
     type: tool

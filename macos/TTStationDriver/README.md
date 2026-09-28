@@ -12,8 +12,8 @@ in a Thunderbolt enclosure. It hands the card's BARs to userspace. It is adapted
 | `Driver/` | the dext: `TTBlackholeDriver` (matches + opens the device) and `TTBlackholeUserClient` (BAR mapping, GetInfo, CfgRead) |
 | `Shared/TTBlackholeABI.h` | the user-client contract (selectors, info slots, memory types, register offsets), shared by both sides |
 | `Host/` | headless `TTStationDriver.app`: embeds the dext and runs `install` / `uninstall` / `status` |
-| `Probe/bh_probe.c` | `tt-station-bh-probe`, a read-only smoke test (spec milestone M1) |
-| `scripts/install-dev.sh` | build → ad-hoc sign → `/Applications` → activate |
+| `Probe/bh_probe.c` | the read-only M1 smoke test: standalone `tt-station-bh-probe`, and also linked into the host app as `TTStationDriver probe` |
+| `scripts/install-dev.sh` | build → sign (`--team ID` development, or ad-hoc) → `/Applications` → activate |
 
 ## Build (no SIP change needed)
 
@@ -21,13 +21,35 @@ in a Thunderbolt enclosure. It hands the card's BARs to userspace. It is adapted
 cd macos/TTStationDriver && scripts/install-dev.sh --build
 ```
 
-## Load it (needs SIP disabled, or a successful `--force` try)
+## Load it with SIP ON (development-signed, the preferred route)
+
+This needs a **paid** Apple Developer team signed in to Xcode (Settings > Accounts). No reboot.
+You approve it once in System Settings.
+
+```bash
+scripts/install-dev.sh --team <TEAMID>
+/Applications/TTStationDriver.app/Contents/MacOS/TTStationDriver probe
+/usr/bin/log stream --predicate 'eventMessage CONTAINS "ttbh:"'
+```
+
+Use `TTStationDriver probe`, not the standalone binary. A development-signed dext only lets
+in clients that carry `userclient-access`, and only the app can carry that entitlement (a bare
+CLI tool can't embed a provisioning profile).
+
+Note the full path `/usr/bin/log`: zsh has a `log` builtin that shadows it.
+
+## Load it with SIP OFF (ad-hoc)
 
 ```bash
 scripts/install-dev.sh
-build/Debug/tt-station-bh-probe
-log stream --predicate 'eventMessage CONTAINS "ttbh:"'
 ```
+
+With SIP on this route cannot work, and it fails in two places:
+
+- `systemextensionsctl developer on` refuses to run.
+- AMFI kills the ad-hoc host app outright (`Code=-424 "The file is adhoc signed but contains
+  restricted entitlements"`, exit 137). Even `status` dies. So on a SIP-on Mac, an app built
+  with `--build` is only good for inspecting.
 
 Uninstall: `/Applications/TTStationDriver.app/Contents/MacOS/TTStationDriver uninstall`.
 
