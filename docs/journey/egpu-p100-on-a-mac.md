@@ -23,6 +23,12 @@ P100. We get there in small steps.
 - A **Razer Core X V2** eGPU enclosure (USB4 v2).
 - Inside it, instead of a graphics card, Taylor's own **Tenstorrent Blackhole P100**.
 
+![A Tenstorrent p100a card installed in a Razer Core X V2 enclosure, below a Corsair RM750e power supply](images/2026-09-28-p100a-in-razer-core-x-v2.jpg)
+
+*The rig: a Tenstorrent **p100a** in the Razer Core X V2's slot, below the enclosure's Corsair
+RM750e (750 W) power supply and a bundle of unused modular PSU cables. There's no GPU anywhere
+in the box.*
+
 Apple Silicon Macs don't support eGPUs *as GPUs*. But an enclosure is just a PCIe slot at the
 end of a Thunderbolt cable, and a Tenstorrent card doesn't need to be a GPU. The first prompt:
 *"look for prior art on GH for drivers like this."*
@@ -249,3 +255,56 @@ tinygrad has a second eGPU trick:
 - The SIP-on route is ready to try the moment a paid team is signed in to Xcode.
 - The open question is whose team: Tenstorrent's (signing reportedly got approved last
   week), or a personal $99 account to get moving.
+
+---
+
+## 2026-09-28 (evening): what fits a P100, and a ghost on this very Mac
+
+Taylor started Apple's developer ID validation. Until that clears, the driver can't load, so
+the question became what could move forward without it.
+
+### The card tells us its name, and the silkscreen agrees
+
+A Mac will show *any* process the IORegistry, driver or not. The card's PCI subsystem ID is
+`0x43`, and luwen's board-type table (`crates/luwen-api/src/chip/mod.rs`) maps `0x43 => "p100a"`.
+The photo at the top of this log, taken inside the enclosure, reads **p100a** on the shroud.
+So tt-station can name the exact board from the Mac with no driver loaded.
+
+### What's right-sized for a P100?
+
+The official `tt` CLI already answers this. `tt model list --hw <device>` filters its catalog
+to one device config and skips auto-detection, which is exactly what a Mac needs because it
+can't auto-detect yet. The catalog it ships (release 0.22.0, 70 models) lists two for a
+`p100`:
+
+```
+Llama-3.1-8B            p100   EXPERIMENTAL   ctx=65536
+Llama-3.1-8B-Instruct   p100   EXPERIMENTAL   ctx=65536
+```
+
+That's a nice echo: Llama 3 8B is also the model blackhole-py runs on a single Blackhole.
+"A small meager P100", in Taylor's words, gets one model family, in 8B.
+
+**tt-model-manager** turned out to be `tt-model`. It publishes and pulls self-contained model
+bundles over the Hugging Face Hub, and `tt model` / `tt serve` forward to it for community
+bundles. Its compatibility check refuses an arch mismatch outright and warns on other
+mismatches, such as too few chips.
+
+The sobering part is that *serving* is built for Linux: tt-inference-server containers or
+tt-model bundles, a host with direct access to the card. Detection and right-sizing can land on
+the Mac now. Serving locally is still the long pole, even after the driver works.
+
+### A ghost in `~/.local/bin`
+
+While checking whether the official CLI was installed here, `which -a tt` turned up
+`~/.local/bin/tt`. Running `--help` printed:
+
+```
+Operator CLI for tt-station
+Usage: tt [OPTIONS] <COMMAND>
+```
+
+It was **our own old CLI**, built July 15, still squatting on `tt` on this Mac. That's the
+exact shadowing bug last month's rename fixed. The rename stopped *creating* the collision, but
+nothing ever cleaned up an existing one, and the official `tt` wasn't installed here at all.
+Before tt-station can delegate to `tt`, the real `tt` has to be the one on the PATH.
