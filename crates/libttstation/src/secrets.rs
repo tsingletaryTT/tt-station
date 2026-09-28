@@ -147,7 +147,6 @@ impl SecretStore for KeychainStore {
     }
 
     fn get(&self, box_name: &str) -> Result<Option<String>> {
-        use security_framework::base::Error as SfError;
         use security_framework::passwords::get_generic_password;
         match get_generic_password(Self::SERVICE, box_name) {
             Ok(bytes) => {
@@ -158,7 +157,7 @@ impl SecretStore for KeychainStore {
             // errSecItemNotFound (-25300): no such item is not an error for
             // `get` — it just means nothing has been stored yet.
             Err(e) if e.code() == -25300 => Ok(None),
-            Err(e) => Err(SfError::from(e)).context("reading token from macOS Keychain"),
+            Err(e) => Err(e).context("reading token from macOS Keychain"),
         }
     }
 

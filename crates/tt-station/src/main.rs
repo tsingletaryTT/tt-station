@@ -46,6 +46,7 @@
 //! call-per-runtime rules.
 
 mod catalog;
+mod local;
 mod ssh;
 
 use std::path::PathBuf;
@@ -393,6 +394,21 @@ enum Command {
     /// service. Run ON the box itself (e.g. over SSH) -- unlike every other
     /// subcommand above, there's no `--host`: it talks to `127.0.0.1
     /// :<ctrl-port>` and to the local systemd/journald, never a remote box.
+    /// Treat THIS machine as the box: detect Tenstorrent cards attached here (on a Mac, a card in
+    /// a Thunderbolt enclosure, read from the IORegistry with no driver needed), name the device
+    /// config (`p100`, ...), and ask the official `tt` CLI which models are right-sized for it
+    /// (`tt model list --hw <config>`). See `crates/tt-station/src/local.rs`.
+    Local {
+        /// Parse this saved `ioreg -a -r -c IOPCIDevice -d 1` XML instead of the live IORegistry
+        /// (tests, and diagnosing someone else's machine from a capture).
+        #[arg(long = "ioreg-file")]
+        ioreg_file: Option<PathBuf>,
+
+        /// Only detect; don't ask the official `tt` CLI for right-sized models.
+        #[arg(long = "no-models")]
+        no_models: bool,
+    },
+
     Console {
         /// Print one `BoxLifecycleSnapshot` as JSON and exit, instead of
         /// launching the TUI. This is what the GTK box panel polls.
@@ -414,6 +430,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
+        Command::Local { ioreg_file, no_models } => {
+            local::run(ioreg_file.as_deref(), *no_models, cli.json)?;
+        }
         Command::Discover {
             hosts,
             no_mdns,

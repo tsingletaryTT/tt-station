@@ -33,7 +33,17 @@ Thunderbolt PCIe tunnels, so an eGPU wouldn't have rescued the old Asahi bounty.
 template is tinygrad's TinyGPU dext. Built so far: `macos/TTStationDriver/` (dext + headless
 host app + read-only `tt-station-bh-probe`, xcodegen, **compiles and ad-hoc signs; not yet
 loaded**, which needs SIP off). Spec + milestones M0–M6:
-`docs/superpowers/specs/2026-09-28-macos-blackhole-dext-design.md`. **Journey log (append a dated entry every session, keep dead ends, quote real output — it will become a blog post):** `docs/journey/egpu-p100-on-a-mac.md`. Next: M1 on hardware.
+`docs/superpowers/specs/2026-09-28-macos-blackhole-dext-design.md`. **Journey log (append a dated entry every session, keep dead ends, quote real output — it will become a blog post):** `docs/journey/egpu-p100-on-a-mac.md`. **Also shipped (v0.12.0, same day):** `tt-station local`
+(`crates/tt-station/src/local.rs`) treats this machine as its own host. It detects the card from the
+macOS IORegistry (`libttstation::local_device`, no driver) and delegates right-sizing to the OFFICIAL
+`tt model list --hw <config>` (P100 → Llama-3.1-8B[-Instruct], EXPERIMENTAL). It refuses a `tt` whose
+`--version` isn't `tt <semver>`, because a stale pre-rename tt-station copy was shadowing `tt` on the
+owner's Mac. The `mesh_for` table moved to `libttstation::device_mesh` (the agent re-exports it) and
+gained `p100|p100a → p100`. `macos/scripts/ensure-official-tt.sh` (used by `install.sh` and by the app's
+first-run `OfficialCLIInstaller`) installs the official CLI via `uv tool install tenstorrent`.
+Corrections: BAR4 is *unassigned* over this link (the 16 B range is BAR5). With SIP on, only a
+**paid** team's development signature loads the dext (free teams can't, and dev mode refuses).
+Next: get onto a paid team → `install-dev.sh --team` → M1 on hardware.
 
 **CLI renamed `tt` → `tt-station` (2026-08-17, branch `refactor/cli-name`, stacks on
 `feat/gozer-integration`).** Our CLI was named `tt`, which is the name Tenstorrent's official

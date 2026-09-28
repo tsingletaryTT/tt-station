@@ -13,7 +13,12 @@ struct TTStationApp: App {
         _model = State(initialValue: AppModel(commands: client, discovery: discovery, registry: registry))
         // Defer to the next main-loop turn: running an NSAlert during App.init()
         // would block before the MenuBarExtra scene (and NSApp run loop) exist.
-        DispatchQueue.main.async { CLIInstaller.runFirstRunIfNeeded() }
+        // Sequential on purpose: CLIInstaller's alert is modal, so the official-tt offer (whose
+        // --check runs off-main) only starts after it's dismissed and can't stack on top of it.
+        DispatchQueue.main.async {
+            CLIInstaller.runFirstRunIfNeeded()
+            OfficialCLIInstaller.runFirstRunIfNeeded()
+        }
     }
 
     var body: some Scene {

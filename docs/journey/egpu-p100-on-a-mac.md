@@ -308,3 +308,104 @@ It was **our own old CLI**, built July 15, still squatting on `tt` on this Mac. 
 exact shadowing bug last month's rename fixed. The rename stopped *creating* the collision, but
 nothing ever cleaned up an existing one, and the official `tt` wasn't installed here at all.
 Before tt-station can delegate to `tt`, the real `tt` has to be the one on the PATH.
+
+---
+
+## 2026-09-28 (night): the Mac becomes its own box
+
+Taylor, with Apple's identity validation still pending:
+
+> since we'll be our own host in this case, we'll need to reuse some of the plumbing.
+> We want to prove it today, with the enclosure we have.
+
+### Evicting the ghost
+
+The stale `~/.local/bin/tt` (our own pre-rename CLI) was deleted. Then:
+
+```
+$ uv tool install tenstorrent
+Installed 1 executable: tt
+$ tt --version
+tt 1.0.1
+```
+
+The real `tt` runs happily on macOS. `tt device status` fails with *"Required tool 'tt-smi' is
+not installed"*, because its detection is tt-smi-based and a Mac can't reach the card that way.
+But `tt model list --hw p100` doesn't need detection at all.
+
+### `tt-station local`
+
+Every tt-station command until now talked to a remote box's agent. `local` is the first to
+treat the machine it runs on as the box. It reuses the plumbing:
+
+- **The device table.** The `(board_type, count) -> mesh` table the box agent uses moved out of
+  `tt-station-agentd` into `libttstation::device_mesh`, gained `p100`/`p100a → p100` to match the
+  official CLI's own mapping, and is re-exported to the agent unchanged. One table, two hosts.
+- **Detection without a driver.** `ioreg -a` gives any process the card's IDs, link and BARs.
+  A real capture from this Mac is now the test fixture.
+- **Right-sizing delegated.** The official CLI does it: `tt --json model list --hw p100`.
+
+On the real card, with no driver loaded:
+
+```
+$ tt-station local
+╔══ tt-station local
+║  p100a  (blackhole 1e52:b140, subsys 0043)  via Thunderbolt  PCIe Gen4 x4  @3:0:0
+║    memory ranges: 512 MiB, 1 MiB, 16 B
+║  device config: p100
+║
+║  right-sized models (official tt 1.0.1: `tt model list --hw p100`):
+║    Llama-3.1-8B                 llm   EXPERIMENTAL  ctx 65536
+║    Llama-3.1-8B-Instruct        llm   EXPERIMENTAL  ctx 65536
+╚══ serving on this Mac is not wired up yet (needs the dext; see macos/TTStationDriver)
+```
+
+That's half of the north star, working today: *detect the attached device → ask the official
+tooling what's right-sized for it.*
+
+### The ghost gets a test
+
+Having just been bitten, `tt-station local` refuses to trust a `tt` that isn't the official one.
+The official CLI answers `--version` with `tt <semver>`, and our old CLI had no `--version`.
+There's an end-to-end test with a fake `tt` that behaves exactly like the stale binary, and it
+has been seen to fail: loosening the guard turns it red.
+
+The same lesson went into the Mac install. `macos/scripts/ensure-official-tt.sh` is run by
+`install.sh` and bundled into the app for a first-run offer. It removes a stale tt-station-as-`tt`
+(ours, so safe), refuses to touch a *foreign* `tt`, installs uv via Homebrew if needed, runs
+`uv tool install tenstorrent`, and verifies the result.
+
+Its first draft had its own instrument bug. It misfiled the stale binary as "foreign" because,
+under `set -o pipefail`, `tt --help | grep -q …` fails when the binary exits non-zero, even
+though grep matched. Our real old binary exits 0 on `--help`, so it would have *happened* to
+work on this Mac. Only a fake that exits 2 exposed it. The fix is to capture first, then match.
+
+### A correction: BAR4 was never 16 bytes
+
+Decoding `assigned-addresses` (which records the config-space offset of each range) showed the
+three ranges are **BAR0, BAR2 and BAR5**. The 16-byte one is BAR5. **BAR4 was never assigned at
+all**, probably because a Thunderbolt bridge can't fit a 64-bit BAR of up to 32 GiB. So the
+first entry's "16-byte BAR4" was a misreading: a list of ranges isn't a list indexed by BAR
+number. The practical upshot is unchanged. There are no 4 GiB windows over this link, which
+tt-kmd tolerates.
+
+### "Prove it today": the Apple wall, mapped
+
+A research pass on SIP-on options came back with one conclusion:
+
+- A **free** Personal Team can't do it. Apple's capability table doesn't offer System Extension
+  or DriverKit to free accounts.
+- Borrowing tinygrad's signed dext can't work, because its match lives in its signed Info.plist.
+- There's no generic IOKit user client that maps BARs on Apple Silicon.
+
+The *only* legitimate SIP-on route is a development signature from a **paid** team. Options:
+
+1. Get invited to an existing paid team (a colleague's; one exists behind a Developer ID signing
+   pipeline internally). This takes hours.
+2. Finish the individual enrollment in the iPhone Apple Developer app. That can take minutes to
+   48 hours.
+3. Tenstorrent's org enrollment (legal approved the terms on 9/23). That takes weeks.
+
+One more adjustment, per Apple DTS: the development entitlement now uses Apple's wildcard PCI
+match. The dext still only ever claims `1e52:b140`, through its Info.plist personality plus an
+ID re-check in `Start`.

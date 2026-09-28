@@ -29,7 +29,7 @@ Observed on the owner's MacBook Pro (macOS 26, TB5) with a P100 in a **Razer Cor
 | `IOName` / `compatible` | `pci1e52,b140`, `pci1e52,43`, `pciclass,120000` | Blackhole, subsystem 0x43 (P100), class 0x12 = processing accelerator |
 | `IOPCITunnelled` | Yes | Reached through a Thunderbolt PCIe tunnel |
 | `IOPCIExpressLinkStatus` | 0x1044 | Gen4 (16 GT/s) × 4 |
-| `IODeviceMemory` | 512 MiB, 1 MiB, **16 B** | BAR0, BAR2, and a third region (see risk R1) |
+| `IODeviceMemory` | 512 MiB, 1 MiB, **16 B** | BAR0, BAR2, and **BAR5** (decoded from `assigned-addresses`, config offset 0x24). BAR4 is not assigned at all (risk R1) |
 | `IOPCIDeviceMapperPageSize` | 16384 | DART IOMMU uses 16 KiB pages |
 | `IOServiceDEXTEntitlements` | `driverkit.transport.pci` | macOS will hand this device to a PCIDriverKit dext |
 | children | none | nothing has claimed it |
@@ -109,7 +109,10 @@ over a TB tunnel are the riskiest operations and nothing needs them to prove M1.
 - **M3 — DMA + blackhole-py:** add `PrepareDMA` (IODMACommand, single segment, respect 16 KiB
   pages) and host-buffer mapping through the iATU; add a Darwin backend to blackhole-py
   replacing its tt-kmd ioctls with user-client calls. Target: a matmul, then Llama 3 8B.
-- **M4 — tt-station sees the local card:** `tt-station` reports the local card (identity,
+- **M4 — tt-station sees the local card:** *(first half done 2026-09-28, with no driver:
+  `tt-station local` reads the IORegistry, names the card `p100a` → device config `p100`, and
+  delegates right-sizing to the official `tt model list --hw p100`. That returns Llama-3.1-8B and
+  Llama-3.1-8B-Instruct, both EXPERIMENTAL. ARC telemetry still needs the dext.)* `tt-station` reports the local card (identity,
   and ARC telemetry like tt-smi) as a device class, e.g. `P100 x1`, the same way it reports a
   box's `device_mesh`. It feeds that class into the existing hardware-aware model catalog, so
   "runs on this device" is computed for a P100.
@@ -148,10 +151,13 @@ That's enough for M1/M2 register pokes, not for M3+. Unverified against a Blackh
 
 ## Risks
 
-- **R1 — BAR4 is 16 bytes.** The third `IODeviceMemory` range is 16 B instead of up to
-  32 GiB. Either the TB bridge window couldn't fit a 64-bit prefetchable BAR4, or that range
-  isn't BAR4 at all. `GetInfo` will tell us. tt-kmd tolerates zero 4G windows, and
-  blackhole-py lives in 2 MiB windows, so this degrades rather than blocks.
+- **R1 — BAR4 is not assigned.** *(Corrected 2026-09-28: the early reading "BAR4 is 16 bytes" was
+  wrong.)* Decoding `assigned-addresses` shows the three ranges sit at config offsets 0x10 (BAR0,
+  512 MiB), 0x18 (BAR2, 1 MiB) and **0x24 (BAR5, 16 B)**. BAR4 (0x20) has no assignment, most
+  likely because the Thunderbolt bridge window can't fit a 64-bit prefetchable BAR of up to
+  32 GiB. So there are zero 4 GiB TLB windows on this link. tt-kmd tolerates that, and blackhole-py
+  lives in 2 MiB windows, so this degrades rather than blocks. `GetInfo` will confirm from inside
+  the dext.
 - **R2 — DMA through DART.** 16 KiB IOMMU pages, per-device IOVA limits, segment counts.
   Blackhole's iATU wants contiguous IOVA per region; request single-segment mappings.
 - **R3 — reset.** Blackhole reset normally goes through ARC messages; PCIe FLR/hot reset

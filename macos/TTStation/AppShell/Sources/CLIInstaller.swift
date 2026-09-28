@@ -87,3 +87,92 @@ enum CLIInstaller {
         alert.runModal()
     }
 }
+
+/// First-run offer to install Tenstorrent's OFFICIAL `tt` CLI (tenstorrent/tt-cli, via
+/// `uv tool install tenstorrent`). tt-station delegates model right-sizing for a card attached
+/// to this Mac to it (`tt-station local` → `tt model list --hw <config>`).
+///
+/// All the logic lives in the bundled `Resources/scripts/ensure-official-tt.sh`, the same script
+/// `macos/install.sh` runs, so the two install paths can't drift. This type only reads the
+/// script's stable exit codes and turns them into alerts. Best-effort and non-fatal, like
+/// `CLIInstaller`: the app works without the official CLI; `tt-station local` just can't
+/// right-size.
+enum OfficialCLIInstaller {
+    private static let offeredKey = "hasOfferedOfficialTTInstall"
+
+    /// Exit codes of ensure-official-tt.sh (see its header).
+    private enum Code: Int32 { case ok = 0, foreign = 3, noUV = 4, stillShadowed = 5, notInstalled = 6 }
+
+    static func runFirstRunIfNeeded(defaults: UserDefaults = .standard) {
+        guard !defaults.bool(forKey: offeredKey) else { return }
+        // Dev/source builds don't bundle the script; don't consume the one-time offer there.
+        guard let script = Bundle.main.resourceURL?.appendingPathComponent("scripts/ensure-official-tt.sh").path,
+              FileManager.default.isExecutableFile(atPath: script) else { return }
+        defaults.set(true, forKey: offeredKey)
+
+        DispatchQueue.global(qos: .utility).async {
+            let (check, checkOut) = run(script, ["--check"])
+            DispatchQueue.main.async {
+                switch check {
+                case Code.ok.rawValue:
+                    return  // already the official CLI; nothing to say
+                case Code.foreign.rawValue:
+                    info("Another `tt` is in the way", checkOut)
+                default:
+                    offerInstall(script: script, detail: checkOut)
+                }
+            }
+        }
+    }
+
+    private static func offerInstall(script: String, detail: String) {
+        let alert = NSAlert()
+        alert.messageText = "Install Tenstorrent's official `tt` CLI?"
+        alert.informativeText = """
+            tt-station asks the official CLI which models are right-sized for a Tenstorrent card \
+            attached to this Mac. This runs `uv tool install tenstorrent` (installing uv with \
+            Homebrew if needed).
+
+            \(detail)
+            """
+        alert.addButton(withTitle: "Install")
+        alert.addButton(withTitle: "Not Now")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let (code, out) = run(script, [])
+            DispatchQueue.main.async {
+                switch code {
+                case Code.ok.rawValue: info("Official `tt` CLI installed", out)
+                case Code.noUV.rawValue: info("uv is needed first", out)
+                case Code.foreign.rawValue, Code.stillShadowed.rawValue: info("Installed, but another `tt` is in the way", out)
+                default: info("Couldn't install the official `tt` CLI", out)
+                }
+            }
+        }
+    }
+
+    /// Run the script, returning its exit status and the last few lines of combined output
+    /// (uv prints a line per package; the alert only needs the verdict).
+    private static func run(_ script: String, _ args: [String]) -> (Int32, String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.arguments = [script] + args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        do { try p.run() } catch { return (-1, "\(error.localizedDescription)") }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        let lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
+        return (p.terminationStatus, lines.suffix(3).joined(separator: "\n"))
+    }
+
+    private static func info(_ title: String, _ body: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = body
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+}

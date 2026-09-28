@@ -8,9 +8,12 @@
   development (distribution signing of PCI/USB still needs Apple's grant; that is spec M6).
   (developer.apple.com/forums/thread/809202)
 
-  The development grant is a wildcard (0xFFFFFFFF&0x00000000); we claim only the Tenstorrent
-  subset of it. There is no allow-any-userclient-access: clients get in through the host app's
-  userclient-access entitlement, which is why the probe is run as `TTStationDriver probe`.
+  The PCI value is Apple's development WILDCARD (0xFFFFFFFF&0x00000000), exactly as DTS gives it:
+  the development profile grants that value, and a hand-narrowed value risks a profile/entitlement
+  mismatch. We are still scoped to Tenstorrent hardware twice over: Info.plist's personality matches
+  only 0xb1401e52, and TTBlackholeDriver::Start re-checks vendor/device before touching anything.
+  There is no allow-any-userclient-access: clients get in through the host app's userclient-access
+  entitlement, which is why the probe is run as `TTStationDriver probe`.
 -->
 <plist version="1.0">
 <dict>
@@ -20,7 +23,7 @@
 	<array>
 		<dict>
 			<key>IOPCIPrimaryMatch</key>
-			<string>0x00001e52&amp;0x0000FFFF</string>
+			<string>0xFFFFFFFF&amp;0x00000000</string>
 		</dict>
 	</array>
 </dict>
