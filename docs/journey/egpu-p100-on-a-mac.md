@@ -481,3 +481,10 @@ backticks around `tt serve`. SwiftUI only parses Markdown in `Text` built from a
 (`LocalizedStringKey`), not from a runtime `String`. The footer under the models, a literal,
 rendered as code; the reasons, passed in as `String`s, didn't. Fixed right after the screenshot
 was taken.*
+
+![The same window after the fix: the "Serving on this Mac" reason now renders tt serve as inline code](images/2026-09-28-window-this-mac-fixed.png)
+
+*After the fix, confirmed by Taylor's next screenshot: "Needs the driver plus a Mac-side serving
+path. `tt serve` targets Linux hosts today." now renders `tt serve` as code. The UI claim here
+was checked by eye, not by me: this terminal can't take screenshots, so the loop closed through
+Taylor.*
