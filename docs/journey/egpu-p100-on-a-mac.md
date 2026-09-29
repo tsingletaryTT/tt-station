@@ -467,3 +467,17 @@ it would be a security-settings change. So the first look at the pane is Taylor'
 (4× Blackhole). The card in the enclosure and the box across the network now appear in one list.
 One is reached over the network through a paired agent. The other is read from the IORegistry
 and right-sized by the official `tt` CLI, with no driver at all.*
+
+![The TTStation window with "This Mac" selected: cards for identity (P100A, Blackhole, Thunderbolt, P100 badge), what macOS can see without a driver, right-sized models (Llama-3.1-8B and -Instruct, Experimental, 64K context), and a status list](images/2026-09-28-window-this-mac.png)
+
+*The control-room window with **This Mac** selected. Everything here was learned without a driver.
+The PCI identity and the Thunderbolt link come from the IORegistry. The P100 device config
+comes from the shared mesh table. The two Llama 3.1 8B models come from the official
+`tt model list --hw p100`. The status list says plainly that live telemetry and serving are
+still "not yet".*
+
+*One more instrument lesson from this screenshot: the "Serving on this Mac" reason shows literal
+backticks around `tt serve`. SwiftUI only parses Markdown in `Text` built from a literal
+(`LocalizedStringKey`), not from a runtime `String`. The footer under the models, a literal,
+rendered as code; the reasons, passed in as `String`s, didn't. Fixed right after the screenshot
+was taken.*

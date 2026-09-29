@@ -92,7 +92,7 @@ struct LocalWorkspaceView: View {
             }
         } else {
             VStack(alignment: .leading, spacing: 4) {
-                Text(report.modelsError ?? "Right-sizing didn't run.")
+                Text(LocalizedStringKey(report.modelsError ?? "Right-sizing didn't run."))
                     .font(.caption).foregroundStyle(.orange)
                     .textSelection(.enabled)
                 Text("tt-station asks Tenstorrent's official `tt` CLI. Install it with `uv tool install tenstorrent`.")
@@ -141,7 +141,9 @@ struct LocalWorkspaceView: View {
             Image(systemName: symbol).foregroundStyle(color)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(.caption.weight(.semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                // `LocalizedStringKey` so inline `code` in the reasons renders as code: a plain
+                // `String` isn't parsed as Markdown (first look showed literal backticks).
+                Text(LocalizedStringKey(detail)).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
     }
