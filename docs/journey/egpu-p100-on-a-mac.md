@@ -457,3 +457,13 @@ Two small instrument lessons on the way:
 
 I couldn't screenshot the result: this terminal has no Screen Recording permission, and granting
 it would be a security-settings change. So the first look at the pane is Taylor's.
+
+### First look
+
+![The TTStation menu-bar popover: a "This Mac" row reading "P100A via Thunderbolt · 2 right-sized models" above the remote QuietBox "qb2-lab, 4xBH"](images/2026-09-28-popover-this-mac.png)
+
+*Taylor's screenshot of the menu-bar popover, the first look at the new UI by anyone. **This Mac**
+(P100A via Thunderbolt, 2 right-sized models) sits above **qb2-lab**, the QuietBox 2 on the LAN
+(4× Blackhole). The card in the enclosure and the box across the network now appear in one list.
+One is reached over the network through a paired agent. The other is read from the IORegistry
+and right-sized by the official `tt` CLI, with no driver at all.*
