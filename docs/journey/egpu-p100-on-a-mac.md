@@ -409,3 +409,51 @@ The *only* legitimate SIP-on route is a development signature from a **paid** te
 One more adjustment, per Apple DTS: the development entitlement now uses Apple's wildcard PCI
 match. The dext still only ever claims `1e52:b140`, through its Info.plist personality plus an
 ID re-check in `Start`.
+
+---
+
+## 2026-09-28 (late): "what if a Linux VM got /dev/tenstorrent?", and the app notices the card
+
+### The VM question
+
+The idea: if macOS is the problem, run Linux in a VM and give it the card. Two walls:
+
+- On a Mac there is no `/dev/tenstorrent` to give. That node is made by tt-kmd, a Linux
+  kernel driver.
+- Apple Silicon virtualization has **no PCIe passthrough**. Grepping the macOS 27 SDK confirms
+  it: `Hypervisor.framework` has CPUs, memory and interrupt controllers, and
+  `Virtualization.framework` passes through USB only.
+
+The SDK did hold a surprise, though. `VZCustomVirtioDevice` (new in macOS 27) lets a host app
+*be* a virtio device for a Linux guest, with shared memory regions it can map host memory into.
+Put our dext's BAR mapping behind that, and a Linux guest could see something tt-kmd-shaped
+while the unmodified Linux stack runs on top. It doesn't get around signing, because the host
+still needs the dext. Taylor filed it under **possible paths forward**, together with the USB
+bridge and a native macOS stack. They're recorded in the spec, not scheduled.
+
+### The app acknowledges the card
+
+The menu-bar app now knows about "This Mac":
+
+- a sidebar section and a popover row, which only appear when a card is attached;
+- a detail pane with what macOS can see without a driver: `1e52:b140`, P100A (subsystem `0x43`),
+  PCIe Gen4 ×4 over Thunderbolt, memory `512 MiB · 1 MiB · 16 B`, and a note that there are no
+  4 GiB windows on this link;
+- the official CLI's right-sized models (Llama-3.1-8B and -Instruct, EXPERIMENTAL);
+- a **Status** list that says plainly what works (detection, right-sizing) and what doesn't yet
+  (live telemetry, serving on this Mac), and why.
+
+Two small instrument lessons on the way:
+
+- **GUI apps get launchd's PATH** (`/usr/bin:/bin:/usr/sbin:/sbin`), which never includes
+  `~/.local/bin`, where uv puts `tt`. `tt-station local` would have quietly reported "no
+  official tt" when launched from the app, while working perfectly in a terminal. It now falls
+  back to uv's and Homebrew's install locations when `tt` isn't on PATH, and it's tested under
+  `env -i` with launchd's PATH. A `tt` that *is* on PATH but isn't official is still refused,
+  never silently skipped.
+- **The popover's only "Open window" button lived inside a box's detail.** On a Mac with a
+  local card and no box selected, the new pane would have been unreachable from the menu bar.
+  The "This Mac" row got its own button.
+
+I couldn't screenshot the result: this terminal has no Screen Recording permission, and granting
+it would be a security-settings change. So the first look at the pane is Taylor's.

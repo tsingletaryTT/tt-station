@@ -59,7 +59,14 @@ struct Report {
 /// had `--version` and answered `--help` with "Operator CLI for tt-station". The official CLI
 /// answers `--version` with `tt <semver>`. Anything else is treated as not-the-official-CLI.
 pub fn find_official_tt() -> Result<OfficialTt> {
-    let bin = std::env::var(OFFICIAL_TT_ENV).unwrap_or_else(|_| "tt".to_string());
+    let bin = match std::env::var(OFFICIAL_TT_ENV) {
+        Ok(explicit) => explicit,
+        Err(_) => locate_tt(
+            std::env::var_os("PATH").as_deref(),
+            std::env::var_os("HOME").map(std::path::PathBuf::from).as_deref(),
+        )
+        .unwrap_or_else(|| "tt".to_string()),
+    };
     let out = Command::new(&bin).arg("--version").output().map_err(|e| {
         anyhow!("could not run `{bin}` ({e}); install the official CLI: uv tool install tenstorrent")
     })?;
@@ -75,6 +82,32 @@ pub fn find_official_tt() -> Result<OfficialTt> {
             )
         })?;
     Ok(OfficialTt { bin, version: version.to_string() })
+}
+
+/// Where `tt` lives: the first `tt` on `PATH`, else uv's and Homebrew's install locations.
+///
+/// The fallback matters because the macOS app runs `tt-station` with launchd's minimal PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`), which never includes `~/.local/bin`, where
+/// `uv tool install tenstorrent` puts the official CLI. A `tt` that IS on PATH always wins, even if
+/// it turns out not to be the official one: [`find_official_tt`] then refuses it loudly instead of
+/// quietly preferring another copy, because a shadowed `tt` is a problem the operator should see.
+pub fn locate_tt(path: Option<&std::ffi::OsStr>, home: Option<&Path>) -> Option<String> {
+    let is_exe = |p: &Path| {
+        use std::os::unix::fs::PermissionsExt;
+        p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    };
+    let on_path = path
+        .map(|p| std::env::split_paths(p).map(|d| d.join("tt")).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let fallbacks = home
+        .map(|h| h.join(".local/bin/tt"))
+        .into_iter()
+        .chain(["/opt/homebrew/bin/tt", "/usr/local/bin/tt"].map(std::path::PathBuf::from));
+    on_path
+        .into_iter()
+        .chain(fallbacks)
+        .find(|p| is_exe(p))
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Ask the official CLI which models run on `mesh`, via `tt --json model list --hw <mesh>`.
@@ -248,6 +281,31 @@ mod tests {
     fn drops_entries_explicitly_unsupported_on_the_mesh() {
         let json = r#"{"models":[{"name":"X","devices":{"p100":{"supported":false}}}]}"#;
         assert!(parse_model_list(json.as_bytes(), "p100").unwrap().is_empty());
+    }
+
+    #[test]
+    fn locate_tt_prefers_path_then_falls_back_to_uv_location() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let tt = bin.join("tt");
+        std::fs::write(&tt, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tt, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // A GUI-style PATH without ~/.local/bin still finds uv's install.
+        let gui_path = std::ffi::OsString::from("/nonexistent-a:/nonexistent-b");
+        assert_eq!(locate_tt(Some(&gui_path), Some(home.path())), Some(tt.to_string_lossy().into_owned()));
+
+        // Something on PATH wins over the fallback (and is then vetted by find_official_tt).
+        let other = tempfile::tempdir().unwrap();
+        let other_tt = other.path().join("tt");
+        std::fs::write(&other_tt, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&other_tt, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            locate_tt(Some(other.path().as_os_str()), Some(home.path())),
+            Some(other_tt.to_string_lossy().into_owned())
+        );
     }
 
     #[test]

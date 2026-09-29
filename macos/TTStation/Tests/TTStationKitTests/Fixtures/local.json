@@ -1,0 +1,50 @@
+{
+  "cards": [
+    {
+      "name": "pci1e52,b140",
+      "location": "3:0:0",
+      "vendor_id": 7762,
+      "device_id": 45376,
+      "subsystem_vendor_id": 7762,
+      "subsystem_id": 67,
+      "chip": "blackhole",
+      "board_type": "p100a",
+      "tunnelled": true,
+      "link": {
+        "gen": 4,
+        "width": 4
+      },
+      "memory_ranges": [
+        536870912,
+        1048576,
+        16
+      ]
+    }
+  ],
+  "device_mesh": "p100",
+  "official_tt": {
+    "bin": "tt",
+    "version": "1.0.1"
+  },
+  "models": [
+    {
+      "name": "Llama-3.1-8B",
+      "model_type": "llm",
+      "engines": [
+        "vLLM"
+      ],
+      "status": "EXPERIMENTAL",
+      "max_context": 65536
+    },
+    {
+      "name": "Llama-3.1-8B-Instruct",
+      "model_type": "llm",
+      "engines": [
+        "vLLM"
+      ],
+      "status": "EXPERIMENTAL",
+      "max_context": 65536
+    }
+  ],
+  "models_error": null
+}

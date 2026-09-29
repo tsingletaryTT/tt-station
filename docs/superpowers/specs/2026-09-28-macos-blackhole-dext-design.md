@@ -149,6 +149,31 @@ uses an Intel Thunderbolt controller, not an ASM2464), tinygrad's patched bridge
 (`extra/usbgpu/patch.py`), slow MMIO, and DMA limited to the bridge's small internal buffer.
 That's enough for M1/M2 register pokes, not for M3+. Unverified against a Blackhole.
 
+## Possible paths forward (not committed to)
+
+Recorded 2026-09-28 so they aren't lost. None of these are milestones yet.
+
+- **Linux VM with a paravirtual Tenstorrent device.** Apple Silicon virtualization has **no PCIe
+  passthrough**: `Hypervisor.framework` has no device assignment, and `Virtualization.framework`
+  passes through USB only (`VZUSBPassthroughDevice`). So a VM can't simply be handed
+  `/dev/tenstorrent`, and on macOS that node doesn't exist anyway (it comes from tt-kmd, a Linux
+  driver). The **macOS 27** SDK adds `VZCustomVirtioDevice`. A host app implements a virtio
+  device, and `VZVirtioSharedMemoryRegion mapMemory:atOffset:size:` maps host memory into the
+  guest, while `guestMemoryMappingAtPhysicalAddress:` exposes guest RAM to the host. That suggests:
+  the host maps BAR0 via our dext and exposes it as a shared-memory region; guest "pin pages"
+  requests become dext `PrepareDMA` calls on guest RAM; a small guest virtio driver presents a
+  tt-kmd-compatible `/dev/tenstorrent`. The payoff is running the existing Linux stack (tt-kmd
+  ABI, tt-metal, vLLM containers) nearly unchanged. The costs:
+  - it **still needs the dext** (only the dext can map BAR0), so it doesn't sidestep signing;
+  - it needs macOS 27 (this Mac is on 26.7);
+  - it's unverified whether device memory (not RAM) can be mapped into a guest with correct MMIO
+    semantics;
+  - it needs a new guest driver;
+  - the vLLM images are amd64, so they'd run under Rosetta for Linux.
+- **ASM2464PD USB enclosure** (see Dev install): no driver at all, register pokes only.
+- **Native macOS stack**: tt-umd's Darwin backend (tt-umd#3411) filled in with our user client,
+  then blackhole-py or tt-metal on top.
+
 ## Risks
 
 - **R1 — BAR4 is not assigned.** *(Corrected 2026-09-28: the early reading "BAR4 is 16 bytes" was

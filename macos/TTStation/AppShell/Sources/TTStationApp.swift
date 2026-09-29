@@ -91,7 +91,9 @@ struct WindowRootView: View {
             BoxSidebarView(model: model)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } detail: {
-            if let box = model.selectedBox {
+            if model.isLocalSelected {
+                ScrollView { LocalWorkspaceView(model: model).padding() }
+            } else if let box = model.selectedBox {
                 VStack(spacing: 0) {
                     ScrollView { BoxWorkspaceView(box: box).padding() }
                     if box.isPaired {
