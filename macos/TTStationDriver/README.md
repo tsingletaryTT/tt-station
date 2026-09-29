@@ -13,6 +13,7 @@ in a Thunderbolt enclosure. It hands the card's BARs to userspace. It is adapted
 | `Shared/TTBlackholeABI.h` | the user-client contract (selectors, info slots, memory types, register offsets), shared by both sides |
 | `Host/` | headless `TTStationDriver.app`: embeds the dext and runs `install` / `uninstall` / `status` |
 | `Probe/bh_probe.c` | the read-only M1 smoke test: standalone `tt-station-bh-probe`, and also linked into the host app as `TTStationDriver probe` |
+| `libttbh/` | dependency-free C for talking to the chip once BAR0 is mapped: TLB register packing, NOC reads/writes, ARC boot status, and the telemetry tag-table walk. Shared by the probe (`--noc`); see below |
 | `scripts/install-dev.sh` | build → sign (`--team ID` development, or ad-hoc) → `/Applications` → activate |
 
 ## Build (no SIP change needed)
@@ -53,10 +54,27 @@ With SIP on this route cannot work, and it fails in two places:
 
 Uninstall: `/Applications/TTStationDriver.app/Contents/MacOS/TTStationDriver uninstall`.
 
+## libttbh: the M2 logic, written and verified before the dext can load
+
+`probe --noc` (`TTStationDriver probe --noc`) aims the driver's 2 MiB window (index 201) at the ARC
+processor and reads its boot status and live telemetry (temperature, power, vcore, AICLK). All of
+that logic lives in `libttbh/` and is checked without the signing key:
+
+```bash
+make -C libttbh test    # bit-packing vs hand vectors + an independent bitfield decoder, in a simulated BAR0
+```
+
+On a Linux box with tt-kmd (a QuietBox), `make -C libttbh kmd-check` builds `ttbh-kmd-check`. It
+runs the same ARC/telemetry code on real silicon, with tt-kmd only aiming the window, and compares
+each value with tt-kmd's own hwmon/sysfs readings. Run it under a gozer lease.
+
+GNU make 3.81 (the macOS default) compares mtimes to the whole second. After swapping a source file
+back and forth quickly (for example in a mutation test), use `make -B` or it may run a stale binary.
+
 ## Safety
 
 - The dext only matches `1e52:b140`, and `Start` re-checks the IDs before touching anything.
 - v1 RPCs are read-only. Bus mastering stays **off** until DMA exists, so the chip cannot write
   to host memory.
-- The probe only reads (TLB register 0 and iATU region 0). Nothing here programs a TLB or talks
-  to the NOC. That is milestone M2.
+- By default the probe only reads (TLB register 0 and iATU region 0). `--noc` additionally programs
+  exactly one TLB register (window 201) to read the ARC. That's milestone M2, and it's opt-in.

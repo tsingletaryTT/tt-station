@@ -53,6 +53,7 @@ targets:
       # The probe is linked in too (`TTStationDriver probe`), so it runs under the app's
       # userclient-access entitlement — see Probe/bh_probe.c header.
       - path: Probe
+      - path: libttbh/ttbh.c
       - path: Shared
         buildPhase: none
     dependencies:
@@ -74,6 +75,7 @@ targets:
     platform: macOS
     sources:
       - path: Probe
+      - path: libttbh/ttbh.c
       - path: Shared
         buildPhase: none
     dependencies:

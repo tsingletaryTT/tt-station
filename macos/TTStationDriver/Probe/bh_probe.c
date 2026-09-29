@@ -7,7 +7,8 @@
 //   4. map BAR0 and read TLB config register 0 (three u32s at BAR0 + 0x1FC00000);
 //   5. map BAR2 and read the first iATU outbound region's CTRL_1 (BAR2 + 0x1000).
 //
-// Everything is a READ. Nothing here reprograms a TLB or touches the NOC — that is M2.
+// Everything is a READ by default. `--noc` (spec M2) additionally programs ONE TLB register (window
+// 201) to reach the ARC processor over the NOC and read its boot status + telemetry via libttbh.
 // A dead link shows up as 0xFFFFFFFF on MMIO reads; the probe flags it.
 //
 // Two ways to run it:
@@ -26,6 +27,7 @@
 
 #include "../Shared/TTBlackholeABI.h"
 #include "bh_probe.h"
+#include "../libttbh/ttbh.h"
 
 static const char * bar_label(uint64_t size, char * buf, size_t n)
 {
@@ -54,7 +56,7 @@ static uint32_t mmio_read32(mach_vm_address_t base, uint64_t offset)
     return *(volatile uint32_t *)(uintptr_t)(base + offset);
 }
 
-int ttbh_probe_run(void)
+int ttbh_probe_run(int noc)
 {
     // ── 1. find + open ──────────────────────────────────────────────
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault,
@@ -113,6 +115,26 @@ int ttbh_probe_run(void)
         uint32_t hi  = mmio_read32(bar0, TTBH_BAR0_TLB_REGS_START + 8);
         dead |= (lo == 0xFFFFFFFFu && mid == 0xFFFFFFFFu && hi == 0xFFFFFFFFu);
         printf("║  TLB[0]   %08x %08x %08x\n", lo, mid, hi);
+
+        // ── 4b. --noc: spec M2, the first NOC access (and first WRITE: one TLB register) ──
+        // Aim the driver's 2 MiB window (index 201, the one tt-kmd reserves for itself) at the
+        // ARC processor and read its boot status + telemetry through libttbh. That logic is
+        // verified against tt-kmd on a real Blackhole (libttbh/tools/ttbh_kmd_check.c).
+        if (noc && !dead) {
+            ttbh_bar0_ctx ctx = { (volatile uint8_t *)(uintptr_t)bar0, size0, TTBH_DRIVER_TLB_INDEX };
+            ttbh_window w = ttbh_bar0_window(&ctx);
+            uint32_t boot = 0, raw = 0;
+            int err = ttbh_arc_boot_status(&w, &boot);
+            printf("║  ARC      boot 0x%08x  %s\n", boot,
+                   err ? ttbh_strerror(err) : (ttbh_arc_ready(boot) ? "ready" : "not ready"));
+            if (err == TTBH_EDEAD) dead = 1;
+            if (!err) {
+                if (!ttbh_telemetry_read(&w, TTBH_TAG_ASIC_TEMP, &raw)) printf("║  temp     %.1f °C\n", ttbh_temp_c(raw));
+                if (!ttbh_telemetry_read(&w, TTBH_TAG_POWER, &raw))     printf("║  power    %u W\n", raw);
+                if (!ttbh_telemetry_read(&w, TTBH_TAG_VCORE, &raw))     printf("║  vcore    %u mV\n", raw);
+                if (!ttbh_telemetry_read(&w, TTBH_TAG_AICLK, &raw))     printf("║  aiclk    %u MHz\n", raw);
+            }
+        }
         IOConnectUnmapMemory64(conn, kTTBHMemoryBar0, mach_task_self(), bar0);
     } else if (bar0) {
         fprintf(stderr, "  BAR0 mapped only 0x%llx bytes — too small for TLB regs\n", size0);
@@ -136,5 +158,10 @@ int ttbh_probe_run(void)
 }
 
 #ifndef TTBH_PROBE_NO_MAIN
-int main(void) { return ttbh_probe_run(); }
+#include <string.h>
+int main(int argc, char **argv)
+{
+    int noc = argc > 1 && strcmp(argv[1], "--noc") == 0;
+    return ttbh_probe_run(noc);
+}
 #endif

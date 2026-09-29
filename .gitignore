@@ -36,3 +36,6 @@ debian/*.debhelper
 # Experimental DriverKit dext (macos/TTStationDriver) — generated project + build products
 macos/TTStationDriver/TTStationDriver.xcodeproj/
 macos/TTStationDriver/build/
+
+# libttbh build output
+macos/TTStationDriver/libttbh/build/
