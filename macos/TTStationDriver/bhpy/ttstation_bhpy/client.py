@@ -40,7 +40,9 @@ class BrokerClient:
             self.sock.connect(self.path)
         except OSError as e:
             self.sock.close()
-            raise OSError(e.errno, f"cannot reach the ttbh broker at {self.path}; start it with "
+            # Keep the OS's reason: e.g. "AF_UNIX path too long" (macOS caps socket paths at 104
+            # bytes), which an errno-only message once hid as "[Errno None]".
+            raise OSError(e.errno, f"cannot reach the ttbh broker at {self.path} ({e}); start it with "
                                    f"`TTStationDriver serve` (or ttbh-broker-sim for tests)") from e
 
     def _recv_exact(self, n):

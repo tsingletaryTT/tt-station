@@ -11,6 +11,31 @@ through tt-station's DriverKit extension. The rest of blackhole-py runs unmodifi
 PYTHONPATH=macos/TTStationDriver/bhpy python3 -m ttstation_bhpy ~/code/blackhole-py examples/matmul_peak.py
 ```
 
+## Prerequisites (macOS)
+
+```bash
+brew install llvm riscv-gnu-toolchain       # Apple's clang has no RISC-V backend
+python3 -m venv .venv && .venv/bin/pip install -r ~/code/blackhole-py/requirements.txt
+PYTHONPATH=macos/TTStationDriver/bhpy .venv/bin/python -m ttstation_bhpy doctor ~/code/blackhole-py
+```
+
+`python -m ttstation_bhpy` points blackhole-py at a RISC-V-capable toolchain automatically
+(`CC`, `TT_RISCV_LD`, `TT_RISCV_OBJCOPY`; anything you set yourself wins). blackhole-py's own
+default is the first `clang` on PATH, which on a Mac is Apple's, and it can't target RISC-V.
+Homebrew's binutils are named `riscv64-unknown-elf-*`, not Linux's `riscv64-linux-gnu-*`.
+
+**What works today, with no dext:** on this Mac, against the simulated broker, blackhole-py's own
+`Device().boot()` completes every host-side step:
+
+1. builds its firmware with the Homebrew toolchain;
+2. broadcasts soft-reset and resident firmware to all tiles;
+3. uploads the per-core images;
+4. writes the boot parameters, including the iATU-mapped sysmem address;
+5. builds the command queue and sends GO.
+
+It then stops exactly where the chip has to *run* code ("CQ DRAM engines did not start"). A test
+guards that point.
+
 ## Why a broker
 
 A development-signed dext only opens for clients with the `userclient-access` entitlement, and

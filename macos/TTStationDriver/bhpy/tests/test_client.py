@@ -232,5 +232,37 @@ class DeviceBringUp(BrokerCase):
             dev.close()
 
 
+@unittest.skipUnless(BHPY_DIR, "BHPY_DIR not set")
+class BootFrontier(BrokerCase):
+    """blackhole-py's own Device().boot() runs every host-side step on this machine, through the
+    broker: firmware build (RISC-V toolchain), multicast soft-reset + firmware upload to all tiles,
+    per-core images, boot params incl. the iATU-mapped sysmem address, command-queue setup in shared
+    memory, GO. It must then stop exactly where the chip has to EXECUTE code (the sim has no RISC-V
+    cores): "CQ DRAM engines did not start". Stopping earlier means a host-side regression."""
+
+    def test_boot_reaches_the_point_where_the_chip_must_run_code(self):
+        import importlib.util
+        if importlib.util.find_spec("numpy") is None:
+            self.skipTest("numpy not installed (blackhole-py's requirements)")
+        from ttstation_bhpy import toolchain
+        if not all(toolchain.apply().values()):
+            self.skipTest("no RISC-V toolchain")
+        self.c.close()
+        del self.c
+        import ttstation_bhpy
+        ttstation_bhpy.install(BHPY_DIR)
+        cwd = os.getcwd()
+        os.chdir(BHPY_DIR)
+        try:
+            import device
+            dev = device.Device(sysmem_size=64 << 20)
+            with self.assertRaises(TimeoutError) as e:
+                dev.boot()
+            self.assertIn("CQ DRAM engines did not start", str(e.exception))
+            dev.pcie.close()
+        finally:
+            os.chdir(cwd)
+
+
 if __name__ == "__main__":
     unittest.main()

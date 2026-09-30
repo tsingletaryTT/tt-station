@@ -730,3 +730,30 @@ way. It's the first route to *serving* on the Mac that doesn't mean porting the 
 The open question that decides it is whether a shared-memory region may hold *device* memory
 (a BAR) rather than RAM. That needs macOS 27 and the signed dext, so for now it goes in the
 spec's "possible paths forward", and we turn back to what's possible today.
+
+### Today, on macOS 26.7: blackhole-py boots up to the chip's front door
+
+Refocused on what works on this Mac right now, with no signing and no macOS 27:
+
+- **The firmware toolchain.** blackhole-py compiles RISC-V firmware with "the first `clang` on
+  PATH". On a Mac that's Apple's clang, which has **no RISC-V backend**. Homebrew's keg-only LLVM
+  does, and Homebrew's binutils are `riscv64-unknown-elf-*` (not Linux's `-linux-gnu-*`). With
+  those, blackhole-py's firmware built here: 9,576 bytes. `ttstation_bhpy` now picks that toolchain
+  automatically, and `doctor` checks every prerequisite. (There's no Linux build to byte-compare
+  against, because qb2-lab has no RISC-V linker, and I wasn't going to `sudo apt` on a shared box.
+  Silicon remains the test.)
+- **The whole host side of boot.** Against the simulated broker, blackhole-py's own
+  `Device().boot()` built its firmware, multicast soft-reset and firmware to all 120 tiles,
+  uploaded the service-core images, wrote boot parameters (including our iATU host-memory
+  address), built its command queue in shared memory, sent GO, and then waited. It stopped with
+  "CQ DRAM engines did not start": exactly the point where a real chip's RISC-V cores would have
+  to run the firmware. Everything before that line now runs on this Mac.
+
+Two more instruments misbehaved on the way there:
+
+- A socket path in the session scratchpad exceeded macOS's **104-byte `AF_UNIX` limit**. The broker
+  said so on stderr, which I'd discarded. The client then reported it as `[Errno None]`. Client
+  errors now carry the OS's reason.
+- `Device()` "succeeded" in 0.0 s, which was suspicious rather than good. The constructor is
+  cheap by design; `boot()` does the real work. Reading the code before believing the number
+  kept that from going in the log as a win.

@@ -16,9 +16,9 @@ import os
 import sys
 import types
 
-from . import pcie_darwin
+from . import pcie_darwin, toolchain  # noqa: F401  (toolchain.apply/doctor for library users)
 
-__all__ = ["install"]
+__all__ = ["install", "toolchain"]
 
 
 def install(bhpy_dir):
