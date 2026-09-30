@@ -488,3 +488,87 @@ was taken.*
 path. `tt serve` targets Linux hosts today." now renders `tt serve` as code. The UI claim here
 was checked by eye, not by me: this terminal can't take screenshots, so the loop closed through
 Taylor.*
+
+---
+
+## 2026-09-29: writing the driver "in theory", and proving it on someone else's silicon
+
+The signing key is still pending. Taylor asked whether we could keep going *in theory*, based on
+the facts we already had. Yes, and most of it could be *proven*, just not on the Mac.
+
+### The M2 logic, as a library
+
+The first NOC read, M2, is almost entirely arithmetic over facts from tt-kmd:
+
+- a 96-bit TLB register whose fields straddle word boundaries;
+- the ARC processor at NOC tile (8, 0);
+- scratch registers at `0x80030400 + 4n`;
+- a telemetry tag table that the firmware publishes in ARC CSM.
+
+`libttbh` is ~250 lines of dependency-free C that does all of that. It sits on a tiny "window"
+interface: aim a 2 MiB window at (x, y, address), get a pointer back. There are two backends. One
+programs raw BAR0 TLB registers, which is what the Mac dext will hand us. The other uses tt-kmd's
+TLB ioctls on Linux.
+
+### Proof, in two halves
+
+**The bit packing** can't be checked on a QuietBox, because there tt-kmd packs the registers
+itself. So it's tested three independent ways:
+
+- hand-computed register words;
+- a *golden decoder* written as packed C bitfields, which is a different implementation strategy
+  from the encoder's shifts and masks;
+- a simulated BAR0 that only returns the right data if the golden-decoded TLB really targets the
+  right tile and address.
+
+Swapping x and y in the encoder produced 15 failures. A wrong address shift produced 12.
+
+**Everything above the packing** ran on real silicon. `ttbh-kmd-check` runs libttbh's ARC and
+telemetry code on a Blackhole in qb2-lab, with tt-kmd only aiming the window, and compares each
+value with tt-kmd's own hwmon:
+
+```
+╔══ ttbh-kmd-check  /dev/tenstorrent/2  (tt-kmd user TLB 0; TT_VISIBLE_DEVICES=0000:03:00.0,0000:04:00.0)
+║  ARC boot status  0x00000005  ready
+║  asic_temp  ours     46.176 C     kmd     46.175 C     agree
+║  power      ours     15.000 W     kmd     15.000 W     agree
+║  vcore      ours    727.000 mV    kmd    727.000 mV    agree
+║  current    ours     22.000 A     kmd     22.000 A     agree
+║  aiclk      ours    800.000 MHz   kmd    800.000 MHz   agree
+║  heartbeat  1350 → 1353  advancing
+╚══ libttbh agrees with tt-kmd on real silicon
+```
+
+Five live values from two independent readers agree, and the heartbeat proves it's live firmware
+state rather than a stale word. When the dext loads, `TTStationDriver probe --noc` runs this same
+code, and the only new variable is the register packing, which is the part already tested.
+
+### The instrument, again (three times)
+
+- **A trailing `\` in a `//` comment** splices the next line into the comment. gcc `-Werror`
+  caught it on the first Linux build.
+- **The Makefile picked the wrong tt-kmd header.** The QuietBox has five tt-kmd versions under
+  `/usr/src`. "First by name" chose 2.10.0 while 2.11.0 was *loaded*. It now reads
+  `/sys/module/tenstorrent/version`.
+- **macOS's GNU make 3.81 compares mtimes to the whole second.** After restoring the encoder from a
+  mutation, the restored source and the mutant binary shared a second, so make re-ran the *mutant*
+  and reported failures for correct code. `make -B` fixed it. It was a false alarm, but it could
+  just as easily have been a false pass.
+
+And the one that mattered, on a shared box:
+
+- **The first silicon run "passed" while doing two wrong things.**
+  - `gozer wait` had *already granted* a lease when the ticket's turn came. My follow-up
+    `gozer acquire --ticket` took a *second* board, and the script released only that second one.
+  - `TT_VISIBLE_DEVICES` holds **PCI addresses** (`0000:03:00.0,…`), not indices, and the tool
+    `atoi()`'d it to 0. So it opened `/dev/tenstorrent/0`, a chip in the leaked lease rather than
+    the one it was given.
+
+  The comparison was internally consistent (chip 0 against chip 0's own hwmon), and no other agent's
+  chip was touched, but that was luck. The fix:
+  - release the leaked lease by hand;
+  - resolve BDFs through `/sys/class/tenstorrent/tenstorrent!N/device`, and refuse rather than guess;
+  - rerun under a single `gozer run`, which always releases;
+  - end with `gozer status` showing every chip FREE.
+
+  The run above is that clean rerun.

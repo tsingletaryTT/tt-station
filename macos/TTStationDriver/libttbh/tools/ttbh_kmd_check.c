@@ -55,10 +55,31 @@ static volatile uint8_t *kmd_aim(void *vctx, uint32_t x, uint32_t y, uint64_t ba
     return k->map;
 }
 
+// /dev/tenstorrent/N for the first chip gozer granted us. gozer's TT_VISIBLE_DEVICES holds PCI
+// BDFs ("0000:03:00.0,0000:04:00.0"), NOT device indices. The first version of this tool did
+// atoi() on it, got 0, and opened a chip outside its lease. So: resolve the BDF through sysfs
+// (/sys/class/tenstorrent/tenstorrent!N/device → .../0000:03:00.0) and refuse if it doesn't resolve.
+// A bare integer is still accepted for manual runs. Returns -1 when nothing matches.
 static int first_visible_device(void)
 {
     const char *v = getenv("TT_VISIBLE_DEVICES");
-    return (v && *v) ? atoi(v) : 0;
+    if (!v || !*v) return -1;
+    char first[64];
+    size_t n = strcspn(v, ",");
+    if (n >= sizeof first) return -1;
+    memcpy(first, v, n);
+    first[n] = 0;
+    if (!strchr(first, ':')) return atoi(first);          // plain index
+    for (int i = 0; i < 64; i++) {
+        char link[128], target[512];
+        snprintf(link, sizeof link, "/sys/class/tenstorrent/tenstorrent!%d/device", i);
+        ssize_t len = readlink(link, target, sizeof target - 1);
+        if (len < 0) continue;
+        target[len] = 0;
+        const char *base = strrchr(target, '/');
+        if (base && strcmp(base + 1, first) == 0) return i;
+    }
+    return -1;
 }
 
 // hwmon value for /dev/tenstorrent/N, or NAN. `name` like "temp1_input".
@@ -108,6 +129,10 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--device") && i + 1 < argc) dev = atoi(argv[++i]);
 
+    if (dev < 0) {
+        fprintf(stderr, "no device: run under a gozer lease (TT_VISIBLE_DEVICES) or pass --device N\n");
+        return 1;
+    }
     char path[64];
     snprintf(path, sizeof path, "/dev/tenstorrent/%d", dev);
     kmd_ctx k = { .fd = open(path, O_RDWR | O_CLOEXEC) };
@@ -123,7 +148,8 @@ int main(int argc, char **argv)
     k.map = map;
 
     ttbh_window w = { &k, kmd_aim };
-    printf("╔══ ttbh-kmd-check  %s  (tt-kmd user TLB %u)\n", path, k.tlb_id);
+    const char *vis = getenv("TT_VISIBLE_DEVICES");
+    printf("╔══ ttbh-kmd-check  %s  (tt-kmd user TLB %u; TT_VISIBLE_DEVICES=%s)\n", path, k.tlb_id, vis ? vis : "unset");
 
     uint32_t boot = 0;
     int err = ttbh_arc_boot_status(&w, &boot);

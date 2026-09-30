@@ -103,7 +103,12 @@ over a TB tunnel are the riskiest operations and nothing needs them to prove M1.
   list` shows `[activated enabled]`; `ioreg` shows our service under `pci1e52,b140`;
   `TTStationDriver probe` prints vendor/device, the three BAR sizes, and reads TLB register 0
   from BAR0 `+0x1FC00000`.
-- **M2 — first NOC read:** program one 2 MiB TLB window (as tt-kmd does with window 201) to
+- **M2 — first NOC read:** *(logic written and verified 2026-09-29, before the dext can load:
+  `libttbh` packs TLB registers (checked against hand vectors and an independent bitfield decoder in
+  a simulated BAR0, and seen to fail under two encoder mutations). Its ARC and telemetry code was run
+  on a real Blackhole in qb2-lab through tt-kmd, and it agreed with tt-kmd's hwmon on temperature,
+  power, vcore, current and AICLK, with a live heartbeat. What remains is running the same code
+  through the dext's BAR0: `TTStationDriver probe --noc`.)* program one 2 MiB TLB window (as tt-kmd does with window 201) to
   ARC (8,0) at `0x80000000`, read `ARC_BOOT_STATUS` (`0x80030408`), expect bit0 = 1. That
   proves MMIO → NOC works end to end over Thunderbolt. First *write* to the device.
 - **M3 — DMA + blackhole-py:** add `PrepareDMA` (IODMACommand, single segment, respect 16 KiB
