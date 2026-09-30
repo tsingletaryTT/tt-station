@@ -1,5 +1,12 @@
 // ttbh.c — see ttbh.h for the layering and where each fact comes from.
 
+// clock_gettime is POSIX, and glibc hides it under a strict -std=c11 unless a feature macro asks
+// (macOS doesn't care, which is why only the Linux build caught it). Ask here, so this file builds
+// under any caller's flags.
+#if !defined(_POSIX_C_SOURCE) && !defined(_DEFAULT_SOURCE) && !defined(_GNU_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "ttbh.h"
 
 #include <string.h>

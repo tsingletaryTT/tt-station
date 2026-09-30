@@ -30,12 +30,20 @@ class BrokerCase(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.sock = os.path.join(self.tmp, "ttbh.sock")
         self.proc = subprocess.Popen([BROKER, self.sock], stderr=subprocess.PIPE)
-        for _ in range(200):
-            if os.path.exists(self.sock):
-                break
-            time.sleep(0.01)
         os.environ["TTBH_BROKER_SOCKET"] = self.sock
-        self.c = wire.BrokerClient(self.sock)
+        # Retry the connection itself rather than waiting for the socket file: bind() creates the
+        # file a moment before listen(), and on macOS the FIRST launch of a freshly built binary is
+        # held for a security assessment that can take seconds (the flake this replaced: 1 failure
+        # right after a rebuild, 0 in 20 steady-state runs).
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                self.c = wire.BrokerClient(self.sock)
+                break
+            except OSError:
+                if time.monotonic() > deadline or self.proc.poll() is not None:
+                    raise
+                time.sleep(0.02)
 
     def tearDown(self):
         if hasattr(self, "c"):

@@ -2,7 +2,7 @@
 #   make test      build the simulated broker and run the Python client tests against it
 #                  (macOS or Linux; set BHPY_DIR to a blackhole-py checkout for the parity tests)
 CC     ?= cc
-CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror
+CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror -D_DEFAULT_SOURCE
 LIB    := ../libttbh
 SRCS   := broker.c $(LIB)/ttbh.c $(LIB)/sim/ttbh_sim.c
 
