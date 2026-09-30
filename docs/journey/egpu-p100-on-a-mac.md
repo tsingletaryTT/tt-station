@@ -889,3 +889,23 @@ boot() reached the chip-execution frontier as expected: CQ DRAM engines did not 
 | 10 | Kernels compile (host only) | PASS | 0s |
 | 11 | boot() reaches the chip-execution frontier | PASS | 6s |
 
+
+### The enclosure comes back on: what survives a power cycle
+
+Taylor switched the P100A back on "just in case". Without signing, the only view of the card is
+macOS's own, which is read-only, but that was enough to check whether the odd facts hold across
+a power cycle:
+
+| | 2026-09-28 | 2026-09-30, after power cycle |
+|---|---|---|
+| BARs assigned | BAR0 512 MiB, BAR2 1 MiB, BAR5 16 B | identical; BAR4 still never assigned |
+| Host placement | `assigned-addresses` … | **byte-identical** (deterministic) |
+| Link | Gen4 x4, tunnelled | Gen4 x4, tunnelled; enclosure at USB4 v2, 80 Gb/s |
+| Card's capability | not decoded | **Gen5 x16**: the tunnel is the bottleneck, not the card |
+
+So the missing 4 GiB windows and the x4 lanes are properties of this Mac, enclosure and card
+together, not a fluke of one boot.
+
+`first-light.sh`, run for real against the live card (install skipped, log sent to a scratch file),
+passed *environment* and *card on the bus*, then stopped at *driver attached*: "the dext did not
+claim the card within 30 s". That's the first step that needs signing, and the ceiling for today.
