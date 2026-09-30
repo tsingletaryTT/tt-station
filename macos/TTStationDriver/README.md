@@ -39,6 +39,19 @@ CLI tool can't embed a provisioning profile).
 
 Note the full path `/usr/bin/log`: zsh has a `log` builtin that shadows it.
 
+## First light: the whole sequence in one command
+
+```bash
+scripts/first-light.sh --team <TEAMID> --bhpy ~/code/blackhole-py --python .venv/bin/python
+scripts/first-light.sh --sim --bhpy ~/code/blackhole-py --python .venv/bin/python   # rehearsal, today
+```
+
+It runs, in order and stopping at the first failure: environment → card on the bus → dev-signed
+install (waits for your approval) → driver attached → `probe` → `probe --noc` → `probe --dma` →
+`tt-station local` → broker + doctor → matmul compiled → matmul **run and validated on the card**.
+Every step's output is appended to `docs/journey/egpu-p100-on-a-mac.md` (the rehearsal logs to
+`$TMPDIR/first-light-sim.md` unless you pass `--log`).
+
 ## Load it with SIP OFF (ad-hoc)
 
 ```bash
