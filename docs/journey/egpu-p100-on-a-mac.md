@@ -681,3 +681,33 @@ Instruments, again:
 Meanwhile on qb2-lab: board 1 was being held by a `tt-smi -s` under a `tt-toplike-tui` with no
 lease, and board 2 by Taylor's other project. So the ARC-queue silicon check waits for a free
 board.
+
+---
+
+## 2026-09-30: the ARC answers, and a flag that was quietly ignored
+
+With a board free on qb2-lab (gozer had cleared the other project's stale lease itself), a
+detached waiter took one, ran the silicon check and released it. On the first attempt the ARC
+section was **missing entirely**, and the run "passed".
+
+The chain was: GitHub → qb2-lab's `~/code/tt-station` → a scratch clone of *that*. I had pulled
+the clone but not the checkout it pulls from, so the tool was one commit old, didn't know
+`--arc`, and **silently ignored it**. There were two fixes: update in order, and make the tool
+refuse unknown flags (exit 2), so a stale build can't pass by omission again.
+
+The rerun:
+
+```
+║  ARC queue  base 0x100436ec  4 entries  located
+║  ARC TEST   16/16 echoes correct (value + 1)
+╚══ libttbh agrees with tt-kmd on real silicon
+```
+
+libttbh's own ring code (push, trigger, pop, pointers wrapping at 2n, twice around both rings)
+talked to the real firmware. The real queue has 4 entries, which happens to be what the
+simulator had assumed. Also on Linux: the bhpy suite's full 12 tests passed, including parity
+against blackhole-py's real `pcie.py` and its `board_config` bringing up the simulated P100A.
+
+That completes the silicon evidence for every layer beneath blackhole-py: TLB windows, NOC,
+telemetry, the iATU, DMA in both directions, and ARC messages. What remains is the one thing
+qb2-lab can't show: the same code through the dext, on the P100 in the enclosure.

@@ -54,6 +54,9 @@ driver (ioreg depth 2) and pulls telemetry through the host app when our dext ho
 app shows a Driver row and a Live telemetry card. **qb2-lab's `~/code/tt-station` tracks
 `experiments/egpu`** (its old `support/tt-cli` branch was left untouched). Its tree has a stale
 `.cargo/config.toml` + `vendor/` from an old deb build, so build new deps from a scratch clone.
+The scratch clone (`~/scratch/tts-clone`) pulls from that checkout, not GitHub: **pull the checkout
+first, then the clone**. A stale clone once built a tool that silently ignored `--arc` (tools now
+reject unknown flags). `~/scratch/ttbh-arc/run.sh` is a detached gozer waiter that always releases.
 Next: paid team → `install-dev.sh --team` → M1–M3 on the Mac; then a Darwin backend for blackhole-py.
 
 **CLI renamed `tt` → `tt-station` (2026-08-17, branch `refactor/cli-name`, stacks on
