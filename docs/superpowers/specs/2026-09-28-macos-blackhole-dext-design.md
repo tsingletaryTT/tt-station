@@ -190,6 +190,27 @@ Recorded 2026-09-28 so they aren't lost. None of these are milestones yet.
     semantics;
   - it needs a new guest driver;
   - the vLLM images are amd64, so they'd run under Rosetta for Linux.
+- **…built on Apple's Containerization package** *(added 2026-09-30)*. `apple/containerization`
+  (Swift, Apache-2.0; the engine under macOS 27's Container Machine) has a supported hook:
+  `VZVirtualMachineInstance.Configuration.extensions` takes `VZInstanceExtension`s whose
+  `configureVZ(_ config: inout VZVirtualMachineConfiguration, …)` runs before the VM is created,
+  which is exactly where a `VZCustomVirtioDeviceConfiguration` for a `virtio-tt` device goes.
+  Containerization already brings a tuned kernel (a custom one via `config.kernel`), OCI images
+  (tt-inference-server ships as OCI), Rosetta for x86-64 guests (`config.rosetta`; the vLLM images
+  are amd64), networking and a vsock agent. The **`container machine` CLI itself exposes no such
+  hook** (`apple/container` never uses `VZInstanceExtension`), so this means our own small host app
+  on the package, not Apple's CLI. The sketch:
+  - the host maps BAR0 via the dext into `sharedMemoryRegions`;
+  - a "pin pages" virtqueue feeds `guestMemoryMapping(atPhysicalAddress:length:)` into the dext's
+    PrepareDMA and the iATU;
+  - a control virtqueue carries config reads, ARC messages and reset (libttbh, silicon-verified);
+  - a small guest `virtio-tt` driver presents tt-kmd's ioctl ABI, so tt-smi / vLLM / `tt serve`
+    run unmodified in the guest.
+  The blockers: dext signing, macOS 27, and **whether `VZVirtioSharedMemoryRegion.mapMemory`
+  accepts device memory with correct MMIO semantics** (RiftVM shares ordinary memory). The
+  fallback proxies window access over a virtqueue, as the broker does. This is the first route to
+  *serving* on the Mac without porting the Linux stack. Apple docs: `VZCustomVirtioDevice`
+  (macOS 27.0+), WWDC26 session 224.
 - **ASM2464PD USB enclosure** (see Dev install): no driver at all, register pokes only.
 - **Native macOS stack**: tt-umd's Darwin backend (tt-umd#3411) filled in with our user client,
   then blackhole-py or tt-metal on top.

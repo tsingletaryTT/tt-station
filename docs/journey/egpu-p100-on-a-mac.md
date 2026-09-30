@@ -711,3 +711,22 @@ against blackhole-py's real `pcie.py` and its `board_config` bringing up the sim
 That completes the silicon evidence for every layer beneath blackhole-py: TLB windows, NOC,
 telemetry, the iATU, DMA in both directions, and ARC messages. What remains is the one thing
 qb2-lab can't show: the same code through the dext, on the P100 in the enclosure.
+
+### The keyhole might become a door (someday)
+
+Taylor pasted Apple's reference for `VZCustomVirtioDevice` (macOS 27.0+) and asked whether
+**Container Machine**, macOS 27's WSL-like Linux VM, could help. Reading the sources gave a split
+answer:
+
+- Apple's `container machine` CLI has no way to attach a custom device. Its code never uses the
+  extension hook.
+- The **Containerization** package under it (Apache-2.0) does:
+  `VZInstanceExtension.configureVZ(_ config: inout VZVirtualMachineConfiguration, …)`, "Modify
+  the VZ configuration before the VM is created." That's exactly where a custom virtio device goes.
+
+So a small host app on Containerization could hand a Linux guest a `virtio-tt` device backed by
+our dext, and get Apple's kernel, OCI images and Rosetta for the amd64 vLLM containers along the
+way. It's the first route to *serving* on the Mac that doesn't mean porting the Linux stack.
+The open question that decides it is whether a shared-memory region may hold *device* memory
+(a BAR) rather than RAM. That needs macOS 27 and the signed dext, so for now it goes in the
+spec's "possible paths forward", and we turn back to what's possible today.
