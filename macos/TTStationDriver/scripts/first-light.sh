@@ -83,8 +83,8 @@ record() {
     echo
     if [ -n "$out" ] && [ -s "$out" ]; then
       echo '```'
-      # Keep the log readable: last 40 lines, no ANSI colour codes.
-      tail -40 "$out" | sed $'s/\x1b\\[[0-9;]*m//g'
+      # Readable and portable: last 40 lines, no ANSI colour codes, $HOME shown as ~.
+      tail -40 "$out" | sed -e $'s/\x1b\\[[0-9;]*m//g' -e "s#$HOME#~#g"
       echo '```'
       echo
     fi

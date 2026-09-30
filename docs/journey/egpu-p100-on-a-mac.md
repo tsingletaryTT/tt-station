@@ -819,10 +819,10 @@ BuildVersion:		25G229
 Xcode 27.0
 Build version 27A266a
 Xcode components: installed
-tt-station: /Users/tsingletary/.local/bin/tt-station
+tt-station: ~/.local/bin/tt-station
 tt 1.0.1
-blackhole-py: /private/tmp/claude-502/-Users-tsingletary-code-tt-station/e0d517d5-fcea-4fe4-b4ff-cf61d2125d93/scratchpad/bhpy-full @ d8eae8f Integrate Llama FP8 and matmul speedups with hardware benchmarks
-python: Python 3.12.12 (/private/tmp/claude-502/-Users-tsingletary-code-tt-station/e0d517d5-fcea-4fe4-b4ff-cf61d2125d93/scratchpad/.venv-bhpy/bin/python)
+blackhole-py: <scratch>/bhpy-full @ d8eae8f Integrate Llama FP8 and matmul speedups with hardware benchmarks
+python: Python 3.12.12 (<scratch>/.venv-bhpy/bin/python)
 ```
 
 ### 2. Card on the bus: absent (fine for --sim) (0s)
@@ -856,7 +856,7 @@ ttbh broker: listening on /var/folders/5r/rmwrbsls2lq3lry7r574mpxm0000gp/T//firs
 ║  ✓ python: numpy                  numpy
 ║  ✓ python: transformers           transformers
 ║  ✓ python: huggingface_hub        huggingface_hub
-║  ✓ blackhole-py checkout          /private/tmp/claude-502/-Users-tsingletary-code-tt-station/e0d517d5-fcea-4fe4-b4ff-cf61d2125d93/scratchpad/bhpy-full/pcie.py
+║  ✓ blackhole-py checkout          <scratch>/bhpy-full/pcie.py
 ║  ✓ ttbh broker socket             /var/folders/5r/rmwrbsls2lq3lry7r574mpxm0000gp/T//first-light.8Mzzo2/ttbh.sock
 ╚══ ready
 ```
