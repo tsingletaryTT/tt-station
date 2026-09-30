@@ -134,7 +134,7 @@ static volatile uint8_t *sim_aim(void *vctx, uint32_t x, uint32_t y, uint64_t ba
 ttbh_window ttbh_sim_window(ttbh_sim *s, uint32_t idx)
 {
     window_ctxs[idx] = (sim_window_ctx){ s, { s->bar0, BAR0_SIZE, idx } };
-    return (ttbh_window){ &window_ctxs[idx], sim_aim };
+    return (ttbh_window){ .ctx = &window_ctxs[idx], .aim = sim_aim };
 }
 
 ttbh_sim *ttbh_sim_new(uint32_t entries)

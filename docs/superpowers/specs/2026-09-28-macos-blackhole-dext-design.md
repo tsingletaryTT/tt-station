@@ -124,7 +124,10 @@ over a TB tunnel are the riskiest operations and nothing needs them to prove M1.
   in the entitled host app (`TTStationDriver serve`; windows proxied, host memory shared through an
   shm fd plus the dext's PrepareDMA plus iATU; power via ARC messages) and a Python drop-in for
   blackhole-py's `pcie` module. It's tested end to end against the real C broker over libttbh's
-  simulated chip, including blackhole-py's own `board_config` bringing up a P100A. ARC messages are verified on
+  simulated chip, including blackhole-py's own `board_config` bringing up a P100A. **ttsim backend (2026-09-30):** the broker also runs over Tenstorrent's ttsim (built natively on
+  macOS). Identity, telemetry, windows and DMA both ways through our iATU into ttsim's are verified
+  and tested. blackhole-py's `boot()` runs its firmware on ttsim for over 6 million clocks, until
+  ttsim hits a Tensix config register it doesn't model (`reg=4`). ARC messages are verified on
   silicon too (2026-09-30, qb2-lab: 16/16 TEST echoes through libttbh's ring code; the real queue
   has 4 entries). Running a real kernel waits on the dext loading.)* add `PrepareDMA` (IODMACommand, single segment, respect 16 KiB
   pages) and host-buffer mapping through the iATU; add a Darwin backend to blackhole-py

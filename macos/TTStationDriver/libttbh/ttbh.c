@@ -118,7 +118,7 @@ static volatile uint8_t *bar0_aim(void *vctx, uint32_t x, uint32_t y, uint64_t b
 
 ttbh_window ttbh_bar0_window(ttbh_bar0_ctx *ctx)
 {
-    ttbh_window w = { ctx, bar0_aim };
+    ttbh_window w = { .ctx = ctx, .aim = bar0_aim };
     return w;
 }
 
@@ -135,6 +135,11 @@ static volatile uint32_t *locate(const ttbh_window *w, uint32_t x, uint32_t y, u
 int ttbh_noc_read32(const ttbh_window *w, uint32_t x, uint32_t y, uint64_t addr, uint32_t *out)
 {
     if (!out || (addr & 3u)) return TTBH_EINVAL;
+    if (w && w->rd32) {                                  // function-call BARs (ttsim)
+        uint64_t base = addr & ~(uint64_t)(TTBH_TLB_2M_SIZE - 1);
+        if (!w->aim || !w->aim(w->ctx, x, y, base)) return TTBH_EWINDOW;
+        return w->rd32(w->ctx, (uint32_t)(addr - base), out);
+    }
     volatile uint32_t *p = locate(w, x, y, addr);
     if (!p) return TTBH_EWINDOW;
     *out = *p;
@@ -144,6 +149,11 @@ int ttbh_noc_read32(const ttbh_window *w, uint32_t x, uint32_t y, uint64_t addr,
 int ttbh_noc_write32(const ttbh_window *w, uint32_t x, uint32_t y, uint64_t addr, uint32_t value)
 {
     if (addr & 3u) return TTBH_EINVAL;
+    if (w && w->wr32) {
+        uint64_t base = addr & ~(uint64_t)(TTBH_TLB_2M_SIZE - 1);
+        if (!w->aim || !w->aim(w->ctx, x, y, base)) return TTBH_EWINDOW;
+        return w->wr32(w->ctx, (uint32_t)(addr - base), value);
+    }
     volatile uint32_t *p = locate(w, x, y, addr);
     if (!p) return TTBH_EWINDOW;
     *p = value;
@@ -216,23 +226,45 @@ static bool iatu_in_range(uint64_t bar2_size, uint32_t region)
     return region < TTBH_IATU_REGIONS && (uint64_t)ttbh_iatu_outbound_offset(region) + 0x24u <= bar2_size;
 }
 
+int ttbh_iatu_outbound_write_with(ttbh_wr32_fn wr, void *ctx, uint32_t region, const ttbh_iatu_regs *r)
+{
+    if (!wr || !r || region >= TTBH_IATU_REGIONS) return TTBH_EINVAL;
+    uint32_t b = ttbh_iatu_outbound_offset(region);
+    // Same order as tt-kmd: addresses first, enable (CTRL_2) after everything it gates.
+    wr(ctx, b + TTBH_IATU_LOWER_BASE, r->lower_base);
+    wr(ctx, b + TTBH_IATU_UPPER_BASE, r->upper_base);
+    wr(ctx, b + TTBH_IATU_LOWER_TARGET, r->lower_target);
+    wr(ctx, b + TTBH_IATU_UPPER_TARGET, r->upper_target);
+    wr(ctx, b + TTBH_IATU_LOWER_LIMIT, r->lower_limit);
+    wr(ctx, b + TTBH_IATU_UPPER_LIMIT, r->upper_limit);
+    wr(ctx, b + TTBH_IATU_CTRL_1, r->ctrl_1);
+    wr(ctx, b + TTBH_IATU_CTRL_2, r->ctrl_2);
+    wr(ctx, b + TTBH_IATU_CTRL_3, r->ctrl_3);
+    return TTBH_OK;
+}
+
+static void ptr_wr32(void *ctx, uint32_t off, uint32_t v) { *(volatile uint32_t *)((volatile uint8_t *)ctx + off) = v; }
+
 int ttbh_iatu_outbound_write(volatile uint8_t *bar2, uint64_t bar2_size, uint32_t region, const ttbh_iatu_regs *r)
 {
     if (!bar2 || !r || !iatu_in_range(bar2_size, region)) return TTBH_EINVAL;
-    volatile uint8_t *b = bar2 + ttbh_iatu_outbound_offset(region);
-#define W(off, v) (*(volatile uint32_t *)(b + (off)) = (v))
-    // Same order as tt-kmd: addresses first, enable (CTRL_2) after everything it gates.
-    W(TTBH_IATU_LOWER_BASE, r->lower_base);
-    W(TTBH_IATU_UPPER_BASE, r->upper_base);
-    W(TTBH_IATU_LOWER_TARGET, r->lower_target);
-    W(TTBH_IATU_UPPER_TARGET, r->upper_target);
-    W(TTBH_IATU_LOWER_LIMIT, r->lower_limit);
-    W(TTBH_IATU_UPPER_LIMIT, r->upper_limit);
-    W(TTBH_IATU_CTRL_1, r->ctrl_1);
-    W(TTBH_IATU_CTRL_2, r->ctrl_2);
-    W(TTBH_IATU_CTRL_3, r->ctrl_3);
-#undef W
-    (void)*(volatile uint32_t *)(b + TTBH_IATU_CTRL_2);    // flush posted writes before first use
+    int err = ttbh_iatu_outbound_write_with(ptr_wr32, (void *)(uintptr_t)bar2, region, r);
+    (void)*(volatile uint32_t *)(bar2 + ttbh_iatu_outbound_offset(region) + TTBH_IATU_CTRL_2);   // flush posted writes
+    return err;
+}
+
+int ttbh_tlb2m_program_with(ttbh_wr32_fn wr, void *ctx, uint32_t index, const ttbh_tlb_config *cfg)
+{
+    if (!wr || index >= TTBH_TLB_2M_COUNT) return TTBH_EINVAL;
+    uint32_t words[3];
+    int err = ttbh_tlb2m_encode(cfg, words);
+    if (err) return err;
+    uint32_t regs = TTBH_TLB_REGS_START + index * TTBH_TLB_REG_SIZE;
+    wr(ctx, regs + 0, words[0]);
+    wr(ctx, regs + 4, words[1]);
+    wr(ctx, regs + 8, words[2]);
+    // Clear any strided (non-rectangular multicast) pattern left by someone else, as tt-kmd does.
+    if (index < TTBH_TLB_STRIDED_COUNT) wr(ctx, TTBH_TLB_REGS_START + TTBH_TLB_STRIDED_REGS_OFF + index * 4u, 0);
     return TTBH_OK;
 }
 

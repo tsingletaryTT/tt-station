@@ -33,6 +33,9 @@
 extern "C" {
 #endif
 
+// A register writer (BAR offset, value), for backends whose BARs are function calls (ttsim).
+typedef void (*ttbh_wr32_fn)(void *ctx, uint32_t offset, uint32_t value);
+
 // ── Blackhole BAR0 layout (tt-kmd blackhole.c) ─────────────────────────────────────────────
 #define TTBH_TLB_2M_SHIFT          21u
 #define TTBH_TLB_2M_SIZE           (1u << TTBH_TLB_2M_SHIFT)       // 2 MiB windows...
@@ -124,6 +127,8 @@ int ttbh_iatu_outbound_encode(uint64_t base, uint64_t limit, uint64_t target, tt
 static inline uint32_t ttbh_iatu_outbound_offset(uint32_t region) { return TTBH_IATU_BASE + 2u * region * TTBH_IATU_REGION_STRIDE; }
 // Write / read one outbound region through a BAR2 mapping. Write order matches tt-kmd.
 int ttbh_iatu_outbound_write(volatile uint8_t *bar2, uint64_t bar2_size, uint32_t region, const ttbh_iatu_regs *r);
+// Same register sequence through a writer callback (BAR2 offset, value), for function-call BARs.
+int ttbh_iatu_outbound_write_with(ttbh_wr32_fn wr, void *ctx, uint32_t region, const ttbh_iatu_regs *r);
 int ttbh_iatu_outbound_read(volatile uint8_t *bar2, uint64_t bar2_size, uint32_t region, ttbh_iatu_regs *r);
 
 // The active PCIe tile's NOC x (Blackhole has two PCIe instances, at x = 2 and x = 11), read from
@@ -175,12 +180,22 @@ int ttbh_tlb2m_encode(const ttbh_tlb_config *cfg, uint32_t out[3]);
 // Same for a 4 GiB (BAR4) window: addr must be 4 GiB-aligned.
 int ttbh_tlb4g_encode(const ttbh_tlb_config *cfg, uint32_t out[3]);
 
+// The three TLB register words (and the strided-register clear for windows < 32) for window
+// `index`, written through a callback (BAR0 offset, value). ttbh_bar0_window uses the same order.
+int ttbh_tlb2m_program_with(ttbh_wr32_fn wr, void *ctx, uint32_t index, const ttbh_tlb_config *cfg);
+
 // ── Window backends ───────────────────────────────────────────────────────────────────────
 // A window backend points one 2 MiB window at (x, y, window_base) and returns the host pointer
 // to the window's start. `window_base` is always 2 MiB-aligned (ttbh_noc_* guarantee it).
 typedef struct ttbh_window {
     void *ctx;
     volatile uint8_t *(*aim)(void *ctx, uint32_t x, uint32_t y, uint64_t window_base);
+    // Optional: for backends whose BARs are FUNCTION CALLS rather than mapped memory (ttsim's
+    // libttsim_pci_mem_*). When set, the NOC helpers access the aimed window through these
+    // (offset within the 2 MiB window) instead of dereferencing aim's return value, which then
+    // only has to be non-NULL. Leave NULL for mapped BARs (the dext, the simulators).
+    int (*rd32)(void *ctx, uint32_t offset, uint32_t *value);
+    int (*wr32)(void *ctx, uint32_t offset, uint32_t value);
 } ttbh_window;
 
 // Raw BAR0 backend: programs TLB register `tlb_index` directly. `bar0` is the host mapping of

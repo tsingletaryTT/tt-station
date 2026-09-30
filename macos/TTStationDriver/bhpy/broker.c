@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -96,31 +97,34 @@ static int respond(int fd, int32_t status, uint64_t r0, uint64_t r1, const void 
 
 // ── commands ──────────────────────────────────────────────────────────────────────────────
 
-static volatile uint8_t *user_window(session *s, uint32_t id)
-{
-    if (id >= TTBH_BROKER_USER_TLBS || !s->tlb_used[id]) return 0;
-    return s->be->bar0 + (uint64_t)id * TTBH_TLB_2M_SIZE;
-}
+static bool window_ok(session *s, uint32_t id) { return id < TTBH_BROKER_USER_TLBS && s->tlb_used[id]; }
+static uint64_t window_off(uint32_t id) { return (uint64_t)id * TTBH_TLB_2M_SIZE; }
+
+// BAR access: mapped pointer (dext, simulators) or function calls (ttsim), whichever the backend has.
+static void bar_rd(const broker_backend *be, int bar, uint64_t off, void *dst, uint32_t n);
+static void bar_wr(const broker_backend *be, int bar, uint64_t off, const void *src, uint32_t n);
+static void bar0_wr32(void *vbe, uint32_t off, uint32_t v) { bar_wr(vbe, 0, off, &v, 4); }
+static void bar2_wr32(void *vbe, uint32_t off, uint32_t v) { bar_wr(vbe, 2, off, &v, 4); }
 
 // Program window `id` exactly as blackhole-py's ConfigureTlb does: end/start rectangle, multicast
 // iff start != end, NOC 0, strict ordering (pcie.py ConfigureTlbPayload).
 static int tlb_target(session *s, uint32_t id, uint64_t addr, uint64_t start, uint64_t end)
 {
-    if (!user_window(s, id)) return TTBH_EINVAL;
+    if (!window_ok(s, id)) return TTBH_EINVAL;
+    // Unicast (start == end) leaves the start coordinates at 0, as tt-kmd's own kernel window does.
+    // blackhole-py's ConfigureTlb puts start = end = core there; silicon ignores start for unicast,
+    // but ttsim rejects it ("x_start/y_start set without mcast"), and tt-kmd's convention is valid on both.
+    const bool mcast = start != end;
     ttbh_tlb_config c = {
         .addr = addr,
-        .x_start = (uint8_t)(start & 0xFF), .y_start = (uint8_t)((start >> 8) & 0xFF),
+        .x_start = mcast ? (uint8_t)(start & 0xFF) : 0, .y_start = mcast ? (uint8_t)((start >> 8) & 0xFF) : 0,
         .x_end = (uint8_t)(end & 0xFF), .y_end = (uint8_t)((end >> 8) & 0xFF),
-        .multicast = start != end, .ordering = 1,
+        .multicast = mcast, .ordering = 1,
     };
-    uint32_t w[3];
-    int err = ttbh_tlb2m_encode(&c, w);
+    int err = ttbh_tlb2m_program_with(bar0_wr32, (void *)s->be, id, &c);
     if (err) return err;
-    volatile uint32_t *regs = (volatile uint32_t *)(s->be->bar0 + TTBH_TLB_REGS_START + id * TTBH_TLB_REG_SIZE);
-    regs[0] = w[0]; regs[1] = w[1]; regs[2] = w[2];
-    if (id < TTBH_TLB_STRIDED_COUNT)
-        *(volatile uint32_t *)(s->be->bar0 + TTBH_TLB_REGS_START + TTBH_TLB_STRIDED_REGS_OFF + id * 4u) = 0;
-    (void)regs[2];   // flush the posted writes before the window is used
+    uint32_t flush;
+    bar_rd(s->be, 0, TTBH_TLB_REGS_START + id * TTBH_TLB_REG_SIZE + 8, &flush, 4);   // flush posted writes
     if (s->be->after_tlb_target) s->be->after_tlb_target(s->be->ctx, id);
     return TTBH_OK;
 }
@@ -138,6 +142,17 @@ static void mmio_copy_to(volatile uint8_t *dst, const uint8_t *src, uint64_t n)
     uint64_t i = 0;
     for (; i + 4 <= n; i += 4) { uint32_t v; memcpy(&v, src + i, 4); *(volatile uint32_t *)(dst + i) = v; }
     for (; i < n; i++) dst[i] = src[i];
+}
+
+static void bar_rd(const broker_backend *be, int bar, uint64_t off, void *dst, uint32_t n)
+{
+    if (be->mmio_rd) { be->mmio_rd(be->ctx, bar, off, dst, n); return; }
+    mmio_copy_from(dst, (bar == 0 ? be->bar0 : be->bar2) + off, n);
+}
+static void bar_wr(const broker_backend *be, int bar, uint64_t off, const void *src, uint32_t n)
+{
+    if (be->mmio_wr) { be->mmio_wr(be->ctx, bar, off, src, n); return; }
+    mmio_copy_to((bar == 0 ? be->bar0 : be->bar2) + off, src, n);
 }
 
 // Allocate shared host memory, DMA-map it, and point iATU regions at it.
@@ -180,7 +195,7 @@ static int sysmem_create(session *s, uint64_t size, int *out_fd, uint64_t *noc, 
     for (uint32_t i = 0; i < nseg; i++) {
         ttbh_iatu_regs r;
         ttbh_iatu_outbound_encode(plan[i].base, plan[i].limit, plan[i].target, &r);
-        ttbh_iatu_outbound_write(s->be->bar2, s->be->bar2_size, plan[i].region, &r);
+        ttbh_iatu_outbound_write_with(bar2_wr32, (void *)s->be, plan[i].region, &r);
         s->region_used[plan[i].region] = true;
     }
     s->next_noc_base = base + size;
@@ -202,7 +217,7 @@ static void sysmem_free(session *s, uint32_t h)
     for (uint32_t i = 0; i < m->nregions; i++) {        // disable first, then unmap the pages
         ttbh_iatu_regs off;
         ttbh_iatu_outbound_encode(0, 0, 0, &off);
-        ttbh_iatu_outbound_write(s->be->bar2, s->be->bar2_size, m->first_region + i, &off);
+        ttbh_iatu_outbound_write_with(bar2_wr32, (void *)s->be, m->first_region + i, &off);
         s->region_used[m->first_region + i] = false;
     }
     s->be->complete_dma(s->be->ctx, m->dma_handle);
@@ -220,7 +235,15 @@ void broker_session(const broker_backend *be, int fd)
     ttbh_window own = own_window(be, &own_ctx);
 
     ttbh_broker_req q;
-    while (read_all(fd, &q, sizeof q) == 0) {
+    for (;;) {
+        if (be->tick) {
+            // Simulated time only moves when we clock it: keep the chip running while the client
+            // thinks (e.g. between blackhole-py's readiness polls), then serve the next request.
+            struct pollfd pfd = { .fd = fd, .events = POLLIN };
+            while (!stop_requested && poll(&pfd, 1, 0) == 0) be->tick(be->ctx);
+            be->tick(be->ctx);
+        }
+        if (read_all(fd, &q, sizeof q) != 0) break;
         if (q.payload_len > TTBH_BROKER_MAX_IO) break;            // protocol violation: drop client
         if (q.payload_len && read_all(fd, s->io, q.payload_len)) break;
         int rc = 0;
@@ -244,17 +267,15 @@ void broker_session(const broker_backend *be, int fd)
             rc = respond(fd, tlb_target(s, q.id, q.a0, q.a1, q.a2), 0, 0, 0, 0, -1);
             break;
         case TTBH_CMD_TLB_READ: {
-            volatile uint8_t *win = user_window(s, q.id);
-            if (!win || q.a1 > TTBH_BROKER_MAX_IO || q.a0 + q.a1 > TTBH_TLB_2M_SIZE) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
+            if (!window_ok(s, q.id) || q.a1 > TTBH_BROKER_MAX_IO || q.a0 + q.a1 > TTBH_TLB_2M_SIZE) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
             if (be->sync) be->sync(be->ctx);
-            mmio_copy_from(s->io, win + q.a0, q.a1);
+            bar_rd(be, 0, window_off(q.id) + q.a0, s->io, (uint32_t)q.a1);
             rc = respond(fd, TTBH_OK, 0, 0, s->io, (uint32_t)q.a1, -1);
             break;
         }
         case TTBH_CMD_TLB_WRITE: {
-            volatile uint8_t *win = user_window(s, q.id);
-            if (!win || q.a0 + q.payload_len > TTBH_TLB_2M_SIZE) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
-            mmio_copy_to(win + q.a0, s->io, q.payload_len);
+            if (!window_ok(s, q.id) || q.a0 + q.payload_len > TTBH_TLB_2M_SIZE) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
+            bar_wr(be, 0, window_off(q.id) + q.a0, s->io, q.payload_len);
             if (be->sync) be->sync(be->ctx);
             rc = respond(fd, TTBH_OK, 0, 0, 0, 0, -1);
             break;

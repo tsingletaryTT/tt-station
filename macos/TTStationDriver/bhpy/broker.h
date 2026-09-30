@@ -72,6 +72,13 @@ typedef struct broker_backend {
     void (*after_tlb_target)(void *ctx, uint32_t id);
     void (*sync)(void *ctx);
     ttbh_window (*own_window)(void *ctx);
+    // Optional function-call BARs (ttsim's libttsim_pci_mem_*): when set, BAR0/BAR2 are reached
+    // through these (bar = 0 or 2, offset within the BAR) and the bar0/bar2 pointers are unused.
+    void (*mmio_rd)(void *ctx, int bar, uint64_t offset, void *dst, uint32_t size);
+    void (*mmio_wr)(void *ctx, int bar, uint64_t offset, const void *src, uint32_t size);
+    // Optional: advance simulated time (ttsim only runs inside libttsim_clock). Called before every
+    // request and repeatedly while waiting for one, so firmware keeps running while a client polls.
+    void (*tick)(void *ctx);
 } broker_backend;
 
 // Serve clients on `socket_path`, one at a time, until a signal. Returns non-zero on setup failure.

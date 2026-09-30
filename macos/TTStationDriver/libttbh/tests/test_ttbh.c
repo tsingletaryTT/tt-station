@@ -152,7 +152,7 @@ static sim_chip *sim_new(void)
     return s;
 }
 static void sim_free(sim_chip *s) { munmap((void *)s->bar0.bar0, SIM_BAR0_SIZE); free(s); }
-static ttbh_window sim_window(sim_chip *s) { return (ttbh_window){ s, sim_aim }; }
+static ttbh_window sim_window(sim_chip *s) { return (ttbh_window){ .ctx = s, .aim = sim_aim }; }
 
 // A plausible firmware telemetry table in ARC CSM (a different 2 MiB window than the scratch regs).
 static void sim_firmware(sim_chip *s)

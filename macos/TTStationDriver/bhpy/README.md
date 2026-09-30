@@ -36,6 +36,39 @@ Homebrew's binutils are named `riscv64-unknown-elf-*`, not Linux's `riscv64-linu
 It then stops exactly where the chip has to *run* code ("CQ DRAM engines did not start"). A test
 guards that point.
 
+## Against a simulated Blackhole that runs code: ttsim
+
+[ttsim](https://github.com/tenstorrent/ttsim) (Apache-2.0) is Tenstorrent's full-system simulator.
+It presents a Blackhole as a virtual PCIe device (config space, BAR accesses, `libttsim_clock`, DMA
+callbacks), which is the same contract the dext gives the broker, and it builds natively on macOS
+(`./make.py :build` gives `src/_out/release_bh/libttsim.so`, Mach-O arm64, in about 6 s).
+`ttbh-broker-ttsim` runs the broker on it:
+
+```bash
+make -C macos/TTStationDriver/bhpy build/ttbh-broker-ttsim
+TTSIM_LIB=~/code/ttsim/src/_out/release_bh/libttsim.so make -C macos/TTStationDriver/bhpy test
+```
+
+Verified through it, end to end through the real C broker and the Python client:
+
+- **Identity and topology:** ttsim models a P150 (120 cores, 8 GDDR), read by libttbh's telemetry walk.
+- **Windows:** client TLB windows reach the ARC (boot status `0x5`) and Tensix L1.
+- **DMA:** in both directions, through our iATU programming into ttsim's iATU model. A deliberately
+  wrong iATU target turns the test red.
+- **blackhole-py's own `boot()`:** runs its firmware on ttsim's RISC-V cores for over 6 million
+  clocks, then ttsim stops with `UnsupportedFunctionality: tensix_cfg_wr32: reg=4`. blackhole-py's
+  hand-written firmware touches a Tensix config register that ttsim (validated against tt-metal)
+  doesn't model. That's a gap between those two projects, not in this stack.
+
+ttsim quirks the backend absorbs (all in `broker_ttsim.c`, none changing what silicon gets, apart
+from one convention change that is valid on both):
+
+- it doesn't implement the strided-TLB registers, so those writes are dropped;
+- its TLB config registers are write-only, so the posted-write flush read is answered locally;
+- it rejects unicast TLBs with start coordinates set. The broker now uses tt-kmd's own convention
+  (start = 0 for unicast) on every backend, which is valid on silicon too;
+- it answers the ARC `TEST` message with zeros. The echo was verified on silicon instead.
+
 ## Why a broker
 
 A development-signed dext only opens for clients with the `userclient-access` entitlement, and

@@ -283,7 +283,7 @@ int main(int argc, char **argv)
     if (map == MAP_FAILED) { perror("mmap TLB"); return 1; }
     k.map = map;
 
-    ttbh_window w = { &k, kmd_aim };
+    ttbh_window w = { .ctx = &k, .aim = kmd_aim };
     const char *vis = getenv("TT_VISIBLE_DEVICES");
     printf("╔══ ttbh-kmd-check  %s  (tt-kmd user TLB %u; TT_VISIBLE_DEVICES=%s)\n", path, k.tlb_id, vis ? vis : "unset");
 

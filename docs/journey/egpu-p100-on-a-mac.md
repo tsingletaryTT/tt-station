@@ -909,3 +909,51 @@ together, not a fluke of one boot.
 `first-light.sh`, run for real against the live card (install skipped, log sent to a scratch file),
 passed *environment* and *card on the bus*, then stopped at *driver attached*: "the dext did not
 claim the card within 30 s". That's the first step that needs signing, and the ceiling for today.
+
+---
+
+## 2026-09-30 (later): ttsim, a Blackhole that actually runs code, on the Mac
+
+Taylor asked whether ttsim, QEMU or Docker could prove anything further. ttsim turned out to be
+exactly the missing piece. It's Tenstorrent's open-source (Apache-2.0) full-system simulator, and
+its library presents a Blackhole **as a virtual PCIe device**: config space, BAR reads and writes,
+`libttsim_clock` to run the RISC-V cores, and callbacks for the chip's DMA into host memory. That's
+the same contract our dext gives the broker. It even **builds natively on this Mac** (6 seconds,
+Mach-O arm64). QEMU and Docker weren't needed.
+
+So the broker got a third backend, `broker_ttsim.c`. It needed two small refactors (libttbh and the
+broker can now reach BARs through function calls rather than mapped memory, and the broker pumps
+simulated time while a client polls), and it had to absorb three ttsim quirks, each of which
+*terminates the whole process* when hit:
+
+- **Strided-TLB registers** are unimplemented (fatal on write). The backend drops those writes.
+- **TLB config registers are write-only** (fatal on read). That tripped our posted-write flush, which
+  matters on PCIe and means nothing in a sim.
+- **Unicast TLBs with start coordinates set** are rejected. blackhole-py sets `start = end = core`;
+  silicon ignores it, ttsim doesn't. The broker now uses tt-kmd's own kernel convention (start = 0),
+  which is valid on both.
+
+Then, through the real C broker and the Python client, against a simulated chip:
+
+- ttsim is a **P150** (120 cores, 8 GDDR), read by libttbh's telemetry walk. blackhole-py's
+  `board_config` accepts it.
+- A client TLB window reads the ARC's boot status, `0x5` (the same value real silicon gave), and a
+  Tensix tile's L1 round-trips "hello from the Mac broker".
+- **DMA both ways through *our* iATU programming into ttsim's iATU model**: 64 chip→host writes and
+  64 host→chip reads, all correct. An off-by-one-page iATU target turns the test red.
+- **blackhole-py's own `boot()`**: host side, then its firmware *executing on ttsim's RISC-V cores for
+  over 6 million clocks*, until ttsim stopped with `UnsupportedFunctionality: tensix_cfg_wr32: reg=4`.
+  ttsim models an explicit list of 97 Tensix config registers, validated against tt-metal's kernels.
+  blackhole-py's hand-written firmware touches one that isn't on the list.
+
+That last stop is a gap between two independent projects, not in anything built here. Everything
+our stack is responsible for delivered: the frontier moved from "the chip must run code" to "the
+code runs, until the simulator meets a register it doesn't know".
+
+Two smaller notes:
+
+- ttsim's ARC answers `TEST` with zeros. Our queue round trip completed; ttsim simply doesn't model
+  the echo. Silicon does (16/16 on qb2-lab).
+- My first read-back check printed MISMATCH next to the right value. Heredoc escaping had turned
+  `b'\xca…'` into a literal backslash string. The instrument was wrong again, and a clean 64-word
+  check replaced it.
