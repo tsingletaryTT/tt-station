@@ -17,6 +17,7 @@
 #include <DriverKit/IOService.iig>
 #include <DriverKit/IOMemoryDescriptor.iig>
 #include <PCIDriverKit/IOPCIDevice.iig>
+#include <DriverKit/IODMACommand.iig>
 
 class TTBlackholeDriver: public IOService
 {
@@ -38,6 +39,12 @@ public:
 
     // Config-space read of `width` (1/2/4) bytes at `offset`.
     kern_return_t CfgRead(uint32_t offset, uint32_t width, uint32_t * value) LOCALONLY;
+
+    // DMA-map `memory` for the device (spec M3): creates an IODMACommand, prepares it, and returns
+    // its DART segments. Enables bus mastering the first time. On success the caller owns *command
+    // and must CompleteDMA + release it.
+    kern_return_t PrepareDMA(IOMemoryDescriptor * memory, uint64_t length, IODMACommand ** command,
+                             IOAddressSegment * segments, uint32_t * segmentCount) LOCALONLY;
 };
 
 #endif /* TTBlackholeDriver_h */

@@ -9,6 +9,8 @@
 //
 // Everything is a READ by default. `--noc` (spec M2) additionally programs ONE TLB register (window
 // 201) to reach the ARC processor over the NOC and read its boot status + telemetry via libttbh.
+// `--dma` (spec M3) DMA-maps a 64 KiB buffer through the dext (which turns on bus mastering),
+// programs iATU regions, and runs a chip↔host loopback. It then disables the regions again.
 // A dead link shows up as 0xFFFFFFFF on MMIO reads; the probe flags it.
 //
 // Two ways to run it:
@@ -56,8 +58,103 @@ static uint32_t mmio_read32(mach_vm_address_t base, uint64_t offset)
     return *(volatile uint32_t *)(uintptr_t)(base + offset);
 }
 
-int ttbh_probe_run(int noc)
+// ── --dma: spec M3 on the Mac ─────────────────────────────────────────────────────────────
+// The same sequence ttbh-kmd-check --dma proved on a real Blackhole under tt-kmd, with the dext in
+// tt-kmd's place:
+//   dext PrepareDMA(host buffer) → DART segments
+//   ttbh_dma_plan                → iATU regions with adjacent NOC bases from 0
+//   ttbh_iatu_outbound_write     → BAR2 (the encoder was bit-compared against tt-kmd's registers)
+//   chip → host: NOC write to the PCIe tile at TTBH_NOC_PCIE_OFFSET + 0x40 → lands in our buffer
+//   host → chip: we write, the chip NOC-reads it back
+// Then the regions are disabled and the mapping completed. Returns 0 on success.
+#include <stdlib.h>
+#include <time.h>
+#define PROBE_DMA_SIZE (64u * 1024u)
+
+static int dma_loopback(io_connect_t conn)
 {
+    int bad = 0;
+    mach_vm_size_t size0 = 0, size2 = 0;
+    mach_vm_address_t bar0 = map_bar(conn, kTTBHMemoryBar0, &size0);
+    mach_vm_address_t bar2 = map_bar(conn, kTTBHMemoryBar2, &size2);
+    if (!bar0 || !bar2) return 1;
+
+    uint32_t pcie_x = 0;
+    int err = ttbh_pcie_noc_x((volatile uint8_t *)(uintptr_t)bar0, size0, &pcie_x);
+    printf("║  PCIe     tile x=%u y=%u  %s\n", pcie_x, TTBH_PCIE_NOC_Y, err ? ttbh_strerror(err) : "detected");
+    if (err) { bad = 1; goto out_maps; }
+
+    // A 16 KiB-aligned buffer (the DART page size) so segments are iATU-granule aligned.
+    volatile uint32_t *host = NULL;
+    if (posix_memalign((void **)&host, 16384, PROBE_DMA_SIZE) != 0) { bad = 1; goto out_maps; }
+    memset((void *)host, 0, PROBE_DMA_SIZE);
+
+    TTBHDMASegment segs[TTBH_MAX_DMA_SEGMENTS];
+    size_t segs_size = sizeof segs;
+    uint64_t out[2] = {0};
+    uint32_t out_n = 2;
+    kern_return_t kr = IOConnectCallMethod(conn, kTTBHPrepareDMA, NULL, 0, (const void *)host, PROBE_DMA_SIZE,
+                                           out, &out_n, segs, &segs_size);
+    if (kr != KERN_SUCCESS) { printf("║  DMA      PrepareDMA failed 0x%08x\n", kr); bad = 1; goto out_buf; }
+    uint32_t dma_id = (uint32_t)out[0], nseg = (uint32_t)out[1];
+    printf("║  DMA      %u KiB → %u DART segment(s), first IOVA 0x%llx\n", PROBE_DMA_SIZE / 1024, nseg,
+           (unsigned long long)segs[0].address);
+
+    ttbh_dma_segment plan_in[TTBH_MAX_DMA_SEGMENTS];
+    ttbh_iatu_plan_entry plan[TTBH_MAX_DMA_SEGMENTS];
+    for (uint32_t i = 0; i < nseg; i++) plan_in[i] = (ttbh_dma_segment){ segs[i].address, segs[i].length };
+    const uint64_t noc_base = 0;          // we own the device: start the chip-visible range at 0
+    if ((err = ttbh_dma_plan(plan_in, nseg, noc_base, 0, plan)) != TTBH_OK) {
+        printf("║  DMA      cannot plan iATU regions: %s\n", ttbh_strerror(err)); bad = 1; goto out_dma;
+    }
+    for (uint32_t i = 0; i < nseg; i++) {
+        ttbh_iatu_regs r;
+        ttbh_iatu_outbound_encode(plan[i].base, plan[i].limit, plan[i].target, &r);
+        ttbh_iatu_outbound_write((volatile uint8_t *)(uintptr_t)bar2, size2, plan[i].region, &r);
+    }
+
+    {
+        ttbh_bar0_ctx ctx = { (volatile uint8_t *)(uintptr_t)bar0, size0, TTBH_DRIVER_TLB_INDEX };
+        ttbh_window w = ttbh_bar0_window(&ctx);
+        const uint64_t noc = TTBH_NOC_PCIE_OFFSET + noc_base;
+        const uint32_t magic = 0xC0DE1234u ^ (uint32_t)time(NULL);
+
+        err = ttbh_noc_write32(&w, pcie_x, TTBH_PCIE_NOC_Y, noc + 0x40, magic);
+        for (int spin = 0; !err && host[0x40 / 4] != magic && spin < 5000000; spin++) { }
+        int wrote = !err && host[0x40 / 4] == magic;
+        printf("║  chip→host 0x%08x  %s\n", magic, wrote ? "landed in host memory" : "DID NOT ARRIVE");
+        bad |= !wrote;
+
+        host[0x80 / 4] = ~magic;
+        __sync_synchronize();
+        uint32_t back = 0;
+        err = ttbh_noc_read32(&w, pcie_x, TTBH_PCIE_NOC_Y, noc + 0x80, &back);
+        int read_ok = !err && back == ~magic;
+        printf("║  host→chip 0x%08x  %s\n", back, read_ok ? "read back through the NOC" : "MISMATCH");
+        bad |= !read_ok;
+    }
+
+    for (uint32_t i = 0; i < nseg; i++) {                 // disable (limit 0), as tt-kmd tears down
+        ttbh_iatu_regs off;
+        ttbh_iatu_outbound_encode(0, 0, 0, &off);
+        ttbh_iatu_outbound_write((volatile uint8_t *)(uintptr_t)bar2, size2, plan[i].region, &off);
+    }
+out_dma:
+    {
+        uint64_t id_in = dma_id;
+        IOConnectCallScalarMethod(conn, kTTBHCompleteDMA, &id_in, 1, NULL, NULL);
+    }
+out_buf:
+    free((void *)host);
+out_maps:
+    IOConnectUnmapMemory64(conn, kTTBHMemoryBar0, mach_task_self(), bar0);
+    IOConnectUnmapMemory64(conn, kTTBHMemoryBar2, mach_task_self(), bar2);
+    return bad;
+}
+
+int ttbh_probe_run(int flags)
+{
+    const int noc = flags & TTBH_PROBE_NOC, dma = flags & TTBH_PROBE_DMA;
     // ── 1. find + open ──────────────────────────────────────────────
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault,
                                                        IOServiceNameMatching(TTBH_SERVICE_NAME));
@@ -150,6 +247,8 @@ int ttbh_probe_run(int noc)
         IOConnectUnmapMemory64(conn, kTTBHMemoryBar2, mach_task_self(), bar2);
     }
 
+    if (dma && !dead && dma_loopback(conn) != 0) dead = 1;
+
     if (dead) printf("║  ⚠ all-ones MMIO reads: link down, memory decode off, or card in reset\n");
     printf("╚══ %s\n", dead ? "reachable config space, MMIO NOT confirmed" : "done");
 
@@ -161,7 +260,11 @@ int ttbh_probe_run(int noc)
 #include <string.h>
 int main(int argc, char **argv)
 {
-    int noc = argc > 1 && strcmp(argv[1], "--noc") == 0;
-    return ttbh_probe_run(noc);
+    int flags = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--noc") == 0) flags |= TTBH_PROBE_NOC;
+        else if (strcmp(argv[i], "--dma") == 0) flags |= TTBH_PROBE_DMA;
+    }
+    return ttbh_probe_run(flags);
 }
 #endif

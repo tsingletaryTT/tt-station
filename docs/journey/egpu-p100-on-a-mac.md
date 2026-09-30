@@ -572,3 +572,40 @@ And the one that mattered, on a shared box:
   - end with `gozer status` showing every chip FREE.
 
   The run above is that clean rerun.
+
+### M3: the chip writes into host memory
+
+The next milestone is DMA, the chip reading and writing *host* memory. Blackhole does that by
+NOC-accessing its PCIe tile at `(4 << 58) + base`. One of 16 outbound **iATU** regions (in BAR2)
+translates that range to a host DMA address: tt-kmd's `dma_handle` on Linux, a DART IOVA on the
+Mac.
+
+tt-kmd lets userspace mmap BAR0 and BAR2, so the silicon check could again stay read-only. tt-kmd
+allocated a DMA buffer and programmed an iATU region, and we *read the registers back* and
+compared them with our encoder. Then the chip was made to write into host memory, and to read
+host memory back, through our NOC path:
+
+```
+║  PCIe tile  x=11 y=0  detected
+║  DMA buf    65536 B  host dma 0x3fffffffffe0000  noc 0x13ffffffffff0000 (base 0x3ffffffffff0000)
+║  iATU       region 0: all 9 registers match our encoder (upper_limit on its 8 implemented bits)
+║  chip→host  0x423d9d80  landed in host memory (6.3 µs)
+║  host→chip  0xbdc2627f  read back through the NOC
+```
+
+That "(upper_limit on its 8 implemented bits)" is the interesting line. The first run reported a
+difference: tt-kmd *wrote* `upper_limit = 0x03ffffff`, exactly what our encoder produces, but the
+register **read back `0x000000ff`**. The hardware keeps only limit bits 32–39 (the iATU's 1 TiB
+region maximum) and takes the higher bits from the base. tt-kmd never notices, because its
+regions are small and never straddle a 1 TiB line. For us it became a rule: an iATU region must
+not cross a 1 TiB boundary, or its limit silently aliases. `ttbh_dma_plan` now refuses such
+regions, and it has a test.
+
+On the Mac side, the dext gained `PrepareDMA`/`CompleteDMA`. Bus mastering switches on only at
+the first mapping, and leftover mappings are cleaned up when a client goes away.
+`TTStationDriver probe --dma` replays the exact loopback proven above, with the dext in
+tt-kmd's place.
+
+A note on sharing: midway, Taylor mentioned that the other lease on qb2-lab (`mesh-shrink`) was
+theirs, for another project. The M3 checks had already finished and released cleanly by then. No
+more qb2-lab leases were taken while it ran.

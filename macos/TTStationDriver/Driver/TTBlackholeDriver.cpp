@@ -2,9 +2,9 @@
 //
 // Adapted from tinygrad's TinyGPUDriver.cpp (MIT). Differences from TinyGPU:
 //   * matches only Tenstorrent Blackhole (Info.plist), not every display-class device;
-//   * enables MEMORY space only — bus mastering stays off until DMA exists (spec M3), so the
-//     chip cannot write host memory while the driver has no way to hand it a safe buffer;
-//   * no reset / config-write / DMA paths yet (spec "User-client contract", v1).
+//   * enables MEMORY space at Start; bus mastering only at the first PrepareDMA (spec M3), so the
+//     chip cannot write host memory until a client has handed it a buffer that is actually mapped;
+//   * DMA mapping (PrepareDMA) but no reset or config-write paths (spec "User-client contract").
 //
 // Logging goes to the unified log under the "ttbh:" prefix:
 //   log stream --predicate 'eventMessage CONTAINS "ttbh:"'
@@ -20,6 +20,7 @@
 struct TTBlackholeDriver_IVars
 {
     IOPCIDevice * pci = nullptr;
+    bool busMaster = false;   // turned on lazily by the first PrepareDMA
 };
 
 bool TTBlackholeDriver::init()
@@ -153,5 +154,41 @@ kern_return_t TTBlackholeDriver::CfgRead(uint32_t offset, uint32_t width, uint32
     case 4: { uint32_t v = 0; ivars->pci->ConfigurationRead32(offset, &v); *value = v; break; }
     default: return kIOReturnBadArgument;
     }
+    return kIOReturnSuccess;
+}
+
+kern_return_t TTBlackholeDriver::PrepareDMA(IOMemoryDescriptor * memory, uint64_t length, IODMACommand ** command,
+                                            IOAddressSegment * segments, uint32_t * segmentCount)
+{
+    if (ivars->pci == nullptr) return kIOReturnNotReady;
+    if (memory == nullptr || command == nullptr || segments == nullptr || segmentCount == nullptr) return kIOReturnBadArgument;
+
+    // 64 address bits: the iATU target is a full 64-bit address, so accept any IOVA DART hands out.
+    IODMACommandSpecification spec = {};
+    spec.options = 0;
+    spec.maxAddressBits = 64;
+    IODMACommand * cmd = nullptr;
+    kern_return_t err = IODMACommand::Create(ivars->pci, kIODMACommandCreateNoOptions, &spec, &cmd);
+    if (err != kIOReturnSuccess) {
+        os_log(OS_LOG_DEFAULT, "ttbh: IODMACommand::Create failed 0x%08x", err);
+        return err;
+    }
+    uint64_t flags = kIOMemoryDirectionInOut;
+    err = cmd->PrepareForDMA(kIODMACommandPrepareForDMANoOptions, memory, 0, length, &flags, segmentCount, segments);
+    if (err != kIOReturnSuccess) {
+        os_log(OS_LOG_DEFAULT, "ttbh: PrepareForDMA failed 0x%08x", err);
+        cmd->release();
+        return err;
+    }
+
+    if (!ivars->busMaster) {
+        uint16_t command16 = 0;
+        ivars->pci->ConfigurationRead16(kIOPCIConfigurationOffsetCommand, &command16);
+        ivars->pci->ConfigurationWrite16(kIOPCIConfigurationOffsetCommand, command16 | kIOPCICommandBusMaster);
+        ivars->busMaster = true;
+        os_log(OS_LOG_DEFAULT, "ttbh: bus mastering enabled (first DMA mapping)");
+    }
+    os_log(OS_LOG_DEFAULT, "ttbh: PrepareDMA %llu bytes -> %u segment(s)", length, *segmentCount);
+    *command = cmd;
     return kIOReturnSuccess;
 }

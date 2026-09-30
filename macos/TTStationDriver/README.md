@@ -71,6 +71,11 @@ each value with tt-kmd's own hwmon/sysfs readings. Run it under a gozer lease.
 GNU make 3.81 (the macOS default) compares mtimes to the whole second. After swapping a source file
 back and forth quickly (for example in a mutation test), use `make -B` or it may run a stale binary.
 
+`probe --dma` (spec M3) has the dext DMA-map a 64 KiB buffer, programs outbound iATU regions
+through BAR2, and runs a chip↔host loopback over the NOC. `make -C libttbh kmd-check` plus
+`ttbh-kmd-check --dma` is the same sequence on a QuietBox. There, the iATU encoder is also compared
+bit for bit against the registers tt-kmd wrote.
+
 ## Safety
 
 - The dext only matches `1e52:b140`, and `Start` re-checks the IDs before touching anything.
@@ -78,3 +83,5 @@ back and forth quickly (for example in a mutation test), use `make -B` or it may
   to host memory.
 - By default the probe only reads (TLB register 0 and iATU region 0). `--noc` additionally programs
   exactly one TLB register (window 201) to read the ARC. That's milestone M2, and it's opt-in.
+- Bus mastering stays off until the first `PrepareDMA`. `--dma` disables its iATU regions and
+  completes its mapping before exiting, and the dext completes any mappings a client leaves behind.

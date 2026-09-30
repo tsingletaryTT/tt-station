@@ -96,7 +96,9 @@ case "probe":
     // Same read-only smoke test as tt-station-bh-probe, but run from inside this app so it
     // carries our userclient-access entitlement (needed once the dext is development-signed).
     // `probe --noc` also reaches the ARC over the NOC (spec M2; programs one TLB register).
-    exit(ttbh_probe_run(args.count > 2 && args[2] == "--noc" ? 1 : 0))
+    // `probe --dma` runs the chip↔host DMA loopback (spec M3; enables bus mastering).
+    let rest = args.dropFirst(2)
+    exit(ttbh_probe_run((rest.contains("--noc") ? TTBH_PROBE_NOC : 0) | (rest.contains("--dma") ? TTBH_PROBE_DMA : 0)))
 case "install", "uninstall":
     guard Bundle.main.bundlePath.hasPrefix("/Applications/") else {
         print("Run from /Applications/TTStationDriver.app — macOS refuses dexts from elsewhere.")
@@ -106,6 +108,6 @@ case "install", "uninstall":
     requester.submit()
     dispatchMain()  // delegate callbacks exit the process
 default:
-    print("usage: TTStationDriver install | uninstall | status | probe [--noc]")
+    print("usage: TTStationDriver install | uninstall | status | probe [--noc] [--dma]")
     exit(Exit.usage.rawValue)
 }

@@ -13,7 +13,8 @@
 //
 //   gozer run --chips 1 --who "claude:ttbh-kmd-check" --reason "validate libttbh" -- ./build/ttbh-kmd-check
 //
-// It uses the first device in TT_VISIBLE_DEVICES (set by gozer), or --device N.
+// It uses the first device in TT_VISIBLE_DEVICES (set by gozer), or --device N. `--dma` adds the M3
+// check (iATU encoding vs tt-kmd's registers + a chip↔host loopback); see dma_check().
 
 #include <errno.h>
 #include <fcntl.h>
@@ -25,6 +26,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <glob.h>
+#include <time.h>
 
 #include <linux/types.h>
 #include "ioctl.h"   // tt-kmd's UAPI header (GPL-2.0 WITH Linux-syscall-note), from the dkms tree
@@ -123,11 +125,114 @@ static void compare(const char *what, double ours, double theirs, double tol, co
     printf("║  %-10s ours %10.3f %-4s  kmd %10.3f %-4s  %s\n", what, ours, unit, theirs, unit, verdict);
 }
 
+// ── --dma: M3 on silicon ──────────────────────────────────────────────────────────────────
+// tt-kmd allocates a NOC-DMA buffer and programs an outbound iATU region for it. We then:
+//   1. find the active PCIe tile ourselves (BAR0 NOC_ID, via tt-kmd's BAR0 mmap, read-only);
+//   2. READ the iATU region tt-kmd wrote (BAR2 mmap, read-only) and require it to equal
+//      ttbh_iatu_outbound_encode(base, limit, target), bit for bit, which verifies our encoder
+//      against the real thing;
+//   3. loop back through the NOC: chip → host write, then host → chip read, using OUR window path
+//      to the PCIe tile at TTBH_NOC_PCIE_OFFSET + base.
+// On macOS the only differences will be: the target is a DART IOVA from the dext, and we write the
+// iATU region ourselves with the same (already bit-compared) encoder.
+
+#define MMAP_RES0_UC 0ull                 // tt-kmd memory.c: MMAP_OFFSET_RESOURCE0_UC (BAR0)
+#define MMAP_RES1_UC (2ull << 36)         // MMAP_OFFSET_RESOURCE1_UC (BAR2)
+#define DMA_SIZE     (64u * 1024u)
+
+static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+
+static int dma_check(kmd_ctx *k, const ttbh_window *w)
+{
+    int bad = 0;
+    // BAR sizes from QUERY_MAPPINGS.
+    struct { struct tenstorrent_query_mappings_in in; struct tenstorrent_mapping m[8]; } q;
+    memset(&q, 0, sizeof q);
+    q.in.output_mapping_count = 8;
+    if (ioctl(k->fd, TENSTORRENT_IOCTL_QUERY_MAPPINGS, &q) != 0) { perror("QUERY_MAPPINGS"); return 1; }
+    uint64_t bar2_size = 0;
+    for (int i = 0; i < 8; i++) if (q.m[i].mapping_id == TENSTORRENT_MAPPING_RESOURCE1_UC) bar2_size = q.m[i].mapping_size;
+
+    // 1. PCIe tile x. Map just the NOC2AXI page of BAR0 and present it at its real BAR0 offset.
+    const uint64_t page_off = TTBH_NOC2AXI_CFG_START, page_len = 0x10000;
+    void *cfg = mmap(NULL, page_len, PROT_READ, MAP_SHARED, k->fd, (off_t)(MMAP_RES0_UC + page_off));
+    if (cfg == MAP_FAILED) { perror("mmap BAR0 NOC2AXI page"); return 1; }
+    uint32_t pcie_x = 0;
+    int err = ttbh_pcie_noc_x((volatile uint8_t *)cfg - page_off, page_off + page_len, &pcie_x);
+    printf("║  PCIe tile  x=%u y=%u  %s\n", pcie_x, TTBH_PCIE_NOC_Y, err ? ttbh_strerror(err) : "detected");
+    munmap(cfg, page_len);
+    if (err) return 1;
+
+    // 2. A NOC-DMA buffer from tt-kmd.
+    struct tenstorrent_allocate_dma_buf a;
+    memset(&a, 0, sizeof a);
+    a.in.requested_size = DMA_SIZE;
+    a.in.buf_index = 0;
+    a.in.flags = TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA;
+    if (ioctl(k->fd, TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF, &a) != 0) { perror("ALLOCATE_DMA_BUF"); return 1; }
+    volatile uint32_t *host = mmap(NULL, a.out.size, PROT_READ | PROT_WRITE, MAP_SHARED, k->fd, (off_t)a.out.mapping_offset);
+    if ((void *)host == MAP_FAILED) { perror("mmap DMA buf"); return 1; }
+    uint64_t base = a.out.noc_address - TTBH_NOC_PCIE_OFFSET, limit = base + a.out.size - 1;
+    printf("║  DMA buf    %u B  host dma 0x%llx  noc 0x%llx (base 0x%llx)\n", a.out.size,
+           (unsigned long long)a.out.physical_address, (unsigned long long)a.out.noc_address, (unsigned long long)base);
+
+    // 3. Find tt-kmd's region for it and compare with our encoder, register by register.
+    void *bar2 = mmap(NULL, bar2_size, PROT_READ, MAP_SHARED, k->fd, (off_t)MMAP_RES1_UC);
+    if (bar2 == MAP_FAILED) { perror("mmap BAR2"); return 1; }
+    ttbh_iatu_regs want;
+    ttbh_iatu_outbound_encode(base, limit, a.out.physical_address, &want);
+    int found = -1;
+    for (uint32_t r = 0; r < TTBH_IATU_REGIONS; r++) {
+        ttbh_iatu_regs got;
+        if (ttbh_iatu_outbound_read(bar2, bar2_size, r, &got)) continue;
+        uint64_t tgt = ((uint64_t)got.upper_target << 32) | got.lower_target;
+        if ((got.ctrl_2 & TTBH_IATU_REGION_EN) && tgt == a.out.physical_address) {
+            found = (int)r;
+            const char *names[] = { "lower_base", "upper_base", "lower_target", "upper_target", "lower_limit", "upper_limit", "ctrl_1", "ctrl_2", "ctrl_3" };
+            const uint32_t *g = &got.lower_base, *wv = &want.lower_base;
+            int diffs = 0;
+            // UPPER_LIMIT (index 5) only implements 8 bits in hardware: compare what it can hold.
+            for (int i = 0; i < 9; i++)
+                if ((i == 5 ? (g[i] ^ wv[i]) & TTBH_IATU_UPPER_LIMIT_IMPL_MASK : g[i] ^ wv[i]) != 0) { printf("║    iATU %-12s kmd 0x%08x  ours 0x%08x  DIFFERENT\n", names[i], g[i], wv[i]); diffs++; }
+            printf("║  iATU       region %u: %s\n", r, diffs ? "differs from our encoder" : "all 9 registers match our encoder (upper_limit on its 8 implemented bits)");
+            bad += diffs != 0;
+            break;
+        }
+    }
+    munmap(bar2, bar2_size);
+    if (found < 0) { printf("║  iATU       no enabled region targets the buffer?\n"); bad++; }
+
+    // 4. Loopback. Chip → host: NOC-write to the PCIe tile; host sees it in the buffer.
+    host[0x40 / 4] = 0;
+    const uint32_t magic = 0xC0DE1234u ^ (uint32_t)now_ns();
+    err = ttbh_noc_write32(w, pcie_x, TTBH_PCIE_NOC_Y, a.out.noc_address + 0x40, magic);
+    uint64_t t0 = now_ns();
+    while (!err && host[0x40 / 4] != magic && now_ns() - t0 < 500000000ull) { }
+    int wrote = !err && host[0x40 / 4] == magic;
+    printf("║  chip→host  0x%08x  %s (%.1f µs)\n", magic, wrote ? "landed in host memory" : "DID NOT ARRIVE", (now_ns() - t0) / 1000.0);
+    bad += !wrote;
+
+    // Host → chip: host writes, chip NOC-reads it back from host memory.
+    host[0x80 / 4] = ~magic;
+    __sync_synchronize();
+    uint32_t back = 0;
+    err = ttbh_noc_read32(w, pcie_x, TTBH_PCIE_NOC_Y, a.out.noc_address + 0x80, &back);
+    int read_ok = !err && back == ~magic;
+    printf("║  host→chip  0x%08x  %s\n", back, read_ok ? "read back through the NOC" : "MISMATCH");
+    bad += !read_ok;
+
+    munmap((void *)host, a.out.size);   // the buffer + its iATU region are freed when the fd closes
+    return bad;
+}
+
 int main(int argc, char **argv)
 {
     int dev = first_visible_device();
-    for (int i = 1; i < argc; i++)
+    int want_dma = 0;
+    for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--device") && i + 1 < argc) dev = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dma")) want_dma = 1;
+    }
 
     if (dev < 0) {
         fprintf(stderr, "no device: run under a gozer lease (TT_VISIBLE_DEVICES) or pass --device N\n");
@@ -179,6 +284,8 @@ int main(int argc, char **argv)
     ttbh_telemetry_read(&w, TTBH_TAG_TIMER_HEARTBEAT, &hb2);
     printf("║  heartbeat  %u → %u  %s\n", raw[5], hb2, hb2 != raw[5] ? "advancing" : "STUCK");
     if (hb2 == raw[5]) mismatches++;
+
+    if (want_dma) mismatches += dma_check(&k, &w);
 
     munmap(map, TTBH_TLB_2M_SIZE);
     struct tenstorrent_free_tlb fr;

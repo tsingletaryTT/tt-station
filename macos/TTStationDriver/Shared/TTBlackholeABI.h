@@ -15,7 +15,7 @@
 
 #include <stdint.h>
 
-#define TTBH_ABI_VERSION 1u
+#define TTBH_ABI_VERSION 2u   // v2 (2026-09-29): PrepareDMA / CompleteDMA
 
 // The name the dext registers its service under (IOService::SetName). Userspace finds the
 // driver with IOServiceNameMatching(TTBH_SERVICE_NAME).
@@ -34,6 +34,17 @@ enum TTBHSelector {
     // in:  [0] config-space offset (< 4096), [1] width in bytes (1, 2 or 4)
     // out: [0] value
     kTTBHCfgRead = 1,
+
+    // Make a client buffer reachable by the chip (spec M3).
+    // in:  structure input = the buffer itself (a >4 KiB struct input arrives in the dext as an
+    //      IOMemoryDescriptor over the client's pages; that's what gets DMA-mapped)
+    // out: scalars [0] dma id (for CompleteDMA), [1] segment count;
+    //      structure output = segment count × TTBHDMASegment (DART IOVA + length)
+    // The first PrepareDMA turns on PCI bus mastering; until then the chip cannot write host memory.
+    kTTBHPrepareDMA = 2,
+
+    // in: [0] dma id from PrepareDMA. Unmaps it (IODMACommand::CompleteDMA).
+    kTTBHCompleteDMA = 3,
 
     kTTBHSelectorCount
 };
@@ -61,6 +72,12 @@ enum TTBHMemoryType {
     kTTBHMemoryBar2 = 2,
     kTTBHMemoryBar4 = 4,
 };
+
+// PrepareDMA limits and output format. 16 = the number of outbound iATU regions, since each
+// segment needs one (libttbh ttbh_dma_plan).
+#define TTBH_MAX_DMA_SEGMENTS 16u
+#define TTBH_MAX_DMA_MAPPINGS 16u      // live PrepareDMA mappings per client
+typedef struct TTBHDMASegment { uint64_t address; uint64_t length; } TTBHDMASegment;
 
 // Blackhole register offsets used by the probe (tt-kmd blackhole.c).
 #define TTBH_BAR0_TLB_REGS_START 0x1FC00000u   // 12 bytes per window: low32, mid32, high32

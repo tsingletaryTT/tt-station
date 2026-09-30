@@ -70,6 +70,61 @@ enum ttbh_telemetry_tag {
     TTBH_TAG_TIMER_HEARTBEAT = 32,
 };
 
+// ── Host DMA: PCIe tile + outbound iATU (tt-kmd blackhole.c / memory.c) ───────────────────
+// The chip reaches host memory by NOC-accessing its active PCIe tile at
+//   TTBH_NOC_PCIE_OFFSET + base
+// where one of 16 outbound iATU regions (in BAR2) translates [base, limit] → a host DMA address
+// (on macOS: the DART IOVA the dext's IODMACommand returns; on Linux: tt-kmd's dma_handle).
+#define TTBH_NOC2AXI_CFG_START     0x1FD00000u                // in BAR0
+#define TTBH_NOC_ID_OFFSET         0x4044u                    // within NOC2AXI cfg; bits 5:0 = NOC x
+#define TTBH_PCIE_NOC_Y            0u
+#define TTBH_NOC_PCIE_OFFSET       (4ull << 58)                // noc_pcie_offset
+#define TTBH_NOC_DMA_LIMIT         ((1ull << 58) - 1)          // noc_dma_limit
+#define TTBH_IATU_BASE             0x1000u                     // in BAR2
+#define TTBH_IATU_REGIONS          16u
+#define TTBH_IATU_REGION_STRIDE    0x100u
+#define TTBH_IATU_MAX_REGION_SIZE  (1ull << 40)                // 1 TiB
+#define TTBH_IATU_INCREASE_REGION_SIZE (1u << 13)              // CTRL_1
+#define TTBH_IATU_REGION_EN        (1u << 31)                  // CTRL_2
+// Observed on silicon (qb2-lab, p300c, 2026-09-29): UPPER_LIMIT implements only 8 bits. tt-kmd
+// wrote upper_32_bits(limit) = 0x03ffffff and it read back 0x000000ff. So the hardware compares
+// limit bits 0..39 only (the 1 TiB region maximum) and takes the higher bits from the base. A
+// region that crossed a 1 TiB boundary would therefore alias. ttbh_dma_plan refuses those.
+#define TTBH_IATU_UPPER_LIMIT_IMPL_MASK 0xFFu
+
+// Register offsets within one outbound region, in the order tt-kmd writes them.
+enum ttbh_iatu_reg {
+    TTBH_IATU_CTRL_1 = 0x00, TTBH_IATU_CTRL_2 = 0x04, TTBH_IATU_LOWER_BASE = 0x08, TTBH_IATU_UPPER_BASE = 0x0C,
+    TTBH_IATU_LOWER_LIMIT = 0x10, TTBH_IATU_LOWER_TARGET = 0x14, TTBH_IATU_UPPER_TARGET = 0x18,
+    TTBH_IATU_CTRL_3 = 0x1C, TTBH_IATU_UPPER_LIMIT = 0x20,
+};
+
+typedef struct ttbh_iatu_regs {
+    uint32_t lower_base, upper_base, lower_target, upper_target, lower_limit, upper_limit, ctrl_1, ctrl_2, ctrl_3;
+} ttbh_iatu_regs;
+
+// Pure: the nine register values for mapping [base, limit] → target. limit == 0 means "disable".
+int ttbh_iatu_outbound_encode(uint64_t base, uint64_t limit, uint64_t target, ttbh_iatu_regs *out);
+// BAR2 offset of outbound region `region`'s register block.
+static inline uint32_t ttbh_iatu_outbound_offset(uint32_t region) { return TTBH_IATU_BASE + 2u * region * TTBH_IATU_REGION_STRIDE; }
+// Write / read one outbound region through a BAR2 mapping. Write order matches tt-kmd.
+int ttbh_iatu_outbound_write(volatile uint8_t *bar2, uint64_t bar2_size, uint32_t region, const ttbh_iatu_regs *r);
+int ttbh_iatu_outbound_read(volatile uint8_t *bar2, uint64_t bar2_size, uint32_t region, ttbh_iatu_regs *r);
+
+// The active PCIe tile's NOC x (Blackhole has two PCIe instances, at x = 2 and x = 11), read from
+// the NOC2AXI config block in BAR0. TTBH_EINVAL if the register holds anything else.
+int ttbh_pcie_noc_x(volatile uint8_t *bar0, uint64_t bar0_size, uint32_t *x);
+
+// Plan the iATU regions for a host buffer that the DMA mapper returned as `n` segments (IOVA,
+// length). Consecutive regions get ADJACENT NOC bases starting at `noc_base`, so the chip sees
+// one contiguous range at TTBH_NOC_PCIE_OFFSET + noc_base even when the IOVA space is fragmented.
+// Uses regions first_region.. first_region+n-1. Pure; the caller writes the plan with
+// ttbh_iatu_outbound_write.
+typedef struct ttbh_dma_segment { uint64_t addr, len; } ttbh_dma_segment;
+typedef struct ttbh_iatu_plan_entry { uint32_t region; uint64_t base, limit, target; } ttbh_iatu_plan_entry;
+int ttbh_dma_plan(const ttbh_dma_segment *segs, uint32_t n, uint64_t noc_base, uint32_t first_region,
+                  ttbh_iatu_plan_entry *out);
+
 // ── Errors ────────────────────────────────────────────────────────────────────────────────
 enum ttbh_err {
     TTBH_OK = 0,

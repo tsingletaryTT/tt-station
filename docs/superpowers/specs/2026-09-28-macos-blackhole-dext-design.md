@@ -87,6 +87,8 @@ exclude PCIe tunnels.)
 |---|---|---|---|---|
 | `ExternalMethod` | 0 `GetInfo` | — | vendor, device, subsys vendor, subsys id, BAR0/2/4 sizes, ABI version | sizes via `GetBARInfo`; answers risk R1 |
 | `ExternalMethod` | 1 `CfgRead` | offset, width (1/2/4) | value | read-only; bounds-checked to 4 KiB |
+| `ExternalMethod` | 2 `PrepareDMA` *(v2)* | struct input = the buffer (>4 KiB → memory descriptor) | dma id, segment count; struct output = `TTBHDMASegment[]` | first call enables bus mastering; ≤16 segments (one iATU region each) |
+| `ExternalMethod` | 3 `CompleteDMA` *(v2)* | dma id | — | unmaps; `Stop` completes any leftovers |
 | `CopyClientMemoryForType` | type = 0, 2, 4 | — | BAR memory | map with `IOConnectMapMemory64(conn, bar, …)` |
 
 Deliberately **not** in v1: config writes, reset, DMA. Writes to config space and resets
@@ -111,7 +113,14 @@ over a TB tunnel are the riskiest operations and nothing needs them to prove M1.
   through the dext's BAR0: `TTStationDriver probe --noc`.)* program one 2 MiB TLB window (as tt-kmd does with window 201) to
   ARC (8,0) at `0x80000000`, read `ARC_BOOT_STATUS` (`0x80030408`), expect bit0 = 1. That
   proves MMIO → NOC works end to end over Thunderbolt. First *write* to the device.
-- **M3 — DMA + blackhole-py:** add `PrepareDMA` (IODMACommand, single segment, respect 16 KiB
+- **M3 — DMA + blackhole-py:** *(DMA half written 2026-09-29. On silicon via tt-kmd: libttbh found
+  the active PCIe tile (x = 11), its iATU encoder matched all 9 registers tt-kmd programmed,
+  and a chip→host NOC write landed in host memory in ~6 µs, with a host→chip read-back. One
+  hardware fact surfaced: `UPPER_LIMIT` keeps only 8 bits (limit bits 32–39), so an iATU region
+  must not cross a 1 TiB boundary, and `ttbh_dma_plan` enforces that. On the Mac, the dext gained
+  `PrepareDMA`/`CompleteDMA` (ABI v2; bus mastering switches on at the first mapping, and
+  mappings are cleaned up in `Stop`). `TTStationDriver probe --dma` replays the proven
+  loopback. The blackhole-py backend is still to do.)* add `PrepareDMA` (IODMACommand, single segment, respect 16 KiB
   pages) and host-buffer mapping through the iATU; add a Darwin backend to blackhole-py
   replacing its tt-kmd ioctls with user-client calls. Target: a matmul, then Llama 3 8B.
 - **M4 — tt-station sees the local card:** *(first half done 2026-09-28, with no driver:

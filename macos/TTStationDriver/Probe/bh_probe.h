@@ -2,6 +2,9 @@
 // bridging header) Swift. Returns 0 = all good, 1 = setup failure, 2 = MMIO looked dead.
 #ifndef bh_probe_h
 #define bh_probe_h
-// noc != 0: also do the M2 NOC read (ARC boot status + telemetry). Writes one TLB register.
-int ttbh_probe_run(int noc);
+// Flags: TTBH_PROBE_NOC = the M2 NOC read (ARC boot status + telemetry; writes one TLB register).
+//        TTBH_PROBE_DMA = the M3 chip↔host DMA loopback (enables bus mastering, writes iATU regions).
+#define TTBH_PROBE_NOC 1
+#define TTBH_PROBE_DMA 2
+int ttbh_probe_run(int flags);
 #endif

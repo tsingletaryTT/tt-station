@@ -175,3 +175,95 @@ int ttbh_telemetry_read(const ttbh_window *w, uint16_t tag, uint32_t *raw)
     }
     return TTBH_ENOTAG;
 }
+
+// ── host DMA ──────────────────────────────────────────────────────────────────────────────
+
+int ttbh_iatu_outbound_encode(uint64_t base, uint64_t limit, uint64_t target, ttbh_iatu_regs *out)
+{
+    if (!out) return TTBH_EINVAL;
+    if (limit != 0) {
+        if (limit < base) return TTBH_EINVAL;
+        if (limit - base + 1 > TTBH_IATU_MAX_REGION_SIZE) return TTBH_EINVAL;   // iATU region max 1 TiB
+    }
+    out->lower_base = (uint32_t)base;
+    out->upper_base = (uint32_t)(base >> 32);
+    out->lower_target = (uint32_t)target;
+    out->upper_target = (uint32_t)(target >> 32);
+    out->lower_limit = (uint32_t)limit;
+    out->upper_limit = (uint32_t)(limit >> 32);
+    out->ctrl_1 = TTBH_IATU_INCREASE_REGION_SIZE;          // limit is 64-bit (upper_limit is honored)
+    out->ctrl_2 = limit == 0 ? 0 : TTBH_IATU_REGION_EN;
+    out->ctrl_3 = 0;
+    return TTBH_OK;
+}
+
+static bool iatu_in_range(uint64_t bar2_size, uint32_t region)
+{
+    return region < TTBH_IATU_REGIONS && (uint64_t)ttbh_iatu_outbound_offset(region) + 0x24u <= bar2_size;
+}
+
+int ttbh_iatu_outbound_write(volatile uint8_t *bar2, uint64_t bar2_size, uint32_t region, const ttbh_iatu_regs *r)
+{
+    if (!bar2 || !r || !iatu_in_range(bar2_size, region)) return TTBH_EINVAL;
+    volatile uint8_t *b = bar2 + ttbh_iatu_outbound_offset(region);
+#define W(off, v) (*(volatile uint32_t *)(b + (off)) = (v))
+    // Same order as tt-kmd: addresses first, enable (CTRL_2) after everything it gates.
+    W(TTBH_IATU_LOWER_BASE, r->lower_base);
+    W(TTBH_IATU_UPPER_BASE, r->upper_base);
+    W(TTBH_IATU_LOWER_TARGET, r->lower_target);
+    W(TTBH_IATU_UPPER_TARGET, r->upper_target);
+    W(TTBH_IATU_LOWER_LIMIT, r->lower_limit);
+    W(TTBH_IATU_UPPER_LIMIT, r->upper_limit);
+    W(TTBH_IATU_CTRL_1, r->ctrl_1);
+    W(TTBH_IATU_CTRL_2, r->ctrl_2);
+    W(TTBH_IATU_CTRL_3, r->ctrl_3);
+#undef W
+    (void)*(volatile uint32_t *)(b + TTBH_IATU_CTRL_2);    // flush posted writes before first use
+    return TTBH_OK;
+}
+
+int ttbh_iatu_outbound_read(volatile uint8_t *bar2, uint64_t bar2_size, uint32_t region, ttbh_iatu_regs *r)
+{
+    if (!bar2 || !r || !iatu_in_range(bar2_size, region)) return TTBH_EINVAL;
+    volatile uint8_t *b = bar2 + ttbh_iatu_outbound_offset(region);
+#define R(off) (*(volatile uint32_t *)(b + (off)))
+    r->lower_base = R(TTBH_IATU_LOWER_BASE);
+    r->upper_base = R(TTBH_IATU_UPPER_BASE);
+    r->lower_target = R(TTBH_IATU_LOWER_TARGET);
+    r->upper_target = R(TTBH_IATU_UPPER_TARGET);
+    r->lower_limit = R(TTBH_IATU_LOWER_LIMIT);
+    r->upper_limit = R(TTBH_IATU_UPPER_LIMIT);
+    r->ctrl_1 = R(TTBH_IATU_CTRL_1);
+    r->ctrl_2 = R(TTBH_IATU_CTRL_2);
+    r->ctrl_3 = R(TTBH_IATU_CTRL_3);
+#undef R
+    return TTBH_OK;
+}
+
+int ttbh_pcie_noc_x(volatile uint8_t *bar0, uint64_t bar0_size, uint32_t *x)
+{
+    if (!bar0 || !x || bar0_size < (uint64_t)TTBH_NOC2AXI_CFG_START + TTBH_NOC_ID_OFFSET + 4) return TTBH_EINVAL;
+    uint32_t id = *(volatile uint32_t *)(bar0 + TTBH_NOC2AXI_CFG_START + TTBH_NOC_ID_OFFSET);
+    if (id == 0xFFFFFFFFu) return TTBH_EDEAD;
+    *x = id & 0x3Fu;
+    return (*x == 2 || *x == 11) ? TTBH_OK : TTBH_EINVAL;
+}
+
+int ttbh_dma_plan(const ttbh_dma_segment *segs, uint32_t n, uint64_t noc_base, uint32_t first_region,
+                  ttbh_iatu_plan_entry *out)
+{
+    if (!segs || !out || n == 0 || first_region + n > TTBH_IATU_REGIONS) return TTBH_EINVAL;
+    uint64_t base = noc_base;
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t len = segs[i].len;
+        // 4 KiB is the iATU's minimum granule; macOS DART segments are 16 KiB-aligned anyway.
+        if (len == 0 || (len & 0xFFFu) || (segs[i].addr & 0xFFFu) || (base & 0xFFFu)) return TTBH_EINVAL;
+        if (len > TTBH_IATU_MAX_REGION_SIZE || base + len - 1 > TTBH_NOC_DMA_LIMIT || base + len < base) return TTBH_EINVAL;
+        // Must stay inside one 1 TiB-aligned block: the iATU only compares limit bits 0..39
+        // (see TTBH_IATU_UPPER_LIMIT_IMPL_MASK), so a crossing region would alias.
+        if ((base >> 40) != ((base + len - 1) >> 40)) return TTBH_EINVAL;
+        out[i] = (ttbh_iatu_plan_entry){ first_region + i, base, base + len - 1, segs[i].addr };
+        base += len;
+    }
+    return TTBH_OK;
+}

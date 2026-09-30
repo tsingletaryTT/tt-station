@@ -7,6 +7,8 @@
 #include <DriverKit/IOLib.h>
 #include <DriverKit/IOUserClient.h>
 #include <DriverKit/OSSharedPtr.h>
+#include <DriverKit/OSData.h>
+#include <DriverKit/IODMACommand.h>
 #include <PCIDriverKit/PCIDriverKit.h>
 
 #include "TTBlackholeUserClient.h"
@@ -16,7 +18,18 @@
 struct TTBlackholeUserClient_IVars
 {
     OSSharedPtr<TTBlackholeDriver> driver;
+    // Live DMA mappings, indexed by the dma id handed to the client. nullptr = free slot.
+    IODMACommand * dma[TTBH_MAX_DMA_MAPPINGS] = {};
 };
+
+// Unmap and drop one DMA mapping. Safe on an empty slot.
+static void completeDMA(IODMACommand *& slot)
+{
+    if (slot == nullptr) return;
+    slot->CompleteDMA(kIODMACommandCompleteDMANoOptions);
+    slot->release();
+    slot = nullptr;
+}
 
 bool TTBlackholeUserClient::init()
 {
@@ -45,6 +58,8 @@ kern_return_t IMPL(TTBlackholeUserClient, Start)
 
 kern_return_t IMPL(TTBlackholeUserClient, Stop)
 {
+    // A client that exits (or crashes) without CompleteDMA must not leave DART mappings behind.
+    for (auto & slot : ivars->dma) completeDMA(slot);
     ivars->driver.reset();
     return Stop(provider, SUPERDISPATCH);
 }
@@ -87,6 +102,43 @@ kern_return_t TTBlackholeUserClient::ExternalMethod(uint64_t selector,
         if (err != kIOReturnSuccess) return err;
         args->scalarOutput[0] = value;
         args->scalarOutputCount = 1;
+        return kIOReturnSuccess;
+    }
+
+    case kTTBHPrepareDMA: {
+        // A >4 KiB structure input arrives as a memory descriptor over the client's own pages.
+        if (args->structureInputDescriptor == nullptr || args->scalarOutputCount < 2) return kIOReturnBadArgument;
+        uint32_t id = 0;
+        while (id < TTBH_MAX_DMA_MAPPINGS && ivars->dma[id] != nullptr) id++;
+        if (id == TTBH_MAX_DMA_MAPPINGS) return kIOReturnNoResources;
+
+        uint64_t length = 0;
+        args->structureInputDescriptor->GetLength(&length);
+        IOAddressSegment segs[TTBH_MAX_DMA_SEGMENTS] = {};
+        uint32_t count = TTBH_MAX_DMA_SEGMENTS;
+        IODMACommand * cmd = nullptr;
+        kern_return_t err = driver->PrepareDMA(args->structureInputDescriptor, length, &cmd, segs, &count);
+        if (err != kIOReturnSuccess) return err;
+
+        TTBHDMASegment out[TTBH_MAX_DMA_SEGMENTS] = {};
+        for (uint32_t i = 0; i < count; i++) out[i] = { segs[i].address, segs[i].length };
+        args->structureOutput = OSData::withBytes(out, count * sizeof(TTBHDMASegment));
+        if (args->structureOutput == nullptr) {
+            cmd->CompleteDMA(kIODMACommandCompleteDMANoOptions);
+            cmd->release();
+            return kIOReturnNoMemory;
+        }
+        ivars->dma[id] = cmd;
+        args->scalarOutput[0] = id;
+        args->scalarOutput[1] = count;
+        args->scalarOutputCount = 2;
+        return kIOReturnSuccess;
+    }
+
+    case kTTBHCompleteDMA: {
+        if (args->scalarInputCount != 1 || args->scalarInput[0] >= TTBH_MAX_DMA_MAPPINGS) return kIOReturnBadArgument;
+        if (ivars->dma[args->scalarInput[0]] == nullptr) return kIOReturnNotFound;
+        completeDMA(ivars->dma[args->scalarInput[0]]);
         return kIOReturnSuccess;
     }
 

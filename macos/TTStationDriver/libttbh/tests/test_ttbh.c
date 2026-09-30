@@ -249,6 +249,88 @@ static void test_noc_write_lands_in_window(void)
     sim_free(s);
 }
 
+// ── host DMA ──────────────────────────────────────────────────────────────────────────────
+
+static void test_iatu_encode(void)
+{
+    ttbh_iatu_regs r;
+    // A 64 KiB buffer at NOC base 0x3FF_FFFF_0000 targeting IOVA 0x1_2345_0000.
+    CHECK_EQ(ttbh_iatu_outbound_encode(0x3FFFFFF0000ull, 0x3FFFFFFFFFFull, 0x123450000ull, &r), TTBH_OK);
+    CHECK_EQ(r.lower_base, 0xFFFF0000u);  CHECK_EQ(r.upper_base, 0x3FFu);
+    CHECK_EQ(r.lower_limit, 0xFFFFFFFFu); CHECK_EQ(r.upper_limit, 0x3FFu);
+    CHECK_EQ(r.lower_target, 0x23450000u); CHECK_EQ(r.upper_target, 0x1u);
+    CHECK_EQ(r.ctrl_1, 1u << 13);          // INCREASE_REGION_SIZE
+    CHECK_EQ(r.ctrl_2, 1u << 31);          // REGION_EN
+    CHECK_EQ(r.ctrl_3, 0u);
+    // limit == 0 disables the region (how tt-kmd tears one down).
+    CHECK_EQ(ttbh_iatu_outbound_encode(0, 0, 0, &r), TTBH_OK);
+    CHECK_EQ(r.ctrl_2, 0u);
+    // > 1 TiB and inverted ranges are rejected.
+    CHECK_EQ(ttbh_iatu_outbound_encode(0, 1ull << 40, 0, &r), TTBH_EINVAL);
+    CHECK_EQ(ttbh_iatu_outbound_encode(0x2000, 0x1000, 0, &r), TTBH_EINVAL);
+}
+
+static void test_iatu_write_lands_at_region_offsets(void)
+{
+    static uint32_t bar2w[(1u << 20) / 4];
+    volatile uint8_t *bar2 = (volatile uint8_t *)bar2w;
+    memset(bar2w, 0, sizeof bar2w);
+    ttbh_iatu_regs r;
+    ttbh_iatu_outbound_encode(0x10000, 0x1FFFF, 0xABCD0000ull, &r);
+    CHECK_EQ(ttbh_iatu_outbound_write(bar2, sizeof bar2w, 3, &r), TTBH_OK);
+    // Region 3 outbound = BAR2 + 0x1000 + (2*3)*0x100 = 0x1600 (inbound regions interleave).
+    CHECK_EQ(ttbh_iatu_outbound_offset(3), 0x1600u);
+    CHECK_EQ(bar2w[(0x1600 + 0x08) / 4], 0x10000u);        // LOWER_BASE
+    CHECK_EQ(bar2w[(0x1600 + 0x10) / 4], 0x1FFFFu);        // LOWER_LIMIT
+    CHECK_EQ(bar2w[(0x1600 + 0x14) / 4], 0xABCD0000u);     // LOWER_TARGET
+    CHECK_EQ(bar2w[(0x1600 + 0x04) / 4], 1u << 31);        // CTRL_2 enable
+    CHECK_EQ(bar2w[(0x1500 + 0x04) / 4], 0u);              // inbound region 2 untouched
+    ttbh_iatu_regs back;
+    CHECK_EQ(ttbh_iatu_outbound_read(bar2, sizeof bar2w, 3, &back), TTBH_OK);
+    CHECK(memcmp(&back, &r, sizeof r) == 0);
+    CHECK_EQ(ttbh_iatu_outbound_write(bar2, sizeof bar2w, 16, &r), TTBH_EINVAL);
+    CHECK_EQ(ttbh_iatu_outbound_write(bar2, 0x1000, 0, &r), TTBH_EINVAL);   // BAR2 too small
+}
+
+static void test_dma_plan_makes_fragmented_iova_contiguous_on_the_noc(void)
+{
+    // Three DART segments, not adjacent in IOVA space.
+    ttbh_dma_segment segs[3] = { { 0x80004000, 0x8000 }, { 0x90000000, 0x4000 }, { 0x7000C000, 0x4000 } };
+    ttbh_iatu_plan_entry plan[3];
+    CHECK_EQ(ttbh_dma_plan(segs, 3, 0x100000, 0, plan), TTBH_OK);
+    CHECK_EQ(plan[0].base, 0x100000u); CHECK_EQ(plan[0].limit, 0x107FFFu); CHECK_EQ(plan[0].target, 0x80004000u);
+    CHECK_EQ(plan[1].base, 0x108000u); CHECK_EQ(plan[1].limit, 0x10BFFFu); CHECK_EQ(plan[1].target, 0x90000000u);
+    CHECK_EQ(plan[2].base, 0x10C000u); CHECK_EQ(plan[2].target, 0x7000C000u);
+    CHECK_EQ(plan[2].region, 2u);
+    // Unaligned segment, too many regions, empty input.
+    ttbh_dma_segment bad = { 0x80000100, 0x1000 };
+    CHECK_EQ(ttbh_dma_plan(&bad, 1, 0, 0, plan), TTBH_EINVAL);
+    CHECK_EQ(ttbh_dma_plan(segs, 3, 0, 14, plan), TTBH_EINVAL);
+    CHECK_EQ(ttbh_dma_plan(segs, 0, 0, 0, plan), TTBH_EINVAL);
+    // A region straddling a 1 TiB boundary would alias (UPPER_LIMIT keeps 8 bits on silicon).
+    ttbh_dma_segment straddle = { 0x80000000, 0x10000 };
+    CHECK_EQ(ttbh_dma_plan(&straddle, 1, (1ull << 40) - 0x8000, 0, plan), TTBH_EINVAL);
+    CHECK_EQ(ttbh_dma_plan(&straddle, 1, (1ull << 40), 0, plan), TTBH_OK);
+}
+
+static void test_pcie_noc_x(void)
+{
+    sim_chip *s = sim_new();
+    uint32_t x = 0;
+    volatile uint32_t *id = (volatile uint32_t *)(s->bar0.bar0 + TTBH_NOC2AXI_CFG_START + TTBH_NOC_ID_OFFSET);
+    *id = 0x00000402u;                       // upper bits are other ID fields; x = 2
+    CHECK_EQ(ttbh_pcie_noc_x(s->bar0.bar0, s->bar0.bar0_size, &x), TTBH_OK);
+    CHECK_EQ(x, 2u);
+    *id = 11;
+    CHECK_EQ(ttbh_pcie_noc_x(s->bar0.bar0, s->bar0.bar0_size, &x), TTBH_OK);
+    CHECK_EQ(x, 11u);
+    *id = 5;
+    CHECK_EQ(ttbh_pcie_noc_x(s->bar0.bar0, s->bar0.bar0_size, &x), TTBH_EINVAL);
+    *id = 0xFFFFFFFFu;
+    CHECK_EQ(ttbh_pcie_noc_x(s->bar0.bar0, s->bar0.bar0_size, &x), TTBH_EDEAD);
+    sim_free(s);
+}
+
 int main(void)
 {
     test_hand_vectors();
@@ -257,6 +339,10 @@ int main(void)
     test_arc_and_telemetry_walk();
     test_failure_modes();
     test_noc_write_lands_in_window();
+    test_iatu_encode();
+    test_iatu_write_lands_at_region_offsets();
+    test_dma_plan_makes_fragmented_iova_contiguous_on_the_noc();
+    test_pcie_noc_x();
     if (failures) { fprintf(stderr, "%d check(s) failed\n", failures); return 1; }
     printf("libttbh: all checks passed\n");
     return 0;
