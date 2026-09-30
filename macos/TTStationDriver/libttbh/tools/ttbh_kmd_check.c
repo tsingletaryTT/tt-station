@@ -225,13 +225,39 @@ static int dma_check(kmd_ctx *k, const ttbh_window *w)
     return bad;
 }
 
+// ── --arc: the ARC message queue on silicon ───────────────────────────────────────────────
+// Locate the queue and run TEST echoes (response payload[0] = value + 1) through libttbh's ring
+// code, enough of them to wrap both rings. Safe on a leased device: tt-kmd only sends its own ARC
+// messages at probe/reset/fw-log setup and on user ioctls, none of which happen while we hold the
+// only fd. This doesn't take tt-kmd's arc_msg_mutex, which is why it needs the lease.
+static int arc_check(const ttbh_window *w)
+{
+    uint32_t base = 0, n = 0;
+    int err = ttbh_arc_msg_locate(w, &base, &n);
+    printf("║  ARC queue  base 0x%08x  %u entries  %s\n", base, n, err ? ttbh_strerror(err) : "located");
+    if (err) return 1;
+    int bad = 0;
+    const uint32_t rounds = 4 * n;           // wraps the request and response rings twice
+    for (uint32_t i = 0; i < rounds; i++) {
+        uint32_t value = 0xC0DE0000u + i, echo = 0;
+        err = ttbh_arc_test(w, value, &echo);
+        if (err || echo != value + 1) {
+            printf("║  ARC TEST   #%u: %s, echo 0x%08x (want 0x%08x)\n", i, err ? ttbh_strerror(err) : "wrong echo", echo, value + 1);
+            bad++;
+        }
+    }
+    printf("║  ARC TEST   %u/%u echoes correct (value + 1)\n", rounds - bad, rounds);
+    return bad != 0;
+}
+
 int main(int argc, char **argv)
 {
     int dev = first_visible_device();
-    int want_dma = 0;
+    int want_dma = 0, want_arc = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--device") && i + 1 < argc) dev = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dma")) want_dma = 1;
+        else if (!strcmp(argv[i], "--arc")) want_arc = 1;
     }
 
     if (dev < 0) {
@@ -286,6 +312,7 @@ int main(int argc, char **argv)
     if (hb2 == raw[5]) mismatches++;
 
     if (want_dma) mismatches += dma_check(&k, &w);
+    if (want_arc) mismatches += arc_check(&w);
 
     munmap(map, TTBH_TLB_2M_SIZE);
     struct tenstorrent_free_tlb fr;
