@@ -9,6 +9,7 @@ firmware, and the sysmem iATU plan over deliberately fragmented fake IOVAs.
 """
 import inspect
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -56,6 +57,8 @@ class BrokerCase(unittest.TestCase):
                 self.proc.kill()
                 self.proc.wait()
             self.proc.stderr.close()
+        if hasattr(self, "tmp"):
+            shutil.rmtree(self.tmp, ignore_errors=True)    # the per-test socket directory
 
 
 class Protocol(BrokerCase):
