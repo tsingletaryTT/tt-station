@@ -40,6 +40,23 @@ EOF
   exit 1
 fi
 
+# --team builds register this Mac with the team (-allowProvisioningUpdates), which goes through
+# Xcode's CoreDevice components. Ask Xcode directly whether its system components are installed
+# (-checkFirstLaunchStatus, non-zero = run -runFirstLaunch). Don't scrape build warnings:
+# `xcodebuild -version` never loads the device plug-ins, so it looks clean even when they're broken.
+# (On 2026-09-28 builds warned "Failed to load … DVTCoreDeviceCore" until the components were
+# installed; the first version of this check grepped -version and could never fire.)
+if [[ "$MODE" == "team" ]] && ! xcodebuild -checkFirstLaunchStatus >/dev/null 2>&1; then
+  cat >&2 <<'EOF2'
+╔══ Xcode's system components (CoreDevice, CoreSimulator) aren't installed for this Xcode.
+║  Team builds register this Mac through them, so install them first (needs your password):
+║      sudo xcodebuild -runFirstLaunch
+║  Check: xcodebuild -checkFirstLaunchStatus && echo ok
+╚══
+EOF2
+  exit 1
+fi
+
 echo "── generate"
 xcodegen generate --quiet
 

@@ -757,3 +757,22 @@ Two more instruments misbehaved on the way there:
 - `Device()` "succeeded" in 0.0 s, which was suspicious rather than good. The constructor is
   cheap by design; `boot()` does the real work. Reading the code before believing the number
   kept that from going in the log as a win.
+
+### A correction about Xcode
+
+Asked "did you mention we need to upgrade Xcode?", I dug up the plug-in errors I had filtered out
+of every build on 2026-09-28 ("Failed to load … DVTCoreDeviceCore", "CoreSimulator is out of date")
+and advised running `sudo xcodebuild -runFirstLaunch`, checked with `xcodebuild -version | grep`.
+Both halves were wrong:
+
+- **The problem was already gone.** `xcodebuild -checkFirstLaunchStatus` returns 0, and the
+  CoreSimulator and CoreDevice frameworks were updated at 16:21 that day, ten minutes after the
+  warnings. The advice came from the log, not the machine.
+- **The check could never have fired.** `xcodebuild -version` doesn't load the device plug-ins,
+  so it's clean even when they're broken. The first version of `install-dev.sh`'s preflight used
+  it and sailed straight past, which is how this surfaced.
+
+The preflight now asks Xcode directly (`-checkFirstLaunchStatus`), and its failing branch was
+tested with a fake `xcodebuild`. The healthy branch then showed signing day's real to-do list:
+"No Accounts", "No profiles for 'com.tenstorrent.ttstation.driver'", "No 'Mac Development'
+signing certificate".
