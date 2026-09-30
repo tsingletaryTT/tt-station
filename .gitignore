@@ -39,3 +39,4 @@ macos/TTStationDriver/build/
 
 # libttbh build output
 macos/TTStationDriver/libttbh/build/
+macos/TTStationDriver/bhpy/build/

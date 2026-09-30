@@ -640,3 +640,44 @@ leftover `.cargo/config.toml` from an old `.deb` build redirects crates.io to a 
 snapshot. Rather than alter Taylor's tree, the tests ran from a throwaway clone in `~/scratch`:
 all green and clippy-clean on Linux. (`build-deb.sh` regenerates `vendor/` itself, so packaging
 isn't affected.)
+
+### blackhole-py, through a keyhole
+
+The last piece of M3 is running blackhole-py (Llama 3 8B on one card, pure Python) on the Mac.
+Its whole hardware boundary is one file, `pcie.py`, with three classes. That makes the plan a
+drop-in replacement, with two constraints:
+
+- **blackhole-py has no license**, so nothing of it may be copied. The drop-in loads
+  `Allocator`, `board_config` and the layout constants from the user's own checkout at runtime.
+- **A development-signed dext only admits entitled clients**, and `python3` can't be one.
+  TinyGPU hit the same wall and put a broker inside its entitled app. BAR mappings can't be lent
+  to another process (task self-ports have been immovable since macOS 12), so window MMIO rides
+  the socket. Host memory is *shared*: an shm fd, DMA-mapped by the dext, passed with
+  `SCM_RIGHTS`. So the bulk data never crosses the socket.
+
+That also needed `SetPowerState`, which tt-kmd implements as an ARC *message*, so libttbh grew
+tt-kmd's message-queue protocol: rings in ARC CSM, pointers wrapping at 2n, and a trigger write.
+It's tested against a fake ARC firmware that only answers once triggered. Two protocol
+mutations were caught: 23 failures for the wrong response slot, 2 for the wrong wrap.
+
+The tests drive the **real C broker** over a simulated chip. The best line in them is blackhole-py's
+own `board_config` accepting the simulated card as a P100A: 117 worker cores and 7 DRAM banks.
+
+Instruments, again:
+
+- **A hang that was the test's fault.** The broker serves one client at a time, and a test opened a
+  second connection, which waited in the listen backlog forever. The fix wasn't only the test: a
+  second client now times out with "busy with another client?" instead of hanging, and there's a
+  test for that.
+- **A hang that was the platform's.** On macOS, `signal()` handlers restart `accept()`, so
+  `SIGTERM` set the stop flag and the broker never looked at it. `sigaction` without `SA_RESTART`
+  fixed it.
+- **A test that couldn't fail.** Every TLB round trip would still pass if x and y were swapped,
+  because the swap is self-consistent. A window aimed at the ARC must read the ARC's own boot
+  status (`0x5` at `0x80030408`), and that absolute check catches the swap.
+- **A parity check stricter than reality.** blackhole-py annotates `fd: int`, and ours is a broker
+  client on purpose. The check now compares what callers can see: names, kinds and defaults.
+
+Meanwhile on qb2-lab: board 1 was being held by a `tt-smi -s` under a `tt-toplike-tui` with no
+lease, and board 2 by Taylor's other project. So the ARC-queue silicon check waits for a free
+board.

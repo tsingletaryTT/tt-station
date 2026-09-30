@@ -54,6 +54,8 @@ targets:
       # userclient-access entitlement — see Probe/bh_probe.c header.
       - path: Probe
       - path: libttbh/ttbh.c
+      - path: bhpy/broker.c
+      - path: bhpy/broker_iokit.c
       - path: Shared
         buildPhase: none
     dependencies:

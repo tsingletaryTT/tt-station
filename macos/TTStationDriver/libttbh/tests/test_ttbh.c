@@ -16,6 +16,7 @@
 #include <sys/mman.h>
 
 #include "../ttbh.h"
+#include "../sim/ttbh_sim.h"
 
 static int failures = 0;
 #define CHECK(cond) do { if (!(cond)) { fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); failures++; } } while (0)
@@ -331,6 +332,56 @@ static void test_pcie_noc_x(void)
     sim_free(s);
 }
 
+static void test_arc_message_queue(void)
+{
+    // Stateful sim (libttbh/sim) + fake ARC firmware.
+    ttbh_sim *c = ttbh_sim_new(4);
+    ttbh_window w = ttbh_sim_window(c, TTBH_DRIVER_TLB_INDEX);
+    uint32_t base = 0, n = 0;
+    CHECK_EQ(ttbh_arc_msg_locate(&w, &base, &n), TTBH_OK);
+    CHECK_EQ(base, 0x10003000u);
+    CHECK_EQ(n, 4u);
+
+    // More exchanges than there are slots, so both rings wrap (pointers run modulo 2n = 8).
+    for (uint32_t i = 0; i < 11; i++) {
+        uint32_t echo = 0;
+        CHECK_EQ(ttbh_arc_test(&w, 0xCAFE0000u + i, &echo), TTBH_OK);
+        CHECK_EQ(echo, 0xCAFE0001u + i);
+    }
+    CHECK_EQ(ttbh_sim_messages_served(c), 11);
+
+    // Power setting: header packing as tt-kmd builds it (0x21 | validity << 8 | flags << 16).
+    CHECK_EQ(ttbh_arc_set_power(&w, 4, 0xF, NULL), TTBH_OK);
+    CHECK_EQ(ttbh_sim_last_header(c), 0x21u | (4u << 8) | (0xFu << 16));
+
+    // An unknown command is answered with a non-zero status → TTBH_EREMOTE.
+    ttbh_arc_msg bogus = { .header = 0x7E };
+    CHECK_EQ(ttbh_arc_msg_send(&w, &bogus), TTBH_EREMOTE);
+    CHECK_EQ(ttbh_sim_bad_messages(c), 1);
+    ttbh_sim_free(c);
+
+    // Not triggered → no answer (proves the trigger is what makes firmware look).
+    c = ttbh_sim_new(4);
+    w = ttbh_sim_window(c, TTBH_DRIVER_TLB_INDEX);
+    uint32_t b2 = 0, n2 = 0;
+    ttbh_arc_msg_locate(&w, &b2, &n2);
+    ttbh_arc_msg m = { .header = TTBH_ARC_MSG_TEST };
+    CHECK_EQ(ttbh_arc_msg_push(&w, b2, n2, &m), TTBH_OK);
+    ttbh_arc_msg r;
+    CHECK_EQ(ttbh_arc_msg_pop(&w, b2, n2, &r), TTBH_EAGAIN);
+    // A full request ring refuses a fifth push while firmware is asleep.
+    for (int i = 0; i < 3; i++) CHECK_EQ(ttbh_arc_msg_push(&w, b2, n2, &m), TTBH_OK);
+    CHECK_EQ(ttbh_arc_msg_push(&w, b2, n2, &m), TTBH_EAGAIN);
+    ttbh_sim_free(c);
+
+    // ARC not ready → refuse to message.
+    c = ttbh_sim_new(4);
+    *ttbh_sim_word(c, 8, 0, TTBH_ARC_BOOT_STATUS) = 0x4;
+    w = ttbh_sim_window(c, TTBH_DRIVER_TLB_INDEX);
+    CHECK_EQ(ttbh_arc_test(&w, 1, NULL), TTBH_ENOTREADY);
+    ttbh_sim_free(c);
+}
+
 int main(void)
 {
     test_hand_vectors();
@@ -343,6 +394,7 @@ int main(void)
     test_iatu_write_lands_at_region_offsets();
     test_dma_plan_makes_fragmented_iova_contiguous_on_the_noc();
     test_pcie_noc_x();
+    test_arc_message_queue();
     if (failures) { fprintf(stderr, "%d check(s) failed\n", failures); return 1; }
     printf("libttbh: all checks passed\n");
     return 0;

@@ -2,6 +2,9 @@
 
 #include "ttbh.h"
 
+#include <string.h>
+#include <time.h>
+
 const char *ttbh_strerror(int err)
 {
     switch (err) {
@@ -12,6 +15,10 @@ const char *ttbh_strerror(int err)
     case TTBH_ENOTELEM: return "telemetry table missing or malformed";
     case TTBH_ENOTAG: return "telemetry tag not present";
     case TTBH_EVERSION: return "unsupported telemetry table version";
+    case TTBH_EAGAIN: return "ARC queue full/empty";
+    case TTBH_ETIMEDOUT: return "ARC did not answer in time";
+    case TTBH_EREMOTE: return "ARC answered with an error status";
+    case TTBH_ENOTREADY: return "ARC not ready for messages";
     default: return "unknown error";
     }
 }
@@ -266,4 +273,116 @@ int ttbh_dma_plan(const ttbh_dma_segment *segs, uint32_t n, uint64_t noc_base, u
         base += len;
     }
     return TTBH_OK;
+}
+
+// ── ARC message queue ─────────────────────────────────────────────────────────────────────
+
+static int csm_read(const ttbh_window *w, uint64_t addr, uint32_t *v)
+{
+    if (!ttbh_in_csm(addr, 4)) return TTBH_EINVAL;
+    int err = arc_read(w, addr, v);
+    if (!err && *v == 0xFFFFFFFFu) return TTBH_EDEAD;       // a wptr/rptr can never be all-ones
+    return err;
+}
+
+static int csm_write(const ttbh_window *w, uint64_t addr, uint32_t v)
+{
+    if (!ttbh_in_csm(addr, 4)) return TTBH_EINVAL;
+    return ttbh_noc_write32(w, TTBH_ARC_X, TTBH_ARC_Y, addr, v);
+}
+
+int ttbh_arc_msg_locate(const ttbh_window *w, uint32_t *queue_base, uint32_t *entries)
+{
+    if (!queue_base || !entries) return TTBH_EINVAL;
+    uint32_t boot = 0, qcb = 0, base = 0, info = 0;
+    int err = ttbh_arc_boot_status(w, &boot);
+    if (err) return err;
+    if (!ttbh_arc_ready(boot)) return TTBH_ENOTREADY;
+    if ((err = arc_read(w, TTBH_ARC_MSG_QCB_PTR, &qcb))) return err;
+    if ((err = csm_read(w, qcb, &base)) || (err = csm_read(w, (uint64_t)qcb + 4, &info))) return err;
+    if ((info & 0xFFu) == 0) return TTBH_EINVAL;             // zero-length queue: nothing to do
+    *queue_base = base;
+    *entries = info & 0xFFu;
+    return TTBH_OK;
+}
+
+#define REQ_WPTR(b) ((uint64_t)(b) + 0x00)
+#define RES_RPTR(b) ((uint64_t)(b) + 0x04)
+#define REQ_RPTR(b) ((uint64_t)(b) + 0x10)
+#define RES_WPTR(b) ((uint64_t)(b) + 0x14)
+
+int ttbh_arc_msg_push(const ttbh_window *w, uint32_t base, uint32_t n, const ttbh_arc_msg *m)
+{
+    if (!m || n == 0) return TTBH_EINVAL;
+    uint32_t wptr, rptr;
+    int err;
+    if ((err = csm_read(w, REQ_WPTR(base), &wptr)) || (err = csm_read(w, REQ_RPTR(base), &rptr))) return err;
+    if ((wptr - rptr) % (2 * n) >= n) return TTBH_EAGAIN;
+    uint64_t slot = (uint64_t)base + TTBH_ARC_MSG_HEADER_SIZE + (uint64_t)(wptr % n) * sizeof(ttbh_arc_msg);
+    for (int i = 0; i < 8; i++)
+        if ((err = csm_write(w, slot + 4u * i, i == 0 ? m->header : m->payload[i - 1]))) return err;
+    return csm_write(w, REQ_WPTR(base), (wptr + 1) % (2 * n));
+}
+
+int ttbh_arc_msg_pop(const ttbh_window *w, uint32_t base, uint32_t n, ttbh_arc_msg *m)
+{
+    if (!m || n == 0) return TTBH_EINVAL;
+    uint32_t rptr, wptr;
+    int err;
+    if ((err = csm_read(w, RES_RPTR(base), &rptr)) || (err = csm_read(w, RES_WPTR(base), &wptr))) return err;
+    if ((wptr - rptr) % (2 * n) == 0) return TTBH_EAGAIN;
+    uint64_t slot = (uint64_t)base + TTBH_ARC_MSG_HEADER_SIZE + (uint64_t)n * sizeof(ttbh_arc_msg)
+                  + (uint64_t)(rptr % n) * sizeof(ttbh_arc_msg);
+    if ((err = arc_read(w, slot, &m->header))) return err;
+    for (int i = 0; i < 7; i++)
+        if ((err = arc_read(w, slot + 4u * (i + 1), &m->payload[i]))) return err;
+    return csm_write(w, RES_RPTR(base), (rptr + 1) % (2 * n));
+}
+
+static uint64_t mono_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
+}
+
+int ttbh_arc_msg_send(const ttbh_window *w, ttbh_arc_msg *m)
+{
+    uint32_t base = 0, n = 0;
+    int err = ttbh_arc_msg_locate(w, &base, &n);
+    if (err) return err;
+    // Discard stale responses from any earlier exchange (bounded, as tt-kmd does).
+    ttbh_arc_msg drain;
+    for (uint32_t i = 0; i < n; i++)
+        if (ttbh_arc_msg_pop(w, base, n, &drain) != TTBH_OK) break;
+    if ((err = ttbh_arc_msg_push(w, base, n, m))) return err;
+    if ((err = ttbh_noc_write32(w, TTBH_ARC_X, TTBH_ARC_Y, TTBH_ARC_MSI_FIFO, 0))) return err;   // trigger
+    uint64_t deadline = mono_ms() + TTBH_ARC_MSG_TIMEOUT_MS;
+    for (;;) {
+        err = ttbh_arc_msg_pop(w, base, n, m);
+        if (err != TTBH_EAGAIN) break;
+        if (mono_ms() > deadline) return TTBH_ETIMEDOUT;
+    }
+    if (err) return err;
+    return m->header == 0 ? TTBH_OK : TTBH_EREMOTE;
+}
+
+int ttbh_arc_test(const ttbh_window *w, uint32_t value, uint32_t *echo)
+{
+    ttbh_arc_msg m;
+    memset(&m, 0, sizeof m);
+    m.header = TTBH_ARC_MSG_TEST;
+    m.payload[0] = value;
+    int err = ttbh_arc_msg_send(w, &m);
+    if (!err && echo) *echo = m.payload[0];
+    return err;
+}
+
+int ttbh_arc_set_power(const ttbh_window *w, uint8_t validity, uint16_t flags, const uint16_t settings[14])
+{
+    ttbh_arc_msg m;
+    memset(&m, 0, sizeof m);
+    m.header = TTBH_ARC_MSG_POWER_SETTING | ((uint32_t)validity << 8) | ((uint32_t)flags << 16);
+    if (settings) memcpy(m.payload, settings, sizeof m.payload);   // 14 × u16 == 7 × u32, as tt-kmd
+    return ttbh_arc_msg_send(w, &m);
 }

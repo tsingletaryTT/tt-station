@@ -120,7 +120,12 @@ over a TB tunnel are the riskiest operations and nothing needs them to prove M1.
   must not cross a 1 TiB boundary, and `ttbh_dma_plan` enforces that. On the Mac, the dext gained
   `PrepareDMA`/`CompleteDMA` (ABI v2; bus mastering switches on at the first mapping, and
   mappings are cleaned up in `Stop`). `TTStationDriver probe --dma` replays the proven
-  loopback. The blackhole-py backend is still to do.)* add `PrepareDMA` (IODMACommand, single segment, respect 16 KiB
+  loopback. **blackhole-py backend written the same day** (`macos/TTStationDriver/bhpy/`): a broker
+  in the entitled host app (`TTStationDriver serve`; windows proxied, host memory shared through an
+  shm fd plus the dext's PrepareDMA plus iATU; power via ARC messages) and a Python drop-in for
+  blackhole-py's `pcie` module. It's tested end to end against the real C broker over libttbh's
+  simulated chip, including blackhole-py's own `board_config` bringing up a P100A. Running a real
+  kernel waits on the dext loading.)* add `PrepareDMA` (IODMACommand, single segment, respect 16 KiB
   pages) and host-buffer mapping through the iATU; add a Darwin backend to blackhole-py
   replacing its tt-kmd ioctls with user-client calls. Target: a matmul, then Llama 3 8B.
 - **M4 — tt-station sees the local card:** *(first half done 2026-09-28, with no driver:

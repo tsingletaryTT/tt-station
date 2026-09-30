@@ -58,6 +58,21 @@ extern "C" {
 #define TTBH_ARC_CSM_BASE          0x10000000ull            // telemetry lives in ARC CSM
 #define TTBH_ARC_CSM_SIZE          (1ull << 19)
 
+// ARC message queue (tt-kmd msgqueue.[ch], blackhole.c). The firmware publishes a queue control
+// block at RESET_SCRATCH(11): {queue_base, info (low byte = entries)}. Each queue has a 32-byte
+// header (REQ_WPTR +0, RES_RPTR +4, REQ_RPTR +0x10, RES_WPTR +0x14), then `n` request slots, then
+// `n` response slots, 32 bytes each (header + 7 payload words). Pointers wrap at 2n. Writing 0 to
+// ARC_MSI_FIFO makes the firmware look. A response header of 0 means success.
+#define TTBH_ARC_MSG_QCB_PTR       TTBH_RESET_SCRATCH(11)
+#define TTBH_ARC_MSI_FIFO          0x800B0000ull
+#define TTBH_ARC_MSG_HEADER_SIZE   32u
+#define TTBH_ARC_MSG_TIMEOUT_MS    1000u
+#define TTBH_ARC_MSG_TEST          0x90u   // echo: response payload[0] = request payload[0] + 1
+#define TTBH_ARC_MSG_ASIC_STATE0   0xA0u   // tt-kmd sends this at device init ("A0 state")
+#define TTBH_ARC_MSG_POWER_SETTING 0x21u   // header = 0x21 | validity << 8 | flags << 16
+
+typedef struct ttbh_arc_msg { uint32_t header; uint32_t payload[7]; } ttbh_arc_msg;
+
 // Telemetry tag IDs (tt-kmd telemetry.h, enum tt_telemetry_tags) — the subset we display.
 enum ttbh_telemetry_tag {
     TTBH_TAG_BOARD_ID       = 1,
@@ -134,6 +149,10 @@ enum ttbh_err {
     TTBH_ENOTELEM = -4,     // telemetry table missing or malformed
     TTBH_ENOTAG = -5,       // tag not present in this firmware's table
     TTBH_EVERSION = -6,     // telemetry table version we don't understand
+    TTBH_EAGAIN = -7,       // ARC queue full (push) or empty (pop)
+    TTBH_ETIMEDOUT = -8,    // ARC didn't answer in time
+    TTBH_EREMOTE = -9,      // ARC answered with a non-zero status
+    TTBH_ENOTREADY = -10,   // ARC isn't ready for messages (boot status bit0 clear)
 };
 const char *ttbh_strerror(int err);
 
@@ -188,6 +207,21 @@ static inline bool ttbh_arc_ready(uint32_t boot_status) { return (boot_status & 
 // PTR → {version, count, tags[count]}; each tag entry = (offset << 16) | tag_id; value lives at
 // DATA + offset*4. All addresses are bounds-checked against the ARC CSM.
 int ttbh_telemetry_read(const ttbh_window *w, uint16_t tag, uint32_t *raw);
+
+// Find the message queue: {base, entries}. Requires ARC ready. Never touches the rings.
+int ttbh_arc_msg_locate(const ttbh_window *w, uint32_t *queue_base, uint32_t *entries);
+// Ring operations, exactly tt-kmd's. push writes the 8 words then advances REQ_WPTR; pop reads a
+// response then advances RES_RPTR. TTBH_EAGAIN when full/empty. Pure ring math plus CSM access.
+int ttbh_arc_msg_push(const ttbh_window *w, uint32_t base, uint32_t entries, const ttbh_arc_msg *m);
+int ttbh_arc_msg_pop(const ttbh_window *w, uint32_t base, uint32_t entries, ttbh_arc_msg *m);
+// Synchronous send like tt-kmd's arc_msg_send_sync: drain stale responses, push, trigger, poll for
+// the response (≤ TTBH_ARC_MSG_TIMEOUT_MS). `m` is replaced by the response. TTBH_EREMOTE if the
+// response header (status) is non-zero. Caller must be the only sender: on Linux tt-kmd
+// serializes its own senders but not us, so only use this on a device nothing else is messaging.
+int ttbh_arc_msg_send(const ttbh_window *w, ttbh_arc_msg *m);
+// Convenience: the TEST echo, and blackhole-py's SetPowerState (tt-kmd blackhole_set_power_state).
+int ttbh_arc_test(const ttbh_window *w, uint32_t value, uint32_t *echo);
+int ttbh_arc_set_power(const ttbh_window *w, uint8_t validity, uint16_t flags, const uint16_t settings[14]);
 
 // Unit conversions for display (tt-kmd telemetry hwmon semantics).
 static inline double ttbh_temp_c(uint32_t raw) { return (double)(raw >> 16) + (double)(raw & 0xFFFFu) / 65536.0; }

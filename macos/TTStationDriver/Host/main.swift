@@ -103,6 +103,15 @@ case "telemetry":
     // One JSON line of live chip telemetry via the dext; `tt-station local` runs this once the
     // dext has claimed the card (it shows up as the card's IORegistry child).
     exit(ttbh_telemetry_json())
+case "serve":
+    // blackhole-py on this Mac: serve the ttbh broker (bhpy/broker.c) so an unentitled python3
+    // can drive the card (`python3 -m ttstation_bhpy …`). Default socket matches the client's.
+    let defaultSocket = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/TTStation/ttbh.sock").path
+    let socketPath = args.count > 2 ? args[2] : defaultSocket
+    try? FileManager.default.createDirectory(atPath: (socketPath as NSString).deletingLastPathComponent,
+                                             withIntermediateDirectories: true)
+    exit(ttbh_broker_serve_iokit(socketPath))
 case "install", "uninstall":
     guard Bundle.main.bundlePath.hasPrefix("/Applications/") else {
         print("Run from /Applications/TTStationDriver.app — macOS refuses dexts from elsewhere.")
@@ -112,6 +121,6 @@ case "install", "uninstall":
     requester.submit()
     dispatchMain()  // delegate callbacks exit the process
 default:
-    print("usage: TTStationDriver install | uninstall | status | probe [--noc] [--dma] | telemetry")
+    print("usage: TTStationDriver install | uninstall | status | probe [--noc] [--dma] | telemetry | serve [SOCKET]")
     exit(Exit.usage.rawValue)
 }

@@ -13,8 +13,8 @@ KMD_INCLUDE ?= $(if $(KMD_VERSION),/usr/src/tenstorrent-$(KMD_VERSION))
 test: build/test_ttbh
 	./build/test_ttbh
 
-build/test_ttbh: ttbh.c ttbh.h tests/test_ttbh.c | build
-	$(CC) $(CFLAGS) ttbh.c tests/test_ttbh.c -o $@
+build/test_ttbh: ttbh.c ttbh.h sim/ttbh_sim.c sim/ttbh_sim.h tests/test_ttbh.c | build
+	$(CC) $(CFLAGS) ttbh.c sim/ttbh_sim.c tests/test_ttbh.c -o $@
 
 kmd-check: build/ttbh-kmd-check
 build/ttbh-kmd-check: ttbh.c ttbh.h tools/ttbh_kmd_check.c | build
