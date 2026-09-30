@@ -258,6 +258,11 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--device") && i + 1 < argc) dev = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dma")) want_dma = 1;
         else if (!strcmp(argv[i], "--arc")) want_arc = 1;
+        else {
+            // Refuse, never ignore: a stale build once skipped --arc silently and "passed".
+            fprintf(stderr, "unknown argument %s (known: --device N, --dma, --arc)\n", argv[i]);
+            return 2;
+        }
     }
 
     if (dev < 0) {
