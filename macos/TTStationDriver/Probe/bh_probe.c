@@ -152,6 +152,56 @@ out_maps:
     return bad;
 }
 
+// ── telemetry --json: what `tt-station local` asks for once our dext has claimed the card ─────
+// One JSON object on stdout: {"abi":N,"boot_status":…,"arc_ready":…,"asic_temp_c":…,"power_w":…,
+// "vcore_mv":…,"current_a":…,"aiclk_mhz":…}. A value is null when its read failed. Exit 0 if the
+// ARC answered, 1 if the dext couldn't be reached, 2 if the card looks dead. The reads are
+// libttbh's, verified against tt-kmd hwmon on a real Blackhole (libttbh/tools/ttbh_kmd_check.c).
+static void json_u32(const char *k, int ok, uint32_t v, int comma) { if (ok) printf("\"%s\":%u", k, v); else printf("\"%s\":null", k); if (comma) putchar(','); }
+
+int ttbh_telemetry_json(void)
+{
+    io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceNameMatching(TTBH_SERVICE_NAME));
+    if (service == IO_OBJECT_NULL) { fprintf(stderr, "no '%s' service\n", TTBH_SERVICE_NAME); return 1; }
+    io_connect_t conn = IO_OBJECT_NULL;
+    kern_return_t kr = IOServiceOpen(service, mach_task_self(), 0, &conn);
+    IOObjectRelease(service);
+    if (kr != KERN_SUCCESS) { fprintf(stderr, "IOServiceOpen failed: 0x%08x\n", kr); return 1; }
+
+    uint64_t info[kTTBHInfoCount] = {0};
+    uint32_t n = kTTBHInfoCount;
+    if (IOConnectCallScalarMethod(conn, kTTBHGetInfo, NULL, 0, info, &n) != KERN_SUCCESS || info[kTTBHInfoABIVersion] != TTBH_ABI_VERSION) {
+        fprintf(stderr, "dext ABI mismatch or GetInfo failed\n"); IOServiceClose(conn); return 1;
+    }
+    mach_vm_size_t size0 = 0;
+    mach_vm_address_t bar0 = map_bar(conn, kTTBHMemoryBar0, &size0);
+    if (!bar0) { IOServiceClose(conn); return 1; }
+
+    ttbh_bar0_ctx ctx = { (volatile uint8_t *)(uintptr_t)bar0, size0, TTBH_DRIVER_TLB_INDEX };
+    ttbh_window w = ttbh_bar0_window(&ctx);
+    uint32_t boot = 0, temp = 0, power = 0, vcore = 0, current = 0, aiclk = 0;
+    int boot_err = ttbh_arc_boot_status(&w, &boot);
+    int ok = boot_err == TTBH_OK;
+    int t_ok = ok && !ttbh_telemetry_read(&w, TTBH_TAG_ASIC_TEMP, &temp);
+    int p_ok = ok && !ttbh_telemetry_read(&w, TTBH_TAG_POWER, &power);
+    int v_ok = ok && !ttbh_telemetry_read(&w, TTBH_TAG_VCORE, &vcore);
+    int c_ok = ok && !ttbh_telemetry_read(&w, TTBH_TAG_CURRENT, &current);
+    int a_ok = ok && !ttbh_telemetry_read(&w, TTBH_TAG_AICLK, &aiclk);
+    IOConnectUnmapMemory64(conn, kTTBHMemoryBar0, mach_task_self(), bar0);
+    IOServiceClose(conn);
+
+    printf("{\"abi\":%u,", TTBH_ABI_VERSION);
+    json_u32("boot_status", ok, boot, 1);
+    printf("\"arc_ready\":%s,", ok && ttbh_arc_ready(boot) ? "true" : "false");
+    if (t_ok) printf("\"asic_temp_c\":%.3f,", ttbh_temp_c(temp)); else printf("\"asic_temp_c\":null,");
+    json_u32("power_w", p_ok, power, 1);
+    json_u32("vcore_mv", v_ok, vcore, 1);
+    json_u32("current_a", c_ok, current, 1);
+    json_u32("aiclk_mhz", a_ok, aiclk, 0);
+    printf("}\n");
+    return boot_err == TTBH_EDEAD ? 2 : ok ? 0 : 1;
+}
+
 int ttbh_probe_run(int flags)
 {
     const int noc = flags & TTBH_PROBE_NOC, dma = flags & TTBH_PROBE_DMA;

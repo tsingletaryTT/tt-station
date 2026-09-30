@@ -24,6 +24,10 @@ use crate::device_mesh::mesh_for;
 /// Tenstorrent's PCI vendor ID (tt-kmd `enumerate.h`).
 pub const TT_VENDOR_ID: u16 = 0x1e52;
 
+/// The IORegistry name tt-station's own DriverKit extension registers under once it has claimed a
+/// card (`TTBH_SERVICE_NAME` in `macos/TTStationDriver/Shared/TTBlackholeABI.h`). Keep in step.
+pub const TT_STATION_DRIVER_NAME: &str = "ttstation-blackhole";
+
 /// One Tenstorrent PCI function (= one ASIC) as macOS sees it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LocalCard {
@@ -47,6 +51,17 @@ pub struct LocalCard {
     /// NB: this is NOT indexed by BAR number. Unassigned BARs are simply absent (on the
     /// 2026-09-28 capture BAR4 was never assigned, and the third range is BAR5).
     pub memory_ranges: Vec<u64>,
+    /// IORegistry name of the driver that has claimed this card, if any (its first child). `None`
+    /// means unclaimed. [`TT_STATION_DRIVER_NAME`] means tt-station's own dext.
+    pub driver: Option<String>,
+}
+
+impl LocalCard {
+    /// Claimed by tt-station's own DriverKit extension, so BARs, NOC reads and telemetry are
+    /// available through `TTStationDriver`.
+    pub fn has_tt_station_driver(&self) -> bool {
+        self.driver.as_deref() == Some(TT_STATION_DRIVER_NAME)
+    }
 }
 
 /// Negotiated PCIe link.
@@ -108,7 +123,16 @@ fn id_prop(dict: &plist::Dictionary, key: &str) -> Option<u16> {
     (bytes.len() >= 2).then(|| u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
-/// Parse `ioreg -a -r -c IOPCIDevice -d 1` output (an XML plist array of IOPCIDevice
+/// The driver attached to an IOPCIDevice: the name of its first IORegistry child (present with
+/// `ioreg -d 2`). A matched dext appears here as an `IOUserService` child.
+fn attached_driver(dict: &plist::Dictionary) -> Option<String> {
+    dict.get("IORegistryEntryChildren")?
+        .as_array()?
+        .iter()
+        .find_map(|c| c.as_dictionary()?.get("IORegistryEntryName")?.as_string().map(str::to_string))
+}
+
+/// Parse `ioreg -a -r -c IOPCIDevice -d 2` output (an XML plist array of IOPCIDevice
 /// dictionaries) and return the Tenstorrent ones. Non-TT devices are skipped silently; a TT
 /// device missing an ID property is an error (the capture is not what we think it is).
 pub fn parse_ioreg(xml: &[u8]) -> Result<Vec<LocalCard>> {
@@ -169,6 +193,7 @@ pub fn parse_ioreg(xml: &[u8]) -> Result<Vec<LocalCard>> {
                 .and_then(Value::as_unsigned_integer)
                 .and_then(decode_link_status),
             memory_ranges,
+            driver: attached_driver(dict),
             name,
         });
     }
@@ -182,7 +207,8 @@ pub fn scan() -> Result<Vec<LocalCard>> {
     #[cfg(target_os = "macos")]
     {
         let out = std::process::Command::new("/usr/sbin/ioreg")
-            .args(["-a", "-r", "-c", "IOPCIDevice", "-d", "1"])
+            // Depth 2 so each device carries its children, i.e. the driver (if any) that claimed it.
+            .args(["-a", "-r", "-c", "IOPCIDevice", "-d", "2"])
             .output()
             .context("running /usr/sbin/ioreg")?;
         if !out.status.success() {
@@ -231,6 +257,34 @@ mod tests {
         assert_eq!(c.location.as_deref(), Some("3:0:0"));
         // BAR0 512 MiB, BAR2 1 MiB, BAR5 16 B — BAR4 was never assigned.
         assert_eq!(c.memory_ranges, vec![512 << 20, 1 << 20, 16]);
+    }
+
+    #[test]
+    fn unclaimed_card_has_no_driver() {
+        let c = &parse_ioreg(FIXTURE).unwrap()[0];
+        assert_eq!(c.driver, None);
+        assert!(!c.has_tt_station_driver());
+    }
+
+    #[test]
+    fn attached_dext_is_read_from_a_real_capture() {
+        // The same capture's Wi-Fi is claimed by Apple's DriverKit dext, the exact shape our own
+        // dext will have once it loads (an IOUserService child of the IOPCIDevice).
+        let root = Value::from_reader_xml(FIXTURE).unwrap();
+        let wlan = root.as_array().unwrap().iter()
+            .filter_map(Value::as_dictionary)
+            .find(|d| d.get("IORegistryEntryName").and_then(Value::as_string) == Some("wlan"))
+            .unwrap();
+        assert_eq!(attached_driver(wlan).as_deref(), Some("AppleBCMWLANBusInterfacePCIe"));
+    }
+
+    #[test]
+    fn our_driver_is_recognised_by_name() {
+        let mut c = parse_ioreg(FIXTURE).unwrap().remove(0);
+        c.driver = Some(TT_STATION_DRIVER_NAME.into());
+        assert!(c.has_tt_station_driver());
+        c.driver = Some("TinyGPUDriver".into());
+        assert!(!c.has_tt_station_driver());
     }
 
     #[test]

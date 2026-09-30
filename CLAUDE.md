@@ -43,7 +43,18 @@ gained `p100|p100a → p100`. `macos/scripts/ensure-official-tt.sh` (used by `in
 first-run `OfficialCLIInstaller`) installs the official CLI via `uv tool install tenstorrent`.
 Corrections: BAR4 is *unassigned* over this link (the 16 B range is BAR5). With SIP on, only a
 **paid** team's development signature loads the dext (free teams can't, and dev mode refuses).
-Next: get onto a paid team → `install-dev.sh --team` → M1 on hardware.
+**2026-09-29: driver built "in theory".** `macos/TTStationDriver/libttbh/` (C) holds M2 (TLB
+packing, NOC, ARC boot status, telemetry walk) and M3 (PCIe tile, outbound iATU, DMA planning).
+It's verified by hardware-free tests (golden decoder, sim BAR0, mutation-checked) and ON SILICON
+via `ttbh-kmd-check [--dma]` on qb2-lab under gozer, which agreed with tt-kmd hwmon, matched all
+9 iATU registers tt-kmd wrote, and did a chip↔host DMA loopback. Silicon fact: iATU `UPPER_LIMIT`
+keeps 8 bits, so a region must not cross 1 TiB. The dext has ABI v2 `PrepareDMA`/`CompleteDMA`;
+the host app has `probe [--noc] [--dma]` and `telemetry`. `tt-station local` reports each card's
+driver (ioreg depth 2) and pulls telemetry through the host app when our dext holds the card; the
+app shows a Driver row and a Live telemetry card. **qb2-lab's `~/code/tt-station` tracks
+`experiments/egpu`** (its old `support/tt-cli` branch was left untouched). Its tree has a stale
+`.cargo/config.toml` + `vendor/` from an old deb build, so build new deps from a scratch clone.
+Next: paid team → `install-dev.sh --team` → M1–M3 on the Mac; then a Darwin backend for blackhole-py.
 
 **CLI renamed `tt` → `tt-station` (2026-08-17, branch `refactor/cli-name`, stacks on
 `feat/gozer-integration`).** Our CLI was named `tt`, which is the name Tenstorrent's official

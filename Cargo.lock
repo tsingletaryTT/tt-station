@@ -2898,6 +2898,7 @@ dependencies = [
  "escargot",
  "futures-util",
  "libttstation",
+ "plist",
  "ratatui",
  "reqwest",
  "serde",

@@ -72,3 +72,64 @@ exit 2"#,
     assert!(err.contains("not the official Tenstorrent CLI"), "{err}");
     assert!(err.contains("uv tool install tenstorrent"), "{err}");
 }
+
+/// The real capture with tt-station's dext attached to the P100A, as it will look once the dext
+/// loads: an IORegistry child named `ttstation-blackhole` (same shape as the capture's Wi-Fi, which
+/// Apple's own dext claims).
+fn fixture_with_our_driver(dir: &tempfile::TempDir) -> PathBuf {
+    let mut root = plist::Value::from_file(fixture()).unwrap();
+    for entry in root.as_array_mut().unwrap() {
+        let d = entry.as_dictionary_mut().unwrap();
+        if d.get("IORegistryEntryName").and_then(plist::Value::as_string) == Some("pci1e52,b140") {
+            let mut child = plist::Dictionary::new();
+            child.insert("IORegistryEntryName".into(), "ttstation-blackhole".into());
+            child.insert("IOObjectClass".into(), "IOUserService".into());
+            d.insert("IORegistryEntryChildren".into(), plist::Value::Array(vec![plist::Value::Dictionary(child)]));
+        }
+    }
+    let path = dir.path().join("ioreg-with-driver.xml");
+    root.to_file_xml(&path).unwrap();
+    path
+}
+
+fn run_local_with(ioreg: &PathBuf, driver_host: &PathBuf) -> serde_json::Value {
+    let out = Command::cargo_bin("tt-station")
+        .unwrap()
+        .env("TTS_DRIVER_HOST_BIN", driver_host)
+        .args(["--json", "local", "--no-models", "--ioreg-file"])
+        .arg(ioreg)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn telemetry_is_read_only_when_our_dext_holds_the_card() {
+    let dir = tempfile::tempdir().unwrap();
+    // A fake host app that prints what bh_probe.c's ttbh_telemetry_json prints (values from the
+    // 2026-09-29 silicon run).
+    let host = dir.path().join("TTStationDriver");
+    std::fs::write(&host, "#!/bin/sh\n[ \"$1\" = telemetry ] || exit 9\necho '{\"abi\":2,\"boot_status\":5,\"arc_ready\":true,\"asic_temp_c\":46.176,\"power_w\":15,\"vcore_mv\":727,\"current_a\":22,\"aiclk_mhz\":800}'\n").unwrap();
+    std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let with = run_local_with(&fixture_with_our_driver(&dir), &host);
+    assert_eq!(with["cards"][0]["driver"], "ttstation-blackhole");
+    assert_eq!(with["telemetry"]["aiclk_mhz"], 800);
+    assert_eq!(with["telemetry"]["arc_ready"], true);
+
+    // Unclaimed card: the host app must not even be asked.
+    let without = run_local_with(&fixture(), &dir.path().join("does-not-exist"));
+    assert!(without["cards"][0]["driver"].is_null());
+    assert!(without["telemetry"].is_null());
+    assert!(without["telemetry_error"].is_null());
+}
+
+#[test]
+fn a_broken_driver_host_is_reported_not_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = run_local_with(&fixture_with_our_driver(&dir), &dir.path().join("missing-host"));
+    assert!(report["telemetry"].is_null());
+    assert!(report["telemetry_error"].as_str().unwrap().contains("telemetry"));
+    assert_eq!(report["device_mesh"], "p100", "detection must survive a broken driver host");
+}

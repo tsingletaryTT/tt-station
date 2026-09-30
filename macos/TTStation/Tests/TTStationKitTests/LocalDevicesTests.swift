@@ -54,6 +54,47 @@ final class LocalDevicesTests: XCTestCase {
         XCTAssertEqual(r.summary, "P100A via Thunderbolt")
     }
 
+    func testUnclaimedCardSaysTelemetryIsNotYet() throws {
+        let r = try fixture()                    // the real capture: no driver attached
+        XCTAssertNil(r.cards[0].driver)
+        XCTAssertEqual(r.cards[0].driverLabel, "none (unclaimed)")
+        XCTAssertFalse(r.hasOurDriver)
+        XCTAssertNil(r.telemetry)
+    }
+
+    func testTelemetryFromOurDriverDecodesAndFlipsTheCapability() throws {
+        // What `tt-station --json local` emits once TTStationDriver holds the card (fields per
+        // crates/tt-station/src/local.rs; values from the 2026-09-29 silicon run).
+        let json = #"""
+        {"cards":[{"name":"pci1e52,b140","location":"3:0:0","vendor_id":7762,"device_id":45376,
+          "subsystem_vendor_id":7762,"subsystem_id":67,"chip":"blackhole","board_type":"p100a",
+          "tunnelled":true,"link":{"gen":4,"width":4},"memory_ranges":[536870912,1048576,16],
+          "driver":"ttstation-blackhole"}],
+         "device_mesh":"p100","official_tt":null,"models":null,"models_error":null,
+         "telemetry":{"abi":2,"boot_status":5,"arc_ready":true,"asic_temp_c":46.176,"power_w":15,
+                      "vcore_mv":727,"current_a":22,"aiclk_mhz":800},
+         "telemetry_error":null}
+        """#
+        let r = try JSONDecoder().decode(LocalReport.self, from: Data(json.utf8))
+        XCTAssertTrue(r.hasOurDriver)
+        XCTAssertEqual(r.cards[0].driverLabel, "TTStationDriver")
+        XCTAssertEqual(r.telemetry?.aiclkMHz, 800)
+        XCTAssertEqual(r.telemetry?.arcReady, true)
+        let caps = LocalCapability.list(for: r)
+        XCTAssertTrue(caps.contains { if case .telemetry = $0 { true } else { false } })
+        XCTAssertFalse(caps.contains { if case let .notYet(t, _) = $0 { t == "Live telemetry" } else { false } })
+    }
+
+    func testOurDriverWithoutTelemetryIsSurfaced() {
+        let card = LocalCard(name: "pci1e52,b140", location: "3:0:0", vendorID: 0x1e52, deviceID: 0xb140,
+                             subsystemVendorID: 0x1e52, subsystemID: 0x43, chip: "blackhole", boardType: "p100a",
+                             tunnelled: true, link: PCIeLink(gen: 4, width: 4), memoryRanges: [], driver: "ttstation-blackhole")
+        let r = LocalReport(cards: [card], deviceMesh: "p100", officialTT: nil, models: nil, modelsError: nil,
+                            telemetry: nil, telemetryError: "`TTStationDriver telemetry` printed no JSON")
+        let caps = LocalCapability.list(for: r)
+        XCTAssertTrue(caps.contains { if case let .telemetryUnavailable(why) = $0 { why.contains("no JSON") } else { false } })
+    }
+
     func testNoCardsMeansNoCapabilities() {
         let r = LocalReport(cards: [], deviceMesh: nil, officialTT: nil, models: nil, modelsError: nil)
         XCTAssertFalse(r.hasCards)

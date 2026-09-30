@@ -99,6 +99,10 @@ case "probe":
     // `probe --dma` runs the chip↔host DMA loopback (spec M3; enables bus mastering).
     let rest = args.dropFirst(2)
     exit(ttbh_probe_run((rest.contains("--noc") ? TTBH_PROBE_NOC : 0) | (rest.contains("--dma") ? TTBH_PROBE_DMA : 0)))
+case "telemetry":
+    // One JSON line of live chip telemetry via the dext; `tt-station local` runs this once the
+    // dext has claimed the card (it shows up as the card's IORegistry child).
+    exit(ttbh_telemetry_json())
 case "install", "uninstall":
     guard Bundle.main.bundlePath.hasPrefix("/Applications/") else {
         print("Run from /Applications/TTStationDriver.app — macOS refuses dexts from elsewhere.")
@@ -108,6 +112,6 @@ case "install", "uninstall":
     requester.submit()
     dispatchMain()  // delegate callbacks exit the process
 default:
-    print("usage: TTStationDriver install | uninstall | status | probe [--noc] [--dma]")
+    print("usage: TTStationDriver install | uninstall | status | probe [--noc] [--dma] | telemetry")
     exit(Exit.usage.rawValue)
 }

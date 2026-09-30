@@ -32,6 +32,15 @@
 		<integer>4651026</integer>
 		<key>IOPCIExpressLinkStatus</key>
 		<integer>4114</integer>
+		<key>IORegistryEntryChildren</key>
+		<array>
+			<dict>
+				<key>IOObjectClass</key>
+				<string>IOUserService</string>
+				<key>IORegistryEntryName</key>
+				<string>AppleBCMWLANBusInterfacePCIe</string>
+			</dict>
+		</array>
 		<key>IORegistryEntryName</key>
 		<string>wlan</string>
 		<key>assigned-addresses</key>

@@ -21,6 +21,9 @@ struct LocalWorkspaceView: View {
                     CardContainer(title: "This Mac") { header(card, mesh: report.deviceMesh) }
                     CardContainer(title: "What macOS can see (no driver)") { facts(card) }
                 }
+                if let t = report.telemetry {
+                    CardContainer(title: "Live telemetry (TTStationDriver)") { telemetry(t) }
+                }
                 CardContainer(title: "Right-sized for this device") { rightSized(report) }
                 CardContainer(title: "Status") { capabilities(report) }
             } else {
@@ -59,6 +62,7 @@ struct LocalWorkspaceView: View {
             row("Link", card.linkLabel)
             row("Location", card.location ?? "?", mono: true)
             row("Memory", card.memorySummary, mono: true)
+            row("Driver", card.driverLabel)
             if !card.hasLargeWindows {
                 Text("No 4 GiB windows over this link (BAR4 wasn't assigned through the Thunderbolt bridge). The card still works through its 2 MiB windows.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -111,10 +115,34 @@ struct LocalWorkspaceView: View {
                     capabilityRow("checkmark.circle.fill", .green, "Right-sized", text)
                 case let .rightSizingUnavailable(text):
                     capabilityRow("exclamationmark.triangle.fill", .orange, "Right-sizing unavailable", text)
+                case let .telemetry(text):
+                    capabilityRow("checkmark.circle.fill", .green, "Live telemetry", text)
+                case let .telemetryUnavailable(text):
+                    capabilityRow("exclamationmark.triangle.fill", .orange, "Telemetry unavailable", text)
                 case let .notYet(title, reason):
                     capabilityRow("clock", .secondary, "\(title): not yet", reason)
                 }
             }
+        }
+    }
+
+    private func telemetry(_ t: LocalTelemetry) -> some View {
+        HStack(spacing: 18) {
+            metric("Temp", t.asicTempC.map { String(format: "%.1f °C", $0) }, color: t.asicTempC.map(TTTheme.tempColor))
+            metric("Power", t.powerW.map { "\($0) W" })
+            metric("Vcore", t.vcoreMV.map { "\($0) mV" })
+            metric("Current", t.currentA.map { "\($0) A" })
+            metric("AICLK", t.aiclkMHz.map { "\($0) MHz" })
+            Spacer()
+            Label(t.arcReady ? "ARC ready" : "ARC not ready", systemImage: t.arcReady ? "checkmark.seal" : "exclamationmark.triangle")
+                .font(.caption).foregroundStyle(t.arcReady ? .green : .orange)
+        }
+    }
+
+    private func metric(_ label: String, _ value: String?, color: Color? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(value ?? "—").font(.body.monospacedDigit().weight(.medium)).foregroundStyle(color ?? .primary)
         }
     }
 

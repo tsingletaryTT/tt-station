@@ -25,6 +25,36 @@ use serde_json::Value;
 /// Env override for the official CLI's binary (tests point it at a fake).
 pub const OFFICIAL_TT_ENV: &str = "TTS_OFFICIAL_TT_BIN";
 
+/// Env override for the TTStationDriver host app's executable, which answers `telemetry` with one
+/// JSON line once tt-station's dext has claimed the card (macos/TTStationDriver/Probe/bh_probe.c).
+pub const DRIVER_HOST_ENV: &str = "TTS_DRIVER_HOST_BIN";
+pub const DRIVER_HOST_DEFAULT: &str = "/Applications/TTStationDriver.app/Contents/MacOS/TTStationDriver";
+
+/// Live chip telemetry read through tt-station's dext (ARC firmware, via libttbh). Fields are
+/// `None` when that particular read failed.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct Telemetry {
+    pub abi: u32,
+    pub boot_status: Option<u32>,
+    pub arc_ready: bool,
+    pub asic_temp_c: Option<f64>,
+    pub power_w: Option<u32>,
+    pub vcore_mv: Option<u32>,
+    pub current_a: Option<u32>,
+    pub aiclk_mhz: Option<u32>,
+}
+
+/// Ask the driver host app for telemetry. Only meaningful when a card's driver is ours.
+pub fn read_telemetry() -> Result<Telemetry> {
+    let bin = std::env::var(DRIVER_HOST_ENV).unwrap_or_else(|_| DRIVER_HOST_DEFAULT.to_string());
+    let out = Command::new(&bin).arg("telemetry").output().with_context(|| format!("running `{bin} telemetry`"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout.lines().find(|l| l.trim_start().starts_with('{')).ok_or_else(|| {
+        anyhow!("`{bin} telemetry` printed no JSON (exit {}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim())
+    })?;
+    serde_json::from_str(line).context("parsing driver telemetry JSON")
+}
+
 /// The official `tt` CLI, verified to BE the official one.
 #[derive(Debug, Clone, Serialize)]
 pub struct OfficialTt {
@@ -50,6 +80,10 @@ struct Report {
     models: Option<Vec<RightSized>>,
     /// Why `models` is absent, when it is.
     models_error: Option<String>,
+    /// Live telemetry, present only when tt-station's own dext has claimed a card.
+    telemetry: Option<Telemetry>,
+    /// Why `telemetry` is absent although our dext is attached.
+    telemetry_error: Option<String>,
 }
 
 /// Locate the official `tt` and prove it is the official one.
@@ -168,7 +202,16 @@ pub fn run(ioreg_file: Option<&Path>, no_models: bool, json: bool) -> Result<()>
     };
     let device_mesh = local_device::local_mesh(&cards);
 
-    let mut report = Report { cards, device_mesh, official_tt: None, models: None, models_error: None };
+    let mut report = Report {
+        cards, device_mesh, official_tt: None, models: None, models_error: None, telemetry: None, telemetry_error: None,
+    };
+    // Telemetry needs our dext; without it there's nothing to ask (and no error to report).
+    if report.cards.iter().any(LocalCard::has_tt_station_driver) {
+        match read_telemetry() {
+            Ok(t) => report.telemetry = Some(t),
+            Err(e) => report.telemetry_error = Some(format!("{e:#}")),
+        }
+    }
     if !no_models {
         match device_mesh {
             None if report.cards.is_empty() => {}
@@ -225,6 +268,25 @@ fn print_human(r: &Report) {
         );
         let ranges: Vec<String> = c.memory_ranges.iter().map(|&n| fmt_size(n)).collect();
         println!("║    memory ranges: {}", ranges.join(", "));
+        let driver = match c.driver.as_deref() {
+            None => "none (unclaimed)".to_string(),
+            Some(_) if c.has_tt_station_driver() => "TTStationDriver (tt-station's dext)".to_string(),
+            Some(other) => format!("{other} (not tt-station's)"),
+        };
+        println!("║    driver: {driver}");
+    }
+    if let Some(t) = &r.telemetry {
+        let f = |v: Option<u32>, unit: &str| v.map(|v| format!("{v} {unit}")).unwrap_or_else(|| "?".into());
+        println!(
+            "║  live: {}  {}  {}  {}  ARC {}",
+            t.asic_temp_c.map(|c| format!("{c:.1} °C")).unwrap_or_else(|| "?".into()),
+            f(t.power_w, "W"),
+            f(t.vcore_mv, "mV"),
+            f(t.aiclk_mhz, "MHz"),
+            if t.arc_ready { "ready" } else { "not ready" },
+        );
+    } else if let Some(e) = &r.telemetry_error {
+        println!("║  live telemetry unavailable: {e}");
     }
     println!("║  device config: {}", r.device_mesh.unwrap_or("(unknown — not guessing)"));
     match (&r.official_tt, &r.models) {
@@ -251,7 +313,10 @@ fn print_human(r: &Report) {
             }
         }
     }
-    println!("╚══ serving on this Mac is not wired up yet (needs the dext; see macos/TTStationDriver)");
+    println!(
+        "╚══ serving on this Mac is not wired up yet{}",
+        if r.cards.iter().any(LocalCard::has_tt_station_driver) { "" } else { " (needs the dext; see macos/TTStationDriver)" }
+    );
 }
 
 #[cfg(test)]

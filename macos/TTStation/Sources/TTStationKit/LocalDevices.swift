@@ -17,18 +17,27 @@ public struct LocalReport: Codable, Equatable {
     /// Right-sized models per the official CLI; `nil` when right-sizing didn't run (see `modelsError`).
     public let models: [RightSizedModel]?
     public let modelsError: String?
+    /// Live chip telemetry. Present only once tt-station's own dext has claimed a card.
+    public let telemetry: LocalTelemetry?
+    public let telemetryError: String?
 
     enum CodingKeys: String, CodingKey {
-        case cards, models
+        case cards, models, telemetry
         case deviceMesh = "device_mesh"
         case officialTT = "official_tt"
         case modelsError = "models_error"
+        case telemetryError = "telemetry_error"
     }
 
-    public init(cards: [LocalCard], deviceMesh: String?, officialTT: OfficialTT?, models: [RightSizedModel]?, modelsError: String?) {
+    public init(cards: [LocalCard], deviceMesh: String?, officialTT: OfficialTT?, models: [RightSizedModel]?, modelsError: String?,
+                telemetry: LocalTelemetry? = nil, telemetryError: String? = nil) {
         self.cards = cards; self.deviceMesh = deviceMesh; self.officialTT = officialTT
         self.models = models; self.modelsError = modelsError
+        self.telemetry = telemetry; self.telemetryError = telemetryError
     }
+
+    /// True when tt-station's dext has claimed at least one card.
+    public var hasOurDriver: Bool { cards.contains { $0.hasTTStationDriver } }
 
     /// True when at least one Tenstorrent card is attached. The app only shows "This Mac"
     /// when this holds.
@@ -58,8 +67,21 @@ public struct LocalCard: Codable, Equatable, Identifiable {
     /// Byte lengths of the memory ranges macOS assigned, in IORegistry order. Not indexed by
     /// BAR number: an unassigned BAR is simply missing.
     public let memoryRanges: [UInt64]
+    /// IORegistry name of the driver that has claimed the card, if any.
+    public let driver: String?
 
     public var id: String { location ?? name }
+
+    /// Must match `TTBH_SERVICE_NAME` (macos/TTStationDriver/Shared/TTBlackholeABI.h) and
+    /// `libttstation::local_device::TT_STATION_DRIVER_NAME`.
+    public static let ttStationDriverName = "ttstation-blackhole"
+    public var hasTTStationDriver: Bool { driver == Self.ttStationDriverName }
+
+    /// "TTStationDriver", "none", or the foreign driver's name.
+    public var driverLabel: String {
+        guard let driver else { return "none (unclaimed)" }
+        return hasTTStationDriver ? "TTStationDriver" : "\(driver) (not tt-station's)"
+    }
 
     enum CodingKeys: String, CodingKey {
         case name, location, chip, tunnelled, link
@@ -69,13 +91,15 @@ public struct LocalCard: Codable, Equatable, Identifiable {
         case subsystemID = "subsystem_id"
         case boardType = "board_type"
         case memoryRanges = "memory_ranges"
+        case driver
     }
 
     public init(name: String, location: String?, vendorID: Int, deviceID: Int, subsystemVendorID: Int, subsystemID: Int,
-                chip: String?, boardType: String?, tunnelled: Bool, link: PCIeLink?, memoryRanges: [UInt64]) {
+                chip: String?, boardType: String?, tunnelled: Bool, link: PCIeLink?, memoryRanges: [UInt64], driver: String? = nil) {
         self.name = name; self.location = location; self.vendorID = vendorID; self.deviceID = deviceID
         self.subsystemVendorID = subsystemVendorID; self.subsystemID = subsystemID; self.chip = chip
         self.boardType = boardType; self.tunnelled = tunnelled; self.link = link; self.memoryRanges = memoryRanges
+        self.driver = driver
     }
 
     /// "P100A", or "Tenstorrent card" when the board type is unknown.
@@ -129,6 +153,30 @@ public struct PCIeLink: Codable, Equatable {
     }
 }
 
+/// Live telemetry from the chip's ARC firmware, read through tt-station's dext (libttbh). Each
+/// value is nil when that read failed.
+public struct LocalTelemetry: Codable, Equatable {
+    public let abi: Int
+    public let bootStatus: UInt32?
+    public let arcReady: Bool
+    public let asicTempC: Double?
+    public let powerW: Int?
+    public let vcoreMV: Int?
+    public let currentA: Int?
+    public let aiclkMHz: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case abi
+        case bootStatus = "boot_status"
+        case arcReady = "arc_ready"
+        case asicTempC = "asic_temp_c"
+        case powerW = "power_w"
+        case vcoreMV = "vcore_mv"
+        case currentA = "current_a"
+        case aiclkMHz = "aiclk_mhz"
+    }
+}
+
 public struct OfficialTT: Codable, Equatable {
     public let bin: String
     public let version: String
@@ -166,11 +214,13 @@ public enum LocalCapability: Equatable, Identifiable {
     case detected(String)
     case rightSized(String)
     case rightSizingUnavailable(String)
+    case telemetry(String)
+    case telemetryUnavailable(String)
     case notYet(title: String, reason: String)
 
     public var id: String {
         switch self {
-        case let .detected(s), let .rightSized(s), let .rightSizingUnavailable(s): return s
+        case let .detected(s), let .rightSized(s), let .rightSizingUnavailable(s), let .telemetry(s), let .telemetryUnavailable(s): return s
         case let .notYet(title, _): return title
         }
     }
@@ -183,8 +233,14 @@ public enum LocalCapability: Equatable, Identifiable {
         } else {
             out.append(.rightSizingUnavailable(report.modelsError ?? "Right-sizing didn't run"))
         }
-        out.append(.notYet(title: "Live telemetry",
-                           reason: "Temperature, power and clocks come from the chip's ARC firmware, which needs the TTStationDriver extension loaded."))
+        if report.telemetry != nil {
+            out.append(.telemetry("Live readings from the ARC firmware, through TTStationDriver"))
+        } else if report.hasOurDriver {
+            out.append(.telemetryUnavailable(report.telemetryError ?? "The driver is attached but telemetry didn't come back"))
+        } else {
+            out.append(.notYet(title: "Live telemetry",
+                               reason: "Temperature, power and clocks come from the chip's ARC firmware, which needs the TTStationDriver extension loaded."))
+        }
         out.append(.notYet(title: "Serving on this Mac",
                            reason: "Needs the driver plus a Mac-side serving path. `tt serve` targets Linux hosts today."))
         return out

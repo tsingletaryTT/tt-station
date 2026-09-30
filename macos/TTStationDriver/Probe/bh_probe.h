@@ -7,4 +7,7 @@
 #define TTBH_PROBE_NOC 1
 #define TTBH_PROBE_DMA 2
 int ttbh_probe_run(int flags);
+
+// One-line JSON telemetry through the dext (for `tt-station local`). 0 = ARC answered.
+int ttbh_telemetry_json(void);
 #endif

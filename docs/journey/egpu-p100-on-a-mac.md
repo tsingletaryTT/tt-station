@@ -609,3 +609,34 @@ tt-kmd's place.
 A note on sharing: midway, Taylor mentioned that the other lease on qb2-lab (`mesh-shrink`) was
 theirs, for another project. The M3 checks had already finished and released cleanly by then. No
 more qb2-lab leases were taken while it ran.
+
+### Wiring the future: driver status and live telemetry, before the driver exists
+
+Going one IORegistry level deeper shows which driver has claimed each device. This Mac had two
+perfect specimens: its Wi-Fi is claimed by `AppleBCMWLANBusInterfacePCIe` and its dock's Ethernet
+by `DriverKit_AppleEthernetE1000`, both DriverKit `IOUserService`s, which is exactly the shape
+TTStationDriver will have. The P100A's entry has no children. So:
+
+- `tt-station local` now reports each card's driver: `none (unclaimed)` today. The test for
+  "attached" uses the real Wi-Fi entry rather than a made-up one.
+- When the driver *is* ours (`ttstation-blackhole`), it asks the host app for
+  `TTStationDriver telemetry`, one JSON line from the same libttbh reads that matched tt-kmd
+  on silicon.
+- The app gains a Driver row and a **Live telemetry** card. Its Status list flips "Live
+  telemetry: not yet" to a green check only when readings actually arrive, and says why when the
+  driver is attached but telemetry fails.
+
+So the moment signing lands and the dext loads, the UI lights up with no further code.
+
+### Keeping the box in step
+
+Taylor asked to keep `~/code/tt-station` on qb2-lab current. The checkout was clean but sat on a
+local `support/tt-cli` branch (created 2026-09-21 at `main`'s tip, no commits). I left that
+branch alone and switched the checkout to track `experiments/egpu`. The live agent runs from
+`~/.local/bin`, not from this tree, so nothing running was touched.
+
+The first Linux build of the week's Rust then failed: `no matching package named plist`. A
+leftover `.cargo/config.toml` from an old `.deb` build redirects crates.io to a July `vendor/`
+snapshot. Rather than alter Taylor's tree, the tests ran from a throwaway clone in `~/scratch`:
+all green and clippy-clean on Linux. (`build-deb.sh` regenerates `vendor/` itself, so packaging
+isn't affected.)
