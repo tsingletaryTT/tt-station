@@ -957,3 +957,9 @@ Two smaller notes:
 - My first read-back check printed MISMATCH next to the right value. Heredoc escaping had turned
   `b'\xca…'` into a literal backslash string. The instrument was wrong again, and a clean 64-word
   check replaced it.
+
+### Upstream gaps, parked
+
+Taylor chose not to file the ttsim/blackhole-py gaps yet. They are written up, with exact error
+text, offsets and workarounds, in [`docs/upstream-issue-drafts.md`](../upstream-issue-drafts.md). Nothing
+has been posted.
