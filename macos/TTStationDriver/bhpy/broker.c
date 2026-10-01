@@ -98,6 +98,9 @@ static int respond(int fd, int32_t status, uint64_t r0, uint64_t r1, const void 
 // ── commands ──────────────────────────────────────────────────────────────────────────────
 
 static bool window_ok(session *s, uint32_t id) { return id < TTBH_BROKER_USER_TLBS && s->tlb_used[id]; }
+// Is [off, off + len) inside one 2 MiB window? Written so it can't wrap: a client-supplied offset
+// near UINT64_MAX would make `off + len` overflow and pass a naive `off + len > size` check.
+static bool span_ok(uint64_t off, uint64_t len) { return off <= TTBH_TLB_2M_SIZE && len <= TTBH_TLB_2M_SIZE - off; }
 static uint64_t window_off(uint32_t id) { return (uint64_t)id * TTBH_TLB_2M_SIZE; }
 
 // BAR access: mapped pointer (dext, simulators) or function calls (ttsim), whichever the backend has.
@@ -267,14 +270,14 @@ void broker_session(const broker_backend *be, int fd)
             rc = respond(fd, tlb_target(s, q.id, q.a0, q.a1, q.a2), 0, 0, 0, 0, -1);
             break;
         case TTBH_CMD_TLB_READ: {
-            if (!window_ok(s, q.id) || q.a1 > TTBH_BROKER_MAX_IO || q.a0 + q.a1 > TTBH_TLB_2M_SIZE) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
+            if (!window_ok(s, q.id) || q.a1 > TTBH_BROKER_MAX_IO || !span_ok(q.a0, q.a1)) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
             if (be->sync) be->sync(be->ctx);
             bar_rd(be, 0, window_off(q.id) + q.a0, s->io, (uint32_t)q.a1);
             rc = respond(fd, TTBH_OK, 0, 0, s->io, (uint32_t)q.a1, -1);
             break;
         }
         case TTBH_CMD_TLB_WRITE: {
-            if (!window_ok(s, q.id) || q.a0 + q.payload_len > TTBH_TLB_2M_SIZE) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
+            if (!window_ok(s, q.id) || !span_ok(q.a0, q.payload_len)) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
             bar_wr(be, 0, window_off(q.id) + q.a0, s->io, q.payload_len);
             if (be->sync) be->sync(be->ctx);
             rc = respond(fd, TTBH_OK, 0, 0, 0, 0, -1);

@@ -45,6 +45,11 @@ public:
     // and must CompleteDMA + release it.
     kern_return_t PrepareDMA(IOMemoryDescriptor * memory, uint64_t length, IODMACommand ** command,
                              IOAddressSegment * segments, uint32_t * segmentCount) LOCALONLY;
+
+    // The one user client is going away (its Stop calls this before completing its DMA mappings):
+    // stop the chip reaching host memory (every outbound iATU region off, bus mastering off), then
+    // let a new client open. Ordering matters: the device must stop issuing before DART unmaps.
+    void ReleaseClient() LOCALONLY;
 };
 
 #endif /* TTBlackholeDriver_h */

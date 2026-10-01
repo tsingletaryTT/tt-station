@@ -147,7 +147,15 @@ env_report() {
   xcodebuild -version
   if xcodebuild -checkFirstLaunchStatus >/dev/null 2>&1; then echo "Xcode components: installed"; else echo "Xcode components: MISSING (sudo xcodebuild -runFirstLaunch)"; return 1; fi
   echo "tt-station: $TTSTATION"
-  tt --version 2>/dev/null || echo "official tt: not installed (macos/scripts/ensure-official-tt.sh)"
+  # The same check the installer and the app use, so "official" means one thing everywhere: a
+  # foreign or stale `tt` (exit 3) fails just like a missing one (exit 6). A real run needs it for
+  # step 8's right-sizing; --sim skips step 8, so there it's only reported.
+  local tt_rc=0
+  "$REPO/macos/scripts/ensure-official-tt.sh" --check || tt_rc=$?
+  if [ $tt_rc -ne 0 ]; then
+    echo "official tt: NOT ready (ensure-official-tt.sh --check exit $tt_rc; run it without --check to install)"
+    [ $SIM -eq 0 ] && return 1
+  fi
   echo "blackhole-py: $BHPY @ $(git -C "$BHPY" log --oneline -1 2>/dev/null)"
   echo "python: $("$PY" --version 2>&1) ($PY)"
 }
@@ -160,6 +168,10 @@ install_and_activate() {
   "$HERE/scripts/install-dev.sh" --team "$TEAM"
   local rc=$?
   [ $rc -eq 0 ] && return 0
+  if [ $rc -eq 5 ]; then                              # accepted, but only live after a restart
+    echo "The extension activates after a reboot. Restart, then re-run this script with --skip-install."
+    return $rc
+  fi
   [ $rc -ne 4 ] && return $rc
   echo "Waiting for you to approve the extension (System Settings > General > Login Items & Extensions > Driver Extensions)…"
   local i

@@ -47,8 +47,29 @@ pub struct Telemetry {
 /// Ask the driver host app for telemetry. Only meaningful when a card's driver is ours.
 pub fn read_telemetry() -> Result<Telemetry> {
     let bin = std::env::var(DRIVER_HOST_ENV).unwrap_or_else(|_| DRIVER_HOST_DEFAULT.to_string());
-    let out = Command::new(&bin).arg("telemetry").output().with_context(|| format!("running `{bin} telemetry`"))?;
+    read_telemetry_from(&bin)
+}
+
+/// [`read_telemetry`] against an explicit host-app binary (tests point this at a fake).
+fn read_telemetry_from(bin: &str) -> Result<Telemetry> {
+    let out = Command::new(bin).arg("telemetry").output().with_context(|| format!("running `{bin} telemetry`"))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
+    // The host app prints its JSON line even on failure (values null), so a nonzero exit has to be
+    // checked first or a dead card would read as a card with no sensors. Exit codes are
+    // `ttbh_telemetry_json`'s (Probe/bh_probe.c): 1 = dext unreachable, 2 = card looks dead.
+    if !out.status.success() {
+        let why = match out.status.code() {
+            Some(1) => "couldn't reach tt-station's driver",
+            Some(2) => "the card looks dead (ARC not answering)",
+            _ => "failed",
+        };
+        return Err(anyhow!(
+            "`{bin} telemetry` {why} (exit {}): {} {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim(),
+            stdout.trim()
+        ));
+    }
     let line = stdout.lines().find(|l| l.trim_start().starts_with('{')).ok_or_else(|| {
         anyhow!("`{bin} telemetry` printed no JSON (exit {}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim())
     })?;
@@ -371,6 +392,30 @@ mod tests {
             locate_tt(Some(other.path().as_os_str()), Some(home.path())),
             Some(other_tt.to_string_lossy().into_owned())
         );
+    }
+
+    /// A fake host app: prints `json`, exits `code`.
+    #[cfg(unix)]
+    fn fake_host(dir: &Path, json: &str, code: i32) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("TTStationDriver");
+        std::fs::write(&p, format!("#!/bin/sh\necho '{json}'\necho 'stderr says why' >&2\nexit {code}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn telemetry_json_from_a_failed_run_is_not_believed() {
+        // The host app prints its JSON line (values null) even when the card is dead; exit 2 must
+        // win over that well-formed JSON.
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{"abi":2,"boot_status":null,"arc_ready":false,"asic_temp_c":null,"power_w":null,"vcore_mv":null,"current_a":null,"aiclk_mhz":null}"#;
+        let err = read_telemetry_from(&fake_host(dir.path(), json, 2)).unwrap_err().to_string();
+        assert!(err.contains("looks dead"), "{err}");
+        assert!(err.contains("stderr says why"), "{err}");
+        // ...and the same JSON with exit 0 parses, so the rejection above is the exit code's doing.
+        assert!(read_telemetry_from(&fake_host(dir.path(), json, 0)).is_ok());
     }
 
     #[test]

@@ -12,7 +12,9 @@ import SystemExtensions
 let dextID = "com.tenstorrent.ttstation.driver"
 
 /// Exit codes, stable for scripts/install-dev.sh.
-enum Exit: Int32 { case ok = 0, usage = 2, failed = 3, needsApproval = 4 }
+/// `rebootRequired`: the request was accepted but the dext isn't running yet, so a caller must not
+/// go on to probe it as if it were.
+enum Exit: Int32 { case ok = 0, usage = 2, failed = 3, needsApproval = 4, rebootRequired = 5 }
 
 /// `systemextensionsctl list` is the only public way to read a dext's state without
 /// submitting a request; parse the line carrying our bundle ID.
@@ -59,11 +61,17 @@ final class Requester: NSObject, OSSystemExtensionRequestDelegate {
     func request(_ request: OSSystemExtensionRequest,
                  didFinishWithResult result: OSSystemExtensionRequest.Result) {
         switch result {
-        case .completed: print(activating ? "Driver activated." : "Driver deactivated.")
-        case .willCompleteAfterReboot: print("Will complete after reboot.")
-        @unknown default: print("Finished: \(result.rawValue)")
+        case .completed:
+            print(activating ? "Driver activated." : "Driver deactivated.")
+            exit(Exit.ok.rawValue)
+        case .willCompleteAfterReboot:
+            print("Will complete after reboot. Restart this Mac, then run: TTStationDriver status")
+            exit(Exit.rebootRequired.rawValue)
+        @unknown default:
+            // A result this build doesn't know can't be read as "done": don't let a script proceed.
+            print("Finished with an unrecognised result (\(result.rawValue)); check: TTStationDriver status")
+            exit(Exit.failed.rawValue)
         }
-        exit(Exit.ok.rawValue)
     }
 
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {

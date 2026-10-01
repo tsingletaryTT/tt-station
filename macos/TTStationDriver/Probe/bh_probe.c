@@ -31,6 +31,12 @@
 #include "bh_probe.h"
 #include "../libttbh/ttbh.h"
 
+// The dext's copy of the outbound-iATU layout (it can't include libttbh) must match libttbh's.
+_Static_assert(TTBH_BAR2_IATU_BASE == TTBH_IATU_BASE, "iATU base");
+_Static_assert(TTBH_BAR2_IATU_REGIONS == TTBH_IATU_REGIONS, "iATU region count");
+_Static_assert(TTBH_BAR2_IATU_STRIDE == 2u * TTBH_IATU_REGION_STRIDE, "iATU outbound stride");
+_Static_assert(TTBH_BAR2_IATU_CTRL_2 == TTBH_IATU_CTRL_2, "iATU CTRL_2");
+
 static const char * bar_label(uint64_t size, char * buf, size_t n)
 {
     if (size == 0) snprintf(buf, n, "absent");
@@ -253,7 +259,8 @@ int ttbh_probe_run(int flags)
         fprintf(stderr, "CfgRead failed: 0x%08x\n", kr);
 
     // ── 4. BAR0: TLB config register 0 ─────────────────────────────
-    int dead = 0;
+    int dead = 0;    // MMIO read back all-ones: link down, decode off, or card in reset
+    int failed = 0;  // MMIO answered, but a check on top of it (ARC boot status, DMA) didn't pass
     mach_vm_size_t size0 = 0;
     mach_vm_address_t bar0 = map_bar(conn, kTTBHMemoryBar0, &size0);
     if (bar0 && size0 > TTBH_BAR0_TLB_REGS_START + TTBH_TLB_REG_SIZE) {
@@ -274,7 +281,10 @@ int ttbh_probe_run(int flags)
             int err = ttbh_arc_boot_status(&w, &boot);
             printf("║  ARC      boot 0x%08x  %s\n", boot,
                    err ? ttbh_strerror(err) : (ttbh_arc_ready(boot) ? "ready" : "not ready"));
+            // Any error fails the probe; only EDEAD (all-ones reads) also means MMIO is dead. A
+            // timeout or a bad tag table is a NOC/ARC failure on a link that otherwise works.
             if (err == TTBH_EDEAD) dead = 1;
+            else if (err) failed = 1;
             if (!err) {
                 if (!ttbh_telemetry_read(&w, TTBH_TAG_ASIC_TEMP, &raw)) printf("║  temp     %.1f °C\n", ttbh_temp_c(raw));
                 if (!ttbh_telemetry_read(&w, TTBH_TAG_POWER, &raw))     printf("║  power    %u W\n", raw);
@@ -297,13 +307,14 @@ int ttbh_probe_run(int flags)
         IOConnectUnmapMemory64(conn, kTTBHMemoryBar2, mach_task_self(), bar2);
     }
 
-    if (dma && !dead && dma_loopback(conn) != 0) dead = 1;
+    if (dma && !dead && dma_loopback(conn) != 0) failed = 1;
 
     if (dead) printf("║  ⚠ all-ones MMIO reads: link down, memory decode off, or card in reset\n");
-    printf("╚══ %s\n", dead ? "reachable config space, MMIO NOT confirmed" : "done");
+    printf("╚══ %s\n", dead ? "reachable config space, MMIO NOT confirmed"
+                        : failed ? "MMIO works, but a NOC/ARC/DMA check FAILED (see above)" : "done");
 
     IOServiceClose(conn);
-    return dead ? 2 : 0;
+    return dead ? 2 : failed ? 3 : 0;
 }
 
 #ifndef TTBH_PROBE_NO_MAIN

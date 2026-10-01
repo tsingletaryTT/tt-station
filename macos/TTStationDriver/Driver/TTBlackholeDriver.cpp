@@ -4,7 +4,11 @@
 //   * matches only Tenstorrent Blackhole (Info.plist), not every display-class device;
 //   * enables MEMORY space at Start; bus mastering only at the first PrepareDMA (spec M3), so the
 //     chip cannot write host memory until a client has handed it a buffer that is actually mapped;
-//   * DMA mapping (PrepareDMA) but no reset or config-write paths (spec "User-client contract").
+//   * DMA mapping (PrepareDMA) but no reset or config-write paths (spec "User-client contract");
+//   * ONE user client at a time (NewUserClient refuses a second), because a client owns the BARs,
+//     the TLB windows and the iATU outright, and two of them would silently clobber each other;
+//   * on that client's exit, DMA is quiesced (iATU regions + bus mastering off) before its DART
+//     mappings go, so a chip still mid-transfer can't write into pages that have been handed back.
 //
 // Logging goes to the unified log under the "ttbh:" prefix:
 //   log stream --predicate 'eventMessage CONTAINS "ttbh:"'
@@ -21,6 +25,8 @@ struct TTBlackholeDriver_IVars
 {
     IOPCIDevice * pci = nullptr;
     bool busMaster = false;   // turned on lazily by the first PrepareDMA
+    bool clientOpen = false;  // exclusive user client; atomics because NewUserClient and the
+                              // client's Stop can run on different dispatch queues
 };
 
 bool TTBlackholeDriver::init()
@@ -106,19 +112,52 @@ kern_return_t IMPL(TTBlackholeDriver, Stop)
 
 kern_return_t IMPL(TTBlackholeDriver, NewUserClient)
 {
+    // Exclusive: claim the slot first, give it back if creation fails.
+    if (__atomic_exchange_n(&ivars->clientOpen, true, __ATOMIC_ACQ_REL)) {
+        os_log(OS_LOG_DEFAULT, "ttbh: refusing a second user client (one owner at a time)");
+        return kIOReturnExclusiveAccess;
+    }
     // "TTBlackholeUserClientProperties" is a dictionary in Info.plist naming the class to create.
     IOService * service = nullptr;
     kern_return_t err = Create(this, "TTBlackholeUserClientProperties", &service);
     if (err != kIOReturnSuccess) {
         os_log(OS_LOG_DEFAULT, "ttbh: user client Create failed 0x%08x", err);
+        __atomic_store_n(&ivars->clientOpen, false, __ATOMIC_RELEASE);
         return err;
     }
     *userClient = OSDynamicCast(IOUserClient, service);
     if (*userClient == nullptr) {
         service->release();
+        __atomic_store_n(&ivars->clientOpen, false, __ATOMIC_RELEASE);
         return kIOReturnError;
     }
     return kIOReturnSuccess;
+}
+
+void TTBlackholeDriver::ReleaseClient()
+{
+    if (ivars->pci != nullptr) {
+        // Every outbound iATU region off: no chip NOC address maps to host memory any more. The
+        // client programmed these through its BAR2 mapping; we only ever clear them.
+        uint8_t memoryIndex = 0, barType = 0;
+        uint64_t size = 0;
+        if (ivars->pci->GetBARInfo(2, &memoryIndex, &size, &barType) == kIOReturnSuccess &&
+            size >= TTBH_BAR2_IATU_BASE + TTBH_BAR2_IATU_REGIONS * TTBH_BAR2_IATU_STRIDE) {
+            for (uint32_t r = 0; r < TTBH_BAR2_IATU_REGIONS; r++)
+                ivars->pci->MemoryWrite32(memoryIndex, TTBH_BAR2_IATU_BASE + r * TTBH_BAR2_IATU_STRIDE + TTBH_BAR2_IATU_CTRL_2, 0);
+        }
+        // And bus mastering off, so even a region we couldn't clear can't reach memory. The next
+        // client's first PrepareDMA turns it back on.
+        if (ivars->busMaster) {
+            uint16_t command16 = 0;
+            ivars->pci->ConfigurationRead16(kIOPCIConfigurationOffsetCommand, &command16);
+            ivars->pci->ConfigurationWrite16(kIOPCIConfigurationOffsetCommand,
+                                             command16 & ~kIOPCICommandBusMaster);
+            os_log(OS_LOG_DEFAULT, "ttbh: client gone: iATU cleared, bus mastering disabled");
+        }
+    }
+    ivars->busMaster = false;
+    __atomic_store_n(&ivars->clientOpen, false, __ATOMIC_RELEASE);
 }
 
 uint64_t TTBlackholeDriver::BarSize(uint8_t bar)

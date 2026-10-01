@@ -963,3 +963,25 @@ Two smaller notes:
 Taylor chose not to file the ttsim/blackhole-py gaps yet. They are written up, with exact error
 text, offsets and workarounds, in [`docs/upstream-issue-drafts.md`](../upstream-issue-drafts.md). Nothing
 has been posted.
+
+## 2026-10-01: the first code review
+
+The branch went up as a PR (tsingletaryTT/tt-station#1) and Copilot reviewed it. Of its eight
+comments, two were about what happens when the userspace side *goes away*, and that's the part a
+crash will test long before any happy path does:
+
+- **The dext let any number of clients open it.** Each client gets the BARs, the TLB windows and
+  the iATU outright, so a second one would quietly reprogram the first one's windows. Now there's
+  one owner (`kIOReturnExclusiveAccess` for anyone else). The broker is how processes share it.
+- **Teardown unmapped DMA while the chip could still write.** On client exit we completed the
+  DART mappings but left bus mastering on and the iATU regions pointing at them. Now the order is
+  device first (all 16 outbound regions off, bus master off), then unmap. Nothing can run this yet
+  without the signing team. It's in place before first light, not added after the first panic.
+
+The rest were smaller honesty fixes, which is the theme of this whole log. The probe treated an
+ARC timeout as a pass. `tt-station local` believed the telemetry JSON that the host app prints
+even when the card is dead. A reboot-pending activation exited 0, so `first-light.sh` would have
+gone straight on to probe a driver that wasn't running. The env step reported "official tt: not
+installed" and passed anyway. One was a real memory-safety hole: the broker's window bounds check
+was `offset + length > 2 MiB`, so an offset near 2^64 wraps around and passes. A new test sends
+exactly that. It failed against the old check before it passed against the new one.

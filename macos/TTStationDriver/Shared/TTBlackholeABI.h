@@ -83,5 +83,11 @@ typedef struct TTBHDMASegment { uint64_t address; uint64_t length; } TTBHDMASegm
 #define TTBH_BAR0_TLB_REGS_START 0x1FC00000u   // 12 bytes per window: low32, mid32, high32
 #define TTBH_TLB_REG_SIZE        12u
 #define TTBH_BAR2_IATU_BASE      0x1000u
+// Outbound iATU regions, as the dext needs them to quiesce DMA on client teardown (it can't include
+// libttbh). Region r's registers are at BASE + r * STRIDE; writing 0 to CTRL_2 clears its enable bit.
+// bh_probe.c static-asserts these against libttbh/ttbh.h.
+#define TTBH_BAR2_IATU_REGIONS   16u
+#define TTBH_BAR2_IATU_STRIDE    0x200u   // outbound/inbound pairs interleave: 2 x 0x100
+#define TTBH_BAR2_IATU_CTRL_2    0x04u
 
 #endif /* TTBlackholeABI_h */

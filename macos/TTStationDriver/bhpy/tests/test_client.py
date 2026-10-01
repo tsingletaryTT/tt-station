@@ -138,6 +138,18 @@ class Windows(BrokerCase):
         with pcie_darwin.TLBWindow(self.c, (1, 2)) as again:
             self.assertEqual(again.id, wid)                    # and its id is reused
 
+    def test_an_offset_that_wraps_64_bits_is_rejected(self):
+        # Raw requests, bypassing TLBWindow's own checks: 2^64 - 2 + 4 wraps to 2, so a naive
+        # `a0 + len > 2 MiB` check passes and the broker would read/write far outside BAR0.
+        with pcie_darwin.TLBWindow(self.c, (1, 2)) as w:
+            w.target(0)
+            huge = (1 << 64) - 2
+            with self.assertRaises(wire.BrokerError):
+                self.c.call(wire.TLB_READ, w.id, huge, 4)
+            with self.assertRaises(wire.BrokerError):
+                self.c.call(wire.TLB_WRITE, w.id, huge, payload=b"\0" * 4)
+            self.assertEqual(len(w.read(0, 4)), 4)            # session still healthy afterwards
+
     def test_multicast_rectangle_is_accepted(self):
         with pcie_darwin.TLBWindow(self.c, (1, 2)) as w:
             w.target(0x0, (1, 2), (14, 11))                    # device.py's soft-reset broadcast

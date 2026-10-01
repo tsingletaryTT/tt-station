@@ -98,6 +98,7 @@ set -e
 case $rc in
   0) echo "activated. Now run: /Applications/TTStationDriver.app/Contents/MacOS/TTStationDriver probe" ;;
   4) echo "approve the extension in System Settings, then re-run: TTStationDriver status / probe" ;;
+  5) echo "accepted, but it only takes effect after a restart: reboot, then TTStationDriver status / probe" ;;
   *) echo "activation failed (exit $rc). See: log show --last 5m --predicate 'eventMessage CONTAINS \"ttbh:\" OR subsystem == \"com.apple.sx\"'" ;;
 esac
 exit $rc

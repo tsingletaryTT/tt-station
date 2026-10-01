@@ -58,7 +58,10 @@ kern_return_t IMPL(TTBlackholeUserClient, Start)
 
 kern_return_t IMPL(TTBlackholeUserClient, Stop)
 {
-    // A client that exits (or crashes) without CompleteDMA must not leave DART mappings behind.
+    // A client that exits (or crashes) must leave neither a chip that can still DMA nor DART
+    // mappings behind, in that order: quiesce the device (iATU + bus master off) first, THEN unmap,
+    // or an in-flight chip write could land in pages the OS has already reused.
+    if (TTBlackholeDriver * driver = ivars->driver.get()) driver->ReleaseClient();
     for (auto & slot : ivars->dma) completeDMA(slot);
     ivars->driver.reset();
     return Stop(provider, SUPERDISPATCH);

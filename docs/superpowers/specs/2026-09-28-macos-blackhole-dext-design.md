@@ -91,6 +91,14 @@ exclude PCIe tunnels.)
 | `ExternalMethod` | 3 `CompleteDMA` *(v2)* | dma id | — | unmaps; `Stop` completes any leftovers |
 | `CopyClientMemoryForType` | type = 0, 2, 4 | — | BAR memory | map with `IOConnectMapMemory64(conn, bar, …)` |
 
+**One client at a time** (2026-10-01, from the PR review): `NewUserClient` returns
+`kIOReturnExclusiveAccess` while a client is open. A client owns the BAR mappings, TLB windows and
+iATU outright, so two would silently clobber each other's state. The broker (`TTStationDriver
+serve`) is the one owner that other processes share. When that client goes away (exit or crash),
+its `Stop` calls the driver's `ReleaseClient` **before** completing DMA mappings. That turns off all
+16 outbound iATU regions (`CTRL_2 = 0`) and bus mastering, then frees the slot. The device has to
+stop issuing before DART unmaps, or an in-flight chip write could land in pages the OS has reused.
+
 Deliberately **not** in v1: config writes, reset, DMA. Writes to config space and resets
 over a TB tunnel are the riskiest operations and nothing needs them to prove M1.
 

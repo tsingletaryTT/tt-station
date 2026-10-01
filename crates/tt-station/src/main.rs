@@ -390,10 +390,6 @@ enum Command {
         host: Option<String>,
     },
 
-    /// Operator TUI for managing THIS box's agent as a systemd `--user`
-    /// service. Run ON the box itself (e.g. over SSH) -- unlike every other
-    /// subcommand above, there's no `--host`: it talks to `127.0.0.1
-    /// :<ctrl-port>` and to the local systemd/journald, never a remote box.
     /// Treat THIS machine as the box: detect Tenstorrent cards attached here (on a Mac, a card in
     /// a Thunderbolt enclosure, read from the IORegistry with no driver needed), name the device
     /// config (`p100`, ...), and ask the official `tt` CLI which models are right-sized for it
@@ -409,6 +405,10 @@ enum Command {
         no_models: bool,
     },
 
+    /// Operator TUI for managing THIS box's agent as a systemd `--user`
+    /// service. Run ON the box itself (e.g. over SSH) -- unlike every other
+    /// subcommand above, there's no `--host`: it talks to `127.0.0.1
+    /// :<ctrl-port>` and to the local systemd/journald, never a remote box.
     Console {
         /// Print one `BoxLifecycleSnapshot` as JSON and exit, instead of
         /// launching the TUI. This is what the GTK box panel polls.
