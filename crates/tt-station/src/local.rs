@@ -172,12 +172,21 @@ pub fn right_sized(tt: &OfficialTt, mesh: &str) -> Result<Vec<RightSized>> {
         .output()
         .with_context(|| format!("running `{} model list`", tt.bin))?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "`tt model list --hw {mesh}` failed: {}",
-            String::from_utf8_lossy(&out.stdout).trim()
-        ));
+        return Err(anyhow!("`tt model list --hw {mesh}` failed ({}): {}", out.status, failure_detail(&out)));
     }
     parse_model_list(&out.stdout, mesh)
+}
+
+/// What a failed command said about why: stderr, where CLIs normally report failures, or stdout
+/// when stderr is empty (some print a JSON error there under `--json`). This text becomes
+/// `models_error`, which the CLI and the Mac pane show, so a blank one would hide the cause.
+fn failure_detail(out: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if stdout.is_empty() { "(no output)".to_string() } else { stdout }
 }
 
 /// Parse `tt --json model list --hw <mesh>` output: `{ "device": .., "models": [ {name,
@@ -416,6 +425,35 @@ mod tests {
         assert!(err.contains("stderr says why"), "{err}");
         // ...and the same JSON with exit 0 parses, so the rejection above is the exit code's doing.
         assert!(read_telemetry_from(&fake_host(dir.path(), json, 0)).is_ok());
+    }
+
+    /// A fake official `tt` that fails with the given streams.
+    #[cfg(unix)]
+    fn fake_tt(dir: &Path, stdout: &str, stderr: &str, code: i32) -> OfficialTt {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("tt");
+        std::fs::write(&p, format!("#!/bin/sh\nprintf '%s' '{stdout}'\nprintf '%s' '{stderr}' >&2\nexit {code}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        OfficialTt { bin: p.to_string_lossy().into_owned(), version: "1.0.1".into() }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn model_list_failure_reports_stderr_and_exit_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = right_sized(&fake_tt(dir.path(), "", "Error: unknown hardware 'p100'", 2), "p100")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown hardware"), "{err}");
+        assert!(err.contains('2'), "exit status missing: {err}");
+        // stderr empty: fall back to stdout (a JSON error under --json)...
+        let err = right_sized(&fake_tt(dir.path(), r#"{"error":"no such hw"}"#, "", 1), "p100")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no such hw"), "{err}");
+        // ...and neither: say so rather than end in a blank.
+        let err = right_sized(&fake_tt(dir.path(), "", "", 1), "p100").unwrap_err().to_string();
+        assert!(err.contains("(no output)"), "{err}");
     }
 
     #[test]
