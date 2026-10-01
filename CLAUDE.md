@@ -23,41 +23,52 @@ installed on this box at `~/.tenstorrent-venv/bin/tt`.
 
 ## ▶ PICK UP HERE
 
-**eGPU experiment — local P100 on a Mac (2026-09-28, branch `experiments/egpu`).** Prompt: owner
-put their own P100 in a Razer Core X V2 Thunderbolt enclosure on their MacBook Pro and asked for
-prior art on a Mac-side driver. Goal they stated: *tt-station detects the attached device and
-invokes the official `tt` CLI / tt-model-manager to deploy a model right-sized for it*,
-reached "in small steps". Findings: macOS already tunnels PCIe and enumerates the card
-(`pci1e52,b140`, Gen4 x4, BAR4 only 16 B, which is risk R1). Asahi can't, because it has no
-Thunderbolt PCIe tunnels, so an eGPU wouldn't have rescued the old Asahi bounty. The best
-template is tinygrad's TinyGPU dext. Built so far: `macos/TTStationDriver/` (dext + headless
-host app + read-only `tt-station-bh-probe`, xcodegen, **compiles and ad-hoc signs; not yet
-loaded**, which needs SIP off). Spec + milestones M0–M6:
-`docs/superpowers/specs/2026-09-28-macos-blackhole-dext-design.md`. **Journey log (append a dated entry every session, keep dead ends, quote real output — it will become a blog post):** `docs/journey/egpu-p100-on-a-mac.md`. **Also shipped (v0.12.0, same day):** `tt-station local`
-(`crates/tt-station/src/local.rs`) treats this machine as its own host. It detects the card from the
-macOS IORegistry (`libttstation::local_device`, no driver) and delegates right-sizing to the OFFICIAL
-`tt model list --hw <config>` (P100 → Llama-3.1-8B[-Instruct], EXPERIMENTAL). It refuses a `tt` whose
-`--version` isn't `tt <semver>`, because a stale pre-rename tt-station copy was shadowing `tt` on the
-owner's Mac. The `mesh_for` table moved to `libttstation::device_mesh` (the agent re-exports it) and
-gained `p100|p100a → p100`. `macos/scripts/ensure-official-tt.sh` (used by `install.sh` and by the app's
-first-run `OfficialCLIInstaller`) installs the official CLI via `uv tool install tenstorrent`.
-Corrections: BAR4 is *unassigned* over this link (the 16 B range is BAR5). With SIP on, only a
-**paid** team's development signature loads the dext (free teams can't, and dev mode refuses).
-**2026-09-29: driver built "in theory".** `macos/TTStationDriver/libttbh/` (C) holds M2 (TLB
-packing, NOC, ARC boot status, telemetry walk) and M3 (PCIe tile, outbound iATU, DMA planning).
-It's verified by hardware-free tests (golden decoder, sim BAR0, mutation-checked) and ON SILICON
-via `ttbh-kmd-check [--dma]` on qb2-lab under gozer, which agreed with tt-kmd hwmon, matched all
-9 iATU registers tt-kmd wrote, and did a chip↔host DMA loopback. Silicon fact: iATU `UPPER_LIMIT`
-keeps 8 bits, so a region must not cross 1 TiB. The dext has ABI v2 `PrepareDMA`/`CompleteDMA`;
-the host app has `probe [--noc] [--dma]` and `telemetry`. `tt-station local` reports each card's
-driver (ioreg depth 2) and pulls telemetry through the host app when our dext holds the card; the
-app shows a Driver row and a Live telemetry card. **qb2-lab's `~/code/tt-station` tracks
-`experiments/egpu`** (its old `support/tt-cli` branch was left untouched). Its tree has a stale
-`.cargo/config.toml` + `vendor/` from an old deb build, so build new deps from a scratch clone.
-The scratch clone (`~/scratch/tts-clone`) pulls from that checkout, not GitHub: **pull the checkout
-first, then the clone**. A stale clone once built a tool that silently ignored `--arc` (tools now
-reject unknown flags). `~/scratch/ttbh-arc/run.sh` is a detached gozer waiter that always releases.
-Next: paid team → `install-dev.sh --team` → M1–M3 on the Mac; then a Darwin backend for blackhole-py.
+**eGPU experiment: a local P100 on a Mac (branch `experiments/egpu`, 2026-09-28 → 10-01).**
+Goal (owner): *tt-station detects a Tenstorrent card attached to a Mac and has the official `tt`
+CLI / tt-model-manager deploy a model right-sized for it*, reached in small steps. Rig: the owner's
+P100A in a Razer Core X V2 (USB4 v2) on a TB5 MacBook Pro, macOS 26.7. **Blocked only on a PAID
+Apple Developer team** (dev-signing is the only SIP-on way to load a dext; free teams can't; dev
+mode refuses with SIP on; ad-hoc apps are killed by AMFI).
+
+State, top to bottom (details: spec `docs/superpowers/specs/2026-09-28-macos-blackhole-dext-design.md`,
+milestones M0–M6; story: **journey log `docs/journey/egpu-p100-on-a-mac.md` — append a dated entry
+every session, keep dead ends, quote real output, it becomes a blog post**):
+- **`tt-station local` (v0.12.0, works today, no driver):** IORegistry detection
+  (`libttstation::local_device`; card, link, BARs, attached driver via ioreg depth 2) → mesh `p100`
+  (shared `libttstation::device_mesh`) → delegates right-sizing to the OFFICIAL `tt model list --hw`;
+  refuses a `tt` that isn't `tt <semver>` (a stale pre-rename copy once shadowed it). Mac app shows a
+  "This Mac" pane. `macos/scripts/ensure-official-tt.sh` installs the official CLI (`uv tool install
+  tenstorrent`) from `install.sh` and the app's first run.
+- **Card facts (stable across power cycles):** `1e52:b140` subsys 0x43 = p100a; Gen4 x4 tunnelled
+  (card capable of Gen5 x16); BAR0 512 MiB, BAR2 1 MiB, BAR5 16 B, **BAR4 unassigned** (no 4 GiB windows).
+- **Dext (`macos/TTStationDriver/`):** TinyGPU-style PCIDriverKit driver, ABI v2 (GetInfo, CfgRead,
+  BAR mapping, PrepareDMA/CompleteDMA; bus master only on first DMA). Host app: `install|status|
+  probe [--noc] [--dma]|telemetry|serve`. Builds + signs; **never loaded yet**.
+- **libttbh (`macos/TTStationDriver/libttbh/`, C):** TLB packing, NOC, ARC boot status + telemetry
+  walk, ARC message queue, PCIe tile, outbound iATU, DMA plan. Verified by mutation-checked sim
+  tests AND on qb2-lab silicon via `ttbh-kmd-check --dma --arc` under gozer (matches tt-kmd hwmon,
+  all 9 iATU regs bit-for-bit, chip↔host DMA, 16/16 ARC TEST echoes). Silicon facts: iATU
+  `UPPER_LIMIT` keeps 8 bits (no region may cross 1 TiB); ARC queue has 4 entries.
+- **blackhole-py on macOS (`macos/TTStationDriver/bhpy/`):** a socket broker (python3 can't hold the
+  dext's userclient entitlement) served by the host app; windows proxied, sysmem shared via shm fd +
+  PrepareDMA + iATU (SCM_RIGHTS); `ttstation_bhpy` is a drop-in for blackhole-py's unlicensed
+  `pcie.py` (nothing copied; Allocator/board_config load from the user's checkout); Mac RISC-V
+  toolchain autodetect + `doctor`. Backends: real (IOKit), simulated (`ttbh-broker-sim`), and
+  **ttsim** (`ttbh-broker-ttsim`; Tenstorrent's simulator builds natively on macOS). On ttsim:
+  DMA through our iATU verified; blackhole-py's `boot()` runs its firmware >6M clocks until ttsim's
+  unmodelled Tensix cfg reg 4. ttsim gaps + workarounds are drafted, **not filed**, in
+  `docs/upstream-issue-drafts.md`.
+- **Signing day = `macos/TTStationDriver/scripts/first-light.sh --team <ID> --bhpy <dir> --python <venv>`**
+  (11 gated steps through M1–M4 to a validated matmul on the card; logs into the journey; `--sim`
+  rehearses today). `install-dev.sh --team` preflights Xcode with `-checkFirstLaunchStatus`.
+- **Next after first light:** blackhole-py Llama 3 8B locally; then the serving leg of the goal
+  (blackhole-py as the Mac runtime short-term, or a Containerization/`VZCustomVirtioDevice` Linux VM
+  with a virtio-tt device on macOS 27 long-term; "possible paths forward" in the spec); M6 = Apple's
+  distribution entitlement for vendor 0x1e52.
+- **qb2-lab:** `~/code/tt-station` tracks `experiments/egpu` (old `support/tt-cli` left alone); its
+  tree has a stale `.cargo/config.toml` + `vendor/`, so build new deps from `~/scratch/tts-clone`,
+  which pulls from that checkout (**pull the checkout first, then the clone**). Always `gozer run`
+  (see memory: `gozer wait` itself grants a lease; `TT_VISIBLE_DEVICES` holds BDFs).
 
 **CLI renamed `tt` → `tt-station` (2026-08-17, branch `refactor/cli-name`, stacks on
 `feat/gozer-integration`).** Our CLI was named `tt`, which is the name Tenstorrent's official
