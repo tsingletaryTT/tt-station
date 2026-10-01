@@ -13,6 +13,21 @@ struct BoxSidebarView: View {
             get: { model.selectedHostPort },
             set: { model.selectedHostPort = $0 }
         )) {
+            // A card attached to this Mac (Thunderbolt enclosure), from `tt-station local`.
+            // Hidden entirely when nothing is attached, so box-only setups look unchanged.
+            if let local = model.localReport, local.hasCards {
+                Section("This Mac") {
+                    HStack(spacing: 6) {
+                        Image(systemName: "cpu").font(.system(size: 10)).foregroundStyle(TTTheme.teal)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(local.cards.first?.boardLabel ?? "Tenstorrent card")
+                            Text(local.cards.first?.tunnelled == true ? "via Thunderbolt" : "local")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    .tag(AppModel.localSelectionID as String?)
+                }
+            }
             Section("Boxes") {
                 ForEach(model.boxes) { box in
                     HStack(spacing: 6) {

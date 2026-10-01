@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TEAM (development-signed) entitlements: scripts/install-dev.sh --team <ID>. This is the path
+  that should load with SIP ENABLED. Apple DTS: DriverKit has "development" entitlement variants
+  that are "available on all paid developer accounts without any special approval" and "allow a
+  DEXT to match against any hardware". Xcode 16+ automatic signing covers the PCI family for
+  development (distribution signing of PCI/USB still needs Apple's grant; that is spec M6).
+  (developer.apple.com/forums/thread/809202)
+
+  The PCI value is Apple's development WILDCARD (0xFFFFFFFF&0x00000000), exactly as DTS gives it:
+  the development profile grants that value, and a hand-narrowed value risks a profile/entitlement
+  mismatch. We are still scoped to Tenstorrent hardware twice over: Info.plist's personality matches
+  only 0xb1401e52, and TTBlackholeDriver::Start re-checks vendor/device before touching anything.
+  There is no allow-any-userclient-access: clients get in through the host app's userclient-access
+  entitlement, which is why the probe is run as `TTStationDriver probe`.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.driverkit</key>
+	<true/>
+	<key>com.apple.developer.driverkit.transport.pci</key>
+	<array>
+		<dict>
+			<key>IOPCIPrimaryMatch</key>
+			<string>0xFFFFFFFF&amp;0x00000000</string>
+		</dict>
+	</array>
+</dict>
+</plist>

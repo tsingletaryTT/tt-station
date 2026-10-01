@@ -23,6 +23,53 @@ installed on this box at `~/.tenstorrent-venv/bin/tt`.
 
 ## ▶ PICK UP HERE
 
+**eGPU experiment: a local P100 on a Mac (branch `experiments/egpu`, 2026-09-28 → 10-01).**
+Goal (owner): *tt-station detects a Tenstorrent card attached to a Mac and has the official `tt`
+CLI / tt-model-manager deploy a model right-sized for it*, reached in small steps. Rig: the owner's
+P100A in a Razer Core X V2 (USB4 v2) on a TB5 MacBook Pro, macOS 26.7. **Blocked only on a PAID
+Apple Developer team** (dev-signing is the only SIP-on way to load a dext; free teams can't; dev
+mode refuses with SIP on; ad-hoc apps are killed by AMFI).
+
+State, top to bottom (details: spec `docs/superpowers/specs/2026-09-28-macos-blackhole-dext-design.md`,
+milestones M0–M6; story: **journey log `docs/journey/egpu-p100-on-a-mac.md` — append a dated entry
+every session, keep dead ends, quote real output, it becomes a blog post**):
+- **`tt-station local` (v0.12.0, works today, no driver):** IORegistry detection
+  (`libttstation::local_device`; card, link, BARs, attached driver via ioreg depth 2) → mesh `p100`
+  (shared `libttstation::device_mesh`) → delegates right-sizing to the OFFICIAL `tt model list --hw`;
+  refuses a `tt` that isn't `tt <semver>` (a stale pre-rename copy once shadowed it). Mac app shows a
+  "This Mac" pane. `macos/scripts/ensure-official-tt.sh` installs the official CLI (`uv tool install
+  tenstorrent`) from `install.sh` and the app's first run.
+- **Card facts (stable across power cycles):** `1e52:b140` subsys 0x43 = p100a; Gen4 x4 tunnelled
+  (card capable of Gen5 x16); BAR0 512 MiB, BAR2 1 MiB, BAR5 16 B, **BAR4 unassigned** (no 4 GiB windows).
+- **Dext (`macos/TTStationDriver/`):** TinyGPU-style PCIDriverKit driver, ABI v2 (GetInfo, CfgRead,
+  BAR mapping, PrepareDMA/CompleteDMA; bus master only on first DMA). Host app: `install|status|
+  probe [--noc] [--dma]|telemetry|serve`. Builds + signs; **never loaded yet**.
+- **libttbh (`macos/TTStationDriver/libttbh/`, C):** TLB packing, NOC, ARC boot status + telemetry
+  walk, ARC message queue, PCIe tile, outbound iATU, DMA plan. Verified by mutation-checked sim
+  tests AND on qb2-lab silicon via `ttbh-kmd-check --dma --arc` under gozer (matches tt-kmd hwmon,
+  all 9 iATU regs bit-for-bit, chip↔host DMA, 16/16 ARC TEST echoes). Silicon facts: iATU
+  `UPPER_LIMIT` keeps 8 bits (no region may cross 1 TiB); ARC queue has 4 entries.
+- **blackhole-py on macOS (`macos/TTStationDriver/bhpy/`):** a socket broker (python3 can't hold the
+  dext's userclient entitlement) served by the host app; windows proxied, sysmem shared via shm fd +
+  PrepareDMA + iATU (SCM_RIGHTS); `ttstation_bhpy` is a drop-in for blackhole-py's unlicensed
+  `pcie.py` (nothing copied; Allocator/board_config load from the user's checkout); Mac RISC-V
+  toolchain autodetect + `doctor`. Backends: real (IOKit), simulated (`ttbh-broker-sim`), and
+  **ttsim** (`ttbh-broker-ttsim`; Tenstorrent's simulator builds natively on macOS). On ttsim:
+  DMA through our iATU verified; blackhole-py's `boot()` runs its firmware >6M clocks until ttsim's
+  unmodelled Tensix cfg reg 4. ttsim gaps + workarounds are drafted, **not filed**, in
+  `docs/upstream-issue-drafts.md`.
+- **Signing day = `macos/TTStationDriver/scripts/first-light.sh --team <ID> --bhpy <dir> --python <venv>`**
+  (11 gated steps through M1–M4 to a validated matmul on the card; logs into the journey; `--sim`
+  rehearses today). `install-dev.sh --team` preflights Xcode with `-checkFirstLaunchStatus`.
+- **Next after first light:** blackhole-py Llama 3 8B locally; then the serving leg of the goal
+  (blackhole-py as the Mac runtime short-term, or a Containerization/`VZCustomVirtioDevice` Linux VM
+  with a virtio-tt device on macOS 27 long-term; "possible paths forward" in the spec); M6 = Apple's
+  distribution entitlement for vendor 0x1e52.
+- **qb2-lab:** `~/code/tt-station` tracks `experiments/egpu` (old `support/tt-cli` left alone); its
+  tree has a stale `.cargo/config.toml` + `vendor/`, so build new deps from `~/scratch/tts-clone`,
+  which pulls from that checkout (**pull the checkout first, then the clone**). Always `gozer run`
+  (see memory: `gozer wait` itself grants a lease; `TT_VISIBLE_DEVICES` holds BDFs).
+
 **CLI renamed `tt` → `tt-station` (2026-08-17, branch `refactor/cli-name`, stacks on
 `feat/gozer-integration`).** Our CLI was named `tt`, which is the name Tenstorrent's official
 CLI (`tenstorrent/tt-cli`) owns — and that CLI already has `run`, `serve`, `stop`, `logs`,

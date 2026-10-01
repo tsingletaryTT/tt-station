@@ -1,3 +1,13 @@
+tt-station (0.12.0) noble; urgency=medium
+
+  * tt-station local: detect a Tenstorrent card attached to this machine
+    (macOS IORegistry, no driver) and ask the official `tt` CLI for
+    right-sized models (`tt model list --hw <config>`).
+  * The (board_type, count) -> device-mesh table moved to libttstation
+    and gained p100/p100a -> p100; the agent re-exports it unchanged.
+
+ -- Tenstorrent <software@tenstorrent.com>  Mon, 28 Sep 2026 16:48:58 -0700
+
 tt-station (0.11.0) noble; urgency=medium
 
   * Release 0.11.0.

@@ -1,0 +1,134 @@
+// TTStationDriver host app — its only job is to carry the dext inside its bundle
+// (Contents/Library/SystemExtensions/) and ask macOS to activate or deactivate it.
+// macOS requires a dext to be installed by an app living in /Applications.
+//
+//   /Applications/TTStationDriver.app/Contents/MacOS/TTStationDriver install|uninstall|status|probe
+//
+// Modeled on tinygrad's TinyGPUCLIRunner.swift (MIT), trimmed to a headless CLI.
+
+import Foundation
+import SystemExtensions
+
+let dextID = "com.tenstorrent.ttstation.driver"
+
+/// Exit codes, stable for scripts/install-dev.sh.
+/// `rebootRequired`: the request was accepted but the dext isn't running yet, so a caller must not
+/// go on to probe it as if it were.
+enum Exit: Int32 { case ok = 0, usage = 2, failed = 3, needsApproval = 4, rebootRequired = 5 }
+
+/// `systemextensionsctl list` is the only public way to read a dext's state without
+/// submitting a request; parse the line carrying our bundle ID.
+func dextState() -> String {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/systemextensionsctl")
+    p.arguments = ["list"]
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = Pipe()
+    guard (try? p.run()) != nil else { return "unknown (systemextensionsctl failed)" }
+    p.waitUntilExit()
+    let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    guard let line = text.split(separator: "\n").first(where: { $0.contains(dextID) }) else {
+        return "not installed"
+    }
+    // The state is the trailing "[...]" group, e.g. "[activated enabled]".
+    if let open = line.lastIndex(of: "[") { return String(line[open...]) }
+    return String(line)
+}
+
+let approvalHelp = """
+    Approve it in System Settings > General > Login Items & Extensions > Driver Extensions
+    (or Privacy & Security, depending on the macOS version), then re-run `status`.
+    """
+
+final class Requester: NSObject, OSSystemExtensionRequestDelegate {
+    let activating: Bool
+    init(activating: Bool) { self.activating = activating }
+
+    func submit() {
+        let req = activating
+            ? OSSystemExtensionRequest.activationRequest(forExtensionWithIdentifier: dextID, queue: .main)
+            : OSSystemExtensionRequest.deactivationRequest(forExtensionWithIdentifier: dextID, queue: .main)
+        req.delegate = self
+        OSSystemExtensionManager.shared.submitRequest(req)
+    }
+
+    func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
+        print("User approval required.\n\(approvalHelp)")
+        exit(Exit.needsApproval.rawValue)
+    }
+
+    func request(_ request: OSSystemExtensionRequest,
+                 didFinishWithResult result: OSSystemExtensionRequest.Result) {
+        switch result {
+        case .completed:
+            print(activating ? "Driver activated." : "Driver deactivated.")
+            exit(Exit.ok.rawValue)
+        case .willCompleteAfterReboot:
+            print("Will complete after reboot. Restart this Mac, then run: TTStationDriver status")
+            exit(Exit.rebootRequired.rawValue)
+        @unknown default:
+            // A result this build doesn't know can't be read as "done": don't let a script proceed.
+            print("Finished with an unrecognised result (\(result.rawValue)); check: TTStationDriver status")
+            exit(Exit.failed.rawValue)
+        }
+    }
+
+    func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
+        let code = (error as NSError).code
+        print("Error (\(code)): \(error.localizedDescription)")
+        // OSSystemExtensionError codes worth a hint.
+        switch code {
+        case 4: print("Missing/invalid entitlements — with SIP on, an ad-hoc dext is rejected here.")
+        case 8: print("Dext not found in the app bundle — was it embedded by the build?")
+        case 9: print("Extension disabled by the user.\n\(approvalHelp)")
+        default: break
+        }
+        exit(Exit.failed.rawValue)
+    }
+
+    func request(_ request: OSSystemExtensionRequest,
+                 actionForReplacingExtension existing: OSSystemExtensionProperties,
+                 withExtension ext: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction {
+        print("Replacing \(existing.bundleVersion) with \(ext.bundleVersion)")
+        return .replace
+    }
+}
+
+let args = CommandLine.arguments
+switch args.count > 1 ? args[1] : "" {
+case "status":
+    print("\(dextID): \(dextState())")
+    exit(Exit.ok.rawValue)
+case "probe":
+    // Same read-only smoke test as tt-station-bh-probe, but run from inside this app so it
+    // carries our userclient-access entitlement (needed once the dext is development-signed).
+    // `probe --noc` also reaches the ARC over the NOC (spec M2; programs one TLB register).
+    // `probe --dma` runs the chip↔host DMA loopback (spec M3; enables bus mastering).
+    let rest = args.dropFirst(2)
+    exit(ttbh_probe_run((rest.contains("--noc") ? TTBH_PROBE_NOC : 0) | (rest.contains("--dma") ? TTBH_PROBE_DMA : 0)))
+case "telemetry":
+    // One JSON line of live chip telemetry via the dext; `tt-station local` runs this once the
+    // dext has claimed the card (it shows up as the card's IORegistry child).
+    exit(ttbh_telemetry_json())
+case "serve":
+    // blackhole-py on this Mac: serve the ttbh broker (bhpy/broker.c) so an unentitled python3
+    // can drive the card (`python3 -m ttstation_bhpy …`). Default socket matches the client's.
+    let defaultSocket = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/TTStation/ttbh.sock").path
+    let socketPath = args.count > 2 ? args[2] : defaultSocket
+    try? FileManager.default.createDirectory(atPath: (socketPath as NSString).deletingLastPathComponent,
+                                             withIntermediateDirectories: true)
+    exit(ttbh_broker_serve_iokit(socketPath))
+case "install", "uninstall":
+    guard Bundle.main.bundlePath.hasPrefix("/Applications/") else {
+        print("Run from /Applications/TTStationDriver.app — macOS refuses dexts from elsewhere.")
+        exit(Exit.failed.rawValue)
+    }
+    let requester = Requester(activating: args[1] == "install")
+    requester.submit()
+    dispatchMain()  // delegate callbacks exit the process
+default:
+    print("usage: TTStationDriver install | uninstall | status | probe [--noc] [--dma] | telemetry | serve [SOCKET]")
+    exit(Exit.usage.rawValue)
+}
