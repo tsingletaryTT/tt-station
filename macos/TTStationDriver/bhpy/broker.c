@@ -326,7 +326,17 @@ int broker_serve(const broker_backend *be, const char *path)
     struct sockaddr_un addr = { .sun_family = AF_UNIX };
     if (strlen(path) >= sizeof addr.sun_path) { fprintf(stderr, "socket path too long\n"); return 1; }
     strcpy(addr.sun_path, path);
-    unlink(path);
+    // Replace only a stale SOCKET at the path. The path is caller-chosen (`serve [SOCKET]`), so
+    // anything else there (a regular file, a directory, a symlink) is left alone and we refuse.
+    struct stat st;
+    if (lstat(path, &st) == 0) {
+        if (!S_ISSOCK(st.st_mode)) {
+            fprintf(stderr, "ttbh broker: %s exists and is not a socket; refusing to replace it\n", path);
+            close(srv);
+            return 1;
+        }
+        unlink(path);
+    }
     mode_t old = umask(0077);                             // only this user may connect
     int err = bind(srv, (struct sockaddr *)&addr, sizeof addr);
     umask(old);

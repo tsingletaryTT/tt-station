@@ -97,7 +97,9 @@ iATU outright, so two would silently clobber each other's state. The broker (`TT
 serve`) is the one owner that other processes share. When that client goes away (exit or crash),
 its `Stop` calls the driver's `ReleaseClient` **before** completing DMA mappings. That turns off all
 16 outbound iATU regions (`CTRL_2 = 0`) and bus mastering, then frees the slot. The device has to
-stop issuing before DART unmaps, or an in-flight chip write could land in pages the OS has reused.
+stop issuing before DART unmaps, or an in-flight chip write could land in pages the OS has reused. `Start` also **clears** Bus
+Master Enable (firmware or a previous driver may have left it on), so "no DMA until the first
+`PrepareDMA`" holds from attach, not only after the first client.
 
 Deliberately **not** in v1: config writes, reset, DMA. Writes to config space and resets
 over a TB tunnel are the riskiest operations and nothing needs them to prove M1.

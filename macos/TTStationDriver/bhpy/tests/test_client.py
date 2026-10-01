@@ -179,6 +179,56 @@ class HostMemory(BrokerCase):
         m.close()
 
 
+class SocketPath(BrokerCase):
+    def setUp(self):
+        if not BROKER:
+            self.skipTest("TTBH_BROKER_SIM not set (run via make test)")
+        self.tmp = tempfile.mkdtemp()
+
+    def test_a_non_socket_at_the_path_is_left_alone(self):
+        path = os.path.join(self.tmp, "precious.txt")
+        with open(path, "w") as f:
+            f.write("not a socket")
+        r = subprocess.run([BROKER, path], capture_output=True, timeout=10)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(b"not a socket", r.stderr)
+        with open(path) as f:
+            self.assertEqual(f.read(), "not a socket")       # still there, untouched
+
+
+class CleanClose(unittest.TestCase):
+    """PCIDevice.close() must close the broker connection even when the steps before it fail:
+    the broker only frees the session (DMA mappings, iATU, the exclusive dext client) on hang-up."""
+
+    def test_socket_closes_even_if_sysmem_free_and_power_down_fail(self):
+        events = []
+
+        class FailingSysmem:
+            def close(self):
+                events.append("sysmem")
+                raise wire.BrokerError(wire.SYSMEM_FREE, -1)
+
+        class FakeConn:
+            def call(self, cmd, *a, **k):
+                events.append("power")
+                raise wire.BrokerError(wire.ARC_MSG, -9)
+
+            def close(self):
+                events.append("socket")
+
+        dev = object.__new__(pcie_darwin.PCIDevice)            # skip __init__: no broker needed
+        dev.fd, dev.sysmem, dev.powered = FakeConn(), FailingSysmem(), True
+        with self.assertRaises(wire.BrokerError) as caught:
+            dev.close()
+        self.assertEqual(events, ["sysmem", "power", "socket"])
+        # The last failure propagates; the earlier one rides along as its context.
+        self.assertEqual(caught.exception.status, -9)
+        self.assertEqual(caught.exception.__context__.status, -1)
+        self.assertIsNone(dev.fd)
+        dev.close()                                            # idempotent afterwards
+        self.assertEqual(events, ["sysmem", "power", "socket"])
+
+
 class _MiniAllocator:
     def __init__(self, start, end, alignment=1):
         self.next, self.end, self.alignment = start, end, alignment

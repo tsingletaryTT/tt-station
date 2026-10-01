@@ -75,12 +75,15 @@ kern_return_t IMPL(TTBlackholeDriver, Start)
         return kIOReturnUnsupported;
     }
 
-    // Decode MMIO so the BAR mappings actually reach the chip. Bus mastering deliberately
-    // left untouched (see file header).
+    // Decode MMIO so the BAR mappings actually reach the chip, and explicitly CLEAR bus mastering:
+    // firmware or a previous driver may have left it set, and the invariant is that the chip can't
+    // reach host memory until our first PrepareDMA (which is also what ReleaseClient's bookkeeping
+    // assumes). See file header.
     uint16_t command = 0;
     ivars->pci->ConfigurationRead16(kIOPCIConfigurationOffsetCommand, &command);
     ivars->pci->ConfigurationWrite16(kIOPCIConfigurationOffsetCommand,
-                                     command | kIOPCICommandMemorySpace);
+                                     (uint16_t)((command | kIOPCICommandMemorySpace) & ~kIOPCICommandBusMaster));
+    ivars->busMaster = false;
 
     // (Plain array: the DriverKit libc++ subset has no std::initializer_list.)
     static const uint8_t kBars[] = {0, 2, 4};

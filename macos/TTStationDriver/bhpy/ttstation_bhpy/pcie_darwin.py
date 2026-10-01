@@ -158,11 +158,21 @@ class PCIDevice:
         self.fd.call(wire.ARC_MSG, payload=struct.pack("<8I", header, *([0] * 7)))
 
     def close(self):
-        if self.fd is not None:
+        # Every step is attempted even if an earlier one fails, and the socket ALWAYS closes: the
+        # broker holds the exclusive dext client and frees this session's DMA mappings and iATU
+        # regions only when the connection drops. If several steps fail, the last
+        # error propagates with the earlier ones chained as its __context__.
+        if self.fd is None:
+            return
+        try:
             if self.sysmem is not None:
-                self.sysmem.close()
-            if self.powered:
-                self._set_power(0)
-                self.powered = False
-            self.fd.close()
-            self.fd = None
+                sysmem, self.sysmem = self.sysmem, None
+                sysmem.close()
+        finally:
+            try:
+                if self.powered:
+                    self.powered = False
+                    self._set_power(0)
+            finally:
+                fd, self.fd = self.fd, None
+                fd.close()

@@ -985,3 +985,11 @@ gone straight on to probe a driver that wasn't running. The env step reported "o
 installed" and passed anyway. One was a real memory-safety hole: the broker's window bounds check
 was `offset + length > 2 MiB`, so an offset near 2^64 wraps around and passes. A new test sends
 exactly that. It failed against the old check before it passed against the new one.
+
+Copilot's second pass found three more of the same kind. `Start` *preserved* a Bus Master bit
+that firmware might have left on, while our bookkeeping said it was off. So "no DMA before the
+first PrepareDMA" was what we believed, not what the code enforced. It now clears it. The
+broker's `unlink(path)` before `bind` would delete whatever sat at a caller-chosen path, so a
+typo'd `serve ~/notes.txt` would cost a file. It now replaces only a stale socket. And
+`PCIDevice.close()` stopped at the first broker error, leaving the socket (and with it the dext's
+one client slot) held. Both new tests failed against the old code first.
