@@ -185,6 +185,29 @@ fn a_file_without_last_model_still_loads() {
 }
 
 #[test]
+fn update_rereads_the_file_so_a_save_made_since_the_last_load_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.json");
+    let mut tray_copy = Registry::load(&path);
+    let id = tray_copy.add_manual("box", 8765).unwrap();
+    tray_copy.save().unwrap();
+
+    // The window saves a new station and a remembered run after the tray's load.
+    let mut window_copy = Registry::load(&path);
+    let added = window_copy.add_manual("added-by-window", 8765).unwrap();
+    window_copy.remember_run(&added, "m", &opts(7));
+    window_copy.save().unwrap();
+
+    Registry::update(&path, |r| r.set_mac(&id, "aa:bb:cc:dd:ee:ff")).unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("added-by-window"), "{text}");
+    assert!(text.contains("aa:bb:cc:dd:ee:ff"), "{text}");
+    let again = Registry::load(&path);
+    assert_eq!(again.last_run(&added, "m"), Some(&opts(7)));
+}
+
+#[test]
 fn save_is_atomic() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stations.json");
@@ -212,6 +235,8 @@ fn save_is_atomic() {
     let leftovers: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .map(|e| e.unwrap().file_name())
+        // The advisory lock file (`.stations.json.lock`) is expected and stays.
+        .filter(|n| !n.to_string_lossy().ends_with(".lock"))
         .collect();
     assert_eq!(
         leftovers.len(),

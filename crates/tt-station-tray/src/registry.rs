@@ -132,11 +132,36 @@ impl Registry {
     /// filesystem), is flushed to disk, then renamed over the target. On any failure the
     /// temporary file is removed and the previous file is untouched. The parent directory is
     /// created if needed.
+    ///
+    /// The write happens under the registry's advisory lock (see [`Registry::update`]).
     pub fn save(&self) -> anyhow::Result<()> {
-        let dir = match self.path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
+        let _lock = lock_registry(&self.path)?;
+        self.save_locked()
+    }
+
+    /// Load the file, apply `f`, and save, all under one exclusive advisory lock on a sibling
+    /// `.<name>.lock` file (`std::fs::File::lock`, an `flock` on Linux).
+    ///
+    /// Use this for a small change made long after the last load, such as the tray recording a
+    /// MAC it learned while polling. Reading the file again under the lock keeps whatever another
+    /// writer saved in the meantime (a station the window added, a run it remembered, a removal).
+    ///
+    /// **Limitation.** The lock only orders writers that take it, and it cannot protect a writer
+    /// that saves an old in-memory copy: the window loads the registry once and later saves its
+    /// whole copy with [`Registry::save`], which can still overwrite a MAC the tray wrote after
+    /// that load. The lock prevents two writes from interleaving and makes this function's
+    /// read-modify-write atomic; it does not merge stale copies. The lock is advisory, so a
+    /// process that ignores it (an editor) is not stopped.
+    pub fn update(path: &Path, f: impl FnOnce(&mut Registry)) -> anyhow::Result<()> {
+        let _lock = lock_registry(path)?;
+        let mut reg = Registry::load(path);
+        f(&mut reg);
+        reg.save_locked()
+    }
+
+    /// The body of [`Registry::save`]; the caller holds the lock.
+    fn save_locked(&self) -> anyhow::Result<()> {
+        let dir = parent_dir(&self.path);
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
         let on_disk = OnDisk {
@@ -238,6 +263,36 @@ impl Registry {
     pub fn last_run(&self, station: &StationId, model: &str) -> Option<&RunOptions> {
         self.last_run.get(&(station.0.clone(), model.to_string()))
     }
+}
+
+/// The registry file's directory, or `.` for a bare file name.
+fn parent_dir(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// Take the exclusive advisory lock for the registry at `path`: an `flock` on
+/// `<dir>/.<name>.lock`, created if needed and held until the returned file is dropped. Blocks
+/// while another holder has it; every holder only reads and writes one small file.
+fn lock_registry(path: &Path) -> anyhow::Result<std::fs::File> {
+    let dir = parent_dir(path);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "stations.json".into());
+    let lock_path = dir.join(format!(".{name}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("opening {}", lock_path.display()))?;
+    file.lock()
+        .with_context(|| format!("locking {}", lock_path.display()))?;
+    Ok(file)
 }
 
 /// The address checks [`Registry::add_manual`] applies, without adding anything: a strict

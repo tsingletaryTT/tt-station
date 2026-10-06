@@ -218,7 +218,8 @@ pub struct TrayLink {
 /// decides, because it knows whether a tray host exists. If the tray is running the hold stays,
 /// so closing the window leaves the tray running; `Quit` from the tray ends the app. If the tray
 /// did not start, the hold is released once the window is open, so closing the window ends the
-/// app as an ordinary windowed app. Later activations (a second launch) open or raise the window.
+/// app as an ordinary windowed app. The same release happens on [`UiRequest::TrayGone`], when
+/// the tray side stops later. Later activations (a second launch) open or raise the window.
 pub fn run_app(
     rt: tokio::runtime::Handle,
     registry_path: &Path,
@@ -283,6 +284,11 @@ pub fn run_app(
                             }
                         }
                         UiRequest::Quit => application.quit(),
+                        // The tray went away: drop the hold so the process ends with the
+                        // last window (at once if none is open) and does not linger unseen.
+                        UiRequest::TrayGone => {
+                            hold.borrow_mut().take();
+                        }
                     }
                 }
             });

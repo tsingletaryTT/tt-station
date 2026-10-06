@@ -127,6 +127,15 @@ impl Station {
         }
     }
 
+    /// The unreachable state used when [`Station::state`] did not finish in time (or its task
+    /// failed). Makes no request and starts no process.
+    pub fn offline_state(&self) -> StationState {
+        match self {
+            Station::Local(s) => s.offline_state(),
+            Station::Remote(s) => s.offline_state(),
+        }
+    }
+
     /// Snapshot of the station. Never fails; see [`StationState`].
     pub async fn state(&self) -> StationState {
         match self {

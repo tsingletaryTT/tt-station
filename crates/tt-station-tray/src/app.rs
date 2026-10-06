@@ -56,6 +56,13 @@ use crate::window::view_model::{mac_to_remember, station_with_registry_mac};
 /// How often the poll loop refreshes every station.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How long one station's `state()` may take in a poll before it is shown as unreachable.
+/// Station calls have no timeout of their own (a box that is off can hold a TCP connect for a
+/// long time), and without this one dead box would hold back every row and the menu itself.
+/// Three seconds is well above a healthy agent's `/status` or a local `tt model ps`, and short
+/// enough that the menu stays current with the 5-second poll.
+pub const STATE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// What [`dispatch`] wants the app to do next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionOutcome {
@@ -82,6 +89,9 @@ pub enum UiRequest {
     },
     /// Quit the app.
     Quit,
+    /// The tray side stopped (its icon went away). The GTK side releases its hold, so the
+    /// process ends when no window is open and does not linger with neither tray nor window.
+    TrayGone,
 }
 
 /// Sends a Wake-on-LAN packet. The real one broadcasts over UDP ([`UdpBroadcast`]); tests use a
@@ -127,6 +137,9 @@ pub struct AppContext {
     pub wayland: bool,
     /// Started with `--no-window`: there is no window to open.
     pub no_window: bool,
+    /// Per-station limit on `state()` in [`AppContext::refresh`]; [`STATE_TIMEOUT`] by default.
+    /// Tests set a short one.
+    pub state_timeout: Duration,
 }
 
 impl AppContext {
@@ -150,6 +163,7 @@ impl AppContext {
             openwebui_port: DEFAULT_OPENWEBUI_PORT,
             wayland: false,
             no_window: false,
+            state_timeout: STATE_TIMEOUT,
         }
     }
 
@@ -180,6 +194,12 @@ impl AppContext {
         }
         ctx.sync_stations(&Registry::load(registry_path));
         ctx
+    }
+
+    /// Use `t` as the per-station poll limit in place of [`STATE_TIMEOUT`].
+    pub fn with_state_timeout(mut self, t: Duration) -> AppContext {
+        self.state_timeout = t;
+        self
     }
 
     /// Mark the context as started with `--no-window`.
@@ -242,35 +262,63 @@ impl AppContext {
         *built = key;
     }
 
-    /// Refresh every station's state (concurrently), merge the registry's MAC into offline
-    /// boxes, save a newly seen MAC, and keep the result for [`AppContext::states`].
+    /// Refresh every station's state, merge the registry's MAC into offline boxes, record a
+    /// newly seen MAC, and keep the result for [`AppContext::states`].
+    ///
+    /// The stations are polled concurrently, each limited to `state_timeout`. A station that
+    /// does not answer in time, or whose task failed, is shown as unreachable
+    /// ([`Station::offline_state`]) and keeps its place in the list; the others are not held
+    /// back. So one refresh takes at most about `state_timeout`.
+    ///
+    /// A new MAC is written with [`Registry::update`], which reads the file again under the
+    /// registry lock after the polls finish. A station, run or removal the window saved while
+    /// the polls ran is kept (the registry's doc names what this does not cover).
     pub async fn refresh(&self) -> Vec<StationState> {
-        let mut reg = self.registry();
+        let reg = self.registry();
         self.sync_stations(&reg);
         let stations: Vec<Arc<Station>> = self
             .stations
             .lock()
             .expect("stations mutex poisoned")
             .clone();
+        let limit = self.state_timeout;
         let tasks: Vec<_> = stations
-            .into_iter()
-            .map(|s| tokio::spawn(async move { s.state().await }))
+            .iter()
+            .map(|s| {
+                let s = s.clone();
+                tokio::spawn(async move { tokio::time::timeout(limit, s.state()).await })
+            })
             .collect();
         let mut states = Vec::with_capacity(tasks.len());
-        let mut changed = false;
-        for t in tasks {
-            let Ok(state) = t.await else { continue };
+        let mut new_macs: Vec<(StationId, String)> = Vec::new();
+        for (station, task) in stations.iter().zip(tasks) {
+            let state = match task.await {
+                Ok(Ok(state)) => state,
+                // Too slow: dropping the future cancels it (a local `tt` is killed on drop).
+                Ok(Err(_elapsed)) => station.offline_state(),
+                Err(e) => {
+                    eprintln!(
+                        "tt-station-tray: polling {} failed ({e}); showing it as unreachable",
+                        station.id().0
+                    );
+                    station.offline_state()
+                }
+            };
             let known = reg.stations().iter().find(|k| k.id() == state.id).cloned();
             if let Some(k) = &known {
                 if let Some(mac) = mac_to_remember(&state, k) {
-                    reg.set_mac(&k.id(), &mac);
-                    changed = true;
+                    new_macs.push((k.id(), mac));
                 }
             }
             states.push(station_with_registry_mac(state, known.as_ref()));
         }
-        if changed {
-            if let Err(e) = reg.save() {
+        if !new_macs.is_empty() {
+            let saved = Registry::update(&self.registry_path, |r| {
+                for (id, mac) in &new_macs {
+                    r.set_mac(id, mac);
+                }
+            });
+            if let Err(e) = saved {
                 eprintln!("tt-station-tray: could not save the registry: {e:#}");
             }
         }
@@ -366,8 +414,17 @@ where
     }
 }
 
-/// Stop what the station serves and start the same model again with the options remembered for
-/// it. With none remembered, it restarts with default options and says so.
+/// Stop what the station serves and start it again with the options remembered for it.
+///
+/// **Which name to run.** The served id (what `/v1/models` or `tt model ps` reports, such as
+/// `meta-llama/Llama-3.1-8B-Instruct`) is often not the name the run sheet ran and remembered
+/// (`Llama-3.1-8B-Instruct`). So the run name is the served id when the registry has options
+/// under it, else the station's most recently run model ([`Registry::last_model`]). That second
+/// case assumes the shown server is the one this app last started there; a server started by
+/// another tool after that would be replaced by the remembered model.
+///
+/// **Order.** The run name is settled before anything is stopped. When there is none, Restart
+/// refuses with a message and leaves the server running.
 async fn restart(ctx: &AppContext, id: &StationId) -> ActionOutcome {
     let Some(st) = ctx.station(id) else {
         return not_listed(id);
@@ -379,18 +436,23 @@ async fn restart(ctx: &AppContext, id: &StationId) -> ActionOutcome {
             state.name
         ));
     };
-    let remembered = ctx.registry().last_run(id, &serving.model).cloned();
-    let options = remembered.clone().unwrap_or_default();
+    let reg = ctx.registry();
+    let run_name = if reg.last_run(id, &serving.model).is_some() {
+        Some(serving.model.clone())
+    } else {
+        reg.last_model(id).map(str::to_string)
+    };
+    let Some(run_name) = run_name else {
+        return ActionOutcome::Message(format!(
+            "Restart needs the model name this app used to start {} on {}, and none is              remembered. The server was left running. Open the window to start it from there.",
+            serving.model, state.name
+        ));
+    };
+    let options = reg.last_run(id, &run_name).cloned().unwrap_or_default();
     if let Err(e) = st.stop().await {
         return ActionOutcome::Message(format!("Restart failed: {e:#}"));
     }
-    match st.run(&serving.model, false, &options).await {
-        Ok(_) if remembered.is_none() => ActionOutcome::Message(format!(
-            "Restarted {} with default options (no options were remembered for it).",
-            serving.model
-        )),
-        r => failed_or_done("Restart", r),
-    }
+    failed_or_done("Restart", st.run(&run_name, false, &options).await)
 }
 
 /// Run the model most recently run on this station, with its remembered options.
@@ -514,13 +576,15 @@ async fn probe_and_notify(ctx: &AppContext) -> HostStatus {
     host
 }
 
-/// Start the SNI tray with the current menu. Returns the handle and the receiver of menu clicks,
-/// or the error text (no session bus, no watcher, no host).
+/// Start the SNI tray with the menu for the states known so far (none at start, which gives
+/// Open window and Quit). It does not poll first: the first poll happens in [`run_loops`], so
+/// a slow station cannot delay the tray or `Started`. Returns the handle and the receiver of
+/// menu clicks, or the error text (no session bus, no watcher, no host).
 async fn spawn_tray(
     ctx: &AppContext,
 ) -> Result<(ksni::Handle<TtTray>, UnboundedReceiver<MenuAction>), String> {
     use ksni::TrayMethods;
-    let states = ctx.refresh().await;
+    let states = ctx.states();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let tray = TtTray {
         items: menu_for(&states, &ctx.registry()),
@@ -533,12 +597,18 @@ async fn spawn_tray(
         .map_err(|e| e.to_string())
 }
 
-/// Default mode, tray side. Probe the host, maybe show the notice, start the tray, tell the GTK
-/// thread whether to open the window, then run the action and poll loops until the app quits.
+/// Default mode, tray side. Probe the host, maybe show the notice, start the tray (skipped when
+/// no host is present, since ksni would refuse anyway), tell the GTK thread whether to open the
+/// window, then run the action and poll loops. No station is polled before `Started` is sent.
 /// A tray that fails to start is logged in one line and the app carries on as a windowed app.
+/// When the loops end (the tray went away) the GTK side gets [`UiRequest::TrayGone`].
 pub async fn start_with_window(ctx: Arc<AppContext>, ui: UnboundedSender<UiRequest>) {
     let host = probe_and_notify(&ctx).await;
-    let tray = spawn_tray(&ctx).await;
+    let tray = if host == HostStatus::Missing {
+        Err("no StatusNotifier host on the session bus".to_string())
+    } else {
+        spawn_tray(&ctx).await
+    };
     if let Err(e) = &tray {
         eprintln!(
             "tt-station-tray: the tray icon did not start ({e}); continuing with the window only"
@@ -554,6 +624,7 @@ pub async fn start_with_window(ctx: Arc<AppContext>, ui: UnboundedSender<UiReque
             let _ = ui2.send(req);
         })
         .await;
+        let _ = ui.send(UiRequest::TrayGone);
     }
 }
 
@@ -590,7 +661,34 @@ pub async fn run_no_window(ctx: Arc<AppContext>) -> i32 {
     0
 }
 
-/// The action loop and the poll loop, until the click channel closes.
+/// Where [`run_loops`] puts each new menu: the ksni handle in the app, a recorder in tests.
+pub trait MenuPusher: Send + Sync + 'static {
+    /// Replace the menu. Returns false when the tray is gone, which ends the poll loop.
+    fn push(
+        &self,
+        items: Vec<MenuItem>,
+        attention: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>;
+}
+
+impl MenuPusher for ksni::Handle<TtTray> {
+    fn push(
+        &self,
+        items: Vec<MenuItem>,
+        attention: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        Box::pin(async move {
+            self.update(|t| {
+                t.items = items;
+                t.needs_attention = attention;
+            })
+            .await
+            .is_some()
+        })
+    }
+}
+
+/// The action loop and the poll loop, until the tray goes away.
 ///
 /// Each click runs [`dispatch`] in its own task, so a slow action (Open WebUI waiting for its
 /// first start) does not hold up Stop. After every action, and every [`POLL_INTERVAL`], the
@@ -598,7 +696,7 @@ pub async fn run_no_window(ctx: Arc<AppContext>) -> i32 {
 /// `Quit`.
 pub async fn run_loops(
     ctx: Arc<AppContext>,
-    handle: ksni::Handle<TtTray>,
+    pusher: impl MenuPusher,
     mut actions: UnboundedReceiver<MenuAction>,
     ui: impl Fn(UiRequest) + Send + Sync + 'static,
 ) {
@@ -613,14 +711,7 @@ pub async fn run_loops(
                 let states = ctx.refresh().await;
                 let menu = menu_for(&states, &ctx.registry());
                 let attention = needs_attention(&states);
-                if handle
-                    .update(|t| {
-                        t.items = menu;
-                        t.needs_attention = attention;
-                    })
-                    .await
-                    .is_none()
-                {
+                if !pusher.push(menu, attention).await {
                     eprintln!("tt-station-tray: the tray icon stopped; menu updates end here");
                     return;
                 }
@@ -649,7 +740,12 @@ pub async fn run_loops(
         }
     };
 
-    tokio::join!(poll, clicks);
+    // The poll loop ends when the tray is gone; the click loop when its channel closes. Either
+    // one ending means the tray is no longer usable.
+    tokio::select! {
+        _ = poll => {}
+        _ = clicks => {}
+    }
 }
 
 /// The part of `--smoke` that covers this module: [`dispatch`] against a fixed, empty context in

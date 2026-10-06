@@ -3,8 +3,9 @@
 //! * no arguments (default): the tray icon, the 5-second poll that keeps its menu current, and
 //!   the main window. The window opens at start only when no tray host is present or the tray
 //!   could not start; otherwise it opens from the tray's "Open window". Closing the window
-//!   leaves the tray running. A second launch raises the running instance's window
-//!   (GApplication single instance, see [`window::run_app`]).
+//!   leaves the tray running. A second launch is designed to raise the running instance's
+//!   window (GApplication single instance, see [`window::run_app`]); that has not yet been
+//!   observed on a desktop.
 //! * `--no-window`: the tray only, with no GTK at all. With no tray host it says so on stderr
 //!   and exits 1, because a tray-only app with no tray would run invisibly. "Open window" in
 //!   this mode shows a message instead. It does not take part in single-instance detection.

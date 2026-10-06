@@ -15,6 +15,9 @@
 //!   workstation and the endpoint may be a QuietBox on the LAN. Only a loopback endpoint
 //!   (`localhost`, `127.x.x.x`, `::1`) is rewritten to `host.docker.internal:<port>`, because
 //!   inside the container loopback is the container itself. A LAN address is passed through as is.
+//! * **Open WebUI is published on loopback only** (`-p 127.0.0.1:<port>:8080`). It runs with
+//!   `WEBUI_AUTH=false`, so publishing it on every interface (as the panel does, on a box) would
+//!   give anyone on the LAN a login-free chat page on this workstation.
 //! * **A running container is reused only when it points at the same endpoint.** The panel only
 //!   ever had one endpoint. The tray can switch between stations, so a running Open WebUI wired
 //!   to another station is replaced.
@@ -145,9 +148,10 @@ pub struct OpenWebUiPlan {
     pub run: Vec<String>,
     /// The OpenAI base URL the container is given.
     pub api_base: String,
-    /// `http://localhost:<host_port>/health`.
+    /// `http://127.0.0.1:<host_port>/health`. The address it is published on: `localhost` may
+    /// resolve to `::1` first, where nothing listens.
     pub health_url: String,
-    /// `http://localhost:<host_port>`, opened in the browser when ready.
+    /// `http://127.0.0.1:<host_port>`, opened in the browser when ready.
     pub open_url: String,
 }
 
@@ -203,7 +207,7 @@ pub fn open_webui_command(
             s("--name"),
             s(c),
             s("-p"),
-            format!("{host_port}:{OPENWEBUI_INTERNAL_PORT}"),
+            format!("127.0.0.1:{host_port}:{OPENWEBUI_INTERNAL_PORT}"),
             s("--add-host=host.docker.internal:host-gateway"),
             s("-e"),
             format!("OPENAI_API_BASE_URL={api_base}"),
@@ -216,8 +220,8 @@ pub fn open_webui_command(
             s(OPENWEBUI_IMAGE),
         ],
         api_base,
-        health_url: format!("http://localhost:{host_port}/health"),
-        open_url: format!("http://localhost:{host_port}"),
+        health_url: format!("http://127.0.0.1:{host_port}/health"),
+        open_url: format!("http://127.0.0.1:{host_port}"),
     })
 }
 
@@ -465,13 +469,27 @@ pub fn copy_to_clipboard(r: &dyn Runner, text: &str, wayland: bool) -> Result<St
 }
 
 /// The `notify-send` argv for a message from the tray.
+///
+/// Messages can carry text a box sent (a model name, a refusal's holder text), so: `--` ends
+/// option parsing before the summary, which keeps a body starting with `-` from being read as
+/// an option; and the body has `&`, `<` and `>` escaped, because notification servers render a
+/// subset of markup in the body.
 pub fn notify_argv(notify_send: &str, message: &str) -> Vec<String> {
     vec![
         notify_send.to_string(),
         "--app-name=TT Station".to_string(),
+        "--".to_string(),
         "TT Station".to_string(),
-        message.to_string(),
+        escape_markup(message),
     ]
+}
+
+/// `message` with `&`, `<` and `>` replaced by their entities (`&` first).
+pub fn escape_markup(message: &str) -> String {
+    message
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Show `message` as a desktop notification when `notify-send` is installed. The message is
@@ -562,7 +580,7 @@ impl Runner for SystemRunner {
     }
 
     /// A plain HTTP/1.0 GET over a TCP socket, once a second until `timeout`. Only used for
-    /// `http://localhost:<port>/health`, so no TLS and no redirects.
+    /// `http://127.0.0.1:<port>/health`, so no TLS and no redirects.
     fn wait_http_ok(&self, url: &str, timeout: Duration) -> bool {
         let Some(u) = parse_url(url) else {
             return false;
@@ -698,7 +716,7 @@ mod tests {
         let run = &plan.run;
         assert_eq!(&run[..3], &["docker", "run", "-d"]);
         assert!(has_pair(run, "--name", "ttstation-openwebui"), "{run:?}");
-        assert!(has_pair(run, "-p", "3000:8080"), "{run:?}");
+        assert!(has_pair(run, "-p", "127.0.0.1:3000:8080"), "{run:?}");
         assert!(run.contains(&"--add-host=host.docker.internal:host-gateway".to_string()));
         assert!(
             has_pair(
@@ -726,7 +744,7 @@ mod tests {
         }
         assert_eq!(plan.inspect[..3], ["docker", "inspect", "-f"]);
         assert_eq!(plan.remove, ["docker", "rm", "-f", "ttstation-openwebui"]);
-        assert_eq!(plan.health_url, "http://localhost:3000/health");
+        assert_eq!(plan.health_url, "http://127.0.0.1:3000/health");
     }
 
     #[test]
@@ -734,7 +752,7 @@ mod tests {
         let plan =
             open_webui_command("docker", &ep("http://localhost:20000/v1", "m"), 3100).unwrap();
         assert_eq!(plan.api_base, "http://host.docker.internal:20000/v1");
-        assert!(has_pair(&plan.run, "-p", "3100:8080"));
+        assert!(has_pair(&plan.run, "-p", "127.0.0.1:3100:8080"));
     }
 
     #[test]
@@ -790,10 +808,10 @@ mod tests {
             r.spawned(),
             vec![vec![
                 "/fake/bin/xdg-open".to_string(),
-                "http://localhost:3000".to_string()
+                "http://127.0.0.1:3000".to_string()
             ]]
         );
-        assert!(msg.contains("http://localhost:3000"), "{msg}");
+        assert!(msg.contains("http://127.0.0.1:3000"), "{msg}");
     }
 
     #[test]
@@ -955,6 +973,18 @@ mod tests {
         let r = Recorder::with(&[]);
         notify(&r, "hello");
         assert!(r.spawned().is_empty());
+    }
+
+    #[test]
+    fn notify_argv_ends_options_before_the_summary_and_escapes_markup() {
+        let argv = notify_argv("/fake/bin/notify-send", "-rf model <b>x</b> & y");
+        let dash = argv.iter().position(|w| w == "--").expect("-- present");
+        assert_eq!(argv[dash + 1], "TT Station");
+        assert_eq!(
+            argv.last().unwrap(),
+            "-rf model &lt;b&gt;x&lt;/b&gt; &amp; y"
+        );
+        assert!(argv[..dash].iter().all(|w| !w.contains("rf")));
     }
 
     #[test]

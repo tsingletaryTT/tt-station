@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use libttstation::run_options::RunOptions;
 use tt_station_tray::app::{
-    dispatch, maybe_show_notice, menu_for, ActionOutcome, AppContext, WolSender,
+    dispatch, maybe_show_notice, menu_for, run_loops, ActionOutcome, AppContext, MenuPusher,
+    WolSender,
 };
 use tt_station_tray::launchers::{RunOutput, Runner};
 use tt_station_tray::local::LocalStation;
@@ -160,11 +161,24 @@ fn port_opts(port: u16) -> RunOptions {
 /// A fake `tt` in `dir` whose `model ps` lists one running server, `shown`, with a URL. Every
 /// call is appended to the returned log. `serve_fails` makes `serve` exit 3 with a message.
 fn fake_tt(dir: &Path, serve_fails: bool) -> (PathBuf, PathBuf) {
+    fake_tt_with(dir, serve_fails, "shown-model", "")
+}
+
+/// [`fake_tt`] with knobs: `served_id` is what `model ps` reports as the served id of the
+/// server whose run name is `shown-model`; `version_delay` is a shell prefix for `--version`
+/// (for example `sleep 5;`) to make every `state()` slow.
+fn fake_tt_with(
+    dir: &Path,
+    serve_fails: bool,
+    served_id: &str,
+    version_delay: &str,
+) -> (PathBuf, PathBuf) {
     let log = dir.join("argv.log");
     let ps = dir.join("ps.json");
     std::fs::write(
         &ps,
-        r#"{"served":[{"name":"shown-model","backend":"tt","port":20000,"base_url":"http://127.0.0.1:20000/v1","status":"running","served_id":"shown-model"}],"probed":true}"#,
+        r#"{"served":[{"name":"shown-model","backend":"tt","port":20000,"base_url":"http://127.0.0.1:20000/v1","status":"running","served_id":"SERVED_ID"}],"probed":true}"#
+            .replace("SERVED_ID", served_id),
     )
     .unwrap();
     let dry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dry_run_catalog.json");
@@ -180,7 +194,7 @@ fn fake_tt(dir: &Path, serve_fails: bool) -> (PathBuf, PathBuf) {
             r#"#!/bin/sh
 echo "$*" >> "{log}"
 case "$*" in
-  "--version") echo "tt 1.0.1" ;;
+  "--version") {version_delay} echo "tt 1.0.1" ;;
   "--json model ps") cat "{ps}" ;;
   "--json serve "*" --dry-run") cat "{dry}" ;;
   "--json serve "*) {serve_line} ;;
@@ -191,6 +205,7 @@ esac
             log = log.display(),
             ps = ps.display(),
             dry = dry.display(),
+            version_delay = version_delay,
         ),
     )
     .unwrap();
@@ -311,7 +326,7 @@ async fn restart_repeats_the_remembered_options_for_that_model() {
 }
 
 #[tokio::test]
-async fn restart_with_nothing_remembered_uses_defaults_and_says_so() {
+async fn restart_with_no_known_run_name_refuses_and_leaves_the_box_serving() {
     let m = spawn_mock_box(&[]);
     remote(&m)
         .run("Llama-3.1-8B-Instruct", false, &port_opts(20005))
@@ -319,8 +334,61 @@ async fn restart_with_nothing_remembered_uses_defaults_and_says_so() {
         .unwrap();
     let c = ctx(vec![remote(&m)]);
     let out = dispatch(MenuAction::Restart(box_id(&m)), &c.ctx).await;
-    assert!(message(&out).contains("default options"), "{out:?}");
-    assert!(last_run_options(&m.base).await.is_null());
+    assert!(message(&out).contains("left running"), "{out:?}");
+    assert!(
+        remote(&m).state().await.serving.is_some(),
+        "nothing may be stopped when Restart cannot run it again"
+    );
+    assert_eq!(
+        last_run_options(&m.base).await["port"],
+        20005,
+        "no new /run was sent"
+    );
+}
+
+#[tokio::test]
+async fn restart_uses_the_remembered_run_name_when_the_served_id_differs() {
+    let tmp = tempfile::tempdir().unwrap();
+    // `tt model ps` says the server named `shown-model` serves `org/shown-model`.
+    let (tt, log) = fake_tt_with(tmp.path(), false, "org/shown-model", "");
+    let c = ctx(vec![Station::Local(LocalStation::new(&tt))]);
+    let local = StationId("local".into());
+    let mut reg = registry(&c);
+    reg.remember_run(&local, "shown-model", &port_opts(20001));
+    reg.save().unwrap();
+
+    let out = dispatch(MenuAction::Restart(local), &c.ctx).await;
+    assert_eq!(out, ActionOutcome::Done);
+    let lines = calls(&log);
+    let stop = lines
+        .iter()
+        .position(|l| l == "--json model stop shown-model")
+        .expect("stopped the shown server");
+    let serve = lines
+        .iter()
+        .position(|l| l.starts_with("--json serve shown-model") && !l.contains("--dry-run"))
+        .unwrap_or_else(|| panic!("served the run name: {lines:?}"));
+    assert!(stop < serve, "{lines:?}");
+    assert!(lines[serve].contains("--port 20001"), "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.contains("serve org/shown-model")),
+        "{lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn restart_on_this_machine_with_no_known_run_name_stops_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (tt, log) = fake_tt_with(tmp.path(), false, "org/shown-model", "");
+    let c = ctx(vec![Station::Local(LocalStation::new(&tt))]);
+    let out = dispatch(MenuAction::Restart(StationId("local".into())), &c.ctx).await;
+    assert!(message(&out).contains("left running"), "{out:?}");
+    let lines = calls(&log);
+    assert!(!lines.iter().any(|l| l.contains("model stop")), "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.starts_with("--json serve")),
+        "{lines:?}"
+    );
 }
 
 #[tokio::test]
@@ -478,7 +546,7 @@ async fn open_webui_runs_docker_wired_to_the_served_endpoint() {
         Recorder::with(&["docker", "xdg-open"]),
     );
     let out = dispatch(MenuAction::OpenWebUi(box_id(&m)), &c.ctx).await;
-    assert!(message(&out).contains("http://localhost:3000"), "{out:?}");
+    assert!(message(&out).contains("http://127.0.0.1:3000"), "{out:?}");
     let run = c
         .runner
         .ran()
@@ -571,6 +639,157 @@ async fn menu_offers_run_last_from_the_registrys_most_recent_model() {
     let states = c.ctx.refresh().await;
     let text = format!("{:?}", menu_for(&states, &registry(&c)));
     assert!(text.contains("Run last model: Recent-Model"), "{text}");
+}
+
+#[tokio::test]
+async fn refresh_records_a_newly_seen_mac_in_the_registry() {
+    let m = spawn_mock_box(&["--mac", "aa:bb:cc:dd:ee:01"]);
+    let c = ctx(vec![remote(&m)]);
+    let mut reg = registry(&c);
+    let id = reg.add_manual("127.0.0.1", m.port).unwrap();
+    reg.save().unwrap();
+    c.ctx.refresh().await;
+    let k = registry(&c)
+        .stations()
+        .iter()
+        .find(|k| k.id() == id)
+        .cloned()
+        .unwrap();
+    assert_eq!(k.mac.as_deref(), Some("aa:bb:cc:dd:ee:01"));
+}
+
+#[tokio::test]
+async fn refresh_keeps_a_station_the_window_saved_while_the_poll_ran() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A slow (but in-time) local station keeps the refresh busy for ~0.6 s.
+    let (tt, _log) = fake_tt_with(tmp.path(), false, "shown-model", "sleep 0.6;");
+    let m = spawn_mock_box(&["--mac", "aa:bb:cc:dd:ee:02"]);
+    let c = ctx(vec![Station::Local(LocalStation::new(&tt)), remote(&m)]);
+    let path = c.dir.path().join("tray-stations.json");
+    let mut reg = Registry::load(&path);
+    reg.add_manual("127.0.0.1", m.port).unwrap();
+    reg.save().unwrap();
+
+    let window = {
+        let path = path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            // The window's save lands after the tray's load and before its MAC write.
+            let mut w = Registry::load(&path);
+            w.add_manual("added-by-window", 8765).unwrap();
+            w.save().unwrap();
+        })
+    };
+    c.ctx.refresh().await;
+    window.await.unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("added-by-window"),
+        "the window's station was lost: {text}"
+    );
+    assert!(
+        text.contains("aa:bb:cc:dd:ee:02"),
+        "the tray's MAC was not saved: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_station_slower_than_the_timeout_is_unreachable_and_does_not_delay_the_others() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (tt, _log) = fake_tt_with(tmp.path(), false, "shown-model", "sleep 5;");
+    let m = spawn_mock_box(&[]);
+    let mut c = ctx(vec![Station::Local(LocalStation::new(&tt)), remote(&m)]);
+    c.ctx = c.ctx.with_state_timeout(Duration::from_millis(300));
+
+    let started = std::time::Instant::now();
+    let states = c.ctx.refresh().await;
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(2), "refresh took {took:?}");
+    assert_eq!(states.len(), 2, "the slow station keeps its row");
+    assert_eq!(states[0].id, StationId("local".into()));
+    assert!(!states[0].reachable, "too slow counts as unreachable");
+    assert!(states[1].reachable, "the box answered in time");
+}
+
+/// Records each pushed menu on a channel.
+struct RecordingPusher(tokio::sync::mpsc::UnboundedSender<Vec<MenuItem>>);
+
+impl MenuPusher for RecordingPusher {
+    fn push(
+        &self,
+        items: Vec<MenuItem>,
+        _attention: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        let ok = self.0.send(items).is_ok();
+        Box::pin(async move { ok })
+    }
+}
+
+#[tokio::test]
+async fn the_first_menu_push_is_not_blocked_by_a_hanging_station() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (tt, _log) = fake_tt_with(tmp.path(), false, "shown-model", "sleep 30;");
+    let m = spawn_mock_box(&[]);
+    let mut c = ctx(vec![Station::Local(LocalStation::new(&tt)), remote(&m)]);
+    c.ctx = c.ctx.with_state_timeout(Duration::from_millis(300));
+    let ctx = Arc::new(c.ctx);
+
+    let (push_tx, mut pushes) = tokio::sync::mpsc::unbounded_channel();
+    let (_clicks_tx, clicks) = tokio::sync::mpsc::unbounded_channel();
+    let loops = tokio::spawn(run_loops(ctx, RecordingPusher(push_tx), clicks, |_| {}));
+
+    let first = tokio::time::timeout(Duration::from_secs(3), pushes.recv())
+        .await
+        .expect("a menu within 3 s")
+        .expect("pusher alive");
+    loops.abort();
+    let text = format!("{first:?}");
+    assert!(text.contains("This machine - offline"), "{text}");
+    assert!(
+        text.contains(&format!("box-{} (p300x2) - idle", m.port)),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn wake_falls_back_to_the_mac_seen_in_the_last_poll() {
+    // The box is not in the registry; its MAC is known only from polling it.
+    let m = spawn_mock_box(&["--mac", "aa:bb:cc:dd:ee:03"]);
+    let c = ctx(vec![remote(&m)]);
+    c.ctx.refresh().await;
+    let out = dispatch(MenuAction::Wake(box_id(&m)), &c.ctx).await;
+    assert!(message(&out).contains("wake-up packet"), "{out:?}");
+    let want = libttstation::wol::magic_packet([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x03]);
+    assert_eq!(*c.wol.sent.lock().unwrap(), vec![want.to_vec()]);
+}
+
+#[tokio::test]
+async fn connect_actions_on_this_machine_use_its_shown_server() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (tt, _log) = fake_tt(tmp.path(), false);
+    let c = ctx_with(
+        vec![Station::Local(LocalStation::new(&tt))],
+        tempfile::tempdir().unwrap(),
+        Recorder::with(&["docker", "xdg-open", "xclip"]),
+    );
+    let local = StationId("local".into());
+    dispatch(MenuAction::CopyEndpoint(local.clone()), &c.ctx).await;
+    let inputs = c.runner.inputs.lock().unwrap().clone();
+    assert_eq!(inputs[0].1, "http://127.0.0.1:20000/v1");
+
+    dispatch(MenuAction::OpenWebUi(local), &c.ctx).await;
+    let run = c
+        .runner
+        .ran()
+        .into_iter()
+        .find(|a| a.get(1).map(String::as_str) == Some("run"))
+        .expect("docker run");
+    assert!(
+        run.contains(&"OPENAI_API_BASE_URL=http://host.docker.internal:20000/v1".to_string()),
+        "{run:?}"
+    );
+    assert!(run.contains(&"127.0.0.1:3000:8080".to_string()), "{run:?}");
 }
 
 #[test]

@@ -93,6 +93,21 @@ impl LocalStation {
         StationKind::Local
     }
 
+    /// The state shown when a poll of this machine did not finish in time: unreachable, with
+    /// the mesh already known. Built without running anything.
+    pub fn offline_state(&self) -> StationState {
+        StationState {
+            id: self.id(),
+            name: self.name.clone(),
+            reachable: false,
+            mesh: self.mesh_now(),
+            serving: None,
+            paired: true,
+            contention: None,
+            mac: None,
+        }
+    }
+
     fn mesh_now(&self) -> Option<String> {
         self.mesh.lock().expect("mesh mutex poisoned").clone()
     }

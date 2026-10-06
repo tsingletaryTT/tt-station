@@ -47,6 +47,21 @@ impl RemoteStation {
         }
     }
 
+    /// The state shown when a poll of this box did not finish in time: unreachable, with the
+    /// pairing and contention this object already knows. Makes no request.
+    pub fn offline_state(&self) -> StationState {
+        StationState {
+            id: self.id(),
+            name: self.name.clone(),
+            reachable: false,
+            mesh: None,
+            serving: None,
+            paired: self.token.is_some(),
+            contention: self.contention_now(),
+            mac: None,
+        }
+    }
+
     fn contention_now(&self) -> Option<String> {
         self.contention
             .lock()

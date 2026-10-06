@@ -106,6 +106,11 @@ enum Command {
         /// Absent = the old behaviour (a random printed code that is never checked).
         #[arg(long = "pair-code")]
         pair_code: Option<String>,
+
+        /// Test hook: report this MAC in `/status`, as a real agent reports its NIC's MAC.
+        /// Absent = no `mac` key (the default, because a fake MAC is a misleading Wake target).
+        #[arg(long = "mac")]
+        mac: Option<String>,
     },
 }
 
@@ -127,6 +132,7 @@ async fn main() -> Result<()> {
             run_conflict,
             run_conflict_count,
             pair_code,
+            mac,
         } => {
             serve(
                 ctrl_port,
@@ -135,6 +141,7 @@ async fn main() -> Result<()> {
                 run_conflict,
                 run_conflict_count,
                 pair_code,
+                mac,
             )
             .await
         }
@@ -248,6 +255,8 @@ struct Inner {
     /// How many `POST /pair/complete` requests arrived, accepted or not. Echoed by `/status`
     /// as `pair_complete_calls` so a test can prove a client never sent one.
     pair_complete_calls: u32,
+    /// MAC reported by `/status` (see `--mac`).
+    mac: Option<String>,
 }
 
 #[derive(Clone)]
@@ -266,6 +275,7 @@ impl MockState {
             run_conflict_left: u32::MAX,
             pair_code: None,
             pair_complete_calls: 0,
+            mac: None,
         })))
     }
 
@@ -319,6 +329,9 @@ struct StatusResponse {
     last_run_options: Option<serde_json::Value>,
     /// Mock-only test hook: how many `POST /pair/complete` requests arrived.
     pair_complete_calls: u32,
+    /// The NIC MAC, only when `--mac` was given (the real agent's field of the same name).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mac: Option<String>,
 }
 
 async fn get_status(State(state): State<MockState>) -> Json<StatusResponse> {
@@ -330,6 +343,7 @@ async fn get_status(State(state): State<MockState>) -> Json<StatusResponse> {
         device_mesh: Some("p300x2".to_string()),
         last_run_options: inner.last_run_options.clone(),
         pair_complete_calls: inner.pair_complete_calls,
+        mac: inner.mac.clone(),
     })
 }
 
@@ -833,10 +847,12 @@ async fn serve(
     run_conflict: Option<String>,
     run_conflict_count: u32,
     pair_code: Option<String>,
+    mac: Option<String>,
 ) -> Result<()> {
     let state = MockState::new(name.clone(), chips, ctrl_port)
         .with_run_conflict(run_conflict, run_conflict_count)
         .with_pair_code(pair_code);
+    state.lock().mac = mac;
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", ctrl_port))
         .await
         .with_context(|| format!("failed to bind control port {ctrl_port}"))?;
