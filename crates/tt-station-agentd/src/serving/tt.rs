@@ -2395,15 +2395,17 @@ mod tests {
         assert_eq!(runner.ps_runs(), 1, "{:?}", runner.log());
     }
 
+    /// The windows are hundreds of milliseconds so the second read lands inside the TTL even
+    /// on a loaded machine (a 30 ms TTL could expire between two calls).
     #[test]
     fn a_read_within_the_ttl_reuses_ps_and_one_after_it_runs_again() {
         let runner = ScriptedRunner::happy();
         runner.on("model ps", 0, PS_LIVE_BUNDLE, "");
-        let b = cached_backend(&runner, 30, 10_000, 1_000);
+        let b = cached_backend(&runner, 400, 10_000, 1_000);
         b.serving_entries().unwrap();
         b.serving_entries().unwrap();
         assert_eq!(runner.ps_runs(), 1);
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(450));
         b.serving_entries().unwrap();
         assert_eq!(runner.ps_runs(), 2);
     }
@@ -2425,11 +2427,13 @@ mod tests {
         assert_eq!(b.serving_entries(), None);
     }
 
+    /// Stale limit of 400 ms: the failing read must land inside it, which a 30 ms limit did
+    /// not guarantee on a loaded machine.
     #[test]
     fn a_failed_ps_falls_back_to_recent_rows_only() {
         let runner = ScriptedRunner::happy();
         runner.on("model ps", 0, PS_LIVE_BUNDLE, "");
-        let b = cached_backend(&runner, 0, 30, 1_000);
+        let b = cached_backend(&runner, 0, 400, 1_000);
         assert_eq!(b.serving_entries().unwrap().len(), 1);
         runner.on("model ps", 1, "", "docker: cannot connect");
         assert_eq!(
@@ -2437,7 +2441,7 @@ mod tests {
             Some(1),
             "rows younger than the stale limit are used"
         );
-        std::thread::sleep(Duration::from_millis(40));
+        std::thread::sleep(Duration::from_millis(450));
         assert_eq!(b.serving_entries(), None, "older rows are not trusted");
     }
 
@@ -2526,11 +2530,11 @@ mod tests {
     fn a_failed_run_is_reused_within_the_ttl_and_retried_after() {
         let runner = ScriptedRunner::happy();
         runner.on("model ps", 1, "", "docker: cannot connect");
-        let b = cached_backend(&runner, 40, 0, 1_000);
+        let b = cached_backend(&runner, 400, 0, 1_000);
         assert_eq!(b.serving_entries(), None);
         assert_eq!(b.serving_entries(), None);
         assert_eq!(runner.ps_runs(), 1);
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(450));
         assert_eq!(b.serving_entries(), None);
         assert_eq!(runner.ps_runs(), 2);
     }
