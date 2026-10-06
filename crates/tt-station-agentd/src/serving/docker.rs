@@ -1064,6 +1064,12 @@ fn sanitize_container_name(model: &str) -> String {
 }
 
 impl ServingBackend for DockerBackend {
+    /// Name used in `OptionsUnsupported` errors. This backend keeps the
+    /// refusing default `start_with_options`, so it rejects any run option.
+    fn backend_name(&self) -> &'static str {
+        "docker"
+    }
+
     /// Start a container serving `model`, taking a gozer chip lease first
     /// when leasing is available.
     ///

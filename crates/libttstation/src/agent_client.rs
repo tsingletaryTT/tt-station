@@ -14,6 +14,7 @@ use crate::model::{
     StatusInfo,
 };
 use crate::pairing::join;
+use crate::run_options::{RunOptions, RunSchema};
 use serde::{Deserialize, Serialize};
 
 /// `GET /models` (UNAUTHED, mirroring the agent's own route -- see
@@ -131,6 +132,25 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
 /// token to hang an `AgentClient` off of yet.
 pub async fn get_config(base: &str) -> anyhow::Result<ConfigSummary> {
     let url = join(base, "config");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
+
+    Ok(resp.json().await?)
+}
+
+/// `GET /run/schema` (UNAUTHED, mirroring the agent's own route): the options
+/// `POST /run` accepts, as a [`RunSchema`] a client can render as a form.
+///
+/// A FREE function rather than an `AgentClient` method, same reasoning as
+/// [`get_config`]: it is read-only discovery and needs no pairing. An agent
+/// older than this feature answers `404`, which surfaces as an error here;
+/// callers should treat that as "no options available".
+pub async fn get_run_schema(base: &str) -> anyhow::Result<RunSchema> {
+    let url = join(base, "run/schema");
     let resp = reqwest::Client::new()
         .get(&url)
         .send()
@@ -361,6 +381,27 @@ impl AgentClient {
     /// `POST /run { "model": "...", "force": <bool> }`: ask the agent to start
     /// serving `model`, returning the resulting [`Endpoint`].
     ///
+    /// Equivalent to [`AgentClient::run_with_options`] with
+    /// `RunOptions::default()`: the request body has no `options` key, so an
+    /// older agent receives exactly the body it always has.
+    ///
+    /// See `run_with_options` for the `409` and `force` behaviour.
+    pub async fn run(&self, model: &str, force: bool) -> anyhow::Result<Endpoint> {
+        self.run_with_options(model, force, &RunOptions::default())
+            .await
+    }
+
+    /// `POST /run { "model": "...", "force": <bool>, "options": {..} }`: ask
+    /// the agent to start serving `model` with per-request [`RunOptions`],
+    /// returning the resulting [`Endpoint`].
+    ///
+    /// `options` is sent only when it is non-empty. The agent validates it and
+    /// answers `400 {"error": "<field>: <message>"}` for a bad value, or `400`
+    /// naming its backend when that backend cannot apply options; either
+    /// message is surfaced in the returned error. This method does not
+    /// validate locally. Call [`RunOptions::validate`] first if you want to
+    /// fail before the network round trip.
+    ///
     /// A `409 Conflict` means the box's chips are held by another tenant;
     /// the agent's own message (which names the board and the holder) is
     /// passed through rather than collapsed into a generic HTTP-status
@@ -371,11 +412,20 @@ impl AgentClient {
     /// `gozer status` describe those chips as ours while the neighbour's
     /// container still drove them) -- see the agent's
     /// `RunPyBackend::acquire_lease`. There is no `409` on that path.
-    pub async fn run(&self, model: &str, force: bool) -> anyhow::Result<Endpoint> {
+    pub async fn run_with_options(
+        &self,
+        model: &str,
+        force: bool,
+        options: &RunOptions,
+    ) -> anyhow::Result<Endpoint> {
         #[derive(Serialize)]
         struct RunRequest<'a> {
             model: &'a str,
             force: bool,
+            /// Omitted entirely when empty, so the body matches what a
+            /// pre-options client sent.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            options: Option<&'a RunOptions>,
         }
 
         #[derive(Deserialize)]
@@ -387,7 +437,11 @@ impl AgentClient {
         let resp = reqwest::Client::new()
             .post(&url)
             .bearer_auth(&self.token)
-            .json(&RunRequest { model, force })
+            .json(&RunRequest {
+                model,
+                force,
+                options: if options.is_empty() { None } else { Some(options) },
+            })
             .send()
             .await?;
 
@@ -412,6 +466,23 @@ impl AgentClient {
                 })
                 .unwrap_or_else(|| "no chips are available on this box".to_string());
             anyhow::bail!("cannot serve '{model}' (409): {detail}");
+        }
+
+        // `400` is the agent rejecting the request itself: a bad option
+        // (`"<field>: <message>"`) or a backend that cannot apply options.
+        // The body is the only useful part, so keep it.
+        if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+            let detail = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| {
+                    body.get("error")
+                        .and_then(|e| e.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "the agent rejected the request".to_string());
+            anyhow::bail!("cannot serve '{model}' (400): {detail}");
         }
 
         let resp = resp

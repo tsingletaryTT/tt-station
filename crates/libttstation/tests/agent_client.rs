@@ -772,3 +772,53 @@ async fn force_reaches_the_wire_on_run_reset_and_power() {
         .await
         .expect("a forced power action must send force alongside the action");
 }
+
+/// `run()` with no options must send exactly the pre-options body: no
+/// `options` key at all (an old agent with `deny_unknown_fields` would
+/// otherwise choke).
+#[tokio::test]
+async fn run_without_options_omits_the_options_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/run"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "endpoint": { "base_url": "http://x", "model": "m", "requires_key": false }
+        })))
+        .mount(&server)
+        .await;
+
+    AgentClient::new(server.uri(), TOKEN)
+        .run("m", false)
+        .await
+        .unwrap();
+
+    let reqs = server.received_requests().await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    assert_eq!(body, serde_json::json!({ "model": "m", "force": false }));
+}
+
+/// A 400 from the agent carries the field-level reason; it must reach the
+/// caller instead of a bare "400 Bad Request".
+#[tokio::test]
+async fn run_with_options_surfaces_the_agents_400_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/run"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(serde_json::json!({ "error": "profile: bad characters" })),
+        )
+        .mount(&server)
+        .await;
+
+    let options = libttstation::run_options::RunOptions {
+        profile: Some("a b".into()),
+        ..Default::default()
+    };
+    let err = AgentClient::new(server.uri(), TOKEN)
+        .run_with_options("m", false, &options)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("profile: bad characters"), "got {err}");
+}

@@ -19,6 +19,29 @@ use std::time::Duration;
 
 use anyhow::Result;
 use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
+use libttstation::run_options::RunOptions;
+
+/// Returned by the default [`ServingBackend::start_with_options`] when the
+/// caller asked for options the backend has no way to apply.
+///
+/// It is a distinct type so `POST /run` can find it by walking the error
+/// chain (`err.chain().any(|c| c.is::<OptionsUnsupported>())`) and answer
+/// `400` (the client asked for something this box cannot do) instead of `500`.
+/// Matching the type survives any `.context(..)` added on the way up; matching
+/// the message text would not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionsUnsupported {
+    /// Which backend refused, from [`ServingBackend::backend_name`].
+    pub backend: &'static str,
+}
+
+impl std::fmt::Display for OptionsUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the {} backend does not support run options", self.backend)
+    }
+}
+
+impl std::error::Error for OptionsUnsupported {}
 
 /// Starts, stops, and reports on model-serving for a box.
 ///
@@ -58,6 +81,41 @@ pub trait ServingBackend: Send + Sync {
     /// {"force": true}`.
     fn start_forced(&self, model: &str) -> Result<Endpoint> {
         self.start_forcing(model, true)
+    }
+
+    /// Start serving `model` with per-request [`RunOptions`] (`POST /run`'s
+    /// `options`).
+    ///
+    /// **Default behaviour.** With empty options this is exactly
+    /// [`ServingBackend::start_forcing`], so a backend that knows nothing about
+    /// options keeps working for every client that sends none. With any option
+    /// set it returns [`OptionsUnsupported`], because silently ignoring a
+    /// requested port or flag would serve something other than what was asked
+    /// for. A backend that can apply options overrides this method.
+    ///
+    /// The caller is expected to have validated `options` already (the route
+    /// builds it with `RunOptions::from_value`).
+    fn start_with_options(
+        &self,
+        model: &str,
+        force: bool,
+        options: &RunOptions,
+    ) -> Result<Endpoint> {
+        if options.is_empty() {
+            self.start_forcing(model, force)
+        } else {
+            Err(OptionsUnsupported {
+                backend: self.backend_name(),
+            }
+            .into())
+        }
+    }
+
+    /// Short stable name of this backend (`"runpy"`, `"docker"`, `"dstack"`),
+    /// used in error messages such as [`OptionsUnsupported`]. Defaults to
+    /// `"unknown"` so test doubles need not implement it.
+    fn backend_name(&self) -> &'static str {
+        "unknown"
     }
 
     /// Stop serving `model`. Idempotent where the underlying tooling allows

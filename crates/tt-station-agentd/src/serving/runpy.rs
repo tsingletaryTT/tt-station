@@ -1040,6 +1040,12 @@ impl RunPyBackend {
 }
 
 impl ServingBackend for RunPyBackend {
+    /// Name used in `OptionsUnsupported` errors. This backend keeps the
+    /// refusing default `start_with_options`, so it rejects any run option.
+    fn backend_name(&self) -> &'static str {
+        "runpy"
+    }
+
     /// See `ServingBackend::start_forcing`. `force` reaches exactly one
     /// decision in this whole function -- `acquire_lease`'s -- and that
     /// method's doc explains what it licenses. Every other guard below

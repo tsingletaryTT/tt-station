@@ -204,6 +204,11 @@ struct Inner {
     ctrl_port: u16,
     status: ServingStatus,
     endpoint: Option<Endpoint>,
+    /// The `options` object of the most recent `POST /run`, verbatim (not
+    /// validated), echoed by `/status` as `last_run_options`. `None` until a
+    /// run arrives, and reset to `None` by a run that sent no options, so a
+    /// test can tell "options arrived on the wire" from "none were sent".
+    last_run_options: Option<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -217,6 +222,7 @@ impl MockState {
             ctrl_port,
             status: ServingStatus::Idle,
             endpoint: None,
+            last_run_options: None,
         })))
     }
 
@@ -248,6 +254,10 @@ struct StatusResponse {
     /// (Task 3.5) -- keeps the two mock surfaces consistent with each other
     /// and with the canned `/telemetry` frame below (also 4 boards).
     device_mesh: Option<String>,
+    /// Mock-only test hook (the real agent has no such field): the `options`
+    /// of the last `POST /run`, or `null`. Lets a test prove a client's
+    /// options reached the server unchanged.
+    last_run_options: Option<serde_json::Value>,
 }
 
 async fn get_status(State(state): State<MockState>) -> Json<StatusResponse> {
@@ -257,6 +267,7 @@ async fn get_status(State(state): State<MockState>) -> Json<StatusResponse> {
         chips: inner.chips.clone(),
         status: inner.status.to_txt(),
         device_mesh: Some("p300x2".to_string()),
+        last_run_options: inner.last_run_options.clone(),
     })
 }
 
@@ -302,6 +313,10 @@ async fn pair_complete(Json(_req): Json<PairCompleteRequest>) -> Json<PairComple
 #[derive(Deserialize)]
 struct RunRequest {
     model: String,
+    /// Accepted and recorded but not validated or acted on: the mock has no
+    /// backend. `force` is likewise ignored (serde skips unknown fields).
+    #[serde(default)]
+    options: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -325,7 +340,14 @@ async fn run_model(
     };
     inner.status = ServingStatus::Serving(req.model);
     inner.endpoint = Some(endpoint.clone());
+    inner.last_run_options = req.options.filter(|v| !v.is_null());
     Json(RunResponse { endpoint })
+}
+
+/// `GET /run/schema`: the real schema from `libttstation`, the same one the
+/// real agent serves.
+async fn run_schema_mock() -> Json<libttstation::run_options::RunSchema> {
+    Json(libttstation::run_options::run_schema())
 }
 
 /// `POST /stop`: go back to idle.
@@ -699,6 +721,7 @@ fn app(state: MockState) -> Router {
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
         .route("/run", post(run_model))
+        .route("/run/schema", get(run_schema_mock))
         .route("/stop", post(stop_model))
         .route("/endpoint", get(get_endpoint))
         .route("/leases", get(get_leases))
@@ -730,4 +753,78 @@ async fn serve(ctrl_port: u16, name: String, chips: String) -> Result<()> {
         .context("mock-box HTTP server failed")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Round-trips `libttstation::agent_client` against this mock's router,
+    //! served in-process on an ephemeral port, to prove run options survive
+    //! the wire.
+
+    use super::*;
+    use libttstation::agent_client::{get_run_schema, get_status, AgentClient};
+    use libttstation::run_options::RunOptions;
+
+    async fn start() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = app(MockState::new("mock".into(), "4xBH".into(), addr.port()));
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn last_options(base: &str) -> serde_json::Value {
+        let v = reqwest::get(format!("{base}/status"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        v["last_run_options"].clone()
+    }
+
+    #[tokio::test]
+    async fn run_with_options_puts_the_options_on_the_wire() {
+        let base = start().await;
+        let client = AgentClient::new(base.clone(), "mock-token");
+        let options = RunOptions {
+            port: Some(20001),
+            offline: true,
+            ..RunOptions::default()
+        };
+        client.run_with_options("m", false, &options).await.unwrap();
+
+        assert_eq!(
+            last_options(&base).await,
+            serde_json::to_value(&options).unwrap(),
+            "mock must see exactly the options the client sent"
+        );
+        assert_eq!(last_options(&base).await["port"], 20001);
+    }
+
+    #[tokio::test]
+    async fn run_without_options_leaves_last_run_options_null() {
+        let base = start().await;
+        let client = AgentClient::new(base.clone(), "mock-token");
+        // Set some first, so a later plain run is seen to clear them.
+        let options = RunOptions {
+            port: Some(20001),
+            ..RunOptions::default()
+        };
+        client.run_with_options("m", false, &options).await.unwrap();
+        client.run("m", false).await.unwrap();
+
+        assert!(last_options(&base).await.is_null());
+        // /status still parses with the client's own type (extra key ignored).
+        get_status(&base).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_schema_is_served() {
+        let base = start().await;
+        let schema = get_run_schema(&base).await.unwrap();
+        assert!(schema.options.iter().any(|o| o.name == "device"));
+    }
 }

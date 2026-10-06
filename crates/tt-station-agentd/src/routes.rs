@@ -1582,6 +1582,16 @@ struct RunRequest {
     /// polite, refusing behaviour.
     #[serde(default)]
     force: bool,
+    /// Optional per-request serve settings (see `libttstation::run_options`).
+    ///
+    /// Deliberately typed `Option<serde_json::Value>` rather than
+    /// `Option<RunOptions>`: a malformed `options` would then fail inside
+    /// axum's `Json` extractor and answer `422` with serde's wording, with no
+    /// field name. Keeping it raw lets `run_model` hand it to
+    /// `RunOptions::from_value` and answer `400 "<field>: <message>"`.
+    /// Absent (every pre-options client) or `null` means no options.
+    #[serde(default)]
+    options: Option<serde_json::Value>,
 }
 
 /// JSON body returned by `POST /run` on success.
@@ -1637,8 +1647,18 @@ fn contention_aware_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse
     backend_error(err)
 }
 
-/// `POST /run { "model": "...", "force": <bool> }` (bearer-guarded): ask the
-/// backend to start serving `model`.
+/// `POST /run { "model": "...", "force": <bool>, "options": {..} }`
+/// (bearer-guarded): ask the backend to start serving `model`.
+///
+/// `options` (optional; absent or `null` means none, so older clients are
+/// unaffected) carries per-request serve settings: device, port, profile,
+/// offline, workflow and allowlisted vLLM flags. It is parsed and validated
+/// here by `RunOptions::from_value` BEFORE the backend is touched, so a bad
+/// value answers `400 {"error": "<field>: <message>"}` and starts nothing. A
+/// backend that cannot apply options (it keeps the refusing default
+/// `ServingBackend::start_with_options`) answers `400` naming the backend,
+/// but only when options were actually set. The advertised options are listed
+/// by `GET /run/schema`.
 ///
 /// `force` (default `false`, so an older client is unaffected) is
 /// `tt-station run --force`: serve even though the box's chips are held by somebody
@@ -1664,25 +1684,60 @@ async fn run_model(
     let model = req.model;
     let force = req.force;
 
-    // `start`/`start_forced` rather than one call with a bool, so the
-    // unforced path through this route is exactly the call every pre-`--force`
-    // caller (and every argv pin) already makes.
-    let result = tokio::task::spawn_blocking(move || {
-        if force {
-            backend.start_forced(&model)
-        } else {
-            backend.start(&model)
-        }
-    })
-    .await
-    .map_err(|join_err| backend_error(anyhow::anyhow!("run task panicked: {join_err}")))?;
+    // Validate before touching the backend. `null` and absent both mean "no
+    // options". The error text is `<field>: <message>` so a UI can point at
+    // the offending input.
+    let options = match req.options.as_ref().filter(|v| !v.is_null()) {
+        None => libttstation::run_options::RunOptions::default(),
+        Some(v) => libttstation::run_options::RunOptions::from_value(v).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("{}: {}", e.field, e.message),
+                }),
+            )
+        })?,
+    };
+
+    // One call for every combination: the trait's default
+    // `start_with_options` forwards empty options to `start_forcing`, which is
+    // what `start`/`start_forced` do too, so the no-options path is unchanged.
+    let result =
+        tokio::task::spawn_blocking(move || backend.start_with_options(&model, force, &options))
+            .await
+            .map_err(|join_err| {
+                backend_error(anyhow::anyhow!("run task panicked: {join_err}"))
+            })?;
 
     // A contended box answers 409 (naming the board and the holder), not
-    // 500 -- see `contention_aware_error`.
-    let endpoint = result.map_err(contention_aware_error)?;
+    // 500 -- see `contention_aware_error`. A backend that cannot apply the
+    // requested options answers 400 naming itself.
+    let endpoint = result.map_err(|err| {
+        if err
+            .chain()
+            .any(|cause| cause.is::<crate::serving::OptionsUnsupported>())
+        {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: err.to_string(),
+                }),
+            )
+        } else {
+            contention_aware_error(err)
+        }
+    })?;
     state.set_serving(endpoint.clone());
 
     Ok(Json(RunResponse { endpoint }))
+}
+
+/// `GET /run/schema` (unauthed): the options `POST /run` accepts, as
+/// `libttstation::run_options::RunSchema`, so a client can build a form
+/// without hard-coding the list. It describes what the agent validates; it
+/// does not promise the active backend will apply them (see `POST /run`).
+async fn run_schema_route() -> Json<libttstation::run_options::RunSchema> {
+    Json(libttstation::run_options::run_schema())
 }
 
 /// `POST /stop` (bearer-guarded): ask the backend to stop serving.
@@ -2569,6 +2624,7 @@ pub fn app(state: AppState) -> Router {
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
         .route("/run", post(run_model))
+        .route("/run/schema", get(run_schema_route))
         .route("/stop", post(stop_model))
         .route("/reset", post(reset))
         .route("/power", post(power))
