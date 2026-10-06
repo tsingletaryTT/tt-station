@@ -14,9 +14,10 @@ ksni = "0.3"
 # Same major as the zbus ksni uses (5.x); used only for one NameHasOwner call in src/sni_host.rs.
 # `default-features = false` + `tokio` reuses the runtime ksni already pulls (no async-io thread).
 zbus = { version = "5", default-features = false, features = ["tokio"] }
-# Plain GTK4 for the main window (libadwaita is not installed on the build box). `v4_12` is the
-# newest feature the installed GTK 4.14 satisfies that we need; see src/window/mod.rs.
-gtk4 = { version = "0.9", features = ["v4_12"] }
+# Plain GTK4 for the main window (libadwaita is not installed on the build box). No `v4_*` feature
+# is enabled: the window compiles against the base GTK 4.0 API, so the build does not need a
+# newer GTK than Ubuntu 22.04's 4.6 (not yet built or run there; see docs/reference/linux-tray.md).
+gtk4 = "0.9"
 
 [dev-dependencies]
 # Runs the built `tt-station-tray --smoke` binary in tests/smoke.rs.

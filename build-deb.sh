@@ -9,7 +9,7 @@
 #   ./build-deb.sh           # full (re-vendor)
 #   ./build-deb.sh --quick   # skip re-vendoring (vendor/ already present)
 #
-# Output: ../tt-station_*.deb and ../tt-station-panel_*.deb
+# Output: ../tt-station_*.deb, ../tt-station-panel_*.deb and ../tt-station-tray_*.deb
 # Prereqs: sudo apt install devscripts debhelper rustc cargo
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -11,8 +11,9 @@
 //! action sends its [`MenuAction`] over a `tokio::sync::mpsc` channel; the app owns the
 //! receiver and does the work, so this file does no I/O of its own.
 //!
-//! Icon: the freedesktop name `com.tenstorrent.ttstation.panel`, which the `tt-station-panel`
-//! package installs under hicolor (art in `box-panel/assets/icons`). If the theme lacks it the
+//! Icon: the freedesktop name `com.tenstorrent.ttstation.tray`, which the `tt-station-tray`
+//! package installs under hicolor (the same art as the panel's, copied from
+//! `box-panel/assets/icons` at package time under this name so the two packages share no file). If the theme lacks it the
 //! host shows its own fallback; no artwork is made here. Status dots are unicode glyphs in menu
 //! labels, because a plain label cannot be colored.
 
@@ -119,7 +120,7 @@ impl ksni::Tray for TtTray {
         "tt-station".into()
     }
     fn icon_name(&self) -> String {
-        "com.tenstorrent.ttstation.panel".into()
+        "com.tenstorrent.ttstation.tray".into()
     }
     fn status(&self) -> ksni::Status {
         if self.needs_attention {

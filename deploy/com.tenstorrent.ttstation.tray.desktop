@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=tt-station Tray
+Comment=Start, stop and connect to models on this machine and on paired QuietBoxes
+Exec=/usr/bin/tt-station-tray
+Icon=com.tenstorrent.ttstation.tray
+Terminal=false
+Categories=Utility;System;
+StartupWMClass=com.tenstorrent.ttstation.tray
