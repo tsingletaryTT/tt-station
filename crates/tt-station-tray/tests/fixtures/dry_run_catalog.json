@@ -1,0 +1,1 @@
+{"model": "Llama-3.1-8B-Instruct", "served_through": "tt-inference-server", "argv": ["python3", "run.py"]}

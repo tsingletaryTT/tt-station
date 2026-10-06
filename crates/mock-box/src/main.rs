@@ -89,6 +89,17 @@ enum Command {
         /// Chip inventory string returned from `/status`.
         #[arg(long, default_value = "4xBH")]
         chips: String,
+
+        /// Test hook: answer every `POST /run` with `409 Conflict` and this text as the
+        /// error, the way the real agent does when another tenant holds the chips (the text
+        /// names the holder). Absent = runs succeed.
+        #[arg(long = "run-conflict")]
+        run_conflict: Option<String>,
+
+        /// With `--run-conflict`: refuse only the first N runs, then accept (so a test can
+        /// see a refusal followed by a success). Default: refuse every run.
+        #[arg(long = "run-conflict-count", default_value_t = u32::MAX)]
+        run_conflict_count: u32,
     },
 }
 
@@ -107,7 +118,9 @@ async fn main() -> Result<()> {
             ctrl_port,
             name,
             chips,
-        } => serve(ctrl_port, name, chips).await,
+            run_conflict,
+            run_conflict_count,
+        } => serve(ctrl_port, name, chips, run_conflict, run_conflict_count).await,
     }
 }
 
@@ -209,6 +222,10 @@ struct Inner {
     /// run arrives, and reset to `None` by a run that sent no options, so a
     /// test can tell "options arrived on the wire" from "none were sent".
     last_run_options: Option<serde_json::Value>,
+    /// When set, `POST /run` answers `409` with this text (see `--run-conflict`).
+    run_conflict: Option<String>,
+    /// How many more runs the conflict applies to.
+    run_conflict_left: u32,
 }
 
 #[derive(Clone)]
@@ -223,7 +240,19 @@ impl MockState {
             status: ServingStatus::Idle,
             endpoint: None,
             last_run_options: None,
+            run_conflict: None,
+            run_conflict_left: u32::MAX,
         })))
+    }
+
+    /// Make `POST /run` answer `409 Conflict` with `text` as the error.
+    fn with_run_conflict(self, text: Option<String>, count: u32) -> Self {
+        {
+            let mut inner = self.lock();
+            inner.run_conflict = text;
+            inner.run_conflict_left = count;
+        }
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -331,8 +360,17 @@ struct RunResponse {
 async fn run_model(
     State(state): State<MockState>,
     Json(req): Json<RunRequest>,
-) -> Json<RunResponse> {
+) -> Result<Json<RunResponse>, (StatusCode, Json<serde_json::Value>)> {
     let mut inner = state.lock();
+    if let Some(text) = inner.run_conflict.clone() {
+        if inner.run_conflict_left > 0 {
+            inner.run_conflict_left = inner.run_conflict_left.saturating_sub(1);
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": text })),
+            ));
+        }
+    }
     let endpoint = Endpoint {
         base_url: format!("http://127.0.0.1:{}/v1", inner.ctrl_port),
         model: req.model.clone(),
@@ -341,7 +379,7 @@ async fn run_model(
     inner.status = ServingStatus::Serving(req.model);
     inner.endpoint = Some(endpoint.clone());
     inner.last_run_options = req.options.filter(|v| !v.is_null());
-    Json(RunResponse { endpoint })
+    Ok(Json(RunResponse { endpoint }))
 }
 
 /// `GET /run/schema`: the real schema from `libttstation`, the same one the
@@ -740,8 +778,15 @@ fn app(state: MockState) -> Router {
 /// until the process is killed. No graceful-shutdown handling (unlike
 /// `tt-station-agentd`) -- this is a disposable test fixture, normally
 /// killed outright by whatever spawned it (see `crates/tt-station/tests/e2e_mock.rs`).
-async fn serve(ctrl_port: u16, name: String, chips: String) -> Result<()> {
-    let state = MockState::new(name.clone(), chips, ctrl_port);
+async fn serve(
+    ctrl_port: u16,
+    name: String,
+    chips: String,
+    run_conflict: Option<String>,
+    run_conflict_count: u32,
+) -> Result<()> {
+    let state = MockState::new(name.clone(), chips, ctrl_port)
+        .with_run_conflict(run_conflict, run_conflict_count);
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", ctrl_port))
         .await
         .with_context(|| format!("failed to bind control port {ctrl_port}"))?;

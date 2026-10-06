@@ -1,0 +1,20 @@
+[package]
+name = "tt-station-tray"
+version.workspace = true
+edition.workspace = true
+description = "Linux tray for tt-station: one Station abstraction over this machine (official tt CLI) and paired QuietBoxes (agent API)."
+
+[dependencies]
+libttstation = { path = "../libttstation" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Builds and spawns the `mock-box` binary from another workspace crate (same pattern as
+# tt-station's e2e test).
+escargot = "0.5"
+# Reads mock-box's `/status` raw to see its test-only `last_run_options` key.
+reqwest = { workspace = true }

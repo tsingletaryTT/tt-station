@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/libttstation", "crates/tt-station", "crates/tt-station-agentd", "crates/mock-box"]
+members = ["crates/libttstation", "crates/tt-station", "crates/tt-station-agentd", "crates/mock-box", "crates/tt-station-tray"]
 
 [workspace.package]
 version = "0.12.0"
