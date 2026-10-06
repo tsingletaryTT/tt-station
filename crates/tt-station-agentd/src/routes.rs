@@ -1415,6 +1415,12 @@ struct StatusResponse {
     /// never a guessed version or a fabricated board count for hardware
     /// this agent never actually asked gozer about.
     leasing: LeasingSummary,
+    /// `true` while the backend is bringing a model up (`ServingBackend::is_starting`; only the
+    /// `tt` backend reports it). `status` stays `idle` until the start returns, so this is how
+    /// a client tells "idle" from "starting". Omitted when false, so the body is byte-for-byte
+    /// what older clients (the Mac app, `tt-station --json status`) already decode.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    starting: bool,
 }
 
 async fn get_status(
@@ -1432,6 +1438,7 @@ async fn get_status(
         device_mesh: state.device_mesh().map(str::to_string),
         mac: state.mac().map(str::to_string),
         leasing,
+        starting: state.backend().is_starting(),
     })
 }
 

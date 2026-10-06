@@ -297,3 +297,99 @@ async fn a_hung_tt_does_not_hang_status_or_serving() {
         started.elapsed()
     );
 }
+
+/// Trimmed from `tt --json serve Llama-3.1-8B-Instruct --dry-run` (tt 1.0.1): a catalog model.
+const DRY_RUN_CATALOG: &str = r#"{"model": "Llama-3.1-8B-Instruct", "workflow": "server",
+    "served_through": null, "default_port": "20000", "argv": ["python", "run.py"]}"#;
+
+/// GET `{base}/status` until `starting` is true, or give up after about 5 s.
+async fn wait_for_starting(base: &str) -> serde_json::Value {
+    let mut body = serde_json::Value::Null;
+    for _ in 0..500 {
+        body = get_json(format!("{base}/status")).await.1;
+        if body["starting"] == true {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    body
+}
+
+/// Final fix wave I2: while one `/run` is bringing a model up, `/status` says `starting`, a
+/// second `/run` answers 409 with the reason and starts nothing, and a `/stop` still aborts
+/// the first run. Idle, `/status` has no `starting` key at all (older clients see no change).
+#[tokio::test]
+async fn a_second_run_while_one_is_starting_is_409_and_status_says_starting() {
+    let runner = FakeRunner::new(u32::MAX); // never healthy: the first run keeps polling
+    runner.set_run_capturing("--version", 0, "tt 1.0.1", "");
+    runner.set_run_capturing("--dry-run", 0, DRY_RUN_CATALOG, "");
+    runner.set_run_capturing("model ps", 0, PS_EMPTY, "");
+    let config = TtConfig {
+        tt_bin: "/fake/tt".to_string(),
+        serving_host: "qb2-lab.local".to_string(),
+        service_port: 20010,
+        // About 20 s of polling at most; the stop below ends it within one interval.
+        health_poll_attempts: 10_000,
+        health_poll_interval: std::time::Duration::from_millis(2),
+        ..TtConfig::default()
+    };
+    let backend: Arc<dyn ServingBackend> =
+        Arc::new(TtBackend::new(config, Box::new(runner.clone())));
+    let state = AppState::new("qb2-lab".to_string(), "4xBH".to_string(), backend)
+        .with_serving_config("qb2-lab.local".to_string(), 20010);
+    let base = serve(state.clone()).await;
+    let client = reqwest::Client::new();
+    let token = pair(&client, &state, &base).await;
+
+    let (_, idle) = get_json(format!("{base}/status")).await;
+    assert_eq!(idle["status"], "idle");
+    assert!(idle.get("starting").is_none(), "no key while idle: {idle}");
+
+    let first = {
+        let client = client.clone();
+        let url = format!("{base}/run");
+        let token = token.clone();
+        tokio::spawn(async move {
+            client
+                .post(url)
+                .bearer_auth(token)
+                .json(&serde_json::json!({ "model": "Llama-3.1-8B-Instruct" }))
+                .send()
+                .await
+                .unwrap()
+        })
+    };
+    let starting = wait_for_starting(&base).await;
+    assert_eq!(starting["starting"], true, "{starting}");
+    assert_eq!(starting["status"], "idle", "{starting}");
+
+    let second = client
+        .post(format!("{base}/run"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "model": "Qwen3-8B" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = second.json().await.unwrap();
+    assert!(
+        body["error"].as_str().unwrap().contains("already starting"),
+        "{body}"
+    );
+    assert!(pos(&runner, "Qwen3-8B").is_none(), "{:?}", runner.commands());
+
+    let stop = client
+        .post(format!("{base}/stop"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stop.status(), reqwest::StatusCode::OK);
+    let first = first.await.unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let body: serde_json::Value = first.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("aborted"), "{body}");
+
+    let (_, after) = get_json(format!("{base}/status")).await;
+    assert!(after.get("starting").is_none(), "cleared: {after}");
+}

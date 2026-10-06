@@ -297,6 +297,16 @@ pub trait ServingBackend: Send + Sync {
         None
     }
 
+    /// True while a `start` is in flight. `GET /status` reports it as `starting: true`, so a
+    /// client can tell "idle" from "bringing a model up" (the stored status stays idle until
+    /// `start` returns). Must be cheap: it is read on every `/status`.
+    ///
+    /// Default `false`: runpy, docker and dstack do not report it, and `/status` omits the
+    /// field for them, as before.
+    fn is_starting(&self) -> bool {
+        false
+    }
+
     fn list_models(&self) -> Result<ModelsResponse> {
         Ok(ModelsResponse {
             release_version: None,

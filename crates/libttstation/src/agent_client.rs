@@ -101,6 +101,10 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
         /// failing the whole call. See [`StatusInfo::leasing`].
         #[serde(default)]
         leasing: Option<crate::model::LeasingSummary>,
+        /// Sent only while true, and only by a `tt`-backend agent. See
+        /// [`StatusInfo::starting`].
+        #[serde(default)]
+        starting: bool,
     }
 
     let url = join(base, "status");
@@ -117,6 +121,7 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
         device_mesh: body.device_mesh,
         mac: body.mac,
         leasing: body.leasing,
+        starting: body.starting,
     })
 }
 

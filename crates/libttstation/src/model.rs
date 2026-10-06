@@ -275,6 +275,13 @@ pub struct StatusInfo {
     /// leasing-capable box as unleased purely because it was running an older
     /// agent.
     pub leasing: Option<LeasingSummary>,
+    /// `true` while the agent is bringing a model up (`/status`'s `starting`, sent only by a
+    /// `tt`-backend agent, and only while true). `status` stays `Idle` until the start ends,
+    /// so this tells "idle" from "starting". Additive: `#[serde(default)]` so an agent that
+    /// never sends it decodes as `false`, and skipped when `false` so the JSON that
+    /// `tt-station --json status` prints (which the Mac app reads) is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub starting: bool,
 }
 
 /// `GET /config`'s response body (see `tt-station-agentd::routes::get_config`,
@@ -485,6 +492,37 @@ pub fn txt_decode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tt-station --json status` prints a serialized `StatusInfo`, and the Mac app reads it.
+    /// `starting: false` must leave that JSON exactly as it was (no new key), and JSON from
+    /// before the field existed must still decode.
+    #[test]
+    fn status_info_starting_is_additive() {
+        let info = StatusInfo {
+            status: ServingStatus::Idle,
+            device_mesh: Some("p300x2".into()),
+            mac: None,
+            leasing: None,
+            starting: false,
+        };
+        let value = serde_json::to_value(&info).unwrap();
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["device_mesh", "leasing", "mac", "status"], "{value}");
+
+        let starting = StatusInfo {
+            starting: true,
+            ..info.clone()
+        };
+        assert_eq!(serde_json::to_value(&starting).unwrap()["starting"], true);
+
+        let old: StatusInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(old, info);
+    }
 
     #[test]
     fn status_roundtrips_through_txt_string() {

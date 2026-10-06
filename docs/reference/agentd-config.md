@@ -156,6 +156,18 @@ naming `model`):
 6. Polls `http://<serving_host>:<port>/v1/models` until a model is listed.
 
 `POST /stop` runs `tt --json model stop <model>` and then releases the lease.
+If a start fails after `tt serve` ran, the backend runs `tt model stop <model>`
+before the lease is released. If that stop fails too, the container may still
+be running, so the lease is kept (a release resets the chips) and the serve is
+recorded; the error says so. The next `POST /stop` or `POST /run` retries the
+stop and releases the lease only after the stop succeeds.
+
+One start runs at a time. While a `POST /run` is bringing a model up,
+`GET /status` carries `"starting": true` (the key is absent otherwise, and
+`status` stays `idle` until the start ends), and a second `POST /run` answers
+409 ("a serve is already starting on this box; stop it first"). A `POST /stop`
+during the start still aborts it.
+
 `GET /serving` lists the backend's serves from `tt --json model ps` (docker
 discovery alone does not recognise tt-model containers), merged with docker
 discovery so one server is listed once. After an agent restart, a running
@@ -179,7 +191,11 @@ by an idle check is confirmed with a fresh read before `POST /stop` stops it
 (and before any lease release), with or without gozer. Fresh reads queue on
 the same lock as the idle checks, so behind a hung `tt` a `POST /run` or
 `POST /stop` that needs one can wait about 10 s (two 5 s timeouts) before it
-fails.
+fails. A successful `tt model stop`, and every `tt serve`, empties that cache,
+so a `GET /status` right after `POST /stop` does not find the stopped server
+again. No rediscovery happens while a stop is running. A server found by an
+idle check whose row later disappears is forgotten, so a later serve on the
+agent's port is found again.
 
 `GET /models` reads `tt --json model list` and keeps the models with a vLLM
 engine.

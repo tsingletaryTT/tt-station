@@ -533,6 +533,26 @@ async fn get_status_parses_idle_with_no_auth_header() {
         .expect("get_status() should succeed");
 
     assert_eq!(info.status, ServingStatus::Idle);
+    assert!(!info.starting, "an agent that omits `starting` is not starting");
+}
+
+/// `starting: true` (a `tt`-backend agent bringing a model up) reaches `StatusInfo`.
+#[tokio::test]
+async fn get_status_decodes_starting() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "name": "qb2-lab",
+            "chips": "4xBH",
+            "status": "idle",
+            "starting": true
+        })))
+        .mount(&server)
+        .await;
+    let info = get_status(&server.uri()).await.unwrap();
+    assert_eq!(info.status, ServingStatus::Idle);
+    assert!(info.starting);
 }
 
 /// (Task 3) `get_status(base)` should decode a present `device_mesh` string

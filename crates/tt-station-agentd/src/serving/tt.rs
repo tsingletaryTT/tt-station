@@ -33,7 +33,12 @@
 //!
 //! Every failure after step 6 starts runs `tt model stop <model>` before the lease guard is
 //! dropped, because `gozer release` resets the released chips and must not do that under a
-//! running container.
+//! running container. If that stop fails too, the lease is NOT released: it is kept in the
+//! backend with the serve recorded, and the next `/stop` or `/run` retries the stop and
+//! releases only once it succeeds (see `fail_after_serve`).
+//!
+//! Only one `start` runs at a time. A second `/run` while one is starting is refused with a
+//! 409, and `GET /status` reports `starting: true` meanwhile (see the `starting` field).
 //!
 //! ## After an agent restart
 //!
@@ -68,7 +73,7 @@
 //! while the lease covers every chip (`gozer::DEFAULT_LEASE_CHIPS = "all"`, today's setting).
 //! Before leases narrow, the backend must pass explicit devices derived from the grant.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -310,15 +315,21 @@ fn tt_failure_detail(captured: &CapturedOutput) -> String {
 }
 
 /// The `tt` serving backend. See the module doc.
+///
+/// **Locks.** When more than one is held, they are taken in this order: `handover`, then
+/// `served`, then `lease`; and `lease` before `adopted_port`. `ps_cache` is always taken
+/// alone (it is held while `ps` runs, so nothing else may be waited on under it). No lock is
+/// held while `tt serve` or `tt model stop` runs; only `ps` runs under its own cache lock.
 pub struct TtBackend {
     config: TtConfig,
     runner: Box<dyn CommandRunner>,
     /// The gozer binary this backend leases chips through, or `None` when gozer is not
     /// installed (leasing off, the default). Set with [`TtBackend::with_gozer`].
     gozer: Option<crate::gozer::Capability>,
-    /// The lease held for the running serve, if any. Set only when `start` succeeds (the
-    /// guard is disarmed and its id moved here). `stop` releases it after the server is
-    /// stopped. Every failing `start` leaves it `None` and lets the guard release instead.
+    /// The lease held for the running serve, if any. Set when `start` succeeds (the guard is
+    /// disarmed and its id moved here), and also when a failed `start` could not stop its
+    /// container (see `fail_after_serve`). `stop` releases it after the server is stopped.
+    /// Any other failing `start` leaves it `None` and lets the guard release instead.
     lease: Mutex<Option<String>>,
     /// What this backend is serving: the model name (the name `tt model stop` needs, which can
     /// differ from the `/v1/models` id), the port, and where the record came from. See
@@ -328,7 +339,8 @@ pub struct TtBackend {
     /// (`tt-station:<port>:<model>`). Used to find that process's server with `tt model ps`
     /// before the adopted lease is released. See `stop_inner`.
     adopted_port: Mutex<Option<u16>>,
-    /// Set by `stop` so an in-flight `start` stops polling; cleared when `start` begins.
+    /// Set by `stop` so an in-flight `start` stops polling; cleared when a `start` begins
+    /// (only by the start that won the `starting` claim, so a refused start cannot clear it).
     /// Same purpose as `RunPyBackend`'s flag: until `start` returns, the agent's status is
     /// still idle, so `/stop` cannot be gated on "a model is serving". `Arc` so tests can set
     /// it from inside a fake runner call, at an exact point in `start`.
@@ -340,8 +352,21 @@ pub struct TtBackend {
     /// There is no third case where both sides think the other one cleaned up.
     handover: Mutex<()>,
     /// True while a `start` is in flight. `discover_own_serve` then reports nothing, so a
-    /// `/status` poll during bring-up does not record the loading server as serving.
+    /// `/status` poll during bring-up does not record the loading server as serving. It is
+    /// also the "one start at a time" claim: `start_with_options` sets it with a `swap` and
+    /// refuses (409) when it was already set, so a second `/run` cannot clear a pending stop's
+    /// `cancel` or start a second `tt serve` on the same port. `GET /status` reports it.
     starting: AtomicBool,
+    /// How many `stop` calls are running `stop_inner` (a count, so one of two overlapping
+    /// stops finishing does not clear it for the other). While it is non-zero,
+    /// `discover_own_serve` reports nothing: between `served` being cleared and `stop`
+    /// returning, a poll would otherwise find the server that is being stopped and record it
+    /// again.
+    stopping: AtomicUsize,
+    /// Counts `stop` calls. `discover_own_serve` reads it before its `ps` and re-checks it
+    /// under the `handover` lock, so a discovery whose `ps` began before a stop does not
+    /// record the row it read (the server may be gone by then).
+    stops: AtomicU64,
     /// The last good `tt --json model ps` rows and when they were read. The mutex is also the
     /// single-flight lock: it is held while `ps` runs, so concurrent callers wait for that one
     /// run and then reuse its result instead of each starting a `tt` process.
@@ -389,12 +414,23 @@ enum PsRead {
     Fresh,
 }
 
-/// Clears `TtBackend::starting` when `start_with_options` returns, on every path.
-struct StartingFlag<'a>(&'a AtomicBool);
+/// Clears `TtBackend::starting` when dropped, so it is cleared on every exit path of
+/// `start_with_options`, panics included. Created only after the `swap` that claimed the flag
+/// succeeded, so a refused second start never clears the first start's claim.
+struct ClearOnDrop<'a>(&'a AtomicBool);
 
-impl Drop for StartingFlag<'_> {
+impl Drop for ClearOnDrop<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Decrements `TtBackend::stopping` when dropped, on every exit path of `stop`.
+struct StopInFlight<'a>(&'a AtomicUsize);
+
+impl Drop for StopInFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -411,6 +447,8 @@ impl TtBackend {
             cancel: Arc::new(AtomicBool::new(false)),
             handover: Mutex::new(()),
             starting: AtomicBool::new(false),
+            stopping: AtomicUsize::new(0),
+            stops: AtomicU64::new(0),
             ps_cache: Mutex::new(PsCache::default()),
         }
     }
@@ -501,6 +539,10 @@ impl TtBackend {
     /// Note that `tt model stop` stops every tt-inference-server container serving that model
     /// on the box, whatever port it is on. It does not stop a container it cannot identify; it
     /// reports it and exits non-zero, which this surfaces as an error.
+    ///
+    /// A successful stop empties the `ps` cache: the cached rows still list the server that
+    /// was just stopped, and an idle `/status` poll within [`PS_CACHE_TTL`] would otherwise
+    /// find it and record it as serving again.
     fn tt_model_stop(&self, name: &str) -> Result<()> {
         let captured = self.run_tt(&["--json", "model", "stop", name], &[])?;
         if captured.code != 0 {
@@ -510,20 +552,83 @@ impl TtBackend {
                 tt_failure_detail(&captured)
             ));
         }
+        self.invalidate_ps_cache();
         Ok(())
     }
 
-    /// Best-effort stop on a failed `start`, run BEFORE the lease guard drops. `gozer release`
-    /// resets the released chips, so releasing under a container that is still running would
-    /// reset chips in use and then advertise them free. A failed stop is logged; the caller is
-    /// already returning an error.
-    fn stop_after_failure(&self, model: &str) {
-        if let Err(err) = self.tt_model_stop(model) {
-            eprintln!(
-                "tt-station-agentd: could not stop '{model}' after a failed serve: {err:#} -- \
-                 if a lease is held, releasing it will reset chips that may still be in use"
-            );
+    /// Forget every cached `tt model ps` outcome, good rows included, so the next read of
+    /// any kind runs `ps`. Called after the set of servers changed: a successful
+    /// `tt model stop`, and `tt serve` returning. Takes only the `ps_cache` lock.
+    fn invalidate_ps_cache(&self) {
+        let mut cache = self
+            .ps_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.last = None;
+        cache.good = None;
+    }
+
+    /// Clean up after a `start` that failed once `tt serve` had run, and return the error
+    /// `start` should report. Must be called with no lock held (it runs `tt model stop`,
+    /// which can take seconds).
+    ///
+    /// `tt model stop <model>` runs first. If it succeeds, `lease` is dropped here and the
+    /// guard releases the chips, which is safe because the container is gone. If it fails,
+    /// the container may still be running, and `gozer release` would reset chips under it.
+    /// So the lease is kept: the guard is disarmed and its id moved into `self.lease`, and
+    /// the serve is recorded in `served` (a trusted record, `discovered: false`). A later
+    /// `/stop` or `/run` then retries the stop and releases only after it succeeds, through
+    /// `stop_inner`, the same rule as a failed `/stop`. The returned error is `err` plus a
+    /// note that the stop failed and the lease was kept.
+    fn fail_after_serve(
+        &self,
+        model: &str,
+        port: u16,
+        lease: Option<crate::gozer::LeaseGuard<'_>>,
+        err: anyhow::Error,
+    ) -> anyhow::Error {
+        let stop_err = match self.tt_model_stop(model) {
+            Ok(()) => {
+                drop(lease); // releases: nothing of ours is running any more
+                return err;
+            }
+            Err(stop_err) => stop_err,
+        };
+        let kept = lease.map(crate::gozer::LeaseGuard::into_lease_id);
+        {
+            // Lock order: handover, then served, then lease (see the struct doc).
+            let _handover = self.handover.lock().expect("handover mutex poisoned");
+            *self.served.lock().expect("served mutex poisoned") = Some(Served {
+                name: model.to_string(),
+                port,
+                discovered: false,
+            });
+            if let Some(id) = &kept {
+                let mut slot = self.lease.lock().expect("lease mutex poisoned");
+                if slot.is_none() {
+                    *slot = Some(id.clone());
+                } else {
+                    // Not expected: `start`'s swap released the previous lease. Keep both
+                    // unreleased rather than reset chips under a live container.
+                    eprintln!(
+                        "tt-station-agentd: lease '{id}' was kept unreleased after a failed \
+                         stop, but another lease is already recorded; clean it up by hand -- \
+                         check `gozer status`"
+                    );
+                }
+            }
         }
+        let lease_note = match &kept {
+            Some(id) => format!(
+                "the chip lease was kept ('{id}') so its chips are not reset under a container \
+                 that may still be running"
+            ),
+            None => "no chip lease was held".to_string(),
+        };
+        anyhow::anyhow!(
+            "{err:#}. Then `tt model stop {model}` also failed ({stop_err:#}); {lease_note}. \
+             Retry with stop once the problem is fixed"
+        )
     }
 
     /// Hand back the lease held for a running serve, if any. `take()` under one lock, so two
@@ -558,7 +663,11 @@ impl TtBackend {
     ///
     /// `hint` is used when this process did not start the serve itself, for example after an
     /// agent restart: the route passes the model id it last reported, and `tt model stop`
-    /// accepts a catalog model's Hugging Face id as well as its catalog name.
+    /// accepts a catalog model's Hugging Face id as well as its catalog name. The hint is a
+    /// `/v1/models` id, so it must pass `validate_model_name` before it goes into an argv;
+    /// an unsafe hint is refused with an error. With a lease held the hint is not used at
+    /// all: the release that follows resets chips, so the server is named by a fresh
+    /// `tt model ps` (`identify_untracked_serve`) instead of by a reported id.
     ///
     /// **A lease held with nothing recorded.** After an agent restart, `adopt_lease` records the
     /// previous process's lease while `served` is empty, and the route may pass no `hint`
@@ -588,7 +697,17 @@ impl TtBackend {
                 ..
             }) => (self.confirm_discovered(&name)?, true),
             Some(served) => (Some(served.name), false),
-            None => ((!hint.is_empty()).then(|| hint.to_string()), false),
+            // With a lease, ignore the hint: the identification below names the server.
+            None if lease_held || hint.is_empty() => (None, false),
+            None => {
+                validate_model_name(hint).map_err(|_| {
+                    anyhow::anyhow!(
+                        "tt backend: the reported model id {hint:?} cannot be passed to \
+                         `tt model stop`; refusing to stop it. Check `tt model ps`"
+                    )
+                })?;
+                (Some(hint.to_string()), false)
+            }
         };
         if name.is_none() && lease_held && !confirmed {
             name = self.identify_untracked_serve()?;
@@ -788,10 +907,23 @@ impl ServingBackend for TtBackend {
         force: bool,
         options: &RunOptions,
     ) -> Result<Endpoint> {
-        // A `/stop` from an earlier run must not cancel this one.
+        // One start at a time. Until `start` returns, the route's status is idle, so the route
+        // cannot refuse a second `/run` itself. Without this, a second start would clear a
+        // pending stop's `cancel` below (the first start then comes up serving and the stop is
+        // lost), and with no gozer it would run a second `tt serve` on the same port, whose
+        // failure path could `tt model stop` the first one's container. The refusal is a
+        // `Contention`, so `POST /run` answers 409 with this message. It returns before the
+        // guard is created, so the first start's claim stays set.
+        if self.starting.swap(true, Ordering::SeqCst) {
+            return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
+                "tt backend: cannot serve '{model}' -- a serve is already starting on this box; \
+                 stop it first"
+            ))));
+        }
+        let _starting = ClearOnDrop(&self.starting);
+        // A `/stop` from an earlier run must not cancel this one. Only the start that holds
+        // the claim above gets here, so this cannot erase a stop aimed at another start.
         self.cancel.store(false, Ordering::SeqCst);
-        self.starting.store(true, Ordering::SeqCst);
-        let _starting = StartingFlag(&self.starting);
 
         // (1) The model name and the options. The route validated both already; checking again
         // costs nothing and keeps this backend safe for any other caller. The model name goes
@@ -864,20 +996,22 @@ impl ServingBackend for TtBackend {
         let mut args: Vec<&str> = vec!["--json"];
         args.extend(serve_args.iter().map(String::as_str));
         let served = self.run_tt(&args, &child_env);
+        // The set of servers on the box has changed (or may have), so cached `ps` rows are old.
+        self.invalidate_ps_cache();
         match &served {
             Ok(captured) if captured.code == 0 => {}
             _ => {
                 // `tt serve` can start a container and then fail. Stop before the lease guard
                 // drops, so the release does not reset chips under it.
-                self.stop_after_failure(model);
-                return Err(match served {
+                let err = match served {
                     Ok(captured) => anyhow::anyhow!(
                         "tt backend: `tt serve {model}` failed (exit {}): {}",
                         captured.code,
                         tt_failure_detail(&captured)
                     ),
                     Err(err) => err,
-                });
+                };
+                return Err(self.fail_after_serve(model, port, lease, err));
             }
         }
 
@@ -889,10 +1023,9 @@ impl ServingBackend for TtBackend {
         let mut served_id = None;
         for _ in 0..self.config.health_poll_attempts {
             if self.cancel.load(Ordering::SeqCst) {
-                self.stop_after_failure(model);
-                return Err(anyhow::anyhow!(
-                    "tt backend: serve of '{model}' aborted by a stop request"
-                ));
+                let err =
+                    anyhow::anyhow!("tt backend: serve of '{model}' aborted by a stop request");
+                return Err(self.fail_after_serve(model, port, lease, err));
             }
             if super::poll_until_healthy(
                 self.runner.as_ref(),
@@ -913,34 +1046,43 @@ impl ServingBackend for TtBackend {
             }
         }
         let Some(served_id) = served_id else {
-            self.stop_after_failure(model);
-            return Err(anyhow::anyhow!(
+            let err = anyhow::anyhow!(
                 "tt backend: '{model}' was not listed on {models_url} within {} attempts",
                 self.config.health_poll_attempts
-            ));
+            );
+            return Err(self.fail_after_serve(model, port, lease, err));
         };
 
         // Handover, under the `handover` lock (see that field). A `/stop` that arrived after the
-        // last poll and before this point aborts the start: the model is stopped here and the
-        // lease guard releases on return. Otherwise record what was started and move the lease
-        // into the backend so it outlives this call. This is the only exit that does not release.
-        {
+        // last poll and before this point aborts the start. Otherwise record what was started
+        // and move the lease into the backend so it outlives this call (the only exit that does
+        // not release).
+        //
+        // On an abort, the lock is released before `tt model stop` runs (a blocking command
+        // that can take seconds, during which `stop` and `discover_own_serve` would queue on
+        // the lock). That weakens nothing: `served` was never recorded and the lease guard is
+        // still local, so a `stop` in that gap finds nothing to stop or release; a second
+        // `start` is refused because `starting` is still set; and discovery reports nothing
+        // while `starting` is set.
+        let aborted = {
             let _handover = self.handover.lock().expect("handover mutex poisoned");
             if self.cancel.load(Ordering::SeqCst) {
-                self.stop_after_failure(model);
-                *self.served.lock().expect("served mutex poisoned") = None;
-                return Err(anyhow::anyhow!(
-                    "tt backend: serve of '{model}' aborted by a stop request"
-                ));
+                Some(lease)
+            } else {
+                *self.served.lock().expect("served mutex poisoned") = Some(Served {
+                    name: model.to_string(),
+                    port,
+                    discovered: false,
+                });
+                if let Some(guard) = lease {
+                    *self.lease.lock().expect("lease mutex poisoned") = Some(guard.into_lease_id());
+                }
+                None
             }
-            *self.served.lock().expect("served mutex poisoned") = Some(Served {
-                name: model.to_string(),
-                port,
-                discovered: false,
-            });
-            if let Some(guard) = lease {
-                *self.lease.lock().expect("lease mutex poisoned") = Some(guard.into_lease_id());
-            }
+        };
+        if let Some(lease) = aborted {
+            let err = anyhow::anyhow!("tt backend: serve of '{model}' aborted by a stop request");
+            return Err(self.fail_after_serve(model, port, lease, err));
         }
 
         Ok(Endpoint {
@@ -953,13 +1095,20 @@ impl ServingBackend for TtBackend {
     /// Stop the serve: `tt model stop <name>` with the name this backend passed to `tt serve`
     /// (falling back to `model`, the id the agent last reported), then release the lease.
     /// Also cancels an in-flight `start`.
+    ///
+    /// While it runs, `stopping` is set (and `stops` was bumped), so an idle `/status` poll
+    /// cannot rediscover the server being stopped. See `discover_own_serve`.
     fn stop(&self, model: &str) -> Result<()> {
-        {
+        let _stopping = {
             // Under `handover`, so this lands wholly before or wholly after the end of an
-            // in-flight `start`. See the `handover` field.
+            // in-flight `start`, and wholly before or after a discovery's re-check. See the
+            // `handover` field.
             let _handover = self.handover.lock().expect("handover mutex poisoned");
             self.cancel.store(true, Ordering::SeqCst);
-        }
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            self.stopping.fetch_add(1, Ordering::SeqCst);
+            StopInFlight(&self.stopping)
+        };
         self.stop_inner(model)
     }
 
@@ -995,6 +1144,12 @@ impl ServingBackend for TtBackend {
     /// started before an agent restart once the route asks. The route consults the backend
     /// only while it believes a model is serving; after a restart `discover_own_serve` is what
     /// brings the stored status back to serving.
+    ///
+    /// When nothing runs on the port and the recorded serve came from discovery, the record is
+    /// dropped. The route goes idle on this answer, and a discovered record left behind would
+    /// make `discover_own_serve` report nothing for good (it skips while a serve is recorded),
+    /// so a later serve on the port would never be found. A record from this process's own
+    /// `start` is kept: `stop` still owns its cleanup (stop, then release the lease).
     fn status(&self) -> Result<ServingStatus> {
         let recorded = self.served.lock().expect("served mutex poisoned").clone();
         let row = self.own_running_row(PsRead::Cached)?;
@@ -1005,7 +1160,23 @@ impl ServingBackend for TtBackend {
                     .or_else(|| recorded.map(|s| s.name))
                     .unwrap_or_else(|| r.name.clone()),
             ),
-            None => ServingStatus::Idle,
+            None => {
+                if let Some(
+                    seen @ Served {
+                        discovered: true, ..
+                    },
+                ) = recorded
+                {
+                    // Lock order: handover, then served. Only the record that was read above
+                    // is dropped; a newer one (a `start` that finished meanwhile) stays.
+                    let _handover = self.handover.lock().expect("handover mutex poisoned");
+                    let mut served = self.served.lock().expect("served mutex poisoned");
+                    if served.as_ref() == Some(&seen) {
+                        *served = None;
+                    }
+                }
+                ServingStatus::Idle
+            }
         })
     }
 
@@ -1055,24 +1226,28 @@ impl ServingBackend for TtBackend {
     /// serve, so `stop` passes the row's name to `tt model stop` (for a bundle the `/v1/models`
     /// id is the weights repo, which `tt model stop` would not recognise).
     ///
-    /// Reports nothing while a `start` is in flight, when a serve is already recorded, when
-    /// `tt model ps` fails, when the row has no `served_id` yet (still loading), or when its
-    /// name is not a safe model name. A row on any other port is not ours.
+    /// Reports nothing while a `start` or a `stop` is in flight, when a `stop` began while
+    /// `ps` ran, when a serve is already recorded, when `tt model ps` fails, when the row has
+    /// no `served_id` yet (still loading), or when its name is not a safe model name. A row on
+    /// any other port is not ours.
     fn discover_own_serve(&self) -> Option<Endpoint> {
-        if self.starting.load(Ordering::SeqCst)
-            || self.served.lock().expect("served mutex poisoned").is_some()
-        {
+        // Read before the `ps`: a stop that begins after this point bumps it.
+        let stops_before = self.stops.load(Ordering::SeqCst);
+        let busy =
+            || self.starting.load(Ordering::SeqCst) || self.stopping.load(Ordering::SeqCst) > 0;
+        if busy() || self.served.lock().expect("served mutex poisoned").is_some() {
             return None;
         }
         let row = self.own_running_row(PsRead::Cached).ok()??;
         let port = row.port?;
         let model = row.served_id.clone()?;
         validate_model_name(&row.name).ok()?;
-        // Re-check under `handover`: a `start` may have begun, or recorded its own serve, while
-        // `ps` ran. A stale discovery must not overwrite that.
+        // Re-check under `handover`: while `ps` ran, a `start` may have begun or recorded its
+        // own serve, or a `stop` may have begun (and maybe finished: then `stops` moved). The
+        // row may describe a server that is gone, so a stale discovery records nothing.
         let _handover = self.handover.lock().expect("handover mutex poisoned");
         let mut served = self.served.lock().expect("served mutex poisoned");
-        if self.starting.load(Ordering::SeqCst) || served.is_some() {
+        if busy() || served.is_some() || self.stops.load(Ordering::SeqCst) != stops_before {
             return None;
         }
         *served = Some(Served {
@@ -1085,6 +1260,11 @@ impl ServingBackend for TtBackend {
             model,
             requires_key: false,
         })
+    }
+
+    /// True between the start and the end of `start_with_options` (the `starting` field).
+    fn is_starting(&self) -> bool {
+        self.starting.load(Ordering::SeqCst)
     }
 
     /// Models from `tt --json model list` that have a vLLM engine. See [`parse_model_list`].
@@ -1238,6 +1418,10 @@ mod tests {
         ps_delay: Arc<Mutex<Duration>>,
         /// When set, every `tt model ps` runs this first (with no lock held).
         on_ps: Arc<Mutex<Option<GetHook>>>,
+        /// When set, every command whose space-joined argv contains the string runs
+        /// the hook first (with no runner lock held), for example on `model stop` or
+        /// `gozer release`, so a test can act at an exact point inside `stop` or `start`.
+        on_run: Arc<Mutex<Option<(String, GetHook)>>>,
     }
 
     type GetHook = Arc<dyn Fn() + Send + Sync>;
@@ -1308,6 +1492,16 @@ mod tests {
         ) -> Result<CapturedOutput> {
             let joined = args.join(" ");
             self.log.lock().unwrap().push(format!("run: {joined}"));
+            let hook = self
+                .on_run
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|(needle, _)| joined.contains(needle.as_str()))
+                .map(|(_, hook)| hook.clone());
+            if let Some(hook) = hook {
+                hook();
+            }
             if self
                 .spawn_failures
                 .lock()
@@ -2525,6 +2719,329 @@ mod tests {
             scope.spawn(|| b.ps(PsRead::Fresh).unwrap());
         });
         assert_eq!(runner.ps_runs(), 2, "{:?}", runner.log());
+    }
+
+    // ---- final fix wave: I1, I2, I3, M1, M2 ----
+
+    /// I1: `tt serve` fails and the stop after it fails too. The container may still run, so
+    /// the lease must not be released (that resets the chips). The lease and the serve are
+    /// recorded, and a later `stop` with a working `tt model stop` stops, then releases.
+    #[test]
+    fn a_failed_serve_whose_stop_fails_keeps_the_lease_for_a_later_stop() {
+        let runner = ScriptedRunner::happy();
+        runner.on("--port 8003", 1, "", "run.py: container failed to start");
+        runner.on("model stop", 1, "", "docker: cannot connect");
+        let b = leasing_backend(&runner);
+        let err = b.start("Llama-3.1-8B-Instruct").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("container failed to start"), "{msg}");
+        assert!(msg.contains("docker: cannot connect"), "{msg}");
+        assert!(msg.contains("lease was kept"), "{msg}");
+        assert!(runner.pos("gozer release").is_none(), "{:?}", runner.log());
+        assert_eq!(b.held_lease().as_deref(), Some("lease-abc123"));
+        assert_eq!(
+            b.served(),
+            Some(("Llama-3.1-8B-Instruct".to_string(), 8003))
+        );
+
+        runner.on("model stop", 0, "", "");
+        let first_stop = runner.pos("model stop").unwrap();
+        b.stop("").unwrap();
+        let log = runner.log();
+        let retry = first_stop
+            + 1
+            + log[first_stop + 1..]
+                .iter()
+                .position(|l| l.contains("model stop Llama-3.1-8B-Instruct"))
+                .expect("the later stop retried tt model stop");
+        let release = runner.pos("gozer release lease-abc123").unwrap();
+        assert!(retry < release, "{log:?}");
+        assert_eq!(b.held_lease(), None);
+        assert_eq!(b.served(), None);
+    }
+
+    /// I1 on the readiness-timeout path: same rule, no release while the stop failed.
+    #[test]
+    fn a_readiness_timeout_whose_stop_fails_keeps_the_lease() {
+        let runner = ScriptedRunner::happy();
+        *runner.bodies.lock().unwrap() = vec![r#"{"data":[]}"#.to_string()];
+        runner.on("model stop", 1, "", "tt: timed out");
+        let b = leasing_backend(&runner);
+        let err = b.start("Llama-3.1-8B-Instruct").unwrap_err();
+        assert!(err.to_string().contains("not listed"), "{err:#}");
+        assert!(err.to_string().contains("lease was kept"), "{err:#}");
+        assert!(runner.pos("gozer release").is_none(), "{:?}", runner.log());
+        assert_eq!(b.held_lease().as_deref(), Some("lease-abc123"));
+    }
+
+    /// I1 without gozer: nothing to keep, but the serve is still recorded so `/stop` retries.
+    #[test]
+    fn without_a_lease_a_failed_stop_after_a_failed_serve_is_recorded_for_retry() {
+        let runner = ScriptedRunner::happy();
+        runner.on("--port 8003", 1, "", "boom");
+        runner.on("model stop", 1, "", "docker: cannot connect");
+        let b = backend(&runner);
+        assert!(b.start("Llama-3.1-8B-Instruct").is_err());
+        assert_eq!(
+            b.served(),
+            Some(("Llama-3.1-8B-Instruct".to_string(), 8003))
+        );
+        assert_eq!(
+            b.discover_own_serve(),
+            None,
+            "a recorded serve is not rediscovered"
+        );
+    }
+
+    /// I2: run A is bringing a model up; a stop arrives, then run B. B is refused as a
+    /// contention (409) and runs nothing; A's pending cancel survives and A aborts.
+    #[test]
+    fn a_second_start_is_refused_and_does_not_erase_a_pending_stop() {
+        let runner = ScriptedRunner::happy();
+        let b = Arc::new(leasing_backend(&runner));
+        let refusal: Arc<Mutex<Option<anyhow::Error>>> = Arc::default();
+        let still_starting = Arc::new(AtomicBool::new(false));
+        {
+            let b = b.clone();
+            let refusal = refusal.clone();
+            let still_starting = still_starting.clone();
+            let once = AtomicBool::new(false);
+            *runner.on_get.lock().unwrap() = Some(Arc::new(move || {
+                if once.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                b.stop("").unwrap();
+                let second = b.start_with_options("Qwen3-8B", false, &RunOptions::default());
+                *refusal.lock().unwrap() = second.err();
+                still_starting.store(b.is_starting(), Ordering::SeqCst);
+            }));
+        }
+        let first = b.start("Llama-3.1-8B-Instruct");
+        *runner.on_get.lock().unwrap() = None; // break the Arc cycle
+        let refusal = refusal
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the second start was refused");
+        assert!(
+            refusal.chain().any(|c| c.is::<crate::gozer::Contention>()),
+            "a contention, so the route answers 409: {refusal:#}"
+        );
+        assert!(
+            refusal.to_string().contains("already starting"),
+            "{refusal:#}"
+        );
+        assert!(
+            still_starting.load(Ordering::SeqCst),
+            "the refusal must not clear the first start's flag"
+        );
+        let err = first.unwrap_err();
+        assert!(err.to_string().contains("aborted"), "{err:#}");
+        assert_eq!(
+            runner
+                .log()
+                .iter()
+                .filter(|l| l.contains("--version"))
+                .count(),
+            1,
+            "the refused start ran nothing: {:?}",
+            runner.log()
+        );
+        assert!(runner.pos("Qwen3-8B").is_none(), "{:?}", runner.log());
+        assert_eq!(b.held_lease(), None);
+        assert!(!b.is_starting());
+    }
+
+    /// I2: the in-flight flag is cleared on success, on failure and on a cancel.
+    #[test]
+    fn starting_is_cleared_after_success_failure_and_cancel() {
+        let runner = ScriptedRunner::happy();
+        let b = Arc::new(backend(&runner));
+        let during = Arc::new(AtomicBool::new(false));
+        {
+            let b = b.clone();
+            let during = during.clone();
+            *runner.on_get.lock().unwrap() = Some(Arc::new(move || {
+                during.store(b.is_starting(), Ordering::SeqCst)
+            }));
+        }
+        b.start("Llama-3.1-8B-Instruct").unwrap();
+        *runner.on_get.lock().unwrap() = None;
+        assert!(during.load(Ordering::SeqCst), "set while start runs");
+        assert!(!b.is_starting(), "cleared after success");
+
+        let failing = ScriptedRunner::happy();
+        failing.on("--port 8003", 1, "", "boom");
+        let b = backend(&failing);
+        assert!(b.start("Llama-3.1-8B-Instruct").is_err());
+        assert!(!b.is_starting(), "cleared after failure");
+
+        let cancelled = ScriptedRunner::happy();
+        let b = backend(&cancelled);
+        *cancelled.cancel_on_get.lock().unwrap() = Some(b.cancel.clone());
+        assert!(b.start("Llama-3.1-8B-Instruct").is_err());
+        assert!(!b.is_starting(), "cleared after a cancel");
+
+        // An early refusal (bad option) clears it too, and the next start proceeds.
+        let b = backend(&ScriptedRunner::happy());
+        assert!(b
+            .start_with_options("-x", false, &RunOptions::default())
+            .is_err());
+        assert!(!b.is_starting());
+        assert!(b.start("Llama-3.1-8B-Instruct").is_ok());
+    }
+
+    /// I3 (1): `/stop`'s confirmation read leaves the stopped row in the cache. The next idle
+    /// poll within the TTL must read `ps` again, and must not find the stopped server.
+    #[test]
+    fn stop_then_status_within_the_ttl_does_not_resurrect_the_server() {
+        let runner = ScriptedRunner::happy();
+        let b = discovered_without_lease(&runner);
+        b.stop("").unwrap();
+        assert!(runner.pos("model stop Llama-3.1-8B-Instruct").is_some());
+        runner.on("model ps", 0, PS_EMPTY, ""); // the container is gone
+        assert_eq!(b.discover_own_serve(), None);
+        assert_eq!(b.served(), None);
+    }
+
+    /// I3 (1): a serve invalidates the cache, so the next read sees the new container.
+    #[test]
+    fn a_serve_invalidates_the_ps_cache() {
+        let runner = ScriptedRunner::happy(); // ps: empty
+        let b = cached_backend(&runner, 10_000, 10_000, 1_000);
+        assert_eq!(b.serving_entries().unwrap().len(), 0);
+        b.start("Llama-3.1-8B-Instruct").unwrap();
+        runner.on("model ps", 0, PS_ONE_RUNNING, "");
+        assert_eq!(
+            b.status().unwrap(),
+            ServingStatus::Serving("meta-llama/Llama-3.1-8B-Instruct".to_string())
+        );
+    }
+
+    /// I3 (2): no rediscovery while a stop is in flight. The poll lands during the lease
+    /// release, after `served` was cleared and before `stop` returns.
+    #[test]
+    fn no_rediscovery_while_a_stop_is_in_flight() {
+        let runner = ScriptedRunner::happy();
+        let b = Arc::new(discovered_with_lease(&runner));
+        let seen: Arc<Mutex<Vec<Option<Endpoint>>>> = Arc::default();
+        {
+            let b = b.clone();
+            let seen = seen.clone();
+            *runner.on_run.lock().unwrap() = Some((
+                "gozer release".to_string(),
+                Arc::new(move || seen.lock().unwrap().push(b.discover_own_serve())),
+            ));
+        }
+        b.stop("").unwrap();
+        *runner.on_run.lock().unwrap() = None; // break the Arc cycle
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen, vec![None], "{:?}", runner.log());
+        assert_eq!(b.served(), None);
+    }
+
+    /// I3 (2): a discovery whose `ps` began before a stop must not record what it read.
+    #[test]
+    fn a_discovery_that_overlaps_a_stop_records_nothing() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_ONE_RUNNING, "");
+        let b = Arc::new(backend(&runner));
+        {
+            let b = b.clone();
+            let once = AtomicBool::new(false);
+            *runner.on_ps.lock().unwrap() = Some(Arc::new(move || {
+                if !once.swap(true, Ordering::SeqCst) {
+                    b.stop("").unwrap();
+                }
+            }));
+        }
+        assert_eq!(b.discover_own_serve(), None);
+        *runner.on_ps.lock().unwrap() = None; // break the Arc cycle
+        assert_eq!(b.served(), None);
+        // A later poll, with no stop around it, finds the server again.
+        assert!(b.discover_own_serve().is_some());
+    }
+
+    /// I3 (3): a discovered record whose row has gone is cleared by `status`, so a later serve
+    /// on the port is rediscovered. A record from this process's own `start` is kept.
+    #[test]
+    fn a_vanished_discovered_serve_is_forgotten_and_a_later_one_found() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_ONE_RUNNING, "");
+        let b = backend(&runner);
+        assert!(b.discover_own_serve().is_some());
+        runner.on("model ps", 0, PS_EMPTY, "");
+        assert_eq!(b.status().unwrap(), ServingStatus::Idle);
+        assert_eq!(b.served(), None, "the discovered record was cleared");
+        runner.on("model ps", 0, PS_OTHER_ON_8003, "");
+        let ep = b
+            .discover_own_serve()
+            .expect("a later serve on the port is found");
+        assert_eq!(ep.model, "Qwen/Qwen3-8B");
+
+        let own = ScriptedRunner::happy();
+        let b = backend(&own);
+        b.start("Llama-3.1-8B-Instruct").unwrap();
+        assert_eq!(b.status().unwrap(), ServingStatus::Idle);
+        assert!(
+            b.served().is_some(),
+            "a started serve is not forgotten by a poll"
+        );
+    }
+
+    /// M1: with a lease held, the route's hint (a `/v1/models` id) is not trusted; the server
+    /// on our port is named by a fresh `tt model ps`.
+    #[test]
+    fn with_a_lease_the_hint_is_ignored_and_ps_names_the_server() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_OTHER_ON_8003, "");
+        let b = leasing_backend(&runner);
+        assert!(b.adopt_lease("lease-old", "tt-station:8003:Llama-3.1-8B-Instruct"));
+        b.stop("meta-llama/Llama-3.1-8B-Instruct").unwrap();
+        assert!(
+            runner.pos("model stop meta-llama").is_none(),
+            "{:?}",
+            runner.log()
+        );
+        let stop = runner
+            .pos("model stop Qwen3-8B")
+            .expect("ps named the server");
+        assert!(stop < runner.pos("gozer release lease-old").unwrap());
+    }
+
+    /// M1: an unsafe hint never reaches `tt model stop`.
+    #[test]
+    fn an_unsafe_hint_is_never_passed_to_tt_model_stop() {
+        for bad in ["--all", "-x", "a b", "a\nb"] {
+            let runner = ScriptedRunner::happy();
+            let err = backend(&runner).stop(bad).unwrap_err();
+            assert!(err.to_string().contains("refusing"), "{bad:?}: {err:#}");
+            assert!(
+                runner.pos("model stop").is_none(),
+                "{bad:?}: {:?}",
+                runner.log()
+            );
+        }
+    }
+
+    /// M2: the stop after an aborted start does not run while the `handover` lock is held.
+    #[test]
+    fn the_stop_after_an_abort_runs_outside_the_handover_lock() {
+        let runner = ScriptedRunner::happy();
+        let b = Arc::new(leasing_backend(&runner));
+        *runner.cancel_on_get.lock().unwrap() = Some(b.cancel.clone());
+        let free: Arc<Mutex<Option<bool>>> = Arc::default();
+        {
+            let b = b.clone();
+            let free = free.clone();
+            *runner.on_run.lock().unwrap() = Some((
+                "model stop".to_string(),
+                Arc::new(move || *free.lock().unwrap() = Some(b.handover.try_lock().is_ok())),
+            ));
+        }
+        assert!(b.start("Llama-3.1-8B-Instruct").is_err());
+        *runner.on_run.lock().unwrap() = None; // break the Arc cycle
+        assert_eq!(*free.lock().unwrap(), Some(true), "{:?}", runner.log());
     }
 
     #[test]
