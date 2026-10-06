@@ -13,5 +13,6 @@ pub mod registry;
 pub mod remote;
 pub mod station;
 pub mod tray;
+pub mod window;
 
 pub use station::{fits, ModelRow, ServingNow, Station, StationId, StationKind, StationState};

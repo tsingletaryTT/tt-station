@@ -205,6 +205,14 @@ impl Registry {
         self.last_run.retain(|(station, _), _| *station != id.0);
     }
 
+    /// Record `mac` as the network card MAC of station `id`, so it can be woken while off.
+    /// Unknown ids are ignored. Call [`Registry::save`] afterwards to keep it.
+    pub fn set_mac(&mut self, id: &StationId, mac: &str) {
+        if let Some(s) = self.stations.iter_mut().find(|s| s.id() == *id) {
+            s.mac = Some(mac.to_string());
+        }
+    }
+
     /// Remember `opts` as the options last used to run `model` on `station`.
     pub fn remember_run(&mut self, station: &StationId, model: &str, opts: &RunOptions) {
         self.last_run

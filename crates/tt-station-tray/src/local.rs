@@ -237,7 +237,7 @@ impl LocalStation {
     ///
     /// Order: validate the model name and options (nothing is spawned if they fail), check that
     /// `tt` is official, ask `tt --json serve <model> --dry-run` whether the model is a catalog
-    /// model or a bundle, build the argv with `serve_argv_for`, run it, then read `tt model ps`
+    /// model or a bundle, build the argv with [`local_serve_argv`], run it, then read `tt model ps`
     /// for the URL. `tt serve` returns once the server's container exists, so the model may
     /// still be loading when this returns; `state()` shows it as serving once `ps` lists it.
     ///
@@ -247,17 +247,9 @@ impl LocalStation {
     pub async fn run(&self, model: &str, _force: bool, options: &RunOptions) -> Result<ServingNow> {
         validate_model_name(model)?;
         options.validate()?;
-        self.vet().await?;
-
-        let plan = self
-            .tt_json(&["--json", "serve", model, "--dry-run"])
-            .await?;
-        let argv = serve_argv_for(
-            ServeTarget::from_dry_run(&plan),
-            model,
-            self.default_port,
-            options,
-        )?;
+        // `serve_plan` vets `tt` before the dry run.
+        let plan = self.serve_plan(model).await?;
+        let argv = local_serve_argv(&plan, model, self.default_port, options)?;
         let mut args: Vec<&str> = vec!["--json"];
         args.extend(argv.iter().map(String::as_str));
         let out = self.tt(&args).await?;
@@ -281,6 +273,26 @@ impl LocalStation {
             model: model.to_string(),
             base_url: format!("http://127.0.0.1:{port}/v1"),
         }))
+    }
+
+    /// The binary this station runs as `tt`, for showing the exact command in the run sheet.
+    pub fn tt_bin(&self) -> &std::path::Path {
+        &self.tt_bin
+    }
+
+    /// The port `tt serve --port` gets when the options do not set one.
+    pub fn default_port(&self) -> u16 {
+        self.default_port
+    }
+
+    /// `tt --json serve <model> --dry-run`: the JSON plan `tt` prints without starting anything.
+    /// [`local_serve_argv`] reads it to tell a catalog model from a bundle. [`LocalStation::run`]
+    /// calls this before every real serve, and the run sheet calls it so its command preview
+    /// uses the same classification. Validates the name and vets `tt` first.
+    pub async fn serve_plan(&self, model: &str) -> Result<serde_json::Value> {
+        validate_model_name(model)?;
+        self.vet().await?;
+        self.tt_json(&["--json", "serve", model, "--dry-run"]).await
     }
 
     /// Pick the server `stop` and `logs` act on. Rules:
@@ -364,6 +376,27 @@ impl LocalStation {
     pub async fn schema(&self) -> Result<RunSchema> {
         Ok(run_schema())
     }
+}
+
+/// The `tt` arguments (without the binary) that [`LocalStation::run`] runs for `model`.
+///
+/// `plan` is the output of `tt --json serve <model> --dry-run` ([`LocalStation::serve_plan`]).
+/// It decides catalog against bundle through `ServeTarget::from_dry_run`; a plan that is not
+/// known yet (`serde_json::Value::Null`) counts as the catalog, the stricter case. The run
+/// sheet's command preview calls this same function, so the preview and the real serve cannot
+/// build different commands.
+pub fn local_serve_argv(
+    plan: &serde_json::Value,
+    model: &str,
+    default_port: u16,
+    options: &RunOptions,
+) -> std::result::Result<Vec<String>, libttstation::run_options::OptionError> {
+    serve_argv_for(
+        ServeTarget::from_dry_run(plan),
+        model,
+        default_port,
+        options,
+    )
 }
 
 /// First few lines of a process's stderr, for an error message.

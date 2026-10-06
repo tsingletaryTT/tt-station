@@ -183,3 +183,20 @@ fn save_is_atomic() {
         "no temp file left behind: {leftovers:?}"
     );
 }
+
+#[test]
+fn set_mac_is_kept_across_save_and_load_and_ignores_unknown_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stations.json");
+    let mut reg = Registry::load(&path);
+    let id = reg.add_manual("qb2-lab.local", 8765).unwrap();
+    reg.set_mac(&StationId("nobody:1".into()), "00:00:00:00:00:00");
+    assert_eq!(reg.stations()[0].mac, None);
+    reg.set_mac(&id, "aa:bb:cc:dd:ee:ff");
+    reg.save().unwrap();
+    let again = Registry::load(&path);
+    assert_eq!(
+        again.stations()[0].mac.as_deref(),
+        Some("aa:bb:cc:dd:ee:ff")
+    );
+}

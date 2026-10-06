@@ -118,6 +118,15 @@ pub enum Station {
 }
 
 impl Station {
+    /// The station's id (`local`, or `host:port` for a box), the key the registry remembers
+    /// run options under.
+    pub fn id(&self) -> StationId {
+        match self {
+            Station::Local(s) => s.id(),
+            Station::Remote(s) => s.id(),
+        }
+    }
+
     /// Snapshot of the station. Never fails; see [`StationState`].
     pub async fn state(&self) -> StationState {
         match self {
@@ -161,6 +170,16 @@ impl Station {
         match self {
             Station::Local(s) => s.logs(tail).await,
             Station::Remote(s) => s.logs(tail).await,
+        }
+    }
+
+    /// The local station's `tt --json serve <model> --dry-run` plan, which the run sheet's
+    /// command preview needs to classify the model the same way [`Station::run`] will. `None`
+    /// for a box: the agent builds its own command, so there is no local plan to show.
+    pub async fn serve_plan(&self, model: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        match self {
+            Station::Local(s) => s.serve_plan(model).await.map(Some),
+            Station::Remote(_) => Ok(None),
         }
     }
 
