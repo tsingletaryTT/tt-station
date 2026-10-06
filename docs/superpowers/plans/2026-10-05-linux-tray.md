@@ -594,3 +594,25 @@ would have made the inner `acquire` return 409. Each serve was listed on `/v1/mo
   is unaffected.
 - `tt-station run` prints only "500 Internal Server Error" and drops the agent's error body (the
   official-`tt` refusal message was visible only with curl).
+
+### Task 4c: re-check at e7c4c2c (bugs 1 and 2 fixed)
+
+Same throwaway-agent setup, same bundle, five serves (115 to 125 s each with warm caches). A logging
+wrapper around `tt` counted every `tt model ps` run.
+
+| Check | Result |
+|---|---|
+| Bug 1: `/serving` lists the agent's tt serve once, `source: agent`, right id and base URL; `tt-station serving` shows it | CONFIRMED |
+| Bug 2 with the lease adopted (`GOZER_HISTORY_ROOT` workaround): after `kill -9` and a restart, `/status` and `/endpoint` report the serve; `/stop` runs a fresh `ps`, then `tt model stop`, then the release (reset ok); idle afterwards | CONFIRMED |
+| Bug 2 without the workaround (lease not adoptable): `/status` and `/endpoint` still report the serve; `/stop` stops the container and releases nothing, so no reset runs under a live container. The orphaned lease stays STALE until released by hand | CONFIRMED (safe) |
+| `ps` cache: 20 parallel `/status` → 1 `ps` run (idle and serving); 200 requests over 5.8 s → 2 runs | CONFIRMED (the 5 s timeout was not exercised) |
+| `/status` and `/serving` during a load: median 43 ms and 16 ms, max 89 ms and 235 ms | CONFIRMED |
+| A serve on `options.port` 20011 is not rediscovered after a restart (`/status` idle, `/serving` lists it as `external`, `/stop` is a safe no-op) | CONFIRMED (documented limitation) |
+| Cleanup: chips FREE, no containers of ours, `tt-smi -s` healthy | CONFIRMED |
+
+**New minor bug.** `/status` can report a just-stopped serve as serving for 2 to 3 s. The idle check
+rediscovers the serve from a `ps` result taken before `tt model stop` (`/stop`'s own confirm
+read, cached 2.5 s), or from a fresh `ps` while the container is still shutting down. In the
+second case it reports the bundle name, not the served id. It heals itself, and stop and release
+decisions are unaffected. Suggested fix: invalidate the `ps` cache after `tt model stop` and
+`tt serve`, and do not rediscover while a stop is in flight.
