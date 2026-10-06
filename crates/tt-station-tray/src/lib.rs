@@ -11,6 +11,7 @@ pub mod menu_model;
 pub mod pairing_flow;
 pub mod registry;
 pub mod remote;
+pub mod sni_host;
 pub mod station;
 pub mod tray;
 pub mod window;

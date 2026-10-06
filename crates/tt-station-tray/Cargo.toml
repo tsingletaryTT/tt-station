@@ -11,6 +11,9 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 ksni = "0.3"
+# Same major as the zbus ksni uses (5.x); used only for one NameHasOwner call in src/sni_host.rs.
+# `default-features = false` + `tokio` reuses the runtime ksni already pulls (no async-io thread).
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 # Plain GTK4 for the main window (libadwaita is not installed on the build box). `v4_12` is the
 # newest feature the installed GTK 4.14 satisfies that we need; see src/window/mod.rs.
 gtk4 = { version = "0.9", features = ["v4_12"] }
