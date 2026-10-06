@@ -52,8 +52,7 @@ use crate::remote::RemoteStation;
 use crate::station::{ModelRow, Station, StationState};
 
 use view_model::{
-    group_models, registry_path_from, station_with_registry_mac, ActionResult, ModelFilter,
-    PreviewTarget, RunForm,
+    group_models, registry_path_from, ActionResult, ModelFilter, PreviewTarget, RunForm,
 };
 
 /// GApplication id. A second launch with the same id activates the running instance instead of
@@ -122,25 +121,29 @@ impl Shared {
 
     /// Store a fresh state for station `i`, with the registry's MAC merged in for an offline
     /// box and a newly seen MAC written back to the registry.
+    ///
+    /// `i` is the index the poll was started for. The list may have been rebuilt since (Add
+    /// or Remove station), so [`view_model::place_state`] drops the answer unless the station
+    /// now at `i` has the same id, and finds the registry entry by id. Without that, box A's
+    /// answer could land in box B's slot and A's MAC would be saved as B's.
     pub fn set_state(&self, i: usize, state: StationState) {
-        let state = {
+        let slot_id = self.stations.borrow().get(i).map(|s| s.id());
+        let placed = {
             let mut reg = self.registry.borrow_mut();
-            // Station i >= 1 is registry entry i - 1 (see `rebuild_stations`).
-            let known = i
-                .checked_sub(1)
-                .and_then(|k| reg.stations().get(k).cloned());
-            if let Some(k) = &known {
-                if let Some(mac) = view_model::mac_to_remember(&state, k) {
-                    reg.set_mac(&k.id(), &mac);
-                    if let Err(e) = reg.save() {
-                        eprintln!("tt-station-tray: could not save the registry: {e:#}");
-                    }
+            let Some(placed) = view_model::place_state(slot_id.as_ref(), state, reg.stations())
+            else {
+                return;
+            };
+            if let Some((id, mac)) = &placed.remember_mac {
+                reg.set_mac(id, mac);
+                if let Err(e) = reg.save() {
+                    eprintln!("tt-station-tray: could not save the registry: {e:#}");
                 }
             }
-            station_with_registry_mac(state, known.as_ref())
+            placed.state
         };
         if let Some(slot) = self.states.borrow_mut().get_mut(i) {
-            *slot = Some(state);
+            *slot = Some(placed);
         }
         self.notify();
     }
@@ -458,4 +461,84 @@ pub fn smoke_check() -> anyhow::Result<()> {
     })();
     let _ = std::fs::remove_dir_all(&dir);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `Shared` with this machine plus boxes `a` and `b` (in that registry order), built
+    /// without GTK: `set_state` touches only the registry, the lists and the listeners.
+    fn shared(dir: &std::path::Path) -> (Shared, tokio::runtime::Runtime) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut registry = Registry::load(&dir.join("stations.toml"));
+        registry.add_manual("a", 8765).unwrap();
+        registry.add_manual("b", 8765).unwrap();
+        let shared = Shared {
+            rt: rt.handle().clone(),
+            registry: RefCell::new(registry),
+            stations: RefCell::new(Vec::new()),
+            states: RefCell::new(Vec::new()),
+            selected: Cell::new(0),
+            listeners: RefCell::new(Vec::new()),
+        };
+        shared.set_station_list(&["a", "b"]);
+        (shared, rt)
+    }
+
+    impl Shared {
+        /// Test-only: this machine, then a remote station per host, with empty states.
+        fn set_station_list(&self, hosts: &[&str]) {
+            let mut list = vec![Arc::new(Station::Local(LocalStation::new("/nonexistent/tt")))];
+            for h in hosts {
+                list.push(Arc::new(Station::Remote(RemoteStation::new(
+                    format!("http://{h}:8765"),
+                    *h,
+                    None,
+                ))));
+            }
+            *self.states.borrow_mut() = vec![None; list.len()];
+            *self.stations.borrow_mut() = list;
+        }
+    }
+
+    fn answer(host: &str, mac: &str) -> StationState {
+        StationState {
+            id: crate::station::StationId(format!("{host}:8765")),
+            name: host.into(),
+            reachable: true,
+            mesh: None,
+            serving: None,
+            paired: false,
+            contention: None,
+            mac: Some(mac.into()),
+        }
+    }
+
+    /// Final fix wave I4: a poll for box A, started at index 1, finishes after A was removed
+    /// and B moved into index 1. The answer is dropped: B's slot stays empty and A's MAC is
+    /// not saved as B's.
+    #[test]
+    fn a_late_answer_is_not_stored_under_the_station_now_at_its_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _rt) = shared(dir.path());
+        let a_id = crate::station::StationId("a:8765".into());
+        app.registry.borrow_mut().remove(&a_id);
+        app.set_station_list(&["b"]);
+
+        app.set_state(1, answer("a", "aa:aa:aa:aa:aa:aa"));
+        assert_eq!(app.states.borrow()[1], None);
+        let reg = app.registry.borrow();
+        assert_eq!(reg.stations().len(), 1);
+        assert_eq!(reg.stations()[0].mac, None, "A's MAC was written onto B");
+
+        // B's own answer is stored, and its MAC saved under B.
+        drop(reg);
+        app.set_state(1, answer("b", "bb:bb:bb:bb:bb:bb"));
+        assert!(app.states.borrow()[1].is_some());
+        assert_eq!(
+            app.registry.borrow().stations()[0].mac.as_deref(),
+            Some("bb:bb:bb:bb:bb:bb")
+        );
+    }
 }

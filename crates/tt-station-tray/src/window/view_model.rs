@@ -11,8 +11,9 @@
 //! * [`RunForm`]: the run sheet's field values, their conversion to [`RunOptions`], and the
 //!   command preview. The preview calls [`local_serve_argv`], the function
 //!   [`crate::local::LocalStation::run`] uses, so the preview shows the command that runs.
-//! * [`station_with_registry_mac`] and [`station_row`]: the Stations pane rows, including the
-//!   MAC of an offline box (the tray's Wake item depends on it).
+//! * [`place_state`], [`station_with_registry_mac`] and [`station_row`]: where a poll answer
+//!   goes (by station id), the Stations pane rows, and the MAC of an offline box (the tray's
+//!   Wake item depends on it).
 //! * [`run_gate`]: whether the run sheet's Start button is enabled.
 //! * [`ActionResult`]: the text shown after Stop, Run or Logs, which keeps the error text the
 //!   station returned (for example a 409 that names who holds the chips).
@@ -28,7 +29,7 @@ use serde_json::{json, Map, Value};
 use crate::local::{local_serve_argv, DEFAULT_SERVE_PORT};
 use crate::menu_model::Dot;
 use crate::registry::KnownStation;
-use crate::station::{ModelRow, StationState};
+use crate::station::{ModelRow, StationId, StationState};
 
 // ---------------------------------------------------------------------------------------------
 // Model browser
@@ -425,6 +426,38 @@ pub fn station_with_registry_mac(
 pub fn mac_to_remember(state: &StationState, known: &KnownStation) -> Option<String> {
     let mac = state.mac.as_ref()?;
     (known.mac.as_ref() != Some(mac)).then(|| mac.clone())
+}
+
+/// What the window does with one station's poll answer: the state to store, and a MAC to save
+/// in the registry (by station id) when the answer carried a new one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacedState {
+    pub state: StationState,
+    pub remember_mac: Option<(StationId, String)>,
+}
+
+/// Decide where a poll answer goes. `slot_id` is the id of the station now at the index the
+/// poll was started for (`None` if that index no longer exists).
+///
+/// The station list is rebuilt when a station is added or removed, and a poll can finish
+/// after that. So the answer is dropped unless the station now in the slot has the answer's
+/// id. The registry entry is looked up by id as well, never by position, so the offline-MAC
+/// merge ([`station_with_registry_mac`]) and the MAC write-back ([`mac_to_remember`]) only
+/// ever touch the station that answered. The tray side matches by `state.id` the same way.
+pub fn place_state(
+    slot_id: Option<&StationId>,
+    state: StationState,
+    known: &[KnownStation],
+) -> Option<PlacedState> {
+    if slot_id != Some(&state.id) {
+        return None;
+    }
+    let entry = known.iter().find(|k| k.id() == state.id);
+    let remember_mac = entry.and_then(|k| mac_to_remember(&state, k).map(|mac| (k.id(), mac)));
+    Some(PlacedState {
+        state: station_with_registry_mac(state, entry),
+        remember_mac,
+    })
 }
 
 /// One Stations pane row.
@@ -997,6 +1030,67 @@ mod tests {
             mac_to_remember(&state("qb:8765", false, true, None), &known(Some("x"))),
             None
         );
+    }
+
+    fn known_at(host: &str, mac: Option<&str>) -> KnownStation {
+        KnownStation {
+            name: host.into(),
+            host: host.into(),
+            port: 8765,
+            mac: mac.map(str::to_string),
+        }
+    }
+
+    /// A poll answer for a station that is no longer in that slot (the list was rebuilt by
+    /// Add or Remove while the poll ran) is dropped.
+    #[test]
+    fn a_stale_state_for_a_removed_or_shifted_station_is_dropped() {
+        let reg = [known_at("b", None)];
+        let a = state("a:8765", true, true, Some("aa:aa:aa:aa:aa:aa"));
+        // Slot 1 held box A when the poll started; A was removed, so B is there now.
+        let b_id = StationId("b:8765".into());
+        assert_eq!(place_state(Some(&b_id), a.clone(), &reg), None);
+        // The list shrank: slot 1 no longer exists.
+        assert_eq!(place_state(None, a, &reg), None);
+    }
+
+    /// The MAC merge and the MAC to save are both found by id, never by position, so one
+    /// box's MAC is never written onto another.
+    #[test]
+    fn the_mac_merge_never_crosses_stations() {
+        // Registry order differs from the slot: A is entry 1, B is entry 0.
+        let reg = [
+            known_at("b", Some("bb:bb:bb:bb:bb:bb")),
+            known_at("a", None),
+        ];
+        let a_id = StationId("a:8765".into());
+        let up = place_state(
+            Some(&a_id),
+            state("a:8765", true, true, Some("aa:aa:aa:aa:aa:aa")),
+            &reg,
+        )
+        .expect("the slot still holds A");
+        assert_eq!(
+            up.remember_mac,
+            Some((a_id.clone(), "aa:aa:aa:aa:aa:aa".to_string()))
+        );
+        assert_eq!(up.state.mac.as_deref(), Some("aa:aa:aa:aa:aa:aa"));
+
+        // Offline A takes no MAC from B's entry.
+        let up = place_state(Some(&a_id), state("a:8765", false, true, None), &reg).unwrap();
+        assert_eq!(up.state.mac, None);
+        assert_eq!(up.remember_mac, None);
+
+        // Offline B gets its own MAC.
+        let b_id = StationId("b:8765".into());
+        let up = place_state(Some(&b_id), state("b:8765", false, true, None), &reg).unwrap();
+        assert_eq!(up.state.mac.as_deref(), Some("bb:bb:bb:bb:bb:bb"));
+
+        // This machine is not in the registry: kept as is, nothing saved.
+        let local = StationId("local".into());
+        let up = place_state(Some(&local), state("local", true, true, None), &reg).unwrap();
+        assert_eq!(up.remember_mac, None);
+        assert_eq!(up.state.id, local);
     }
 
     #[test]
