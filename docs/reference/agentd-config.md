@@ -162,8 +162,22 @@ discovery so one server is listed once. After an agent restart, a running
 `tt model ps` row on the agent's own serving port (the port in an adopted
 lease, else `serving_port`) is recorded as serving: `GET /status` and
 `GET /endpoint` report it, and `POST /stop` stops it by name before releasing
-any lease. A row on another port is not treated as the agent's. `GET /models` reads `tt --json model list` and keeps
-the models with a vLLM engine.
+any lease. A row on another port is not treated as the agent's.
+
+Two consequences of that rule. Only a serve on the agent's own port is
+rediscovered after a restart: a serve started with the `port` option on another
+port, whose lease was not adopted, stays invisible until the next `POST /run`.
+And any running row on the agent's own port is adopted, including one started
+by hand or by another tenant, so `POST /stop` will stop it.
+
+The idle checks behind `GET /status`, `GET /endpoint` and `GET /serving` reuse
+a `tt model ps` result for 2.5 s, share one run between concurrent requests,
+and kill a `ps` that takes longer than 5 s (then rows up to 10 s old are used,
+or none). Deciding what to stop before a lease release always reads `ps`
+fresh.
+
+`GET /models` reads `tt --json model list` and keeps the models with a vLLM
+engine.
 
 This is the only backend that applies `POST /run` `options` (see
 `GET /run/schema`). `tt serve` refuses some options for catalog models, and the

@@ -239,3 +239,61 @@ async fn a_restarted_agent_with_nothing_on_its_port_stays_idle() {
     let (_, body) = get_json(format!("{base}/status")).await;
     assert_eq!(body["status"], "idle");
 }
+
+/// A `tt` whose `model ps` never answers: it sleeps out the caller's timeout and fails, the way
+/// `RealCommandRunner` kills a child that overruns.
+struct HungTt;
+
+impl tt_station_agentd::serving::docker::CommandRunner for HungTt {
+    fn run(&self, _args: &[&str]) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+    fn health_ok(&self, _url: &str) -> bool {
+        false
+    }
+    /// Without a timeout the call just hangs (5 s here, so a regression fails the test's time
+    /// bound instead of hanging the suite).
+    fn run_capturing(
+        &self,
+        args: &[&str],
+    ) -> anyhow::Result<tt_station_agentd::serving::docker::CapturedOutput> {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        Err(anyhow::anyhow!("{} hung", args.join(" ")))
+    }
+    fn run_capturing_with_timeout(
+        &self,
+        args: &[&str],
+        _env: &[(&str, &str)],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<tt_station_agentd::serving::docker::CapturedOutput> {
+        std::thread::sleep(timeout);
+        Err(anyhow::anyhow!("{} timed out", args.join(" ")))
+    }
+}
+
+/// A hung `tt model ps` must not hang the unauthenticated idle `/status` or `/serving`.
+#[tokio::test]
+async fn a_hung_tt_does_not_hang_status_or_serving() {
+    let config = TtConfig {
+        tt_bin: "/fake/tt".to_string(),
+        service_port: 20010,
+        ps_timeout: std::time::Duration::from_millis(50),
+        ..TtConfig::default()
+    };
+    let backend: Arc<dyn ServingBackend> = Arc::new(TtBackend::new(config, Box::new(HungTt)));
+    let state = AppState::new("qb2-lab".to_string(), "4xBH".to_string(), backend)
+        .with_serving_config("127.0.0.1".to_string(), 20010);
+    let base = serve(state).await;
+
+    let started = std::time::Instant::now();
+    let (status, body) = get_json(format!("{base}/status")).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(body["status"], "idle");
+    let (status, _) = get_json(format!("{base}/serving")).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+}

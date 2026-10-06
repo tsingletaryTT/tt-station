@@ -175,6 +175,24 @@ pub trait CommandRunner: Send + Sync {
         let _ = env;
         self.run_capturing(args)
     }
+
+    /// Like `run_capturing_with_env`, but gives up after `timeout`: the child is killed and an
+    /// error is returned. For read-only probes that an unauthenticated route triggers (the `tt`
+    /// backend's `tt --json model ps`), where a hung tool or a wedged docker must not hang the
+    /// request and hold a blocking-pool thread forever.
+    ///
+    /// Default implementation ignores `timeout` and calls `run_capturing_with_env`. That is right
+    /// for fakes that answer at once; a fake that simulates a hang overrides this.
+    /// `RealCommandRunner` overrides it with a real wait-with-timeout and `kill()`.
+    fn run_capturing_with_timeout(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        timeout: std::time::Duration,
+    ) -> Result<CapturedOutput> {
+        let _ = timeout;
+        self.run_capturing_with_env(args, env)
+    }
 }
 
 /// Exit code, stdout, and stderr from a `run_capturing` call -- the
@@ -279,6 +297,74 @@ impl CommandRunner for RealCommandRunner {
             code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+    }
+
+    /// Spawns the child with piped stdout and stderr, drains both on helper threads (so a chatty
+    /// child cannot block on a full pipe), and polls `try_wait` until it exits or `timeout`
+    /// passes. On timeout the child is killed and reaped, and the reader threads are left to
+    /// finish on their own: a grandchild that inherited the pipes can keep them open, and the
+    /// caller must not wait for it.
+    fn run_capturing_with_timeout(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        timeout: std::time::Duration,
+    ) -> Result<CapturedOutput> {
+        use std::io::Read;
+        let (program, rest) = args.split_first().ok_or_else(|| {
+            anyhow::anyhow!("CommandRunner::run_capturing_with_timeout called with empty argv")
+        })?;
+        let mut child = std::process::Command::new(program)
+            .args(rest)
+            .envs(env.iter().copied())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to spawn {}", args.join(" ")))?;
+        let drain = |pipe: Option<Box<dyn Read + Send>>| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut p) = pipe {
+                    let _ = p.read_to_end(&mut buf);
+                }
+                let _ = tx.send(buf);
+            });
+            rx
+        };
+        let out_rx = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+        let err_rx = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+
+        let deadline = std::time::Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = child.try_wait().context("waiting for child")? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow::anyhow!(
+                    "{} did not finish within {:?} and was killed",
+                    args.join(" "),
+                    timeout
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        // The child has exited; its pipes close unless a grandchild holds them. Bound the wait
+        // for the remaining output by what is left of the timeout.
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let text = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
+            rx.recv_timeout(left)
+                .map(|b| String::from_utf8_lossy(&b).trim().to_string())
+                .unwrap_or_default()
+        };
+        Ok(CapturedOutput {
+            code: status.code().unwrap_or(-1),
+            stdout: text(out_rx),
+            stderr: text(err_rx),
         })
     }
 
@@ -1535,6 +1621,31 @@ mod tests {
         fn health_ok(&self, _url: &str) -> bool {
             true
         }
+    }
+
+    /// The real timeout: a child that outlives it is killed and the call returns promptly.
+    #[test]
+    fn real_runner_kills_a_child_that_outlives_the_timeout() {
+        let started = std::time::Instant::now();
+        let err = RealCommandRunner
+            .run_capturing_with_timeout(
+                &["sleep", "5"],
+                &[],
+                std::time::Duration::from_millis(100),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("was killed"), "{err:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+        // A quick child is captured normally, with its exit code and both streams.
+        let out = RealCommandRunner
+            .run_capturing_with_timeout(
+                &["sh", "-c", "echo out; echo err >&2; exit 3"],
+                &[("X", "1")],
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!((out.code, out.stdout.as_str(), out.stderr.as_str()), (3, "out", "err"));
     }
 
     /// The container name built from a slashed model id must be valid, but

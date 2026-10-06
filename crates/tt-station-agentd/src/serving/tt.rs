@@ -43,6 +43,17 @@
 //! feeds `GET /serving` from `tt model ps`, because docker discovery only recognises
 //! tt-inference-server images and tt-model images are `tt-model/<name>:<tag>`.
 //!
+//! Two limits follow from that rule. Only a serve on the agent's own port is rediscovered: the
+//! port of an adopted lease, else `service_port`. A serve started with `options.port` on
+//! another port, whose lease was not adopted, stays invisible until the next `/run`. And any
+//! running row on that port is treated as the agent's, including one started by hand or by
+//! another tenant, so `/stop` will stop it.
+//!
+//! These read-only paths go through a short `ps` cache with single-flight and a hard timeout
+//! ([`PS_CACHE_TTL`], [`PS_TIMEOUT`], [`PS_STALE_LIMIT`]), because idle `/status` polls are
+//! unauthenticated. The paths that decide what to stop before a lease release always run a
+//! fresh `ps`.
+//!
 //! ## What has been checked so far
 //!
 //! Live on 2026-10-05 (Task 4, bundle `changh95/qwen3.8-27b-p300x2` on 4x p300c, tt 1.0.1):
@@ -80,6 +91,21 @@ pub const DEFAULT_HEALTH_POLL_ATTEMPTS: u32 = 1200;
 /// Delay between `/v1/models` polls. See [`DEFAULT_HEALTH_POLL_ATTEMPTS`].
 pub const DEFAULT_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How long a `tt --json model ps` result is reused by the read-only paths (`/status`,
+/// `/endpoint`, `/serving`, and `/stop`'s rediscovery). Idle `/status` polls are unauthenticated
+/// and each one asks the backend, so without this every poll would start a Python CLI and a few
+/// docker calls. 2.5 s keeps a tray polling every few seconds to about one `ps` per poll.
+pub const PS_CACHE_TTL: Duration = Duration::from_millis(2500);
+
+/// Hard limit on one `tt --json model ps` run. After it the child is killed and the call
+/// fails, so a hung `tt` or a wedged docker cannot hang a request forever. `ps` normally takes
+/// well under a second.
+pub const PS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// When a cached-path `ps` fails or times out, the last good rows are still returned if they are
+/// younger than this. Older rows are not trusted, and the error is returned.
+pub const PS_STALE_LIMIT: Duration = Duration::from_secs(10);
+
 /// Settings for [`TtBackend`].
 #[derive(Debug, Clone)]
 pub struct TtConfig {
@@ -99,6 +125,12 @@ pub struct TtConfig {
     pub health_poll_attempts: u32,
     /// Delay between polls. See [`DEFAULT_HEALTH_POLL_INTERVAL`].
     pub health_poll_interval: Duration,
+    /// See [`PS_CACHE_TTL`]. A field so tests can use milliseconds.
+    pub ps_cache_ttl: Duration,
+    /// See [`PS_TIMEOUT`].
+    pub ps_timeout: Duration,
+    /// See [`PS_STALE_LIMIT`].
+    pub ps_stale_limit: Duration,
 }
 
 impl Default for TtConfig {
@@ -109,6 +141,9 @@ impl Default for TtConfig {
             service_port: 8000,
             health_poll_attempts: DEFAULT_HEALTH_POLL_ATTEMPTS,
             health_poll_interval: DEFAULT_HEALTH_POLL_INTERVAL,
+            ps_cache_ttl: PS_CACHE_TTL,
+            ps_timeout: PS_TIMEOUT,
+            ps_stale_limit: PS_STALE_LIMIT,
         }
     }
 }
@@ -300,6 +335,21 @@ pub struct TtBackend {
     /// True while a `start` is in flight. `discover_own_serve` then reports nothing, so a
     /// `/status` poll during bring-up does not record the loading server as serving.
     starting: AtomicBool,
+    /// The last good `tt --json model ps` rows and when they were read. The mutex is also the
+    /// single-flight lock: it is held while `ps` runs, so concurrent callers wait for that one
+    /// run and then reuse its result instead of each starting a `tt` process.
+    ps_cache: Mutex<Option<(std::time::Instant, Vec<ServedModel>)>>,
+}
+
+/// Whether a `ps` read may come from the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PsRead {
+    /// Read-only paths: reuse rows younger than `ps_cache_ttl`, and fall back to rows younger
+    /// than `ps_stale_limit` when the run fails.
+    Cached,
+    /// Paths that decide what to stop or release (chips get reset): always run `ps`, never fall
+    /// back to old rows.
+    Fresh,
 }
 
 /// Clears `TtBackend::starting` when `start_with_options` returns, on every path.
@@ -324,6 +374,7 @@ impl TtBackend {
             cancel: Arc::new(AtomicBool::new(false)),
             handover: Mutex::new(()),
             starting: AtomicBool::new(false),
+            ps_cache: Mutex::new(None),
         }
     }
 
@@ -503,7 +554,7 @@ impl TtBackend {
     /// `Ok(None)` means nothing is running on the lease's port.
     fn identify_untracked_serve(&self) -> Result<Option<String>> {
         let port = self.own_port();
-        let row = self.own_running_row().context(
+        let row = self.own_running_row(PsRead::Fresh).context(
             "tt backend: a chip lease is held but this agent did not start the server using \
              it, and `tt model ps` could not say what is running; refusing to release the lease \
              (that would reset chips under a live server). Stop the server by hand, then retry",
@@ -541,18 +592,54 @@ impl TtBackend {
 
     /// The running `tt model ps` row on [`TtBackend::own_port`], if any. This is the single
     /// rule for "which server is ours" used by the adopted-lease stop, by
-    /// `discover_own_serve` and by the `agent` source in `serving_entries`.
-    fn own_running_row(&self) -> Result<Option<ServedModel>> {
+    /// `discover_own_serve`, `status` and the `agent` source in `serving_entries`.
+    fn own_running_row(&self, read: PsRead) -> Result<Option<ServedModel>> {
         let port = self.own_port();
         Ok(self
-            .ps()?
+            .ps(read)?
             .into_iter()
             .find(|r| r.port == Some(port) && r.status.as_deref() == Some("running")))
     }
 
-    /// `tt --json model ps`, parsed.
-    fn ps(&self) -> Result<Vec<ServedModel>> {
-        let captured = self.run_tt(&["--json", "model", "ps"], &[])?;
+    /// `tt --json model ps`, through the cache (see the `ps_cache` field and [`PsRead`]).
+    fn ps(&self, read: PsRead) -> Result<Vec<ServedModel>> {
+        // Held across the run: this is the single-flight lock.
+        let mut cache = self.ps_cache.lock().expect("ps_cache mutex poisoned");
+        if read == PsRead::Cached {
+            if let Some((at, rows)) = cache.as_ref() {
+                if at.elapsed() < self.config.ps_cache_ttl {
+                    return Ok(rows.clone());
+                }
+            }
+        }
+        match self.ps_run() {
+            Ok(rows) => {
+                *cache = Some((std::time::Instant::now(), rows.clone()));
+                Ok(rows)
+            }
+            Err(err) => match (read, cache.as_ref()) {
+                (PsRead::Cached, Some((at, rows))) if at.elapsed() < self.config.ps_stale_limit => {
+                    eprintln!(
+                        "tt-station-agentd: {err:#}; using `tt model ps` rows from {:?} ago",
+                        at.elapsed()
+                    );
+                    Ok(rows.clone())
+                }
+                _ => Err(err),
+            },
+        }
+    }
+
+    /// One `tt --json model ps` run, bounded by `ps_timeout`, parsed.
+    fn ps_run(&self) -> Result<Vec<ServedModel>> {
+        let argv = self.tt_argv(&["--json", "model", "ps"]);
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let captured = self
+            .runner
+            .run_capturing_with_timeout(&refs, &[], self.config.ps_timeout)
+            .with_context(|| {
+                format!("tt backend: `{} model ps` did not run", self.config.tt_bin)
+            })?;
         if captured.code != 0 {
             return Err(anyhow::anyhow!(
                 "tt backend: `tt model ps` failed (exit {}): {}",
@@ -782,22 +869,15 @@ impl ServingBackend for TtBackend {
     /// whatever its `health`: `tt model ps` probes with a 1.5 s timeout, and a busy server that
     /// misses it shows `starting`, which must not make the agent declare the model gone.
     ///
-    /// The port is the one this backend last served on, else the configured `service_port`.
-    /// The reported id is the row's `served_id`, else the recorded model name, else the row's
+    /// The port is [`TtBackend::own_port`], the same rule as every other path. The `ps` read
+    /// may come from the short cache (see [`PS_CACHE_TTL`]). The reported id is the row's `served_id`, else the recorded model name, else the row's
     /// `name`. Because this reads the box through `tt`, it also sees a serve
     /// started before an agent restart once the route asks. The route consults the backend
     /// only while it believes a model is serving; after a restart `discover_own_serve` is what
     /// brings the stored status back to serving.
     fn status(&self) -> Result<ServingStatus> {
         let recorded = self.served.lock().expect("served mutex poisoned").clone();
-        let port = recorded
-            .as_ref()
-            .map(|(_, p)| *p)
-            .unwrap_or(self.config.service_port);
-        let rows = self.ps()?;
-        let row = rows
-            .iter()
-            .find(|r| r.port == Some(port) && r.status.as_deref() == Some("running"));
+        let row = self.own_running_row(PsRead::Cached)?;
         Ok(match row {
             Some(r) => ServingStatus::Serving(
                 r.served_id
@@ -824,7 +904,7 @@ impl ServingBackend for TtBackend {
     /// port ([`TtBackend::own_port`]) and `external` for the rest. `None` when `tt model ps`
     /// fails, so `/serving` falls back to discovery alone.
     fn serving_entries(&self) -> Option<Vec<ServingEntry>> {
-        let rows = match self.ps() {
+        let rows = match self.ps(PsRead::Cached) {
             Ok(rows) => rows,
             Err(err) => {
                 eprintln!("tt-station-agentd: /serving: {err:#}; using docker discovery only");
@@ -864,11 +944,18 @@ impl ServingBackend for TtBackend {
         {
             return None;
         }
-        let row = self.own_running_row().ok()??;
+        let row = self.own_running_row(PsRead::Cached).ok()??;
         let port = row.port?;
         let model = row.served_id.clone()?;
         validate_model_name(&row.name).ok()?;
-        *self.served.lock().expect("served mutex poisoned") = Some((row.name, port));
+        // Re-check under `handover`: a `start` may have begun, or recorded its own serve, while
+        // `ps` ran. A stale discovery must not overwrite that.
+        let _handover = self.handover.lock().expect("handover mutex poisoned");
+        let mut served = self.served.lock().expect("served mutex poisoned");
+        if self.starting.load(Ordering::SeqCst) || served.is_some() {
+            return None;
+        }
+        *served = Some((row.name, port));
         Some(Endpoint {
             base_url: format!("http://{}:{port}/v1", self.config.serving_host),
             model,
@@ -1018,7 +1105,16 @@ mod tests {
         /// When set, every `http_get` sets this flag first. A test hands in the backend's
         /// cancel flag to land a `/stop` exactly while the readiness GET is answering.
         cancel_on_get: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+        /// When set, every `http_get` runs this first (with no lock held), so a test can act
+        /// on the backend at an exact point inside `start`.
+        on_get: Arc<Mutex<Option<GetHook>>>,
+        /// When true, `tt model ps` hangs until the caller's timeout runs out.
+        hang_ps: Arc<AtomicBool>,
+        /// Extra time each `tt model ps` takes, so concurrent callers really overlap.
+        ps_delay: Arc<Mutex<Duration>>,
     }
+
+    type GetHook = Arc<dyn Fn() + Send + Sync>;
 
     impl ScriptedRunner {
         /// The happy path: the official CLI, a catalog model, `tt serve` succeeds, the model is
@@ -1052,6 +1148,11 @@ mod tests {
 
         fn log(&self) -> Vec<String> {
             self.log.lock().unwrap().clone()
+        }
+
+        /// How many times `tt model ps` was run.
+        fn ps_runs(&self) -> usize {
+            self.log().iter().filter(|l| l.contains("model ps")).count()
         }
 
         /// Index of the first log line containing `needle`.
@@ -1121,8 +1222,36 @@ mod tests {
             self.healthy.load(Ordering::SeqCst)
         }
 
+        fn run_capturing_with_timeout(
+            &self,
+            args: &[&str],
+            env: &[(&str, &str)],
+            timeout: Duration,
+        ) -> Result<CapturedOutput> {
+            let joined = args.join(" ");
+            if joined.contains("model ps") {
+                let delay = *self.ps_delay.lock().unwrap();
+                std::thread::sleep(delay);
+                if self.hang_ps.load(Ordering::SeqCst) {
+                    self.log
+                        .lock()
+                        .unwrap()
+                        .push(format!("run: {joined} (hung)"));
+                    std::thread::sleep(timeout);
+                    return Err(anyhow::anyhow!(
+                        "{joined} did not finish within {timeout:?}"
+                    ));
+                }
+            }
+            self.run_capturing_with_env(args, env)
+        }
+
         fn http_get(&self, url: &str) -> Result<String> {
             self.log.lock().unwrap().push(format!("get: {url}"));
+            let hook = self.on_get.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
             if let Some(flag) = self.cancel_on_get.lock().unwrap().as_ref() {
                 flag.store(true, Ordering::SeqCst);
             }
@@ -1142,6 +1271,11 @@ mod tests {
             service_port: 8003,
             health_poll_attempts: 3,
             health_poll_interval: Duration::from_millis(1),
+            // No caching by default, so each test sees every `ps` it scripts. The cache tests
+            // below set their own limits.
+            ps_cache_ttl: Duration::ZERO,
+            ps_timeout: Duration::from_secs(1),
+            ps_stale_limit: Duration::ZERO,
         }
     }
 
@@ -1896,6 +2030,146 @@ mod tests {
         assert_eq!(b.discover_own_serve(), None);
         b.starting.store(false, Ordering::SeqCst);
         assert!(b.discover_own_serve().is_some());
+    }
+
+    // ---- Task 4b fix round 1: the `ps` cache and the in-flight start guard ----
+
+    fn cached_backend(
+        runner: &ScriptedRunner,
+        ttl_ms: u64,
+        stale_ms: u64,
+        timeout_ms: u64,
+    ) -> TtBackend {
+        TtBackend::new(
+            TtConfig {
+                ps_cache_ttl: Duration::from_millis(ttl_ms),
+                ps_stale_limit: Duration::from_millis(stale_ms),
+                ps_timeout: Duration::from_millis(timeout_ms),
+                ..config()
+            },
+            Box::new(runner.clone()),
+        )
+    }
+
+    /// Ten concurrent idle polls start one `tt model ps`, not ten.
+    #[test]
+    fn concurrent_reads_share_one_ps_run() {
+        let runner = ScriptedRunner::happy();
+        // A row on another port: nothing is adopted, so every caller really reads `ps`.
+        runner.on("model ps", 0, PS_LIVE_BUNDLE, "");
+        *runner.ps_delay.lock().unwrap() = Duration::from_millis(20);
+        let b = cached_backend(&runner, 10_000, 10_000, 1_000);
+        let barrier = std::sync::Barrier::new(10);
+        std::thread::scope(|scope| {
+            for _ in 0..10 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    assert_eq!(b.discover_own_serve(), None);
+                });
+            }
+        });
+        assert_eq!(runner.ps_runs(), 1, "{:?}", runner.log());
+    }
+
+    #[test]
+    fn a_read_within_the_ttl_reuses_ps_and_one_after_it_runs_again() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_LIVE_BUNDLE, "");
+        let b = cached_backend(&runner, 30, 10_000, 1_000);
+        b.serving_entries().unwrap();
+        b.serving_entries().unwrap();
+        assert_eq!(runner.ps_runs(), 1);
+        std::thread::sleep(Duration::from_millis(40));
+        b.serving_entries().unwrap();
+        assert_eq!(runner.ps_runs(), 2);
+    }
+
+    /// A hung `tt model ps` is cut off at the timeout, and the poll reports nothing.
+    #[test]
+    fn a_hung_ps_returns_within_the_timeout() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_ONE_RUNNING, ""); // would be adopted if it answered
+        runner.hang_ps.store(true, Ordering::SeqCst);
+        let b = cached_backend(&runner, 2_500, 10_000, 30);
+        let started = std::time::Instant::now();
+        assert_eq!(b.discover_own_serve(), None);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(b.serving_entries(), None);
+    }
+
+    #[test]
+    fn a_failed_ps_falls_back_to_recent_rows_only() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_LIVE_BUNDLE, "");
+        let b = cached_backend(&runner, 0, 30, 1_000);
+        assert_eq!(b.serving_entries().unwrap().len(), 1);
+        runner.on("model ps", 1, "", "docker: cannot connect");
+        assert_eq!(
+            b.serving_entries().map(|e| e.len()),
+            Some(1),
+            "rows younger than the stale limit are used"
+        );
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(b.serving_entries(), None, "older rows are not trusted");
+    }
+
+    /// The paths that decide what to stop before a lease release read `ps` fresh, even with a
+    /// cached value in hand.
+    #[test]
+    fn stop_and_start_read_ps_fresh_despite_the_cache() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_ONE_RUNNING, "");
+        let b = cached_backend(&runner, 10_000, 10_000, 1_000).with_gozer(Some(capability()));
+        b.serving_entries().unwrap(); // fills the cache
+        assert_eq!(runner.ps_runs(), 1);
+        assert!(b.adopt_lease("lease-old", "tt-station:8003:Llama-3.1-8B-Instruct"));
+        b.stop("").unwrap();
+        assert_eq!(
+            runner.ps_runs(),
+            2,
+            "stop identified the server with a fresh ps"
+        );
+
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_ONE_RUNNING, "");
+        let b = cached_backend(&runner, 10_000, 10_000, 1_000).with_gozer(Some(capability()));
+        b.serving_entries().unwrap();
+        assert!(b.adopt_lease("lease-old", "tt-station:8003:Llama-3.1-8B-Instruct"));
+        b.start("Llama-3.1-8B-Instruct").unwrap();
+        assert_eq!(
+            runner.ps_runs(),
+            2,
+            "start's swap read ps fresh: {:?}",
+            runner.log()
+        );
+        assert!(runner.pos("model stop").unwrap() < runner.pos("gozer release lease-old").unwrap());
+    }
+
+    /// While a start is in flight, an idle poll must not record the loading server as an
+    /// already-running serve. The poll runs from inside `start` (in the readiness GET), with a
+    /// `ps` row on the port.
+    #[test]
+    fn discover_own_serve_reports_nothing_during_a_real_start() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_ONE_RUNNING, "");
+        let b = Arc::new(backend(&runner));
+        let seen: Arc<Mutex<Vec<Option<Endpoint>>>> = Arc::default();
+        {
+            let b = b.clone();
+            let seen = seen.clone();
+            *runner.on_get.lock().unwrap() = Some(Arc::new(move || {
+                seen.lock().unwrap().push(b.discover_own_serve());
+            }));
+        }
+        b.start("Llama-3.1-8B-Instruct").unwrap();
+        *runner.on_get.lock().unwrap() = None; // break the Arc cycle
+        let seen = seen.lock().unwrap().clone();
+        assert!(!seen.is_empty(), "the hook ran during start");
+        assert!(seen.iter().all(Option::is_none), "{seen:?}");
     }
 
     #[test]

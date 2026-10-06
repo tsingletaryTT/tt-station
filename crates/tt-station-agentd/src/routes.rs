@@ -875,10 +875,13 @@ impl AppState {
     /// `set_idle()` so `/status`, `/endpoint`, AND the mDNS advertisement all
     /// stop lying, then returns the corrected status.
     ///
-    /// The docker probe (delegated to the backend) only runs when the stored
-    /// status is `Serving` (the only state that can be stale-positive); an
-    /// `Idle` status returns immediately without touching the backend, keeping
-    /// the common idle poll cheap. The probe is blocking I/O, so it runs on
+    /// The stale-positive check (`backend.reconciled_status`) only runs when the
+    /// stored status is `Serving`. An `Idle` status instead asks the backend
+    /// whether a serve of its own is running anyway (below). That is free for
+    /// runpy, docker and dstack (their `discover_own_serve` is the default
+    /// `None`); the `tt` backend answers from `tt --json model ps` through a
+    /// short cache with a hard timeout, so an idle poll costs at most one `ps`
+    /// run per cache period. Both calls are blocking I/O, so they run on
     /// `spawn_blocking` (like `/serving`).
     ///
     /// **Idle, but something of ours is running.** A fresh agent process starts idle even when
@@ -924,8 +927,29 @@ impl AppState {
             endpoint.model, endpoint.base_url
         );
         let status = ServingStatus::Serving(endpoint.model.clone());
-        self.set_serving(endpoint);
+        // Only if still idle: a `/run` or `/stop` that finished while the backend was being
+        // asked owns the status now, and a stale adoption must not overwrite it.
+        if !self.set_serving_if_idle(endpoint) {
+            return None;
+        }
         Some(status)
+    }
+
+    /// `set_serving`, but only when the stored status is still `Idle`, checked and set under
+    /// the same lock. Returns whether it set anything.
+    fn set_serving_if_idle(&self, endpoint: Endpoint) -> bool {
+        let new_status = ServingStatus::Serving(endpoint.model.clone());
+        {
+            let mut status = self.inner.status.lock().expect("status mutex poisoned");
+            if !matches!(*status, ServingStatus::Idle) {
+                return false;
+            }
+            let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
+            *status = new_status.clone();
+            *stored_endpoint = Some(endpoint);
+        }
+        self.advertise_status(&new_status);
+        true
     }
 
     /// Snapshot the currently-serving `Endpoint`, or `None` if idle.
@@ -2861,5 +2885,54 @@ mod logs_query_tests {
             parse_logs_query(Some("tail=notanumber")),
             ("container".to_string(), crate::logs::DEFAULT_TAIL)
         );
+    }
+}
+
+#[cfg(test)]
+mod adopt_backend_serve_tests {
+    use super::*;
+    use std::sync::{Arc, OnceLock};
+
+    fn ep(model: &str, port: u16) -> Endpoint {
+        Endpoint {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            model: model.to_string(),
+            requires_key: false,
+        }
+    }
+
+    /// A backend that reports an old serve, but only after a concurrent `/run` has recorded a
+    /// new one: its `discover_own_serve` calls `set_serving` on the agent first. That is the
+    /// race where a stale adoption could overwrite a fresh `/run`.
+    struct RacingBackend {
+        state: OnceLock<AppState>,
+    }
+
+    impl crate::serving::ServingBackend for RacingBackend {
+        fn start_forcing(&self, _model: &str, _force: bool) -> anyhow::Result<Endpoint> {
+            unreachable!()
+        }
+        fn stop(&self, _model: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn status(&self) -> anyhow::Result<ServingStatus> {
+            Ok(ServingStatus::Idle)
+        }
+        fn discover_own_serve(&self) -> Option<Endpoint> {
+            self.state.get().unwrap().set_serving(ep("from-run", 20011));
+            Some(ep("stale", 20010))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stale_adoption_does_not_overwrite_a_concurrent_run() {
+        let backend = Arc::new(RacingBackend {
+            state: OnceLock::new(),
+        });
+        let state = AppState::new("qb2-lab".into(), "4xBH".into(), backend.clone());
+        let _ = backend.state.set(state.clone());
+        assert_eq!(state.adopt_backend_serve().await, None);
+        assert_eq!(state.status(), ServingStatus::Serving("from-run".into()));
+        assert_eq!(state.endpoint().unwrap().base_url, "http://127.0.0.1:20011/v1");
     }
 }
