@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod local_device;
 pub mod model;
 pub mod pairing;
+pub mod run_options;
 pub mod secrets;
 pub mod wol;
 
