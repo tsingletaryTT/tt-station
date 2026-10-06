@@ -300,11 +300,19 @@ impl CommandRunner for RealCommandRunner {
         })
     }
 
-    /// Spawns the child with piped stdout and stderr, drains both on helper threads (so a chatty
-    /// child cannot block on a full pipe), and polls `try_wait` until it exits or `timeout`
-    /// passes. On timeout the child is killed and reaped, and the reader threads are left to
-    /// finish on their own: a grandchild that inherited the pipes can keep them open, and the
-    /// caller must not wait for it.
+    /// Spawns the child in its own process group with piped stdout and stderr, drains both on
+    /// helper threads (so a chatty child cannot block on a full pipe), and polls `try_wait`
+    /// until it exits or `timeout` passes.
+    ///
+    /// On timeout the WHOLE process group is killed (`kill(-pgid, SIGKILL)`), then the child is
+    /// reaped. Killing only the child would leave its own children, for example the `docker`
+    /// CLI that `tt model ps` runs, alive and holding the pipes, and the reader threads blocked
+    /// on them. With the group dead the pipes close and the readers finish.
+    ///
+    /// When the child exits in time, its output is collected by waiting for the readers. If a
+    /// background process it left behind still holds the pipes at the deadline (or a short
+    /// grace after the exit, whichever is later), the group is killed then too, and whatever
+    /// was written before is still returned.
     fn run_capturing_with_timeout(
         &self,
         args: &[&str],
@@ -312,6 +320,9 @@ impl CommandRunner for RealCommandRunner {
         timeout: std::time::Duration,
     ) -> Result<CapturedOutput> {
         use std::io::Read;
+        use std::os::unix::process::CommandExt;
+        use std::time::{Duration, Instant};
+
         let (program, rest) = args.split_first().ok_or_else(|| {
             anyhow::anyhow!("CommandRunner::run_capturing_with_timeout called with empty argv")
         })?;
@@ -321,8 +332,18 @@ impl CommandRunner for RealCommandRunner {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            // Its own process group (pgid = its pid), so a timeout can kill everything it started.
+            .process_group(0)
             .spawn()
             .with_context(|| format!("failed to spawn {}", args.join(" ")))?;
+        let pgid = child.id() as libc::pid_t;
+        let kill_group = || {
+            // SAFETY: plain syscall with integer arguments; a negative pid names the group we
+            // created above. An already-dead group just returns ESRCH, which is ignored.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        };
         let drain = |pipe: Option<Box<dyn Read + Send>>| {
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
@@ -337,13 +358,19 @@ impl CommandRunner for RealCommandRunner {
         let out_rx = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
         let err_rx = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
 
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = Instant::now() + timeout;
         let status = loop {
-            if let Some(status) = child.try_wait().context("waiting for child")? {
-                break status;
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(err) => {
+                    kill_group();
+                    let _ = child.wait();
+                    return Err(err).context("waiting for child");
+                }
             }
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
+            if Instant::now() >= deadline {
+                kill_group();
                 let _ = child.wait();
                 return Err(anyhow::anyhow!(
                     "{} did not finish within {:?} and was killed",
@@ -351,20 +378,36 @@ impl CommandRunner for RealCommandRunner {
                     timeout
                 ));
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(10));
         };
-        // The child has exited; its pipes close unless a grandchild holds them. Bound the wait
-        // for the remaining output by what is left of the timeout.
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        let text = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
-            rx.recv_timeout(left)
-                .map(|b| String::from_utf8_lossy(&b).trim().to_string())
-                .unwrap_or_default()
+
+        // The child has exited. Collect its output: wait for both readers until the deadline
+        // (at least a short grace, so output written right at the deadline is not lost). If a
+        // leftover process still holds a pipe by then, kill the group so the readers finish.
+        let grace_end = deadline.max(Instant::now() + Duration::from_millis(250));
+        let (mut out, mut err) = (None, None);
+        while (out.is_none() || err.is_none()) && Instant::now() < grace_end {
+            if out.is_none() {
+                out = out_rx.try_recv().ok();
+            }
+            if err.is_none() {
+                err = err_rx.try_recv().ok();
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if out.is_none() || err.is_none() {
+            kill_group();
+        }
+        let finish = |got: Option<Vec<u8>>, rx: std::sync::mpsc::Receiver<Vec<u8>>| {
+            let bytes = got
+                .or_else(|| rx.recv_timeout(Duration::from_secs(1)).ok())
+                .unwrap_or_default();
+            String::from_utf8_lossy(&bytes).trim().to_string()
         };
         Ok(CapturedOutput {
             code: status.code().unwrap_or(-1),
-            stdout: text(out_rx),
-            stderr: text(err_rx),
+            stdout: finish(out, out_rx),
+            stderr: finish(err, err_rx),
         })
     }
 
@@ -1646,6 +1689,66 @@ mod tests {
             )
             .unwrap();
         assert_eq!((out.code, out.stdout.as_str(), out.stderr.as_str()), (3, "out", "err"));
+    }
+
+    /// Whether a process is still alive (`kill -0`).
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks for existence.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// Poll for up to a second until `pid` is gone. (A killed process may be a zombie for a
+    /// moment until init reaps it; `kill -0` still succeeds on a zombie, so this waits.)
+    fn gone_within_a_second(pid: i32) -> bool {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < until {
+            if !alive(pid) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        !alive(pid)
+    }
+
+    /// A timeout kills the child's own children too, like the `docker` CLI under `tt model ps`.
+    #[test]
+    fn real_runner_timeout_kills_the_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("grandchild.pid");
+        let script = format!("sleep 7 & echo $! > {}; wait", pidfile.display());
+        let started = std::time::Instant::now();
+        let err = RealCommandRunner
+            .run_capturing_with_timeout(
+                &["sh", "-c", &script],
+                &[],
+                std::time::Duration::from_millis(200),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("was killed"), "{err:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        assert!(gone_within_a_second(pid), "grandchild {pid} survived the timeout");
+    }
+
+    /// The child exits at once but leaves a background process holding its stdout. The call
+    /// still returns by the deadline, with the output written before, and the leftover is killed.
+    #[test]
+    fn real_runner_collects_output_when_a_leftover_holds_the_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("leftover.pid");
+        let script = format!("echo out; sleep 7 & echo $! > {}", pidfile.display());
+        let started = std::time::Instant::now();
+        let got = RealCommandRunner
+            .run_capturing_with_timeout(
+                &["sh", "-c", &script],
+                &[],
+                std::time::Duration::from_millis(300),
+            )
+            .unwrap();
+        assert_eq!((got.code, got.stdout.as_str()), (0, "out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        assert!(gone_within_a_second(pid), "leftover {pid} survived");
     }
 
     /// The container name built from a slashed model id must be valid, but

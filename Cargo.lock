@@ -3492,6 +3492,7 @@ dependencies = [
  "clap",
  "filetime",
  "futures-util",
+ "libc",
  "libttstation",
  "mdns-sd",
  "rand 0.9.4",

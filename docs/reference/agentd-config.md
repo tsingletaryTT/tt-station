@@ -171,10 +171,12 @@ And any running row on the agent's own port is adopted, including one started
 by hand or by another tenant, so `POST /stop` will stop it.
 
 The idle checks behind `GET /status`, `GET /endpoint` and `GET /serving` reuse
-a `tt model ps` result for 2.5 s, share one run between concurrent requests,
-and kill a `ps` that takes longer than 5 s (then rows up to 10 s old are used,
-or none). Deciding what to stop before a lease release always reads `ps`
-fresh.
+a `tt model ps` outcome (success or failure) for 2.5 s and share one run
+between concurrent requests. A `ps` that takes longer than 5 s is killed with
+its whole process group; then rows up to 10 s old are used, or none. Deciding
+what to stop before a lease release always reads `ps` fresh: a server found
+by an idle check is confirmed with a fresh read before `POST /stop` stops it
+and releases the lease.
 
 `GET /models` reads `tt --json model list` and keeps the models with a vLLM
 engine.
