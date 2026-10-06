@@ -2,8 +2,9 @@
 //!
 //! The GTK files next to this one (`stations_pane.rs`, `models_pane.rs`, `run_sheet.rs`,
 //! `pair_dialog.rs`) only copy values from here into widgets and send clicks back. Every rule
-//! about what the window shows lives in this file so that each rule is a unit test, because the
-//! window itself cannot be shown on the headless machine this was written on.
+//! about what the window shows lives in this file so that each rule is a unit test. No one has
+//! looked at this window or exercised its click paths, so these tests are the only check on
+//! what it shows.
 //!
 //! What is here:
 //! * [`group_models`] and [`ModelFilter`]: the model browser's search, filters and groups.
@@ -18,6 +19,7 @@
 
 use std::collections::BTreeMap;
 
+use libttstation::official_tt::OFFICIAL_TT_DEFAULT_BIN;
 use libttstation::run_options::{
     validate_model_name, OptionError, OptionSpec, RunOptions, RunSchema,
 };
@@ -146,6 +148,17 @@ pub fn filter_choices(rows: &[ModelRow]) -> (Vec<String>, Vec<String>) {
     (kinds.into_iter().collect(), sources.into_iter().collect())
 }
 
+/// Whether a model list fetched for station `i` may still be shown.
+///
+/// The Models page starts a load for the selected station and records it in `loaded_for`. A
+/// slow load (a local `tt model list` can take seconds) may finish after the person picked
+/// another station, or after a newer load started. Its rows must then be dropped: shown under
+/// the wrong station, "Run..." would send that station's model to a different one. So a result
+/// is current only when it belongs to the latest load and that station is still selected.
+pub fn load_is_current(loaded_for: Option<usize>, selected: usize, i: usize) -> bool {
+    loaded_for == Some(i) && selected == i
+}
+
 // ---------------------------------------------------------------------------------------------
 // Run sheet
 // ---------------------------------------------------------------------------------------------
@@ -195,7 +208,8 @@ pub struct RunForm {
 impl RunForm {
     /// A form for `schema`. Each field starts at the schema default (or empty), then the values
     /// of `last` (the options last used for this model on this station) replace those
-    /// defaults. The preview target starts as [`PreviewTarget::local`] with program `tt`; call
+    /// defaults. The preview target starts as [`PreviewTarget::local`] with the official binary's
+    /// default name (`official_tt::OFFICIAL_TT_DEFAULT_BIN`); call
     /// [`RunForm::with_target`] to change it.
     pub fn from_schema(schema: &RunSchema, last: Option<&RunOptions>) -> RunForm {
         let mut form = RunForm {
@@ -205,7 +219,7 @@ impl RunForm {
                 .iter()
                 .map(|s| (s.name.clone(), s.default.clone().unwrap_or_default()))
                 .collect(),
-            target: PreviewTarget::local("tt"),
+            target: PreviewTarget::local(OFFICIAL_TT_DEFAULT_BIN),
         };
         if let Some(last) = last {
             for (name, value) in option_fields(last) {
@@ -1080,5 +1094,26 @@ mod tests {
             PathBuf::from("/h/.config/tt-station/tray-stations.json"),
             "empty variables count as unset"
         );
+    }
+
+    #[test]
+    fn a_model_list_for_another_station_or_an_older_load_is_dropped() {
+        assert!(
+            load_is_current(Some(0), 0, 0),
+            "the latest load, still selected"
+        );
+        assert!(
+            !load_is_current(Some(0), 1, 0),
+            "the person switched to a box meanwhile"
+        );
+        assert!(
+            !load_is_current(Some(1), 1, 0),
+            "a newer load for station 1 replaced it"
+        );
+        assert!(
+            !load_is_current(Some(1), 0, 0),
+            "switched away and back, but a newer load ran"
+        );
+        assert!(!load_is_current(None, 0, 0), "no load is recorded");
     }
 }

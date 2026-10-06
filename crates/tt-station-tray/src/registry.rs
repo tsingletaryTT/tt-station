@@ -177,10 +177,7 @@ impl Registry {
     /// literal (no scheme, brackets, path, user, query or spaces) and `port` must be 1..=65535.
     /// The display name starts as the host. Returns the new station's id (`host:port`).
     pub fn add_manual(&mut self, host: &str, port: u16) -> Result<StationId, AddError> {
-        validate_host(host)?;
-        if port == 0 {
-            return Err(AddError::BadAddress("port must be 1 to 65535".into()));
-        }
+        validate_address(host, port)?;
         if self
             .stations
             .iter()
@@ -223,6 +220,17 @@ impl Registry {
     pub fn last_run(&self, station: &StationId, model: &str) -> Option<&RunOptions> {
         self.last_run.get(&(station.0.clone(), model.to_string()))
     }
+}
+
+/// The address checks [`Registry::add_manual`] applies, without adding anything: a strict
+/// bare host (see `validate_host`) and a port of 1 to 65535. The Add station dialog calls this
+/// before pairing, so an address the registry would refuse is never paired with.
+pub fn validate_address(host: &str, port: u16) -> Result<(), AddError> {
+    validate_host(host)?;
+    if port == 0 {
+        return Err(AddError::BadAddress("port must be 1 to 65535".into()));
+    }
+    Ok(())
 }
 
 /// Strict check of a bare host: an IP literal, or a DNS-style name of letters, digits, `-`, `_`

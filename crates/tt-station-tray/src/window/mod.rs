@@ -5,11 +5,10 @@
 //! it), so this uses `gtk4` 0.9 with the `v4_12` feature only. Nothing here depends on GNOME;
 //! the window should look like a plain GTK app on KDE and XFCE.
 //!
-//! **Not seen.** This window was written on a headless machine. It compiles and passes clippy,
-//! and every rule it shows comes from [`view_model`], which is unit tested. The window itself,
-//! its layout, and every click path have never been displayed or exercised. The headless check
-//! is [`smoke_check`] (`tt-station-tray --smoke`), which builds the view models and the registry
-//! and never initialises GTK.
+//! **Not looked at.** No one has looked at this window or exercised its click paths. It
+//! compiles and passes clippy, and every rule it shows comes from [`view_model`], which is unit
+//! tested. The headless check is [`smoke_check`] (`tt-station-tray --smoke`), which builds the
+//! view models and the registry and never initialises GTK.
 //!
 //! **Threads.** GTK widgets live on the main thread. Station calls are `async` and use
 //! `reqwest` and `tokio::process`, so they run on a tokio runtime that `main` owns.

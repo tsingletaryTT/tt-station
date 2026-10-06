@@ -16,7 +16,7 @@
 //! Remembered options: the form starts from the options last used for this model on this
 //! station (`Registry::last_run`), and a successful Start saves the new ones.
 //!
-//! Unverified (headless build): the dialog's layout, the expander, the field widgets, and the
+//! Never looked at or clicked: the dialog's layout, the expander, the field widgets, and the
 //! enable and disable behaviour of Start. Named presets from the spec are not built.
 
 use std::cell::RefCell;
@@ -89,7 +89,7 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
     let preview_heading = gtk::Label::new(Some(if is_remote {
         "Preview (options only; the box builds the command)"
     } else {
-        "Exact command"
+        "Command (run with --json added, so the app can read tt's output)"
     }));
     preview_heading.set_xalign(0.0);
     preview_heading.add_css_class("heading");

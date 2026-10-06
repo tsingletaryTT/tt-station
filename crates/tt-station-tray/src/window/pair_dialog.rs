@@ -13,11 +13,15 @@
 //! block. The GTK main thread only awaits channels.
 //!
 //! Closing the dialog while the code is being asked drops the code sender; the closure then
-//! returns an empty code, the box refuses it, and nothing is stored.
+//! returns `None`, `pair_station` stops before `pair-complete` (so the abandoned attempt does
+//! not count toward the box's wrong-code limit), and nothing is stored.
+//!
+//! The address is checked with `registry::validate_address`, the check `add_manual` uses,
+//! before the box is contacted.
 //!
 //! The box is added to the registry only after pairing succeeds.
 //!
-//! Unverified (headless build): the dialog's layout, the two-step reveal of the code field, the
+//! Never looked at or clicked: the dialog's layout, the two-step reveal of the code field, the
 //! discovered-box list, and closing mid-pairing.
 
 use std::cell::RefCell;
@@ -31,7 +35,7 @@ use gtk4 as gtk;
 
 use crate::discover::discover_all;
 use crate::pairing_flow::{open_store, pair_station};
-use crate::registry::{AddError, KnownStation};
+use crate::registry::{validate_address, AddError, KnownStation};
 
 use super::view_model::{parse_address, ActionResult};
 use super::{set_margins, show_result, spawn_call, App};
@@ -130,6 +134,12 @@ pub fn open(app: &App, parent: Option<&gtk::Window>) {
                     return;
                 }
             };
+            // The registry's own strict check, before any pairing: an address it would refuse
+            // must not end up with a stored token.
+            if let Err(e) = validate_address(&host, port) {
+                show_result(&status, &ActionResult::Failed(e.to_string()));
+                return;
+            }
             let k = KnownStation {
                 name: host.clone(),
                 host: host.clone(),
@@ -151,7 +161,9 @@ pub fn open(app: &App, parent: Option<&gtk::Window>) {
                     let store = open_store();
                     let ask = move || {
                         let _ = ask_tx.send(());
-                        rx.recv().unwrap_or_default()
+                        // `None` (sender dropped: the dialog closed) aborts before
+                        // pair-complete, so no attempt is spent.
+                        rx.recv().ok()
                     };
                     pair_station(&base, ask, store.as_ref()).await
                 });
@@ -234,7 +246,7 @@ pub fn open(app: &App, parent: Option<&gtk::Window>) {
     {
         let code_tx = code_tx.clone();
         window.connect_close_request(move |_| {
-            // Unblocks a pairing thread waiting for a code; it then fails without storing.
+            // Unblocks a pairing thread waiting for a code; it aborts before pair-complete.
             code_tx.borrow_mut().take();
             glib::Propagation::Proceed
         });

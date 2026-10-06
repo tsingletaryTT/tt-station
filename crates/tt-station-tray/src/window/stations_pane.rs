@@ -5,7 +5,7 @@
 //! by [`super::Shared::set_state`]. Selecting a row makes it the station the Models and Logs
 //! pages act on.
 //!
-//! Unverified (headless build): row layout, selection behaviour, and that the Stop result line
+//! Never looked at or clicked: row layout, selection behaviour, and that the Stop result line
 //! is visible where expected. The text in it comes from [`ActionResult`], which is tested.
 
 use std::rc::Rc;

@@ -9,7 +9,7 @@
 //! The spec's detail pane shows `tt model info` data. No `Station` method returns that yet, so
 //! the detail pane shows the fields of [`ModelRow`] (kind, source, hardware, cached, fit).
 //!
-//! Unverified (headless build): the list's look, scrolling, the heading style, selection and
+//! Never looked at or clicked: the list's look, scrolling, the heading style, selection and
 //! the filter dropdowns' behaviour.
 
 use std::cell::{Cell, RefCell};
@@ -20,7 +20,7 @@ use gtk4 as gtk;
 
 use crate::station::ModelRow;
 
-use super::view_model::{filter_choices, group_models, ModelFilter, ModelGroups};
+use super::view_model::{filter_choices, group_models, load_is_current, ModelFilter, ModelGroups};
 use super::{set_margins, spawn_call, App};
 
 /// One line of the list: a group heading or a model with the heading of its group.
@@ -305,6 +305,7 @@ fn load(app: &App, page: &Rc<Page>) {
     let (station, _) = app.current();
     page.status.set_text("Loading models...");
     let page = page.clone();
+    let app2 = app.clone();
     spawn_call(
         app,
         async move {
@@ -313,27 +314,34 @@ fn load(app: &App, page: &Rc<Page>) {
             let mesh = station.state().await.mesh;
             (models, mesh)
         },
-        move |(models, mesh)| match models {
-            Ok(rows) => {
-                let (kinds, sources) = filter_choices(&rows);
-                let mut k = vec![ALL_KINDS.to_string()];
-                k.extend(kinds);
-                let mut s = vec![ALL_SOURCES.to_string()];
-                s.extend(sources);
-                let kr: Vec<&str> = k.iter().map(String::as_str).collect();
-                let sr: Vec<&str> = s.iter().map(String::as_str).collect();
-                *page.rows.borrow_mut() = rows;
-                page.mesh_known.set(mesh.is_some());
-                page.kind.set_model(Some(&gtk::StringList::new(&kr)));
-                page.source.set_model(Some(&gtk::StringList::new(&sr)));
-                page.regroup();
+        move |(models, mesh)| {
+            // Drop a result that arrived after the person switched station or a newer load
+            // started; showing it would let "Run..." send this station's model elsewhere.
+            if !load_is_current(page.loaded_for.get(), app2.selected.get(), i) {
+                return;
             }
-            Err(e) => {
-                page.rows.borrow_mut().clear();
-                page.regroup();
-                page.status
-                    .set_text(&format!("Could not list models: {e:#}"));
-                page.status.add_css_class("error");
+            match models {
+                Ok(rows) => {
+                    let (kinds, sources) = filter_choices(&rows);
+                    let mut k = vec![ALL_KINDS.to_string()];
+                    k.extend(kinds);
+                    let mut s = vec![ALL_SOURCES.to_string()];
+                    s.extend(sources);
+                    let kr: Vec<&str> = k.iter().map(String::as_str).collect();
+                    let sr: Vec<&str> = s.iter().map(String::as_str).collect();
+                    *page.rows.borrow_mut() = rows;
+                    page.mesh_known.set(mesh.is_some());
+                    page.kind.set_model(Some(&gtk::StringList::new(&kr)));
+                    page.source.set_model(Some(&gtk::StringList::new(&sr)));
+                    page.regroup();
+                }
+                Err(e) => {
+                    page.rows.borrow_mut().clear();
+                    page.regroup();
+                    page.status
+                        .set_text(&format!("Could not list models: {e:#}"));
+                    page.status.add_css_class("error");
+                }
             }
         },
     );

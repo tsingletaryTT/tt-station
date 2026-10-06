@@ -245,6 +245,9 @@ struct Inner {
     run_conflict_left: u32,
     /// When set, the only pairing code `POST /pair/complete` accepts (see `--pair-code`).
     pair_code: Option<String>,
+    /// How many `POST /pair/complete` requests arrived, accepted or not. Echoed by `/status`
+    /// as `pair_complete_calls` so a test can prove a client never sent one.
+    pair_complete_calls: u32,
 }
 
 #[derive(Clone)]
@@ -262,6 +265,7 @@ impl MockState {
             run_conflict: None,
             run_conflict_left: u32::MAX,
             pair_code: None,
+            pair_complete_calls: 0,
         })))
     }
 
@@ -313,6 +317,8 @@ struct StatusResponse {
     /// of the last `POST /run`, or `null`. Lets a test prove a client's
     /// options reached the server unchanged.
     last_run_options: Option<serde_json::Value>,
+    /// Mock-only test hook: how many `POST /pair/complete` requests arrived.
+    pair_complete_calls: u32,
 }
 
 async fn get_status(State(state): State<MockState>) -> Json<StatusResponse> {
@@ -323,6 +329,7 @@ async fn get_status(State(state): State<MockState>) -> Json<StatusResponse> {
         status: inner.status.to_txt(),
         device_mesh: Some("p300x2".to_string()),
         last_run_options: inner.last_run_options.clone(),
+        pair_complete_calls: inner.pair_complete_calls,
     })
 }
 
@@ -368,7 +375,9 @@ async fn pair_complete(
 ) -> Result<Json<PairCompleteResponse>, StatusCode> {
     // With `--pair-code`, a wrong code is refused with 401 like the real agent. Without it
     // every code is accepted.
-    if let Some(expected) = state.lock().pair_code.as_deref() {
+    let mut inner = state.lock();
+    inner.pair_complete_calls += 1;
+    if let Some(expected) = inner.pair_code.as_deref() {
         if req.code != expected {
             return Err(StatusCode::UNAUTHORIZED);
         }

@@ -34,13 +34,19 @@ pub fn token_for(store: &dyn SecretStore, id: &StationId) -> Result<Option<Strin
 ///
 /// `ask_code` runs after the box has been contacted, so it is never asked of a person when the
 /// box is unreachable. It is a plain closure because the caller may block on a dialog.
+///
+/// `ask_code` returns `None` when the person gave up (closed the dialog). Then this returns an
+/// error without calling `pair-complete`, so an abandoned attempt does not count toward the
+/// box's limit on wrong codes, and nothing is stored.
 pub async fn pair_station(
     base: &str,
-    ask_code: impl FnOnce() -> String,
+    ask_code: impl FnOnce() -> Option<String>,
     store: &dyn SecretStore,
 ) -> Result<()> {
     let pair_id = pair_init(base).await.context("starting pairing")?;
-    let code = ask_code();
+    let Some(code) = ask_code() else {
+        anyhow::bail!("pairing was cancelled before a code was entered");
+    };
     let token = pair_complete(base, &pair_id, code.trim())
         .await
         .context("the box did not accept that pairing code")?;
