@@ -27,3 +27,5 @@ security-framework = "2"
 [dev-dependencies]
 tokio = { workspace = true }
 wiremock = "0.6"
+# Temporary directories for `official_tt::locate`'s test (a fake `tt` on a fake PATH).
+tempfile = { workspace = true }

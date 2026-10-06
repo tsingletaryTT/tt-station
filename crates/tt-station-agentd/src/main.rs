@@ -25,6 +25,7 @@ use tt_station_agentd::routes::{app, AppState, StatusAdvertiser};
 use tt_station_agentd::serving::docker::{CommandRunner, DockerConfig, RealCommandRunner};
 use tt_station_agentd::serving::make_backend;
 use tt_station_agentd::serving::runpy::RunPyConfig;
+use tt_station_agentd::serving::tt::TtConfig;
 
 /// Which serving backend to use for running models.
 ///
@@ -32,12 +33,16 @@ use tt_station_agentd::serving::runpy::RunPyConfig;
 /// launch LLMs (`tt-inference-server/run.py`, not a hand-rolled `docker
 /// run` -- see `docs/reference/tt-inference-server-docker.md`'s "⭐ Ground
 /// truth" section). `Docker` remains available as a best-effort fallback
-/// for when `run.py`/its repo checkout isn't available. `Dstack` is the M4
-/// direction and still an intentional stub.
+/// for when `run.py`/its repo checkout isn't available. `Tt` delegates to
+/// Tenstorrent's official `tt` CLI (`tt serve`, `tt model ps|stop`) and is the
+/// only backend that applies `POST /run` options; it is opt-in until it has
+/// been proven on real hardware. `Dstack` is the M4 direction and still an
+/// intentional stub.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Backend {
     Runpy,
     Docker,
+    Tt,
     Dstack,
 }
 
@@ -46,6 +51,7 @@ impl std::fmt::Display for Backend {
         match self {
             Backend::Runpy => write!(f, "runpy"),
             Backend::Docker => write!(f, "docker"),
+            Backend::Tt => write!(f, "tt"),
             Backend::Dstack => write!(f, "dstack"),
         }
     }
@@ -345,6 +351,19 @@ struct Cli {
     /// own `$PATH` search already covers the common case.
     #[arg(long = "gozer-path")]
     gozer_path: Option<String>,
+
+    /// Tenstorrent's official CLI, run by `--backend tt`. Only meaningful for
+    /// that backend. It must answer `--version` with `tt <semver>`; anything
+    /// else is refused when a model is started.
+    ///
+    /// No clap default: when this and `[global].official_tt_bin` are both
+    /// absent, `libttstation::official_tt::resolve_bin` picks it
+    /// (`TTS_OFFICIAL_TT_BIN`, then `PATH`, then `~/.local/bin/tt`, where
+    /// `uv tool install tenstorrent` puts it). The `PATH` of a
+    /// `systemctl --user` unit usually lacks `~/.local/bin`; the fallback
+    /// covers that case.
+    #[arg(long = "official-tt-bin")]
+    official_tt_bin: Option<String>,
 
     /// Path to agentd.toml. Defaults to `$TT_CONFIG_DIR/agentd.toml` if
     /// `TT_CONFIG_DIR` is set, else `$HOME/.config/tt-station/agentd.toml`.
@@ -728,13 +747,20 @@ async fn build_serving_backend(
     gozer_path: Option<&str>,
     docker_config: DockerConfig,
     runpy_config: RunPyConfig,
+    tt_config: TtConfig,
 ) -> Result<(
     Box<dyn tt_station_agentd::serving::ServingBackend>,
     Option<gozer::Capability>,
 )> {
     let gozer_capability = detect_startup_gozer(gozer_path).await;
-    let backend = make_backend(kind, docker_config, runpy_config, gozer_capability.clone())
-        .context("failed to construct serving backend")?;
+    let backend = make_backend(
+        kind,
+        docker_config,
+        runpy_config,
+        tt_config,
+        gozer_capability.clone(),
+    )
+    .context("failed to construct serving backend")?;
     Ok((backend, gozer_capability))
 }
 
@@ -833,6 +859,7 @@ async fn main() -> Result<()> {
         telemetry_interval_ms: cli.telemetry_interval_ms,
         tt_smi_bin: cli.tt_smi_bin.clone(),
         gozer_path: cli.gozer_path.clone(),
+        official_tt_bin: cli.official_tt_bin.clone(),
         backend: cli.backend.map(|b| b.to_string()),
         tt_inference_repo: cli.tt_inference_repo.clone(),
         serving_image: cli.serving_image.clone(),
@@ -944,6 +971,19 @@ async fn main() -> Result<()> {
         enable_tool_calling: true,
     };
 
+    // `--backend tt`: the official CLI serves on the same host/port settings the
+    // other backends use. The binary is resolved here (not in `config::resolve`)
+    // because the fallback search reads `PATH`/`HOME`, and `resolve` is pure.
+    let tt_config = TtConfig {
+        tt_bin: rc
+            .official_tt_bin
+            .clone()
+            .unwrap_or_else(libttstation::official_tt::resolve_bin),
+        serving_host: rc.serving_host.clone(),
+        service_port: rc.serving_port,
+        ..TtConfig::default()
+    };
+
     // Probe for gozer and build the backend TOGETHER, in that order -- see
     // `build_serving_backend`'s doc comment for why the ordering is the
     // point. `gozer_capability` is carried down to `AppState::with_gozer`
@@ -953,6 +993,7 @@ async fn main() -> Result<()> {
         rc.gozer_path.as_deref(),
         docker_config,
         runpy_config,
+        tt_config,
     )
     .await?;
 
@@ -1431,12 +1472,13 @@ mod startup_wiring_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let stub = write_stub_gozer(dir.path());
 
-        for kind in ["runpy", "docker"] {
+        for kind in ["runpy", "docker", "tt"] {
             let (backend, capability) = build_serving_backend(
                 kind,
                 Some(&stub),
                 DockerConfig::default(),
                 RunPyConfig::default(),
+                TtConfig::default(),
             )
             .await
             .expect("backend should construct");
@@ -1482,6 +1524,7 @@ mod startup_wiring_tests {
             Some("/nonexistent/tt-station-agentd-test/gozer"),
             DockerConfig::default(),
             RunPyConfig::default(),
+            TtConfig::default(),
         )
         .await
         .expect("an absent gozer must not fail startup");

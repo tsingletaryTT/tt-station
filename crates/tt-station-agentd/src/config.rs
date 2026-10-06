@@ -42,6 +42,8 @@ pub struct GlobalSection {
     pub telemetry_interval_ms: Option<u64>,
     pub tt_smi_bin: Option<String>,
     pub gozer_path: Option<String>,
+    /// The official `tt` CLI the `tt` backend runs. See `ResolvedConfig::official_tt_bin`.
+    pub official_tt_bin: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq)]
@@ -73,6 +75,7 @@ pub struct CliOverrides {
     pub telemetry_interval_ms: Option<u64>,
     pub tt_smi_bin: Option<String>,
     pub gozer_path: Option<String>,
+    pub official_tt_bin: Option<String>,
     // serving-scoped
     pub backend: Option<String>,
     pub tt_inference_repo: Option<String>,
@@ -116,10 +119,16 @@ pub struct ResolvedConfig {
     /// `gozer`'s module doc), so `None` all the way through to `probe`
     /// failing to find anything is a perfectly normal outcome, not an error.
     pub gozer_path: Option<String>,
+    /// The official `tt` CLI for the `tt` backend, tilde-expanded, from
+    /// `--official-tt-bin` or `[global].official_tt_bin`. `None` when neither is
+    /// given; `main.rs` then searches with `libttstation::official_tt::resolve_bin`.
+    /// No default string here, for the same reason as `gozer_path`: the search
+    /// reads the environment and this function stays pure.
+    pub official_tt_bin: Option<String>,
     // active serving profile
     pub active_profile: Option<String>, // None = implicit default profile
     pub available_profiles: Vec<String>, // sorted; empty when no [profile.*]
-    pub backend: String,                // "runpy" | "docker" | "dstack"
+    pub backend: String,                // "runpy" | "docker" | "tt" | "dstack"
     pub serving_host: String,
     pub serving_port: u16,
     pub serving_image: Option<String>,
@@ -272,6 +281,8 @@ pub fn resolve(
     // actually given; `expand_tilde` on an absent value would just produce
     // an empty string to expand, which isn't the same as "not configured".
     let gozer_path = pick([&cli.gozer_path, &g.gozer_path, &None]).map(|p| expand_tilde(&p));
+    let official_tt_bin =
+        pick([&cli.official_tt_bin, &g.official_tt_bin, &None]).map(|p| expand_tilde(&p));
 
     let no_token_persistence = cli.no_token_persistence || g.no_token_persistence.unwrap_or(false);
     let token_store = if no_token_persistence {
@@ -320,6 +331,7 @@ pub fn resolve(
         telemetry_interval_ms,
         tt_smi_bin,
         gozer_path,
+        official_tt_bin,
         active_profile,
         available_profiles,
         backend,
@@ -558,6 +570,31 @@ mod resolve_tests {
         cli.no_token_persistence = true;
         let r = resolve(cli, None, None, None).unwrap();
         assert_eq!(r.token_store, None);
+    }
+
+    #[test]
+    fn official_tt_bin_comes_from_flag_then_global_and_is_otherwise_unset() {
+        std::env::set_var("HOME", "/home/tester");
+        let r = resolve(base_cli(), None, None, None).unwrap();
+        assert_eq!(r.official_tt_bin, None, "unset means: search at startup");
+
+        let f = file_with("[global]\nofficial_tt_bin = \"~/.local/bin/tt\"\n");
+        let r = resolve(base_cli(), None, Some(f), None).unwrap();
+        assert_eq!(r.official_tt_bin.as_deref(), Some("/home/tester/.local/bin/tt"));
+
+        let f = file_with("[global]\nofficial_tt_bin = \"/from/file\"\n");
+        let mut cli = base_cli();
+        cli.official_tt_bin = Some("/from/flag".into());
+        let r = resolve(cli, None, Some(f), None).unwrap();
+        assert_eq!(r.official_tt_bin.as_deref(), Some("/from/flag"));
+    }
+
+    #[test]
+    fn backend_tt_is_accepted_from_a_profile() {
+        let f = file_with("[profile.p]\nbackend = \"tt\"\nserving_port = 20000\n");
+        let r = resolve(base_cli(), None, Some(f), None).unwrap();
+        assert_eq!(r.backend, "tt");
+        assert_eq!(r.serving_port, 20000);
     }
 
     #[test]

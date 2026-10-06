@@ -14,6 +14,7 @@ pub mod discovery;
 pub mod docker;
 pub mod dstack;
 pub mod runpy;
+pub mod tt;
 
 use std::time::Duration;
 
@@ -301,12 +302,12 @@ pub(crate) fn poll_until_healthy(
 
 /// Construct a `ServingBackend` for the given `--backend` CLI choice.
 ///
-/// `"runpy"`, `"docker"`, and `"dstack"` are the only recognized kinds;
+/// `"runpy"`, `"docker"`, `"tt"` and `"dstack"` are the only recognized kinds;
 /// anything else is an error rather than a silent fallback, since a typo'd
 /// backend name should fail loudly at startup rather than quietly serving
 /// nothing.
 ///
-/// `docker_config`/`runpy_config` are each only meaningful for their own
+/// `docker_config`/`runpy_config`/`tt_config` are each only meaningful for their own
 /// backend (dstack's stub needs neither); both are threaded through here
 /// rather than the individual fields being hardcoded so the CLI wiring in
 /// `main.rs` has a single function to call regardless of which backend was
@@ -336,9 +337,15 @@ pub fn make_backend(
     kind: &str,
     docker_config: docker::DockerConfig,
     runpy_config: runpy::RunPyConfig,
+    tt_config: tt::TtConfig,
     gozer: Option<crate::gozer::Capability>,
 ) -> Result<Box<dyn ServingBackend>> {
     match kind {
+        // Delegates to the official `tt` CLI (`serving/tt.rs`). Not the default: `runpy`
+        // stays the default until this backend is proven on real hardware.
+        "tt" => Ok(Box::new(
+            tt::TtBackend::new(tt_config, Box::new(docker::RealCommandRunner)).with_gozer(gozer),
+        )),
         "runpy" => Ok(Box::new(
             runpy::RunPyBackend::new(runpy_config, Box::new(docker::RealCommandRunner))
                 .with_gozer(gozer),
@@ -370,11 +377,12 @@ mod tests {
     }
 
     #[test]
-    fn make_backend_constructs_runpy_docker_and_dstack() {
+    fn make_backend_constructs_runpy_docker_tt_and_dstack() {
         assert!(make_backend(
             "runpy",
             docker::DockerConfig::default(),
             runpy::RunPyConfig::default(),
+            tt::TtConfig::default(),
             None
         )
         .is_ok());
@@ -382,6 +390,15 @@ mod tests {
             "docker",
             docker::DockerConfig::default(),
             runpy::RunPyConfig::default(),
+            tt::TtConfig::default(),
+            None
+        )
+        .is_ok());
+        assert!(make_backend(
+            "tt",
+            docker::DockerConfig::default(),
+            runpy::RunPyConfig::default(),
+            tt::TtConfig::default(),
             None
         )
         .is_ok());
@@ -389,6 +406,7 @@ mod tests {
             "dstack",
             docker::DockerConfig::default(),
             runpy::RunPyConfig::default(),
+            tt::TtConfig::default(),
             None
         )
         .is_ok());
@@ -410,11 +428,12 @@ mod tests {
     /// the caller passed `Some`.
     #[test]
     fn make_backend_hands_the_capability_to_the_backend_it_builds() {
-        for kind in ["runpy", "docker"] {
+        for kind in ["runpy", "docker", "tt"] {
             let backend = make_backend(
                 kind,
                 docker::DockerConfig::default(),
                 runpy::RunPyConfig::default(),
+                tt::TtConfig::default(),
                 Some(capability()),
             )
             .expect("backend should construct");
@@ -432,11 +451,12 @@ mod tests {
     /// in its pre-leasing state.
     #[test]
     fn make_backend_without_a_capability_leaves_leasing_off() {
-        for kind in ["runpy", "docker", "dstack"] {
+        for kind in ["runpy", "docker", "tt", "dstack"] {
             let backend = make_backend(
                 kind,
                 docker::DockerConfig::default(),
                 runpy::RunPyConfig::default(),
+                tt::TtConfig::default(),
                 None,
             )
             .expect("backend should construct");
@@ -457,6 +477,7 @@ mod tests {
             "dstack",
             docker::DockerConfig::default(),
             runpy::RunPyConfig::default(),
+            tt::TtConfig::default(),
             Some(capability()),
         )
         .expect("dstack backend should construct");
@@ -472,6 +493,7 @@ mod tests {
             "bogus",
             docker::DockerConfig::default(),
             runpy::RunPyConfig::default(),
+            tt::TtConfig::default(),
             None,
         ) {
             Err(err) => assert!(err.to_string().contains("bogus")),

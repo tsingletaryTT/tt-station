@@ -157,7 +157,9 @@ pub struct RunOptions {
     /// Port for the served `/v1`. `1024..=65535`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// Name of a profile in the agent's config. `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
+    /// A tt-model bundle profile, passed to `tt serve --profile`. `tt serve` accepts it only
+    /// for bundles and refuses it for catalog models (checked 2026-10-05 against `tt 1.0.1`; see
+    /// [`serve_argv_for`]). `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     /// Serve from already-cached weights without network access.
@@ -376,6 +378,123 @@ fn check_vllm_value(flag: &str, kind: VllmKind, value: Option<&str>) -> Result<(
     }
 }
 
+/// How the official `tt serve` will run a model: through tt-inference-server (a model in tt's
+/// released catalog) or through tt-model (a Hub bundle id that the catalog does not cover).
+///
+/// The model name alone does not decide this. A Hugging Face id such as
+/// `meta-llama/Llama-3.1-8B-Instruct` has a `/` in it and still resolves to the catalog model
+/// `Llama-3.1-8B-Instruct` (checked 2026-10-05 with `tt --json serve
+/// meta-llama/Llama-3.1-8B-Instruct --dry-run`). Only `tt` knows its catalog, so the target is
+/// read from `tt --json serve <model> --dry-run` with [`ServeTarget::from_dry_run`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServeTarget {
+    /// A catalog model, served by tt-inference-server's `run.py`.
+    Catalog,
+    /// A tt-model bundle (`namespace/name` not in the catalog), served by `tt-model serve`.
+    Bundle,
+}
+
+impl ServeTarget {
+    /// Classify from the JSON plan that `tt --json serve <model> --dry-run` prints.
+    ///
+    /// With `tt 1.0.1` a bundle's plan carries `"backend": "tt-model"` and an `argv` that starts
+    /// with the `tt-model` binary. A catalog model's plan has no `backend` key; it carries
+    /// `served_through` and an `argv` that runs tt-inference-server's `run.py`. Anything that is
+    /// not explicitly `tt-model` is treated as the catalog, which is the stricter of the two:
+    /// catalog models accept fewer options.
+    pub fn from_dry_run(plan: &serde_json::Value) -> ServeTarget {
+        match plan.get("backend").and_then(serde_json::Value::as_str) {
+            Some("tt-model") => ServeTarget::Bundle,
+            _ => ServeTarget::Catalog,
+        }
+    }
+}
+
+/// The arguments for the official `tt serve`, without the binary name: `["serve", model, ...]`.
+///
+/// Order: `serve`, the model, then `--port <default_port>` unless `options.port` is set (the
+/// caller owns the port, so one is always given), then [`RunOptions::to_serve_args`]. When
+/// `options.port` is set it appears once, inside the options, and `default_port` is not used.
+///
+/// This is the plain mapping, shared by the agent's `tt` backend, the tray's local station and
+/// the run sheet's command preview so all three show the same command. It does not know whether
+/// `tt` will treat `model` as a catalog model or a bundle; [`serve_argv_for`] adds that.
+///
+/// It does not validate. Build `options` with [`RunOptions::from_value`], or call
+/// [`RunOptions::validate`], first. Every value that reaches the output has then passed the
+/// character checks, and the output is meant to be run as an argv (no shell).
+pub fn serve_argv(model: &str, default_port: u16, options: &RunOptions) -> Vec<String> {
+    let mut out = vec!["serve".to_string(), model.to_string()];
+    if options.port.is_none() {
+        out.push("--port".to_string());
+        out.push(default_port.to_string());
+    }
+    out.extend(options.to_serve_args());
+    out
+}
+
+/// [`serve_argv`] for a known [`ServeTarget`], refusing options `tt serve` would refuse.
+///
+/// What `tt 1.0.1` does with each option, checked with `--dry-run` on 2026-10-05:
+///
+/// * **Catalog:** `--profile` and pass-through vLLM flags (after `--`) are refused with exit 2.
+///   This function refuses them first, as an [`OptionError`] that names the field, so nothing is
+///   started and the caller can show which input was wrong. It does not drop them silently: a
+///   request that asked for `--max-model-len 4096` and got a server without it would be a
+///   different server from the one asked for.
+/// * **Bundle:** only the `server` workflow exists (`tt` refuses the others), so any other
+///   workflow is refused here. `--detach` is added right after the model name, because without
+///   it `tt serve` follows the bundle's boot instead of returning once the container is up.
+///   `--detach` is a bundle-only flag: `tt` refuses it for a catalog model.
+///
+/// A catalog `tt serve` returns on its own once tt-inference-server's container exists, because
+/// `run.py --docker-server` returns at that point for the `server` workflow.
+pub fn serve_argv_for(
+    target: ServeTarget,
+    model: &str,
+    default_port: u16,
+    options: &RunOptions,
+) -> Result<Vec<String>, OptionError> {
+    match target {
+        ServeTarget::Catalog => {
+            if options.profile.is_some() {
+                return Err(OptionError::new(
+                    "profile",
+                    format!(
+                        "applies only to tt-model bundles; `{}` is a catalog model",
+                        sanitize_for_message(model)
+                    ),
+                ));
+            }
+            if !options.vllm_args.is_empty() {
+                return Err(OptionError::new(
+                    "vllm_args",
+                    format!(
+                        "pass-through vLLM flags apply only to tt-model bundles; `{}` is a \
+                         catalog model",
+                        sanitize_for_message(model)
+                    ),
+                ));
+            }
+            Ok(serve_argv(model, default_port, options))
+        }
+        ServeTarget::Bundle => {
+            if let Some(w) = options.workflow.filter(|w| *w != Workflow::Server) {
+                return Err(OptionError::new(
+                    "workflow",
+                    format!(
+                        "tt-model bundles support only the `server` workflow, not `{}`",
+                        w.as_str()
+                    ),
+                ));
+            }
+            let mut argv = serve_argv(model, default_port, options);
+            argv.insert(2, "--detach".to_string());
+            Ok(argv)
+        }
+    }
+}
+
 /// Describes one option for a UI: its name, value kind and limits.
 ///
 /// Vendor flags are named `vllm:<flag>`.
@@ -433,11 +552,17 @@ pub fn run_schema() -> RunSchema {
             max: Some(65535),
             ..spec("port", "int", "Port for the served /v1.")
         },
-        spec(
-            "profile",
-            "string",
-            "Named serving profile from the agent's config.",
-        ),
+        // `tt serve --profile` is a tt-model bundle option. `tt 1.0.1` refuses it for a
+        // catalog model ("--profile only applies to a tt-model bundle"), so the schema says
+        // bundle only.
+        OptionSpec {
+            applies_to: vec!["bundle".to_string()],
+            ..spec(
+                "profile",
+                "string",
+                "tt-model bundle profile to serve instead of the bundle's default.",
+            )
+        },
         OptionSpec {
             default: Some("false".to_string()),
             ..spec(
@@ -459,8 +584,10 @@ pub fn run_schema() -> RunSchema {
     for (flag, kind) in VLLM_ALLOWLIST {
         let name = format!("vllm:{flag}");
         let description = format!("Pass --{flag} through to vLLM.");
-        // `vllm:*` applies to bundle models only until the catalog path is
-        // shown to honour pass-through flags.
+        // `vllm:*` applies to bundle models only. Checked 2026-10-05 against
+        // `tt 1.0.1`: `tt --json serve Llama-3.1-8B-Instruct --dry-run -- --max-model-len 4096`
+        // exits 2 with "Unrecognized arguments for a catalog model: --max-model-len 4096".
+        // Pass-through arguments go to tt-model, which serves bundles only.
         let mut s = match kind {
             VllmKind::Int { min, max } => OptionSpec {
                 min: Some(*min),
@@ -574,6 +701,165 @@ mod tests {
         assert!(opts(json!({"port": 80})).is_err());
         assert!(opts(json!({"port": 1024})).is_ok());
         assert!(opts(json!({"port": 70000})).is_err());
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn serve_argv_places_model_first_then_options() {
+        let o = opts(json!({
+            "device": "p300x2", "offline": true,
+            "vllm_args": [{"flag": "max-model-len", "value": "4096"}]
+        }))
+        .unwrap();
+        let argv = serve_argv("Llama-3.1-8B-Instruct", 20000, &o);
+        // The agent owns the port: it is always given, before the options.
+        let mut want = strings(&["serve", "Llama-3.1-8B-Instruct", "--port", "20000"]);
+        want.extend(o.to_serve_args());
+        assert_eq!(argv, want);
+
+        // No options at all: still the port.
+        assert_eq!(
+            serve_argv("m", 8003, &RunOptions::default()),
+            strings(&["serve", "m", "--port", "8003"])
+        );
+    }
+
+    #[test]
+    fn serve_argv_uses_the_requested_port_once() {
+        let o = opts(json!({"port": 20005})).unwrap();
+        let argv = serve_argv("m", 20000, &o);
+        assert_eq!(argv, strings(&["serve", "m", "--port", "20005"]));
+        assert_eq!(argv.iter().filter(|a| *a == "--port").count(), 1);
+        assert!(!argv.contains(&"20000".to_string()));
+    }
+
+    /// Every hostile value is stopped by `from_value`, so none can reach `serve_argv`. And for
+    /// values that do pass, every argv element is either a fixed flag or text drawn from the
+    /// validators' character sets: no whitespace, no shell syntax, nothing that starts a new flag.
+    #[test]
+    fn serve_argv_never_contains_unvalidated_text() {
+        let hostile = [
+            "4096 --privileged",
+            "x; rm -rf /",
+            "a\nb",
+            "--x",
+            "",
+            "$(id)",
+            "a b",
+            "`id`",
+            "a|b",
+            "a&&b",
+            "../../etc",
+            "'quoted'",
+        ];
+        for bad in hostile {
+            // Each refusal must come from the field under test, not from some unrelated
+            // problem that would make the assertion pass for the wrong reason.
+            for field in ["device", "profile", "workflow"] {
+                let e = opts(json!({ field: bad }))
+                    .expect_err(&format!("{field} {bad:?} must not get through to serve_argv"));
+                assert_eq!(e.field, field, "{bad:?}");
+            }
+            for flag in ["tool-call-parser", "reasoning-parser", "max-model-len"] {
+                let e = opts(json!({"vllm_args": [{"flag": flag, "value": bad}]})).expect_err(
+                    &format!("vllm {flag} {bad:?} must not get through to serve_argv"),
+                );
+                assert_eq!(e.field, "vllm_args");
+            }
+            let e = opts(json!({"vllm_args": [{"flag": bad}]}))
+                .expect_err(&format!("vllm flag name {bad:?} must not get through"));
+            assert_eq!(e.field, "vllm_args");
+        }
+
+        let good = opts(json!({
+            "device": "p300x2", "port": 20001, "profile": "fast.v2-a",
+            "offline": true, "workflow": "server",
+            "vllm_args": [
+                {"flag": "max-model-len", "value": "4096"},
+                {"flag": "tool-call-parser", "value": "llama3_json"},
+                {"flag": "enable-auto-tool-choice"}
+            ]
+        }))
+        .unwrap();
+        for arg in serve_argv("Llama-3.1-8B-Instruct", 20000, &good).iter().skip(2) {
+            assert!(
+                arg.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+                "unexpected character in argv element {arg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn serve_target_comes_from_the_dry_run_plan() {
+        // Trimmed from `tt --json serve Adartras/qwen3.6-a3b-blackhole --dry-run` (tt 1.0.1).
+        let bundle = json!({"bundle": null, "backend": "tt-model",
+            "model": "Adartras/qwen3.6-a3b-blackhole", "port": null,
+            "argv": ["/home/ttuser/.local/share/tenstorrent/bin/tt-model", "serve",
+                     "Adartras/qwen3.6-a3b-blackhole"]});
+        assert_eq!(ServeTarget::from_dry_run(&bundle), ServeTarget::Bundle);
+        // Trimmed from `tt --json serve meta-llama/Llama-3.1-8B-Instruct --dry-run`: a slash in
+        // the name, and still the catalog model.
+        let catalog = json!({"model": "Llama-3.1-8B-Instruct", "workflow": "server",
+            "served_through": null, "default_port": "20000"});
+        assert_eq!(ServeTarget::from_dry_run(&catalog), ServeTarget::Catalog);
+        assert_eq!(ServeTarget::from_dry_run(&json!({})), ServeTarget::Catalog);
+    }
+
+    #[test]
+    fn catalog_target_refuses_bundle_only_options_by_name() {
+        let vllm = opts(json!({"vllm_args": [{"flag": "max-model-len", "value": "4096"}]})).unwrap();
+        let e = serve_argv_for(ServeTarget::Catalog, "Llama-3.1-8B-Instruct", 20000, &vllm)
+            .unwrap_err();
+        assert_eq!(e.field, "vllm_args");
+
+        let profile = opts(json!({"profile": "fast"})).unwrap();
+        let e = serve_argv_for(ServeTarget::Catalog, "Llama-3.1-8B-Instruct", 20000, &profile)
+            .unwrap_err();
+        assert_eq!(e.field, "profile");
+
+        // Options a catalog model accepts pass through unchanged, with no `--detach`.
+        let ok = opts(json!({"device": "p300x2", "offline": true, "workflow": "server"})).unwrap();
+        assert_eq!(
+            serve_argv_for(ServeTarget::Catalog, "Llama-3.1-8B-Instruct", 20000, &ok).unwrap(),
+            serve_argv("Llama-3.1-8B-Instruct", 20000, &ok)
+        );
+    }
+
+    #[test]
+    fn bundle_target_detaches_and_keeps_pass_through_flags() {
+        let o = opts(json!({"profile": "fast",
+            "vllm_args": [{"flag": "max-model-len", "value": "4096"}]}))
+        .unwrap();
+        let argv = serve_argv_for(ServeTarget::Bundle, "ns/name", 20000, &o).unwrap();
+        assert_eq!(
+            argv,
+            strings(&[
+                "serve", "ns/name", "--detach", "--port", "20000", "--profile", "fast", "--",
+                "--max-model-len", "4096"
+            ])
+        );
+
+        let bench = opts(json!({"workflow": "benchmarks"})).unwrap();
+        let e = serve_argv_for(ServeTarget::Bundle, "ns/name", 20000, &bench).unwrap_err();
+        assert_eq!(e.field, "workflow");
+    }
+
+    /// Pins the Step 1 finding: a catalog model refuses `--` pass-through arguments and
+    /// `--profile`, so the schema must not offer them for catalog models.
+    #[test]
+    fn schema_offers_vllm_flags_and_profile_for_bundles_only() {
+        let s = run_schema();
+        for o in &s.options {
+            if o.name.starts_with("vllm:") || o.name == "profile" {
+                assert_eq!(o.applies_to, vec!["bundle".to_string()], "{}", o.name);
+            }
+        }
+        let device = s.options.iter().find(|o| o.name == "device").unwrap();
+        assert!(device.applies_to.contains(&"catalog".to_string()));
     }
 
     #[test]

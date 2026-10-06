@@ -77,6 +77,34 @@ impl ServingBackend for DefaultBackend {
     }
 }
 
+/// A backend that refuses one option for the requested model, the way the `tt`
+/// backend refuses vLLM flags for a catalog model.
+struct RefusingBackend;
+
+impl ServingBackend for RefusingBackend {
+    fn start_forcing(&self, _model: &str, _force: bool) -> anyhow::Result<Endpoint> {
+        Ok(endpoint())
+    }
+    fn start_with_options(
+        &self,
+        _model: &str,
+        _force: bool,
+        _options: &RunOptions,
+    ) -> anyhow::Result<Endpoint> {
+        Err(anyhow::Error::new(libttstation::run_options::OptionError {
+            field: "vllm_args".to_string(),
+            message: "pass-through vLLM flags apply only to tt-model bundles".to_string(),
+        })
+        .context("tt backend: refused"))
+    }
+    fn stop(&self, _model: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn status(&self) -> anyhow::Result<ServingStatus> {
+        Ok(ServingStatus::Idle)
+    }
+}
+
 async fn serve(state: AppState) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -259,4 +287,24 @@ async fn run_schema_is_unauthed_and_lists_options() {
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let text = resp.text().await.unwrap();
     assert!(text.contains("\"device\""), "got {text}");
+}
+
+/// An option the backend refuses for this model is the client's mistake: 400,
+/// with the field first so a UI can point at it. Without the route's
+/// `OptionError` branch this was a 500.
+#[tokio::test]
+async fn an_option_the_backend_refuses_is_400_naming_the_field() {
+    let (client, base, token) = boot(Arc::new(RefusingBackend)).await;
+    let resp = client
+        .post(format!("{base}/run"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "model": "Llama-3.1-8B-Instruct",
+            "options": { "vllm_args": [{"flag": "max-model-len", "value": "4096"}] } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let msg = body["error"].as_str().unwrap();
+    assert!(msg.starts_with("vllm_args: "), "got {msg:?}");
 }

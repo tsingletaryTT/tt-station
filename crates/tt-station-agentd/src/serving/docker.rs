@@ -156,6 +156,25 @@ pub trait CommandRunner: Send + Sync {
             stderr: String::new(),
         })
     }
+
+    /// Like `run_capturing`, with `env` also set on the CHILD process (never on this process;
+    /// see `run_in_dir_with_env` for why that matters).
+    ///
+    /// Added for the `tt` backend (`serving/tt.rs`): it needs `tt serve`'s exit code and BOTH
+    /// streams, because `tt --json` prints its error object on stdout, and it needs to hand the
+    /// gozer grant's `TT_VISIBLE_DEVICES` to the child. `run_in_dir_with_env` keeps only stderr
+    /// on failure, and `run_capturing` takes no environment.
+    ///
+    /// Default implementation ignores `env` and calls `run_capturing`. That is right for fakes,
+    /// which never spawn anything; `RealCommandRunner` overrides it.
+    fn run_capturing_with_env(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<CapturedOutput> {
+        let _ = env;
+        self.run_capturing(args)
+    }
 }
 
 /// Exit code, stdout, and stderr from a `run_capturing` call -- the
@@ -235,11 +254,21 @@ impl CommandRunner for RealCommandRunner {
     }
 
     fn run_capturing(&self, args: &[&str]) -> Result<CapturedOutput> {
+        self.run_capturing_with_env(args, &[])
+    }
+
+    fn run_capturing_with_env(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<CapturedOutput> {
         let (program, rest) = args.split_first().ok_or_else(|| {
             anyhow::anyhow!("CommandRunner::run_capturing called with empty argv")
         })?;
         let output = std::process::Command::new(program)
             .args(rest)
+            // Child-only environment, as in `run_in_dir_with_env`. Empty for `run_capturing`.
+            .envs(env.iter().copied())
             .output()
             .with_context(|| format!("failed to spawn {}", args.join(" ")))?;
         Ok(CapturedOutput {

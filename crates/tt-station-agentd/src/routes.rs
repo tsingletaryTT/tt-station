@@ -1711,9 +1711,23 @@ async fn run_model(
 
     // A contended box answers 409 (naming the board and the holder), not
     // 500 -- see `contention_aware_error`. A backend that cannot apply the
-    // requested options answers 400 naming itself.
+    // requested options answers 400 naming itself. A backend that refuses one
+    // particular option for this model (the `tt` backend refuses vLLM flags for
+    // a catalog model, because `tt serve` would) returns an `OptionError`, which
+    // answers 400 in the same `<field>: <message>` form as a validation failure,
+    // so a UI can point at the input either way.
     let endpoint = result.map_err(|err| {
-        if err
+        if let Some(option_err) = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<libttstation::run_options::OptionError>())
+        {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("{}: {}", option_err.field, option_err.message),
+                }),
+            )
+        } else if err
             .chain()
             .any(|cause| cause.is::<crate::serving::OptionsUnsupported>())
         {

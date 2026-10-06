@@ -4,6 +4,7 @@ pub mod device_mesh;
 pub mod discovery;
 pub mod local_device;
 pub mod model;
+pub mod official_tt;
 pub mod pairing;
 pub mod run_options;
 pub mod secrets;

@@ -54,6 +54,7 @@ all — see "Precedence").
 | `telemetry_interval_ms` | integer (u64) | Interval between `tt-smi -s` snapshots pushed on `GET /telemetry`. Default `1000`. |
 | `tt_smi_bin` | string | `tt-smi` binary the telemetry stream runs. Default `"tt-smi"`. |
 | `gozer_path` | string (path) | `gozer` binary agentd probes for **once** at startup, to lease chips per board instead of serving whole-box. Optional and **no default string**: unset means "search `$PATH`", and finding nothing there means leasing is simply off (see [`chip-leasing.md`](chip-leasing.md)). Tilde-expanded. |
+| `official_tt_bin` | string (path) | Tenstorrent's official `tt` CLI, run by `backend = "tt"`. Flag: `--official-tt-bin`. It must answer `--version` with `tt <semver>`, or every serve is refused. **No default string**: unset means search `TTS_OFFICIAL_TT_BIN`, then `$PATH`, then `~/.local/bin/tt` (where `uv tool install tenstorrent` puts it; a `systemctl --user` unit's `$PATH` usually lacks that directory). Tilde-expanded. |
 
 ### `[profile.<name>]` — how a profile serves
 
@@ -62,7 +63,7 @@ complete, independently-selectable serving configuration.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `backend` | string | `"runpy"` \| `"docker"` \| `"dstack"`. Default `"runpy"`. |
+| `backend` | string | `"runpy"` \| `"docker"` \| `"tt"` \| `"dstack"`. Default `"runpy"`. See "The `tt` backend" below. |
 | `tt_inference_repo` | string (path) | Local `tt-inference-server` checkout (the `runpy` backend). Default: `./vendor/tt-inference-server` if present, else `$HOME/code/tt-inference-server`. |
 | `serving_image` | string | Container image to serve (`run.py --override-docker-image`, or `docker run <image>` for the `docker` backend). No default for `runpy` (left unset so `run.py` can self-resolve via `model_spec.json`); the `docker` backend falls back to a hardcoded example tag if unset — pin this per box. |
 | `auto_image` | bool | `runpy` only: opt in to auto-picking the newest locally-present release image when `serving_image` is unset. Default `false` — image↔run.py compatibility is a curated matrix, so pinning is safer. |
@@ -115,6 +116,53 @@ tt_inference_repo = "~/code/tt-inference-server-next"
 serving_image = "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.17.0-<sha>"
 serving_port = 8004
 ```
+
+### The `tt` backend
+
+`backend = "tt"` serves through Tenstorrent's official CLI instead of calling
+`run.py` directly. It is opt-in: `runpy` stays the default until this backend
+has been proven on real hardware.
+
+```toml
+[global]
+name = "qb2-lab"
+ctrl_port = 8765
+# official_tt_bin = "~/.local/bin/tt"   # optional; found automatically otherwise
+
+[profile.tt]
+backend = "tt"
+serving_host = "qb2-lab.local"
+serving_port = 20000
+```
+
+What it runs, in order, for `POST /run`:
+
+1. `tt --version`. Anything other than `tt <semver>` is refused.
+2. `tt --json serve <model> --dry-run`, which says whether `tt` will serve the
+   model from its catalog (through tt-inference-server) or as a tt-model bundle.
+   An unknown model is refused here, before any chips are leased.
+3. Stops what this backend was serving and releases its gozer lease.
+4. Leases chips through gozer, when gozer is installed (same 409 behaviour as
+   the other backends).
+5. `tt --json serve <model> --port <serving_port> [options]`. Bundles also get
+   `--detach`, so the command returns once the container is up.
+6. Polls `http://<serving_host>:<port>/v1/models` until a model is listed.
+
+`POST /stop` runs `tt --json model stop <model>` and then releases the lease.
+`GET /status` reads `tt --json model ps`, so it also sees a serve started
+before an agent restart. `GET /models` reads `tt --json model list` and keeps
+the models with a vLLM engine.
+
+This is the only backend that applies `POST /run` `options` (see
+`GET /run/schema`). `tt serve` refuses some options for catalog models, and the
+agent refuses them first with a `400` naming the field: `profile` and
+`vllm_args` apply to tt-model bundles only. Only the `server` workflow is
+accepted, because `benchmarks` and `evals` run in the foreground and leave no
+`/v1` behind. The settings that only `runpy`/`docker` read
+(`tt_inference_repo`, `serving_image`, `auto_image`, `tt_device`,
+`host_hf_cache`, `no_device_reset`, and a profile's `hf_token`) are ignored by
+this backend; `tt` makes those decisions itself and reads its own environment,
+which it inherits from the agent.
 
 ## `~/` expansion
 
