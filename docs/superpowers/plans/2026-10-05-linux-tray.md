@@ -525,3 +525,72 @@ This task is the point where autonomous work ends. Do not proceed past it withou
   - What is needed from the owner: (a) `tt-station-agentd` installed and running on franklinstower (`sudo dpkg -i` the `.deb`, or copy the binary, then `systemctl --user enable --now tt-station-agentd`), (b) the pairing code shown on its panel or `tt-station console`, (c) whether franklinstower runs GNOME or KDE, (d) `sudo apt install libadwaita-1-dev` only if they want the libadwaita restyle later.
   - A checklist for the live pass: add by address, pair, browse models, run with a non-default port, stop, restart, connect, plus what to look at in the tray.
 - [ ] **Step 3: Do not push.** Pushing the branch and opening a PR is the owner's call.
+
+---
+
+## Task 4 results (2026-10-05, live check on tsingletaryTT-quietbox, 4x p300c)
+
+Full report with commands and outputs: `.superpowers/sdd/2026-10-05-linux-tray/task-4-report.md`
+(local, gitignored).
+
+**What ran.** A throwaway agent (`--backend tt --ctrl-port 18765 --serving-port 20010`, temp
+`TT_CONFIG_DIR` and token store) served the community tt-model bundle
+`changh95/qwen3.8-27b-p300x2` three times. Its image (`tt-model/qwen3.8-27b-p300x2:0becf4834925`)
+and weights (`Qwen/Qwen3.8-27B`, 52 GB, plus 31 GB of tensor cache) were already on disk, so
+nothing was downloaded. The agent leased the chips itself through gozer (`--chips all`, all 4
+granted). It was not wrapped in `gozer run`: the backend takes its own lease, and an outer lease
+would have made the inner `acquire` return 409. Each serve was listed on `/v1/models` after about
+250 to 275 seconds. No catalog model is cached here, so the catalog path was not run.
+
+| Check | Result |
+|---|---|
+| (a) `tt serve <bundle> --detach` returns once the container is up | CONFIRMED |
+| (b) `TT_VISIBLE_DEVICES` reaches the container | REFUTED. tt-model passes `--device /dev/tenstorrent/0..3` and no `TT_VISIBLE_DEVICES`; it ignores the variable when it picks devices |
+| (c) `requires_key: false` for a bundle's `/v1` | CONFIRMED |
+| (d) a non-empty `tt --json model ps` matches `parse_ps` | CONFIRMED; the capture is now the `PS_LIVE_BUNDLE` fixture |
+| (e) `/status`, `/serving`, `/endpoint` agree after start | REFUTED for `/serving`, which returns `[]` (bug 1). `/status` and `/endpoint` agree |
+| (f) `options` change what runs (`port`, `vllm_args`) | CONFIRMED (port 20011, `--max-model-len 65536` in the container args, `max_model_len` 65536 on `/v1/models`) |
+| (g) `tt serve --offline` for catalog models | NOT TESTED |
+| (h) `POST /stop` stops exactly our container, releases the lease, chips healthy | CONFIRMED |
+| (i) adopted lease after an agent restart | CONFIRMED only with `GOZER_HISTORY_ROOT` set to a writable directory. Without it, adoption fails on this box (environment problem 1) and the agent answers `/run` with a safe 409 |
+| (j) a `tt` that is not the official one is refused | CONFIRMED |
+
+**Bugs found (not fixed here).**
+
+1. `GET /serving` cannot see the tt backend's own serve. `serving::discovery::discover_serving`
+   keeps only images whose name contains `tt-inference-server` (`IMAGE_MARKER`), and tt-model
+   bundle images are named `tt-model/<name>:<tag>`. Effect: `/serving` is `[]` while `/status`
+   says `serving:Qwen/Qwen3.8-27B`. The tray's `serving_now` prefers `/serving` and only falls
+   back to `/endpoint` when paired. Suggested fix: for the tt backend, build `/serving` from
+   `tt --json model ps` (it covers both catalog and bundle servers). Another option is to also
+   accept images that start with `tt-model/` or carry the `org.tenstorrent.tt-model` label.
+2. `GET /status` reports `idle` after an agent restart while the tt backend's serve is still
+   running. `AppState::reconciled_status` (routes.rs) asks the backend only when the stored status is
+   `Serving`, and a fresh process starts out `Idle`. So `TtBackend::status` (`tt model ps`) is never
+   consulted, contrary to the module doc and `agentd-config.md` ("so it also sees a serve
+   started before an agent restart"). In the same state, `POST /stop` returns 200 and does
+   nothing, because the route has no current model and the backend has no recorded serve.
+   Suggested fix: when the stored status is `Idle` and the backend is `tt`, consult
+   `backend.status()` once (at startup, or on each `/status` with a short cache), and adopt a
+   running row on `serving_port` as the current serve.
+
+**Environment problem on this box (not a tt-station bug).**
+
+1. `/tmp/tt-gozer/history.jsonl` is owned by root with mode 644 (last written 14:59 local time by a root-run
+   gozer). gozer swallows the write error, so no grant or release since then is in the history.
+   tt-station's startup sweep reconstructs lease ids from that history, so a restarted agent
+   cannot adopt its own lease ("no resolvable lease id"). The owner should `sudo chown ttuser
+   /tmp/tt-gozer/history.jsonl` or set `GOZER_HISTORY_ROOT` box-wide. The proper fix is for gozer to put
+   `lease_id` in `gozer status --json`, which the gozer module doc already notes.
+
+**Other observations.**
+
+- A serve on a non-default `options.port` gets a lease `who` of `tt-station:<that port>:...`, so a
+  restarted agent will not adopt it: the startup sweep adopts only leases on `serving_port`. This
+  is Task 3 concern 7, now seen live.
+- tt-model names the container after the bundle and profile (`tt-model-qwen3.8-27b-p300x2-batch32`),
+  so one model cannot run twice at once on different ports.
+- `tt --json model stop <bundle>` printed human-readable text instead of JSON. The backend only checks the exit code, so it
+  is unaffected.
+- `tt-station run` prints only "500 Internal Server Error" and drops the agent's error body (the
+  official-`tt` refusal message was visible only with curl).

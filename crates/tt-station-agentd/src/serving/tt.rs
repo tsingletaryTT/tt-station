@@ -790,10 +790,12 @@ mod tests {
   "probed": true
 }"#;
 
-    /// A non-empty `tt --json model ps`. NOT captured live: no model was served on this box
-    /// while this was written (a real serve is Task 4). It is built field for field from
-    /// tt-cli's `ServedModel` dataclass (`src/tenstorrent/models/served.py`), which documents
-    /// its field order as the `--json` contract. Replace it with a captured one in Task 4.
+    /// A non-empty `tt --json model ps` with a catalog row and a tt-studio row. Constructed,
+    /// not captured: it was built field for field from tt-cli's `ServedModel` dataclass
+    /// (`src/tenstorrent/models/served.py`). Task 4's live capture ([`PS_LIVE_BUNDLE`]) has the
+    /// same thirteen keys in the same order, so the shape is confirmed. The catalog
+    /// (`inference-server`) and `studio` rows themselves have not been seen live: only a
+    /// tt-model bundle was served on this box (no catalog model is cached here).
     const PS_ONE_RUNNING: &str = r#"{
   "served": [
     {
@@ -825,6 +827,31 @@ mod tests {
       "uptime_s": null,
       "profile": null,
       "served_id": null
+    }
+  ],
+  "probed": true
+}"#;
+
+    /// `tt --json model ps` captured live on tsingletaryTT-quietbox (4x p300c, tt 1.0.1,
+    /// 2026-10-05), verbatim, while this backend served the tt-model bundle
+    /// `changh95/qwen3.8-27b-p300x2` on port 20010 (Task 4 of the Linux tray plan). Note `name` is the bundle id, `backend` is
+    /// `model-manager`, `profile` is set, and `served_id` is the weights repo vLLM reports.
+    const PS_LIVE_BUNDLE: &str = r#"{
+  "served": [
+    {
+      "name": "changh95/qwen3.8-27b-p300x2",
+      "backend": "model-manager",
+      "container": "tt-model-qwen3.8-27b-p300x2-batch32",
+      "container_id": "68a7a7fd598f",
+      "image": "tt-model/qwen3.8-27b-p300x2:0becf4834925",
+      "port": 20010,
+      "base_url": "http://127.0.0.1:20010/v1",
+      "status": "running",
+      "health": "healthy",
+      "started_at": "2026-10-06T02:33:40Z",
+      "uptime_s": 286,
+      "profile": "batch32",
+      "served_id": "Qwen/Qwen3.8-27B"
     }
   ],
   "probed": true
@@ -1043,6 +1070,39 @@ mod tests {
         );
         assert_eq!(rows[1].served_id, None);
         assert_eq!(rows[1].health.as_deref(), Some("starting"));
+    }
+
+    /// The live capture parses, and `status` on its port reports vLLM's id (the row's
+    /// `served_id`), not the bundle id in `name`. An adopted lease on that port is stopped by
+    /// the bundle id, which must pass `validate_model_name`.
+    #[test]
+    fn parse_ps_reads_a_live_bundle_capture() {
+        let rows = parse_ps(PS_LIVE_BUNDLE).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.name, "changh95/qwen3.8-27b-p300x2");
+        assert_eq!(row.backend.as_deref(), Some("model-manager"));
+        assert_eq!(row.port, Some(20010));
+        assert_eq!(row.status.as_deref(), Some("running"));
+        assert_eq!(row.health.as_deref(), Some("healthy"));
+        assert_eq!(row.profile.as_deref(), Some("batch32"));
+        assert_eq!(row.uptime_s, Some(286));
+        assert_eq!(row.served_id.as_deref(), Some("Qwen/Qwen3.8-27B"));
+        assert!(validate_model_name(&row.name).is_ok());
+
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_LIVE_BUNDLE, "");
+        let b = TtBackend::new(
+            TtConfig {
+                service_port: 20010,
+                ..config()
+            },
+            Box::new(runner.clone()),
+        );
+        assert_eq!(
+            b.status().unwrap(),
+            ServingStatus::Serving("Qwen/Qwen3.8-27B".to_string())
+        );
     }
 
     #[test]
