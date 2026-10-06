@@ -232,4 +232,45 @@ mod tests {
         (item.activate)(&mut t2);
         assert_eq!(rx.try_recv().unwrap(), MenuAction::Quit);
     }
+
+    #[test]
+    fn ksni_conversion_keeps_submenu_and_enabled_flag() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tray = TtTray {
+            items: vec![MenuItem::Submenu {
+                label: "Connect".into(),
+                items: vec![
+                    MenuItem::Action {
+                        label: "On".into(),
+                        action: MenuAction::Quit,
+                        enabled: true,
+                    },
+                    MenuItem::Action {
+                        label: "Off".into(),
+                        action: MenuAction::Quit,
+                        enabled: false,
+                    },
+                ],
+            }],
+            tx,
+            needs_attention: false,
+        };
+        let mut menu = ksni::Tray::menu(&tray);
+        let ksni::MenuItem::SubMenu(sub) = menu.remove(0) else {
+            panic!("submenu")
+        };
+        assert_eq!(sub.label, "Connect");
+        let flags: Vec<(String, bool)> = sub
+            .submenu
+            .iter()
+            .map(|i| match i {
+                ksni::MenuItem::Standard(s) => (s.label.clone(), s.enabled),
+                _ => panic!("standard"),
+            })
+            .collect();
+        assert_eq!(
+            flags,
+            vec![("On".to_string(), true), ("Off".to_string(), false)]
+        );
+    }
 }

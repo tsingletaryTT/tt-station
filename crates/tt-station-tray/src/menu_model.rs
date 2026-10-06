@@ -7,10 +7,14 @@
 //! Rules, per station:
 //! * offline: grey header, no run actions; a Wake item only when a MAC is known;
 //! * reachable but not paired (a remote): a pair prompt that opens the window;
-//! * paired and contended (another tenant holds the chips): the holder text, and no Stop,
-//!   Restart or run action, because the tray must not stop or re-run against someone else's work;
 //! * paired and serving: Stop, Restart and a Connect submenu;
-//! * paired and idle: "Run last model" only when `last_run` knows a model for the station.
+//! * paired and idle: "Run last model" only when `last_run` knows a model for the station;
+//! * paired and contended (another tenant held the chips on a refused run): a red line with the
+//!   holder text is added. It removes nothing, because the message stays until a later run
+//!   succeeds and can be stale. Serving and contended keeps Stop, Restart and Connect (the
+//!   served model may be the user's own); idle and contended has no Stop or Restart but keeps
+//!   "Run last model", since retrying is how the message clears. Offline and unpaired are
+//!   checked first and ignore contention text.
 //!
 //! The menu always ends with a separator, Open window and Quit.
 
@@ -58,7 +62,7 @@ impl Dot {
         }
     }
 
-    /// A glyph for use in a menu label. The shapes differ so the state is not carried by
+    /// A glyph for use in a menu label. `tray.rs` prefixes a Header's text with it. The shapes differ so the state is not carried by
     /// color alone, because a plain-text menu label cannot be colored.
     pub fn glyph(self) -> &'static str {
         match self {
@@ -147,17 +151,23 @@ fn station_items(
         ));
         return;
     }
-    if let Some(holder) = &st.contention {
-        // Contention wins over serving: do not offer to stop work that may not be ours.
-        out.push(header(Dot::Red, " - busy"));
-        out.push(MenuItem::Header {
+    // A contention message can be stale (it stays until a later run succeeds), so it never
+    // removes an action the station's own state justifies. It adds a red holder line.
+    let holder_line = || {
+        st.contention.as_ref().map(|holder| MenuItem::Header {
             text: holder.clone(),
             dot: Dot::Red,
-        });
-        return;
-    }
+        })
+    };
     if let Some(serving) = &st.serving {
-        out.push(header(Dot::Green, &format!(" - serving {}", serving.model)));
+        // The served model may be the user's own, so Stop and Restart stay.
+        let dot = if st.contention.is_some() {
+            Dot::Red
+        } else {
+            Dot::Green
+        };
+        out.push(header(dot, &format!(" - serving {}", serving.model)));
+        out.extend(holder_line());
         out.push(action("Stop", MenuAction::Stop(st.id.clone())));
         out.push(action("Restart", MenuAction::Restart(st.id.clone())));
         out.push(MenuItem::Submenu {
@@ -170,7 +180,13 @@ fn station_items(
         });
         return;
     }
-    out.push(header(Dot::Amber, " - idle"));
+    if st.contention.is_some() {
+        out.push(header(Dot::Red, " - busy"));
+        out.extend(holder_line());
+    } else {
+        out.push(header(Dot::Amber, " - idle"));
+    }
+    // Retrying is how a stale contention message clears, so Run last stays when contended.
     if let Some(model) = last_run(&st.id) {
         out.push(action(
             format!("Run last model: {model}"),
@@ -307,26 +323,62 @@ mod tests {
         assert!(!a.iter().any(is_run));
     }
 
+    fn holder_header(m: &[MenuItem]) -> bool {
+        m.iter().any(|i| {
+            matches!(i, MenuItem::Header { text, dot: Dot::Red } if text.contains("chips held by alice"))
+        })
+    }
+    fn contended(s: StationState) -> StationState {
+        let mut c = s;
+        c.contention = Some("chips held by alice".into());
+        c
+    }
+
     #[test]
-    fn contended_station_shows_the_holder_text_and_no_stop() {
-        for serving_too in [false, true] {
-            let mut c = st("box:8765");
-            c.contention = Some("chips held by alice".into());
-            if serving_too {
-                c = serving(c);
-            }
-            let m = build_menu(&[c], &some);
-            assert!(
-                m.iter().any(|i| matches!(i, MenuItem::Header { text, .. } if text.contains("chips held by alice"))),
-                "holder text shown"
-            );
-            let a = actions(&m);
-            assert!(
-                !a.iter().any(is_run),
-                "no Stop/Restart/Run on a contended station: {a:?}"
-            );
-            assert_eq!(dots(&m)[0], Dot::Red);
-        }
+    fn contended_and_idle_shows_holder_no_stop_but_keeps_run_last() {
+        let m = build_menu(&[contended(st("box:8765"))], &some);
+        assert!(holder_header(&m));
+        let a = actions(&m);
+        assert!(!a.iter().any(is_stop_or_restart), "{a:?}");
+        assert!(a.contains(&MenuAction::RunLast(StationId("box:8765".into()))));
+        assert_eq!(dots(&m)[0], Dot::Red);
+    }
+
+    #[test]
+    fn contended_and_serving_shows_holder_and_keeps_stop_restart_connect() {
+        let m = build_menu(&[contended(serving(st("box:8765")))], &some);
+        assert!(holder_header(&m));
+        let a = actions(&m);
+        let id = StationId("box:8765".into());
+        assert!(a.contains(&MenuAction::Stop(id.clone())));
+        assert!(a.contains(&MenuAction::Restart(id.clone())));
+        assert!(a.contains(&MenuAction::OpenWebUi(id)));
+    }
+
+    #[test]
+    fn serving_station_offers_no_run_last() {
+        let a = actions(&build_menu(&[serving(st("local"))], &some));
+        assert!(!a.iter().any(|a| matches!(a, MenuAction::RunLast(_))));
+    }
+
+    #[test]
+    fn offline_with_stale_contention_shows_offline_and_no_holder_actions() {
+        let mut o = contended(serving(st("box:8765")));
+        o.reachable = false;
+        let m = build_menu(&[o], &some);
+        assert_eq!(dots(&m), vec![Dot::Grey]);
+        assert!(!holder_header(&m));
+        assert!(!actions(&m).iter().any(is_run));
+    }
+
+    #[test]
+    fn unpaired_with_contention_text_shows_pair_prompt_and_no_run_actions() {
+        let mut u = contended(st("box:8765"));
+        u.paired = false;
+        let m = build_menu(&[u], &some);
+        assert!(actions(&m).contains(&MenuAction::OpenWindow));
+        assert!(!actions(&m).iter().any(is_run));
+        assert!(!holder_header(&m));
     }
 
     #[test]
