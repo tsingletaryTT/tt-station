@@ -100,6 +100,12 @@ enum Command {
         /// see a refusal followed by a success). Default: refuse every run.
         #[arg(long = "run-conflict-count", default_value_t = u32::MAX)]
         run_conflict_count: u32,
+
+        /// Test hook: use this exact pairing code. `POST /pair/init` prints it and
+        /// `POST /pair/complete` answers `401` for any other code, like the real agent.
+        /// Absent = the old behaviour (a random printed code that is never checked).
+        #[arg(long = "pair-code")]
+        pair_code: Option<String>,
     },
 }
 
@@ -120,7 +126,18 @@ async fn main() -> Result<()> {
             chips,
             run_conflict,
             run_conflict_count,
-        } => serve(ctrl_port, name, chips, run_conflict, run_conflict_count).await,
+            pair_code,
+        } => {
+            serve(
+                ctrl_port,
+                name,
+                chips,
+                run_conflict,
+                run_conflict_count,
+                pair_code,
+            )
+            .await
+        }
     }
 }
 
@@ -226,6 +243,8 @@ struct Inner {
     run_conflict: Option<String>,
     /// How many more runs the conflict applies to.
     run_conflict_left: u32,
+    /// When set, the only pairing code `POST /pair/complete` accepts (see `--pair-code`).
+    pair_code: Option<String>,
 }
 
 #[derive(Clone)]
@@ -242,6 +261,7 @@ impl MockState {
             last_run_options: None,
             run_conflict: None,
             run_conflict_left: u32::MAX,
+            pair_code: None,
         })))
     }
 
@@ -252,6 +272,12 @@ impl MockState {
             inner.run_conflict = text;
             inner.run_conflict_left = count;
         }
+        self
+    }
+
+    /// Require this pairing code (see `--pair-code`).
+    fn with_pair_code(self, code: Option<String>) -> Self {
+        self.lock().pair_code = code;
         self
     }
 
@@ -306,20 +332,23 @@ struct PairInitResponse {
 }
 
 /// `POST /pair/init`: mint a fixed `pair_id` and print a code the way a
-/// box's screen would. The pair_id is fixed (not tracked/validated) because
-/// `pair/complete` below accepts any code for any pair_id -- there's nothing
-/// to correlate.
-async fn pair_init() -> Json<PairInitResponse> {
-    let code: u32 = rand::rng().random_range(0..1_000_000);
-    println!("mock-box: pairing code: {code:06}");
+/// box's screen would (the `--pair-code` value when given, else random). The pair_id is
+/// fixed (not tracked) because there's nothing to correlate: `pair/complete` checks only
+/// the code, and only when `--pair-code` was given.
+async fn pair_init(State(state): State<MockState>) -> Json<PairInitResponse> {
+    let code = match state.lock().pair_code.clone() {
+        Some(fixed) => fixed,
+        None => format!("{:06}", rand::rng().random_range(0..1_000_000u32)),
+    };
+    println!("mock-box: pairing code: {code}");
     Json(PairInitResponse {
         pair_id: "mock-pair".to_string(),
     })
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)] // fields accepted for shape-compatibility with the real agent; unused (see module doc)
 struct PairCompleteRequest {
+    #[allow(dead_code)] // accepted for shape-compatibility; the mock has a single fixed pair_id
     pair_id: String,
     code: String,
 }
@@ -329,14 +358,24 @@ struct PairCompleteResponse {
     token: String,
 }
 
-/// `POST /pair/complete`: accepts ANY `pair_id`/`code` and returns a fixed
-/// token. Real pairing (Task 7) validates both against what `/pair/init`
+/// `POST /pair/complete`: returns a fixed token. Accepts ANY code unless `--pair-code` was
+/// given, in which case any other code is a 401. Real pairing (Task 7) validates both against what `/pair/init`
 /// minted; the mock skips that entirely so the e2e test doesn't need to
 /// scrape a printed code out of a child process's stdout.
-async fn pair_complete(Json(_req): Json<PairCompleteRequest>) -> Json<PairCompleteResponse> {
-    Json(PairCompleteResponse {
+async fn pair_complete(
+    State(state): State<MockState>,
+    Json(req): Json<PairCompleteRequest>,
+) -> Result<Json<PairCompleteResponse>, StatusCode> {
+    // With `--pair-code`, a wrong code is refused with 401 like the real agent. Without it
+    // every code is accepted.
+    if let Some(expected) = state.lock().pair_code.as_deref() {
+        if req.code != expected {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    Ok(Json(PairCompleteResponse {
         token: "mock-token".to_string(),
-    })
+    }))
 }
 
 #[derive(Deserialize)]
@@ -784,9 +823,11 @@ async fn serve(
     chips: String,
     run_conflict: Option<String>,
     run_conflict_count: u32,
+    pair_code: Option<String>,
 ) -> Result<()> {
     let state = MockState::new(name.clone(), chips, ctrl_port)
-        .with_run_conflict(run_conflict, run_conflict_count);
+        .with_run_conflict(run_conflict, run_conflict_count)
+        .with_pair_code(pair_code);
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", ctrl_port))
         .await
         .with_context(|| format!("failed to bind control port {ctrl_port}"))?;

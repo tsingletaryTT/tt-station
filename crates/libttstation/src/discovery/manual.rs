@@ -54,8 +54,8 @@ where
     }
 }
 
-use anyhow::Context;
 use crate::model::ServingStatus;
+use anyhow::Context;
 
 // The probe below used to live in the `tt-station` CLI. It moved here so the Linux tray
 // probes manual hosts exactly the way `tt-station discover --host` does.
@@ -133,7 +133,6 @@ pub fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> anyhow::
         mac: resp.mac,
     })
 }
-
 
 #[cfg(test)]
 mod tests {

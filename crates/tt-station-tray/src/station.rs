@@ -15,6 +15,20 @@ use crate::remote::RemoteStation;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StationId(pub String);
 
+impl StationId {
+    /// The id for a box whose agent lives at `base` (`http://host:port`, with or without a
+    /// trailing slash): `"host:port"`. This is also the key the box's pairing token is stored
+    /// under, the same string `tt-station pair <host:port>` uses.
+    pub fn from_base(base: &str) -> StationId {
+        StationId(
+            base.trim_end_matches('/')
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .to_string(),
+        )
+    }
+}
+
 /// Which kind of station this is, for the few places that must say so (an icon, a heading).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StationKind {

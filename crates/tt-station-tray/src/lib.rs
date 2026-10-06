@@ -5,7 +5,10 @@
 //! `tt-station-agentd` over HTTP). The UI holds `Station` values and never branches on which
 //! kind it has.
 
+pub mod discover;
 pub mod local;
+pub mod pairing_flow;
+pub mod registry;
 pub mod remote;
 pub mod station;
 

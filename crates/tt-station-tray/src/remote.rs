@@ -38,12 +38,7 @@ impl RemoteStation {
 
     /// `"<host>:<port>"`, taken from the base URL.
     pub fn id(&self) -> StationId {
-        let trimmed = self
-            .base
-            .trim_end_matches('/')
-            .trim_start_matches("https://")
-            .trim_start_matches("http://");
-        StationId(trimmed.to_string())
+        StationId::from_base(&self.base)
     }
 
     pub fn kind(&self) -> StationKind {
