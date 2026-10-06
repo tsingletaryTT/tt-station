@@ -187,11 +187,21 @@ app beyond adopting `/run/schema` later.
 
 ## Open items
 
-- **franklinstower access.** It needs `tt-station-agentd` installed and running, and a way
-  for me to reach it (an authorized SSH key, or the owner runs the install commands).
-  Its distribution, GNOME or KDE session, and TT hardware are unchecked.
-- **Local pairing UX on the same machine.** Whether a station should pair with itself is
-  undecided. The design assumes `LocalStation` needs no pairing.
-- **Window toolkit risk.** `gtk4-rs` and libadwaita versions on Ubuntu 22.04 (jammy) may be
-  older than the crates need. If so, jammy gets the tray menu only, or the window crate
-  pins older bindings.
+Updated 2026-10-05 after implementation (Tasks 1-10).
+
+- **franklinstower access: still blocked.** It needs `tt-station-agentd` installed and running,
+  and a way for the implementer to reach it (an authorized SSH key, or the owner runs the
+  install commands). Its distribution, GNOME or KDE session, and TT hardware are unchecked.
+  Nothing has been tested on it.
+- **Local pairing UX on the same machine: resolved.** `LocalStation` needs no pairing.
+- **Local leasing: open for the owner.** `LocalStation::run` does not take a gozer lease, which
+  can collide with another tenant on a shared box.
+- **Window toolkit and jammy: partly resolved.** The window uses plain GTK4 with no `gtk4`
+  `v4_*` feature, so it compiles against the base GTK 4.0 API. Jammy (GTK 4.6) has not been
+  built; that is the only evidence for it.
+- **Deviation: libadwaita not used.** `libadwaita-dev` is not installed on the build box.
+  Restyling to libadwaita is a later swap (`sudo apt install libadwaita-dev` first).
+- **Deviation: `Station` is an enum, not a trait object.** There are two fixed kinds, and the
+  enum avoids an `async-trait` dependency.
+- **Live `tt` backend check (Task 4): deferred.** All four chips were held by another tenant.
+- **Never run on a display:** the tray, the window and the single-instance logic.

@@ -23,6 +23,35 @@ installed on this box at `~/.tenstorrent-venv/bin/tt`.
 
 ## ▶ PICK UP HERE
 
+**Linux tray (`tt-station-tray`, v0.13.0, branch `feat/linux-tray`, 2026-10-05).** Original
+prompt: *"Branching off this current branch, imagine how tt-station on the linux side could also
+do what it does on the mac side. Tray app in gnome, kde, xfce, etc. Helpful connection to running
+llms. stop start them. use tt CLI, my machine franklinstower is connected and can be our guinea
+pig."* Spec: `docs/superpowers/specs/2026-10-05-linux-tray-design.md`; reference:
+`docs/reference/linux-tray.md`; per-task reports in `.superpowers/sdd/2026-10-05-linux-tray/`.
+Key decisions:
+- One `Station` **enum** (`LocalStation` = official `tt --json`, `RemoteStation` = agent API)
+  instead of the spec's trait object: two fixed kinds, no `async-trait` dependency.
+- **Plain GTK4, no libadwaita**: `libadwaita-dev` is not installed here, and plain GTK4 also fits
+  jammy. No `gtk4` `v4_*` feature is enabled. Restyle is a later swap.
+- **`--backend tt`** in agentd serves through the official `tt` CLI (`serving/tt.rs`); opt-in,
+  `runpy` stays the default.
+- **Run options** (`libttstation::run_options`) are a closed set with a vLLM-flag allowlist;
+  `GET /run/schema` describes them for UIs. Only the `tt` backend applies them.
+- Networking, option 3: mDNS plus manually added hosts now; Tailscale auto-discovery later.
+- Open WebUI is published on `127.0.0.1` only.
+- `LocalStation::run` takes **no gozer lease** (owner decision pending: a shared box can collide).
+- Package `tt-station-tray` (own icon name, autostart in default mode, not `--no-window`).
+State: unit tests, clippy and `tt-station-tray --smoke` pass. **Never run on a display** (tray,
+window, `--no-window`, single-instance, ksni updates, the real docker/terminal/clipboard/
+notify-send/WoL runner). The `tt` backend has not run on hardware (Task 4 deferred: all four
+chips were held by another tenant). Nothing tested on franklinstower. No `.deb` built from the
+new packaging; jammy not built. Gaps: Logs fetches on demand, no `tt model info` pane, no presets,
+no Queue button on 409, GNOME needs the AppIndicator extension.
+Owner to do for franklinstower: install and start `tt-station-agentd` and send the pairing code;
+say whether the session is GNOME or KDE; authorize an SSH key if we are to test over SSH;
+`sudo apt install libadwaita-dev` only for a later restyle.
+
 **eGPU experiment: a local P100 on a Mac (branch `experiments/egpu`, 2026-09-28 → 10-01).**
 Goal (owner): *tt-station detects a Tenstorrent card attached to a Mac and has the official `tt`
 CLI / tt-model-manager deploy a model right-sized for it*, reached in small steps. Rig: the owner's
