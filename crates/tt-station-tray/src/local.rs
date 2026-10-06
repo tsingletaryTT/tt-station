@@ -1,10 +1,19 @@
 //! This machine, driven through the official `tt` CLI (`tenstorrent/tt-cli`).
 //!
 //! Everything goes through `tt`: `tt --json model list`, `tt --json model ps`,
-//! `tt --json serve`, `tt --json model stop`. The tray does not talk to Docker or run.py for
-//! those. The one exception is [`LocalStation::logs`]: `tt` has no `logs` command (checked with
-//! tt 1.0.1), so it reads the serving container's log with `docker logs`, using the container
-//! name that `tt model ps` reports.
+//! `tt --json serve`, `tt --json model stop`, and `tt model logs <name> --tail N` for logs. The
+//! tray does not talk to Docker or run.py.
+//!
+//! **Which server the tray acts on.** `tt model ps` can list servers the tray did not start (on a
+//! shared box, or TT-Studio's). `stop` and `logs` act only on the server [`LocalStation::state`]
+//! reports as serving, the one the UI shows, and never on "everything running".
+//!
+//! **Where the default binary comes from.** [`LocalStation::from_env`] uses
+//! `official_tt::resolve_bin`, not the `ToolNames` of `tt-station console`. `ToolNames` names the
+//! tools of a box this program operates over SSH or systemd. The local station needs the
+//! official `tt` on this machine, and `resolve_bin` is the shared lookup that also searches
+//! `~/.local/bin` (where `uv tool install tenstorrent` puts it), which a short desktop `PATH`
+//! lacks.
 //!
 //! **Process rules.** `tt` is started with [`tokio::process::Command`] and an argument vector.
 //! No shell string is ever built. Model names and options are validated before anything is
@@ -34,7 +43,7 @@ use crate::station::{fits, ModelRow, ServingNow, StationId, StationKind, Station
 /// agent's `tt` backend uses for the same command.
 pub const DEFAULT_SERVE_PORT: u16 = 20000;
 
-/// What a finished `tt` (or `docker`) invocation left behind.
+/// What a finished `tt` invocation left behind.
 struct Captured {
     success: bool,
     code: Option<i32>,
@@ -88,16 +97,32 @@ impl LocalStation {
         self.mesh.lock().expect("mesh mutex poisoned").clone()
     }
 
-    /// Run `program args...` with no shell. Stdin is closed and the child is killed if the
+    /// Run `program args...` with no shell (only ever called with the `tt` binary). Stdin is closed and the child is killed if the
     /// future is dropped.
     async fn exec(program: &std::ffi::OsStr, args: &[&str]) -> Result<Captured> {
-        let out = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output()
-            .await
-            .with_context(|| format!("could not run `{}`", program.to_string_lossy()))?;
+        // Retry a few times on ETXTBSY ("text file busy", errno 26). It happens when a script
+        // was written a moment ago and another thread forked while the write handle was still
+        // open. It is transient and never means the program is wrong.
+        let mut attempt = 0;
+        let out = loop {
+            let res = Command::new(program)
+                .args(args)
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output()
+                .await;
+            match res {
+                Err(e) if e.raw_os_error() == Some(26) && attempt < 5 => {
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                other => {
+                    break other.with_context(|| {
+                        format!("could not run `{}`", program.to_string_lossy())
+                    })?
+                }
+            }
+        };
         Ok(Captured {
             success: out.status.success(),
             code: out.status.code(),
@@ -214,6 +239,10 @@ impl LocalStation {
     /// model or a bundle, build the argv with `serve_argv_for`, run it, then read `tt model ps`
     /// for the URL. `tt serve` returns once the server's container exists, so the model may
     /// still be loading when this returns; `state()` shows it as serving once `ps` lists it.
+    ///
+    /// **Cancelling.** Dropping the returned future kills the `tt` process (`kill_on_drop`) but
+    /// not a container that `tt serve` already created. The UI task is to call a best-effort
+    /// `stop()` after a cancel.
     pub async fn run(&self, model: &str, _force: bool, options: &RunOptions) -> Result<ServingNow> {
         validate_model_name(model)?;
         options.validate()?;
@@ -253,48 +282,81 @@ impl LocalStation {
         }))
     }
 
-    /// Stop every running model server `tt model ps` lists, except TT-Studio's containers (the
-    /// tray did not start those and Studio manages them). Succeeds with nothing to do when
-    /// nothing is running. If several stops fail, the first error is returned after all were
-    /// tried.
-    pub async fn stop(&self) -> Result<()> {
-        self.vet().await?;
-        let mut first_err = None;
-        for s in self.served().await? {
-            if s.backend.as_deref() == Some("studio") {
-                continue;
-            }
-            if let Err(e) = self.tt_json(&["--json", "model", "stop", &s.name]).await {
-                first_err.get_or_insert(e);
-            }
+    /// Pick the server `stop` and `logs` act on. Rules:
+    ///
+    /// 1. If any running row has a URL, the first such row is the one the UI shows (the same
+    ///    choice [`LocalStation::state`] makes). That is the target.
+    /// 2. Otherwise, one running row is the target, none means there is nothing to act on, and
+    ///    several is an error asking the caller to choose. It never means "all of them".
+    ///
+    /// TT-Studio rows are never returned when `allow_studio` is false (`stop`); a shown Studio
+    /// row is then an error, because Studio manages its own containers.
+    async fn target(&self, allow_studio: bool) -> Result<Option<Served>> {
+        let rows = self.served().await?;
+        let shown = rows.iter().position(|s| s.now().is_some());
+        let pick = match shown {
+            Some(i) => Some(i),
+            None => match rows.len() {
+                0 => None,
+                1 => Some(0),
+                n => bail!(
+                    "{n} model servers are running and none is the one this app shows; stop the \
+                     one you mean with `tt model stop <name>`"
+                ),
+            },
+        };
+        let Some(i) = pick else { return Ok(None) };
+        let row = rows.into_iter().nth(i).expect("index from position");
+        if !allow_studio && row.backend.as_deref() == Some("studio") {
+            bail!("`{}` is managed by TT-Studio; stop it there", row.name);
         }
-        first_err.map_or(Ok(()), Err)
+        // The name and profile come from `tt model ps`, which reads other tools' containers.
+        // Check them like any client-supplied name before they reach a command line.
+        validate_model_name(&row.name)?;
+        if let Some(p) = &row.profile {
+            validate_model_name(p)?;
+        }
+        Ok(Some(row))
     }
 
-    /// The last `tail` lines of the running server's container log, via `docker logs` (`tt` has
-    /// no logs command). Empty when nothing is running.
+    /// Stop the server this app shows as serving (see the module doc), with
+    /// `tt model stop <name>` and `--profile <p>` when the row has one. Does nothing when
+    /// nothing is running. Refuses a TT-Studio server, an unsafe name, and the ambiguous case
+    /// where several servers run and none is the shown one.
+    pub async fn stop(&self) -> Result<()> {
+        self.vet().await?;
+        let Some(row) = self.target(false).await? else {
+            return Ok(());
+        };
+        let mut args = vec!["--json", "model", "stop", row.name.as_str()];
+        if let Some(p) = row.profile.as_deref() {
+            args.extend(["--profile", p]);
+        }
+        self.tt_json(&args).await.map(|_| ())
+    }
+
+    /// The last `tail` lines of the shown server's log, from `tt model logs <name> --tail N`
+    /// (`--profile <p>` when the row has one). Empty when nothing is running.
     pub async fn logs(&self, tail: usize) -> Result<Vec<String>> {
         self.vet().await?;
-        let Some(container) = self.served().await?.into_iter().find_map(|s| s.container) else {
+        let Some(row) = self.target(true).await? else {
             return Ok(Vec::new());
         };
         let tail = tail.to_string();
-        let out = Self::exec(
-            std::ffi::OsStr::new("docker"),
-            &["logs", "--tail", &tail, &container],
-        )
-        .await?;
-        if !out.success {
-            bail!("`docker logs {container}` failed: {}", brief(&out.stderr));
+        let mut args = vec!["model", "logs", row.name.as_str(), "--tail", tail.as_str()];
+        if let Some(p) = row.profile.as_deref() {
+            args.extend(["--profile", p]);
         }
-        // Docker writes a container's stderr to our stderr; the log reader wants both, in order
-        // as far as two pipes allow.
-        Ok(out
-            .stdout
-            .lines()
-            .chain(out.stderr.lines())
-            .map(str::to_string)
-            .collect())
+        let out = self.tt(&args).await?;
+        if !out.success {
+            bail!(
+                "`tt {}` failed (exit {:?}): {}",
+                args.join(" "),
+                out.code,
+                brief(&out.stderr)
+            );
+        }
+        Ok(out.stdout.lines().map(str::to_string).collect())
     }
 
     /// The run options `tt serve` accepts through this app. Does not start a process.
@@ -325,13 +387,11 @@ struct Ps {
 
 /// The fields of one `served` row the tray uses. Every field but `name` is optional so a row
 /// with missing keys still parses.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct Served {
     name: String,
     #[serde(default)]
     backend: Option<String>,
-    #[serde(default)]
-    container: Option<String>,
     #[serde(default)]
     port: Option<u16>,
     #[serde(default)]
@@ -340,6 +400,8 @@ struct Served {
     status: Option<String>,
     #[serde(default)]
     served_id: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
 }
 
 impl Served {

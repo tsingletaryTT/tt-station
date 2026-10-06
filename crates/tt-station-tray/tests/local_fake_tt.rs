@@ -16,8 +16,60 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Write a fake `tt` into `dir`. `version` is what `--version` prints. Returns (script, log).
+/// Knobs for the fake `tt`.
+struct Opts {
+    /// File `model ps` prints.
+    ps: PathBuf,
+    /// `serve` (not `--dry-run`) exits 3 with a message on stderr.
+    serve_fails: bool,
+    /// `model ps` exits 5.
+    ps_fails: bool,
+}
+
+impl Default for Opts {
+    fn default() -> Self {
+        Opts {
+            ps: fixture("model_ps.json"),
+            serve_fails: false,
+            ps_fails: false,
+        }
+    }
+}
+
 fn fake_tt(dir: &Path, version: &str) -> (PathBuf, PathBuf) {
+    fake_tt_with(dir, version, Opts::default())
+}
+
+/// A `ps` file in `dir` with these `served` rows (each a JSON object literal).
+fn ps_file(dir: &Path, rows: &[&str]) -> PathBuf {
+    let p = dir.join("ps.json");
+    std::fs::write(
+        &p,
+        format!(r#"{{"served":[{}],"probed":true}}"#, rows.join(",")),
+    )
+    .unwrap();
+    p
+}
+
+fn row(name: &str, port: u16, backend: &str, profile: Option<&str>) -> String {
+    let profile = profile.map_or("null".to_string(), |p| format!("\"{p}\""));
+    format!(
+        r#"{{"name":"{name}","backend":"{backend}","container":"c-{port}","port":{port},"base_url":"http://127.0.0.1:{port}/v1","status":"running","health":"healthy","profile":{profile},"served_id":"{name}"}}"#
+    )
+}
+
+/// Write a fake `tt` into `dir`. `version` is what `--version` prints. Returns (script, log).
+fn fake_tt_with(dir: &Path, version: &str, o: Opts) -> (PathBuf, PathBuf) {
+    let serve_line = if o.serve_fails {
+        r#"echo "boom: no chips available" >&2; exit 3"#
+    } else {
+        "echo '{}'"
+    };
+    let ps_line = if o.ps_fails {
+        r#"echo "ps broke" >&2; exit 5"#.to_string()
+    } else {
+        format!(r#"cat "{}""#, o.ps.display())
+    };
     let log = dir.join("argv.log");
     let script = dir.join("tt");
     let body = format!(
@@ -26,9 +78,10 @@ echo "$*" >> "{log}"
 case "$*" in
   "--version") echo "{version}" ;;
   "--json model list") cat "{list}" ;;
-  "--json model ps") cat "{ps}" ;;
+  "--json model ps") {ps_line} ;;
+  "model logs "*) printf 'line one\nline two\n' ;;
   "--json serve "*" --dry-run") cat "{dry}" ;;
-  "--json serve "*) echo '{{}}' ;;
+  "--json serve "*) {serve_line} ;;
   "--json model stop "*) echo '{{}}' ;;
   *) echo "fake tt: unexpected: $*" >&2; exit 64 ;;
 esac
@@ -36,7 +89,8 @@ esac
         log = log.display(),
         version = version,
         list = fixture("model_list.json").display(),
-        ps = fixture("model_ps.json").display(),
+        ps_line = ps_line,
+        serve_line = serve_line,
         dry = fixture("dry_run_catalog.json").display(),
     );
     std::fs::write(&script, body).unwrap();
@@ -235,11 +289,206 @@ async fn local_run_refuses_options_a_catalog_model_cannot_take() {
 }
 
 #[tokio::test]
-async fn local_stop_stops_each_running_server_by_name() {
+async fn local_stop_stops_the_shown_server_by_name() {
     let dir = tempfile::tempdir().unwrap();
     let (script, log) = fake_tt(dir.path(), "tt 1.0.1");
     station(&script).stop().await.unwrap();
     assert!(calls(&log).contains(&"--json model stop Llama-3.1-8B-Instruct".to_string()));
+}
+
+#[tokio::test]
+async fn local_stop_with_two_rows_stops_only_the_shown_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let ps = ps_file(
+        dir.path(),
+        &[
+            &row("ours", 20000, "inference-server", None),
+            &row("theirs", 20001, "inference-server", None),
+        ],
+    );
+    let (script, log) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            ps,
+            ..Opts::default()
+        },
+    );
+    let st = station(&script);
+    // The row the UI shows is the one state() reports.
+    assert_eq!(st.state().await.serving.unwrap().model, "ours");
+    st.stop().await.unwrap();
+    let stops: Vec<String> = calls(&log)
+        .into_iter()
+        .filter(|c| c.contains("model stop"))
+        .collect();
+    assert_eq!(
+        stops,
+        vec!["--json model stop ours".to_string()],
+        "the other server must be untouched"
+    );
+}
+
+#[tokio::test]
+async fn local_stop_passes_the_profile_when_the_row_has_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let ps = ps_file(
+        dir.path(),
+        &[&row("org/bundle", 20000, "model-manager", Some("fast"))],
+    );
+    let (script, log) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            ps,
+            ..Opts::default()
+        },
+    );
+    station(&script).stop().await.unwrap();
+    assert!(calls(&log).contains(&"--json model stop org/bundle --profile fast".to_string()));
+}
+
+#[tokio::test]
+async fn local_stop_never_stops_a_studio_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let ps = ps_file(dir.path(), &[&row("studio-model", 20000, "studio", None)]);
+    let (script, log) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            ps,
+            ..Opts::default()
+        },
+    );
+    let err = station(&script).stop().await.unwrap_err();
+    assert!(err.to_string().contains("TT-Studio"), "got {err}");
+    assert!(!calls(&log).iter().any(|c| c.contains("model stop")));
+}
+
+#[tokio::test]
+async fn local_stop_refuses_an_unsafe_name_from_ps() {
+    let dir = tempfile::tempdir().unwrap();
+    let ps = ps_file(
+        dir.path(),
+        &[&row("--all", 20000, "inference-server", None)],
+    );
+    let (script, log) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            ps,
+            ..Opts::default()
+        },
+    );
+    let err = station(&script).stop().await.unwrap_err();
+    assert!(err.to_string().contains("model"), "got {err}");
+    assert!(!calls(&log).iter().any(|c| c.contains("model stop")));
+}
+
+#[tokio::test]
+async fn local_stop_with_several_unidentifiable_rows_errors_and_stops_none() {
+    let dir = tempfile::tempdir().unwrap();
+    // No port and no URL: neither row can be the one the UI shows.
+    let bare =
+        |n: &str| format!(r#"{{"name":"{n}","backend":"inference-server","status":"running"}}"#);
+    let ps = ps_file(dir.path(), &[&bare("a"), &bare("b")]);
+    let (script, log) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            ps,
+            ..Opts::default()
+        },
+    );
+    let err = station(&script).stop().await.unwrap_err();
+    assert!(err.to_string().contains("none is the one"), "got {err}");
+    assert!(!calls(&log).iter().any(|c| c.contains("model stop")));
+}
+
+#[tokio::test]
+async fn local_logs_run_tt_model_logs_with_exact_argv() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, log) = fake_tt(dir.path(), "tt 1.0.1");
+    station(&script).logs(50).await.unwrap();
+    assert!(
+        calls(&log).contains(&"model logs Llama-3.1-8B-Instruct --tail 50".to_string()),
+        "ran: {:?}",
+        calls(&log)
+    );
+}
+
+#[tokio::test]
+async fn local_logs_with_profile_and_returns_the_scripts_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let ps = ps_file(
+        dir.path(),
+        &[&row("org/bundle", 20000, "model-manager", Some("fast"))],
+    );
+    let (script, log) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            ps,
+            ..Opts::default()
+        },
+    );
+    let lines = station(&script).logs(2).await.unwrap();
+    assert_eq!(lines, vec!["line one".to_string(), "line two".to_string()]);
+    assert!(calls(&log).contains(&"model logs org/bundle --tail 2 --profile fast".to_string()));
+}
+
+#[tokio::test]
+async fn local_logs_when_nothing_runs_is_empty_and_calls_no_logs() {
+    let dir = tempfile::tempdir().unwrap();
+    let ps = ps_file(dir.path(), &[]);
+    let (script, log) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            ps,
+            ..Opts::default()
+        },
+    );
+    assert!(station(&script).logs(10).await.unwrap().is_empty());
+    assert!(!calls(&log).iter().any(|c| c.starts_with("model logs")));
+}
+
+#[tokio::test]
+async fn local_run_surfaces_a_failing_tt_serve() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, _) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            serve_fails: true,
+            ..Opts::default()
+        },
+    );
+    let err = station(&script)
+        .run("Llama-3.1-8B-Instruct", false, &RunOptions::default())
+        .await
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("boom: no chips available") && text.contains("exit"),
+        "got {text}"
+    );
+}
+
+#[tokio::test]
+async fn local_state_survives_a_failing_ps() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, _) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            ps_fails: true,
+            ..Opts::default()
+        },
+    );
+    let s = station(&script).state().await;
+    assert!(s.reachable, "tt itself works");
+    assert!(s.serving.is_none());
 }
 
 #[tokio::test]
