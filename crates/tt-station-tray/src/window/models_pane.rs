@@ -20,7 +20,10 @@ use gtk4 as gtk;
 
 use crate::station::ModelRow;
 
-use super::view_model::{filter_choices, group_models, load_is_current, ModelFilter, ModelGroups};
+use super::view_model::{
+    filter_choices, group_models, load_is_current, needs_reload, on_load_dropped, ModelFilter,
+    ModelGroups,
+};
 use super::{set_margins, spawn_call, App};
 
 /// One line of the list: a group heading or a model with the heading of its group.
@@ -270,7 +273,7 @@ pub fn build(app: &App) -> gtk::Widget {
         app.on_change(move || {
             let Some(app) = weak.upgrade() else { return };
             heading.set_text(&app.current_heading());
-            if page.loaded_for.get() != Some(app.selected.get()) {
+            if needs_reload(page.loaded_for.get(), app.selected.get()) {
                 load(&app, &page);
             }
         });
@@ -318,6 +321,9 @@ fn load(app: &App, page: &Rc<Page>) {
             // Drop a result that arrived after the person switched station or a newer load
             // started; showing it would let "Run..." send this station's model elsewhere.
             if !load_is_current(page.loaded_for.get(), app2.selected.get(), i) {
+                // Clear this load's marker so returning to station `i` reloads it.
+                page.loaded_for
+                    .set(on_load_dropped(page.loaded_for.get(), i));
                 return;
             }
             match models {

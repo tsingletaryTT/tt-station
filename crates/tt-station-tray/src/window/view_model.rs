@@ -159,6 +159,26 @@ pub fn load_is_current(loaded_for: Option<usize>, selected: usize, i: usize) -> 
     loaded_for == Some(i) && selected == i
 }
 
+/// The new `loaded_for` after a load for station `i` was dropped by [`load_is_current`].
+///
+/// If no newer load has started (`loaded_for` is still `Some(i)`), the marker is cleared to
+/// `None`. Otherwise the page would believe station `i` is loaded although its rows were thrown
+/// away, and coming back to station `i` would not reload it ("Loading models..." forever). A
+/// newer load's marker is left alone.
+pub fn on_load_dropped(loaded_for: Option<usize>, i: usize) -> Option<usize> {
+    if loaded_for == Some(i) {
+        None
+    } else {
+        loaded_for
+    }
+}
+
+/// Whether the Models page must start a load for the `selected` station: true unless the latest
+/// load was for that station and has not been dropped.
+pub fn needs_reload(loaded_for: Option<usize>, selected: usize) -> bool {
+    loaded_for != Some(selected)
+}
+
 // ---------------------------------------------------------------------------------------------
 // Run sheet
 // ---------------------------------------------------------------------------------------------
@@ -1115,5 +1135,60 @@ mod tests {
             "switched away and back, but a newer load ran"
         );
         assert!(!load_is_current(None, 0, 0), "no load is recorded");
+    }
+
+    /// The page's load bookkeeping as a tiny state machine, to replay event sequences.
+    struct LoadSim {
+        loaded_for: Option<usize>,
+        selected: usize,
+    }
+
+    impl LoadSim {
+        fn start_load(&mut self) -> usize {
+            self.loaded_for = Some(self.selected);
+            self.selected
+        }
+        /// A load for `i` returns. Returns whether its rows were shown.
+        fn result_arrives(&mut self, i: usize) -> bool {
+            if load_is_current(self.loaded_for, self.selected, i) {
+                true
+            } else {
+                self.loaded_for = on_load_dropped(self.loaded_for, i);
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn a_dropped_load_does_not_leave_its_station_marked_loaded() {
+        // Start a load for station 0, select station 1 before it returns (no load started for
+        // 1), the late result for 0 is dropped, then select 0 again: it must reload.
+        let mut sim = LoadSim {
+            loaded_for: None,
+            selected: 0,
+        };
+        let first = sim.start_load();
+        sim.selected = 1;
+        assert!(!sim.result_arrives(first), "late result for 0 is dropped");
+        assert_eq!(
+            sim.loaded_for, None,
+            "the marker for the dropped load is cleared"
+        );
+        sim.selected = 0;
+        assert!(
+            needs_reload(sim.loaded_for, sim.selected),
+            "station 0 reloads"
+        );
+        let second = sim.start_load();
+        assert!(
+            sim.result_arrives(second),
+            "and this time its rows are shown"
+        );
+        assert!(!needs_reload(sim.loaded_for, sim.selected));
+
+        // A dropped older load leaves a newer load's marker alone.
+        assert_eq!(on_load_dropped(Some(1), 0), Some(1));
+        assert_eq!(on_load_dropped(Some(0), 0), None);
+        assert_eq!(on_load_dropped(None, 0), None);
     }
 }
