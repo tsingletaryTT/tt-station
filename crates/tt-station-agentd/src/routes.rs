@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::authkeys;
 use crate::pairing;
-use crate::serving::discovery::discover_serving;
+use crate::serving::discovery::{discover_serving, merge_serving};
 use crate::serving::docker::{CommandRunner, RealCommandRunner};
 use crate::serving::ServingBackend;
 use crate::telemetry;
@@ -880,10 +880,15 @@ impl AppState {
     /// `Idle` status returns immediately without touching the backend, keeping
     /// the common idle poll cheap. The probe is blocking I/O, so it runs on
     /// `spawn_blocking` (like `/serving`).
+    ///
+    /// **Idle, but something of ours is running.** A fresh agent process starts idle even when
+    /// its backend's serve outlived the previous process. So while the stored status is idle,
+    /// this first asks the backend ([`AppState::adopt_backend_serve`]). Only the `tt` backend
+    /// answers; for the others it is a no-op and the idle path is unchanged.
     async fn reconciled_status(&self) -> ServingStatus {
         let stored = self.status();
         if !matches!(stored, ServingStatus::Serving(_)) {
-            return stored;
+            return self.adopt_backend_serve().await.unwrap_or(stored);
         }
         let backend = self.backend();
         let reconciled = tokio::task::spawn_blocking(move || backend.reconciled_status())
@@ -899,6 +904,28 @@ impl AppState {
             self.set_idle();
         }
         reconciled
+    }
+
+    /// While the stored status is idle, ask the backend whether a serve of its own is running
+    /// anyway (`ServingBackend::discover_own_serve`), and if so record it with `set_serving`,
+    /// so `/status`, `/endpoint` and `/stop` act on it. Returns the new status when one was
+    /// adopted. Off the async runtime, since the `tt` backend runs `tt model ps`.
+    async fn adopt_backend_serve(&self) -> Option<ServingStatus> {
+        if !matches!(self.status(), ServingStatus::Idle) {
+            return None;
+        }
+        let backend = self.backend();
+        let endpoint = tokio::task::spawn_blocking(move || backend.discover_own_serve())
+            .await
+            .ok()
+            .flatten()?;
+        eprintln!(
+            "tt-station-agentd: found a serve of this backend already running: {} at {}",
+            endpoint.model, endpoint.base_url
+        );
+        let status = ServingStatus::Serving(endpoint.model.clone());
+        self.set_serving(endpoint);
+        Some(status)
     }
 
     /// Snapshot the currently-serving `Endpoint`, or `None` if idle.
@@ -1793,6 +1820,10 @@ async fn stop_model(
         }
     );
 
+    // A serve that outlived a previous agent process is recorded first, so the
+    // backend is told what to stop (a no-op for backends other than `tt`).
+    state.adopt_backend_serve().await;
+
     // Model name is only used for logging by backends that track one;
     // `RunPyBackend::stop` ignores the argument entirely. When nothing is
     // serving there's no name to pass, so hand it an empty placeholder.
@@ -2263,10 +2294,18 @@ async fn get_serving(
     let serving_host = state.serving_host().to_string();
     let serving_port = state.serving_port();
     let status = state.status();
+    let backend = state.backend();
 
+    // The backend's own entries (the `tt` backend reads `tt model ps`) merged
+    // with docker discovery; one server seen by both is listed once, as the
+    // backend reports it. See `ServingBackend::serving_entries`.
     let serving = tokio::task::spawn_blocking(move || {
         let runner = RealCommandRunner;
-        discover_serving(&runner, &serving_host, serving_port, &status)
+        let own = backend.serving_entries().unwrap_or_default();
+        merge_serving(
+            own,
+            discover_serving(&runner, &serving_host, serving_port, &status),
+        )
     })
     .await
     // A join failure (the blocking task panicked) is reported as "nothing

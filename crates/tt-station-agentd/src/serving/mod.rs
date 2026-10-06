@@ -19,7 +19,7 @@ pub mod tt;
 use std::time::Duration;
 
 use anyhow::Result;
-use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
+use libttstation::model::{Endpoint, ModelsResponse, ServingEntry, ServingStatus};
 use libttstation::run_options::RunOptions;
 
 /// Returned by the default [`ServingBackend::start_with_options`] when the
@@ -267,6 +267,36 @@ pub trait ServingBackend: Send + Sync {
     /// still a stub). `RunPyBackend` is the one backend that overrides
     /// this, since `run.py`'s `model_spec.json` is an actual catalog to
     /// read.
+    /// `GET /serving` entries this backend knows from its own records, or `None` when it
+    /// keeps none.
+    ///
+    /// `/serving` normally comes from docker discovery (`discovery::discover_serving`), which
+    /// only recognises tt-inference-server images. A backend whose serves look different (the
+    /// `tt` backend: tt-model images are `tt-model/<name>:<tag>`) reports them here, and the
+    /// route merges them with discovery (see `discovery::merge_serving`): an entry from here
+    /// wins over a discovered entry on the same host port. `None` or an empty list leaves
+    /// `/serving` as discovery alone. Must not fail: a backend that cannot read its records
+    /// returns `None`.
+    ///
+    /// Default `None`: runpy, docker and dstack keep the discovery-only behaviour.
+    fn serving_entries(&self) -> Option<Vec<ServingEntry>> {
+        None
+    }
+
+    /// A serve this backend can see running on its own serving port although the agent has
+    /// no record of it, typically one started before an agent restart. When `Some`, the route
+    /// records it as serving (so `/status`, `/endpoint` and `/stop` see it). A backend that
+    /// returns `Some` must also be able to stop that serve through `stop`.
+    ///
+    /// Called by `AppState` only while the stored status is idle, before `/status`, `/endpoint`
+    /// and `/stop`. Must not fail and must not report a serve that is still coming up.
+    ///
+    /// Default `None`: runpy, docker and dstack keep their behaviour, where a fresh agent
+    /// process reports idle until its own `/run`.
+    fn discover_own_serve(&self) -> Option<Endpoint> {
+        None
+    }
+
     fn list_models(&self) -> Result<ModelsResponse> {
         Ok(ModelsResponse {
             release_version: None,

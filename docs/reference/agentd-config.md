@@ -147,14 +147,22 @@ naming `model`):
    agent restart, a lease adopted from the previous process is released only
    once its server (found with `tt --json model ps`) has been stopped.
 4. Leases chips through gozer, when gozer is installed (same 409 behaviour as
-   the other backends).
+   the other backends). The lease does not restrict which chips the container
+   opens: tt-model ignores the grant's `TT_VISIBLE_DEVICES` and mounts
+   `/dev/tenstorrent/0` to `3` itself (seen on hardware, 2026-10-05). That is
+   harmless only while the lease covers every chip, which is today's setting.
 5. `tt --json serve <model> --port <serving_port> [options]`. Bundles also get
    `--detach`, so the command returns once the container is up.
 6. Polls `http://<serving_host>:<port>/v1/models` until a model is listed.
 
 `POST /stop` runs `tt --json model stop <model>` and then releases the lease.
-`GET /status` reads `tt --json model ps`, so it also sees a serve started
-before an agent restart. `GET /models` reads `tt --json model list` and keeps
+`GET /serving` lists the backend's serves from `tt --json model ps` (docker
+discovery alone does not recognise tt-model containers), merged with docker
+discovery so one server is listed once. After an agent restart, a running
+`tt model ps` row on the agent's own serving port (the port in an adopted
+lease, else `serving_port`) is recorded as serving: `GET /status` and
+`GET /endpoint` report it, and `POST /stop` stops it by name before releasing
+any lease. A row on another port is not treated as the agent's. `GET /models` reads `tt --json model list` and keeps
 the models with a vLLM engine.
 
 This is the only backend that applies `POST /run` `options` (see

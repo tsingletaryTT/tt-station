@@ -35,24 +35,34 @@
 //! dropped, because `gozer release` resets the released chips and must not do that under a
 //! running container.
 //!
+//! ## After an agent restart
+//!
+//! A new agent process starts idle. `discover_own_serve` finds a `tt model ps` row on this
+//! backend's own port (the port in an adopted lease's `who`, else `service_port`) and the route
+//! records it as serving, so `/status`, `/endpoint` and `/stop` act on it. `serving_entries`
+//! feeds `GET /serving` from `tt model ps`, because docker discovery only recognises
+//! tt-inference-server images and tt-model images are `tt-model/<name>:<tag>`.
+//!
 //! ## What has been checked so far
 //!
-//! Steps 2, 3 and the argv shapes were checked against `tt 1.0.1` with `--dry-run` on
-//! 2026-10-05. A real `tt serve` under a gozer lease has not been run through this backend yet;
-//! that is Task 4 of the Linux tray plan. Open points it must settle:
+//! Live on 2026-10-05 (Task 4, bundle `changh95/qwen3.8-27b-p300x2` on 4x p300c, tt 1.0.1):
+//! steps 2 to 7, `options` reaching the container, stop-then-release, and the adopted-lease swap.
+//! A bundle's `/v1` needs no API key (`requires_key: false` holds). Catalog models were checked
+//! only with `--dry-run`.
 //!
-//! * Whether `TT_VISIBLE_DEVICES` from the gozer grant (passed in `tt serve`'s environment)
-//!   reaches the container. With the default lease (`gozer::DEFAULT_LEASE_CHIPS`, every chip)
-//!   `tt`'s own device auto-detection describes the leased set anyway.
-//! * Whether a bundle served by `tt-model` needs an API key. This backend reports
-//!   `requires_key: false`; `tt serve` passes `--no-auth` to `run.py` for catalog models.
+//! **The lease does not restrict which chips the container opens.** The grant's
+//! `TT_VISIBLE_DEVICES` is set in `tt serve`'s environment, but it does not reach the
+//! container: tt-model picks the devices itself and mounts `/dev/tenstorrent/0` to `3` (seen in
+//! `docker inspect`, and `tt-model serve --print` ignores the variable). This is harmless only
+//! while the lease covers every chip (`gozer::DEFAULT_LEASE_CHIPS = "all"`, today's setting).
+//! Before leases narrow, the backend must pass explicit devices derived from the grant.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use libttstation::model::{Endpoint, ModelInfo, ModelsResponse, ServingStatus};
+use libttstation::model::{Endpoint, ModelInfo, ModelsResponse, ServingEntry, ServingStatus};
 use libttstation::official_tt;
 use libttstation::run_options::{
     serve_argv_for, validate_model_name, OptionError, RunOptions, ServeTarget, Workflow,
@@ -287,6 +297,18 @@ pub struct TtBackend {
     /// or after it (then `stop` finds `served` and the lease, and stops and releases them).
     /// There is no third case where both sides think the other one cleaned up.
     handover: Mutex<()>,
+    /// True while a `start` is in flight. `discover_own_serve` then reports nothing, so a
+    /// `/status` poll during bring-up does not record the loading server as serving.
+    starting: AtomicBool,
+}
+
+/// Clears `TtBackend::starting` when `start_with_options` returns, on every path.
+struct StartingFlag<'a>(&'a AtomicBool);
+
+impl Drop for StartingFlag<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl TtBackend {
@@ -301,6 +323,7 @@ impl TtBackend {
             adopted_port: Mutex::new(None),
             cancel: Arc::new(AtomicBool::new(false)),
             handover: Mutex::new(()),
+            starting: AtomicBool::new(false),
         }
     }
 
@@ -479,20 +502,13 @@ impl TtBackend {
     /// Find the server running under a lease this process did not start (see `stop_inner`).
     /// `Ok(None)` means nothing is running on the lease's port.
     fn identify_untracked_serve(&self) -> Result<Option<String>> {
-        let port = self
-            .adopted_port
-            .lock()
-            .expect("adopted_port mutex poisoned")
-            .unwrap_or(self.config.service_port);
-        let rows = self.ps().context(
+        let port = self.own_port();
+        let row = self.own_running_row().context(
             "tt backend: a chip lease is held but this agent did not start the server using \
              it, and `tt model ps` could not say what is running; refusing to release the lease \
              (that would reset chips under a live server). Stop the server by hand, then retry",
         )?;
-        let Some(row) = rows
-            .into_iter()
-            .find(|r| r.port == Some(port) && r.status.as_deref() == Some("running"))
-        else {
+        let Some(row) = row else {
             return Ok(None);
         };
         validate_model_name(&row.name).map_err(|_| {
@@ -504,6 +520,34 @@ impl TtBackend {
             )
         })?;
         Ok(Some(row.name))
+    }
+
+    /// The port this backend's serve lives on: the one it last served on, else the port in an
+    /// adopted lease's `who`, else the configured `service_port`.
+    fn own_port(&self) -> u16 {
+        let recorded = self
+            .served
+            .lock()
+            .expect("served mutex poisoned")
+            .as_ref()
+            .map(|(_, p)| *p);
+        recorded
+            .or(*self
+                .adopted_port
+                .lock()
+                .expect("adopted_port mutex poisoned"))
+            .unwrap_or(self.config.service_port)
+    }
+
+    /// The running `tt model ps` row on [`TtBackend::own_port`], if any. This is the single
+    /// rule for "which server is ours" used by the adopted-lease stop, by
+    /// `discover_own_serve` and by the `agent` source in `serving_entries`.
+    fn own_running_row(&self) -> Result<Option<ServedModel>> {
+        let port = self.own_port();
+        Ok(self
+            .ps()?
+            .into_iter()
+            .find(|r| r.port == Some(port) && r.status.as_deref() == Some("running")))
     }
 
     /// `tt --json model ps`, parsed.
@@ -543,6 +587,8 @@ impl ServingBackend for TtBackend {
     ) -> Result<Endpoint> {
         // A `/stop` from an earlier run must not cancel this one.
         self.cancel.store(false, Ordering::SeqCst);
+        self.starting.store(true, Ordering::SeqCst);
+        let _starting = StartingFlag(&self.starting);
 
         // (1) The model name and the options. The route validated both already; checking again
         // costs nothing and keeps this backend safe for any other caller. The model name goes
@@ -599,7 +645,8 @@ impl ServingBackend for TtBackend {
         )?;
 
         // (6) `tt --json serve ...`. The grant's environment (today `TT_VISIBLE_DEVICES=<bdfs>`)
-        // is set on the child only.
+        // is set on the child only. tt-model ignores it and mounts every device (see the module
+        // doc), so it pins nothing; it is passed so a future tt that honours it gets it.
         let child_env: Vec<(&str, &str)> = lease
             .as_ref()
             .map(|guard| {
@@ -738,7 +785,9 @@ impl ServingBackend for TtBackend {
     /// The port is the one this backend last served on, else the configured `service_port`.
     /// The reported id is the row's `served_id`, else the recorded model name, else the row's
     /// `name`. Because this reads the box through `tt`, it also sees a serve
-    /// started before an agent restart. `reconciled_status` uses the default, which calls this.
+    /// started before an agent restart once the route asks. The route consults the backend
+    /// only while it believes a model is serving; after a restart `discover_own_serve` is what
+    /// brings the stored status back to serving.
     fn status(&self) -> Result<ServingStatus> {
         let recorded = self.served.lock().expect("served mutex poisoned").clone();
         let port = recorded
@@ -763,6 +812,68 @@ impl ServingBackend for TtBackend {
     #[cfg(any(test, feature = "test-hooks"))]
     fn gozer_capability(&self) -> Option<&crate::gozer::Capability> {
         self.gozer.as_ref()
+    }
+
+    /// `/serving` entries from `tt --json model ps`, which (unlike docker discovery) recognises
+    /// tt-model containers as well as tt-inference-server and TT-Studio ones.
+    ///
+    /// One entry per running row that has a published port and a `served_id` (tt sets it only
+    /// once `/v1/models` answered, matching discovery's readiness rule). `model` is the
+    /// `served_id`, `base_url` uses the configured `serving_host` and the row's port,
+    /// `container` is the container name. `source` is `agent` for the row on this backend's own
+    /// port ([`TtBackend::own_port`]) and `external` for the rest. `None` when `tt model ps`
+    /// fails, so `/serving` falls back to discovery alone.
+    fn serving_entries(&self) -> Option<Vec<ServingEntry>> {
+        let rows = match self.ps() {
+            Ok(rows) => rows,
+            Err(err) => {
+                eprintln!("tt-station-agentd: /serving: {err:#}; using docker discovery only");
+                return None;
+            }
+        };
+        let own = self.own_port();
+        Some(
+            rows.into_iter()
+                .filter(|r| r.status.as_deref() == Some("running"))
+                .filter_map(|r| {
+                    let port = r.port?;
+                    let model = r.served_id?;
+                    Some(ServingEntry {
+                        model,
+                        base_url: format!("http://{}:{port}/v1", self.config.serving_host),
+                        host_port: port,
+                        container: r.container.unwrap_or_default(),
+                        source: if port == own { "agent" } else { "external" }.to_string(),
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// The serve on this backend's own port, found with `tt --json model ps`, when the backend
+    /// has no record of it (after an agent restart). It is then recorded as this backend's
+    /// serve, so `stop` passes the row's name to `tt model stop` (for a bundle the `/v1/models`
+    /// id is the weights repo, which `tt model stop` would not recognise).
+    ///
+    /// Reports nothing while a `start` is in flight, when a serve is already recorded, when
+    /// `tt model ps` fails, when the row has no `served_id` yet (still loading), or when its
+    /// name is not a safe model name. A row on any other port is not ours.
+    fn discover_own_serve(&self) -> Option<Endpoint> {
+        if self.starting.load(Ordering::SeqCst)
+            || self.served.lock().expect("served mutex poisoned").is_some()
+        {
+            return None;
+        }
+        let row = self.own_running_row().ok()??;
+        let port = row.port?;
+        let model = row.served_id.clone()?;
+        validate_model_name(&row.name).ok()?;
+        *self.served.lock().expect("served mutex poisoned") = Some((row.name, port));
+        Some(Endpoint {
+            base_url: format!("http://{}:{port}/v1", self.config.serving_host),
+            model,
+            requires_key: false,
+        })
     }
 
     /// Models from `tt --json model list` that have a vLLM engine. See [`parse_model_list`].
@@ -1692,6 +1803,99 @@ mod tests {
         );
         assert_eq!(b.held_lease(), None);
         assert_eq!(b.served(), None);
+    }
+
+    // ---- Task 4b: /serving and restart ----
+
+    fn backend_on_20010(runner: &ScriptedRunner) -> TtBackend {
+        TtBackend::new(
+            TtConfig {
+                service_port: 20010,
+                serving_host: "qb2-lab.local".to_string(),
+                ..config()
+            },
+            Box::new(runner.clone()),
+        )
+    }
+
+    #[test]
+    fn serving_entries_come_from_tt_model_ps() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_LIVE_BUNDLE, "");
+        let entries = backend_on_20010(&runner).serving_entries().unwrap();
+        assert_eq!(
+            entries,
+            vec![ServingEntry {
+                model: "Qwen/Qwen3.8-27B".to_string(),
+                base_url: "http://qb2-lab.local:20010/v1".to_string(),
+                host_port: 20010,
+                container: "tt-model-qwen3.8-27b-p300x2-batch32".to_string(),
+                source: "agent".to_string(),
+            }]
+        );
+        // Another port: listed, but not ours.
+        let entries = backend(&runner).serving_entries().unwrap();
+        assert_eq!(entries[0].source, "external");
+        // A row still loading (no served_id) is not listed.
+        let loading = ScriptedRunner::happy();
+        loading.on(
+            "model ps",
+            0,
+            &PS_LIVE_BUNDLE.replace(r#""Qwen/Qwen3.8-27B""#, "null"),
+            "",
+        );
+        assert!(backend_on_20010(&loading)
+            .serving_entries()
+            .unwrap()
+            .is_empty());
+        // `tt model ps` failing: None, so the route uses discovery alone.
+        let broken = ScriptedRunner::happy();
+        broken.on("model ps", 1, "", "docker: cannot connect");
+        assert_eq!(backend_on_20010(&broken).serving_entries(), None);
+    }
+
+    #[test]
+    fn discover_own_serve_adopts_the_row_on_our_port_and_stop_uses_its_name() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_LIVE_BUNDLE, "");
+        let b = backend_on_20010(&runner);
+        let ep = b.discover_own_serve().expect("the row on 20010 is ours");
+        assert_eq!(ep.base_url, "http://qb2-lab.local:20010/v1");
+        assert_eq!(ep.model, "Qwen/Qwen3.8-27B");
+        assert!(!ep.requires_key);
+        // Already recorded: asking again reports nothing new.
+        assert_eq!(b.discover_own_serve(), None);
+        // The route then passes the /v1 id; `tt model stop` must get the bundle name.
+        b.stop("Qwen/Qwen3.8-27B").unwrap();
+        assert!(
+            runner
+                .pos("run: /fake/tt --json model stop changh95/qwen3.8-27b-p300x2")
+                .is_some(),
+            "{:?}",
+            runner.log()
+        );
+
+        // A row on another port is not ours; a loading row is not serving yet.
+        assert_eq!(backend(&runner).discover_own_serve(), None);
+        let loading = ScriptedRunner::happy();
+        loading.on(
+            "model ps",
+            0,
+            &PS_LIVE_BUNDLE.replace(r#""Qwen/Qwen3.8-27B""#, "null"),
+            "",
+        );
+        assert_eq!(backend_on_20010(&loading).discover_own_serve(), None);
+    }
+
+    #[test]
+    fn discover_own_serve_reports_nothing_while_a_start_is_in_flight() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_LIVE_BUNDLE, "");
+        let b = backend_on_20010(&runner);
+        b.starting.store(true, Ordering::SeqCst);
+        assert_eq!(b.discover_own_serve(), None);
+        b.starting.store(false, Ordering::SeqCst);
+        assert!(b.discover_own_serve().is_some());
     }
 
     #[test]
