@@ -4,8 +4,13 @@
 //! official `tt` CLI) or a paired QuietBox ([`remote::RemoteStation`], which talks to the box's
 //! `tt-station-agentd` over HTTP). The UI holds `Station` values and never branches on which
 //! kind it has.
+//!
+//! [`app`] wires the tray menu to those stations (actions, polling, start-up) and [`launchers`]
+//! holds the Connect actions (Open WebUI, opencode, copy the `/v1` URL).
 
+pub mod app;
 pub mod discover;
+pub mod launchers;
 pub mod local;
 pub mod menu_model;
 pub mod pairing_flow;

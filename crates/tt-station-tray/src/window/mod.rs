@@ -15,7 +15,9 @@
 //! [`spawn_call`] starts a future on that runtime and awaits its `JoinHandle` inside a
 //! `glib::spawn_future_local` task, so the result comes back on the GTK main thread without
 //! the main thread ever blocking. (`glib::MainContext::channel`, named in the brief, was removed
-//! in glib 0.19; awaiting the join handle from the GLib executor does the same job.)
+//! in glib 0.19; awaiting the join handle from the GLib executor does the same job.) Requests
+//! from the tray side ([`TrayLink`]) arrive the same way: a tokio channel awaited from the GLib
+//! executor.
 //!
 //! Layout of the files:
 //! * `view_model.rs`: all decisions, pure and tested.
@@ -41,6 +43,7 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 use gtk4 as gtk;
 
+use crate::app::UiRequest;
 use crate::local::LocalStation;
 use crate::pairing_flow::{open_store, token_for};
 use crate::registry::Registry;
@@ -189,15 +192,47 @@ pub fn show_result(label: &gtk::Label, r: &ActionResult) {
     }
 }
 
+/// What the window needs from the tray side in the default (tray plus window) mode.
+pub struct TrayLink {
+    /// Requests from the tray side (see [`crate::app::UiRequest`]). Awaited on the GTK main
+    /// thread with `glib::spawn_future_local`, so a send wakes the main loop; nothing polls.
+    pub requests: tokio::sync::mpsc::UnboundedReceiver<UiRequest>,
+    /// Called once, on the GTK main thread, when this process becomes the primary instance
+    /// (GApplication's `startup`). It starts the tray side on the tokio runtime. A second launch
+    /// never gets `startup`, so it never starts a second tray.
+    pub on_startup: Box<dyn FnOnce()>,
+}
+
 /// Start the GTK application and block until it quits. `rt` must outlive the call.
-pub fn run_app(rt: tokio::runtime::Handle, registry_path: &Path) -> glib::ExitCode {
+///
+/// **Single instance.** The application id [`APP_ID`] makes GApplication unique on the session
+/// bus: a second launch hands an `activate` to the running instance and exits. That is how "a
+/// second launch focuses the running instance" works; there is no lock file or socket of our
+/// own. Without a session bus GApplication cannot register, and that case is not handled here.
+///
+/// **Without `tray`** every activation opens or raises the window, and the app ends when the
+/// window closes.
+///
+/// **With `tray`** the app holds itself open from `startup` until the tray side reports
+/// [`UiRequest::Started`]. The first activation (this launch's own) opens nothing: the tray side
+/// decides, because it knows whether a tray host exists. If the tray is running the hold stays,
+/// so closing the window leaves the tray running; `Quit` from the tray ends the app. If the tray
+/// did not start, the hold is released once the window is open, so closing the window ends the
+/// app as an ordinary windowed app. Later activations (a second launch) open or raise the window.
+pub fn run_app(
+    rt: tokio::runtime::Handle,
+    registry_path: &Path,
+    tray: Option<TrayLink>,
+) -> glib::ExitCode {
     let application = gtk::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::empty())
         .build();
     let registry_path = registry_path.to_path_buf();
-    application.connect_activate(move |application| {
-        // A second activation (another launch) presents the existing window.
+    let with_tray = tray.is_some();
+
+    // Open the window, or raise it when one is already open.
+    let present: Rc<dyn Fn(&gtk::Application)> = Rc::new(move |application| {
         if let Some(w) = application.active_window() {
             w.present();
             return;
@@ -212,6 +247,57 @@ pub fn run_app(rt: tokio::runtime::Handle, registry_path: &Path) -> glib::ExitCo
         });
         app.rebuild_stations();
         build_window(application, &app).present();
+    });
+
+    let link = RefCell::new(tray);
+    let hold: Rc<RefCell<Option<gio::ApplicationHoldGuard>>> = Rc::new(RefCell::new(None));
+    {
+        let present = present.clone();
+        let hold = hold.clone();
+        application.connect_startup(move |application| {
+            let Some(TrayLink {
+                mut requests,
+                on_startup,
+            }) = link.borrow_mut().take()
+            else {
+                return;
+            };
+            *hold.borrow_mut() = Some(application.hold());
+            on_startup();
+            let application = application.clone();
+            let present = present.clone();
+            let hold = hold.clone();
+            glib::spawn_future_local(async move {
+                while let Some(req) = requests.recv().await {
+                    match req {
+                        UiRequest::OpenWindow => present(&application),
+                        UiRequest::Started {
+                            open_window,
+                            tray_running,
+                        } => {
+                            if open_window {
+                                present(&application);
+                            }
+                            if !tray_running {
+                                hold.borrow_mut().take();
+                            }
+                        }
+                        UiRequest::Quit => application.quit(),
+                    }
+                }
+            });
+        });
+    }
+
+    let activations = Cell::new(0u32);
+    application.connect_activate(move |application| {
+        let n = activations.get();
+        activations.set(n.saturating_add(1));
+        if with_tray && n == 0 {
+            // This launch's own activation: the tray side decides (see above).
+            return;
+        }
+        present(application);
     });
     // GTK must not parse our own flags (`--smoke`, `--version`); `main` already did.
     application.run_with_args::<&str>(&[])

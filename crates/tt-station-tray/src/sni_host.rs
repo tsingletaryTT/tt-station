@@ -8,8 +8,8 @@
 //!
 //! [`probe`] must be called inside a tokio runtime (it reports `Missing` otherwise).
 //!
-//! Everything but [`probe`] is pure so it can be tested without a desktop. `main.rs` wiring is a
-//! separate task.
+//! Everything but [`probe`] is pure so it can be tested without a desktop. `app.rs` calls these at
+//! start-up (`app::maybe_show_notice`, `app::run_no_window`).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

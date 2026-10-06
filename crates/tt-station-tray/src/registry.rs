@@ -89,6 +89,10 @@ struct OnDisk {
     stations: Vec<KnownStation>,
     #[serde(default)]
     last_run: Vec<RunMemory>,
+    /// The model most recently run per station id, for the tray's "Run last model". Absent in
+    /// files written before it existed, which load with no last model.
+    #[serde(default)]
+    last_model: BTreeMap<String, String>,
 }
 
 /// The known stations plus remembered run options, backed by one JSON file.
@@ -97,6 +101,9 @@ pub struct Registry {
     stations: Vec<KnownStation>,
     /// Keyed by (station id text, model name).
     last_run: BTreeMap<(String, String), RunOptions>,
+    /// Station id text -> the model most recently passed to [`Registry::remember_run`]. Kept
+    /// apart from `last_run` because that map is ordered by model name and has no record of time.
+    last_model: BTreeMap<String, String>,
 }
 
 impl Registry {
@@ -115,6 +122,7 @@ impl Registry {
                 .into_iter()
                 .map(|r| ((r.station, r.model), r.options))
                 .collect(),
+            last_model: parsed.last_model,
         }
     }
 
@@ -142,6 +150,7 @@ impl Registry {
                     options: options.clone(),
                 })
                 .collect(),
+            last_model: self.last_model.clone(),
         };
         let json = serde_json::to_vec_pretty(&on_disk).context("serializing the registry")?;
 
@@ -200,6 +209,7 @@ impl Registry {
     pub fn remove(&mut self, id: &StationId) {
         self.stations.retain(|s| s.id() != *id);
         self.last_run.retain(|(station, _), _| *station != id.0);
+        self.last_model.remove(&id.0);
     }
 
     /// Record `mac` as the network card MAC of station `id`, so it can be woken while off.
@@ -210,10 +220,18 @@ impl Registry {
         }
     }
 
-    /// Remember `opts` as the options last used to run `model` on `station`.
+    /// Remember `opts` as the options last used to run `model` on `station`, and `model` as the
+    /// most recent model run there ([`Registry::last_model`]).
     pub fn remember_run(&mut self, station: &StationId, model: &str, opts: &RunOptions) {
         self.last_run
             .insert((station.0.clone(), model.to_string()), opts.clone());
+        self.last_model.insert(station.0.clone(), model.to_string());
+    }
+
+    /// The model most recently remembered for `station`, if any. The tray's "Run last model"
+    /// offers this one, with its options from [`Registry::last_run`].
+    pub fn last_model(&self, station: &StationId) -> Option<&str> {
+        self.last_model.get(&station.0).map(String::as_str)
     }
 
     /// The options last used for `model` on `station`, if any.
