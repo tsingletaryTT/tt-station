@@ -326,19 +326,32 @@ pub fn opencode_config(endpoint: &ServingNow) -> String {
 /// with every character other than ASCII letters, digits, `.` and `-` replaced by `_`. The panel
 /// replaced only `/` and `:`; here anything else is replaced too, so the name can never hold a
 /// quote and is safe inside the single-quoted `cd` in [`opencode_terminal_argv`].
+///
+/// The base URL comes from the box, so the name is also kept inside the opencode directory:
+/// leading dots become `_` (so the name is never `.` or `..`, which would point at the
+/// directory itself or one level up, and never a hidden directory), and an empty name is `_`.
 pub fn opencode_dir_name(base_url: &str) -> String {
     let bare = base_url
         .trim_start_matches("https://")
         .trim_start_matches("http://");
-    bare.chars()
+    let mut leading = true;
+    let name: String = bare
+        .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+            let keep = c.is_ascii_alphanumeric() || c == '-' || (c == '.' && !leading);
+            leading = leading && c == '.';
+            if keep {
                 c
             } else {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if name.is_empty() {
+        "_".to_string()
+    } else {
+        name
+    }
 }
 
 /// A terminal emulator and the flag after which it takes the command to run, or `None`.
@@ -872,6 +885,37 @@ mod tests {
             !odd.contains('\'') && !odd.contains('/') && !odd.contains('$'),
             "{odd}"
         );
+    }
+
+    /// M3: the name is joined onto the opencode directory, so it must never be `.`, `..` or
+    /// empty (a remote-reported `base_url` of `http://..` would write one level up), and a
+    /// leading dot would make a hidden directory.
+    #[test]
+    fn opencode_dir_name_is_never_a_dot_path_or_empty() {
+        assert_eq!(opencode_dir_name("http://.."), "__");
+        assert_eq!(opencode_dir_name("http://."), "_");
+        assert_eq!(opencode_dir_name("http://"), "_");
+        assert_eq!(opencode_dir_name(""), "_");
+        assert_eq!(opencode_dir_name("http://.hidden:1/v1"), "_hidden_1_v1");
+        assert_eq!(
+            opencode_dir_name("http://h.local:8003/v1"),
+            "h.local_8003_v1"
+        );
+        let base = Path::new("/home/x/.local/share/tt-station/opencode");
+        for url in [
+            "http://..",
+            "http://.",
+            "http://",
+            "http://../..",
+            "http://..:1",
+        ] {
+            let dir = base.join(opencode_dir_name(url));
+            assert_eq!(dir.parent(), Some(base), "{url} -> {}", dir.display());
+            assert!(
+                !dir.file_name().unwrap().to_string_lossy().starts_with('.'),
+                "{url}"
+            );
+        }
     }
 
     #[test]
