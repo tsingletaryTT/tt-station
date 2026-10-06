@@ -6,6 +6,8 @@
 //! "is a watcher there?" ([`probe`]), says what to do if not ([`install_hint`]), and keeps the
 //! "tell them once" marker ([`should_show_notice`], [`mark_notice_shown`]).
 //!
+//! [`probe`] must be called inside a tokio runtime (it reports `Missing` otherwise).
+//!
 //! Everything but [`probe`] is pure so it can be tested without a desktop. `main.rs` wiring is a
 //! separate task.
 
@@ -29,12 +31,24 @@ pub fn classify(watcher_has_owner: Result<bool, String>) -> HostStatus {
     }
 }
 
+/// True when called from within a tokio runtime (the guard [`probe`] uses before touching zbus).
+fn runtime_available() -> bool {
+    tokio::runtime::Handle::try_current().is_ok()
+}
+
 /// How long [`probe`] waits for the bus before giving up and reporting `Missing`.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Ask the session bus whether `org.kde.StatusNotifierWatcher` has an owner. Never panics;
 /// every failure maps to `Missing` through [`classify`]. Read-only (`NameHasOwner`).
+///
+/// **Must run inside a tokio runtime.** zbus's `tokio` feature spawns its tasks with
+/// `tokio::spawn`, which panics without one. [`runtime_available`] is checked first, and with no
+/// runtime the answer is `Missing`.
 pub async fn probe() -> HostStatus {
+    if !runtime_available() {
+        return classify(Err("no tokio runtime".to_string()));
+    }
     async fn ask() -> Result<bool, String> {
         let conn = zbus::Connection::session()
             .await
@@ -60,12 +74,12 @@ pub async fn probe() -> HostStatus {
 /// hold several colon-separated names (`ubuntu:GNOME`). Names below were checked on 2026-10-05:
 /// * Ubuntu: `apt-cache policy gnome-shell-extension-appindicator` on Ubuntu 24.04 finds the
 ///   package, and its `metadata.json` (`dpkg -L`) has uuid `ubuntu-appindicators@ubuntu.com`.
-///   Ubuntu ships it enabled-on-request, so only the enable command is given.
+///   The apt line is for machines where it is not already installed.
 /// * Fedora: packages.fedoraproject.org lists `gnome-shell-extension-appindicator`; its extension
 ///   uuid is `appindicatorsupport@rgcjonas.gmail.com`, which matches upstream's `metadata.json`
 ///   (github.com/ubuntu/gnome-shell-extension-appindicator). Package page fetched through a
 ///   summarising tool, not read raw; the uuid was cross-checked against upstream.
-/// * Anything else: the extension's display name, with no package name guessed.
+/// * Derivatives (matched on `ID=` only, never `ID_LIKE=`) and other desktops: the extension's display name, with no package name guessed.
 pub fn install_hint(os_release: &str, desktop: &str) -> Option<String> {
     let desktops: Vec<String> = desktop
         .split(':')
@@ -75,32 +89,30 @@ pub fn install_hint(os_release: &str, desktop: &str) -> Option<String> {
     if has("kde") {
         return None; // Plasma hosts StatusNotifierItem itself.
     }
-    let mut ids: Vec<String> = Vec::new();
-    for line in os_release.lines() {
-        let line = line.trim();
-        for key in ["ID_LIKE=", "ID="] {
-            if let Some(v) = line.strip_prefix(key) {
-                ids.extend(
-                    v.trim_matches(|c| c == '"' || c == '\'')
-                        .split_whitespace()
-                        .map(|w| w.to_ascii_lowercase()),
-                );
-            }
-        }
-    }
-    let is = |n: &str| ids.iter().any(|i| i == n);
-    if has("gnome") && is("ubuntu") {
+    // Only `ID=` is matched. `ID_LIKE=` would make Pop!_OS count as Ubuntu and Rocky/Alma count
+    // as Fedora, and nothing here was verified for those: their package source or extension uuid
+    // may differ. Every derivative gets the generic hint below.
+    let id = os_release
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ID="))
+        .map(|v| {
+            v.trim_matches(|c| c == '"' || c == '\'')
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
+    if has("gnome") && id == "ubuntu" {
         return Some(
-            "Tray icons need a GNOME extension. Run: gnome-extensions enable ubuntu-appindicators@ubuntu.com \
-             (then log out and in if the icon does not appear)."
+            "Tray icons need a GNOME extension. If it is not installed, run: sudo apt install gnome-shell-extension-appindicator. \
+             Then run: gnome-extensions enable ubuntu-appindicators@ubuntu.com \
+             (if it says the extension does not exist, log out and in first)."
                 .to_string(),
         );
     }
-    if has("gnome") && is("fedora") {
+    if has("gnome") && id == "fedora" {
         return Some(
-            "Tray icons need a GNOME extension. Run: sudo dnf install gnome-shell-extension-appindicator, \
-             then: gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com \
-             (log out and in if the icon does not appear)."
+            "Tray icons need a GNOME extension. Install it: sudo dnf install gnome-shell-extension-appindicator. \
+             Then log out and in again, because a newly installed extension is not seen until the next login. \
+             Then enable it: gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com."
                 .to_string(),
         );
     }
@@ -118,11 +130,14 @@ pub fn notice_marker_path(config_dir: &Path) -> PathBuf {
 
 /// Show the notice only when the host is missing, we have something to say, and we have not
 /// said it before.
-pub fn should_show_notice(status: HostStatus, hint: &Option<String>, marker_exists: bool) -> bool {
+pub fn should_show_notice(status: HostStatus, hint: Option<&str>, marker_exists: bool) -> bool {
     status == HostStatus::Missing && hint.is_some() && !marker_exists
 }
 
 /// Record that the notice was shown. Creates `config_dir` if needed.
+///
+/// A caller must treat `Err` as "not recorded": log it and carry on. The notice may then repeat
+/// on the next start.
 ///
 /// The marker is an empty file; creating it is a single step, so a crash leaves either no marker
 /// (the notice shows once more) or a whole one.
@@ -165,17 +180,31 @@ mod tests {
             "{h}"
         );
     }
+    /// Positions of the three steps, asserting each is present.
+    fn pos(h: &str, needle: &str) -> usize {
+        h.find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} missing from {h}"))
+    }
     #[test]
-    fn hint_for_fedora_gnome_says_install_the_appindicator_extension_package() {
+    fn hint_for_fedora_gnome_installs_then_relogs_then_enables() {
         let h = install_hint(FEDORA, "GNOME").unwrap();
-        assert!(
-            h.contains("sudo dnf install gnome-shell-extension-appindicator"),
-            "{h}"
+        let install = pos(&h, "sudo dnf install gnome-shell-extension-appindicator");
+        let relog = pos(&h, "log out and in");
+        let enable = pos(
+            &h,
+            "gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com",
         );
-        assert!(
-            h.contains("gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com"),
-            "{h}"
+        assert!(install < relog && relog < enable, "{h}");
+    }
+    #[test]
+    fn hint_for_ubuntu_gnome_installs_if_missing_then_enables() {
+        let h = install_hint(UBUNTU, "ubuntu:GNOME").unwrap();
+        let install = pos(&h, "sudo apt install gnome-shell-extension-appindicator");
+        let enable = pos(
+            &h,
+            "gnome-extensions enable ubuntu-appindicators@ubuntu.com",
         );
+        assert!(install < enable, "{h}");
     }
     #[test]
     fn hint_for_kde_is_none() {
@@ -196,10 +225,20 @@ mod tests {
         );
     }
     #[test]
-    fn ubuntu_derivative_via_id_like_counts_as_ubuntu() {
-        let mint = "ID=pop\nID_LIKE=\"ubuntu debian\"\n";
-        let h = install_hint(mint, "GNOME").unwrap();
-        assert!(h.contains("ubuntu-appindicators@ubuntu.com"), "{h}");
+    fn derivatives_via_id_like_get_the_generic_hint() {
+        let pop = "ID=pop\nID_LIKE=\"ubuntu debian\"\n";
+        let rocky = "ID=rocky\nID_LIKE=\"rhel centos fedora\"\n";
+        for os in [pop, rocky] {
+            let h = install_hint(os, "GNOME").unwrap();
+            assert!(
+                h.contains("AppIndicator and KStatusNotifierItem Support"),
+                "{h}"
+            );
+            assert!(
+                !h.contains("apt install") && !h.contains("dnf install"),
+                "{h}"
+            );
+        }
     }
     #[test]
     fn ubuntu_with_non_gnome_desktop_gets_generic_hint() {
@@ -209,11 +248,11 @@ mod tests {
 
     #[test]
     fn notice_shown_only_when_missing_hinted_and_unmarked() {
-        let hint = Some("x".to_string());
-        assert!(should_show_notice(HostStatus::Missing, &hint, false));
-        assert!(!should_show_notice(HostStatus::Present, &hint, false));
-        assert!(!should_show_notice(HostStatus::Missing, &None, false));
-        assert!(!should_show_notice(HostStatus::Missing, &hint, true));
+        let hint = Some("x");
+        assert!(should_show_notice(HostStatus::Missing, hint, false));
+        assert!(!should_show_notice(HostStatus::Present, hint, false));
+        assert!(!should_show_notice(HostStatus::Missing, None, false));
+        assert!(!should_show_notice(HostStatus::Missing, hint, true));
     }
     #[test]
     fn marker_roundtrip_creates_dir_and_is_idempotent() {
@@ -226,6 +265,32 @@ mod tests {
         assert!(p.exists());
         mark_notice_shown(&cfg).unwrap();
         assert!(p.exists());
+    }
+    #[test]
+    fn runtime_available_is_false_on_a_plain_thread() {
+        assert!(!runtime_available());
+    }
+    #[tokio::test]
+    async fn runtime_available_is_true_inside_a_runtime() {
+        assert!(runtime_available());
+    }
+    #[test]
+    fn probe_without_a_runtime_is_missing_not_a_panic() {
+        // futures-free: poll the future once by hand on a plain thread (no tokio context).
+        use std::future::Future;
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn raw() -> RawWaker {
+            fn clone(_: *const ()) -> RawWaker {
+                raw()
+            }
+            fn noop(_: *const ()) {}
+            static VT: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+            RawWaker::new(std::ptr::null(), &VT)
+        }
+        let waker = unsafe { Waker::from_raw(raw()) };
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(probe());
+        assert_eq!(fut.as_mut().poll(&mut cx), Poll::Ready(HostStatus::Missing));
     }
     #[test]
     fn probe_never_panics() {
