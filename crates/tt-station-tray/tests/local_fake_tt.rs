@@ -499,3 +499,25 @@ async fn local_schema_is_the_shared_one() {
     assert!(schema.options.iter().any(|o| o.name == "port"));
     assert!(!log.exists());
 }
+
+/// M4: `tt serve --workflow benchmarks|evals` runs in the foreground until it finishes, which
+/// would block the tray. `LocalStation::run` refuses them before `tt` runs at all.
+#[tokio::test]
+async fn local_run_refuses_non_server_workflows_before_tt_runs() {
+    use libttstation::run_options::Workflow;
+    for w in [Workflow::Benchmarks, Workflow::Evals] {
+        let dir = tempfile::tempdir().unwrap();
+        let (script, log) = fake_tt(dir.path(), "tt 1.0.1");
+        let opts = RunOptions {
+            workflow: Some(w),
+            ..RunOptions::default()
+        };
+        let err = station(&script)
+            .run("Llama-3.1-8B-Instruct", false, &opts)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("workflow") && msg.contains(w.as_str()), "{msg}");
+        assert!(!log.exists(), "tt ran: {:?}", calls(&log));
+    }
+}

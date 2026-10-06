@@ -64,7 +64,11 @@ impl Workflow {
 /// `flag` is stored without leading dashes (for example `"max-model-len"`);
 /// the dashes are added by [`RunOptions::to_serve_args`]. `value` is `None`
 /// for boolean flags and `Some(..)` for every other kind.
+///
+/// Unknown keys in an entry are refused (`deny_unknown_fields`), as they are at the top level
+/// of [`RunOptions`]: a misspelled `"vaule"` must not be silently dropped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VllmArg {
     /// Flag name without leading dashes. Must be in [`VLLM_ALLOWLIST`].
     pub flag: String,
@@ -599,12 +603,13 @@ pub fn run_schema() -> RunSchema {
                 "Serve from cached weights without network access.",
             )
         },
+        // Only `server` is offered. `benchmarks` and `evals` run in the foreground until they
+        // finish and then stop the container: every agent backend refuses them on `POST /run`,
+        // and the tray's local station refuses them too, because `tt serve` would block it.
+        // The `Workflow` enum keeps all three, so a request naming one gets a clear refusal.
         OptionSpec {
             default: Some("server".to_string()),
-            choices: [Workflow::Server, Workflow::Benchmarks, Workflow::Evals]
-                .iter()
-                .map(|w| w.as_str().to_string())
-                .collect(),
+            choices: vec![Workflow::Server.as_str().to_string()],
             ..spec("workflow", "choice", "Which workflow to run.")
         },
     ];
@@ -905,6 +910,27 @@ mod tests {
         }
         let device = s.options.iter().find(|o| o.name == "device").unwrap();
         assert!(device.applies_to.contains(&"catalog".to_string()));
+    }
+
+    /// M4: every agent backend refuses `benchmarks` and `evals`, and a local `tt serve` of
+    /// them blocks in the foreground, so the schema offers only `server`.
+    #[test]
+    fn schema_offers_only_the_server_workflow() {
+        let s = run_schema();
+        let w = s.options.iter().find(|o| o.name == "workflow").unwrap();
+        assert_eq!(w.choices, vec!["server".to_string()]);
+        assert_eq!(w.default.as_deref(), Some("server"));
+    }
+
+    /// T1: an extra key in a vLLM entry is refused, the same as an extra top-level key.
+    #[test]
+    fn a_vllm_entry_with_an_unknown_key_is_refused() {
+        let err = opts(json!({
+            "vllm_args": [{"flag": "max-model-len", "value": "4096", "extra": true}]
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("extra"), "{err}");
+        assert!(opts(json!({"vllm_args": [{"flag": "max-model-len", "value": "4096"}]})).is_ok());
     }
 
     #[test]

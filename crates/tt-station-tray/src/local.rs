@@ -32,7 +32,7 @@ use std::sync::Mutex;
 use anyhow::{anyhow, bail, Context, Result};
 use libttstation::official_tt::{not_official_message, parse_version, resolve_bin};
 use libttstation::run_options::{
-    run_schema, serve_argv_for, validate_model_name, RunOptions, RunSchema, ServeTarget,
+    run_schema, serve_argv_for, validate_model_name, RunOptions, RunSchema, ServeTarget, Workflow,
 };
 use serde::Deserialize;
 use tokio::process::Command;
@@ -262,6 +262,18 @@ impl LocalStation {
     pub async fn run(&self, model: &str, _force: bool, options: &RunOptions) -> Result<ServingNow> {
         validate_model_name(model)?;
         options.validate()?;
+        // `benchmarks` and `evals` make `tt serve` run in the foreground until the whole
+        // workflow finishes, which would block this call (and the tray) for that long. The
+        // run schema offers only `server`; this refuses a request that names another anyway.
+        if let Some(w) = options.workflow.filter(|w| *w != Workflow::Server) {
+            bail!(
+                "workflow: the tray serves models over /v1; the `{}` workflow runs in the \
+                 foreground until it finishes, so start it from a terminal with \
+                 `tt serve {model} --workflow {}`",
+                w.as_str(),
+                w.as_str()
+            );
+        }
         // `serve_plan` vets `tt` before the dry run.
         let plan = self.serve_plan(model).await?;
         let argv = local_serve_argv(&plan, model, self.default_port, options)?;

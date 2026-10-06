@@ -71,7 +71,7 @@ tray all validate through it.
 | `port` | Port to serve on |
 | `profile` | tt-model bundle profile |
 | `offline` | Serve without network access |
-| `workflow` | `server`, `benchmarks` or `evals` |
+| `workflow` | `server`, the only value the schema offers. `benchmarks` and `evals` parse, but every agent backend and the tray's local station refuse them: they run in the foreground until they finish |
 | `vllm_args` | Pass-through vLLM flags, allowlist only |
 
 Unknown keys are rejected by name. Every string that reaches a command line is checked
