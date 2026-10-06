@@ -418,13 +418,16 @@ where
 ///
 /// **Which name to run.** The served id (what `/v1/models` or `tt model ps` reports, such as
 /// `meta-llama/Llama-3.1-8B-Instruct`) is often not the name the run sheet ran and remembered
-/// (`Llama-3.1-8B-Instruct`). So the run name is the served id when the registry has options
-/// under it, else the station's most recently run model ([`Registry::last_model`]). That second
-/// case assumes the shown server is the one this app last started there; a server started by
-/// another tool after that would be replaced by the remembered model.
+/// (`Llama-3.1-8B-Instruct`). The run name is decided by [`restart_plan`], in this order:
+/// 1. this machine: the `tt model ps` row's `name` ([`Station::shown_run_name`]), exactly;
+/// 2. a box, when the registry has options under the served id: the served id;
+/// 3. a box, when the station's most recently run model ([`Registry::last_model`]) matches the
+///    served id ([`served_id_matches`]): that model, and the result says so in a message.
 ///
-/// **Order.** The run name is settled before anything is stopped. When there is none, Restart
-/// refuses with a message and leaves the server running.
+/// Otherwise Restart refuses, names both models, and stops nothing. This keeps Restart from
+/// stopping a server another client started and replacing it with a different model.
+///
+/// **Order.** The run name is settled before anything is stopped.
 async fn restart(ctx: &AppContext, id: &StationId) -> ActionOutcome {
     let Some(st) = ctx.station(id) else {
         return not_listed(id);
@@ -436,23 +439,85 @@ async fn restart(ctx: &AppContext, id: &StationId) -> ActionOutcome {
             state.name
         ));
     };
+    let exact = match st.shown_run_name().await {
+        Ok(name) => name,
+        Err(e) => return ActionOutcome::Message(format!("Restart failed: {e:#}")),
+    };
     let reg = ctx.registry();
-    let run_name = if reg.last_run(id, &serving.model).is_some() {
-        Some(serving.model.clone())
-    } else {
-        reg.last_model(id).map(str::to_string)
+    let plan = match restart_plan(&reg, id, &serving.model, exact.as_deref()) {
+        Ok(plan) => plan,
+        Err(refusal) => {
+            return ActionOutcome::Message(format!("{refusal} on {}.", state.name));
+        }
     };
-    let Some(run_name) = run_name else {
-        return ActionOutcome::Message(format!(
-            "Restart needs the model name this app used to start {} on {}, and none is              remembered. The server was left running. Open the window to start it from there.",
-            serving.model, state.name
-        ));
-    };
-    let options = reg.last_run(id, &run_name).cloned().unwrap_or_default();
+    let options = reg
+        .last_run(id, &plan.run_name)
+        .cloned()
+        .unwrap_or_default();
     if let Err(e) = st.stop().await {
         return ActionOutcome::Message(format!("Restart failed: {e:#}"));
     }
-    failed_or_done("Restart", st.run(&run_name, false, &options).await)
+    match st.run(&plan.run_name, false, &options).await {
+        Err(e) => ActionOutcome::Message(format!("Restart failed: {e:#}")),
+        Ok(_) if plan.guessed => ActionOutcome::Message(format!(
+            "Restarted {} (was {}).",
+            plan.run_name, serving.model
+        )),
+        Ok(_) => ActionOutcome::Done,
+    }
+}
+
+/// The name Restart will run, and whether it came from the `last_model` match (rule 3 of
+/// [`restart`]), which the result reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestartPlan {
+    pub run_name: String,
+    pub guessed: bool,
+}
+
+/// Decide Restart's run name (see [`restart`]). `exact` is the station's own run name for the
+/// shown server, when it has one. `Err` is the refusal text, without the station name.
+pub fn restart_plan(
+    reg: &Registry,
+    id: &StationId,
+    served_id: &str,
+    exact: Option<&str>,
+) -> Result<RestartPlan, String> {
+    if let Some(name) = exact {
+        return Ok(RestartPlan {
+            run_name: name.to_string(),
+            guessed: false,
+        });
+    }
+    if reg.last_run(id, served_id).is_some() {
+        return Ok(RestartPlan {
+            run_name: served_id.to_string(),
+            guessed: false,
+        });
+    }
+    let left_running = "The server was left running. Open the window to start a model from there";
+    match reg.last_model(id) {
+        Some(last) if served_id_matches(served_id, last) => Ok(RestartPlan {
+            run_name: last.to_string(),
+            guessed: true,
+        }),
+        Some(last) => Err(format!(
+            "Restart did nothing: the server shows {served_id}, and the model this app last \
+             started is {last}, which may not be the same server. {left_running}"
+        )),
+        None => Err(format!(
+            "Restart did nothing: no model name is remembered for {served_id}. {left_running}"
+        )),
+    }
+}
+
+/// Whether the served id names the remembered run name: equal, or ending with
+/// `/<run name>`, ignoring case. So `meta-llama/Llama-3.1-8B-Instruct` matches
+/// `Llama-3.1-8B-Instruct`, and `Qwen3-8B` does not match `Llama-3.1-8B-Instruct`.
+pub fn served_id_matches(served_id: &str, run_name: &str) -> bool {
+    let served = served_id.to_ascii_lowercase();
+    let run = run_name.to_ascii_lowercase();
+    !run.is_empty() && (served == run || served.ends_with(&format!("/{run}")))
 }
 
 /// Run the model most recently run on this station, with its remembered options.
@@ -817,6 +882,31 @@ pub fn smoke_check() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::station::ServingNow;
+
+    #[test]
+    fn served_id_matches_equal_or_slash_suffix_ignoring_case() {
+        assert!(served_id_matches("Llama-3.1-8B", "llama-3.1-8b"));
+        assert!(served_id_matches("meta-llama/Llama-3.1-8B", "Llama-3.1-8B"));
+        assert!(!served_id_matches("meta-llama/Llama-3.1-8B", "8B"));
+        assert!(!served_id_matches("Qwen3-8B", "Llama-3.1-8B"));
+        assert!(!served_id_matches("xLlama-3.1-8B", "Llama-3.1-8B"));
+        assert!(!served_id_matches("anything", ""));
+    }
+
+    #[test]
+    fn refusal_messages_have_no_runs_of_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::load(&dir.path().join("r.json"));
+        let id = StationId("b:1".into());
+        let none = restart_plan(&reg, &id, "org/X", None).unwrap_err();
+        reg.remember_run(&id, "Y", &RunOptions::default());
+        let other = restart_plan(&reg, &id, "org/X", None).unwrap_err();
+        for m in [&none, &other] {
+            assert!(!m.contains("  "), "two spaces in {m:?}");
+            assert!(m.contains("left running"), "{m}");
+        }
+        assert!(other.contains("org/X") && other.contains(" Y,"), "{other}");
+    }
 
     #[test]
     fn window_opens_at_start_only_without_a_working_tray() {

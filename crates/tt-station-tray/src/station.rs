@@ -166,6 +166,15 @@ impl Station {
         }
     }
 
+    /// The run name of the shown server when the station can say it exactly: the `tt model ps`
+    /// row's `name` for this machine. `None` for a box, whose agent reports only the served id.
+    pub async fn shown_run_name(&self) -> anyhow::Result<Option<String>> {
+        match self {
+            Station::Local(s) => s.shown_run_name().await,
+            Station::Remote(_) => Ok(None),
+        }
+    }
+
     /// Stop what the station is serving.
     pub async fn stop(&self) -> anyhow::Result<()> {
         match self {

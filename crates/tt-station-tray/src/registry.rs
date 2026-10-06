@@ -152,6 +152,10 @@ impl Registry {
     /// that load. The lock prevents two writes from interleaving and makes this function's
     /// read-modify-write atomic; it does not merge stale copies. The lock is advisory, so a
     /// process that ignores it (an editor) is not stopped.
+    ///
+    /// `f` must only change the registry. A closure that calls [`Registry::save`] deadlocks
+    /// itself, because `save` takes the lock again through a new open file and an `flock` held
+    /// by one open file description blocks another, even in the same process.
     pub fn update(path: &Path, f: impl FnOnce(&mut Registry)) -> anyhow::Result<()> {
         let _lock = lock_registry(path)?;
         let mut reg = Registry::load(path);

@@ -111,6 +111,13 @@ enum Command {
         /// Absent = no `mac` key (the default, because a fake MAC is a misleading Wake target).
         #[arg(long = "mac")]
         mac: Option<String>,
+
+        /// Test hook: after `POST /run {model}`, report the served id as `<prefix><model>` in
+        /// `/endpoint` and `/run`'s answer, the way a real vLLM often serves
+        /// `meta-llama/Llama-3.1-8B-Instruct` for the run name `Llama-3.1-8B-Instruct`.
+        /// Absent = the served id is the run name.
+        #[arg(long = "served-id-prefix")]
+        served_id_prefix: Option<String>,
     },
 }
 
@@ -133,6 +140,7 @@ async fn main() -> Result<()> {
             run_conflict_count,
             pair_code,
             mac,
+            served_id_prefix,
         } => {
             serve(
                 ctrl_port,
@@ -141,7 +149,10 @@ async fn main() -> Result<()> {
                 run_conflict,
                 run_conflict_count,
                 pair_code,
-                mac,
+                ServeHooks {
+                    mac,
+                    served_id_prefix,
+                },
             )
             .await
         }
@@ -257,6 +268,8 @@ struct Inner {
     pair_complete_calls: u32,
     /// MAC reported by `/status` (see `--mac`).
     mac: Option<String>,
+    /// Prefix added to the run name to form the served id (see `--served-id-prefix`).
+    served_id_prefix: String,
 }
 
 #[derive(Clone)]
@@ -276,6 +289,7 @@ impl MockState {
             pair_code: None,
             pair_complete_calls: 0,
             mac: None,
+            served_id_prefix: String::new(),
         })))
     }
 
@@ -435,7 +449,7 @@ async fn run_model(
     }
     let endpoint = Endpoint {
         base_url: format!("http://127.0.0.1:{}/v1", inner.ctrl_port),
-        model: req.model.clone(),
+        model: format!("{}{}", inner.served_id_prefix, req.model),
         requires_key: false,
     };
     inner.status = ServingStatus::Serving(req.model);
@@ -836,6 +850,15 @@ fn app(state: MockState) -> Router {
         .with_state(state)
 }
 
+/// The `serve` test hooks that only change what the mock reports (grouped to keep `serve`'s
+/// argument list short).
+struct ServeHooks {
+    /// See `--mac`.
+    mac: Option<String>,
+    /// See `--served-id-prefix`.
+    served_id_prefix: Option<String>,
+}
+
 /// Bind `ctrl_port` and serve the fake control API + fake vLLM endpoint
 /// until the process is killed. No graceful-shutdown handling (unlike
 /// `tt-station-agentd`) -- this is a disposable test fixture, normally
@@ -847,12 +870,16 @@ async fn serve(
     run_conflict: Option<String>,
     run_conflict_count: u32,
     pair_code: Option<String>,
-    mac: Option<String>,
+    hooks: ServeHooks,
 ) -> Result<()> {
     let state = MockState::new(name.clone(), chips, ctrl_port)
         .with_run_conflict(run_conflict, run_conflict_count)
         .with_pair_code(pair_code);
-    state.lock().mac = mac;
+    {
+        let mut inner = state.lock();
+        inner.mac = hooks.mac;
+        inner.served_id_prefix = hooks.served_id_prefix.unwrap_or_default();
+    }
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", ctrl_port))
         .await
         .with_context(|| format!("failed to bind control port {ctrl_port}"))?;

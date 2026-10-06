@@ -377,18 +377,83 @@ async fn restart_uses_the_remembered_run_name_when_the_served_id_differs() {
 }
 
 #[tokio::test]
-async fn restart_on_this_machine_with_no_known_run_name_stops_nothing() {
+async fn restart_on_this_machine_runs_the_ps_row_name_and_never_guesses() {
     let tmp = tempfile::tempdir().unwrap();
     let (tt, log) = fake_tt_with(tmp.path(), false, "org/shown-model", "");
     let c = ctx(vec![Station::Local(LocalStation::new(&tt))]);
-    let out = dispatch(MenuAction::Restart(StationId("local".into())), &c.ctx).await;
-    assert!(message(&out).contains("left running"), "{out:?}");
+    let local = StationId("local".into());
+    // The most recent model run here is a different one; the ps row name must win.
+    let mut reg = registry(&c);
+    reg.remember_run(&local, "other-model", &port_opts(20009));
+    reg.save().unwrap();
+
+    let out = dispatch(MenuAction::Restart(local), &c.ctx).await;
+    assert_eq!(out, ActionOutcome::Done);
     let lines = calls(&log);
-    assert!(!lines.iter().any(|l| l.contains("model stop")), "{lines:?}");
+    let serve: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("--json serve") && !l.contains("--dry-run"))
+        .collect();
+    assert_eq!(serve.len(), 1, "{lines:?}");
     assert!(
-        !lines.iter().any(|l| l.starts_with("--json serve")),
+        serve[0].starts_with("--json serve shown-model"),
         "{lines:?}"
     );
+    assert!(
+        !serve[0].contains("20009"),
+        "other-model's options leaked: {lines:?}"
+    );
+}
+
+#[tokio::test]
+async fn restart_falls_back_to_last_model_when_the_served_id_ends_with_it() {
+    let m = spawn_mock_box(&["--served-id-prefix", "meta-llama/"]);
+    remote(&m)
+        .run("Llama-3.1-8B-Instruct", false, &port_opts(20005))
+        .await
+        .unwrap();
+    assert_eq!(
+        remote(&m).state().await.serving.unwrap().model,
+        "meta-llama/Llama-3.1-8B-Instruct",
+        "the fixture reports a served id that differs from the run name"
+    );
+    let c = ctx(vec![remote(&m)]);
+    let mut reg = registry(&c);
+    reg.remember_run(&box_id(&m), "Llama-3.1-8B-Instruct", &port_opts(20001));
+    reg.save().unwrap();
+
+    let out = dispatch(MenuAction::Restart(box_id(&m)), &c.ctx).await;
+    assert_eq!(
+        message(&out),
+        "Restarted Llama-3.1-8B-Instruct (was meta-llama/Llama-3.1-8B-Instruct)."
+    );
+    assert_eq!(last_run_options(&m.base).await["port"], 20001);
+}
+
+#[tokio::test]
+async fn restart_refuses_when_last_model_is_a_different_model_and_stops_nothing() {
+    let m = spawn_mock_box(&[]);
+    // Another client started Qwen3-8B; this tray last ran Llama on the box.
+    remote(&m)
+        .run("Qwen3-8B", false, &port_opts(20005))
+        .await
+        .unwrap();
+    let c = ctx(vec![remote(&m)]);
+    let mut reg = registry(&c);
+    reg.remember_run(&box_id(&m), "Llama-3.1-8B-Instruct", &port_opts(20001));
+    reg.save().unwrap();
+
+    let out = dispatch(MenuAction::Restart(box_id(&m)), &c.ctx).await;
+    let text = message(&out);
+    assert!(text.contains("left running"), "{text}");
+    assert!(
+        text.contains("Qwen3-8B") && text.contains("Llama-3.1-8B-Instruct"),
+        "{text}"
+    );
+    assert!(!text.contains("  "), "{text:?}");
+    // Not stopped (a stop makes mock-box idle) and no new /run.
+    assert_eq!(remote(&m).state().await.serving.unwrap().model, "Qwen3-8B");
+    assert_eq!(last_run_options(&m.base).await["port"], 20005);
 }
 
 #[tokio::test]

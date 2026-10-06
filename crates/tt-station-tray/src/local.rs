@@ -347,6 +347,14 @@ impl LocalStation {
         Ok(Some(row))
     }
 
+    /// The run name (`tt model ps`'s `name`, what `tt serve` was given) of the server this app
+    /// shows as serving, picked by the same rule as [`LocalStation::stop`]. `None` when nothing
+    /// runs. Restart uses it, so it never has to guess a run name from the served id.
+    pub async fn shown_run_name(&self) -> Result<Option<String>> {
+        self.vet().await?;
+        Ok(self.target(true).await?.map(|row| row.name))
+    }
+
     /// Stop the server this app shows as serving (see the module doc), with
     /// `tt model stop <name>` and `--profile <p>` when the row has one. Does nothing when
     /// nothing is running. Refuses a TT-Studio server, an unsafe name, and the ambiguous case
