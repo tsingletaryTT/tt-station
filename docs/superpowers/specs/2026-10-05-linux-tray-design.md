@@ -201,7 +201,11 @@ Updated 2026-10-05 after implementation (Tasks 1-10).
   built; that is the only evidence for it.
 - **Deviation: libadwaita not used.** `libadwaita-dev` is not installed on the build box.
   Restyling to libadwaita is a later swap (`sudo apt install libadwaita-dev` first).
-- **Deviation: `Station` is an enum, not a trait object.** There are two fixed kinds, and the
-  enum avoids an `async-trait` dependency.
-- **Live `tt` backend check (Task 4): deferred.** All four chips were held by another tenant.
+- **Deviation: `Station` is an enum with two variants.** The spec proposed a trait object.
+  There are two fixed kinds, and the enum avoids an `async-trait` dependency.
+- **Live `tt` backend check (Tasks 4 and 4c): done for one tt-model bundle.**
+  `changh95/qwen3.8-27b-p300x2` was served 5 times on the development box (about 2 to 4 minutes
+  to `/v1/models`, nothing downloaded); `/serving` and restart rediscovery were verified after
+  commit e7c4c2c. Catalog models were checked only with `--dry-run`, and `--offline` is untested.
+  See "What is verified" in `docs/reference/linux-tray.md`.
 - **Never run on a display:** the tray, the window and the single-instance logic.

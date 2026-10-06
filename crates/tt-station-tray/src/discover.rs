@@ -48,6 +48,6 @@ async fn run(manual: &[KnownStation], timeout: Duration, mdns: bool) -> Vec<BoxR
         aggregate(&providers, timeout)
     })
     .await
-    // A panic in a provider yields "found nothing", not a crash of the tray.
+    // A panic in a provider yields "found nothing", and the tray keeps running.
     .unwrap_or_default()
 }

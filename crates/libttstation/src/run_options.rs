@@ -1,5 +1,5 @@
 //! Shared "run options": the optional knobs a client may pass when it asks a
-//! box to serve a model, plus the one place that decides which values are
+//! box to serve a model, plus the only code that decides which values are
 //! acceptable.
 //!
 //! The agent daemon, the CLI client and the tray UI all use this module so that
@@ -317,7 +317,7 @@ impl RunOptions {
 
 /// Check a model name from a client before it is used anywhere.
 ///
-/// The model name is the one piece of a run request that is not part of [`RunOptions`], and it
+/// The model name is the only piece of a run request that is not part of [`RunOptions`], and it
 /// reaches several command lines: `tt serve <model>` (the dry run and the real serve),
 /// `tt model stop <model>`, and gozer's `--who tt-station:<port>:<model>`. Rule:
 /// `[A-Za-z0-9][A-Za-z0-9._/-]{0,127}`. So it cannot start with `-` (no flag can be smuggled in

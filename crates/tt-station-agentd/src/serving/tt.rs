@@ -108,11 +108,12 @@ pub const PS_CACHE_TTL: Duration = Duration::from_millis(2500);
 /// Hard limit on one `tt --json model ps` run. After it the child is killed and the call
 /// fails, so a hung `tt` or a wedged docker cannot hang a request forever. `ps` normally takes
 /// well under a second.
+///
+/// A `/run` or `/stop` that needs a fresh read queues on the same lock as the idle polls, so
+/// behind a hung `tt` it can wait about twice `PS_TIMEOUT` (the poll's run, then its own)
+/// before failing.
 pub const PS_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A `/run` or `/stop` that needs a fresh read queues on the same lock as the idle polls, so
-/// behind a hung `tt` it can wait about 2x this (the poll's run, then its own) before failing.
-///
 /// When a cached-path `ps` fails or times out, the last good rows are still returned if they are
 /// younger than this. Older rows are not trusted, and the error is returned.
 pub const PS_STALE_LIMIT: Duration = Duration::from_secs(10);
@@ -2375,7 +2376,7 @@ mod tests {
         )
     }
 
-    /// Ten concurrent idle polls start one `tt model ps`, not ten.
+    /// Ten concurrent idle polls start exactly one `tt model ps` run.
     #[test]
     fn concurrent_reads_share_one_ps_run() {
         let runner = ScriptedRunner::happy();

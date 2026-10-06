@@ -1,9 +1,9 @@
 //! Types shared by every station, and the [`Station`] enum that dispatches to one.
 //!
-//! **Enum, not trait object.** The design spec described a `Station` trait. The tray has exactly
-//! two kinds and no plug-in point, so an `enum` with plain `async fn`s does the same job with no
-//! `async-trait` dependency and no boxing. The UI still never branches on kind: it calls the
-//! methods here.
+//! `Station` is an enum with two variants, `Local` and `Remote`, and plain `async fn`s that
+//! dispatch to them. The design spec described a `Station` trait. The tray has exactly two kinds
+//! and no plug-in point, and the enum needs no `async-trait` dependency and no boxing. The UI
+//! never branches on kind: it calls the methods here.
 
 use libttstation::run_options::{RunOptions, RunSchema};
 use serde::{Deserialize, Serialize};

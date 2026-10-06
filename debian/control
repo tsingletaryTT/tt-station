@@ -33,8 +33,8 @@ Description: On-box GTK control panel for tt-station
 
 Package: tt-station-tray
 Architecture: amd64
-Depends: ${shlibs:Depends}, ${misc:Depends}, tt-station (= ${binary:Version}), libgtk-4-1
-Recommends: gnome-shell-extension-appindicator
+Depends: ${shlibs:Depends}, ${misc:Depends}, libgtk-4-1
+Recommends: tt-station (= ${binary:Version}), gnome-shell-extension-appindicator
 Suggests: docker.io | docker-ce, xdg-utils
 Description: Linux tray app for tt-station
  A system tray icon and small GTK4 window that start, stop and connect to

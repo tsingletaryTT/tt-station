@@ -78,8 +78,8 @@ pub fn not_official_message(bin: &str, got: &str) -> String {
 /// where `uv tool install tenstorrent` puts the official CLI.
 ///
 /// A `tt` that is on `PATH` always wins, even if it turns out not to be the official one. The
-/// caller then refuses it loudly instead of quietly preferring another copy, because a shadowed
-/// `tt` is a problem the operator should see.
+/// caller then refuses it with an error and does not fall back to another copy, because a
+/// shadowed `tt` is a problem the operator should see.
 pub fn locate(path: Option<&std::ffi::OsStr>, home: Option<&Path>) -> Option<String> {
     let is_exe = |p: &Path| {
         use std::os::unix::fs::PermissionsExt;

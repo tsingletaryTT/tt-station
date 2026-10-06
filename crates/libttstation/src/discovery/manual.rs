@@ -78,9 +78,14 @@ pub fn build_probe_client(timeout: Duration) -> anyhow::Result<reqwest::blocking
 
 /// The `fetch` closure `ManualProvider` calls per configured host: a plain
 /// blocking `GET /status`, decoded into a `BoxRecord`. Blocking (not async)
-/// because `ManualProvider::discover` is a synchronous trait method -- see
-/// the module doc for why that's fine here (no runtime is active when
-/// `discover` runs).
+/// because `ManualProvider::discover` is a synchronous trait method.
+///
+/// **Never call this directly from async code.** It uses
+/// `reqwest::blocking`, which panics when it runs on a tokio runtime thread
+/// and would block that thread anyway. The CLI calls it with no runtime
+/// active; the tray calls it inside a runtime, but from a
+/// `tokio::task::spawn_blocking` thread (`tt-station-tray`'s `discover.rs`,
+/// behind `discover_all`). Any new async caller must do the same.
 ///
 /// `timeout` is the same duration as `discover`'s `--timeout-ms`: a manual
 /// probe shouldn't get to hang longer than mDNS browsing is allowed to run.
@@ -125,8 +130,8 @@ pub fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> anyhow::
         apiver: 1,
         // This IS the "per-box status probe" `discover` already runs for
         // manual hosts (mDNS-discovered boxes have no such probe -- see
-        // `libttstation::model::txt_decode`), so it's the one discover path
-        // that can populate `device_mesh` from real data instead of `None`.
+        // `libttstation::model::txt_decode`), so it is the only discover path
+        // that fills `device_mesh` from real data; the others leave it `None`.
         device_mesh: resp.device_mesh,
         // Same "this IS the per-box probe" reasoning as `device_mesh` above,
         // applied to the box's detected primary NIC MAC (Task 3).

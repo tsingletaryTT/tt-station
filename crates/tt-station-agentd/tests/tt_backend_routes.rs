@@ -232,7 +232,7 @@ async fn a_restarted_agent_with_nothing_on_its_port_stays_idle() {
     let (_, body) = get_json(format!("{base}/status")).await;
     assert_eq!(body["status"], "idle");
 
-    // A row on a different port is somebody else's server, not ours.
+    // A row on a different port belongs to somebody else.
     let runner = FakeRunner::new(0);
     runner.set_run_capturing("model ps", 0, &PS_LIVE_BUNDLE.replace("20010", "20099"), "");
     let base = serve(restarted_agent(&runner, false)).await;

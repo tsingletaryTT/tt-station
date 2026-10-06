@@ -23,7 +23,7 @@
 //!
 //! **Official `tt` only.** Before the first real use, `tt --version` must print `tt <semver>`
 //! (`libttstation::official_tt::parse_version`). A stale pre-rename copy of tt-station's own CLI
-//! has shadowed the official one before; it is refused, not run.
+//! has shadowed the official one before; it is refused and never run.
 
 use std::path::PathBuf;
 use std::process::Stdio;

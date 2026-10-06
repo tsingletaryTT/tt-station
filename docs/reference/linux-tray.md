@@ -9,10 +9,10 @@ See "What is verified" below before relying on any behavior described here.
 
 ## Stations
 
-A *station* is anything that can serve models. The tray treats two kinds the same way
-(`Station` enum in `crates/tt-station-tray/src/station.rs`; the spec proposed a trait object,
-and the enum replaced it because there are exactly two fixed kinds and it avoids an
-`async-trait` dependency):
+A *station* is anything that can serve models. The tray treats two kinds the same way.
+`Station` in `crates/tt-station-tray/src/station.rs` is an enum with two variants, one per
+kind. (The spec proposed a trait object. There are exactly two fixed kinds, and the enum needs
+no `async-trait` dependency.)
 
 | Kind | Talks to | Pairing |
 |------|----------|---------|
@@ -23,9 +23,13 @@ and the enum replaced it because there are exactly two fixed kinds and it avoids
 stale or shadowing copy is reported and never run. `RemoteStation` uses the same endpoints as
 `tt-station run|stop|status`.
 
-Known stations are kept in a registry file in `$TT_CONFIG_DIR` (else `$XDG_CONFIG_HOME/tt-station`, else
-`~/.config/tt-station`), guarded by a `flock` so two tray processes do not
-overwrite each other. The registry holds no tokens.
+Known stations are kept in a registry file in `$TT_CONFIG_DIR` (else
+`$XDG_CONFIG_HOME/tt-station`, else `~/.config/tt-station`). Every write takes an advisory
+`flock` on a sibling lock file, so two writes never interleave, and the tray's MAC updates
+re-read the file under that lock. The lock does not merge stale copies: the window loads the
+registry once and saves its whole copy later, so a window save can still overwrite a MAC the
+tray recorded after the window loaded (see `Registry::update` in `registry.rs`). The registry
+holds no tokens.
 
 ## Finding and pairing boxes
 
@@ -82,7 +86,9 @@ identifiers). See `VLLM_ALLOWLIST` in `crates/libttstation/src/run_options.rs`.
 
 `GET /run/schema` (unauthed) returns a description of every option, generated from the same
 tables that drive validation, so a UI can build its form from it. Only the `tt` backend applies
-`options`; other backends ignore them.
+`options`. The `runpy`, `docker` and `dstack` backends refuse a request with non-empty
+`options` with HTTP 400 (`OptionsUnsupported`, naming the backend); a request without
+`options` is served as before.
 
 ## The `tt` backend
 
@@ -120,8 +126,17 @@ Not verified:
 * **Nothing has run on a display**: the tray icon, the window, default mode, `--no-window`, the
   GApplication single-instance logic, ksni menu updates, and the real runner for docker,
   terminal, clipboard, `notify-send` and Wake-on-LAN.
-* **The `tt` backend has not run against live hardware.** The check was deferred because all
-  four chips on the development box were held by another tenant.
+* **The `tt` backend is live-verified for one tt-model bundle only.** Tasks 4 and 4c served
+  `changh95/qwen3.8-27b-p300x2` on the development box (4x p300c, `tt` 1.0.1): 5 serves, about
+  2 to 4 minutes to `/v1/models`, nothing downloaded. `/serving` listing and rediscovery after
+  an agent restart were verified after the fixes in commit e7c4c2c. Still open:
+  * catalog models were checked only with `tt serve --dry-run`;
+  * `--offline` is untested;
+  * the lease's `TT_VISIBLE_DEVICES` does not reach the container (see "The `tt` backend");
+  * a serve on a non-default `options.port` is not rediscovered after an agent restart;
+  * on the development box `/tmp/tt-gozer/history.jsonl` is owned by root, so a restarted agent
+    cannot adopt its lease. The owner fixes that with
+    `sudo chown ttuser /tmp/tt-gozer/history.jsonl`.
 * **Nothing has been tested on `franklinstower`**, the intended second machine.
 * **A `.deb` has not been built or installed** from these packaging files.
 * **Ubuntu 22.04 (jammy) has not been built.** The crate enables no `gtk4` `v4_*` feature, so
@@ -145,6 +160,15 @@ owner has to decide whether the local station should lease too.
 ## Packaging
 
 Package `tt-station-tray` (amd64) installs `/usr/bin/tt-station-tray`, the launcher
-`com.tenstorrent.ttstation.tray.desktop`, an autostart entry in `/etc/xdg/autostart/`, and the
-panel's icons under the tray's own icon name. It depends on `tt-station (= same version)` and
-`libgtk-4-1`, and recommends the GNOME AppIndicator extension.
+`com.tenstorrent.ttstation.tray.desktop`, an autostart entry in `/etc/xdg/autostart/` (it
+starts the tray for every user who logs in to a desktop), and the panel's icons under the
+tray's own icon name. It depends on `libgtk-4-1`, and recommends `tt-station (= same version)`
+and the GNOME AppIndicator extension.
+
+The `tt-station` package (CLI and box agent) is optional for a tray-only workstation. The tray
+runs no `tt-station` binary: it talks to boxes over the agent's HTTP API and to this machine
+through the official `tt` CLI. Installing `tt-station` also installs the agent's systemd user
+unit and the polkit rule `/etc/polkit-1/rules.d/49-tt-station-power.rules`, which lets members
+of the `sudo` group suspend, reboot or power off the machine from any program without a
+password prompt. On a workstation that only needs the tray, install it with
+`--no-install-recommends` to leave both out.

@@ -30,24 +30,37 @@ llms. stop start them. use tt CLI, my machine franklinstower is connected and ca
 pig."* Spec: `docs/superpowers/specs/2026-10-05-linux-tray-design.md`; reference:
 `docs/reference/linux-tray.md`; per-task reports in `.superpowers/sdd/2026-10-05-linux-tray/`.
 Key decisions:
-- One `Station` **enum** (`LocalStation` = official `tt --json`, `RemoteStation` = agent API)
-  instead of the spec's trait object: two fixed kinds, no `async-trait` dependency.
+- `Station` is an **enum** with two variants (`LocalStation` = official `tt --json`,
+  `RemoteStation` = agent API). The spec proposed a trait object; the kinds are fixed, and the
+  enum needs no `async-trait` dependency.
 - **Plain GTK4, no libadwaita**: `libadwaita-dev` is not installed here, and plain GTK4 should also fit
   jammy (not yet built there). No `gtk4` `v4_*` feature is enabled. Restyle is a later swap.
 - **`--backend tt`** in agentd serves through the official `tt` CLI (`serving/tt.rs`); opt-in,
   `runpy` stays the default.
 - **Run options** (`libttstation::run_options`) are a closed set with a vLLM-flag allowlist;
-  `GET /run/schema` describes them for UIs. Only the `tt` backend applies them.
+  `GET /run/schema` describes them for UIs. Only the `tt` backend applies them; runpy, docker
+  and dstack answer 400 (`OptionsUnsupported`) to non-empty options. The schema offers only the
+  `server` workflow.
 - Networking, option 3: mDNS plus manually added hosts now; Tailscale auto-discovery later.
 - Open WebUI is published on `127.0.0.1` only.
 - `LocalStation::run` takes **no gozer lease** (owner decision pending: a shared box can collide).
 - Package `tt-station-tray` (own icon name, autostart runs default mode because a `--no-window` instance does not join single-instance).
 State: unit tests, clippy and `tt-station-tray --smoke` pass. **Never run on a display** (tray,
 window, `--no-window`, single-instance, ksni updates, the real docker/terminal/clipboard/
-notify-send/WoL runner). The `tt` backend has not run on hardware (Task 4 deferred: all four
-chips were held by another tenant). Nothing tested on franklinstower. No `.deb` built from the
+notify-send/WoL runner). The `tt` backend is live-verified for one tt-model bundle
+(`changh95/qwen3.8-27b-p300x2`, Tasks 4 and 4c: 5 serves, ~2-4 min to `/v1/models`, nothing
+downloaded; `/serving` and restart rediscovery verified after e7c4c2c). Catalog models only
+`--dry-run`; `--offline` untested; `TT_VISIBLE_DEVICES` does not reach the container; an
+`options.port` serve is not rediscovered after a restart; `/tmp/tt-gozer/history.jsonl` is
+root-owned here, which blocks lease adoption (owner: `sudo chown ttuser
+/tmp/tt-gozer/history.jsonl`). Nothing tested on franklinstower. No `.deb` built from the
 new packaging; jammy not built. Gaps: Logs fetches on demand, no `tt model info` pane, no presets,
 no Queue button on 409, GNOME needs the AppIndicator extension.
+Final review fix wave (2026-10-05): the `tt` backend keeps its lease when a failed start cannot
+stop its container, refuses a second concurrent start (409, `/status` `starting: true`), and no
+longer rediscovers a just-stopped serve; the window stores poll answers by station id; the
+schema offers only the `server` workflow; the tray package Recommends (no longer Depends on)
+`tt-station`, so a tray-only workstation can skip the agent and its passwordless power rule.
 Owner to do for franklinstower: install and start `tt-station-agentd` and send the pairing code;
 say whether the session is GNOME or KDE; authorize an SSH key if we are to test over SSH;
 `sudo apt install libadwaita-dev` only for a later restyle.
