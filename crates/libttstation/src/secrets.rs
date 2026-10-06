@@ -326,6 +326,28 @@ pub fn default_store() -> Box<dyn SecretStore> {
     }
 }
 
+/// The key a box's pairing token is stored under: `"<host>:<port>"`.
+///
+/// This is the exact string a person types after `tt-station pair`, so a token written by the
+/// CLI for `qb2.local:8765` is found by anything that asks for `token_key("qb2.local", 8765)`,
+/// and the reverse. The Linux tray uses it as its station id too.
+pub fn token_key(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
+}
+
+/// The token store the CLI and the tray both use.
+///
+/// When `TT_CONFIG_DIR` is set this is a [`FileStore`] at `$TT_CONFIG_DIR/secrets.json`, so
+/// tests and anyone wanting an isolated config directory never touch real state. Otherwise it
+/// is [`default_store`] (Keychain on macOS, a file under the user config dir elsewhere).
+/// Keeping this in one place is what makes "paired in the CLI" mean "paired in the tray".
+pub fn store_from_env() -> Box<dyn SecretStore> {
+    if let Ok(dir) = std::env::var("TT_CONFIG_DIR") {
+        return Box::new(FileStore::new(PathBuf::from(dir).join("secrets.json")));
+    }
+    default_store()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

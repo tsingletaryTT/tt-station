@@ -13,7 +13,7 @@ mdns-sd = { workspace = true }
 # pairing client only ever talks to `http://` control-plane addresses today,
 # but a TLS backend costs little and keeps `https://` working later without
 # revisiting this dependency.
-reqwest = { workspace = true, features = ["rustls-tls"] }
+reqwest = { workspace = true, features = ["rustls-tls", "blocking"] }
 # Parses `ioreg -a` XML for driverless local card detection (local_device.rs).
 plist = "1"
 

@@ -54,6 +54,87 @@ where
     }
 }
 
+use anyhow::Context;
+use crate::model::ServingStatus;
+
+// The probe below used to live in the `tt-station` CLI. It moved here so the Linux tray
+// probes manual hosts exactly the way `tt-station discover --host` does.
+
+/// Build the `reqwest::blocking::Client` used to probe a manual host's
+/// `/status`. Both the overall request timeout and the TCP connect timeout
+/// are set to `timeout` -- without this, `reqwest::blocking::get` uses no
+/// request timeout at all and falls back to the OS's default TCP connect
+/// timeout (on the order of minutes) when a host is routable but not
+/// answering, which makes `tt-station discover --host <dead-ip>:<port> --timeout-ms
+/// <n>` hang far longer than `--timeout-ms` promises. Split out as its own
+/// function so it's unit-testable without making a real network call.
+pub fn build_probe_client(timeout: Duration) -> anyhow::Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(timeout)
+        .build()
+        .context("building HTTP client for manual host probe")
+}
+
+/// The `fetch` closure `ManualProvider` calls per configured host: a plain
+/// blocking `GET /status`, decoded into a `BoxRecord`. Blocking (not async)
+/// because `ManualProvider::discover` is a synchronous trait method -- see
+/// the module doc for why that's fine here (no runtime is active when
+/// `discover` runs).
+///
+/// `timeout` is the same duration as `discover`'s `--timeout-ms`: a manual
+/// probe shouldn't get to hang longer than mDNS browsing is allowed to run.
+pub fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> anyhow::Result<BoxRecord> {
+    #[derive(serde::Deserialize)]
+    struct StatusResponse {
+        name: String,
+        chips: String,
+        status: String,
+        /// (Task 3) The box's detected device-mesh label -- see
+        /// `tt-station-agentd::routes::StatusResponse::device_mesh`. Missing
+        /// or `null` on the wire both deserialize to `None` here (serde
+        /// treats an absent `Option<T>` field as `None`, same as an explicit
+        /// `null`), so this stays compatible with any `/status` responder
+        /// that predates Task 2 (e.g. `mock-box`).
+        device_mesh: Option<String>,
+        /// (Task 3) The box's detected primary NIC MAC -- see
+        /// `tt-station-agentd::routes::StatusResponse::mac`. Same
+        /// missing/`null` -> `None` back-compat reasoning as `device_mesh`.
+        mac: Option<String>,
+    }
+
+    let url = format!("http://{host}:{port}/status");
+    let client = build_probe_client(timeout)?;
+    let resp: StatusResponse = client
+        .get(&url)
+        .send()
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .with_context(|| format!("GET {url}"))?
+        .json()
+        .with_context(|| format!("parsing response from {url}"))?;
+
+    Ok(BoxRecord {
+        name: resp.name,
+        host: host.to_string(),
+        ctrl_port: port,
+        chips: resp.chips,
+        status: ServingStatus::from_txt(&resp.status)?,
+        // `/status` doesn't report an API version; manual hosts are assumed
+        // to speak the same API version this CLI does.
+        apiver: 1,
+        // This IS the "per-box status probe" `discover` already runs for
+        // manual hosts (mDNS-discovered boxes have no such probe -- see
+        // `libttstation::model::txt_decode`), so it's the one discover path
+        // that can populate `device_mesh` from real data instead of `None`.
+        device_mesh: resp.device_mesh,
+        // Same "this IS the per-box probe" reasoning as `device_mesh` above,
+        // applied to the box's detected primary NIC MAC (Task 3).
+        mac: resp.mac,
+    })
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::super::DiscoveryProvider;
