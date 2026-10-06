@@ -34,11 +34,11 @@ Description: On-box GTK control panel for tt-station
 Package: tt-station-tray
 Architecture: amd64
 Depends: ${shlibs:Depends}, ${misc:Depends}, tt-station (= ${binary:Version}), libgtk-4-1
-Recommends: gnome-shell-extension-appindicator | kde-plasma-desktop | xfce4-statusnotifier-plugin
+Recommends: gnome-shell-extension-appindicator
 Suggests: docker.io | docker-ce, xdg-utils
 Description: Linux tray app for tt-station
  A system tray icon and small GTK4 window that start, stop and connect to
  models served by this machine (through Tenstorrent's official `tt` CLI) and
  by paired QuietBoxes (through the tt-station agent API). Works with any
  desktop that hosts StatusNotifierItem tray icons; GNOME needs the AppIndicator
- extension.
+ extension (recommended). KDE Plasma hosts them itself.

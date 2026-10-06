@@ -15,7 +15,7 @@ ksni = "0.3"
 # `default-features = false` + `tokio` reuses the runtime ksni already pulls (no async-io thread).
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 # Plain GTK4 for the main window (libadwaita is not installed on the build box). No `v4_*` feature
-# is enabled: the window compiles against the base GTK 4.0 API, so the build does not need a
+# is enabled: the window compiles against the base GTK 4.0 API, so the build should not need a
 # newer GTK than Ubuntu 22.04's 4.6 (not yet built or run there; see docs/reference/linux-tray.md).
 gtk4 = "0.9"
 

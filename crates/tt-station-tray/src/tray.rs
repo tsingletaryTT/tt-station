@@ -13,8 +13,8 @@
 //!
 //! Icon: the freedesktop name `com.tenstorrent.ttstation.tray`, which the `tt-station-tray`
 //! package installs under hicolor (the same art as the panel's, copied from
-//! `box-panel/assets/icons` at package time under this name so the two packages share no file). If the theme lacks it the
-//! host shows its own fallback; no artwork is made here. Status dots are unicode glyphs in menu
+//! `box-panel/assets/icons` at package time under this name so the two packages share no
+//! file). If the theme lacks it the host shows its own fallback; no artwork is made here. Status dots are unicode glyphs in menu
 //! labels, because a plain label cannot be colored.
 
 use tokio::sync::mpsc::UnboundedSender;

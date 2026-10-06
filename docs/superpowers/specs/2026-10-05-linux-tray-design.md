@@ -197,7 +197,7 @@ Updated 2026-10-05 after implementation (Tasks 1-10).
 - **Local leasing: open for the owner.** `LocalStation::run` does not take a gozer lease, which
   can collide with another tenant on a shared box.
 - **Window toolkit and jammy: partly resolved.** The window uses plain GTK4 with no `gtk4`
-  `v4_*` feature, so it compiles against the base GTK 4.0 API. Jammy (GTK 4.6) has not been
+  `v4_*` feature, so it should compile against the base GTK 4.0 API. Jammy (GTK 4.6) has not been
   built; that is the only evidence for it.
 - **Deviation: libadwaita not used.** `libadwaita-dev` is not installed on the build box.
   Restyling to libadwaita is a later swap (`sudo apt install libadwaita-dev` first).

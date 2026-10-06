@@ -38,14 +38,16 @@ is already paired in the tray, and the reverse. The agent shows its code on the 
 
 ## Tray and window
 
-* **Tray.** Built on `ksni` (StatusNotifierItem over D-Bus). It works on KDE Plasma and on
-  XFCE with the status-notifier plugin. **GNOME does not host StatusNotifierItem icons by
+* **Tray.** Built on `ksni` (StatusNotifierItem over D-Bus). KDE Plasma hosts StatusNotifierItem
+  icons itself. XFCE needs a status-notifier or indicator panel plugin; the package name was not
+  confirmed here (`xfce4-indicator-plugin` has an apt candidate on 24.04, but whether it hosts
+  these icons was not checked). **GNOME does not host StatusNotifierItem icons by
   default**: install the AppIndicator extension (`gnome-shell-extension-appindicator`) and enable
   it. At start-up the tray checks whether a host owns `org.kde.StatusNotifierWatcher` and, if
   not, shows install hints for the detected distribution in the window.
 * **Window.** Plain GTK4 with Stations, Models and Logs pages. libadwaita is not used: the
-  development box has no `libadwaita-dev`, and plain GTK4 also builds against Ubuntu 22.04's
-  GTK 4.6. A libadwaita restyle is a later swap.
+  development box has no `libadwaita-dev`, and plain GTK4 should also build against Ubuntu
+  22.04's GTK 4.6 (not yet built there). A libadwaita restyle is a later swap.
 * **Connect launchers.** Open WebUI (a local `docker run`, published on `127.0.0.1` only; a
   loopback model endpoint is rewritten to `host.docker.internal` for the container), opencode in
   a terminal, copy the `/v1` URL, open it in a browser. Missing docker, a terminal, `xdg-open`
@@ -118,7 +120,8 @@ Not verified:
 * **Nothing has been tested on `franklinstower`**, the intended second machine.
 * **A `.deb` has not been built or installed** from these packaging files.
 * **Ubuntu 22.04 (jammy) has not been built.** The crate enables no `gtk4` `v4_*` feature, so
-  it compiles against the base GTK 4.0 API, and that is the only evidence for jammy.
+  it should compile against the base GTK 4.0 API. That is the only evidence for jammy, and it
+  is an inference.
 
 ## Open decision: leasing
 
@@ -139,4 +142,4 @@ owner has to decide whether the local station should lease too.
 Package `tt-station-tray` (amd64) installs `/usr/bin/tt-station-tray`, the launcher
 `com.tenstorrent.ttstation.tray.desktop`, an autostart entry in `/etc/xdg/autostart/`, and the
 panel's icons under the tray's own icon name. It depends on `tt-station (= same version)` and
-`libgtk-4-1`, and recommends a StatusNotifierItem host.
+`libgtk-4-1`, and recommends the GNOME AppIndicator extension.

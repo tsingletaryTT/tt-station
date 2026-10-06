@@ -32,8 +32,8 @@ pig."* Spec: `docs/superpowers/specs/2026-10-05-linux-tray-design.md`; reference
 Key decisions:
 - One `Station` **enum** (`LocalStation` = official `tt --json`, `RemoteStation` = agent API)
   instead of the spec's trait object: two fixed kinds, no `async-trait` dependency.
-- **Plain GTK4, no libadwaita**: `libadwaita-dev` is not installed here, and plain GTK4 also fits
-  jammy. No `gtk4` `v4_*` feature is enabled. Restyle is a later swap.
+- **Plain GTK4, no libadwaita**: `libadwaita-dev` is not installed here, and plain GTK4 should also fit
+  jammy (not yet built there). No `gtk4` `v4_*` feature is enabled. Restyle is a later swap.
 - **`--backend tt`** in agentd serves through the official `tt` CLI (`serving/tt.rs`); opt-in,
   `runpy` stays the default.
 - **Run options** (`libttstation::run_options`) are a closed set with a vLLM-flag allowlist;
@@ -41,7 +41,7 @@ Key decisions:
 - Networking, option 3: mDNS plus manually added hosts now; Tailscale auto-discovery later.
 - Open WebUI is published on `127.0.0.1` only.
 - `LocalStation::run` takes **no gozer lease** (owner decision pending: a shared box can collide).
-- Package `tt-station-tray` (own icon name, autostart in default mode, not `--no-window`).
+- Package `tt-station-tray` (own icon name, autostart runs default mode because a `--no-window` instance does not join single-instance).
 State: unit tests, clippy and `tt-station-tray --smoke` pass. **Never run on a display** (tray,
 window, `--no-window`, single-instance, ksni updates, the real docker/terminal/clipboard/
 notify-send/WoL runner). The `tt` backend has not run on hardware (Task 4 deferred: all four

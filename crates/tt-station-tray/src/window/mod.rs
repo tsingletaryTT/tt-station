@@ -2,7 +2,8 @@
 //!
 //! **Plain GTK4, no libadwaita.** The design spec asked for GTK4 with libadwaita. The build
 //! machine has the GTK 4.14 development files and no `libadwaita-dev` (and no root to install
-//! it), so this uses `gtk4` 0.9 with no `v4_*` feature (base GTK 4.0 API, so jammy's GTK 4.6 can satisfy the build). Nothing here depends on GNOME;
+//! it), so this uses `gtk4` 0.9 with no `v4_*` feature (base GTK 4.0 API, so jammy's GTK 4.6
+//! should satisfy the build; not yet built there). Nothing here depends on GNOME;
 //! the window should look like a plain GTK app on KDE and XFCE.
 //!
 //! **Not looked at.** No one has looked at this window or exercised its click paths. It
