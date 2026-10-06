@@ -472,6 +472,31 @@ pub fn install_hint(os_release: &str, desktop: &str) -> Option<String>;   // pur
 
 ---
 
+### Task 9b: App wiring (added during execution)
+
+Added on 2026-10-05 after Task 7 and Task 8 reviews showed that no task connects the menu to anything. Without it the tray draws a menu whose items do nothing and the window and the tray never run together.
+
+**Files:**
+- Modify: `crates/tt-station-tray/src/main.rs`, `src/lib.rs`
+- Create: `crates/tt-station-tray/src/app.rs` (event loop and action dispatch), `src/launchers.rs` (pure builders for Connect actions)
+- Test: inline tests plus `crates/tt-station-tray/tests/app_actions.rs`
+
+**Interfaces:**
+- Consumes: `Station`, `StationState`, `Registry`, `build_menu`, `MenuAction`, `tray` (ksni glue), `sni_host::{probe, install_hint, should_show_notice, mark_notice_shown}`, `window::run_app`, `libttstation::wol`.
+- Produces:
+  - `pub async fn dispatch(action: MenuAction, ctx: &AppContext) -> ActionOutcome` where `ActionOutcome` is `Done`, `Message(String)` (shown to the user) or `OpenWindow`. `AppContext` holds the stations, the registry, and handles for launching.
+  - `launchers::{open_webui_command(endpoint: &ServingNow) -> Command description, opencode_config(endpoint) -> String, copy_text(endpoint) -> String}` as pure builders, ported from `box-panel/panel_launchers.py` (same container name, image, and config shape).
+
+- [ ] **Step 1: Failing tests** for `dispatch` against mock-box and a fake `tt`: Stop acts only on the shown server (reuses `Station::stop`); Restart repeats the remembered options for that model (from `Registry::last_run`); RunLast with no remembered run returns `Message`; Wake sends a magic packet through an injectable sender (test with a recording sender, never the network); OpenWindow returns `OpenWindow`; a failing station call returns `Message` with the error text verbatim.
+- [ ] **Step 2: Failing tests** for `launchers`: the Open WebUI docker argv has no shell string, uses `host.docker.internal` and the endpoint port; the opencode config splits `ttstation/<model>` on the first `/` the way `panel_launchers.py` does; a missing docker or terminal returns a message, never a panic. Cross-check against `box-panel/test_panel_launchers.py` expectations.
+- [ ] **Step 3: Implement** `app.rs`: a poll loop (every 5 s, and immediately after any action) that refreshes each station state, merges the registry MAC for offline stations (reuse the pure fn in `window/view_model.rs`), rebuilds the menu with `build_menu`, and pushes it to the ksni handle. Run `sni_host::probe()` once at start; when `should_show_notice` is true, send a desktop notification through `notify-send` if present and record `mark_notice_shown`. A failure to start the tray (`ksni` spawn error, no session bus) logs one line and continues as a windowed app. Never `unwrap` on the bus path.
+- [ ] **Step 4: `main.rs`:** default mode starts the tray, the poll loop and, on `OpenWindow` or on first launch when no tray host exists, the window; closing the window leaves the tray running; a second launch focuses the running instance (use a simple lock/socket in the runtime dir; if that is not practical, document the limitation rather than faking it). Keep `--version` and `--smoke` behaviour, and add `--no-window` (tray only).
+- [ ] **Step 5: Verify.** `cargo test --workspace`, clippy `-D warnings`, `tt-station-tray --smoke` still prints `ok`. Do NOT launch the window or tray on this box (live desktop session). State plainly in the report what was not run.
+- [ ] **Step 6: Mutation checks.** Make Restart ignore remembered options; make Stop act on all stations; confirm each test goes red; restore.
+- [ ] **Step 7: Commit** `feat(tray): wire menu actions, polling, Connect launchers and tray plus window start-up`.
+
+---
+
 ### Task 10: Packaging, CI, docs, version
 
 **Files:**
