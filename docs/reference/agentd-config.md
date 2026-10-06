@@ -176,7 +176,10 @@ between concurrent requests. A `ps` that takes longer than 5 s is killed with
 its whole process group; then rows up to 10 s old are used, or none. Deciding
 what to stop before a lease release always reads `ps` fresh: a server found
 by an idle check is confirmed with a fresh read before `POST /stop` stops it
-and releases the lease.
+(and before any lease release), with or without gozer. Fresh reads queue on
+the same lock as the idle checks, so behind a hung `tt` a `POST /run` or
+`POST /stop` that needs one can wait about 10 s (two 5 s timeouts) before it
+fails.
 
 `GET /models` reads `tt --json model list` and keeps the models with a vLLM
 engine.

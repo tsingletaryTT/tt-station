@@ -105,6 +105,9 @@ pub const PS_CACHE_TTL: Duration = Duration::from_millis(2500);
 /// well under a second.
 pub const PS_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A `/run` or `/stop` that needs a fresh read queues on the same lock as the idle polls, so
+/// behind a hung `tt` it can wait about 2x this (the poll's run, then its own) before failing.
+///
 /// When a cached-path `ps` fails or times out, the last good rows are still returned if they are
 /// younger than this. Older rows are not trusted, and the error is returned.
 pub const PS_STALE_LIMIT: Duration = Duration::from_secs(10);
@@ -567,21 +570,27 @@ impl TtBackend {
     /// it is released.
     ///
     /// **A name found by discovery.** A name `discover_own_serve` recorded may come from a
-    /// cached `tt model ps` read. With a lease held it is confirmed with a fresh read first (see
-    /// `confirm_discovered`), because the stop is followed by a chip reset.
+    /// cached `tt model ps` read, possibly long ago. It is always confirmed with a fresh read
+    /// first (see `confirm_discovered`), with or without a lease: the stop must reach only the
+    /// server now on our port, and with a lease the stop is followed by a chip reset.
     fn stop_inner(&self, hint: &str) -> Result<()> {
         let recorded = self.served.lock().expect("served mutex poisoned").clone();
         let lease_held = self.lease.lock().expect("lease mutex poisoned").is_some();
-        let mut name = match recorded {
+        // A discovered name is always confirmed with a fresh read, lease or not: it may be
+        // seconds or hours old, and `tt model stop` must not hit a server that is no longer on
+        // our port. That fresh read already answers "what runs on our port", so the
+        // identification below is skipped after it (no second `ps`, and a failure of a second
+        // read cannot refuse a release that the first clean read allowed).
+        let (mut name, confirmed) = match recorded {
             Some(Served {
                 name,
                 discovered: true,
                 ..
-            }) if lease_held => self.confirm_discovered(&name)?,
-            Some(served) => Some(served.name),
-            None => (!hint.is_empty()).then(|| hint.to_string()),
+            }) => (self.confirm_discovered(&name)?, true),
+            Some(served) => (Some(served.name), false),
+            None => ((!hint.is_empty()).then(|| hint.to_string()), false),
         };
-        if name.is_none() && lease_held {
+        if name.is_none() && lease_held && !confirmed {
             name = self.identify_untracked_serve()?;
         }
         if let Some(name) = name {
@@ -595,8 +604,8 @@ impl TtBackend {
         self.release_lease()
     }
 
-    /// Confirm a discovered serve with a fresh `tt model ps` before stopping it and releasing a
-    /// lease. Returns the name to stop: the running row on this backend's own port, which may
+    /// Confirm a discovered serve with a fresh `tt model ps` before stopping it (and before
+    /// releasing a lease, when one is held). Returns the name to stop: the running row on this backend's own port, which may
     /// differ from `recorded` if the server changed since the cached read. `Ok(None)` when
     /// nothing runs anywhere under that name and nothing runs on our port: the lease is then
     /// released as for any idle lease. Refuses (error, lease kept) when `ps` fails, when the
@@ -607,14 +616,15 @@ impl TtBackend {
         let port = self.own_port();
         let rows = self.ps(PsRead::Fresh).context(
             "tt backend: could not confirm the running server with `tt model ps`; refusing to \
-             stop it or release the lease",
+             stop it (and to release any lease)",
         )?;
         let running = |r: &&ServedModel| r.status.as_deref() == Some("running");
         if let Some(row) = rows.iter().filter(running).find(|r| r.port == Some(port)) {
             validate_model_name(&row.name).map_err(|_| {
                 anyhow::anyhow!(
                     "tt backend: `tt model ps` names the server on port {port} {:?}, which \
-                     cannot be passed to `tt model stop`; refusing to release the lease",
+                     cannot be passed to `tt model stop`; refusing to stop it (and to release \
+                     any lease)",
                     row.name
                 )
             })?;
@@ -623,7 +633,7 @@ impl TtBackend {
         if let Some(moved) = rows.iter().filter(running).find(|r| r.name == recorded) {
             return Err(anyhow::anyhow!(
                 "tt backend: '{recorded}' is now running on port {:?}, not on this agent's port \
-                 {port}; refusing to stop it or release the lease. Check `tt model ps`",
+                 {port}; refusing to stop it (and to release any lease). Check `tt model ps`",
                 moved.port
             ));
         }
@@ -2437,6 +2447,84 @@ mod tests {
         }));
         assert!(b.ps_cache.is_poisoned());
         assert_eq!(b.serving_entries().map(|e| e.len()), Some(1));
+    }
+
+    // ---- Task 4b fix round 3 ----
+
+    /// Discovery with gozer off (no lease), from a cached read.
+    fn discovered_without_lease(runner: &ScriptedRunner) -> TtBackend {
+        runner.on("model ps", 0, PS_ONE_RUNNING, "");
+        let b = cached_backend(runner, 10_000, 10_000, 1_000);
+        assert!(b.discover_own_serve().is_some());
+        b
+    }
+
+    #[test]
+    fn without_a_lease_a_discovered_serve_on_another_port_is_not_stopped() {
+        let runner = ScriptedRunner::happy();
+        let b = discovered_without_lease(&runner);
+        runner.on("model ps", 0, &PS_ONE_RUNNING.replace("8003", "9001"), "");
+        let err = b.stop("").unwrap_err();
+        assert!(format!("{err:#}").contains("refusing"), "{err:#}");
+        assert!(runner.pos("model stop").is_none(), "{:?}", runner.log());
+    }
+
+    #[test]
+    fn without_a_lease_the_row_now_on_our_port_is_stopped() {
+        let runner = ScriptedRunner::happy();
+        let b = discovered_without_lease(&runner);
+        runner.on("model ps", 0, PS_OTHER_ON_8003, "");
+        b.stop("").unwrap();
+        assert!(
+            runner.pos("model stop Qwen3-8B").is_some(),
+            "{:?}",
+            runner.log()
+        );
+        assert!(runner.pos("model stop Llama-3.1-8B-Instruct").is_none());
+    }
+
+    #[test]
+    fn without_a_lease_a_discovered_serve_that_is_gone_is_not_stopped() {
+        let runner = ScriptedRunner::happy();
+        let b = discovered_without_lease(&runner);
+        runner.on("model ps", 0, PS_EMPTY, "");
+        b.stop("").unwrap();
+        assert!(runner.pos("model stop").is_none(), "{:?}", runner.log());
+        assert_eq!(b.served(), None);
+    }
+
+    /// With a lease and nothing running, the confirmation's fresh read is the only one: no
+    /// second `ps` for the identification, and a failing second read cannot block the release.
+    #[test]
+    fn a_confirmed_empty_port_needs_one_fresh_read() {
+        let runner = ScriptedRunner::happy();
+        let b = discovered_with_lease(&runner);
+        assert_eq!(runner.ps_runs(), 1, "the discovery read");
+        runner.on("model ps", 0, PS_EMPTY, "");
+        b.stop("").unwrap();
+        assert_eq!(
+            runner.ps_runs(),
+            2,
+            "exactly one fresh read: {:?}",
+            runner.log()
+        );
+        assert!(runner.pos("gozer release lease-old").is_some());
+    }
+
+    /// A fresh reader that arrives while a cached run is already in flight must not reuse that
+    /// run (it began before the reader asked); it runs `ps` again.
+    #[test]
+    fn a_fresh_reader_does_not_reuse_a_run_that_started_before_it_arrived() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_LIVE_BUNDLE, "");
+        *runner.ps_delay.lock().unwrap() = Duration::from_millis(80);
+        let b = cached_backend(&runner, 10_000, 10_000, 1_000);
+        std::thread::scope(|scope| {
+            scope.spawn(|| b.ps(PsRead::Cached).unwrap());
+            std::thread::sleep(Duration::from_millis(20)); // the cached run is in flight now
+            scope.spawn(|| b.ps(PsRead::Fresh).unwrap());
+        });
+        assert_eq!(runner.ps_runs(), 2, "{:?}", runner.log());
     }
 
     #[test]
