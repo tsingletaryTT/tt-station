@@ -180,6 +180,7 @@ impl LocalStation {
             serving: None,
             paired: true,
             contention: None,
+            mac: None,
         };
         if self.vet().await.is_err() {
             return state;

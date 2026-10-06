@@ -73,12 +73,14 @@ impl RemoteStation {
             serving: None,
             paired: self.token.is_some(),
             contention: self.contention_now(),
+            mac: None,
         };
         let Ok(status) = agent_client::get_status(&self.base).await else {
             return state;
         };
         state.reachable = true;
         state.mesh = status.device_mesh;
+        state.mac = status.mac;
         if let ServingStatus::Serving(model) = status.status {
             state.serving = Some(self.serving_now(&model).await);
         }

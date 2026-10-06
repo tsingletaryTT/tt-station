@@ -7,9 +7,11 @@
 
 pub mod discover;
 pub mod local;
+pub mod menu_model;
 pub mod pairing_flow;
 pub mod registry;
 pub mod remote;
 pub mod station;
+pub mod tray;
 
 pub use station::{fits, ModelRow, ServingNow, Station, StationId, StationKind, StationState};

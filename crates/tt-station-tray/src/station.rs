@@ -68,6 +68,11 @@ pub struct StationState {
     /// Text of the last refused run (another tenant holds the chips), kept until a run succeeds.
     /// Only remote stations set it.
     pub contention: Option<String>,
+    /// The box's network card MAC, when known, so the tray can offer Wake-on-LAN for a box that
+    /// is off. A powered-off box cannot report it, so it comes from the registry's
+    /// `KnownStation::mac` or a previous `/status`; whoever builds the state for an offline box
+    /// fills it in. `None` for the local station and for a box whose MAC was never seen.
+    pub mac: Option<String>,
 }
 
 /// One row in the model browser, the same shape for both station kinds.
