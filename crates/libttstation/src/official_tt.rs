@@ -27,37 +27,35 @@ pub const OFFICIAL_TT_DEFAULT_BIN: &str = "tt";
 
 /// Read the version from the official CLI's `--version` output.
 ///
-/// Returns `Some(version)` only when the first line is `tt <semver>`: the literal `tt`, one
-/// space, then `MAJOR.MINOR.PATCH` in digits, optionally followed by a `-pre` or `+build` suffix
-/// made of letters, digits, `.` and `-`. `"tt 1.0.1"` gives `Some("1.0.1")`. `"tt-cli 0.0.3"`,
-/// `"Operator CLI for tt-station"` and an empty string give `None`.
+/// Returns `Some(version)` only when the first line is the literal `tt`, one space, then a
+/// version that starts with at least two numeric segments (`N.N`) and continues with any of
+/// `0-9 A-Z a-z . + -`. That accepts strict semver (`tt 1.0.1`) and the PEP 440 versions a
+/// Python editable or development build of tt-cli prints (`tt 1.0.2.dev3+gabc`, `tt 1.0.0rc1`).
+/// It rejects `"tt-cli 0.0.3"`, `"Operator CLI for tt-station"` (what the stale pre-rename
+/// binary printed), `"tt"`, `"tt abc"`, `"tt 1"` and an empty string. Error messages still say
+/// `tt <semver>`, the form users will recognise.
 ///
 /// The caller must also check that the process exited successfully. This function sees only the
 /// text.
 pub fn parse_version(stdout: &str) -> Option<String> {
     let first = stdout.lines().next().unwrap_or("").trim();
     let version = first.strip_prefix("tt ")?;
-    is_semver(version).then(|| version.to_string())
+    is_tt_version(version).then(|| version.to_string())
 }
 
-/// `MAJOR.MINOR.PATCH[(-|+)suffix]`, with each of the three core parts made only of digits.
-fn is_semver(v: &str) -> bool {
-    // Split off an optional pre-release or build suffix at the first '-' or '+'.
-    let (core, suffix) = match v.find(['-', '+']) {
-        Some(i) => (&v[..i], Some(&v[i + 1..])),
-        None => (v, None),
-    };
-    let parts: Vec<&str> = core.split('.').collect();
-    let core_ok = parts.len() == 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
-    let suffix_ok = suffix.is_none_or(|s| {
-        !s.is_empty()
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
-    });
-    core_ok && suffix_ok
+/// `N.N` (digits, a dot, digits) followed by any of `[0-9A-Za-z.+-]`.
+fn is_tt_version(v: &str) -> bool {
+    let digits = |s: &str| s.chars().take_while(|c| c.is_ascii_digit()).count();
+    let major = digits(v);
+    if major == 0 || !v[major..].starts_with('.') {
+        return false;
+    }
+    let rest = &v[major + 1..];
+    let minor = digits(rest);
+    minor > 0
+        && rest[minor..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
 }
 
 /// The error text for a binary that did not answer `--version` with `tt <semver>`. Shared so that
@@ -144,6 +142,12 @@ mod tests {
             parse_version("tt 1.0.1+abc.1").as_deref(),
             Some("1.0.1+abc.1")
         );
+        // PEP 440 versions from editable or development builds of tt-cli.
+        assert_eq!(
+            parse_version("tt 1.0.2.dev3+gabc").as_deref(),
+            Some("1.0.2.dev3+gabc")
+        );
+        assert_eq!(parse_version("tt 1.0.0rc1").as_deref(), Some("1.0.0rc1"));
     }
 
     #[test]
@@ -152,12 +156,13 @@ mod tests {
             "tt-cli 0.0.3",
             "Operator CLI for tt-station",
             "",
+            "tt",
             "tt ",
+            "tt abc",
             "tt 1",
-            "tt 1.0",
+            "tt 1.",
+            "tt .1",
             "tt v1.0.1",
-            "tt 1.0.x",
-            "tt 1.0.1-",
             "tt 1.0.1 extra",
             "TT 1.0.1",
             "tt  1.0.1",

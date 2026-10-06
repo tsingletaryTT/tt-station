@@ -308,3 +308,35 @@ async fn an_option_the_backend_refuses_is_400_naming_the_field() {
     let msg = body["error"].as_str().unwrap();
     assert!(msg.starts_with("vllm_args: "), "got {msg:?}");
 }
+
+/// A model name that could be read as a flag (or that breaks gozer's `--who`)
+/// is refused at the route with 400 naming `model`, and the backend is never
+/// called.
+#[tokio::test]
+async fn an_unsafe_model_name_is_400_and_the_backend_is_not_called() {
+    let calls = Arc::new(Mutex::new(Calls::default()));
+    let (client, base, token) = boot(Arc::new(RecordingBackend { calls: calls.clone() })).await;
+    for bad in ["--port=1", "a:b", "-x", "a\nb", ""] {
+        let resp = client
+            .post(format!("{base}/run"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "model": bad }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST, "{bad:?}");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let msg = body["error"].as_str().unwrap();
+        assert!(msg.starts_with("model: "), "got {msg:?}");
+    }
+    assert_eq!(calls.lock().unwrap().seen.len(), 0);
+
+    let resp = client
+        .post(format!("{base}/run"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "model": "meta-llama/Llama-3.1-8B-Instruct" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}

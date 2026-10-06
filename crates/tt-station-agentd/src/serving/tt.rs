@@ -14,13 +14,16 @@
 //!
 //! ## What `start` does, in order
 //!
-//! 1. Validate the options again (the route already did) and refuse a non-`server` workflow.
+//! 1. Validate the model name and the options again (the route already did) and refuse a
+//!    non-`server` workflow.
 //! 2. Check that the configured binary is the official CLI: `--version` must print
 //!    `tt <semver>` (see `libttstation::official_tt`).
 //! 3. Ask `tt --json serve <model> --dry-run` how it would serve the model. That says whether
 //!    the model is a catalog model or a tt-model bundle, which decides which options are
 //!    allowed, and it rejects an unknown model before any chips are leased.
-//! 4. Stop whatever this backend is already serving and release its lease.
+//! 4. Stop whatever this backend is already serving and release its lease. A lease adopted
+//!    from a previous agent process is released only after its server, found with
+//!    `tt model ps`, has been stopped; if that server cannot be identified, the start is refused.
 //! 5. Lease chips through gozer, when gozer is installed.
 //! 6. Run `tt --json serve ...`. For a catalog model it returns once tt-inference-server's
 //!    container exists. For a bundle the argv carries `--detach`, which makes it return once
@@ -45,13 +48,15 @@
 //!   `requires_key: false`; `tt serve` passes `--no-auth` to `run.py` for catalog models.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use libttstation::model::{Endpoint, ModelInfo, ModelsResponse, ServingStatus};
 use libttstation::official_tt;
-use libttstation::run_options::{serve_argv_for, OptionError, RunOptions, ServeTarget, Workflow};
+use libttstation::run_options::{
+    serve_argv_for, validate_model_name, OptionError, RunOptions, ServeTarget, Workflow,
+};
 use serde::Deserialize;
 
 use super::docker::{CapturedOutput, CommandRunner};
@@ -267,10 +272,21 @@ pub struct TtBackend {
     /// What this backend started: the model name it passed to `tt serve` (the name `tt model
     /// stop` needs, which can differ from the `/v1/models` id) and the port it served on.
     served: Mutex<Option<(String, u16)>>,
+    /// The serving port named in the `who` of a lease adopted from a previous agent process
+    /// (`tt-station:<port>:<model>`). Used to find that process's server with `tt model ps`
+    /// before the adopted lease is released. See `stop_inner`.
+    adopted_port: Mutex<Option<u16>>,
     /// Set by `stop` so an in-flight `start` stops polling; cleared when `start` begins.
     /// Same purpose as `RunPyBackend`'s flag: until `start` returns, the agent's status is
-    /// still idle, so `/stop` cannot be gated on "a model is serving".
-    cancel: AtomicBool,
+    /// still idle, so `/stop` cannot be gated on "a model is serving". `Arc` so tests can set
+    /// it from inside a fake runner call, at an exact point in `start`.
+    cancel: Arc<AtomicBool>,
+    /// Serialises the end of a successful `start` (check `cancel`, record `served`, move the
+    /// lease in) against `stop` setting `cancel`. With it, a `/stop` lands either before the
+    /// handover (then `start` sees `cancel`, stops the model and lets the lease guard release)
+    /// or after it (then `stop` finds `served` and the lease, and stops and releases them).
+    /// There is no third case where both sides think the other one cleaned up.
+    handover: Mutex<()>,
 }
 
 impl TtBackend {
@@ -282,7 +298,9 @@ impl TtBackend {
             gozer: None,
             lease: Mutex::new(None),
             served: Mutex::new(None),
-            cancel: AtomicBool::new(false),
+            adopted_port: Mutex::new(None),
+            cancel: Arc::new(AtomicBool::new(false)),
+            handover: Mutex::new(()),
         }
     }
 
@@ -297,6 +315,12 @@ impl TtBackend {
     #[cfg(test)]
     fn held_lease(&self) -> Option<String> {
         self.lease.lock().expect("lease mutex poisoned").clone()
+    }
+
+    /// Test-only: what this backend has recorded as serving.
+    #[cfg(test)]
+    fn served(&self) -> Option<(String, u16)> {
+        self.served.lock().expect("served mutex poisoned").clone()
     }
 
     /// `[tt_bin, args...]` as owned strings.
@@ -420,6 +444,15 @@ impl TtBackend {
     /// `hint` is used when this process did not start the serve itself, for example after an
     /// agent restart: the route passes the model id it last reported, and `tt model stop`
     /// accepts a catalog model's Hugging Face id as well as its catalog name.
+    ///
+    /// **A lease held with nothing recorded.** After an agent restart, `adopt_lease` records the
+    /// previous process's lease while `served` is empty, and the route may pass no `hint`
+    /// either. Releasing that lease straight away would reset the chips under the old server,
+    /// which is still running. So in that case the server is looked up with `tt model ps` (the
+    /// running row on the adopted lease's port, else `service_port`) and stopped by name first.
+    /// If `tt model ps` fails, or the row's name is not a safe model name, this returns an error
+    /// and releases nothing. No running row on that port means nothing is using the lease, and
+    /// it is released.
     fn stop_inner(&self, hint: &str) -> Result<()> {
         let recorded = self
             .served
@@ -427,12 +460,50 @@ impl TtBackend {
             .expect("served mutex poisoned")
             .as_ref()
             .map(|(name, _)| name.clone());
-        let name = recorded.or_else(|| (!hint.is_empty()).then(|| hint.to_string()));
+        let mut name = recorded.or_else(|| (!hint.is_empty()).then(|| hint.to_string()));
+        let lease_held = self.lease.lock().expect("lease mutex poisoned").is_some();
+        if name.is_none() && lease_held {
+            name = self.identify_untracked_serve()?;
+        }
         if let Some(name) = name {
             self.tt_model_stop(&name)?;
         }
         *self.served.lock().expect("served mutex poisoned") = None;
+        *self
+            .adopted_port
+            .lock()
+            .expect("adopted_port mutex poisoned") = None;
         self.release_lease()
+    }
+
+    /// Find the server running under a lease this process did not start (see `stop_inner`).
+    /// `Ok(None)` means nothing is running on the lease's port.
+    fn identify_untracked_serve(&self) -> Result<Option<String>> {
+        let port = self
+            .adopted_port
+            .lock()
+            .expect("adopted_port mutex poisoned")
+            .unwrap_or(self.config.service_port);
+        let rows = self.ps().context(
+            "tt backend: a chip lease is held but this agent did not start the server using \
+             it, and `tt model ps` could not say what is running; refusing to release the lease \
+             (that would reset chips under a live server). Stop the server by hand, then retry",
+        )?;
+        let Some(row) = rows
+            .into_iter()
+            .find(|r| r.port == Some(port) && r.status.as_deref() == Some("running"))
+        else {
+            return Ok(None);
+        };
+        validate_model_name(&row.name).map_err(|_| {
+            anyhow::anyhow!(
+                "tt backend: a chip lease is held for the server on port {port}, but `tt model \
+                 ps` names it {:?}, which cannot be passed to `tt model stop`; refusing to \
+                 release the lease. Stop that server by hand, then retry",
+                row.name
+            )
+        })?;
+        Ok(Some(row.name))
     }
 
     /// `tt --json model ps`, parsed.
@@ -473,8 +544,10 @@ impl ServingBackend for TtBackend {
         // A `/stop` from an earlier run must not cancel this one.
         self.cancel.store(false, Ordering::SeqCst);
 
-        // (1) Options. The route validated them already; checking again costs nothing and
-        // keeps this backend safe for any other caller.
+        // (1) The model name and the options. The route validated both already; checking again
+        // costs nothing and keeps this backend safe for any other caller. The model name goes
+        // into several argvs and into gozer's `--who`, so nothing runs before this check.
+        validate_model_name(model)?;
         options.validate()?;
         if let Some(w) = options.workflow.filter(|w| *w != Workflow::Server) {
             // `benchmarks` and `evals` run in the foreground until they finish, then stop the
@@ -597,20 +670,22 @@ impl ServingBackend for TtBackend {
             ));
         };
 
-        // Success. Record what was started, then move the lease into the backend so it
-        // outlives this call. This is the only exit that does not release.
-        *self.served.lock().expect("served mutex poisoned") = Some((model.to_string(), port));
-        if let Some(guard) = lease {
-            *self.lease.lock().expect("lease mutex poisoned") = Some(guard.into_lease_id());
-            // A `/stop` that arrived after the poll succeeded may have read no lease and
-            // released nothing. It has already stopped the server, so give the lease back now.
+        // Handover, under the `handover` lock (see that field). A `/stop` that arrived after the
+        // last poll and before this point aborts the start: the model is stopped here and the
+        // lease guard releases on return. Otherwise record what was started and move the lease
+        // into the backend so it outlives this call. This is the only exit that does not release.
+        {
+            let _handover = self.handover.lock().expect("handover mutex poisoned");
             if self.cancel.load(Ordering::SeqCst) {
-                if let Err(err) = self.release_lease() {
-                    eprintln!(
-                        "tt-station-agentd: releasing the lease of a serve that a concurrent \
-                         stop raced failed: {err:#}"
-                    );
-                }
+                self.stop_after_failure(model);
+                *self.served.lock().expect("served mutex poisoned") = None;
+                return Err(anyhow::anyhow!(
+                    "tt backend: serve of '{model}' aborted by a stop request"
+                ));
+            }
+            *self.served.lock().expect("served mutex poisoned") = Some((model.to_string(), port));
+            if let Some(guard) = lease {
+                *self.lease.lock().expect("lease mutex poisoned") = Some(guard.into_lease_id());
             }
         }
 
@@ -625,13 +700,21 @@ impl ServingBackend for TtBackend {
     /// (falling back to `model`, the id the agent last reported), then release the lease.
     /// Also cancels an in-flight `start`.
     fn stop(&self, model: &str) -> Result<()> {
-        self.cancel.store(true, Ordering::SeqCst);
+        {
+            // Under `handover`, so this lands wholly before or wholly after the end of an
+            // in-flight `start`. See the `handover` field.
+            let _handover = self.handover.lock().expect("handover mutex poisoned");
+            self.cancel.store(true, Ordering::SeqCst);
+        }
         self.stop_inner(model)
     }
 
     /// Take ownership of a lease a previous agent process left behind, so the next `stop`
     /// releases (and resets) it. Refuses when leasing is off or a lease is already held.
-    fn adopt_lease(&self, lease_id: &str, _who: &str) -> bool {
+    ///
+    /// The port in `who` (`tt-station:<port>:<model>`) is kept, so the next stop can find the
+    /// previous process's server with `tt model ps` before it releases (see `stop_inner`).
+    fn adopt_lease(&self, lease_id: &str, who: &str) -> bool {
         if self.gozer.is_none() {
             return false;
         }
@@ -640,6 +723,10 @@ impl ServingBackend for TtBackend {
             return false;
         }
         *held = Some(lease_id.to_string());
+        *self
+            .adopted_port
+            .lock()
+            .expect("adopted_port mutex poisoned") = crate::gozer::who_service_port(who);
         true
     }
 
@@ -788,6 +875,11 @@ mod tests {
         /// `http_get` bodies, consumed in order and sticking at the last one.
         bodies: Arc<Mutex<Vec<String>>>,
         healthy: Arc<AtomicBool>,
+        /// Argv substrings whose call fails to SPAWN (`Err`), like a missing binary.
+        spawn_failures: Arc<Mutex<Vec<String>>>,
+        /// When set, every `http_get` sets this flag first. A test hands in the backend's
+        /// cancel flag to land a `/stop` exactly while the readiness GET is answering.
+        cancel_on_get: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     }
 
     impl ScriptedRunner {
@@ -851,6 +943,17 @@ mod tests {
         ) -> Result<CapturedOutput> {
             let joined = args.join(" ");
             self.log.lock().unwrap().push(format!("run: {joined}"));
+            if self
+                .spawn_failures
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|n| joined.contains(n.as_str()))
+            {
+                return Err(anyhow::anyhow!(
+                    "failed to spawn {joined}: No such file or directory (os error 2)"
+                ));
+            }
             self.envs.lock().unwrap().push((
                 joined.clone(),
                 env.iter()
@@ -882,6 +985,9 @@ mod tests {
 
         fn http_get(&self, url: &str) -> Result<String> {
             self.log.lock().unwrap().push(format!("get: {url}"));
+            if let Some(flag) = self.cancel_on_get.lock().unwrap().as_ref() {
+                flag.store(true, Ordering::SeqCst);
+            }
             let mut bodies = self.bodies.lock().unwrap();
             match bodies.len() {
                 0 => Err(anyhow::anyhow!("no body")),
@@ -1372,6 +1478,160 @@ mod tests {
         assert!(b.adopt_lease("l1", "tt-station:8003:m"));
         assert!(!b.adopt_lease("l2", "tt-station:8003:m"));
         assert_eq!(b.held_lease().as_deref(), Some("l1"));
+    }
+
+    // ---- fix round 1 ----
+
+    #[test]
+    fn an_unsafe_model_name_is_refused_before_anything_runs() {
+        for bad in ["--port=1", "-x", "a:b", "a\nb", ""] {
+            let runner = ScriptedRunner::happy();
+            let err = leasing_backend(&runner)
+                .start_with_options(bad, false, &RunOptions::default())
+                .unwrap_err();
+            let option_err = err
+                .chain()
+                .find_map(|c| c.downcast_ref::<OptionError>())
+                .expect("an OptionError naming the model");
+            assert_eq!(option_err.field, "model", "{bad:?}");
+            assert!(runner.log().is_empty(), "{bad:?}: {:?}", runner.log());
+        }
+    }
+
+    /// A missing `tt` is a spawn error, not an exit code. It must say how to install the
+    /// official CLI, and nothing may run after the failed `--version`.
+    #[test]
+    fn a_missing_tt_says_how_to_install_it() {
+        let runner = ScriptedRunner::happy();
+        runner
+            .spawn_failures
+            .lock()
+            .unwrap()
+            .push("--version".to_string());
+        let err = leasing_backend(&runner)
+            .start("Llama-3.1-8B-Instruct")
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("could not run `/fake/tt`"), "{msg}");
+        assert!(msg.contains("uv tool install tenstorrent"), "{msg}");
+        assert_eq!(runner.log(), ["run: /fake/tt --version"]);
+    }
+
+    #[test]
+    fn a_failing_version_command_is_refused_even_with_the_right_text() {
+        let runner = ScriptedRunner::happy();
+        runner.on("--version", 1, "tt 1.0.1", "something broke");
+        let err = leasing_backend(&runner)
+            .start("Llama-3.1-8B-Instruct")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("tt <semver>"), "{err:#}");
+        assert_eq!(runner.log(), ["run: /fake/tt --version"]);
+    }
+
+    /// After an agent restart the adopted lease is held while `served` is empty. The next
+    /// `/run` must stop the old server (found with `tt model ps`) before it releases that
+    /// lease, because the release resets the chips.
+    #[test]
+    fn an_adopted_lease_is_released_only_after_its_server_is_stopped() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 0, PS_ONE_RUNNING, "");
+        let b = leasing_backend(&runner);
+        assert!(b.adopt_lease("lease-old", "tt-station:8003:Llama-3.1-8B-Instruct"));
+        b.start("Llama-3.1-8B-Instruct").unwrap();
+        let stop = runner
+            .pos("model stop Llama-3.1-8B-Instruct")
+            .expect("the old server was stopped");
+        let release = runner
+            .pos("gozer release lease-old")
+            .expect("the adopted lease was released");
+        assert!(stop < release, "stop before release: {:?}", runner.log());
+        assert!(release < runner.pos("gozer acquire").unwrap());
+    }
+
+    #[test]
+    fn an_adopted_lease_is_kept_when_its_server_cannot_be_identified() {
+        let runner = ScriptedRunner::happy();
+        runner.on("model ps", 1, "", "docker: cannot connect");
+        let b = leasing_backend(&runner);
+        assert!(b.adopt_lease("lease-old", "tt-station:8003:Llama-3.1-8B-Instruct"));
+        let err = b.start("Llama-3.1-8B-Instruct").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("refusing to release the lease"),
+            "{err:#}"
+        );
+        assert!(runner.pos("gozer").is_none(), "{:?}", runner.log());
+        assert!(runner.pos("--port 8003").is_none(), "nothing started");
+        assert_eq!(b.held_lease().as_deref(), Some("lease-old"));
+    }
+
+    #[test]
+    fn an_adopted_lease_with_nothing_running_is_released() {
+        let runner = ScriptedRunner::happy(); // `tt model ps` lists nothing
+        let b = leasing_backend(&runner);
+        assert!(b.adopt_lease("lease-old", "tt-station:8003:m"));
+        b.stop("").unwrap();
+        assert!(runner.pos("model stop").is_none());
+        assert!(runner.pos("gozer release lease-old").is_some());
+        assert_eq!(b.held_lease(), None);
+    }
+
+    /// A `/stop` from another thread while `start` is still polling: `start` notices within one
+    /// interval, stops the model, and the lease guard releases after the stop.
+    #[test]
+    fn a_stop_during_bring_up_aborts_the_start_and_releases_after_stopping() {
+        let runner = ScriptedRunner::happy();
+        runner.healthy.store(false, Ordering::SeqCst);
+        let b = TtBackend::new(
+            TtConfig {
+                // About 4 s of polling: far longer than the stop below takes to land, and short
+                // enough that a regression fails the test instead of hanging it.
+                health_poll_attempts: 2_000,
+                health_poll_interval: Duration::from_millis(2),
+                ..config()
+            },
+            Box::new(runner.clone()),
+        )
+        .with_gozer(Some(capability()));
+        let result = std::thread::scope(|scope| {
+            let starter = scope.spawn(|| b.start("Llama-3.1-8B-Instruct"));
+            // Wait until polling has begun, then stop.
+            for _ in 0..5_000 {
+                if runner.pos("health:").is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            b.stop("").unwrap();
+            starter.join().unwrap()
+        });
+        let err = result.unwrap_err();
+        assert!(format!("{err:#}").contains("aborted"), "{err:#}");
+        let stop = runner.pos("model stop Llama-3.1-8B-Instruct").unwrap();
+        let release = runner.pos("gozer release lease-abc123").unwrap();
+        assert!(stop < release, "{:?}", runner.log());
+        assert_eq!(b.held_lease(), None);
+        assert_eq!(b.served(), None);
+    }
+
+    /// The race after the last poll: a `/stop` that lands while the readiness GET is answering
+    /// (after polling succeeded, before `served` is recorded). The start must report "aborted",
+    /// not hand back an endpoint, and must leave nothing recorded or leased.
+    #[test]
+    fn a_stop_between_poll_success_and_handover_aborts_the_start() {
+        let runner = ScriptedRunner::happy();
+        let b = leasing_backend(&runner);
+        *runner.cancel_on_get.lock().unwrap() = Some(b.cancel.clone());
+        let err = b.start("Llama-3.1-8B-Instruct").unwrap_err();
+        assert!(format!("{err:#}").contains("aborted"), "{err:#}");
+        let stop = runner.pos("model stop Llama-3.1-8B-Instruct").unwrap();
+        let release = runner.pos("gozer release lease-abc123").unwrap();
+        assert!(
+            runner.pos("get:").unwrap() < stop && stop < release,
+            "{:?}",
+            runner.log()
+        );
+        assert_eq!(b.held_lease(), None);
+        assert_eq!(b.served(), None);
     }
 
     #[test]

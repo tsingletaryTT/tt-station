@@ -1684,6 +1684,18 @@ async fn run_model(
     let model = req.model;
     let force = req.force;
 
+    // The model name reaches backend command lines (`tt serve <model>`, gozer's
+    // `--who`), so it is checked like an option: 400 naming `model`, nothing
+    // started. Backends that use it (the `tt` backend) check it again.
+    libttstation::run_options::validate_model_name(&model).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("{}: {}", e.field, e.message),
+            }),
+        )
+    })?;
+
     // Validate before touching the backend. `null` and absent both mean "no
     // options". The error text is `<field>: <message>` so a UI can point at
     // the offending input.

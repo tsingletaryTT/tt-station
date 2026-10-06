@@ -135,13 +135,17 @@ serving_host = "qb2-lab.local"
 serving_port = 20000
 ```
 
-What it runs, in order, for `POST /run`:
+What it runs, in order, for `POST /run` (the model name must match
+`[A-Za-z0-9][A-Za-z0-9._/-]{0,127}`, or the request is refused with a 400
+naming `model`):
 
 1. `tt --version`. Anything other than `tt <semver>` is refused.
 2. `tt --json serve <model> --dry-run`, which says whether `tt` will serve the
    model from its catalog (through tt-inference-server) or as a tt-model bundle.
    An unknown model is refused here, before any chips are leased.
-3. Stops what this backend was serving and releases its gozer lease.
+3. Stops what this backend was serving and releases its gozer lease. After an
+   agent restart, a lease adopted from the previous process is released only
+   once its server (found with `tt --json model ps`) has been stopped.
 4. Leases chips through gozer, when gozer is installed (same 409 behaviour as
    the other backends).
 5. `tt --json serve <model> --port <serving_port> [options]`. Bundles also get

@@ -311,6 +311,34 @@ impl RunOptions {
     }
 }
 
+/// Check a model name from a client before it is used anywhere.
+///
+/// The model name is the one piece of a run request that is not part of [`RunOptions`], and it
+/// reaches several command lines: `tt serve <model>` (the dry run and the real serve),
+/// `tt model stop <model>`, and gozer's `--who tt-station:<port>:<model>`. Rule:
+/// `[A-Za-z0-9][A-Za-z0-9._/-]{0,127}`. So it cannot start with `-` (no flag can be smuggled in
+/// as the model, such as `--port=1`), and it holds no `:` (the separator in gozer's `--who`), no
+/// whitespace and no control characters. Catalog names (`Llama-3.1-8B-Instruct`), Hugging Face
+/// ids and tt-model bundle ids (`meta-llama/Llama-3.1-8B-Instruct`) all fit.
+///
+/// The error names the field `model`.
+pub fn validate_model_name(model: &str) -> Result<(), OptionError> {
+    let mut chars = model.chars();
+    let first_ok = matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric());
+    let ok = first_ok
+        && model.len() <= 128
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(OptionError::new(
+            "model",
+            "must be 1-128 characters of letters, digits, '.', '_', '/' and '-', starting with a \
+             letter or digit",
+        ))
+    }
+}
+
 /// `^[a-z0-9]{2,16}$`
 fn is_device_name(s: &str) -> bool {
     (2..=16).contains(&s.len())
@@ -772,6 +800,10 @@ mod tests {
             let e = opts(json!({"vllm_args": [{"flag": bad}]}))
                 .expect_err(&format!("vllm flag name {bad:?} must not get through"));
             assert_eq!(e.field, "vllm_args");
+            // The model name is checked by its own validator before it reaches serve_argv.
+            let e = validate_model_name(bad)
+                .expect_err(&format!("model {bad:?} must not get through to serve_argv"));
+            assert_eq!(e.field, "model");
         }
 
         let good = opts(json!({
@@ -790,6 +822,19 @@ mod tests {
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
                 "unexpected character in argv element {arg:?}"
             );
+        }
+    }
+
+    #[test]
+    fn model_names_are_validated() {
+        for good in ["Llama-3.1-8B-Instruct", "meta-llama/Llama-3.1-8B-Instruct", "a"] {
+            assert!(validate_model_name(good).is_ok(), "{good:?} must be accepted");
+        }
+        let long = "a".repeat(129);
+        assert!(validate_model_name(&"a".repeat(128)).is_ok());
+        for bad in ["-x", "--port=1", "a:b", "a\nb", "", long.as_str(), "a b", "/abs", "a\tb", "$(id)"] {
+            let e = validate_model_name(bad).expect_err(&format!("{bad:?} must be refused"));
+            assert_eq!(e.field, "model");
         }
     }
 
