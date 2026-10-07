@@ -37,9 +37,12 @@ use tt_station_agentd::serving::tt::TtConfig;
 /// Tenstorrent's official `tt` CLI (`tt serve`, `tt model ps|stop`) and is the
 /// only backend that applies `POST /run` options; it is opt-in until it has
 /// been proven on real hardware. `Dstack` is the M4 direction and still an
-/// intentional stub.
+/// intentional stub. `Auto` is not a backend of its own: it resolves to `Tt` when a valid
+/// official `tt` is installed and to `Runpy` otherwise (see `config::resolve_with`). It is
+/// opt-in, and the default when nothing is set stays `Runpy`.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Backend {
+    Auto,
     Runpy,
     Docker,
     Tt,
@@ -49,6 +52,7 @@ enum Backend {
 impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Backend::Auto => write!(f, "auto"),
             Backend::Runpy => write!(f, "runpy"),
             Backend::Docker => write!(f, "docker"),
             Backend::Tt => write!(f, "tt"),
@@ -65,15 +69,15 @@ impl std::fmt::Display for Backend {
 struct Cli {
     /// Box name; used as both the mDNS instance name and the `name` TXT/JSON key.
     ///
-    /// `Option` because it can also come from `[global].name` in the config
-    /// file -- `resolve` enforces that ONE of the two is present, so this
-    /// remains effectively required for an operator not using a config file.
+    /// Default: the machine's short hostname (the first label, no dots), used only when
+    /// this flag and `[global].name` are both absent. If the hostname is unusable
+    /// (empty, `localhost`), start-up fails and asks for `--name`.
     #[arg(long)]
     name: Option<String>,
 
     /// Control-plane HTTP port to listen on and advertise in the `ctrl` TXT key.
     ///
-    /// `Option` for the same reason as `--name` -- see its doc comment.
+    /// Default: 8765, used only when this flag and `[global].ctrl_port` are both absent.
     #[arg(long = "ctrl-port")]
     ctrl_port: Option<u16>,
 
@@ -81,16 +85,21 @@ struct Cli {
     /// into the real `ServingBackend` trait object `/run`/`/stop` delegate
     /// to. Defaults to `runpy` -- see `Backend`'s doc comment.
     ///
-    /// No clap default: `resolve` supplies `"runpy"` when this, the active
-    /// profile, and `[global]` are all absent.
+    /// `auto` picks `tt` when the official `tt` CLI is installed and answers
+    /// `tt --version` with `tt <semver>`, and `runpy` otherwise. `--print-config`
+    /// shows which one it chose. `auto` is never the default.
+    ///
+    /// No clap default: `resolve` supplies `"runpy"` when this and the active
+    /// profile are both absent.
     #[arg(long, value_enum)]
     backend: Option<Backend>,
 
     /// Chip inventory string advertised in the `chips` TXT key and returned
     /// from `/status`.
     ///
-    /// No clap default: `resolve` supplies `"4xBH"` when this and
-    /// `[global].chips` are both absent.
+    /// Default: derived from `tt-smi -s` (a `p300x2` box is `4xBH`) when this and
+    /// `[global].chips` are both absent. Falls back to `4xBH` when `tt-smi` fails
+    /// or the hardware has no known mapping.
     #[arg(long)]
     chips: Option<String>,
 
@@ -103,20 +112,18 @@ struct Cli {
 
     /// Host the serving container/VM is reachable on, baked into the
     /// `base_url` of any `Endpoint` `/run` returns. Only meaningful for the
-    /// Docker backend today. Defaults to loopback since the PoC's client and
-    /// agent are expected to run on the same box; a real deployment would
-    /// pass the box's LAN address.
+    /// Docker backend today.
     ///
-    /// No clap default: `resolve` supplies `"127.0.0.1"` when this and the
-    /// active profile's `serving_host` are both absent.
+    /// Default: the box's primary LAN IPv4 address, else its short hostname, else
+    /// `127.0.0.1`, used only when this and the active profile's `serving_host` are
+    /// both absent. Pass `127.0.0.1` here to keep the endpoint on loopback.
     #[arg(long = "serving-host")]
     serving_host: Option<String>,
 
-    /// Host port the serving container/VM's HTTP port is mapped to. Only
-    /// meaningful for the Docker backend today.
+    /// Host port the serving container/VM's HTTP port is mapped to.
     ///
-    /// No clap default: `resolve` supplies `8000` when this and the active
-    /// profile's `serving_port` are both absent.
+    /// Default: 20000 for the `tt` backend and 8000 for every other backend, used
+    /// only when this and the active profile's `serving_port` are both absent.
     #[arg(long = "serving-port")]
     serving_port: Option<u16>,
 
@@ -439,19 +446,31 @@ const DEFAULT_DOCKER_SERVING_IMAGE: &str =
 /// the device mesh itself; see `--tt-device`'s doc comment.
 const DEFAULT_DOCKER_TT_DEVICE: &str = "p300x2";
 
-/// Build the redacted `ConfigSummary` (Task 4 type) from a `ResolvedConfig`.
+/// Build the redacted `ConfigSummary` from a `ResolvedConfig` (see `ResolvedConfig::summary`).
 /// NEVER includes `hf_token` or token-store contents.
 fn config_summary(rc: &config::ResolvedConfig) -> libttstation::model::ConfigSummary {
-    libttstation::model::ConfigSummary {
-        active_profile: rc.active_profile.clone(),
-        available_profiles: rc.available_profiles.clone(),
-        backend: rc.backend.clone(),
-        serving_host: rc.serving_host.clone(),
-        serving_port: rc.serving_port,
-        serving_image: rc.serving_image.clone(),
-        tt_inference_repo: Some(rc.tt_inference_repo.clone()),
-        tt_device: rc.tt_device.clone(),
-    }
+    rc.summary()
+}
+
+/// A one-line start-up description of the resolved identity and serving settings, each with its
+/// source, e.g. `name=qb2 (detected) ctrl_port=8765 (default) backend=tt (auto) ...`.
+fn describe_choices(rc: &config::ResolvedConfig) -> String {
+    let src = |k: &str| rc.sources.get(k).map(|s| s.as_str()).unwrap_or("-");
+    format!(
+        "name={} ({}) ctrl_port={} ({}) chips={} ({}) backend={} ({}) serving={}:{} ({}, {})",
+        rc.name,
+        src("name"),
+        rc.ctrl_port,
+        src("ctrl_port"),
+        rc.chips,
+        src("chips"),
+        rc.backend,
+        src("backend"),
+        rc.serving_host,
+        rc.serving_port,
+        src("serving_host"),
+        src("serving_port"),
+    )
 }
 
 /// How long `detect_startup_device_mesh` waits for `<tt_smi_bin> -s` before
@@ -880,8 +899,16 @@ async fn main() -> Result<()> {
         model_source: cli.model_source.clone(),
         model_spec: cli.model_spec.clone(),
     };
-    let rc = config::resolve(overrides, env_hf_token, file, cli.profile.as_deref())
-        .context("failed to resolve configuration")?;
+    // Detection (hostname, LAN address, installed chips, official `tt`) runs only for the
+    // settings that no flag, profile or `[global]` entry supplies -- see `resolve_with`.
+    let rc = config::resolve_with(
+        overrides,
+        env_hf_token,
+        file,
+        cli.profile.as_deref(),
+        &tt_station_agentd::detect::SystemDetect,
+    )
+    .context("failed to resolve configuration")?;
 
     // `--print-config` is purely diagnostic: resolve, print the redacted
     // summary, exit -- WITHOUT binding the control port or touching mDNS.
@@ -892,6 +919,10 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
+
+    // One line saying where the defaults came from, so the journal explains the agent's choices
+    // without a second `--print-config` run. Values only, never secrets.
+    println!("tt-station-agentd: {}", describe_choices(&rc));
 
     // `DockerBackend` (the manual escape hatch -- see `Backend`'s doc
     // comment) has no auto-resolution of its own the way `run.py` does, so
