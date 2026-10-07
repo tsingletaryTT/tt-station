@@ -482,6 +482,12 @@ pub struct DockerConfig {
     /// `localhost`, since the agent and the client calling it aren't
     /// necessarily the same machine.
     pub host: String,
+    /// Host the backend polls for readiness. `None` means the same as `host`, which is what every
+    /// operator-set host gets. `main` sets loopback when `host` came from detection or the hostname
+    /// fallback: that address is captured once at start-up and may go stale or sit on a VPN
+    /// tunnel, while a poll on `127.0.0.1` reaches the published port regardless. The returned
+    /// `Endpoint`'s `base_url` always uses `host`.
+    pub probe_host: Option<String>,
     /// Host port mapped onto the container's fixed serving port (8000 --
     /// see `CONTAINER_PORT`). This is the only port that's actually
     /// configurable; the container always listens on 8000 internally.
@@ -525,6 +531,13 @@ pub struct DockerConfig {
     pub hugepages_src: String,
 }
 
+impl DockerConfig {
+    /// The host readiness polls use: `probe_host` when set, else `host`.
+    pub fn probe_host(&self) -> &str {
+        self.probe_host.as_deref().unwrap_or(&self.host)
+    }
+}
+
 impl Default for DockerConfig {
     /// Defaults chosen to make hermetic tests concise (override only the
     /// field a given test cares about via struct-update syntax); NOT
@@ -535,6 +548,7 @@ impl Default for DockerConfig {
         DockerConfig {
             image: "tenstorrent/tt-inference-server:unset".to_string(),
             host: "127.0.0.1".to_string(),
+            probe_host: None,
             host_port: 8000,
             tt_device: "p150x4".to_string(),
             hf_token: None,
@@ -1379,7 +1393,8 @@ impl ServingBackend for DockerBackend {
         // see docs/reference/tt-inference-server-docker.md.
         let health_url = format!(
             "http://{}:{}/health",
-            self.config.host, self.config.host_port
+            self.config.probe_host(),
+            self.config.host_port
         );
         let healthy = super::poll_until_healthy(
             self.runner.as_ref(),

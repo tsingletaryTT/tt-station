@@ -34,9 +34,10 @@ pub trait Detect {
     fn hostname(&self) -> Option<String>;
     /// The IPv4 address other machines on the LAN reach this box at.
     fn primary_ipv4(&self) -> Option<String>;
-    /// The `chips` string (`"4xBH"` style) for the installed hardware, found by running
-    /// `<tt_smi_bin> -s`. `None` when detection fails or the hardware has no known mapping.
-    fn chips(&self, tt_smi_bin: &str) -> Option<String>;
+    /// The raw stdout of `<tt_smi_bin> -s`, or `None` when it cannot run, fails, or times out.
+    /// The resolver derives `chips` from it and `main` derives `device_mesh` from the same text,
+    /// so `tt-smi` runs once per start-up.
+    fn tt_smi_snapshot(&self, tt_smi_bin: &str) -> Option<String>;
     /// The official `tt` CLI, when one is installed and answers `--version` with `tt <semver>`.
     /// `explicit_bin` is the configured `official_tt_bin`; `None` means search for it the way
     /// `libttstation::official_tt::resolve_bin` does.
@@ -54,7 +55,7 @@ impl Detect for NoDetect {
     fn primary_ipv4(&self) -> Option<String> {
         None
     }
-    fn chips(&self, _tt_smi_bin: &str) -> Option<String> {
+    fn tt_smi_snapshot(&self, _tt_smi_bin: &str) -> Option<String> {
         None
     }
     fn official_tt(&self, _explicit_bin: Option<&str>) -> Option<OfficialTt> {
@@ -77,9 +78,8 @@ impl Detect for SystemDetect {
         crate::net::primary_ipv4()
     }
 
-    fn chips(&self, tt_smi_bin: &str) -> Option<String> {
-        let snapshot = run_with_timeout(tt_smi_bin, &["-s"], TT_SMI_TIMEOUT)?;
-        crate::device::chips_for_mesh(&crate::device::detect_device_mesh(&snapshot)?)
+    fn tt_smi_snapshot(&self, tt_smi_bin: &str) -> Option<String> {
+        run_with_timeout(tt_smi_bin, &["-s"], TT_SMI_TIMEOUT)
     }
 
     fn official_tt(&self, explicit_bin: Option<&str>) -> Option<OfficialTt> {
@@ -95,7 +95,8 @@ impl Detect for SystemDetect {
 /// The first label of a hostname, or `None` when the hostname is unusable.
 ///
 /// Unusable means empty, `localhost` (a box that answers to it has no name of its own), the
-/// kernel's `(none)` placeholder, or anything outside letters, digits, `-` and `_` after
+/// kernel's `(none)` placeholder, all digits (an IP-literal hostname such as `10.0.0.5` would
+/// otherwise become the name `10`), or anything outside letters, digits, `-` and `_` after
 /// trimming (a name goes into an mDNS instance name and a URL, so odd characters are refused
 /// rather than escaped).
 pub fn short_hostname(raw: &str) -> Option<String> {
@@ -103,6 +104,7 @@ pub fn short_hostname(raw: &str) -> Option<String> {
     let usable = !first.is_empty()
         && !first.eq_ignore_ascii_case("localhost")
         && first != "(none)"
+        && !first.chars().all(|c| c.is_ascii_digit())
         && first
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
@@ -170,6 +172,8 @@ mod tests {
             "localhost",
             "LocalHost.localdomain",
             "(none)",
+            "10.0.0.5",
+            "12345",
             "bad name",
             "a/b",
             "é",

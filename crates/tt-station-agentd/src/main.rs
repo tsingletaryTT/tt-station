@@ -111,12 +111,14 @@ struct Cli {
     apiver: Option<u8>,
 
     /// Host the serving container/VM is reachable on, baked into the
-    /// `base_url` of any `Endpoint` `/run` returns. Only meaningful for the
-    /// Docker backend today.
+    /// `base_url` of any `Endpoint` `/run` returns and every `/serving` entry. Every
+    /// backend uses it.
     ///
-    /// Default: the box's primary LAN IPv4 address, else its short hostname, else
+    /// Default: the box's primary LAN IPv4 address, else `<short hostname>.local`, else
     /// `127.0.0.1`, used only when this and the active profile's `serving_host` are
-    /// both absent. Pass `127.0.0.1` here to keep the endpoint on loopback.
+    /// both absent. The agent still checks readiness on `127.0.0.1` when it chose the host
+    /// itself; a host you pass here is polled as given. Pass `127.0.0.1` to keep the
+    /// endpoint on loopback.
     #[arg(long = "serving-host")]
     serving_host: Option<String>,
 
@@ -937,6 +939,7 @@ async fn main() -> Result<()> {
             .clone()
             .unwrap_or_else(|| DEFAULT_DOCKER_SERVING_IMAGE.to_string()),
         host: rc.serving_host.clone(),
+        probe_host: rc.probe_host.clone(),
         host_port: rc.serving_port,
         tt_device: rc
             .tt_device
@@ -958,6 +961,7 @@ async fn main() -> Result<()> {
     let runpy_config = RunPyConfig {
         repo_dir: rc.tt_inference_repo.clone(),
         host: rc.serving_host.clone(),
+        probe_host: rc.probe_host.clone(),
         service_port: rc.serving_port,
         no_auth: !rc.require_auth,
         model_source: rc.model_source.clone(),
@@ -1011,6 +1015,7 @@ async fn main() -> Result<()> {
             .clone()
             .unwrap_or_else(libttstation::official_tt::resolve_bin),
         serving_host: rc.serving_host.clone(),
+        probe_host: rc.probe_host.clone(),
         service_port: rc.serving_port,
         ..TtConfig::default()
     };
@@ -1145,7 +1150,22 @@ async fn main() -> Result<()> {
     // wedged `tt-smi` can delay the socket bind below by at most that
     // ceiling, never indefinitely; startup then proceeds regardless of the
     // outcome. See `detect_startup_device_mesh`'s doc comment.
-    let device_mesh = detect_startup_device_mesh(&rc.tt_smi_bin).await;
+    // When `resolve_with` already ran `tt-smi -s` to detect `chips`, reuse that run: `tt-smi`
+    // runs once per start-up. Otherwise (chips came from a flag or `[global]`) this is the
+    // only run.
+    let device_mesh = match &rc.tt_smi_probe {
+        Some(snapshot) => {
+            let mesh = snapshot.as_deref().and_then(detect_device_mesh);
+            if mesh.is_none() {
+                eprintln!(
+                    "tt-station-agentd: the start-up '{} -s' run did not map to a known device mesh; device_mesh will report null",
+                    rc.tt_smi_bin
+                );
+            }
+            mesh
+        }
+        None => detect_startup_device_mesh(&rc.tt_smi_bin).await,
+    };
     let state = state.with_device_mesh(device_mesh.clone());
 
     // Record the `gozer` capability probed ONCE at startup, up in

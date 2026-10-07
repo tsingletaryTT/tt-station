@@ -26,10 +26,10 @@ runs no probe.
 
 | Setting | Default | Source label | Fallback if the probe fails |
 |---|---|---|---|
-| `name` | the short hostname (first label, no dots) | `detected` | none: start-up fails and asks for `--name` (an empty or `localhost` hostname is unusable) |
+| `name` | the short hostname (first label, no dots) | `detected` | none: start-up fails and asks for `--name`. A hostname is refused when it is empty, `localhost`, the kernel placeholder `(none)`, all digits (an IP-literal hostname such as `10.0.0.5` would become the name `10`), or contains anything other than letters, digits, `-` and `_` |
 | `ctrl_port` | `8765` | `default` | none needed |
-| `chips` | derived from `tt-smi -s` (the same snapshot that gives `device_mesh`; `p300x2` is `4xBH`) | `detected` | `4xBH` (`default`) |
-| `serving_host` | the primary LAN IPv4 address (the source address of `ip route get 1.1.1.1`) | `detected` | the short hostname (`detected`), then `127.0.0.1` (`default`) |
+| `chips` | derived from `tt-smi -s` (`p300x2` is `4xBH`). The agent runs `tt-smi -s` once at start-up and uses that one run for both `chips` and the `device_mesh` of `/status`. When `chips` is set by flag or `[global]`, the one run is the `device_mesh` probe | `detected` | `4xBH` (`default`) |
+| `serving_host` | the primary LAN IPv4 address (the source address of `ip route get 1.1.1.1`). An address that is loopback, link-local (169.254/16), multicast, broadcast or in 100.64.0.0/10 (carrier-grade NAT, which Tailscale and similar VPNs use) counts as not found | `detected` | `<short hostname>.local` (`detected`; resolvable from a Mac through mDNS when avahi runs on the box), then `127.0.0.1` (`default`) |
 | `serving_port` | `20000` for the `tt` backend, `8000` for every other backend | `default` | none needed |
 | `backend` | `runpy`; `auto` is opt-in | `default` | none needed |
 
@@ -38,6 +38,19 @@ Wormhole meshes such as `n300` have no confirmed mapping to the `NxBH` style, so
 `4xBH` fallback.
 
 To keep the serving endpoint on loopback, pass `--serving-host 127.0.0.1` (or set it in a profile).
+
+**Readiness checks use loopback when the agent chose `serving_host`.** The detected address is read
+once at start-up, so it can go stale (DHCP renumbering, an agent started before the network was up)
+or point at a VPN tunnel. When `serving_host` came from detection, the hostname fallback or the
+loopback default, the `runpy`, `docker` and `tt` backends poll `/health` and `/v1/models` on
+`127.0.0.1`, and `/serving` probes loopback as it always has. Endpoint URLs (`base_url`) still carry
+`serving_host`. When a flag or profile sets `serving_host`, the agent polls that host exactly as
+before.
+
+**`--backend tt` with no port now serves on 20000** (it was 8000). A gozer lease tagged with the old
+port (`tt-station:8000:<model>`) does not match the start-up sweep for the new port, so a stale lease
+from before the change stays until it is released by hand (`gozer release`). Set
+`serving_port = 8000` in the profile to keep the old port.
 
 ## File location
 
@@ -150,7 +163,8 @@ serving_port = 8004
 `--backend auto` (or `backend = "auto"` in a profile) chooses at start-up:
 
 1. It looks for the official `tt` CLI: `--official-tt-bin` or `[global].official_tt_bin` if set,
-   else `TTS_OFFICIAL_TT_BIN`, then `PATH`, then `~/.local/bin/tt`.
+   else `TTS_OFFICIAL_TT_BIN`, then `PATH`, then `~/.local/bin/tt`, `/opt/homebrew/bin/tt` and
+   `/usr/local/bin/tt`, in that order.
 2. It runs `<tt> --version` with a 5 second limit. The CLI counts as found only when the command
    exits successfully and prints `tt <semver>`.
 3. Found: the backend is `tt`. Not found, or the check fails or times out: the backend is `runpy`.

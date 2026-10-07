@@ -130,6 +130,12 @@ pub struct TtConfig {
     /// Host the served `/v1` is reachable on. It goes into the returned `Endpoint`'s `base_url`
     /// and into the readiness URL this backend polls.
     pub serving_host: String,
+    /// Host the backend polls for readiness. `None` means the same as `serving_host`, which is what every
+    /// operator-set host gets. `main` sets loopback when `serving_host` came from detection or the hostname
+    /// fallback: that address is captured once at start-up and may go stale or sit on a VPN
+    /// tunnel, while a poll on `127.0.0.1` reaches the published port regardless. The returned
+    /// `Endpoint`'s `base_url` always uses `serving_host`.
+    pub probe_host: Option<String>,
     /// Port passed to `tt serve --port` when the request does not set one. The agent owns the
     /// port so it knows where to poll and what to advertise.
     pub service_port: u16,
@@ -145,11 +151,19 @@ pub struct TtConfig {
     pub ps_stale_limit: Duration,
 }
 
+impl TtConfig {
+    /// The host readiness polls use: `probe_host` when set, else `serving_host`.
+    pub fn probe_host(&self) -> &str {
+        self.probe_host.as_deref().unwrap_or(&self.serving_host)
+    }
+}
+
 impl Default for TtConfig {
     fn default() -> Self {
         TtConfig {
             tt_bin: official_tt::OFFICIAL_TT_DEFAULT_BIN.to_string(),
             serving_host: "127.0.0.1".to_string(),
+            probe_host: None,
             service_port: 8000,
             health_poll_attempts: DEFAULT_HEALTH_POLL_ATTEMPTS,
             health_poll_interval: DEFAULT_HEALTH_POLL_INTERVAL,
@@ -1020,7 +1034,7 @@ impl ServingBackend for TtBackend {
         // "probe, sleep" step, one attempt per round, so a `/stop` is noticed within one
         // interval. A 200 with an empty `data` array means vLLM is up but not ready, so the
         // body is checked too.
-        let models_url = format!("http://{}:{port}/v1/models", self.config.serving_host);
+        let models_url = format!("http://{}:{port}/v1/models", self.config.probe_host());
         let mut served_id = None;
         for _ in 0..self.config.health_poll_attempts {
             if self.cancel.load(Ordering::SeqCst) {
@@ -1593,6 +1607,7 @@ mod tests {
         TtConfig {
             tt_bin: "/fake/tt".to_string(),
             serving_host: "127.0.0.1".to_string(),
+            probe_host: None,
             service_port: 8003,
             health_poll_attempts: 3,
             health_poll_interval: Duration::from_millis(1),
@@ -1738,6 +1753,38 @@ mod tests {
             .start_with_options("Llama-3.1-8B-Instruct", false, &RunOptions::default())
             .unwrap();
         assert_eq!(ep.model, "meta-llama/Llama-3.1-8B-Instruct");
+    }
+
+    /// A defaulted serving host (detected LAN address) is advertised in the endpoint but the
+    /// readiness poll goes to loopback; an operator-set host (no `probe_host`) is polled as before.
+    #[test]
+    fn readiness_polls_probe_host_while_the_endpoint_advertises_serving_host() {
+        let runner = ScriptedRunner::happy();
+        let cfg = TtConfig {
+            serving_host: "192.168.9.9".to_string(),
+            probe_host: Some("127.0.0.1".to_string()),
+            ..config()
+        };
+        let ep = TtBackend::new(cfg, Box::new(runner.clone()))
+            .start_with_options("Llama-3.1-8B-Instruct", false, &RunOptions::default())
+            .unwrap();
+        assert_eq!(ep.base_url, "http://192.168.9.9:8003/v1");
+        let log = runner.log();
+        assert!(log.contains(&"get: http://127.0.0.1:8003/v1/models".to_string()), "{log:?}");
+        assert!(!log.iter().any(|l| l.contains("192.168.9.9")), "{log:?}");
+
+        // Operator-set host: no `probe_host`, so the poll goes to that host, byte for byte.
+        let runner = ScriptedRunner::happy();
+        let cfg = TtConfig {
+            serving_host: "qb2-lab.local".to_string(),
+            ..config()
+        };
+        let ep = TtBackend::new(cfg, Box::new(runner.clone()))
+            .start_with_options("Llama-3.1-8B-Instruct", false, &RunOptions::default())
+            .unwrap();
+        assert_eq!(ep.base_url, "http://qb2-lab.local:8003/v1");
+        let gets: Vec<_> = runner.log().into_iter().filter(|l| l.starts_with("get:")).collect();
+        assert_eq!(gets, ["get: http://qb2-lab.local:8003/v1/models"]);
     }
 
     #[test]

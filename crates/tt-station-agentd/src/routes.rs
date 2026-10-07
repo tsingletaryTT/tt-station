@@ -51,12 +51,13 @@ const DEFAULT_TELEMETRY_INTERVAL_MS: u64 = 1000;
 const DEFAULT_TT_SMI_BIN: &str = "tt-smi";
 
 /// Default serving host baked into `GET /serving` `base_url`s when `AppState`
-/// isn't told otherwise. Mirrors `main.rs`'s `--serving-host` default.
+/// isn't told otherwise. A fixed fallback for an `AppState` built without
+/// `with_serving_config`; `main.rs` resolves the real default (the box's LAN address) itself.
 const DEFAULT_SERVING_HOST: &str = "127.0.0.1";
 
 /// Default serving port `GET /serving` treats as the agent's own, when
-/// `AppState` isn't told otherwise. Mirrors `main.rs`'s `--serving-port`
-/// default.
+/// `AppState` isn't told otherwise. A fixed fallback for tests; `main.rs`
+/// resolves the real default (20000 for the `tt` backend, else 8000) itself.
 const DEFAULT_SERVING_PORT: u16 = 8000;
 
 /// TTL on the cached `gozer status --json` parse shared by `GET /leases`

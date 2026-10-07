@@ -205,6 +205,16 @@ pub struct ResolvedConfig {
     /// `serving_image`, `tt_inference_repo` and `tt_device` came from. The last two and
     /// `serving_image` appear only when they have a value.
     pub sources: BTreeMap<&'static str, Source>,
+    /// `Some("127.0.0.1")` when `serving_host` was NOT set by the operator (it came from
+    /// detection, the hostname fallback, or the loopback default). The backends then poll
+    /// readiness on loopback, because the detected address is captured once at start-up and can
+    /// go stale or sit on a tunnel, while `serving_host` still goes into every endpoint URL.
+    /// `None` when a flag or profile set `serving_host`: readiness is polled there, as before.
+    pub probe_host: Option<String>,
+    /// The outcome of the one `tt-smi -s` run `resolve_with` made to detect `chips`:
+    /// `None` = no run (something else set `chips`), `Some(None)` = it ran and failed,
+    /// `Some(Some(stdout))` = it ran. `main` reuses it for `device_mesh`, so `tt-smi` runs once.
+    pub tt_smi_probe: Option<Option<String>>,
 }
 
 impl ResolvedConfig {
@@ -324,7 +334,7 @@ pub fn resolve(
 /// | `name` | short hostname | error |
 /// | `ctrl_port` | none | 8765 |
 /// | `chips` | `tt-smi -s` mesh, via `device::chips_for_mesh` | `4xBH` |
-/// | `serving_host` | primary LAN IPv4, then short hostname | `127.0.0.1` |
+/// | `serving_host` | primary LAN IPv4, then `<short hostname>.local` | `127.0.0.1` |
 /// | `serving_port` | none | 20000 for `tt`, else 8000 |
 /// | `backend` | none; `auto` asks for the official `tt` | `runpy` |
 ///
@@ -414,13 +424,23 @@ pub fn resolve_with(
         pick([&cli.telemetry_interval_ms, &g.telemetry_interval_ms, &None]).unwrap_or(1000);
     let tt_smi_bin =
         pick([&cli.tt_smi_bin, &g.tt_smi_bin, &None]).unwrap_or_else(|| "tt-smi".into());
-    // `chips` comes after `tt_smi_bin` because detection runs that binary.
+    // `chips` comes after `tt_smi_bin` because detection runs that binary. The raw snapshot is
+    // kept (`tt_smi_probe`) so `main` can derive `device_mesh` from the same run.
+    let mut tt_smi_probe: Option<Option<String>> = None;
     let (chips, chips_src) = match pick_src(&cli.chips, &g.chips, Source::Global) {
         Some(found) => found,
-        None => match detect.chips(&tt_smi_bin) {
-            Some(detected) => (detected, Source::Detected),
-            None => (FALLBACK_CHIPS.to_string(), Source::Default),
-        },
+        None => {
+            let snapshot = detect.tt_smi_snapshot(&tt_smi_bin);
+            let derived = snapshot
+                .as_deref()
+                .and_then(crate::device::detect_device_mesh)
+                .and_then(|mesh| crate::device::chips_for_mesh(&mesh));
+            tt_smi_probe = Some(snapshot);
+            match derived {
+                Some(detected) => (detected, Source::Detected),
+                None => (FALLBACK_CHIPS.to_string(), Source::Default),
+            }
+        }
     };
     sources.insert("chips", chips_src);
     // No `unwrap_or_else` default string here (unlike `tt_smi_bin`): `None`
@@ -474,12 +494,21 @@ pub fn resolve_with(
     let (serving_host, host_src) =
         match pick_src(&cli.serving_host, &prof.serving_host, Source::Profile) {
             Some(found) => found,
-            None => match detect.primary_ipv4().or_else(|| detect.hostname()) {
+            // `<short>.local` so a Mac can resolve it through mDNS; the bare short name often
+            // does not resolve from another machine.
+            None => match detect
+                .primary_ipv4()
+                .or_else(|| detect.hostname().map(|h| format!("{h}.local")))
+            {
                 Some(detected) => (detected, Source::Detected),
                 None => ("127.0.0.1".to_string(), Source::Default),
             },
         };
     sources.insert("serving_host", host_src);
+    let probe_host = match host_src {
+        Source::Flag | Source::Profile => None,
+        _ => Some("127.0.0.1".to_string()),
+    };
     let (serving_port, port_src) = pick_src(&cli.serving_port, &prof.serving_port, Source::Profile)
         .unwrap_or((
             if backend == "tt" {
@@ -560,6 +589,8 @@ pub fn resolve_with(
         model_source,
         model_spec: cli.model_spec,
         sources,
+        probe_host,
+        tt_smi_probe,
     })
 }
 
@@ -865,7 +896,7 @@ mod defaults_tests {
     struct FakeDetect {
         host: Option<&'static str>,
         ip: Option<&'static str>,
-        chips: Option<&'static str>,
+        smi: Option<String>,
         tt: Option<(&'static str, &'static str)>,
         calls: RefCell<Vec<String>>,
     }
@@ -879,9 +910,9 @@ mod defaults_tests {
             self.calls.borrow_mut().push("ip".into());
             self.ip.map(String::from)
         }
-        fn chips(&self, tt_smi_bin: &str) -> Option<String> {
+        fn tt_smi_snapshot(&self, tt_smi_bin: &str) -> Option<String> {
             self.calls.borrow_mut().push(format!("chips:{tt_smi_bin}"));
-            self.chips.map(String::from)
+            self.smi.clone()
         }
         fn official_tt(&self, explicit_bin: Option<&str>) -> Option<OfficialTt> {
             self.calls
@@ -902,6 +933,13 @@ mod defaults_tests {
 
     fn file_with(body: &str) -> AgentConfigFile {
         toml::from_str(body).unwrap()
+    }
+
+    /// A `tt-smi -s` snapshot with `n` boards of one type.
+    fn snap(board: &str, n: usize) -> Option<String> {
+        let entry = format!(r#"{{"board_info":{{"board_type":"{board}"}}}}"#);
+        let all = vec![entry; n].join(",");
+        Some(format!(r#"{{"device_info":[{all}]}}"#))
     }
 
     fn run(
@@ -931,7 +969,7 @@ mod defaults_tests {
         let d = FakeDetect {
             host: Some("detected-host"),
             ip: Some("192.168.9.9"),
-            chips: None, // detection finds nothing: `chips` keeps today's default
+            smi: None, // detection finds nothing: `chips` keeps today's default
             tt: Some(("/x/tt", "1.0.1")),
             ..Default::default()
         };
@@ -1051,7 +1089,7 @@ mod defaults_tests {
     fn chips_precedence_flag_global_detected_fallback() {
         let d = FakeDetect {
             host: Some("h"),
-            chips: Some("2xBH"),
+            smi: snap("p150", 2),
             ..Default::default()
         };
         let f = || file_with("[global]\nchips = \"8xBH\"\n");
@@ -1080,7 +1118,7 @@ mod defaults_tests {
     fn chips_detection_uses_the_resolved_tt_smi_bin() {
         let d = FakeDetect {
             host: Some("h"),
-            chips: Some("4xBH"),
+            smi: snap("p300c", 4),
             ..Default::default()
         };
         let f = file_with("[global]\ntt_smi_bin = \"/opt/tt-smi\"\n");
@@ -1117,7 +1155,7 @@ mod defaults_tests {
             ..Default::default()
         };
         let r = run(CliOverrides::default(), None, &no_ip).unwrap();
-        assert_eq!(r.serving_host, "short");
+        assert_eq!(r.serving_host, "short.local");
         assert_eq!(r.sources["serving_host"], Source::Detected);
 
         // Hostname is only usable through `--name` here, so detection yields nothing.
@@ -1260,7 +1298,7 @@ mod defaults_tests {
             ..Default::default()
         };
         let d = FakeDetect {
-            chips: Some("2xBH"),
+            smi: snap("p150", 2),
             tt: Some(("/x/tt", "1.0.0")),
             ..Default::default()
         };
@@ -1281,7 +1319,7 @@ mod defaults_tests {
         let d = FakeDetect {
             host: Some("qb2"),
             ip: Some("192.168.1.50"),
-            chips: Some("4xBH"),
+            smi: snap("p300c", 4),
             tt: Some(("/x/tt", "1.0.1")),
             ..Default::default()
         };
@@ -1311,5 +1349,116 @@ mod defaults_tests {
         ] {
             assert!(json.contains(&format!("\"{key}\"")), "missing {key}: {json}");
         }
+    }
+
+    // ---- probe_host, one tt-smi run, mixed sources ----------------------------------------
+
+    #[test]
+    fn probe_host_is_loopback_only_when_the_host_was_not_set_by_the_operator() {
+        let d = || FakeDetect {
+            host: Some("short"),
+            ip: Some("192.168.1.50"),
+            ..Default::default()
+        };
+        // Detected address, hostname fallback, and loopback default: probe loopback.
+        let r = run(CliOverrides::default(), None, &d()).unwrap();
+        assert_eq!(r.probe_host.as_deref(), Some("127.0.0.1"));
+        let no_ip = FakeDetect {
+            host: Some("short"),
+            ..Default::default()
+        };
+        let r = run(CliOverrides::default(), None, &no_ip).unwrap();
+        assert_eq!(r.probe_host.as_deref(), Some("127.0.0.1"));
+        // Flag or profile: poll that host (no probe_host), exactly as before.
+        let flag = CliOverrides {
+            serving_host: Some("qb2-lab.local".into()),
+            ..Default::default()
+        };
+        assert_eq!(run(flag, None, &d()).unwrap().probe_host, None);
+        let f = file_with("[profile.p]\nserving_host = \"qb2-lab.local\"\n");
+        assert_eq!(run(CliOverrides::default(), Some(f), &d()).unwrap().probe_host, None);
+    }
+
+    #[test]
+    fn a_profile_port_with_a_detected_host_keeps_each_source() {
+        let f = file_with("[profile.p]\nserving_port = 8003\n");
+        let d = FakeDetect {
+            host: Some("h"),
+            ip: Some("192.168.1.50"),
+            ..Default::default()
+        };
+        let r = run(CliOverrides::default(), Some(f), &d).unwrap();
+        assert_eq!((r.serving_host.as_str(), r.serving_port), ("192.168.1.50", 8003));
+        assert_eq!(r.sources["serving_host"], Source::Detected);
+        assert_eq!(r.sources["serving_port"], Source::Profile);
+        assert_eq!(r.probe_host.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn tt_smi_runs_once_and_its_snapshot_is_kept_for_the_device_mesh() {
+        let d = FakeDetect {
+            host: Some("h"),
+            smi: snap("p300c", 4),
+            ..Default::default()
+        };
+        let r = run(CliOverrides::default(), None, &d).unwrap();
+        let probes = d.calls.borrow().iter().filter(|c| c.starts_with("chips:")).count();
+        assert_eq!(probes, 1);
+        let kept = r.tt_smi_probe.clone().expect("probe recorded").expect("snapshot kept");
+        assert_eq!(crate::device::detect_device_mesh(&kept).as_deref(), Some("p300x2"));
+        // A failed run is recorded as failed, so `main` does not run it a second time.
+        let failed = FakeDetect {
+            host: Some("h"),
+            ..Default::default()
+        };
+        let r = run(CliOverrides::default(), None, &failed).unwrap();
+        assert_eq!(r.tt_smi_probe, Some(None));
+        // Chips set by the operator: no run here, so `main` makes the only run.
+        let cli = CliOverrides {
+            chips: Some("4xBH".into()),
+            ..Default::default()
+        };
+        let d = FakeDetect {
+            host: Some("h"),
+            ..Default::default()
+        };
+        assert_eq!(run(cli, None, &d).unwrap().tt_smi_probe, None);
+        assert!(!d.called("chips:"));
+    }
+
+    /// This box's real `agentd.toml` shape: identity and serving image set, `chips` unset.
+    /// `chips` is detected from exactly one `tt-smi` run and every set value is unchanged.
+    #[test]
+    fn this_boxs_agentd_toml_shape_probes_tt_smi_exactly_once() {
+        let f = file_with(
+            r#"
+            default_profile = "stable"
+            [global]
+            name = "qb2-lab"
+            ctrl_port = 8765
+            [profile.stable]
+            backend = "runpy"
+            serving_host = "qb2-lab.local"
+            serving_port = 8003
+            serving_image = "ghcr.io/x/img:0.14.0"
+            tt_device = "p300x2"
+            "#,
+        );
+        let d = FakeDetect {
+            smi: snap("p300c", 4),
+            ..Default::default()
+        };
+        let r = run(CliOverrides::default(), Some(f), &d).unwrap();
+        assert_eq!(
+            (r.name.as_str(), r.ctrl_port, r.chips.as_str()),
+            ("qb2-lab", 8765, "4xBH")
+        );
+        assert_eq!(
+            (r.backend.as_str(), r.serving_host.as_str(), r.serving_port),
+            ("runpy", "qb2-lab.local", 8003)
+        );
+        assert_eq!(r.serving_image.as_deref(), Some("ghcr.io/x/img:0.14.0"));
+        assert_eq!(r.probe_host, None);
+        assert_eq!(*d.calls.borrow(), vec!["chips:tt-smi".to_string()]);
     }
 }

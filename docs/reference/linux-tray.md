@@ -99,7 +99,9 @@ matching flags so the tray and CLI can be tested without hardware.
 
 To start the agent on a typical box, run `tt-station-agentd --backend auto`. It picks the `tt`
 backend when the official `tt` CLI is installed and `runpy` otherwise, and takes the box name,
-control port, chip count and serving address from the machine, so it needs no other flags.
+control port, chip count and serving address from the machine, so the box's identity needs no flags.
+If `auto` falls back to `runpy`, pin the serving image (`--serving-image` or `serving_image` in a
+profile) as before; `auto` does not choose an image.
 `tt-station-agentd --backend auto --print-config` shows what it chose and why.
 
 The agent's gozer lease does not restrict which chips the container opens. On hardware
