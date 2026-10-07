@@ -510,6 +510,7 @@ async fn get_config() -> Json<ConfigSummary> {
         serving_image: None,
         tt_inference_repo: None,
         tt_device: None,
+        ..Default::default()
     })
 }
 

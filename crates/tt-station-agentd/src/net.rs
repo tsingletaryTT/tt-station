@@ -58,6 +58,37 @@ pub fn primary_mac() -> Option<String> {
     None
 }
 
+/// The IPv4 source address out of `ip route get <dest>` output, e.g.
+/// `1.1.1.1 via 192.168.1.1 dev eth0 src 192.168.1.50 uid 1000`. `None` when there is no `src`
+/// token or it is not a usable address (loopback, unspecified, link-local, or not IPv4).
+///
+/// Pure, so the parsing is tested without running `ip`.
+pub fn parse_route_src(route_output: &str) -> Option<std::net::Ipv4Addr> {
+    let src = route_output
+        .split_whitespace()
+        .skip_while(|t| *t != "src")
+        .nth(1)?;
+    let ip: std::net::Ipv4Addr = src.parse().ok()?;
+    (!ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local()).then_some(ip)
+}
+
+/// The IPv4 address of the interface the default route leaves through, which is the address
+/// other machines on the LAN reach this box at. Sits next to [`primary_mac`] and uses the same
+/// `ip route get 1.1.1.1` lookup. Best-effort: any failure (no `ip`, no route, no address)
+/// returns `None` and the caller falls back to the hostname.
+///
+/// Sends no packets: `ip route get` only consults the routing table.
+pub fn primary_ipv4() -> Option<String> {
+    let out = std::process::Command::new("ip")
+        .args(["route", "get", "1.1.1.1"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_route_src(&String::from_utf8_lossy(&out.stdout)).map(|ip| ip.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,5 +106,22 @@ mod tests {
         assert_eq!(normalize_mac("aa:bb:cc"), None);
         assert_eq!(normalize_mac("zz:bb:cc:dd:ee:ff"), None);
         assert_eq!(normalize_mac(""), None);
+    }
+
+    #[test]
+    fn parse_route_src_takes_the_src_address() {
+        let out = "1.1.1.1 via 192.168.1.1 dev eth0 src 192.168.1.50 uid 1000\n    cache\n";
+        assert_eq!(parse_route_src(out), Some("192.168.1.50".parse().unwrap()));
+    }
+
+    #[test]
+    fn parse_route_src_refuses_unusable_answers() {
+        assert_eq!(parse_route_src(""), None);
+        assert_eq!(parse_route_src("1.1.1.1 dev eth0 uid 1000"), None); // no src
+        assert_eq!(parse_route_src("1.1.1.1 dev lo src 127.0.0.1"), None);
+        assert_eq!(parse_route_src("1.1.1.1 dev x src 0.0.0.0"), None);
+        assert_eq!(parse_route_src("1.1.1.1 dev x src 169.254.3.4"), None);
+        assert_eq!(parse_route_src("1.1.1.1 dev x src fe80::1"), None);
+        assert_eq!(parse_route_src("1.1.1.1 dev x src"), None);
     }
 }

@@ -374,6 +374,7 @@ impl AppState {
                     serving_image: None,
                     tt_inference_repo: None,
                     tt_device: None,
+                    ..Default::default()
                 },
                 ssh_authorized_keys_path: PathBuf::new(),
                 ssh_user: "ttuser".to_string(),
