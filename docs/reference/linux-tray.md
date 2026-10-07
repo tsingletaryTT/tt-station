@@ -97,6 +97,11 @@ tables that drive validation, so a UI can build its form from it. Only the `tt` 
 `docs/reference/agentd-config.md` under "The `tt` backend". The mock box (`mock-box`) takes
 matching flags so the tray and CLI can be tested without hardware.
 
+To start the agent on a typical box, run `tt-station-agentd --backend auto`. It picks the `tt`
+backend when the official `tt` CLI is installed and `runpy` otherwise, and takes the box name,
+control port, chip count and serving address from the machine, so it needs no other flags.
+`tt-station-agentd --backend auto --print-config` shows what it chose and why.
+
 The agent's gozer lease does not restrict which chips the container opens. On hardware
 (2026-10-05) tt-model ignored the grant's `TT_VISIBLE_DEVICES` and mounted `/dev/tenstorrent/0`
 to `3` itself. That is harmless only while the lease covers every chip, which is the agent's
