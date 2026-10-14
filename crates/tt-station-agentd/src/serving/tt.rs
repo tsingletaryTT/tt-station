@@ -3516,7 +3516,9 @@ mod tests {
         });
         *runner.on_run.lock().unwrap() = None;
         let log = runner.log();
-        let x_release = runner.pos("gozer release lease-abc123").expect("X released A");
+        let x_release = runner
+            .pos("gozer release lease-abc123")
+            .expect("X released A");
         let late: Vec<_> = log
             .iter()
             .skip(x_release + 1)
@@ -3570,7 +3572,11 @@ mod tests {
             let held_after_start = b.held_lease();
             y.join().unwrap().unwrap();
             started.unwrap();
-            assert_eq!(held_after_start.as_deref(), Some("lease-B"), "S finished before Y");
+            assert_eq!(
+                held_after_start.as_deref(),
+                Some("lease-B"),
+                "S finished before Y"
+            );
         });
         *runner.on_run.lock().unwrap() = None;
         assert!(

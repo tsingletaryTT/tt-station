@@ -393,4 +393,3 @@ async fn a_second_run_while_one_is_starting_is_409_and_status_says_starting() {
     let (_, after) = get_json(format!("{base}/status")).await;
     assert!(after.get("starting").is_none(), "cleared: {after}");
 }
-
