@@ -328,7 +328,8 @@ async fn restart_repeats_the_remembered_options_for_that_model() {
 
 #[tokio::test]
 async fn restart_with_no_known_run_name_refuses_and_leaves_the_box_serving() {
-    let m = spawn_mock_box(&[]);
+    // Options reach /run only on a box whose backend takes them.
+    let m = spawn_mock_box(&["--backend", "tt"]);
     remote(&m)
         .run("Llama-3.1-8B-Instruct", false, &port_opts(20005))
         .await
@@ -433,7 +434,8 @@ async fn restart_falls_back_to_last_model_when_the_served_id_ends_with_it() {
 
 #[tokio::test]
 async fn restart_refuses_when_last_model_is_a_different_model_and_stops_nothing() {
-    let m = spawn_mock_box(&[]);
+    // Options reach /run only on a box whose backend takes them.
+    let m = spawn_mock_box(&["--backend", "tt"]);
     // Another client started Qwen3-8B; this tray last ran Llama on the box.
     remote(&m)
         .run("Qwen3-8B", false, &port_opts(20005))
@@ -479,7 +481,8 @@ async fn run_last_with_no_remembered_run_is_a_message() {
 
 #[tokio::test]
 async fn run_last_runs_the_most_recent_model_with_its_options() {
-    let m = spawn_mock_box(&[]);
+    // Options reach /run only on a box whose backend takes them.
+    let m = spawn_mock_box(&["--backend", "tt"]);
     let c = ctx(vec![remote(&m)]);
     let mut reg = registry(&c);
     reg.remember_run(&box_id(&m), "First-Model", &port_opts(20002));

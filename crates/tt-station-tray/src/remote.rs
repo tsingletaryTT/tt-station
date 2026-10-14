@@ -177,12 +177,40 @@ impl RemoteStation {
         self.client()?.stop().await
     }
 
+    /// The box's resolved serving backend from `GET /config`, `None` when it cannot be read.
+    async fn backend(&self) -> Option<String> {
+        agent_client::get_config(&self.base)
+            .await
+            .ok()
+            .map(|c| c.backend)
+    }
+
+    /// The second half of `Station::replace`, after [`RemoteStation::check_run`] passed.
+    ///
+    /// On a `tt`-backend box this sends only `/run`: the agent's `tt` backend checks the model
+    /// and options (catalog against bundle, `serve_argv_for`) before its swap stops the old
+    /// serve, so a refused run leaves the old serve running. Every other backend (and a box
+    /// whose `/config` cannot be read) gets `/stop` and then `/run`, because their `/run` does
+    /// not stop the previous serve first.
+    pub async fn replace_checked(
+        &self,
+        model: &str,
+        force: bool,
+        options: &RunOptions,
+    ) -> Result<ServingNow> {
+        if self.backend().await.as_deref() != Some("tt") {
+            self.stop().await?;
+        }
+        self.run(model, force, options).await
+    }
+
     /// What can be checked before a run without starting anything: pairing, the model name and
     /// options, and, when there are options, whether this box takes them at all
     /// ([`remote_options_refusal`], from `GET /run/schema` and the backend in `GET /config`).
     /// The box still decides the rest (for example a catalog model refusing a vLLM flag on a
-    /// `tt`-backend box), because only it knows how it classifies the model. Restart calls this
-    /// before it stops the running server.
+    /// `tt`-backend box), because only it knows how it classifies the model; Restart on such a
+    /// box therefore sends no `/stop` ([`RemoteStation::replace_checked`]). Restart calls this
+    /// before it stops anything.
     pub async fn check_run(&self, model: &str, options: &RunOptions) -> Result<()> {
         self.client()?;
         libttstation::run_options::validate_model_name(model)?;
@@ -191,10 +219,7 @@ impl RemoteStation {
             return Ok(());
         }
         let schema = self.schema().await?;
-        let backend = agent_client::get_config(&self.base)
-            .await
-            .ok()
-            .map(|c| c.backend);
+        let backend = self.backend().await;
         match remote_options_refusal(!schema.options.is_empty(), backend.as_deref()) {
             Some(why) => Err(anyhow!("{} {why}", self.name)),
             None => Ok(()),

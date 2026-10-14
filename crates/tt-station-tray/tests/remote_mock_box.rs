@@ -66,7 +66,7 @@ async fn remote_unreachable_is_a_value_not_an_error() {
 
 #[tokio::test]
 async fn remote_run_sends_options_on_the_wire() {
-    let m = spawn_mock_box(&[]);
+    let m = spawn_mock_box(&["--backend", "tt"]);
     let options = RunOptions {
         port: Some(20001),
         ..RunOptions::default()
@@ -183,4 +183,36 @@ async fn remote_replace_refuses_options_a_runpy_box_cannot_take_and_stops_nothin
         .await
         .unwrap();
     assert_eq!(st.state().await.serving.unwrap().model, "New-Model");
+}
+
+/// Review of the Copilot fixes, Important 3: on a `tt`-backend box the agent checks a run
+/// before its swap stops the old serve. Restart must leave that to the agent: a vLLM flag on a
+/// catalog model is refused and the box keeps serving the old model.
+#[tokio::test]
+async fn remote_replace_on_a_tt_box_lets_the_agent_refuse_before_anything_stops() {
+    let m = spawn_mock_box(&["--backend", "tt"]);
+    let st = station(&m);
+    st.run("Old-Model", false, &RunOptions::default())
+        .await
+        .unwrap();
+    let flag = RunOptions::from_value(
+        &serde_json::json!({ "vllm_args": [{ "flag": "max-model-len", "value": "4096" }] }),
+    )
+    .unwrap();
+    let err = st
+        .replace("Llama-3.1-8B-Instruct", false, &flag)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("vllm_args"), "{err}");
+    let now = st
+        .state()
+        .await
+        .serving
+        .expect("the old serve is untouched");
+    assert_eq!(now.model, "Old-Model");
+
+    // A run the box accepts replaces the old one.
+    st.replace("org/bundle", false, &flag).await.unwrap();
+    assert_eq!(st.state().await.serving.unwrap().model, "org/bundle");
 }

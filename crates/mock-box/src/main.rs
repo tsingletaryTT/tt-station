@@ -119,8 +119,9 @@ enum Command {
         #[arg(long = "served-id-prefix")]
         served_id_prefix: Option<String>,
 
-        /// Test hook: the resolved backend `/config` reports. Default `runpy`, the real
-        /// agent's default, which takes no run options. `tt` is the backend that does.
+        /// Test hook: the resolved backend `/config` reports, and how `POST /run` treats
+        /// options. Default `runpy`, the real agent's default, which refuses any run options
+        /// with 400. `tt` accepts them and refuses only those the model cannot take.
         #[arg(long = "backend", default_value = "runpy")]
         backend: String,
     },
@@ -428,10 +429,44 @@ async fn pair_complete(
 #[derive(Deserialize)]
 struct RunRequest {
     model: String,
-    /// Accepted and recorded but not validated or acted on: the mock has no
-    /// backend. `force` is likewise ignored (serde skips unknown fields).
+    /// Validated like the real agent before anything changes (see
+    /// [`check_run_options`]), then recorded verbatim for `last_run_options`.
+    /// `force` is ignored (serde skips unknown fields).
     #[serde(default)]
     options: Option<serde_json::Value>,
+}
+
+/// The real agent's answer to `POST /run` options, before it touches its running serve:
+/// options that do not parse are a 400 naming the field (the route's check); a backend other
+/// than `tt` refuses any non-empty options (`OptionsUnsupported`); the `tt` backend refuses
+/// options the model cannot take (`serve_argv_for`). The mock has no `tt`, so it classifies a
+/// model with a `/` as a tt-model bundle and anything else as a catalog model.
+fn check_run_options(
+    backend: &str,
+    model: &str,
+    options: Option<&serde_json::Value>,
+) -> std::result::Result<(), String> {
+    use libttstation::run_options::{serve_argv_for, RunOptions, ServeTarget};
+    let opts = match options.filter(|v| !v.is_null()) {
+        None => return Ok(()),
+        Some(v) => RunOptions::from_value(v).map_err(|e| format!("{}: {}", e.field, e.message))?,
+    };
+    if opts.is_empty() {
+        return Ok(());
+    }
+    if backend != "tt" {
+        return Err(format!(
+            "the {backend} backend does not support run options"
+        ));
+    }
+    let target = if model.contains('/') {
+        ServeTarget::Bundle
+    } else {
+        ServeTarget::Catalog
+    };
+    serve_argv_for(target, model, 20000, &opts)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -456,6 +491,13 @@ async fn run_model(
                 Json(serde_json::json!({ "error": text })),
             ));
         }
+    }
+    // Like the real agent: refuse bad options before the running serve is touched.
+    if let Err(error) = check_run_options(&inner.backend, &req.model, req.options.as_ref()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error })),
+        ));
     }
     let endpoint = Endpoint {
         base_url: format!("http://127.0.0.1:{}/v1", inner.ctrl_port),
@@ -919,10 +961,17 @@ mod tests {
     use libttstation::agent_client::{get_run_schema, get_status, AgentClient};
     use libttstation::run_options::RunOptions;
 
+    /// A mock whose backend takes run options (`tt`), so options reach `last_run_options`.
     async fn start() -> String {
+        start_with("tt").await
+    }
+
+    async fn start_with(backend: &str) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let router = app(MockState::new("mock".into(), "4xBH".into(), addr.port()));
+        let state = MockState::new("mock".into(), "4xBH".into(), addr.port());
+        state.lock().backend = backend.to_string();
+        let router = app(state);
         tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
@@ -980,5 +1029,61 @@ mod tests {
         let base = start().await;
         let schema = get_run_schema(&base).await.unwrap();
         assert!(schema.options.iter().any(|o| o.name == "device"));
+    }
+
+    async fn status_of(base: &str) -> String {
+        reqwest::get(format!("{base}/status"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()["status"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Like the real agent's default backend, a `runpy` mock refuses non-empty options with a
+    /// 400 and leaves its running serve alone.
+    #[tokio::test]
+    async fn a_runpy_mock_refuses_options_and_keeps_serving() {
+        let base = start_with("runpy").await;
+        let client = AgentClient::new(base.clone(), "mock-token");
+        client.run("old", false).await.unwrap();
+        let options = RunOptions {
+            port: Some(20001),
+            ..RunOptions::default()
+        };
+        let err = client
+            .run_with_options("new", false, &options)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not support run options"), "{err}");
+        assert_eq!(status_of(&base).await, "serving:old");
+    }
+
+    /// A `tt` mock refuses options the model cannot take (a vLLM flag on a catalog model)
+    /// before it touches the running serve, as the agent's `tt` backend does.
+    #[tokio::test]
+    async fn a_tt_mock_refuses_a_vllm_flag_on_a_catalog_model_and_keeps_serving() {
+        let base = start().await;
+        let client = AgentClient::new(base.clone(), "mock-token");
+        client.run("old", false).await.unwrap();
+        let options = RunOptions::from_value(
+            &serde_json::json!({ "vllm_args": [{ "flag": "max-model-len", "value": "4096" }] }),
+        )
+        .unwrap();
+        assert!(client
+            .run_with_options("Llama-3.1-8B-Instruct", false, &options)
+            .await
+            .is_err());
+        assert_eq!(status_of(&base).await, "serving:old");
+        // A bundle takes it.
+        client
+            .run_with_options("org/bundle", false, &options)
+            .await
+            .unwrap();
+        assert_eq!(status_of(&base).await, "serving:org/bundle");
     }
 }

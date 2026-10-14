@@ -213,6 +213,11 @@ impl Station {
     /// ([`Station::check_run`]), and only if it passes stop the running server and start
     /// `model` with `options`. A refused request stops nothing; its error says the server is
     /// still running.
+    ///
+    /// A box whose agent uses the `tt` backend gets no `/stop`: its `/run` checks the model and
+    /// options (including catalog against bundle, which only the box can tell) and only then
+    /// swaps out the old serve, so a run it refuses leaves the old serve running
+    /// ([`RemoteStation::replace_checked`]).
     pub async fn replace(
         &self,
         model: &str,
@@ -226,8 +231,13 @@ impl Station {
                 why.trim_end_matches('.')
             );
         }
-        self.stop().await?;
-        self.run(model, force, options).await
+        match self {
+            Station::Local(s) => {
+                s.stop().await?;
+                s.run(model, force, options).await
+            }
+            Station::Remote(s) => s.replace_checked(model, force, options).await,
+        }
     }
 
     /// The run name of the shown server when the station can say it exactly: the `tt model ps`
