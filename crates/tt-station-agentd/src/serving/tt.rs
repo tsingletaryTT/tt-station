@@ -382,6 +382,14 @@ pub struct TtBackend {
     /// under the `handover` lock, so a discovery whose `ps` began before a stop does not
     /// record the row it read (the server may be gone by then).
     stops: AtomicU64,
+    /// Bumped, under the `handover` lock, each time a serve of this process is recorded in
+    /// `served` together with its lease (the handover at the end of a successful `start`, and
+    /// `fail_after_serve` keeping a lease). `stop_inner` reads it before it stops anything and
+    /// clears `served` and takes the lease only if it is unchanged, under the same lock. A
+    /// stop whose `tt model stop` was slow therefore cannot release the lease of a serve that
+    /// was started and handed over meanwhile (gozer would reset chips under that serve). A
+    /// lease id alone cannot tell the two serves apart, because gozer reuses ids.
+    serve_epoch: AtomicU64,
     /// The last good `tt --json model ps` rows and when they were read. The mutex is also the
     /// single-flight lock: it is held while `ps` runs, so concurrent callers wait for that one
     /// run and then reuse its result instead of each starting a `tt` process.
@@ -464,6 +472,7 @@ impl TtBackend {
             starting: AtomicBool::new(false),
             stopping: AtomicUsize::new(0),
             stops: AtomicU64::new(0),
+            serve_epoch: AtomicU64::new(0),
             ps_cache: Mutex::new(PsCache::default()),
         }
     }
@@ -613,6 +622,7 @@ impl TtBackend {
         {
             // Lock order: handover, then served, then lease (see the struct doc).
             let _handover = self.handover.lock().expect("handover mutex poisoned");
+            self.serve_epoch.fetch_add(1, Ordering::SeqCst);
             *self.served.lock().expect("served mutex poisoned") = Some(Served {
                 name: model.to_string(),
                 port,
@@ -646,15 +656,16 @@ impl TtBackend {
         )
     }
 
-    /// Hand back the lease held for a running serve, if any. `take()` under one lock, so two
-    /// concurrent stops cannot both release the same id (gozer reuses ids, so the second
-    /// release could land on another tenant's lease). A refused release puts the id back,
-    /// unless a newer lease has been stored meanwhile, so a later `stop` can retry.
-    fn release_lease(&self) -> Result<()> {
+    /// Hand back `taken`, the lease id `stop_inner` took out of `self.lease`, if any. The id
+    /// was taken with `take()` under one lock, so two concurrent stops cannot both release the
+    /// same id (gozer reuses ids, so the second release could land on another tenant's lease).
+    /// A refused release puts the id back, unless a newer lease has been stored meanwhile, so
+    /// a later `stop` can retry.
+    fn release_lease(&self, taken: Option<String>) -> Result<()> {
         let Some(capability) = &self.gozer else {
             return Ok(());
         };
-        let Some(lease_id) = self.lease.lock().expect("lease mutex poisoned").take() else {
+        let Some(lease_id) = taken else {
             return Ok(());
         };
         if let Err(err) = crate::gozer::release(self.runner.as_ref(), capability, &lease_id) {
@@ -697,7 +708,14 @@ impl TtBackend {
     /// cached `tt model ps` read, possibly long ago. It is always confirmed with a fresh read
     /// first (see `confirm_discovered`), with or without a lease: the stop must reach only the
     /// server now on our port, and with a lease the stop is followed by a chip reset.
+    ///
+    /// **A serve started while this stop ran.** `tt model stop` can take a long time, and no
+    /// lock is held while it runs, so another `start` can record a new serve and its lease
+    /// meanwhile (its own swap stops the same server again). This stop then leaves that newer
+    /// record and lease alone: it reads `serve_epoch` first and clears `served` and takes the
+    /// lease only if the epoch is unchanged, both under the `handover` lock.
     fn stop_inner(&self, hint: &str) -> Result<()> {
+        let epoch = self.serve_epoch.load(Ordering::SeqCst);
         let recorded = self.served.lock().expect("served mutex poisoned").clone();
         let lease_held = self.lease.lock().expect("lease mutex poisoned").is_some();
         // A discovered name is always confirmed with a fresh read, lease or not: it may be
@@ -730,12 +748,28 @@ impl TtBackend {
         if let Some(name) = name {
             self.tt_model_stop(&name)?;
         }
-        *self.served.lock().expect("served mutex poisoned") = None;
-        *self
-            .adopted_port
-            .lock()
-            .expect("adopted_port mutex poisoned") = None;
-        self.release_lease()
+        let taken = {
+            // Lock order: handover, then served, then lease, then adopted_port (each of the
+            // last three is held only for its own statement).
+            let _handover = self.handover.lock().expect("handover mutex poisoned");
+            if self.serve_epoch.load(Ordering::SeqCst) != epoch {
+                // A newer serve was handed over while `tt model stop` ran. Its record and
+                // lease belong to it; the server this stop aimed at is already stopped.
+                eprintln!(
+                    "tt-station-agentd: a new serve started while this stop ran; leaving its \
+                     record and chip lease alone"
+                );
+                return Ok(());
+            }
+            *self.served.lock().expect("served mutex poisoned") = None;
+            let taken = self.lease.lock().expect("lease mutex poisoned").take();
+            *self
+                .adopted_port
+                .lock()
+                .expect("adopted_port mutex poisoned") = None;
+            taken
+        };
+        self.release_lease(taken)
     }
 
     /// Confirm a discovered serve with a fresh `tt model ps` before stopping it (and before
@@ -1084,6 +1118,7 @@ impl ServingBackend for TtBackend {
             if self.cancel.load(Ordering::SeqCst) {
                 Some(lease)
             } else {
+                self.serve_epoch.fetch_add(1, Ordering::SeqCst);
                 *self.served.lock().expect("served mutex poisoned") = Some(Served {
                     name: model.to_string(),
                     port,
@@ -3099,5 +3134,63 @@ mod tests {
     #[test]
     fn backend_name_is_tt() {
         assert_eq!(backend(&ScriptedRunner::happy()).backend_name(), "tt");
+    }
+
+    /// Copilot review of PR #2: a `/stop` for serve A whose `tt model stop` is slow must not,
+    /// when it finally finishes, clear the record of serve B or release B's lease. B was
+    /// started (and handed over) while A's stop was still inside `tt model stop`. Releasing
+    /// B's lease would make gozer reset the chips under B's live container.
+    #[test]
+    fn a_slow_stop_never_releases_the_lease_of_a_serve_started_meanwhile() {
+        let runner = ScriptedRunner::happy();
+        let b = Arc::new(leasing_backend(&runner));
+        b.start("Llama-3.1-8B-Instruct").unwrap();
+        assert_eq!(b.held_lease().as_deref(), Some("lease-abc123"));
+        // B's grant carries a different id, so the assertions can tell the two apart.
+        runner.on(
+            "gozer acquire",
+            0,
+            &GRANT_JSON.replace("lease-abc123", "lease-B"),
+            "",
+        );
+
+        // The first `tt model stop` (the slow /stop of A) parks until B has been handed over.
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let (entered, resume) = (entered.clone(), resume.clone());
+            *runner.on_run.lock().unwrap() = Some((
+                "model stop".to_string(),
+                Arc::new(move || {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        entered.wait();
+                        resume.wait();
+                    }
+                }),
+            ));
+        }
+        std::thread::scope(|scope| {
+            let stopper = {
+                let b = b.clone();
+                scope.spawn(move || b.stop("meta-llama/Llama-3.1-8B-Instruct"))
+            };
+            entered.wait();
+            // A's stop is inside `tt model stop`. Start B: its swap stops A again and releases
+            // A's lease, then B is leased, served and handed over.
+            b.start("Qwen3-8B").unwrap();
+            assert_eq!(b.held_lease().as_deref(), Some("lease-B"));
+            resume.wait();
+            stopper.join().unwrap().unwrap();
+        });
+        *runner.on_run.lock().unwrap() = None;
+
+        assert!(
+            runner.pos("gozer release lease-B").is_none(),
+            "A's stop released B's lease: {:?}",
+            runner.log()
+        );
+        assert_eq!(b.held_lease().as_deref(), Some("lease-B"));
+        assert_eq!(b.served(), Some(("Qwen3-8B".to_string(), 8003)));
     }
 }
