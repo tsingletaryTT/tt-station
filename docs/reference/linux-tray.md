@@ -22,14 +22,27 @@ https://github.com/tsingletaryTT/tt-station/pull/2). The branch was pushed on 20
 every commit up to the Models page reference performance work (`beaa04c`); later commits are
 local until the next push.
 
-GitHub Copilot reviewed #2 on 2026-10-14 (seven inline comments and one summary claim). All
-eight were confirmed in the code and fixed with a failing test first, in local commits
-`c0ba10b` to `f47d0c5`: the agent's `tt` backend no longer lets a slow stop release a newer
-serve's lease; an agent without `/run/schema` gets a default run; a new pairing token rebuilds
-the tray's station; a local stop is judged by its exit status; the Models page clears the
-previous station's rows and never runs one station's model on another; pairing a listed box
-typed in other letter case uses its listed id; Start stays disabled while a Start or Restart
-runs; and Restart checks the replacement before it stops the server. The triage is in
+GitHub Copilot reviewed #2 on 2026-10-14 (seven inline comments and one summary claim). Each
+claim matched the code. The fixes were written test-first in local commits `c0ba10b` to
+`f47d0c5`, and an independent review of those added a second round (`14bf6da` onward):
+* agentd's `tt` backend: a slow stop no longer releases a newer serve's lease or reports it
+  idle; stops run one at a time (a stop waits at most 60 s for an earlier one, then fails
+  with "a stop is already in progress");
+* an agent without `/run/schema` gets a default run;
+* a new pairing token rebuilds the tray's station;
+* a local stop is judged by its exit status, and a failing local `tt` command shows tt's JSON
+  error text;
+* the Models page clears the previous station's rows and never runs one station's model on
+  another;
+* pairing a listed box typed in other letter case uses its listed id;
+* Start stays disabled while a Start or Restart runs (also when the background task panics),
+  and turns into Restart after a successful Start;
+* Restart checks the replacement before anything is stopped (see "Run options").
+
+Gaps that remain: a Restart can still lose the old serve when the new one fails after the
+stop for a reason no check can see in advance (no chips, a failing container); a box paired in
+the CLI under one host spelling and listed in the tray under another is still unpaired in the
+tray; none of the window fixes was exercised on a display. The triage is in
 `.superpowers/sdd/2026-10-05-linux-tray/copilot-review-triage.md` (local, gitignored).
 
 ## Stations
@@ -197,9 +210,10 @@ Restart (run sheet or tray menu) checks the replacement before it stops anything
 (`Station::replace`). For this machine that is every check `tt serve` would face from the
 tray, including the dry-run plan (a catalog model takes no `profile` or vLLM flags). For a box
 with non-empty options it is the schema and the backend in `GET /config`: only a `tt`-backend
-box takes options. A refused Restart leaves the server running and says so. A `tt`-backend box
-still decides catalog against bundle itself, so a vLLM flag on a catalog model is refused
-there only after the stop.
+box takes options. A refused Restart leaves the server running and says so. On a `tt`-backend
+box Restart sends only `/run`: the agent checks the model and options (including catalog
+against bundle, which only the box can tell) and only then swaps out the old serve, so a run
+it refuses leaves the old serve running. Other backends get `/stop` and then `/run`.
 
 ## The `tt` backend
 

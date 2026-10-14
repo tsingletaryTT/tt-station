@@ -92,12 +92,16 @@ Boxes show nothing until the agent's `/models` gains a `perf` field. The `GtkPan
 height` CRITICAL came from the wrapping detail label; it now sits in a vertical-only
 ScrolledWindow, and a live walk of all three pages logged none. Report:
 `.superpowers/sdd/2026-10-05-linux-tray/perf-and-paned-report.md`.
-Copilot review of PR #2 (2026-10-14): 7 inline comments plus the summary claim, all
-confirmed and fixed test-first (`c0ba10b`..`f47d0c5`, local, not pushed): agentd `tt` backend
-stop/lease race (serve epoch), `/run/schema` 404 = empty schema, token-change rebuild, local
-stop by exit status, Models page station switch, pairing case, Start in-flight flag, Restart
-pre-check (`Station::replace`). Draft replies: `.superpowers/sdd/2026-10-05-linux-tray/
-copilot-replies-draft.md` (not posted).
+Copilot review of PR #2 (2026-10-14): 7 inline comments plus the summary claim. Each matched
+the code and was fixed test-first (`c0ba10b`..`f47d0c5`), then an independent review added a
+second round (`14bf6da` onward). All local, not pushed. Fixed: agentd `tt` backend stop/lease
+race (serve epoch, one stop at a time with a 60 s wait, `/stop` keeps a newer serve's status),
+`/run/schema` 404 = empty schema, token-change rebuild, local stop by exit status and tt's JSON
+error text, Models page station switch, pairing case, Start in-flight guard and Restart after a
+successful Start, Restart pre-check (`Station::replace`; a `tt`-backend box gets only `/run`).
+Still open: a Restart loses the old serve when the new one fails for a reason no check sees;
+CLI-vs-tray host spelling; no window fix seen on a display. Draft replies:
+`.superpowers/sdd/2026-10-05-linux-tray/copilot-replies-draft.md` (not posted).
 Owner to do for franklinstower: install and start `tt-station-agentd` and send the pairing code;
 say whether the session is GNOME or KDE; authorize an SSH key if we are to test over SSH;
 `sudo apt install libadwaita-dev` only for a later restyle.
