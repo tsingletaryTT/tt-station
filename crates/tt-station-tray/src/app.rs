@@ -52,6 +52,7 @@ use crate::sni_host::{self, HostStatus};
 use crate::station::{ServingNow, Station, StationId, StationState};
 use crate::tray::TtTray;
 use crate::window::view_model::{mac_to_remember, station_with_registry_mac};
+use libttstation::secrets::SecretStore;
 
 /// How often the poll loop refreshes every station.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -112,6 +113,20 @@ impl WolSender for UdpBroadcast {
     }
 }
 
+/// What one box's station was built from: its id, its name, and a digest of its pairing token
+/// (`None` when unpaired). The digest changes when the box is paired again after a reset, so
+/// the station is rebuilt with the new token; the token itself is not kept in this key.
+type StationKey = (String, String, Option<u64>);
+
+/// A digest of a pairing token, for noticing that it changed. Only compared within this
+/// process, never stored or logged.
+fn token_digest(token: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut h);
+    h.finish()
+}
+
 /// Everything [`dispatch`] and the poll loop need: the stations, where the registry lives, and
 /// the handles for launching (process runner, Wake sender).
 pub struct AppContext {
@@ -122,8 +137,8 @@ pub struct AppContext {
     /// Index 0 is this machine when built by [`AppContext::from_env`]. Never locked across an
     /// `.await`.
     stations: Mutex<Vec<Arc<Station>>>,
-    /// What `stations` was built from: (id, name, has token) per known box.
-    built_from: Mutex<Vec<(String, String, bool)>>,
+    /// What `stations` was built from, per known box (see [`StationKey`]).
+    built_from: Mutex<Vec<StationKey>>,
     /// The states from the most recent poll.
     states: Mutex<Vec<StationState>>,
     pub runner: Arc<dyn Runner>,
@@ -228,20 +243,30 @@ impl AppContext {
         self.states.lock().expect("states mutex poisoned").clone()
     }
 
-    /// Rebuild the station list when the registry's boxes or their pairing changed. Rebuilding
-    /// only on change keeps each `RemoteStation`'s remembered contention text between polls.
+    /// Rebuild the station list when the registry's boxes or their pairing tokens changed (a
+    /// new pairing after a reset counts). Rebuilding only on change keeps each
+    /// `RemoteStation`'s remembered contention text between polls.
     fn sync_stations(&self, reg: &Registry) {
+        self.sync_stations_with(reg, open_store().as_ref());
+    }
+
+    /// [`AppContext::sync_stations`] with the token store passed in (tests use a temporary one).
+    fn sync_stations_with(&self, reg: &Registry, store: &dyn SecretStore) {
         if !self.follow_registry {
             return;
         }
-        let store = open_store();
-        let key: Vec<(String, String, bool)> = reg
+        // Read each token once: the key and the stations built below use the same snapshot.
+        // A store read error counts as "not paired", as in the window.
+        let tokens: Vec<Option<String>> = reg
             .stations()
             .iter()
-            .map(|k| {
-                let paired = token_for(store.as_ref(), &k.id()).ok().flatten().is_some();
-                (k.id().0, k.name.clone(), paired)
-            })
+            .map(|k| token_for(store, &k.id()).ok().flatten())
+            .collect();
+        let key: Vec<StationKey> = reg
+            .stations()
+            .iter()
+            .zip(&tokens)
+            .map(|(k, token)| (k.id().0, k.name.clone(), token.as_deref().map(token_digest)))
             .collect();
         let mut built = self.built_from.lock().expect("built_from mutex poisoned");
         let mut stations = self.stations.lock().expect("stations mutex poisoned");
@@ -249,9 +274,7 @@ impl AppContext {
             return;
         }
         let mut list = vec![Arc::new(Station::Local(LocalStation::from_env()))];
-        for k in reg.stations() {
-            // A store read error counts as "not paired", as in the window.
-            let token = token_for(store.as_ref(), &k.id()).ok().flatten();
+        for (k, token) in reg.stations().iter().zip(tokens) {
             list.push(Arc::new(Station::Remote(RemoteStation::new(
                 k.base(),
                 k.name.clone(),
@@ -891,6 +914,44 @@ mod tests {
         assert!(!served_id_matches("Qwen3-8B", "Llama-3.1-8B"));
         assert!(!served_id_matches("xLlama-3.1-8B", "Llama-3.1-8B"));
         assert!(!served_id_matches("anything", ""));
+    }
+
+    /// Copilot review of PR #2: after a box is reset and paired again, its new token must
+    /// replace the revoked one in the tray's station, or every Run and Stop from the tray
+    /// fails with 401 until the tray restarts. An unchanged token keeps the same station (its
+    /// remembered contention text survives polls).
+    #[test]
+    fn a_new_token_for_a_paired_box_rebuilds_its_station() {
+        use libttstation::secrets::FileStore;
+        let dir = tempfile::tempdir().unwrap();
+        let reg_path = dir.path().join("r.json");
+        let mut reg = Registry::load(&reg_path);
+        let id = reg.add_manual("qb", 8765).unwrap();
+        let store = FileStore::new(dir.path().join("secrets.json"));
+        let mut ctx = AppContext::new(
+            &reg_path,
+            Vec::new(),
+            Arc::new(crate::launchers::SystemRunner),
+            Arc::new(UdpBroadcast),
+            dir.path(),
+        );
+        ctx.follow_registry = true;
+
+        store.set(&id.0, "revoked-token").unwrap();
+        ctx.sync_stations_with(&reg, &store);
+        let first = ctx.station(&id).unwrap();
+        ctx.sync_stations_with(&reg, &store);
+        assert!(
+            Arc::ptr_eq(&first, &ctx.station(&id).unwrap()),
+            "same token: the station is kept"
+        );
+
+        store.set(&id.0, "fresh-token").unwrap();
+        ctx.sync_stations_with(&reg, &store);
+        assert!(
+            !Arc::ptr_eq(&first, &ctx.station(&id).unwrap()),
+            "a new token must rebuild the station"
+        );
     }
 
     #[test]
