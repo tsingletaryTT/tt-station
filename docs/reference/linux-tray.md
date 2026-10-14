@@ -22,6 +22,16 @@ https://github.com/tsingletaryTT/tt-station/pull/2). The branch was pushed on 20
 every commit up to the Models page reference performance work (`beaa04c`); later commits are
 local until the next push.
 
+GitHub Copilot reviewed #2 on 2026-10-14 (seven inline comments and one summary claim). All
+eight were confirmed in the code and fixed with a failing test first, in local commits
+`c0ba10b` to `f47d0c5`: the agent's `tt` backend no longer lets a slow stop release a newer
+serve's lease; an agent without `/run/schema` gets a default run; a new pairing token rebuilds
+the tray's station; a local stop is judged by its exit status; the Models page clears the
+previous station's rows and never runs one station's model on another; pairing a listed box
+typed in other letter case uses its listed id; Start stays disabled while a Start or Restart
+runs; and Restart checks the replacement before it stops the server. The triage is in
+`.superpowers/sdd/2026-10-05-linux-tray/copilot-review-triage.md` (local, gitignored).
+
 ## Stations
 
 A *station* is anything that can serve models. The tray treats two kinds the same way.
@@ -54,6 +64,12 @@ Discovery combines mDNS (`_tenstorrent._tcp`) with hosts added by hand (probed t
 Pairing uses the same handshake and token store as the CLI. A box paired with `tt-station pair`
 is already paired in the tray, and the reverse. The agent shows its code on the box (panel or
 `tt-station console`); enter it in the tray's pairing dialog.
+
+The token is stored under `"<host>:<port>"` with the host as typed, the key `tt-station pair`
+uses. Pairing again with a box the tray already lists, typed in other letter case, stores the
+token under the listed spelling, which is the key the tray reads. Hosts are not lower-cased:
+that would orphan tokens the CLI stored. A box paired in the CLI under one spelling and listed
+in the tray under another is still seen as unpaired by the tray.
 
 ## Tray and window
 
@@ -173,6 +189,18 @@ tables that drive validation, so a UI can build its form from it. Only the `tt` 
 `options` with HTTP 400 (`OptionsUnsupported`, naming the backend); a request without
 `options` is served as before.
 
+An agent older than run options answers 404 to `GET /run/schema`. The client reports that as
+an empty schema, and the tray's run sheet shows no fields, a note saying the box does not
+describe run options, and Start with the box's defaults.
+
+Restart (run sheet or tray menu) checks the replacement before it stops anything
+(`Station::replace`). For this machine that is every check `tt serve` would face from the
+tray, including the dry-run plan (a catalog model takes no `profile` or vLLM flags). For a box
+with non-empty options it is the schema and the backend in `GET /config`: only a `tt`-backend
+box takes options. A refused Restart leaves the server running and says so. A `tt`-backend box
+still decides catalog against bundle itself, so a vLLM flag on a catalog model is refused
+there only after the stop.
+
 ## The `tt` backend
 
 `tt-station-agentd --backend tt` (or `backend = "tt"` in a profile) serves through the official
@@ -237,6 +265,9 @@ Verified:
   `asr, 1 user: rtr 16, tput_user 62, ttft_ms 1900 (theoretical)`, and `bge-m3` shows its
   embedding line. A screenshot of the window showed the block wrapped inside the detail pane.
 * `cargo clippy --workspace --all-targets -- -D warnings` is clean.
+* The Copilot review fixes (2026-10-14) are covered by unit tests, the fake `tt`, `mock-box`
+  and the agent's scripted runner, each test seen red before its fix and again under a
+  mutation. None of them was exercised on a display or against a real agent.
 
 Not verified:
 * **Mostly not run on a display**: only the icon properties, the two ways of opening the
