@@ -33,9 +33,6 @@ type ChildEnv = Vec<(String, String)>;
 /// A side effect to run when a `run` argv matches, paired with its matcher.
 /// Named alias for the same `type_complexity` reason as the two above.
 type RunHook = (String, Box<dyn Fn() + Send + Sync>);
-/// A hook for `run_capturing`. `Arc` so it can be called after the hook list's lock is
-/// released: a hook may block (on a barrier) while other threads keep running commands.
-type CaptureHook = (String, Arc<dyn Fn() + Send + Sync>);
 
 /// A scratch `model_spec.json` fixture, unique per call and removed on drop.
 /// Was duplicated near-identically in `tests/models.rs` and `tests/runpy.rs`
@@ -157,9 +154,6 @@ pub struct FakeRunner {
     /// `gozer release`). Fired before the canned failure/output lookup, so a
     /// hook still runs on a command that is about to fail.
     run_hooks: Arc<Mutex<Vec<RunHook>>>,
-    /// Like `run_hooks`, for `run_capturing` calls (the `tt` backend's `tt model stop`, gozer's
-    /// `release`). Called with no lock held, before the canned failure/output lookup.
-    capture_hooks: Arc<Mutex<Vec<CaptureHook>>>,
 }
 
 /// Default `http_get` body when nothing is configured: a non-empty `data`
@@ -188,18 +182,7 @@ impl FakeRunner {
             run_capturing_failures: Arc::new(Mutex::new(Vec::new())),
             child_envs: Arc::new(Mutex::new(Vec::new())),
             run_hooks: Arc::new(Mutex::new(Vec::new())),
-            capture_hooks: Arc::new(Mutex::new(Vec::new())),
         }
-    }
-
-    /// Run `action` whenever a future `run_capturing` call's space-joined argv contains
-    /// `matcher` -- see the `capture_hooks` field.
-    #[allow(dead_code)]
-    pub fn on_run_capturing(&self, matcher: &str, action: impl Fn() + Send + Sync + 'static) {
-        self.capture_hooks
-            .lock()
-            .expect("capture_hooks mutex poisoned")
-            .push((matcher.to_string(), Arc::new(action)));
     }
 
     /// Run `action` whenever a future `run` call's space-joined argv contains
@@ -668,18 +651,6 @@ impl CommandRunner for FakeRunner {
             .push(args.iter().map(|s| s.to_string()).collect());
 
         let joined = args.join(" ");
-
-        let hooks: Vec<Arc<dyn Fn() + Send + Sync>> = self
-            .capture_hooks
-            .lock()
-            .expect("capture_hooks mutex poisoned")
-            .iter()
-            .filter(|(matcher, _)| joined.contains(matcher.as_str()))
-            .map(|(_, hook)| hook.clone())
-            .collect();
-        for hook in hooks {
-            hook();
-        }
 
         if let Some((_, message)) = self
             .run_capturing_failures

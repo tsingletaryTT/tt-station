@@ -329,12 +329,20 @@ fn tt_failure_detail(captured: &CapturedOutput) -> String {
     "(no output)".to_string()
 }
 
+/// How long a stop (a `/stop`, or the swap at the start of a `/run`) waits for an earlier
+/// stop that is still running before it gives up with "a stop is already in progress". A hung
+/// `tt model stop` then blocks later stops and starts for at most this long.
+pub const STOP_SERIAL_WAIT: Duration = Duration::from_secs(60);
+
 /// The `tt` serving backend. See the module doc.
 ///
-/// **Locks.** When more than one is held, they are taken in this order: `handover`, then
-/// `served`, then `lease`; and `lease` before `adopted_port`. `ps_cache` is always taken
-/// alone (it is held while `ps` runs, so nothing else may be waited on under it). No lock is
-/// held while `tt serve` or `tt model stop` runs; only `ps` runs under its own cache lock.
+/// **Locks.** When more than one is held, they are taken in this order: `stop_serial`, then
+/// `handover`, then `served`, then `lease`; and `lease` before `adopted_port`. `ps_cache` is
+/// always taken alone (it is held while `ps` runs, so nothing else may be waited on under it).
+/// `stop_serial` is a turn, held for a whole `stop_inner` (including its `tt model stop`) and
+/// never acquired while `handover` or any later lock is held; it is waited for at most
+/// `stop_wait`. No other lock is held while `tt serve` or `tt model stop` runs; only `ps` runs
+/// under its own cache lock.
 pub struct TtBackend {
     config: TtConfig,
     runner: Box<dyn CommandRunner>,
@@ -386,10 +394,21 @@ pub struct TtBackend {
     /// `served` together with its lease (the handover at the end of a successful `start`, and
     /// `fail_after_serve` keeping a lease). `stop_inner` reads it before it stops anything and
     /// clears `served` and takes the lease only if it is unchanged, under the same lock. A
-    /// stop whose `tt model stop` was slow therefore cannot release the lease of a serve that
-    /// was started and handed over meanwhile (gozer would reset chips under that serve). A
-    /// lease id alone cannot tell the two serves apart, because gozer reuses ids.
+    /// stop whose `tt model stop` was slow therefore cannot release the lease of a serve
+    /// recorded meanwhile (gozer would reset chips under that serve). A lease id alone cannot
+    /// tell the two serves apart, because gozer reuses ids.
     serve_epoch: AtomicU64,
+    /// One `stop_inner` at a time (a `/stop`, or the swap at the start of a `/run`). Without
+    /// it, two overlapping stops of the same serve both ran `tt model stop`, and the first to
+    /// return released the lease, so gozer reset the chips while the other's `tt model stop`
+    /// was still taking the container down. `true` while a stop holds the turn. Waited for at
+    /// most `stop_wait`, so a hung `tt model stop` cannot block later stops and starts forever.
+    /// A start that aborts on `cancel` stops its own container in `fail_after_serve`, which
+    /// does not take the turn, so it never waits behind a parked stop.
+    stop_serial: (Mutex<bool>, std::sync::Condvar),
+    /// How long a stop waits for an earlier stop to finish before it gives up
+    /// ([`STOP_SERIAL_WAIT`]; tests set a short one).
+    stop_wait: Duration,
     /// The last good `tt --json model ps` rows and when they were read. The mutex is also the
     /// single-flight lock: it is held while `ps` runs, so concurrent callers wait for that one
     /// run and then reuse its result instead of each starting a `tt` process.
@@ -448,6 +467,17 @@ impl Drop for ClearOnDrop<'_> {
     }
 }
 
+/// A stop's turn on `TtBackend::stop_serial`; gives it back (and wakes a waiter) when dropped.
+struct StopTurn<'a>(&'a (Mutex<bool>, std::sync::Condvar));
+
+impl Drop for StopTurn<'_> {
+    fn drop(&mut self) {
+        let (busy, freed) = self.0;
+        *busy.lock().expect("stop_serial mutex poisoned") = false;
+        freed.notify_one();
+    }
+}
+
 /// Decrements `TtBackend::stopping` when dropped, on every exit path of `stop`.
 struct StopInFlight<'a>(&'a AtomicUsize);
 
@@ -473,6 +503,8 @@ impl TtBackend {
             stopping: AtomicUsize::new(0),
             stops: AtomicU64::new(0),
             serve_epoch: AtomicU64::new(0),
+            stop_serial: (Mutex::new(false), std::sync::Condvar::new()),
+            stop_wait: STOP_SERIAL_WAIT,
             ps_cache: Mutex::new(PsCache::default()),
         }
     }
@@ -481,6 +513,13 @@ impl TtBackend {
     /// `None` keeps it off. `make_backend` calls it in production.
     pub fn with_gozer(mut self, gozer: Option<crate::gozer::Capability>) -> Self {
         self.gozer = gozer;
+        self
+    }
+
+    /// Test-only: wait at most `wait` for an earlier stop instead of [`STOP_SERIAL_WAIT`].
+    #[cfg(test)]
+    fn with_stop_wait(mut self, wait: Duration) -> Self {
+        self.stop_wait = wait;
         self
     }
 
@@ -709,12 +748,19 @@ impl TtBackend {
     /// first (see `confirm_discovered`), with or without a lease: the stop must reach only the
     /// server now on our port, and with a lease the stop is followed by a chip reset.
     ///
-    /// **A serve started while this stop ran.** `tt model stop` can take a long time, and no
-    /// lock is held while it runs, so another `start` can record a new serve and its lease
-    /// meanwhile (its own swap stops the same server again). This stop then leaves that newer
-    /// record and lease alone: it reads `serve_epoch` first and clears `served` and takes the
-    /// lease only if the epoch is unchanged, both under the `handover` lock.
+    /// **A serve recorded while this stop ran.** `tt model stop` can take a long time. A
+    /// `start`'s swap waits for this stop's turn, but a start that was already past its swap
+    /// can still record a serve and its lease meanwhile (`fail_after_serve` keeping a lease
+    /// after its own stop failed, or a handover that lands after this stop began). This stop
+    /// then leaves that newer record and lease alone: it reads `serve_epoch` first and clears
+    /// `served` and takes the lease only if the epoch is unchanged, both under the `handover`
+    /// lock.
+    ///
+    /// **One stop at a time.** The whole of this function runs under `stop_serial`. A stop
+    /// that finds another one running waits up to `stop_wait`, then fails with "a stop is
+    /// already in progress" and changes nothing.
     fn stop_inner(&self, hint: &str) -> Result<()> {
+        let _turn = self.take_stop_turn()?;
         let epoch = self.serve_epoch.load(Ordering::SeqCst);
         let recorded = self.served.lock().expect("served mutex poisoned").clone();
         let lease_held = self.lease.lock().expect("lease mutex poisoned").is_some();
@@ -770,6 +816,24 @@ impl TtBackend {
             taken
         };
         self.release_lease(taken)
+    }
+
+    /// Wait (at most `stop_wait`) for the stop turn. See `stop_serial`.
+    fn take_stop_turn(&self) -> Result<StopTurn<'_>> {
+        let (busy, freed) = &self.stop_serial;
+        let held = busy.lock().expect("stop_serial mutex poisoned");
+        let (mut held, _) = freed
+            .wait_timeout_while(held, self.stop_wait, |busy| *busy)
+            .expect("stop_serial mutex poisoned");
+        if *held {
+            return Err(anyhow::anyhow!(
+                "tt backend: a stop is already in progress (waited {:?}); try again when it \
+                 finishes",
+                self.stop_wait
+            ));
+        }
+        *held = true;
+        Ok(StopTurn(&self.stop_serial))
     }
 
     /// Confirm a discovered serve with a fresh `tt model ps` before stopping it (and before
@@ -3136,61 +3200,224 @@ mod tests {
         assert_eq!(backend(&ScriptedRunner::happy()).backend_name(), "tt");
     }
 
-    /// Copilot review of PR #2: a `/stop` for serve A whose `tt model stop` is slow must not,
-    /// when it finally finishes, clear the record of serve B or release B's lease. B was
-    /// started (and handed over) while A's stop was still inside `tt model stop`. Releasing
-    /// B's lease would make gozer reset the chips under B's live container.
+    /// A hook for the first `tt model stop` matching `needle`: it parks on `entered` and then
+    /// `resume`. Later matching calls pass straight through.
+    fn park_first_stop(
+        runner: &ScriptedRunner,
+        needle: &str,
+    ) -> (Arc<std::sync::Barrier>, Arc<std::sync::Barrier>) {
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (e, r) = (entered.clone(), resume.clone());
+        *runner.on_run.lock().unwrap() = Some((
+            needle.to_string(),
+            Arc::new(move || {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    e.wait();
+                    r.wait();
+                }
+            }),
+        ));
+        (entered, resume)
+    }
+
+    /// Whether the log gains a line containing `needle` within `limit`.
+    fn appears_within(runner: &ScriptedRunner, needle: &str, limit: Duration) -> bool {
+        let until = std::time::Instant::now() + limit;
+        while std::time::Instant::now() < until {
+            if runner.pos(needle).is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        runner.pos(needle).is_some()
+    }
+
+    /// Copilot review of PR #2, and review fix round 1 (Important 2): a `/run` whose swap
+    /// overlaps a slow `/stop` of serve A waits for that stop. It never releases A's lease while
+    /// A's `tt model stop` is still taking the container down, and A's stop never releases B's
+    /// lease.
     #[test]
-    fn a_slow_stop_never_releases_the_lease_of_a_serve_started_meanwhile() {
+    fn a_swap_waits_for_a_slow_stop_and_never_touches_the_new_lease() {
         let runner = ScriptedRunner::happy();
         let b = Arc::new(leasing_backend(&runner));
         b.start("Llama-3.1-8B-Instruct").unwrap();
-        assert_eq!(b.held_lease().as_deref(), Some("lease-abc123"));
-        // B's grant carries a different id, so the assertions can tell the two apart.
         runner.on(
             "gozer acquire",
             0,
             &GRANT_JSON.replace("lease-abc123", "lease-B"),
             "",
         );
-
-        // The first `tt model stop` (the slow /stop of A) parks until B has been handed over.
-        let entered = Arc::new(std::sync::Barrier::new(2));
-        let resume = Arc::new(std::sync::Barrier::new(2));
-        {
-            let calls = Arc::new(AtomicUsize::new(0));
-            let (entered, resume) = (entered.clone(), resume.clone());
-            *runner.on_run.lock().unwrap() = Some((
-                "model stop".to_string(),
-                Arc::new(move || {
-                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                        entered.wait();
-                        resume.wait();
-                    }
-                }),
-            ));
-        }
+        let (entered, resume) = park_first_stop(&runner, "model stop");
         std::thread::scope(|scope| {
             let stopper = {
                 let b = b.clone();
                 scope.spawn(move || b.stop("meta-llama/Llama-3.1-8B-Instruct"))
             };
             entered.wait();
-            // A's stop is inside `tt model stop`. Start B: its swap stops A again and releases
-            // A's lease, then B is leased, served and handed over.
-            b.start("Qwen3-8B").unwrap();
-            assert_eq!(b.held_lease().as_deref(), Some("lease-B"));
+            let starter = {
+                let b = b.clone();
+                scope.spawn(move || b.start("Qwen3-8B"))
+            };
+            // Asserted after the threads are released, so a failure cannot hang the scope.
+            let early = appears_within(&runner, "gozer release", Duration::from_millis(300));
+            let early_log = runner.log();
             resume.wait();
-            stopper.join().unwrap().unwrap();
+            let stopped = stopper.join().unwrap();
+            let started = starter.join().unwrap();
+            assert!(
+                !early,
+                "the swap released a lease while A's stop was still running: {early_log:?}"
+            );
+            stopped.unwrap();
+            started.unwrap();
         });
         *runner.on_run.lock().unwrap() = None;
-
+        let log = runner.log();
+        assert_eq!(
+            log.iter().filter(|l| l.contains("gozer release")).count(),
+            1,
+            "{log:?}"
+        );
+        assert!(runner.pos("gozer release lease-B").is_none(), "{log:?}");
         assert!(
-            runner.pos("gozer release lease-B").is_none(),
-            "A's stop released B's lease: {:?}",
-            runner.log()
+            runner.pos("gozer release lease-abc123").unwrap()
+                < log
+                    .iter()
+                    .rposition(|l| l.contains("gozer acquire"))
+                    .unwrap(),
+            "{log:?}"
         );
         assert_eq!(b.held_lease().as_deref(), Some("lease-B"));
         assert_eq!(b.served(), Some(("Qwen3-8B".to_string(), 8003)));
+    }
+
+    /// Review fix round 1 (Important 2): two stops of the same serve. The second waits until
+    /// the first's `tt model stop` has finished, so gozer never resets chips under a container
+    /// that is still exiting.
+    #[test]
+    fn a_second_stop_waits_for_the_first_before_any_release() {
+        let runner = ScriptedRunner::happy();
+        let b = Arc::new(leasing_backend(&runner));
+        b.start("Llama-3.1-8B-Instruct").unwrap();
+        let (entered, resume) = park_first_stop(&runner, "model stop");
+        std::thread::scope(|scope| {
+            let first = {
+                let b = b.clone();
+                scope.spawn(move || b.stop(""))
+            };
+            entered.wait();
+            let second = {
+                let b = b.clone();
+                scope.spawn(move || b.stop(""))
+            };
+            let early = appears_within(&runner, "gozer release", Duration::from_millis(300));
+            let early_log = runner.log();
+            resume.wait();
+            let (first, second) = (first.join().unwrap(), second.join().unwrap());
+            assert!(
+                !early,
+                "released while the first stop's `tt model stop` was running: {early_log:?}"
+            );
+            first.unwrap();
+            second.unwrap();
+        });
+        *runner.on_run.lock().unwrap() = None;
+        let log = runner.log();
+        assert_eq!(
+            log.iter().filter(|l| l.contains("gozer release")).count(),
+            1,
+            "{log:?}"
+        );
+        assert_eq!(b.held_lease(), None);
+    }
+
+    /// Review fix round 1 (Important 2): a stop that waits longer than the limit for an earlier
+    /// one gives up with an error, and leaves the record and the lease to the earlier stop.
+    #[test]
+    fn a_stop_behind_a_hung_stop_gives_up_after_the_limit() {
+        let runner = ScriptedRunner::happy();
+        let b = Arc::new(leasing_backend(&runner).with_stop_wait(Duration::from_millis(50)));
+        b.start("Llama-3.1-8B-Instruct").unwrap();
+        let (entered, resume) = park_first_stop(&runner, "model stop");
+        std::thread::scope(|scope| {
+            let first = {
+                let b = b.clone();
+                scope.spawn(move || b.stop(""))
+            };
+            entered.wait();
+            let started = std::time::Instant::now();
+            let second = b.stop("");
+            let waited = started.elapsed();
+            let early_log = runner.log();
+            resume.wait();
+            first.join().unwrap().unwrap();
+            let err = second.expect_err("the second stop must give up while the first runs");
+            assert!(
+                err.to_string().contains("a stop is already in progress"),
+                "{err:#}"
+            );
+            assert!(waited < Duration::from_secs(5), "{waited:?}");
+            assert!(
+                !early_log.iter().any(|l| l.contains("gozer release")),
+                "{early_log:?}"
+            );
+        });
+        *runner.on_run.lock().unwrap() = None;
+        assert_eq!(b.held_lease(), None);
+        assert!(runner.pos("gozer release lease-abc123").is_some());
+    }
+
+    /// Review fix round 1 (minor 4): `fail_after_serve` bumps the serve epoch. A stop lands
+    /// during B's bring-up and is slow (its own `tt model stop`); B sees the cancel, its own
+    /// `tt model stop` fails, so B is recorded with its lease kept. The slow stop must leave
+    /// that record and lease alone when it ends.
+    #[test]
+    fn a_slow_stop_leaves_a_lease_kept_by_a_failed_bring_up() {
+        let runner = ScriptedRunner::happy();
+        runner.healthy.store(false, Ordering::SeqCst); // B keeps polling until cancelled
+        runner.on("model stop Llama", 1, "", "docker: stuck");
+        let b = Arc::new(
+            TtBackend::new(
+                TtConfig {
+                    health_poll_attempts: 100_000,
+                    ..config()
+                },
+                Box::new(runner.clone()),
+            )
+            .with_gozer(Some(capability())),
+        );
+        let (entered, resume) = park_first_stop(&runner, "model stop Other-Model");
+        std::thread::scope(|scope| {
+            let starter = {
+                let b = b.clone();
+                scope.spawn(move || b.start("Llama-3.1-8B-Instruct"))
+            };
+            assert!(appears_within(&runner, "health:", Duration::from_secs(5)));
+            let stopper = {
+                let b = b.clone();
+                scope.spawn(move || b.stop("Other-Model"))
+            };
+            entered.wait();
+            let started = starter.join().unwrap();
+            let kept = b.held_lease();
+            resume.wait();
+            stopper.join().unwrap().unwrap();
+            let err = started.unwrap_err();
+            assert!(err.to_string().contains("lease was kept"), "{err:#}");
+            assert_eq!(kept.as_deref(), Some("lease-abc123"));
+        });
+        *runner.on_run.lock().unwrap() = None;
+        assert!(
+            runner.pos("gozer release").is_none(),
+            "the slow stop released the kept lease: {:?}",
+            runner.log()
+        );
+        assert_eq!(b.held_lease().as_deref(), Some("lease-abc123"));
+        assert_eq!(
+            b.served(),
+            Some(("Llama-3.1-8B-Instruct".to_string(), 8003))
+        );
     }
 }
