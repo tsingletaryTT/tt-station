@@ -498,6 +498,11 @@ impl LocalStation {
     /// `tt model stop <name>` and `--profile <p>` when the row has one. Does nothing when
     /// nothing is running. Refuses a TT-Studio server, an unsafe name, and the ambiguous case
     /// where several servers run and none is the shown one.
+    ///
+    /// Success is judged by the exit status alone. For a tt-model bundle, `tt --json model
+    /// stop` hands over to `tt-model stop` with inherited stdio and prints no JSON (tt-cli's
+    /// `stop_model`), so stdout may be human-readable text or empty. The agent's `tt` backend
+    /// judges the same command the same way.
     pub async fn stop(&self) -> Result<()> {
         self.vet().await?;
         let Some(row) = self.target(false).await? else {
@@ -507,7 +512,16 @@ impl LocalStation {
         if let Some(p) = row.profile.as_deref() {
             args.extend(["--profile", p]);
         }
-        self.tt_json(&args).await.map(|_| ())
+        let out = self.tt(&args).await?;
+        if !out.success {
+            bail!(
+                "`tt {}` failed (exit {:?}): {}",
+                args.join(" "),
+                out.code,
+                brief(&out.stderr)
+            );
+        }
+        Ok(())
     }
 
     /// The last `tail` lines of the shown server's log, from `tt model logs <name> --tail N`

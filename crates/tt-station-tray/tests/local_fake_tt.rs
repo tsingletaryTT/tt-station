@@ -28,6 +28,8 @@ struct Opts {
     dry: PathBuf,
     /// `serve ... --dry-run` hangs (sleeps 30 s) instead of printing.
     dry_hangs: bool,
+    /// Shell for `--json model stop ...`; `None` prints `{}`.
+    stop_line: Option<String>,
 }
 
 impl Default for Opts {
@@ -38,6 +40,7 @@ impl Default for Opts {
             ps_fails: false,
             dry: fixture("dry_run_catalog.json"),
             dry_hangs: false,
+            stop_line: None,
         }
     }
 }
@@ -88,7 +91,7 @@ case "$*" in
   "model logs "*) printf 'line one\nline two\n' ;;
   "--json serve "*" --dry-run") {dry_line} ;;
   "--json serve "*) {serve_line} ;;
-  "--json model stop "*) echo '{{}}' ;;
+  "--json model stop "*) {stop_line} ;;
   *) echo "fake tt: unexpected: $*" >&2; exit 64 ;;
 esac
 "#,
@@ -97,6 +100,7 @@ esac
         list = fixture("model_list.json").display(),
         ps_line = ps_line,
         serve_line = serve_line,
+        stop_line = o.stop_line.as_deref().unwrap_or("echo '{}'"),
         dry_line = if o.dry_hangs {
             "exec sleep 30".to_string()
         } else {
@@ -356,6 +360,58 @@ async fn local_stop_passes_the_profile_when_the_row_has_one() {
     );
     station(&script).stop().await.unwrap();
     assert!(calls(&log).contains(&"--json model stop org/bundle --profile fast".to_string()));
+}
+
+/// `tt --json model stop <bundle>` hands the stop to tt-model with inherited stdio and emits no
+/// JSON (tt-cli `commands/model.py::stop_model`; seen live in Task 4). A zero exit is a
+/// successful stop whatever stdout holds, so Restart goes on to start the new serve. Copilot
+/// review of PR #2.
+#[tokio::test]
+async fn local_stop_succeeds_on_exit_zero_even_when_stdout_is_not_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let ps = ps_file(
+        dir.path(),
+        &[&row("org/bundle", 20000, "model-manager", Some("fast"))],
+    );
+    let (script, log) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            ps,
+            stop_line: Some("echo 'Stopping tt-model-bundle-fast ... done'".into()),
+            ..Opts::default()
+        },
+    );
+    station(&script).stop().await.unwrap();
+    assert!(calls(&log).contains(&"--json model stop org/bundle --profile fast".to_string()));
+
+    // An empty stdout is a success too.
+    let dir = tempfile::tempdir().unwrap();
+    let (script, _) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            stop_line: Some("true".into()),
+            ..Opts::default()
+        },
+    );
+    station(&script).stop().await.unwrap();
+}
+
+/// A failing stop is still an error, with tt's stderr in the message.
+#[tokio::test]
+async fn local_stop_failure_is_an_error_with_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, _) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            stop_line: Some("echo 'docker: permission denied' >&2; exit 1".into()),
+            ..Opts::default()
+        },
+    );
+    let err = station(&script).stop().await.unwrap_err().to_string();
+    assert!(err.contains("docker: permission denied"), "{err}");
 }
 
 #[tokio::test]
