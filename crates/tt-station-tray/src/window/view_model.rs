@@ -766,6 +766,32 @@ pub fn parse_address(text: &str) -> Result<(String, u16), String> {
     }
 }
 
+/// The box the Add station dialog pairs with, from what the person typed: [`parse_address`],
+/// then `registry::validate_address` (the check `Registry::add_manual` applies), so an address
+/// the registry would refuse is never paired with.
+///
+/// When `known` already lists that box under another spelling of the host (host names compare
+/// ignoring case, as `add_manual`'s duplicate check does), the listed station is returned. The
+/// token is then stored under that station's id, the key the station list reads it back with.
+/// Otherwise the host is kept exactly as typed, so the key matches what `tt-station pair`
+/// stores for the same text.
+pub fn pairing_target(text: &str, known: &[KnownStation]) -> Result<KnownStation, String> {
+    let (host, port) = parse_address(text)?;
+    crate::registry::validate_address(&host, port).map_err(|e| e.to_string())?;
+    if let Some(listed) = known
+        .iter()
+        .find(|k| k.port == port && k.host.eq_ignore_ascii_case(&host))
+    {
+        return Ok(listed.clone());
+    }
+    Ok(KnownStation {
+        name: host.clone(),
+        host,
+        port,
+        mac: None,
+    })
+}
+
 /// Where the tray keeps its station registry: `$TT_CONFIG_DIR/tray-stations.json` when that is
 /// set (the same override the CLI's token store honours), else
 /// `$XDG_CONFIG_HOME/tt-station/tray-stations.json`, else `~/.config/tt-station/...`.
@@ -1477,6 +1503,41 @@ mod tests {
         assert!(parse_address("qb:99999").is_err());
         assert!(parse_address("qb:abc").is_err());
         assert!(parse_address("[::1").is_err());
+    }
+
+    /// Copilot review of PR #2: pairing again with an existing box typed in other letter case
+    /// stores the token under the listed station's id, the key the station list reads.
+    #[test]
+    fn pairing_an_existing_box_typed_in_other_case_uses_its_listed_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = crate::registry::Registry::load(&dir.path().join("r.json"));
+        let listed = reg.add_manual("QB2-Lab.local", 8765).unwrap();
+        reg.add_manual("FE80::1", 8765).unwrap();
+
+        let k = pairing_target("qb2-lab.LOCAL", reg.stations()).unwrap();
+        assert_eq!(k.id(), listed);
+        assert_eq!(k.base(), "http://QB2-Lab.local:8765");
+        // IPv6 literals compare the same way and keep their brackets in the id.
+        let v6 = pairing_target("[fe80::1]:8765", reg.stations()).unwrap();
+        assert_eq!(v6.id().0, "[FE80::1]:8765");
+        // Another port is another box.
+        assert_eq!(
+            pairing_target("qb2-lab.local:8766", reg.stations())
+                .unwrap()
+                .id()
+                .0,
+            "qb2-lab.local:8766"
+        );
+        // A new box keeps the spelling typed, the same key `tt-station pair` writes.
+        assert_eq!(
+            pairing_target("New-Box.local", reg.stations())
+                .unwrap()
+                .id()
+                .0,
+            "New-Box.local:8765"
+        );
+        // The registry's own check still applies before any pairing.
+        assert!(pairing_target("bad host", reg.stations()).is_err());
     }
 
     #[test]

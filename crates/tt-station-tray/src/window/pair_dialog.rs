@@ -17,7 +17,9 @@
 //! not count toward the box's wrong-code limit), and nothing is stored.
 //!
 //! The address is checked with `registry::validate_address`, the check `add_manual` uses,
-//! before the box is contacted.
+//! before the box is contacted ([`super::view_model::pairing_target`]). A box already listed
+//! under another letter case of its host is paired under its listed id, so the token lands
+//! under the key the station list reads.
 //!
 //! The box is added to the registry only after pairing succeeds.
 //!
@@ -35,9 +37,9 @@ use gtk4 as gtk;
 
 use crate::discover::discover_all;
 use crate::pairing_flow::{open_store, pair_station};
-use crate::registry::{validate_address, AddError, KnownStation};
+use crate::registry::{AddError, KnownStation};
 
-use super::view_model::{parse_address, ActionResult};
+use super::view_model::{pairing_target, ActionResult};
 use super::{set_margins, show_result, spawn_call, App};
 
 pub fn open(app: &App, parent: Option<&gtk::Window>) {
@@ -127,25 +129,16 @@ pub fn open(app: &App, parent: Option<&gtk::Window>) {
         let code_tx = code_tx.clone();
         let (code_label, code, pair) = (code_label.clone(), code.clone(), pair.clone());
         cont.connect_clicked(move |cont| {
-            let (host, port) = match parse_address(&address.text()) {
-                Ok(hp) => hp,
+            // The registry's own strict check runs before any pairing, and a box already listed
+            // under another letter case is paired under its listed id (see `pairing_target`).
+            let k = match pairing_target(&address.text(), app.registry.borrow().stations()) {
+                Ok(k) => k,
                 Err(e) => {
                     show_result(&status, &ActionResult::Failed(e));
                     return;
                 }
             };
-            // The registry's own strict check, before any pairing: an address it would refuse
-            // must not end up with a stored token.
-            if let Err(e) = validate_address(&host, port) {
-                show_result(&status, &ActionResult::Failed(e.to_string()));
-                return;
-            }
-            let k = KnownStation {
-                name: host.clone(),
-                host: host.clone(),
-                port,
-                mac: None,
-            };
+            let (host, port) = (k.host.clone(), k.port);
             let base = k.base();
             cont.set_sensitive(false);
             status.remove_css_class("error");
