@@ -687,6 +687,23 @@ pub fn start_enabled(gate_allowed: bool, form_valid: bool, in_flight: bool) -> b
     gate_allowed && form_valid && !in_flight
 }
 
+/// The run sheet's button text: "Restart" when the station serves a model (the click then
+/// replaces it), else "Start".
+pub fn start_label(serving: bool) -> &'static str {
+    if serving {
+        "Restart"
+    } else {
+        "Start"
+    }
+}
+
+/// Whether the run sheet treats the station as serving after a Start or Restart finished.
+/// A successful Start leaves a model serving, so the next click must be a Restart (stop, then
+/// start); a failed Start leaves nothing new running. A Restart stays a Restart either way.
+pub fn serving_after(was_serving: bool, succeeded: bool) -> bool {
+    was_serving || succeeded
+}
+
 /// Whether `state` is this machine.
 fn is_local(state: &StationState) -> bool {
     state.id.0 == "local"
@@ -1480,6 +1497,20 @@ mod tests {
         );
         assert!(!start_enabled(false, true, false), "gate disabled");
         assert!(!start_enabled(true, false, false), "form invalid");
+    }
+
+    /// Review of the Copilot fixes, minor 6: after a successful Start the sheet's next click is
+    /// a Restart, so a second click never starts a second serve beside the first.
+    #[test]
+    fn a_successful_start_turns_the_sheet_into_restart() {
+        assert_eq!(start_label(false), "Start");
+        assert!(serving_after(false, true), "Start succeeded: now serving");
+        assert_eq!(start_label(serving_after(false, true)), "Restart");
+        assert!(
+            !serving_after(false, false),
+            "a failed Start started nothing"
+        );
+        assert!(serving_after(true, false) && serving_after(true, true));
     }
 
     #[test]

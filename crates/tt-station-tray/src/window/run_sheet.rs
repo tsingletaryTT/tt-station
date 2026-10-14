@@ -38,7 +38,8 @@ use libttstation::run_options::{OptionSpec, RunSchema};
 use crate::station::Station;
 
 use super::view_model::{
-    run_gate, schema_note, start_enabled, ActionResult, PreviewTarget, RunForm, RunGate,
+    run_gate, schema_note, serving_after, start_enabled, start_label, ActionResult, PreviewTarget,
+    RunForm, RunGate,
 };
 use super::{set_margins, show_result, spawn_call, App};
 
@@ -52,7 +53,11 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
             "This station has not been checked yet; press Refresh on the Stations page.".into(),
         ),
     };
-    let serving = state.as_ref().is_some_and(|s| s.serving.is_some());
+    // Whether a click replaces a running model (Restart) or starts one (Start). Becomes true
+    // after a successful Start from this sheet ([`serving_after`]).
+    let serving = Rc::new(Cell::new(
+        state.as_ref().is_some_and(|s| s.serving.is_some()),
+    ));
     let is_remote = matches!(*station, Station::Remote(_));
     let target = match &*station {
         Station::Local(l) => PreviewTarget::Local {
@@ -114,7 +119,7 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
     field_error.set_wrap(true);
     field_error.add_css_class("error");
 
-    let start = gtk::Button::with_label(if serving { "Restart" } else { "Start" });
+    let start = gtk::Button::with_label(start_label(serving.get()));
     start.add_css_class("suggested-action");
     start.set_sensitive(false);
     let result = gtk::Label::new(None);
@@ -226,7 +231,8 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
                 }
                 None => return,
             };
-            let verb = if serving { "Restart" } else { "Start" };
+            let was_serving = serving.get();
+            let verb = start_label(was_serving);
             in_flight.set(true);
             btn.set_sensitive(false);
             result.remove_css_class("error");
@@ -242,12 +248,14 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
             let in_flight = in_flight.clone();
             let update = update.clone();
             let model = model.clone();
+            let serving = serving.clone();
+            let btn = btn.clone();
             // The station this sheet was opened for, even if the selection changes meanwhile.
             let id = station.id();
             spawn_call(
                 &app,
                 async move {
-                    if serving {
+                    if was_serving {
                         // Checks the request first and stops nothing when it would be refused.
                         st.replace(&m, f, &o).await
                     } else {
@@ -269,6 +277,9 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
                     }
                     // A 409 holder message or any other Err text is shown word for word.
                     show_result(&result, &shown);
+                    // After a successful Start the next click must replace that serve.
+                    serving.set(serving_after(was_serving, r.is_ok()));
+                    btn.set_label(start_label(serving.get()));
                     // Recompute from the form as it is now (it may have been edited meanwhile).
                     in_flight.set(false);
                     update();
