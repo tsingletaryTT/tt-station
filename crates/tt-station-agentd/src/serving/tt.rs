@@ -409,6 +409,16 @@ pub struct TtBackend {
     /// How long a stop waits for an earlier stop to finish before it gives up
     /// ([`STOP_SERIAL_WAIT`]; tests set a short one).
     stop_wait: Duration,
+    /// Counts `start`s that claimed the start slot. Bumped under `handover` together with the
+    /// start's reset of `cancel`. `stop` records it (and `serve_epoch`) under the same lock when
+    /// the stop is requested; `stop_inner` compares them once it has its turn, so a stop
+    /// requested before a later start never acts on that start (see `stop_inner`).
+    starts: AtomicU64,
+    /// TEST-ONLY: milliseconds `stop` sleeps between recording the request and waiting for
+    /// its turn, so a test can let a later `start`'s swap take the turn first. Always 0
+    /// outside tests (the field does not exist there).
+    #[cfg(test)]
+    pre_turn_delay_ms: AtomicU64,
     /// The last good `tt --json model ps` rows and when they were read. The mutex is also the
     /// single-flight lock: it is held while `ps` runs, so concurrent callers wait for that one
     /// run and then reuse its result instead of each starting a `tt` process.
@@ -505,6 +515,9 @@ impl TtBackend {
             serve_epoch: AtomicU64::new(0),
             stop_serial: (Mutex::new(false), std::sync::Condvar::new()),
             stop_wait: STOP_SERIAL_WAIT,
+            starts: AtomicU64::new(0),
+            #[cfg(test)]
+            pre_turn_delay_ms: AtomicU64::new(0),
             ps_cache: Mutex::new(PsCache::default()),
         }
     }
@@ -759,8 +772,28 @@ impl TtBackend {
     /// **One stop at a time.** The whole of this function runs under `stop_serial`. A stop
     /// that finds another one running waits up to `stop_wait`, then fails with "a stop is
     /// already in progress" and changes nothing.
-    fn stop_inner(&self, hint: &str) -> Result<()> {
+    ///
+    /// **A stop requested before a start.** `requested` is `(starts, serve_epoch)` as `stop`
+    /// read them under `handover` when the stop was asked for (`None` for a start's own swap).
+    /// The turn can come only after a later start's swap. Then, if a serve was recorded since
+    /// the request, that serve is newer than the request and is left alone (nothing is done);
+    /// if a start began since the request, the route's hint names the model as it was before
+    /// that start (possibly the very model being started) and is ignored.
+    fn stop_inner(&self, hint: &str, requested: Option<(u64, u64)>) -> Result<()> {
         let _turn = self.take_stop_turn()?;
+        let mut hint = hint;
+        if let Some((starts_then, epoch_then)) = requested {
+            if self.serve_epoch.load(Ordering::SeqCst) != epoch_then {
+                eprintln!(
+                    "tt-station-agentd: a serve was recorded after this stop was requested; \
+                     leaving it alone"
+                );
+                return Ok(());
+            }
+            if self.starts.load(Ordering::SeqCst) != starts_then {
+                hint = "";
+            }
+        }
         let epoch = self.serve_epoch.load(Ordering::SeqCst);
         let recorded = self.served.lock().expect("served mutex poisoned").clone();
         let lease_held = self.lease.lock().expect("lease mutex poisoned").is_some();
@@ -1035,8 +1068,14 @@ impl ServingBackend for TtBackend {
         }
         let _starting = ClearOnDrop(&self.starting);
         // A `/stop` from an earlier run must not cancel this one. Only the start that holds
-        // the claim above gets here, so this cannot erase a stop aimed at another start.
-        self.cancel.store(false, Ordering::SeqCst);
+        // the claim above gets here, so this cannot erase a stop aimed at another start. The
+        // `starts` bump goes with it, under `handover`, so a stop requested before this point
+        // knows it predates this start (see `stop_inner`).
+        {
+            let _handover = self.handover.lock().expect("handover mutex poisoned");
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            self.cancel.store(false, Ordering::SeqCst);
+        }
 
         // (1) The model name and the options. The route validated both already; checking again
         // costs nothing and keeps this backend safe for any other caller. The model name goes
@@ -1078,7 +1117,7 @@ impl ServingBackend for TtBackend {
         // (4) Swap: stop what this backend is already serving and give back its lease, so the
         // new lease is not requested while the old one is still held. Stop first, release
         // second (the release resets chips).
-        self.stop_inner("")
+        self.stop_inner("", None)
             .context("tt backend: failed to stop the previous serve before starting a new one")?;
 
         // (5) Lease. The guard releases on drop, which covers every failure exit below. Only
@@ -1213,7 +1252,7 @@ impl ServingBackend for TtBackend {
     /// While it runs, `stopping` is set (and `stops` was bumped), so an idle `/status` poll
     /// cannot rediscover the server being stopped. See `discover_own_serve`.
     fn stop(&self, model: &str) -> Result<()> {
-        let _stopping = {
+        let (_stopping, requested) = {
             // Under `handover`, so this lands wholly before or wholly after the end of an
             // in-flight `start`, and wholly before or after a discovery's re-check. See the
             // `handover` field.
@@ -1221,9 +1260,20 @@ impl ServingBackend for TtBackend {
             self.cancel.store(true, Ordering::SeqCst);
             self.stops.fetch_add(1, Ordering::SeqCst);
             self.stopping.fetch_add(1, Ordering::SeqCst);
-            StopInFlight(&self.stopping)
+            let requested = (
+                self.starts.load(Ordering::SeqCst),
+                self.serve_epoch.load(Ordering::SeqCst),
+            );
+            (StopInFlight(&self.stopping), requested)
         };
-        self.stop_inner(model)
+        #[cfg(test)]
+        {
+            let delay = self.pre_turn_delay_ms.load(Ordering::SeqCst);
+            if delay > 0 {
+                std::thread::sleep(Duration::from_millis(delay));
+            }
+        }
+        self.stop_inner(model, Some(requested))
     }
 
     /// Take ownership of a lease a previous agent process left behind, so the next `stop`
@@ -3419,5 +3469,116 @@ mod tests {
             b.served(),
             Some(("Llama-3.1-8B-Instruct".to_string(), 8003))
         );
+    }
+
+    /// Review fix round 2 (the reviewer's repro): a `/stop` requested BEFORE a `/run` of the
+    /// same model, but given its turn only AFTER that run's swap, must not `tt model stop` the
+    /// model being started (its hint is stale), nor stop and release the serve the run handed
+    /// over meanwhile.
+    #[test]
+    fn a_stop_requested_before_a_start_never_stops_the_new_serve() {
+        let runner = ScriptedRunner::happy();
+        let b = Arc::new(leasing_backend(&runner));
+        b.start("Qwen3-8B").unwrap();
+        runner.on(
+            "gozer acquire",
+            0,
+            &GRANT_JSON.replace("lease-abc123", "lease-B"),
+            "",
+        );
+        let (entered, resume) = park_first_stop(&runner, "model stop");
+        std::thread::scope(|scope| {
+            // X holds the stop turn, parked inside `tt model stop`.
+            let x = {
+                let b = b.clone();
+                scope.spawn(move || b.stop(""))
+            };
+            entered.wait();
+            // Y: a /stop whose route hint is the model it last reported. It records its request
+            // now and (test-only delay) reaches the turn only after the start's swap has it.
+            b.pre_turn_delay_ms.store(300, Ordering::SeqCst);
+            let y = {
+                let b = b.clone();
+                scope.spawn(move || b.stop("Qwen3-8B"))
+            };
+            std::thread::sleep(Duration::from_millis(50));
+            // A later Start of the same model: resets cancel; its swap waits for the turn.
+            let s = {
+                let b = b.clone();
+                scope.spawn(move || b.start("Qwen3-8B"))
+            };
+            std::thread::sleep(Duration::from_millis(500));
+            b.pre_turn_delay_ms.store(0, Ordering::SeqCst);
+            resume.wait();
+            x.join().unwrap().unwrap();
+            y.join().unwrap().unwrap();
+            s.join().unwrap().unwrap();
+        });
+        *runner.on_run.lock().unwrap() = None;
+        let log = runner.log();
+        let x_release = runner.pos("gozer release lease-abc123").expect("X released A");
+        let late: Vec<_> = log
+            .iter()
+            .skip(x_release + 1)
+            .filter(|l| l.contains("model stop") || l.contains("gozer release"))
+            .collect();
+        assert!(
+            late.is_empty(),
+            "a stale stop acted after the new start began: {late:?} in {log:?}"
+        );
+        assert_eq!(b.held_lease().as_deref(), Some("lease-B"));
+        assert_eq!(b.served(), Some(("Qwen3-8B".to_string(), 8003)));
+    }
+
+    /// The same, when the start has already handed its serve over by the time the earlier stop
+    /// gets its turn: that serve was recorded after the stop was requested, so the stop leaves
+    /// it (and its lease) alone.
+    #[test]
+    fn a_stop_requested_before_a_completed_start_leaves_its_serve() {
+        let runner = ScriptedRunner::happy();
+        let b = Arc::new(leasing_backend(&runner));
+        b.start("Qwen3-8B").unwrap();
+        runner.on(
+            "gozer acquire",
+            0,
+            &GRANT_JSON.replace("lease-abc123", "lease-B"),
+            "",
+        );
+        let (entered, resume) = park_first_stop(&runner, "model stop");
+        std::thread::scope(|scope| {
+            let x = {
+                let b = b.clone();
+                scope.spawn(move || b.stop(""))
+            };
+            entered.wait();
+            // Test-only delay: Y reaches the turn long after the start below has finished.
+            b.pre_turn_delay_ms.store(800, Ordering::SeqCst);
+            let y = {
+                let b = b.clone();
+                scope.spawn(move || b.stop("Qwen3-8B"))
+            };
+            std::thread::sleep(Duration::from_millis(50));
+            b.pre_turn_delay_ms.store(0, Ordering::SeqCst);
+            let s = {
+                let b = b.clone();
+                scope.spawn(move || b.start("Qwen3-8B"))
+            };
+            std::thread::sleep(Duration::from_millis(200));
+            resume.wait();
+            x.join().unwrap().unwrap();
+            let started = s.join().unwrap();
+            let held_after_start = b.held_lease();
+            y.join().unwrap().unwrap();
+            started.unwrap();
+            assert_eq!(held_after_start.as_deref(), Some("lease-B"), "S finished before Y");
+        });
+        *runner.on_run.lock().unwrap() = None;
+        assert!(
+            runner.pos("gozer release lease-B").is_none(),
+            "{:?}",
+            runner.log()
+        );
+        assert_eq!(b.held_lease().as_deref(), Some("lease-B"));
+        assert_eq!(b.served(), Some(("Qwen3-8B".to_string(), 8003)));
     }
 }
