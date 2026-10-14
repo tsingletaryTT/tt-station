@@ -151,15 +151,21 @@ pub async fn get_config(base: &str) -> anyhow::Result<ConfigSummary> {
 /// `POST /run` accepts, as a [`RunSchema`] a client can render as a form.
 ///
 /// A FREE function rather than an `AgentClient` method, same reasoning as
-/// [`get_config`]: it is read-only discovery and needs no pairing. An agent
-/// older than this feature answers `404`, which surfaces as an error here;
-/// callers should treat that as "no options available".
+/// [`get_config`]: it is read-only discovery and needs no pairing.
+///
+/// An agent older than run options has no such route and answers `404`. That
+/// agent still serves a default run through `POST /run`, so a `404` (and only
+/// a `404`) comes back as an empty schema: no options to offer. Every other
+/// failure is an error.
 pub async fn get_run_schema(base: &str) -> anyhow::Result<RunSchema> {
     let url = join(base, "run/schema");
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .send()
-        .await?
+    let resp = reqwest::Client::new().get(&url).send().await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(RunSchema {
+            options: Vec::new(),
+        });
+    }
+    let resp = resp
         .error_for_status()
         .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
 

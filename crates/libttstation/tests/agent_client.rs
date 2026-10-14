@@ -13,7 +13,8 @@
 //! methods share and the brief calls out explicitly.
 
 use libttstation::agent_client::{
-    get_logs, get_status, list_models, list_serving, power, reset, AgentClient, SshRevokeBy,
+    get_logs, get_run_schema, get_status, list_models, list_serving, power, reset, AgentClient,
+    SshRevokeBy,
 };
 use libttstation::model::{Endpoint, ServingStatus};
 use wiremock::matchers::{header, method, path, query_param};
@@ -841,4 +842,31 @@ async fn run_with_options_surfaces_the_agents_400_message() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("profile: bad characters"), "got {err}");
+}
+
+/// An agent older than run options has no `GET /run/schema` and answers 404. That box still
+/// serves a default run through `POST /run`, so the client reports an empty schema (no options
+/// to offer) instead of an error. Copilot review of PR #2.
+#[tokio::test]
+async fn run_schema_404_from_an_older_agent_is_an_empty_schema() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/run/schema"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let schema = get_run_schema(&server.uri()).await.unwrap();
+    assert!(schema.options.is_empty(), "{schema:?}");
+}
+
+/// Any other failure stays an error: a 500 does not mean "this box has no options".
+#[tokio::test]
+async fn run_schema_500_is_still_an_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/run/schema"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    assert!(get_run_schema(&server.uri()).await.is_err());
 }

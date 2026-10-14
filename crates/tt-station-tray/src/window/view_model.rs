@@ -472,6 +472,18 @@ impl RunForm {
     }
 }
 
+/// Shown in the run sheet's Advanced section when the station describes no run options: a box
+/// whose agent predates them (its `GET /run/schema` answers 404, which the client reports as an
+/// empty schema). Start stays available and runs the model with the box's defaults.
+pub const NO_RUN_OPTIONS: &str =
+    "This box does not describe run options (its agent is older). Start runs the model with the \
+     box's defaults.";
+
+/// The note for the Advanced section, when the schema has no options at all.
+pub fn schema_note(schema: &RunSchema) -> Option<&'static str> {
+    schema.options.is_empty().then_some(NO_RUN_OPTIONS)
+}
+
 /// An [`OptionError`] for form field `field`. `OptionError::new` is private to libttstation.
 fn field_error(field: &str, message: &str) -> OptionError {
     OptionError {
@@ -1205,6 +1217,24 @@ mod tests {
             f.command_preview("Llama-3.1-8B-Instruct"),
             "Options sent to the box: (none, the box's defaults apply)"
         );
+    }
+
+    /// An older box's empty schema still gives a valid form: Start is allowed and sends no
+    /// options, and the sheet says why there are no fields.
+    #[test]
+    fn an_empty_schema_allows_a_default_run_and_says_so() {
+        let empty = RunSchema {
+            options: Vec::new(),
+        };
+        let f = RunForm::from_schema(&empty, None).with_target(PreviewTarget::Remote);
+        assert!(f.to_options().unwrap().is_empty());
+        assert_eq!(
+            f.command_preview("Llama-3.1-8B-Instruct"),
+            "Options sent to the box: (none, the box's defaults apply)"
+        );
+        assert_eq!(schema_note(&empty), Some(NO_RUN_OPTIONS));
+        assert!(NO_RUN_OPTIONS.contains("does not describe run options"));
+        assert_eq!(schema_note(&run_schema()), None);
     }
 
     fn state(id: &str, reachable: bool, paired: bool, mac: Option<&str>) -> StationState {

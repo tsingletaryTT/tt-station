@@ -11,7 +11,9 @@
 //! lists only the options sent, and says so, because the agent builds the command.
 //!
 //! **Fields come from the schema.** The local station's schema is `run_schema()`; a box's comes
-//! from `GET /run/schema`. No flag list is hardcoded here.
+//! from `GET /run/schema`. No flag list is hardcoded here. A box whose agent predates run
+//! options has no schema route; it gets no fields, a note saying so ([`schema_note`]), and Start
+//! with the box's defaults.
 //!
 //! Remembered options: the form starts from the options last used for this model on this
 //! station (`Registry::last_run`), and a successful Start saves the new ones.
@@ -28,7 +30,9 @@ use libttstation::run_options::{OptionSpec, RunSchema};
 
 use crate::station::Station;
 
-use super::view_model::{run_gate, ActionResult, PreviewTarget, RunForm, RunGate};
+use super::view_model::{
+    run_gate, schema_note, ActionResult, PreviewTarget, RunForm, RunGate,
+};
 use super::{set_margins, show_result, spawn_call, App};
 
 pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
@@ -154,6 +158,12 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
                 let f = RunForm::from_schema(&schema, last.as_ref()).with_target(target);
                 *form.borrow_mut() = Some(f);
                 grid.remove(&loading);
+                if let Some(note) = schema_note(&schema) {
+                    let label = gtk::Label::new(Some(note));
+                    label.set_xalign(0.0);
+                    label.set_wrap(true);
+                    grid.attach(&label, 0, 0, 2, 1);
+                }
                 build_fields(&grid, &schema, &form, &update);
                 update();
             }

@@ -182,7 +182,8 @@ impl RemoteStation {
             .lines)
     }
 
-    /// `GET /run/schema`. An older agent answers 404, which comes back as an error.
+    /// `GET /run/schema`. An older agent answers 404, which comes back as an empty schema (no
+    /// options; a default run still works).
     pub async fn schema(&self) -> Result<RunSchema> {
         agent_client::get_run_schema(&self.base).await
     }
