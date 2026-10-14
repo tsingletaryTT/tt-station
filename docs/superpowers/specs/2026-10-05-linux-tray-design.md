@@ -1,7 +1,9 @@
 # tt-station on Linux: tray app and main window
 
-Status: design, awaiting owner review. Branch `feat/linux-tray`, cut from `experiments/egpu`.
-Date: 2026-10-05.
+Status: implemented on `feat/linux-tray`, which is stacked on `experiments/egpu` (PR #1); see
+`docs/reference/linux-tray.md` for what is verified and what is not (the tray and window have never
+run on a display). Design written 2026-10-05; the stack and review state are described in
+`docs/reference/linux-tray.md` under "Branch and review".
 
 ## Goal
 

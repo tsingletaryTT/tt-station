@@ -7,6 +7,19 @@ served by this machine and by paired QuietBoxes.
 Status: built, unit-tested and smoke-checked headless. **It has never been run on a display.**
 See "What is verified" below before relying on any behavior described here.
 
+## Branch and review
+
+The work lives on `feat/linux-tray`, which is stacked on `experiments/egpu` (the macOS Blackhole
+experiment, open as PR #1 against `main`): `main` <- `experiments/egpu` <- `feat/linux-tray`.
+Its pull request targets `experiments/egpu`, so the review shows only the Linux work. Merge
+#1 first and delete its branch; GitHub then retargets the stacked PR to `main`. A build for another machine clones the
+branch directly (`git clone -b feat/linux-tray git@github.com:tsingletaryTT/tt-station.git`).
+The branch edits `.github/workflows/`, so pushing it needs a credential with the `workflow`
+scope (an SSH key, or `gh auth refresh -h github.com -s workflow`). As of 2026-10-14 the
+remote branch is behind the local one by the agent-defaults commits, and the stacked PR is not
+opened yet; the PR description is drafted in `.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md`
+on the box that built it.
+
 ## Stations
 
 A *station* is anything that can serve models. The tray treats two kinds the same way.

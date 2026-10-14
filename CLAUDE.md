@@ -61,6 +61,26 @@ stop its container, refuses a second concurrent start (409, `/status` `starting:
 longer rediscovers a just-stopped serve; the window stores poll answers by station id; the
 schema offers only the `server` workflow; the tray package Recommends (no longer Depends on)
 `tt-station`, so a tray-only workstation can skip the agent and its passwordless power rule.
+Agent defaults (2026-10-06, commits `a9ee660`..`94ac84b`): `tt-station-agentd --backend auto`
+needs no other flags on a typical box. `name` defaults to the short hostname, `ctrl_port` to 8765,
+`chips` to the detected hardware (Blackhole meshes only; other meshes keep `4xBH`),
+`serving_host` to the primary LAN IPv4 (then `<short>.local`, then `127.0.0.1`), and
+`serving_port` to 20000 for the `tt` backend and 8000 for the others. Each applies only when no
+flag, profile or `[global]` value sets it, so a box with a config file resolves as before (checked
+against this box's real `agentd.toml`). `auto` picks `tt` when a valid official `tt` is found and
+`runpy` otherwise; the default backend stays `runpy`. When the agent chose `serving_host` itself it
+polls readiness on `127.0.0.1` and advertises the LAN address in endpoints. `--print-config` and
+`/config` report each value's source. A `--backend tt` agent with no port now serves on 20000
+(was 8000). Reference: `docs/reference/agentd-config.md`.
+**Branches and review (as of 2026-10-14).** The branches stack: `main` <- `experiments/egpu`
+(PR #1, open) <- `feat/linux-tray`. `feat/linux-tray` was cut from `experiments/egpu`, so its PR
+targets `experiments/egpu`. When #1 merges and its branch is deleted, GitHub retargets the
+stacked PR to `main`. On `origin`, `feat/linux-tray` was pushed once (2026-10-06, at `3d0782b`, over SSH because
+the https OAuth token lacks the `workflow` scope and the branch edits `.github/workflows/`). The
+four agent-defaults commits and this docs commit are local until pushed, and the stacked PR is
+not opened yet. To publish: `git push -u origin feat/linux-tray` (use the SSH URL, or
+`gh auth refresh -h github.com -s workflow` first), then open the PR with the body drafted in
+`.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md` and fill the PR number in here.
 Owner to do for franklinstower: install and start `tt-station-agentd` and send the pairing code;
 say whether the session is GNOME or KDE; authorize an SSH key if we are to test over SSH;
 `sudo apt install libadwaita-dev` only for a later restyle.
