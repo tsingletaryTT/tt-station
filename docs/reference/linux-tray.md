@@ -55,7 +55,9 @@ is already paired in the tray, and the reverse. The agent shows its code on the 
 
 ## Tray and window
 
-* **Tray.** Built on `ksni` (StatusNotifierItem over D-Bus). KDE Plasma hosts StatusNotifierItem
+* **Tray.** Built on `ksni` (StatusNotifierItem over D-Bus). Left click opens the window and
+  right click shows the menu (`ksni` 0.3.6 fixes `ItemIsMenu` to false). The icon is an embedded
+  pixmap, so it does not depend on an installed icon file. KDE Plasma hosts StatusNotifierItem
   icons itself. XFCE needs a status-notifier or indicator panel plugin; the package name was not
   confirmed here (`xfce4-indicator-plugin` has an apt candidate on 24.04, but whether it hosts
   these icons was not checked). **GNOME does not host StatusNotifierItem icons by
@@ -140,10 +142,17 @@ Verified:
   fake `tt`), the registry, pairing flow, menu model, window view models, SNI probe and
   launcher command lines.
 * `tt-station-tray --smoke` runs headless.
+* **First display run, KDE Plasma on Wayland (2026-10-14).** Over D-Bus on the live tray:
+  `IconPixmap` carries two entries (48 and 128 px) and `IconName` is empty; `Activate(0, 0)`
+  (left click) and the "Open window" dbusmenu event each made a window titled "TT Station"
+  appear in KWin's windows runner (it listed none before), with no panic or GTK critical in the
+  log. This was driven by D-Bus calls, so a physical click and a screenshot of the drawn icon
+  were not checked.
 * `cargo clippy --workspace --all-targets -- -D warnings` is clean.
 
 Not verified:
-* **Nothing has run on a display**: the tray icon, the window, default mode, `--no-window`, the
+* **Mostly not run on a display**: only the icon properties and the two ways of opening the
+  window (see above) were observed. Still open: the drawn icon, window contents, default mode, `--no-window`, the
   GApplication single-instance logic, ksni menu updates, and the real runner for docker,
   terminal, clipboard, `notify-send` and Wake-on-LAN.
 * **The `tt` backend is live-verified for one tt-model bundle only.** Tasks 4 and 4c served
@@ -182,7 +191,7 @@ owner has to decide whether the local station should lease too.
 Package `tt-station-tray` (amd64) installs `/usr/bin/tt-station-tray`, the launcher
 `com.tenstorrent.ttstation.tray.desktop`, an autostart entry in `/etc/xdg/autostart/` (it
 starts the tray for every user who logs in to a desktop), and the panel's icons under the
-tray's own icon name. It depends on `libgtk-4-1`, and recommends `tt-station (= same version)`
+tray's own icon name (the running tray draws its embedded icon pixmap, not this theme entry). It depends on `libgtk-4-1`, and recommends `tt-station (= same version)`
 and the GNOME AppIndicator extension.
 
 The `tt-station` package (CLI and box agent) is optional for a tray-only workstation. The tray

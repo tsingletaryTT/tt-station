@@ -18,6 +18,8 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # is enabled: the window compiles against the base GTK 4.0 API, so the build should not need a
 # newer GTK than Ubuntu 22.04's 4.6 (not yet built or run there; see docs/reference/linux-tray.md).
 gtk4 = "0.9"
+# Decodes the embedded tray icon PNGs into the ARGB pixmaps the StatusNotifierItem carries.
+png = "0.18"
 
 [dev-dependencies]
 # Runs the built `tt-station-tray --smoke` binary in tests/smoke.rs.
