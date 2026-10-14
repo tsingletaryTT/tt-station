@@ -458,6 +458,27 @@ async fn local_replace_refuses_inapplicable_options_before_stopping() {
     assert!(stop < serve, "{seen:?}");
 }
 
+/// Review of the Copilot fixes, minor 7: under `--json` tt reports a failure as an `error`
+/// object on stdout, often with nothing on stderr. The message shows that object's text.
+#[tokio::test]
+async fn local_stop_failure_shows_tts_json_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, _) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            stop_line: Some(
+                r#"echo '{"error": {"what": "Cannot tell which container serves Llama-3.1-8B-Instruct.", "why": "1 running container(s) could not be identified.", "next_step": "docker ps"}}'; exit 1"#
+                    .into(),
+            ),
+            ..Opts::default()
+        },
+    );
+    let err = station(&script).stop().await.unwrap_err().to_string();
+    assert!(err.contains("Cannot tell which container serves"), "{err}");
+    assert!(err.contains("Next step: docker ps"), "{err}");
+}
+
 #[tokio::test]
 async fn local_stop_never_stops_a_studio_row() {
     let dir = tempfile::tempdir().unwrap();

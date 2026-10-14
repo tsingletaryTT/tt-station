@@ -225,7 +225,7 @@ impl LocalStation {
                 "`tt {}` failed (exit {:?}): {}",
                 args.join(" "),
                 out.code,
-                brief(&out.stderr)
+                failure_detail(&out)
             );
         }
         serde_json::from_str(&out.stdout)
@@ -329,7 +329,7 @@ impl LocalStation {
                 "`tt {}` failed (exit {:?}): {}",
                 argv.join(" "),
                 out.code,
-                brief(&out.stderr)
+                failure_detail(&out)
             );
         }
 
@@ -517,7 +517,7 @@ impl LocalStation {
                 "`tt {}` failed (exit {:?}): {}",
                 args.join(" "),
                 out.code,
-                brief(&out.stderr)
+                failure_detail(&out)
             );
         }
         Ok(())
@@ -541,7 +541,7 @@ impl LocalStation {
                 "`tt {}` failed (exit {:?}): {}",
                 args.join(" "),
                 out.code,
-                brief(&out.stderr)
+                failure_detail(&out)
             );
         }
         Ok(out.stdout.lines().map(str::to_string).collect())
@@ -591,6 +591,30 @@ pub fn local_serve_argv(
         default_port,
         options,
     )
+}
+
+/// One readable explanation of a failed `tt` call. Under `--json`, `tt` prints a failure as
+/// `{"error": {"what", "why", "next_step", ...}}` on stdout, often with nothing on stderr; that
+/// object's text is used when present (the agent's `tt` backend reads it the same way).
+/// Otherwise the first lines of stderr, then of stdout.
+fn failure_detail(out: &Captured) -> String {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&out.stdout) {
+        if let Some(err) = value.get("error") {
+            let field = |k: &str| err.get(k).and_then(serde_json::Value::as_str);
+            let mut text = field("what").unwrap_or("tt reported an error").to_string();
+            if let Some(why) = field("why") {
+                text.push_str(&format!(" {why}"));
+            }
+            if let Some(next) = field("next_step") {
+                text.push_str(&format!(" Next step: {next}"));
+            }
+            return text;
+        }
+    }
+    if out.stderr.trim().is_empty() && !out.stdout.trim().is_empty() {
+        return brief(&out.stdout);
+    }
+    brief(&out.stderr)
 }
 
 /// First few lines of a process's stderr, for an error message.
