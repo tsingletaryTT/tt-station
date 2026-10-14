@@ -26,6 +26,8 @@ struct Opts {
     ps_fails: bool,
     /// File `serve <model> --dry-run` prints.
     dry: PathBuf,
+    /// `serve ... --dry-run` hangs (sleeps 30 s) instead of printing.
+    dry_hangs: bool,
 }
 
 impl Default for Opts {
@@ -35,6 +37,7 @@ impl Default for Opts {
             serve_fails: false,
             ps_fails: false,
             dry: fixture("dry_run_catalog.json"),
+            dry_hangs: false,
         }
     }
 }
@@ -83,7 +86,7 @@ case "$*" in
   "--json model list") cat "{list}" ;;
   "--json model ps") {ps_line} ;;
   "model logs "*) printf 'line one\nline two\n' ;;
-  "--json serve "*" --dry-run") cat "{dry}" ;;
+  "--json serve "*" --dry-run") {dry_line} ;;
   "--json serve "*) {serve_line} ;;
   "--json model stop "*) echo '{{}}' ;;
   *) echo "fake tt: unexpected: $*" >&2; exit 64 ;;
@@ -94,7 +97,11 @@ esac
         list = fixture("model_list.json").display(),
         ps_line = ps_line,
         serve_line = serve_line,
-        dry = o.dry.display(),
+        dry_line = if o.dry_hangs {
+            "exec sleep 30".to_string()
+        } else {
+            format!(r#"cat "{}""#, o.dry.display())
+        },
     );
     std::fs::write(&script, body).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -572,13 +579,20 @@ async fn perf_reference_comes_from_the_checkout_the_dry_run_names_and_is_cached(
         },
     );
     let s = Station::Local(LocalStation::new(&script).with_tools_dir(&tools));
+    // Listing the models teaches the station its mesh (`p300x2` in the fixture), which the dry
+    // run then passes as `--device` so tt does not auto-detect hardware.
+    s.models().await.unwrap();
     let table = s
         .perf_reference(Some("gemma-4-31B-it"))
         .await
         .expect("table");
     assert_eq!(table.version.as_deref(), Some("0.21.0"));
     assert!(table.models.contains_key("gemma-4-31b-it"));
-    assert!(calls(&log).contains(&"--json serve gemma-4-31B-it --dry-run".to_string()));
+    assert!(
+        calls(&log).contains(&"--json serve gemma-4-31B-it --device p300x2 --dry-run".to_string()),
+        "{:?}",
+        calls(&log)
+    );
 
     let before = calls(&log).len();
     let again = s
@@ -644,4 +658,100 @@ async fn local_models_carry_hf_repo() {
     let rows = station(&script).models().await.unwrap();
     let g = rows.iter().find(|r| r.name == "gemma-4-31B-it").unwrap();
     assert_eq!(g.hf_repo.as_deref(), Some("google/gemma-4-31B-it"));
+}
+
+#[tokio::test]
+async fn perf_reference_without_a_known_mesh_sends_no_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let named = fake_checkout(&dir.path().join("elsewhere"), "0.21.0");
+    let (script, log) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            dry: dry_plan(dir.path(), &named),
+            ..Opts::default()
+        },
+    );
+    let s = Station::Local(LocalStation::new(&script).with_tools_dir(dir.path().join("none")));
+    assert!(s.perf_reference(Some("gemma-4-31B-it")).await.is_some());
+    assert!(calls(&log).contains(&"--json serve gemma-4-31B-it --dry-run".to_string()));
+}
+
+#[tokio::test]
+async fn a_hanging_dry_run_falls_back_within_the_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let tools = dir.path().join("tools");
+    fake_checkout(&tools, "0.18.0");
+    let (script, log) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            dry_hangs: true,
+            ..Opts::default()
+        },
+    );
+    let s = Station::Local(
+        LocalStation::new(&script)
+            .with_tools_dir(&tools)
+            .with_perf_dry_run_timeout(std::time::Duration::from_millis(300)),
+    );
+    let started = std::time::Instant::now();
+    let table = s
+        .perf_reference(Some("gemma-4-31B-it"))
+        .await
+        .expect("fallback table");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "took {:?}; the fake dry run sleeps 30 s",
+        started.elapsed()
+    );
+    assert_eq!(table.version.as_deref(), Some("0.18.0"));
+    assert!(
+        calls(&log).iter().any(|c| c.ends_with("--dry-run")),
+        "the dry run was tried"
+    );
+}
+
+#[tokio::test]
+async fn a_miss_is_remembered_so_the_next_load_starts_no_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, log) = fake_tt(dir.path(), "tt 1.0.1");
+    let s = Station::Local(LocalStation::new(&script).with_tools_dir(dir.path().join("empty")));
+    assert!(s
+        .perf_reference(Some("Llama-3.1-8B-Instruct"))
+        .await
+        .is_none());
+    let before = calls(&log).len();
+    assert!(before > 0, "the first lookup ran the dry run");
+    assert!(s
+        .perf_reference(Some("Llama-3.1-8B-Instruct"))
+        .await
+        .is_none());
+    assert_eq!(
+        calls(&log).len(),
+        before,
+        "a remembered miss starts no process"
+    );
+
+    // Once the remembered miss expires the lookup runs again.
+    let dir2 = tempfile::tempdir().unwrap();
+    let (script2, log2) = fake_tt(dir2.path(), "tt 1.0.1");
+    let s = Station::Local(
+        LocalStation::new(&script2)
+            .with_tools_dir(dir2.path().join("empty"))
+            .with_perf_miss_ttl(std::time::Duration::ZERO),
+    );
+    assert!(s
+        .perf_reference(Some("Llama-3.1-8B-Instruct"))
+        .await
+        .is_none());
+    let first = calls(&log2).len();
+    assert!(s
+        .perf_reference(Some("Llama-3.1-8B-Instruct"))
+        .await
+        .is_none());
+    assert!(
+        calls(&log2).len() > first,
+        "an expired miss is looked up again"
+    );
 }

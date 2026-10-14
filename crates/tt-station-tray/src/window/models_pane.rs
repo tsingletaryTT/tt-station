@@ -13,9 +13,12 @@
 //! reference targets ([`crate::perf`]): a short tokens-per-second suffix on list rows and a
 //! labelled block in the detail pane, both built by [`view_model::model_line`] and
 //! [`view_model::model_detail`]. The table is found and parsed by
-//! [`Station::perf_reference`](crate::station::Station::perf_reference) inside the page's load
-//! task, on the tokio runtime and never on the GTK thread, and is cached by the station. A box
-//! has no table, so its rows and details show no performance text.
+//! [`Station::perf_reference`](crate::station::Station::perf_reference) in a second task that
+//! starts after the rows are shown (so the list never waits for it), on the tokio runtime and
+//! never on the GTK thread, and is cached by the station. When it arrives the list is redrawn
+//! with the selected model kept selected, and the count line gains a one-line legend saying
+//! the figures are targets. A box has no table, so its rows and details show no performance
+//! text.
 //!
 //! Never looked at or clicked: the list's look, scrolling, the heading style, selection and
 //! the filter dropdowns' behaviour.
@@ -31,8 +34,9 @@ use crate::perf::PerfRef;
 use crate::station::ModelRow;
 
 use super::view_model::{
-    filter_choices, group_models, load_is_current, model_detail, model_line, needs_reload,
-    on_load_dropped, perf_sample_model, ModelFilter, ModelGroups, PerfContext,
+    filter_choices, group_models, load_is_current, model_detail, model_line, models_status,
+    needs_reload, on_load_dropped, perf_sample_model, reselect, ModelFilter, ModelGroups,
+    PerfContext,
 };
 use super::{set_margins, spawn_call, App};
 
@@ -55,6 +59,8 @@ struct Page {
     /// The station index the rows were loaded for, so a station change triggers a reload.
     loaded_for: Cell<Option<usize>>,
     strings: gtk::StringList,
+    /// The list's selection model, kept here so a redraw can keep the chosen model selected.
+    selection: gtk::SingleSelection,
     search: gtk::SearchEntry,
     kind: gtk::DropDown,
     source: gtk::DropDown,
@@ -108,14 +114,42 @@ impl Page {
         *self.entries.borrow_mut() = entries;
         self.strings.splice(0, self.strings.n_items(), &refs);
         self.status.remove_css_class("error");
-        self.status.set_text(&format!(
-            "{} of {} models shown",
-            groups.runs_here.len()
-                + groups.experimental.len()
-                + groups.other_hardware.len()
-                + groups.unknown_fit.len(),
-            self.rows.borrow().len()
-        ));
+        let shown = groups.runs_here.len()
+            + groups.experimental.len()
+            + groups.other_hardware.len()
+            + groups.unknown_fit.len();
+        let perf_shown = self.with_perf(|ctx| ctx.is_some());
+        self.status
+            .set_text(&models_status(shown, self.rows.borrow().len(), perf_shown));
+    }
+
+    /// [`Page::regroup`], then select the same model again if it is still listed. Used when
+    /// reference numbers arrive after the rows, so the person's selection survives the redraw
+    /// (the selection handler then refreshes the detail pane with the numbers).
+    fn regroup_keeping_selection(&self) {
+        let chosen = match self
+            .entries
+            .borrow()
+            .get(self.selection.selected() as usize)
+        {
+            Some(Entry::Model(r, _)) => Some(r.name.clone()),
+            _ => None,
+        };
+        self.regroup();
+        let index = {
+            let entries = self.entries.borrow();
+            let names: Vec<Option<&str>> = entries
+                .iter()
+                .map(|e| match e {
+                    Entry::Model(r, _) => Some(r.name.as_str()),
+                    Entry::Heading(_) => None,
+                })
+                .collect();
+            reselect(&names, chosen.as_deref())
+        };
+        if let Some(i) = index {
+            self.selection.set_selected(i as u32);
+        }
     }
 }
 
@@ -132,6 +166,7 @@ pub fn build(app: &App) -> gtk::Widget {
     heading.set_xalign(0.0);
     heading.add_css_class("heading");
 
+    let strings = gtk::StringList::new(&[]);
     let page = Rc::new(Page {
         rows: RefCell::new(Vec::new()),
         mesh_known: Cell::new(false),
@@ -139,7 +174,8 @@ pub fn build(app: &App) -> gtk::Widget {
         perf: RefCell::new(None),
         entries: RefCell::new(Vec::new()),
         loaded_for: Cell::new(None),
-        strings: gtk::StringList::new(&[]),
+        selection: gtk::SingleSelection::new(Some(strings.clone())),
+        strings,
         search: gtk::SearchEntry::new(),
         kind: gtk::DropDown::from_strings(&[ALL_KINDS]),
         source: gtk::DropDown::from_strings(&[ALL_SOURCES]),
@@ -189,7 +225,7 @@ pub fn build(app: &App) -> gtk::Widget {
             }
         });
     }
-    let selection = gtk::SingleSelection::new(Some(page.strings.clone()));
+    let selection = page.selection.clone();
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
     let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
@@ -205,9 +241,9 @@ pub fn build(app: &App) -> gtk::Widget {
     detail_label.set_yalign(0.0);
     detail_label.set_wrap(true);
     // Let the label break inside long words (model ids such as `org/very-long-model-name` have
-    // no spaces) and bound its width request.
+    // no spaces) and cap its natural width. No `width_chars`: the detail box's 280 px size
+    // request sets the minimum width.
     detail_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    detail_label.set_width_chars(24);
     detail_label.set_max_width_chars(48);
     detail_label.set_selectable(true);
     // The label sits in a vertical-only ScrolledWindow so the detail pane's minimum height does
@@ -328,6 +364,8 @@ pub fn build(app: &App) -> gtk::Widget {
 }
 
 /// Fetch the selected station's models and its mesh, then refill the filters and the list.
+/// Reference performance is fetched afterwards by [`load_perf`], so the rows never wait for
+/// it.
 fn load(app: &App, page: &Rc<Page>) {
     let i = app.selected.get();
     page.loaded_for.set(Some(i));
@@ -335,22 +373,16 @@ fn load(app: &App, page: &Rc<Page>) {
     page.status.set_text("Loading models...");
     let page = page.clone();
     let app2 = app.clone();
+    let station2 = station.clone();
     spawn_call(
         app,
         async move {
             let models = station.models().await;
             // Read the mesh after `models()`: the local station learns it from `tt model list`.
             let mesh = station.state().await.mesh;
-            // The reference performance table: one `tt serve --dry-run` and one file parse the
-            // first time, cached by the station afterwards; always `None` for a box.
-            let sample = models
-                .as_ref()
-                .ok()
-                .and_then(|rows| perf_sample_model(rows).map(str::to_string));
-            let perf = station.perf_reference(sample.as_deref()).await;
-            (models, mesh, perf)
+            (models, mesh)
         },
-        move |(models, mesh, perf)| {
+        move |(models, mesh)| {
             // Drop a result that arrived after the person switched station or a newer load
             // started; showing it would let "Run..." send this station's model elsewhere.
             if !load_is_current(page.loaded_for.get(), app2.selected.get(), i) {
@@ -359,6 +391,8 @@ fn load(app: &App, page: &Rc<Page>) {
                     .set(on_load_dropped(page.loaded_for.get(), i));
                 return;
             }
+            // Never show another station's table with these rows.
+            *page.perf.borrow_mut() = None;
             match models {
                 Ok(rows) => {
                     let (kinds, sources) = filter_choices(&rows);
@@ -368,23 +402,49 @@ fn load(app: &App, page: &Rc<Page>) {
                     s.extend(sources);
                     let kr: Vec<&str> = k.iter().map(String::as_str).collect();
                     let sr: Vec<&str> = s.iter().map(String::as_str).collect();
+                    let sample = perf_sample_model(&rows).map(str::to_string);
                     *page.rows.borrow_mut() = rows;
                     page.mesh_known.set(mesh.is_some());
                     *page.mesh.borrow_mut() = mesh;
-                    *page.perf.borrow_mut() = perf;
                     page.kind.set_model(Some(&gtk::StringList::new(&kr)));
                     page.source.set_model(Some(&gtk::StringList::new(&sr)));
                     page.regroup();
+                    load_perf(&app2, &page, station2, i, sample);
                 }
                 Err(e) => {
                     page.rows.borrow_mut().clear();
-                    *page.perf.borrow_mut() = None;
                     page.regroup();
                     page.status
                         .set_text(&format!("Could not list models: {e:#}"));
                     page.status.add_css_class("error");
                 }
             }
+        },
+    );
+}
+
+/// Fetch the reference performance table for the station of load `i` (one dry run and a file
+/// parse the first time, cached by the station afterwards; always `None` for a box), then
+/// attach it and redraw the list, keeping the selected model selected. A result for a load
+/// that is no longer current is dropped.
+fn load_perf(
+    app: &App,
+    page: &Rc<Page>,
+    station: Arc<crate::station::Station>,
+    i: usize,
+    sample: Option<String>,
+) {
+    let page = page.clone();
+    let app2 = app.clone();
+    spawn_call(
+        app,
+        async move { station.perf_reference(sample.as_deref()).await },
+        move |perf| {
+            if perf.is_none() || !load_is_current(page.loaded_for.get(), app2.selected.get(), i) {
+                return;
+            }
+            *page.perf.borrow_mut() = perf;
+            page.regroup_keeping_selection();
         },
     );
 }

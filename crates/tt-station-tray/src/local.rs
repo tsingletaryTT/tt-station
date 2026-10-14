@@ -44,6 +44,25 @@ use crate::station::{fits, ModelRow, ServingNow, StationId, StationKind, Station
 /// agent's `tt` backend uses for the same command.
 pub const DEFAULT_SERVE_PORT: u16 = 20000;
 
+/// How long [`LocalStation::perf_reference`] waits for `tt --version` plus the
+/// `tt serve --dry-run` that names the tt-inference-server checkout. It normally takes under a
+/// second; past this the lookup falls back to scanning the tools directory.
+pub const PERF_DRY_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a failed reference-table lookup (no file anywhere) is remembered, so a machine
+/// without tt-inference-server does not run a dry run on every Models page load.
+pub const PERF_MISS_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// What [`LocalStation::perf_reference`] remembers between calls.
+enum PerfCache {
+    /// Not looked up yet, or the remembered miss has expired.
+    Unknown,
+    /// A table was found; kept for the life of the station.
+    Found(Arc<PerfRef>),
+    /// No table was found at this instant; trusted until [`LocalStation::perf_miss_ttl`] passes.
+    Missing(std::time::Instant),
+}
+
 /// What a finished `tt` invocation left behind.
 struct Captured {
     success: bool,
@@ -65,10 +84,14 @@ pub struct LocalStation {
     /// (`~/.local/share/tenstorrent/tools`), searched by [`LocalStation::perf_reference`] when
     /// the dry run does not name a checkout. `None` when `HOME` is unset.
     tools_dir: Option<PathBuf>,
-    /// The parsed reference performance table, once one was found. Only a success is cached: a
-    /// failed lookup is retried on the next call (one dry run per Models page load), so a
-    /// checkout installed while the tray runs is picked up.
-    perf: Mutex<Option<Arc<PerfRef>>>,
+    /// The reference performance lookup's result. A found table is kept for the life of the
+    /// station. A miss is kept for `perf_miss_ttl`, then retried, so a checkout installed
+    /// while the tray runs is picked up within a few minutes.
+    perf: Mutex<PerfCache>,
+    /// Limit on the dry run inside [`LocalStation::perf_reference`] ([`PERF_DRY_RUN_TIMEOUT`]).
+    perf_dry_run_timeout: std::time::Duration,
+    /// How long a miss is remembered ([`PERF_MISS_TTL`]).
+    perf_miss_ttl: std::time::Duration,
 }
 
 impl LocalStation {
@@ -81,8 +104,22 @@ impl LocalStation {
             mesh: Mutex::new(None),
             tools_dir: std::env::var_os("HOME")
                 .map(|h| PathBuf::from(h).join(".local/share/tenstorrent/tools")),
-            perf: Mutex::new(None),
+            perf: Mutex::new(PerfCache::Unknown),
+            perf_dry_run_timeout: PERF_DRY_RUN_TIMEOUT,
+            perf_miss_ttl: PERF_MISS_TTL,
         }
+    }
+
+    /// Use `limit` instead of [`PERF_DRY_RUN_TIMEOUT`] for the perf lookup's dry run (tests).
+    pub fn with_perf_dry_run_timeout(mut self, limit: std::time::Duration) -> Self {
+        self.perf_dry_run_timeout = limit;
+        self
+    }
+
+    /// Remember a failed perf lookup for `ttl` instead of [`PERF_MISS_TTL`] (tests).
+    pub fn with_perf_miss_ttl(mut self, ttl: std::time::Duration) -> Self {
+        self.perf_miss_ttl = ttl;
+        self
     }
 
     /// Search `dir` instead of `~/.local/share/tenstorrent/tools` for tt-inference-server
@@ -346,18 +383,38 @@ impl LocalStation {
     /// `tt serve` would use, or `None`.
     ///
     /// The checkout is the directory of the `run.py` in the argv of
-    /// `tt --json serve <sample_model> --dry-run` (read-only; nothing starts). When there is no
-    /// sample, the dry run fails, or its checkout has no reference file, the newest
-    /// `tt-inference-server-v*/src` under the tools directory that has one is used instead. The
-    /// file is read and parsed on a blocking-pool thread, never on the caller's (GTK) thread,
-    /// and a success is cached for the life of this station, so later calls start no process.
+    /// `tt --json serve <sample_model> [--device <mesh>] --dry-run`. The dry run is read-only:
+    /// tt's `serve` command returns the plan before any preflight, install or container start.
+    /// When the mesh is known it is passed as `--device`, which also makes tt skip its own
+    /// device auto-detection (a `tt-smi` snapshot), so the dry run reads nothing from the
+    /// device. The version check and the dry run together get [`PERF_DRY_RUN_TIMEOUT`]; the
+    /// child is killed if the limit passes (`kill_on_drop`).
+    ///
+    /// When there is no sample, the dry run fails or times out, or its checkout has no
+    /// reference file, the newest `tt-inference-server-v*/src` under the tools directory that
+    /// has one is used instead. The file is read and parsed on a blocking-pool thread, never on
+    /// the caller's (GTK) thread. A found table is cached for the life of this station; a miss
+    /// is cached for [`PERF_MISS_TTL`]. While either is cached, calls start no process.
     pub async fn perf_reference(&self, sample_model: Option<&str>) -> Option<Arc<PerfRef>> {
-        if let Some(p) = self.perf.lock().expect("perf mutex poisoned").clone() {
-            return Some(p);
+        match &*self.perf.lock().expect("perf mutex poisoned") {
+            PerfCache::Found(p) => return Some(p.clone()),
+            PerfCache::Missing(at) if at.elapsed() < self.perf_miss_ttl => return None,
+            _ => {}
         }
+        let found = self.find_perf_reference(sample_model).await;
+        *self.perf.lock().expect("perf mutex poisoned") = match &found {
+            Some(p) => PerfCache::Found(p.clone()),
+            None => PerfCache::Missing(std::time::Instant::now()),
+        };
+        found
+    }
+
+    /// The uncached lookup behind [`LocalStation::perf_reference`].
+    async fn find_perf_reference(&self, sample_model: Option<&str>) -> Option<Arc<PerfRef>> {
         let mut checkout = None;
         if let Some(model) = sample_model {
-            if let Ok(plan) = self.serve_plan(model).await {
+            let plan = tokio::time::timeout(self.perf_dry_run_timeout, self.perf_plan(model)).await;
+            if let Ok(Ok(plan)) = plan {
                 checkout =
                     perf::checkout_from_plan(&plan).filter(|c| perf::reference_path(c).is_some());
             }
@@ -366,13 +423,30 @@ impl LocalStation {
             checkout = self.tools_dir.as_deref().and_then(perf::newest_checkout);
         }
         let checkout = checkout?;
-        let table = tokio::task::spawn_blocking(move || perf::load(&checkout))
+        tokio::task::spawn_blocking(move || perf::load(&checkout))
             .await
             .ok()
             .flatten()
-            .map(Arc::new)?;
-        *self.perf.lock().expect("perf mutex poisoned") = Some(table.clone());
-        Some(table)
+            .map(Arc::new)
+    }
+
+    /// `tt --json serve <model> [--device <mesh>] --dry-run` for the perf lookup: like
+    /// [`LocalStation::serve_plan`], plus `--device` when the mesh is known.
+    async fn perf_plan(&self, model: &str) -> Result<serde_json::Value> {
+        validate_model_name(model)?;
+        let mesh = self.mesh_now();
+        if let Some(m) = &mesh {
+            // The mesh comes from `tt model list` output; check it like any name before it
+            // reaches a command line.
+            validate_model_name(m)?;
+        }
+        self.vet().await?;
+        let mut args = vec!["--json", "serve", model];
+        if let Some(m) = mesh.as_deref() {
+            args.extend(["--device", m]);
+        }
+        args.push("--dry-run");
+        self.tt_json(&args).await
     }
 
     /// Pick the server `stop` and `logs` act on. Rules:
