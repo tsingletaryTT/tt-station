@@ -4,8 +4,9 @@
 system tray and opens a small GTK4 window. From either, you start, stop and connect to models
 served by this machine and by paired QuietBoxes.
 
-Status: built, unit-tested and smoke-checked headless. **It has never been run on a display.**
-See "What is verified" below before relying on any behavior described here.
+Status: built, unit-tested and smoke-checked headless. It has been run on a display only in part
+(KDE Plasma on Wayland, 2026-10-14). See "What is verified" below before relying on any behavior
+described here.
 
 ## Branch and review
 
@@ -15,10 +16,13 @@ Its pull request targets `experiments/egpu`, so the review shows only the Linux 
 #1 first and delete its branch; GitHub then retargets the stacked PR to `main`. A build for another machine clones the
 branch directly (`git clone -b feat/linux-tray git@github.com:tsingletaryTT/tt-station.git`).
 The branch edits `.github/workflows/`, so pushing it needs a credential with the `workflow`
-scope (an SSH key, or `gh auth refresh -h github.com -s workflow`). As of 2026-10-14 the
-remote branch is behind the local one by the agent-defaults commits, and the stacked PR is not
-opened yet; the PR description is drafted in `.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md`
-on the box that built it.
+scope (an SSH key, or `gh auth refresh -h github.com -s workflow`). The owner pushed
+`feat/linux-tray` on 2026-10-14: `origin/feat/linux-tray` is at `4596d11` (tray icon and
+left-click fix), so everything up to and including the agent-defaults and docs commits is on
+`origin`. Commits made after `4596d11` (the GtkPaned fixes, reference performance on the Models
+page, and these docs) are local until the next push. The stacked PR is not opened yet; its
+description is drafted in `.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md` on the box
+that built it.
 
 ## Stations
 
@@ -77,6 +81,55 @@ is already paired in the tray, and the reverse. The agent shows its code on the 
 Run modes: no argument (tray plus window host; used by the autostart entry), `--no-window` (tray
 only), `--smoke`, `--version`. A `--no-window` instance does not take part in single-instance,
 so the autostart entry uses the default mode.
+
+## Reference performance on the Models page
+
+For this machine, the Models page shows performance numbers that ship with tt-inference-server.
+They are **reference targets from a file. They were not measured on this machine**, and the page
+says so in the heading of every block.
+
+* **Source file.** `model_performance_reference.json` in a tt-inference-server checkout:
+  `reference_config/benchmarking/benchmark_targets/` (0.22.x, keys are Hugging Face ids) or
+  `benchmarking/benchmark_targets/` (0.18.x, keys are short names). The tray takes the checkout
+  from the `run.py` path in one `tt --json serve <catalog model> --dry-run` (read-only; nothing
+  starts), so the numbers come from the version `tt serve` would run. If that fails it uses the
+  newest `~/.local/share/tenstorrent/tools/tt-inference-server-v*/src` that has the file. If
+  there is no file, the page shows no numbers and reports no error. The version in the label
+  comes from the checkout's `VERSION` file, else from the `tt-inference-server-vX` directory name.
+* **What is shown.** A list row gets a suffix such as `  ·  ~37 tok/s/user`. The detail pane
+  gets a block such as:
+
+  ```
+  Reference performance on p300x2 (tt-inference-server 0.22.0 targets, not measured on this machine)
+  1 user, 128 in / 128 out: 46 ms to first token, 37 tok/s per user (theoretical)
+  32 users, 128 in / 128 out: 400 tok/s total (theoretical)
+  "theoretical" is the ceiling the file sets for this hardware.
+  ```
+
+  The single-user line uses the 1-user configuration with the smallest input plus output
+  length, which is closest to one chat turn. The total line uses the highest concurrency the
+  file lists. Image, audio, video and embedding models get one line per configuration with the
+  file's own metric names (`rtr`, `tput_prefill`, `e2el_ms`, ...) and no list suffix. A model
+  with no entry for this mesh shows `No reference numbers for <mesh> in tt-inference-server
+  <version>.`
+* **Matching rules.** A model is found by its `hf_repo`, then its name: exact first, then
+  ignoring case, then by the last path segment. Only the device entry equal to the station's
+  mesh is used; numbers are never borrowed or scaled from another device. Entries that declare
+  `data_parallel` are skipped, because tt-inference-server uses them only when the model spec
+  sets `data_parallel_size`, which the tray cannot see. When a configuration has a `measured`
+  target (only on such data-parallel entries in 0.22.0 so far) it is preferred over
+  `theoretical`, and the label names whichever kind was used.
+* **Local station only.** A paired box shows no numbers: the agent's `/models` does not carry
+  them. The next step would be an additive `perf` field on the agent's `/models`, filled from
+  the box's own checkout by the same `crate::perf` code.
+* **Cost.** The first page load runs one extra `tt` dry run and parses the file (about 200 KB)
+  on the tokio blocking pool, so the GTK thread does not wait for it. The parsed table is cached for the life of
+  the tray, so later loads start no process for it.
+
+Code: `crates/tt-station-tray/src/perf.rs` (pure parse, lookup and formatting, unit-tested
+against small real snippets in `tests/fixtures/perf_reference_*.json`),
+`view_model::model_line` / `model_detail` (what the page binds), and
+`LocalStation::perf_reference`. `--smoke` runs the same path against the short-name fixture.
 
 ## Run options
 
@@ -145,14 +198,29 @@ Verified:
 * **First display run, KDE Plasma on Wayland (2026-10-14).** Over D-Bus on the live tray:
   `IconPixmap` carries two entries (48 and 128 px) and `IconName` is empty; `Activate(0, 0)`
   (left click) and the "Open window" dbusmenu event each made a window titled "TT Station"
-  appear in KWin's windows runner (it listed none before), with no panic or GTK critical in the
-  log. This was driven by D-Bus calls, so a physical click and a screenshot of the drawn icon
+  appear in KWin's windows runner (it listed none before), with no panic. That check looked at
+  the log only right after opening; about 15 s later, when the model list loaded, GTK logged
+  `GtkPaned ... reports a minimum height of 191, but minimum height for width of 1048576 is
+  229`. This was driven by D-Bus calls, so a physical click and a screenshot of the drawn icon
   were not checked.
+* **GtkPaned CRITICAL fixed and the Models page checked live (KDE Plasma, Wayland,
+  2026-10-14).** The cause was the Models detail label, which wrapped directly inside the
+  page's `gtk::Paned`, so its height depended on the width the Paned gave it. The label now
+  sits in a vertical-only `ScrolledWindow`. The tray was relaunched, the window opened with
+  `Activate`, and the Stations, Models and Logs pages and five model rows were selected through
+  AT-SPI selection (no button was pressed). The previous build logged 21 CRITICAL lines during
+  that walk; the fixed build logged none in about 70 s. Read back through AT-SPI on this box
+  (`p300x2`, tt-inference-server 0.22.0 via `tt` 1.0.1): `gemma-4-31B-it` shows
+  `~37 tok/s/user` and the 1-user and 32-user lines, `Llama-3.1-8B-Instruct` shows "No
+  reference numbers for p300x2 in tt-inference-server 0.22.0.", `whisper-large-v3` shows
+  `asr, 1 user: rtr 16, tput_user 62, ttft_ms 1900 (theoretical)`, and `bge-m3` shows its
+  embedding line. A screenshot of the window showed the block wrapped inside the detail pane.
 * `cargo clippy --workspace --all-targets -- -D warnings` is clean.
 
 Not verified:
-* **Mostly not run on a display**: only the icon properties and the two ways of opening the
-  window (see above) were observed. Still open: the drawn icon, window contents, default mode, `--no-window`, the
+* **Mostly not run on a display**: only the icon properties, the two ways of opening the
+  window and the Models page (see above) were observed. Still open: the drawn icon, the
+  Stations and Logs page contents beyond their headings, a physical click, `--no-window`, the
   GApplication single-instance logic, ksni menu updates, and the real runner for docker,
   terminal, clipboard, `notify-send` and Wake-on-LAN.
 * **The `tt` backend is live-verified for one tt-model bundle only.** Tasks 4 and 4c served
@@ -166,6 +234,8 @@ Not verified:
   * on the development box `/tmp/tt-gozer/history.jsonl` is owned by root, so a restarted agent
     cannot adopt its lease. The owner fixes that with
     `sudo chown ttuser /tmp/tt-gozer/history.jsonl`.
+* **Reference performance** was not checked against a remote station (it shows none by design),
+  against a machine with only a 0.18.x checkout (covered by unit tests only), or on GNOME/XFCE.
 * **Nothing has been tested on `franklinstower`**, the intended second machine.
 * **A `.deb` has not been built or installed** from these packaging files.
 * **Ubuntu 22.04 (jammy) has not been built.** The crate enables no `gtk4` `v4_*` feature, so

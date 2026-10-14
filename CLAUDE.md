@@ -45,9 +45,10 @@ Key decisions:
 - Open WebUI is published on `127.0.0.1` only.
 - `LocalStation::run` takes **no gozer lease** (owner decision pending: a shared box can collide).
 - Package `tt-station-tray` (own icon name, autostart runs default mode because a `--no-window` instance does not join single-instance).
-State: unit tests, clippy and `tt-station-tray --smoke` pass. **Never run on a display** (tray,
-window, `--no-window`, single-instance, ksni updates, the real docker/terminal/clipboard/
-notify-send/WoL runner). The `tt` backend is live-verified for one tt-model bundle
+State: unit tests, clippy and `tt-station-tray --smoke` pass. **Run on a display only in part**
+(KDE Wayland, 2026-10-14: icon properties, opening the window, the Models page through AT-SPI);
+still unchecked: a physical click, `--no-window`, single-instance, ksni updates, the real
+docker/terminal/clipboard/notify-send/WoL runner. The `tt` backend is live-verified for one tt-model bundle
 (`changh95/qwen3.8-27b-p300x2`, Tasks 4 and 4c: 5 serves, ~2-4 min to `/v1/models`, nothing
 downloaded; `/serving` and restart rediscovery verified after e7c4c2c). Catalog models only
 `--dry-run`; `--offline` untested; `TT_VISIBLE_DEVICES` does not reach the container; an
@@ -75,12 +76,20 @@ polls readiness on `127.0.0.1` and advertises the LAN address in endpoints. `--p
 **Branches and review (as of 2026-10-14).** The branches stack: `main` <- `experiments/egpu`
 (PR #1, open) <- `feat/linux-tray`. `feat/linux-tray` was cut from `experiments/egpu`, so its PR
 targets `experiments/egpu`. When #1 merges and its branch is deleted, GitHub retargets the
-stacked PR to `main`. On `origin`, `feat/linux-tray` was pushed once (2026-10-06, at `3d0782b`, over SSH because
-the https OAuth token lacks the `workflow` scope and the branch edits `.github/workflows/`). The
-four agent-defaults commits and this docs commit are local until pushed, and the stacked PR is
-not opened yet. To publish: `git push -u origin feat/linux-tray` (use the SSH URL, or
-`gh auth refresh -h github.com -s workflow` first), then open the PR with the body drafted in
+stacked PR to `main`. The owner pushed `feat/linux-tray` on 2026-10-14: `origin/feat/linux-tray`
+is at `4596d11` (tray icon and left-click fix), so everything up to and including the
+agent-defaults and docs commits is on `origin`. Commits made after `4596d11` are local until the
+next push. Pushing needs SSH or a token with the `workflow` scope (the branch edits
+`.github/workflows/`). The stacked PR is not opened yet: open it with the body drafted in
 `.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md` and fill the PR number in here.
+**Models page reference performance and GtkPaned fix (2026-10-14, after `4596d11`).** The Models
+page shows tt-inference-server's `model_performance_reference.json` targets for this machine
+(`crate::perf`): a `~N tok/s/user` row suffix and a detail block labelled "not measured on this
+machine" with the tt-inference-server version; the checkout comes from one `tt serve --dry-run`.
+Boxes show nothing until the agent's `/models` gains a `perf` field. The `GtkPaned ... minimum
+height` CRITICAL came from the wrapping detail label; it now sits in a vertical-only
+ScrolledWindow, and a live walk of all three pages logged none. Report:
+`.superpowers/sdd/2026-10-05-linux-tray/perf-and-paned-report.md`.
 Owner to do for franklinstower: install and start `tt-station-agentd` and send the pairing code;
 say whether the session is GNOME or KDE; authorize an SSH key if we are to test over SSH;
 `sudo apt install libadwaita-dev` only for a later restyle.

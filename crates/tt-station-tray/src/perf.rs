@@ -124,7 +124,8 @@ pub struct PerfSummary {
     pub body: PerfBody,
 }
 
-/// Metrics that are grading parameters, not performance figures. Never shown.
+/// Keys inside a target that are grading parameters (`tolerance` is the allowed shortfall when
+/// a benchmark is graded). They are dropped at parse time and never shown.
 const NOT_METRICS: [&str; 1] = ["tolerance"];
 
 /// Parse the reference file. `None` when `text` is not JSON or its top level is not an object.
@@ -611,7 +612,7 @@ mod tests {
         assert_eq!(galaxy[0].targets["measured"]["tput_user"], 55.1);
         assert!(
             !galaxy[0].targets["measured"].contains_key("tolerance"),
-            "tolerance is a grading parameter, not a metric"
+            "tolerance is a grading parameter and is dropped"
         );
         assert!(!galaxy[2].data_parallel);
         // whisper's `ttft_streaming_ms: null` is dropped.
