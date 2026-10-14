@@ -18,10 +18,13 @@
 //! Remembered options: the form starts from the options last used for this model on this
 //! station (`Registry::last_run`), and a successful Start saves the new ones.
 //!
+//! Start is disabled from a click until that Start or Restart finishes ([`start_enabled`]), so an
+//! edit made meanwhile cannot enable a second click.
+//!
 //! Never looked at or clicked: the dialog's layout, the expander, the field widgets, and the
 //! enable and disable behaviour of Start. Named presets from the spec are not built.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -31,7 +34,7 @@ use libttstation::run_options::{OptionSpec, RunSchema};
 use crate::station::Station;
 
 use super::view_model::{
-    run_gate, schema_note, ActionResult, PreviewTarget, RunForm, RunGate,
+    run_gate, schema_note, start_enabled, ActionResult, PreviewTarget, RunForm, RunGate,
 };
 use super::{set_margins, show_result, spawn_call, App};
 
@@ -116,6 +119,8 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
     result.set_selectable(true);
 
     let form: Rc<RefCell<Option<RunForm>>> = Rc::new(RefCell::new(None));
+    // True from a Start or Restart click until it finishes. While set, nothing enables Start.
+    let in_flight = Rc::new(Cell::new(false));
 
     // Recompute the preview, the field error and Start's sensitivity from the form.
     let update: Rc<dyn Fn()> = {
@@ -125,20 +130,22 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
         let start = start.clone();
         let model = model.clone();
         let allowed = gate == RunGate::Allowed;
+        let in_flight = in_flight.clone();
         Rc::new(move || {
             let f = form.borrow();
             let Some(f) = f.as_ref() else { return };
             preview.set_text(&f.command_preview(&model));
-            match f.to_options() {
+            let valid = match f.to_options() {
                 Ok(_) => {
                     field_error.set_text("");
-                    start.set_sensitive(allowed);
+                    true
                 }
                 Err(e) => {
                     field_error.set_text(&format!("{}: {}", e.field, e.message));
-                    start.set_sensitive(false);
+                    false
                 }
-            }
+            };
+            start.set_sensitive(start_enabled(allowed, valid, in_flight.get()));
         })
     };
 
@@ -201,7 +208,12 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
         let result = result.clone();
         let force = force.clone();
         let station = station.clone();
+        let in_flight = in_flight.clone();
+        let update = update.clone();
         start.connect_clicked(move |btn| {
+            if in_flight.get() {
+                return;
+            }
             let opts = match form.borrow().as_ref().map(RunForm::to_options) {
                 Some(Ok(o)) => o,
                 Some(Err(e)) => {
@@ -211,6 +223,7 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
                 None => return,
             };
             let verb = if serving { "Restart" } else { "Start" };
+            in_flight.set(true);
             btn.set_sensitive(false);
             result.remove_css_class("error");
             result.set_text(&format!(
@@ -222,7 +235,8 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
             let f = force.is_active();
             let app2 = app.clone();
             let result = result.clone();
-            let btn = btn.clone();
+            let in_flight = in_flight.clone();
+            let update = update.clone();
             let model = model.clone();
             // The station this sheet was opened for, even if the selection changes meanwhile.
             let id = station.id();
@@ -249,7 +263,9 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
                     }
                     // A 409 holder message or any other Err text is shown word for word.
                     show_result(&result, &shown);
-                    btn.set_sensitive(true);
+                    // Recompute from the form as it is now (it may have been edited meanwhile).
+                    in_flight.set(false);
+                    update();
                     super::stations_pane::refresh_all(&app2);
                 },
             );

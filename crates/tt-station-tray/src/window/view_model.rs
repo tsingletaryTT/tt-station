@@ -679,6 +679,14 @@ pub fn run_gate(state: &StationState) -> RunGate {
     }
 }
 
+/// Whether the run sheet's Start (or Restart) button is enabled: the station allows a run
+/// ([`run_gate`]), the form is valid, and no Start or Restart from this sheet is still in
+/// flight. Every change to a field recomputes this, so the in-flight part keeps an edit made
+/// during a long Restart from enabling a second click.
+pub fn start_enabled(gate_allowed: bool, form_valid: bool, in_flight: bool) -> bool {
+    gate_allowed && form_valid && !in_flight
+}
+
 /// Whether `state` is this machine.
 fn is_local(state: &StationState) -> bool {
     state.id.0 == "local"
@@ -1459,6 +1467,19 @@ mod tests {
             run_gate(&state("qb:8765", false, true, None)),
             RunGate::Disabled(_)
         ));
+    }
+
+    /// Copilot review of PR #2: while Start or Restart runs, editing a valid field must not
+    /// enable the button again.
+    #[test]
+    fn start_stays_disabled_while_an_operation_is_in_flight() {
+        assert!(start_enabled(true, true, false));
+        assert!(
+            !start_enabled(true, true, true),
+            "a valid edit during a Restart must not enable a second click"
+        );
+        assert!(!start_enabled(false, true, false), "gate disabled");
+        assert!(!start_enabled(true, false, false), "form invalid");
     }
 
     #[test]
