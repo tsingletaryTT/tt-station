@@ -18,6 +18,10 @@
 //! Remembered options: the form starts from the options last used for this model on this
 //! station (`Registry::last_run`), and a successful Start saves the new ones.
 //!
+//! Restart goes through [`Station::replace`], which checks the model and options (including
+//! whether the new model or the box takes them) before it stops the running server, and leaves
+//! that server running when the check fails.
+//!
 //! Start is disabled from a click until that Start or Restart finishes ([`start_enabled`]), so an
 //! edit made meanwhile cannot enable a second click.
 //!
@@ -244,9 +248,11 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
                 &app,
                 async move {
                     if serving {
-                        st.stop().await?;
+                        // Checks the request first and stops nothing when it would be refused.
+                        st.replace(&m, f, &o).await
+                    } else {
+                        st.run(&m, f, &o).await
                     }
-                    st.run(&m, f, &o).await
                 },
                 move |r| {
                     let mut shown = ActionResult::from_result(verb, &r);

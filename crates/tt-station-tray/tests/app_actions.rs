@@ -305,7 +305,8 @@ async fn stop_on_this_machine_stops_only_its_shown_server_and_not_a_box() {
 
 #[tokio::test]
 async fn restart_repeats_the_remembered_options_for_that_model() {
-    let m = spawn_mock_box(&[]);
+    // A box whose backend takes run options (`tt`); a `runpy` box is refused before the stop.
+    let m = spawn_mock_box(&["--backend", "tt"]);
     remote(&m)
         .run("Llama-3.1-8B-Instruct", false, &RunOptions::default())
         .await
@@ -407,7 +408,7 @@ async fn restart_on_this_machine_runs_the_ps_row_name_and_never_guesses() {
 
 #[tokio::test]
 async fn restart_falls_back_to_last_model_when_the_served_id_ends_with_it() {
-    let m = spawn_mock_box(&["--served-id-prefix", "meta-llama/"]);
+    let m = spawn_mock_box(&["--served-id-prefix", "meta-llama/", "--backend", "tt"]);
     remote(&m)
         .run("Llama-3.1-8B-Instruct", false, &port_opts(20005))
         .await
@@ -911,4 +912,29 @@ fn a_notice_marker_that_cannot_be_written_is_logged_not_fatal() {
         &blocker
     ));
     assert_eq!(r.spawned().len(), 1);
+}
+
+/// Copilot review of PR #2: the tray's Restart checks the remembered options against the box
+/// before it stops anything. A `runpy` box takes no run options, so the box keeps serving.
+#[tokio::test]
+async fn restart_with_options_a_runpy_box_cannot_take_stops_nothing() {
+    let m = spawn_mock_box(&[]);
+    remote(&m)
+        .run("Llama-3.1-8B-Instruct", false, &RunOptions::default())
+        .await
+        .unwrap();
+    let c = ctx(vec![remote(&m)]);
+    let mut reg = registry(&c);
+    reg.remember_run(&box_id(&m), "Llama-3.1-8B-Instruct", &port_opts(20001));
+    reg.save().unwrap();
+
+    let out = dispatch(MenuAction::Restart(box_id(&m)), &c.ctx).await;
+    let text = message(&out);
+    assert!(
+        text.contains("runpy") && text.contains("still running"),
+        "{text}"
+    );
+    // Nothing reached /run (the restart's run would have carried port 20001).
+    assert_ne!(last_run_options(&m.base).await["port"], 20001);
+    assert!(remote(&m).state().await.serving.is_some(), "still serving");
 }

@@ -149,3 +149,38 @@ async fn remote_models_stop_logs_and_schema_pass_through() {
     st.stop().await.unwrap();
     assert!(st.state().await.serving.is_none());
 }
+
+/// Copilot review of PR #2: Restart on a box whose backend takes no run options (mock-box
+/// reports `runpy` in `/config`, as does the agent's default) refuses non-empty options BEFORE
+/// it stops anything. The box keeps serving the old model.
+#[tokio::test]
+async fn remote_replace_refuses_options_a_runpy_box_cannot_take_and_stops_nothing() {
+    let m = spawn_mock_box(&[]);
+    let st = station(&m);
+    st.run("Old-Model", false, &RunOptions::default())
+        .await
+        .unwrap();
+    let opts = RunOptions {
+        port: Some(20001),
+        ..RunOptions::default()
+    };
+    let err = st
+        .replace("New-Model", false, &opts)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("runpy"), "{err}");
+    assert!(err.contains("still running"), "{err}");
+    let now = st
+        .state()
+        .await
+        .serving
+        .expect("the old serve is untouched");
+    assert_eq!(now.model, "Old-Model");
+
+    // No options: the replacement goes ahead.
+    st.replace("New-Model", false, &RunOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(st.state().await.serving.unwrap().model, "New-Model");
+}

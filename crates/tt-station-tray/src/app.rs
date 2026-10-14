@@ -450,7 +450,8 @@ where
 /// Otherwise Restart refuses, names both models, and stops nothing. This keeps Restart from
 /// stopping a server another client started and replacing it with a different model.
 ///
-/// **Order.** The run name is settled before anything is stopped.
+/// **Order.** The run name is settled, and the run checked ([`Station::replace`]), before
+/// anything is stopped.
 async fn restart(ctx: &AppContext, id: &StationId) -> ActionOutcome {
     let Some(st) = ctx.station(id) else {
         return not_listed(id);
@@ -477,10 +478,8 @@ async fn restart(ctx: &AppContext, id: &StationId) -> ActionOutcome {
         .last_run(id, &plan.run_name)
         .cloned()
         .unwrap_or_default();
-    if let Err(e) = st.stop().await {
-        return ActionOutcome::Message(format!("Restart failed: {e:#}"));
-    }
-    match st.run(&plan.run_name, false, &options).await {
+    // `replace` checks the run first and stops nothing if it would be refused.
+    match st.replace(&plan.run_name, false, &options).await {
         Err(e) => ActionOutcome::Message(format!("Restart failed: {e:#}")),
         Ok(_) if plan.guessed => ActionOutcome::Message(format!(
             "Restarted {} (was {}).",

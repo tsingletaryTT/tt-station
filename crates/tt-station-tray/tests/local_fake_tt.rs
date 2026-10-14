@@ -414,6 +414,50 @@ async fn local_stop_failure_is_an_error_with_stderr() {
     assert!(err.contains("docker: permission denied"), "{err}");
 }
 
+/// Copilot review of PR #2: Restart on this machine refuses options the new model cannot take
+/// BEFORE it stops anything, so the running server is left running. A catalog model takes no
+/// `--profile` (`serve_argv_for`), which `RunForm::to_options` alone does not know.
+#[tokio::test]
+async fn local_replace_refuses_inapplicable_options_before_stopping() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, log) = fake_tt(dir.path(), "tt 1.0.1");
+    let st = station(&script);
+    let opts = RunOptions {
+        profile: Some("fast".into()),
+        ..RunOptions::default()
+    };
+    let err = st
+        .replace("Llama-3.1-8B-Instruct", false, &opts)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("profile"), "{err}");
+    assert!(err.contains("still running"), "{err}");
+    let seen = calls(&log);
+    assert!(
+        !seen.iter().any(|c| c.contains("model stop")),
+        "nothing may be stopped: {seen:?}"
+    );
+    assert!(!seen
+        .iter()
+        .any(|c| c.starts_with("--json serve") && !c.ends_with("--dry-run")));
+
+    // Applicable options: stop, then serve.
+    let dir = tempfile::tempdir().unwrap();
+    let (script, log) = fake_tt(dir.path(), "tt 1.0.1");
+    station(&script)
+        .replace("Llama-3.1-8B-Instruct", false, &RunOptions::default())
+        .await
+        .unwrap();
+    let seen = calls(&log);
+    let stop = seen.iter().position(|c| c.contains("model stop")).unwrap();
+    let serve = seen
+        .iter()
+        .position(|c| c.starts_with("--json serve") && !c.ends_with("--dry-run"))
+        .unwrap();
+    assert!(stop < serve, "{seen:?}");
+}
+
 #[tokio::test]
 async fn local_stop_never_stops_a_studio_row() {
     let dir = tempfile::tempdir().unwrap();

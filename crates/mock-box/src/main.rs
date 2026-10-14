@@ -118,6 +118,11 @@ enum Command {
         /// Absent = the served id is the run name.
         #[arg(long = "served-id-prefix")]
         served_id_prefix: Option<String>,
+
+        /// Test hook: the resolved backend `/config` reports. Default `runpy`, the real
+        /// agent's default, which takes no run options. `tt` is the backend that does.
+        #[arg(long = "backend", default_value = "runpy")]
+        backend: String,
     },
 }
 
@@ -141,6 +146,7 @@ async fn main() -> Result<()> {
             pair_code,
             mac,
             served_id_prefix,
+            backend,
         } => {
             serve(
                 ctrl_port,
@@ -152,6 +158,7 @@ async fn main() -> Result<()> {
                 ServeHooks {
                     mac,
                     served_id_prefix,
+                    backend,
                 },
             )
             .await
@@ -270,6 +277,8 @@ struct Inner {
     mac: Option<String>,
     /// Prefix added to the run name to form the served id (see `--served-id-prefix`).
     served_id_prefix: String,
+    /// The backend `/config` reports (see `--backend`).
+    backend: String,
 }
 
 #[derive(Clone)]
@@ -290,6 +299,7 @@ impl MockState {
             pair_complete_calls: 0,
             mac: None,
             served_id_prefix: String::new(),
+            backend: "runpy".to_string(),
         })))
     }
 
@@ -494,17 +504,19 @@ async fn get_models() -> Json<ModelsResponse> {
     })
 }
 
-/// `GET /config`: a fixed, canned `ConfigSummary` -- doesn't consult
-/// `MockState` at all (there's no real config-file/profile resolution behind
-/// this mock, unlike `tt-station-agentd::routes::get_config`, Task 5), just
-/// enough shape for `tt-station config` (and its e2e test, Task 6) to exercise the
-/// unauthed discover -> config flow with no real agent/hardware. The
-/// `active_profile: "mock"` value is what that e2e test asserts on.
-async fn get_config() -> Json<ConfigSummary> {
+/// `GET /config`: a canned `ConfigSummary` (there's no real
+/// config-file/profile resolution behind this mock, unlike
+/// `tt-station-agentd::routes::get_config`, Task 5), just enough shape for
+/// `tt-station config` (and its e2e test, Task 6) to exercise the unauthed
+/// discover -> config flow with no real agent/hardware. The
+/// `active_profile: "mock"` value is what that e2e test asserts on. Only
+/// `backend` comes from `MockState` (`--backend`, default `runpy`).
+async fn get_config(State(state): State<MockState>) -> Json<ConfigSummary> {
+    let backend = state.lock().backend.clone();
     Json(ConfigSummary {
         active_profile: Some("mock".to_string()),
         available_profiles: vec!["mock".to_string()],
-        backend: "runpy".to_string(),
+        backend,
         serving_host: "127.0.0.1".to_string(),
         serving_port: 8000,
         serving_image: None,
@@ -858,6 +870,8 @@ struct ServeHooks {
     mac: Option<String>,
     /// See `--served-id-prefix`.
     served_id_prefix: Option<String>,
+    /// See `--backend`.
+    backend: String,
 }
 
 /// Bind `ctrl_port` and serve the fake control API + fake vLLM endpoint
@@ -880,6 +894,7 @@ async fn serve(
         let mut inner = state.lock();
         inner.mac = hooks.mac;
         inner.served_id_prefix = hooks.served_id_prefix.unwrap_or_default();
+        inner.backend = hooks.backend;
     }
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", ctrl_port))
         .await

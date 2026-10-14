@@ -116,6 +116,35 @@ pub fn fits(model_hw: &[String], mesh: Option<&str>) -> bool {
     })
 }
 
+/// Why a box will not take non-empty run options, or `None` when it will.
+///
+/// `schema_has_options` is false when the box's `GET /run/schema` lists no options (an agent
+/// older than run options answers 404, which the client reports as an empty schema).
+/// `backend` is the resolved backend from the box's `GET /config`, `None` when that could not
+/// be read. Only the agent's `tt` backend applies run options; `runpy`, `docker` and `dstack`
+/// answer 400 to non-empty options.
+pub fn remote_options_refusal(schema_has_options: bool, backend: Option<&str>) -> Option<String> {
+    if !schema_has_options {
+        return Some(
+            "does not describe run options (its agent is older), so it cannot take them; clear \
+             the Advanced fields to use the box's defaults."
+                .to_string(),
+        );
+    }
+    match backend {
+        Some("tt") => None,
+        Some(other) => Some(format!(
+            "serves with the `{other}` backend, which takes no run options (only the `tt` \
+             backend does); clear the Advanced fields to use the box's defaults."
+        )),
+        None => Some(
+            "did not say which serving backend it uses (GET /config failed), so the run \
+             options cannot be checked; clear the Advanced fields or try again."
+                .to_string(),
+        ),
+    }
+}
+
 /// A place a model can run: this machine or a paired box.
 pub enum Station {
     Local(LocalStation),
@@ -169,6 +198,36 @@ impl Station {
             Station::Local(s) => s.run(model, force, options).await,
             Station::Remote(s) => s.run(model, force, options).await,
         }
+    }
+
+    /// Every check of a run request that can be made without starting anything (see
+    /// [`LocalStation::check_run`] and [`RemoteStation::check_run`]).
+    pub async fn check_run(&self, model: &str, options: &RunOptions) -> anyhow::Result<()> {
+        match self {
+            Station::Local(s) => s.check_run(model, options).await,
+            Station::Remote(s) => s.check_run(model, options).await,
+        }
+    }
+
+    /// Replace what the station serves with `model` (Restart): check the request
+    /// ([`Station::check_run`]), and only if it passes stop the running server and start
+    /// `model` with `options`. A refused request stops nothing; its error says the server is
+    /// still running.
+    pub async fn replace(
+        &self,
+        model: &str,
+        force: bool,
+        options: &RunOptions,
+    ) -> anyhow::Result<ServingNow> {
+        if let Err(e) = self.check_run(model, options).await {
+            let why = format!("{e:#}");
+            anyhow::bail!(
+                "{}. Nothing was stopped; the running server is still running.",
+                why.trim_end_matches('.')
+            );
+        }
+        self.stop().await?;
+        self.run(model, force, options).await
     }
 
     /// The run name of the shown server when the station can say it exactly: the `tt model ps`
@@ -238,6 +297,19 @@ mod tests {
 
     fn hw(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn only_a_tt_backend_box_with_a_schema_takes_run_options() {
+        assert_eq!(remote_options_refusal(true, Some("tt")), None);
+        let old = remote_options_refusal(false, Some("tt")).unwrap();
+        assert!(old.contains("does not describe run options"), "{old}");
+        let runpy = remote_options_refusal(true, Some("runpy")).unwrap();
+        assert!(runpy.contains("`runpy`"), "{runpy}");
+        assert!(
+            remote_options_refusal(true, None).is_some(),
+            "unknown backend"
+        );
     }
 
     #[test]

@@ -317,20 +317,7 @@ impl LocalStation {
     /// not a container that `tt serve` already created. The UI task is to call a best-effort
     /// `stop()` after a cancel.
     pub async fn run(&self, model: &str, _force: bool, options: &RunOptions) -> Result<ServingNow> {
-        validate_model_name(model)?;
-        options.validate()?;
-        // `benchmarks` and `evals` make `tt serve` run in the foreground until the whole
-        // workflow finishes, which would block this call (and the tray) for that long. The
-        // run schema offers only `server`; this refuses a request that names another anyway.
-        if let Some(w) = options.workflow.filter(|w| *w != Workflow::Server) {
-            bail!(
-                "workflow: the tray serves models over /v1; the `{}` workflow runs in the \
-                 foreground until it finishes, so start it from a terminal with \
-                 `tt serve {model} --workflow {}`",
-                w.as_str(),
-                w.as_str()
-            );
-        }
+        check_request(model, options)?;
         // `serve_plan` vets `tt` before the dry run.
         let plan = self.serve_plan(model).await?;
         let argv = local_serve_argv(&plan, model, self.default_port, options)?;
@@ -357,6 +344,18 @@ impl LocalStation {
             model: model.to_string(),
             base_url: format!("http://127.0.0.1:{port}/v1"),
         }))
+    }
+
+    /// Every check [`LocalStation::run`] makes before it starts anything, without starting
+    /// anything: the model name and options, the official `tt`, and the
+    /// `tt --json serve <model> --dry-run` plan against the options ([`local_serve_argv`]
+    /// refuses, for example, a `profile` or a vLLM flag for a catalog model). Restart calls it
+    /// before it stops the running server ([`crate::station::Station::replace`]).
+    pub async fn check_run(&self, model: &str, options: &RunOptions) -> Result<()> {
+        check_request(model, options)?;
+        let plan = self.serve_plan(model).await?;
+        local_serve_argv(&plan, model, self.default_port, options)?;
+        Ok(())
     }
 
     /// The binary this station runs as `tt`, for showing the exact command in the run sheet.
@@ -552,6 +551,25 @@ impl LocalStation {
     pub async fn schema(&self) -> Result<RunSchema> {
         Ok(run_schema())
     }
+}
+
+/// The checks of a run request that need no process: a safe model name, valid options, and
+/// the `server` workflow. `benchmarks` and `evals` make `tt serve` run in the foreground until
+/// the whole workflow finishes, which would block the call (and the tray) for that long. The
+/// run schema offers only `server`; this refuses a request that names another anyway.
+fn check_request(model: &str, options: &RunOptions) -> Result<()> {
+    validate_model_name(model)?;
+    options.validate()?;
+    if let Some(w) = options.workflow.filter(|w| *w != Workflow::Server) {
+        bail!(
+            "workflow: the tray serves models over /v1; the `{}` workflow runs in the \
+             foreground until it finishes, so start it from a terminal with \
+             `tt serve {model} --workflow {}`",
+            w.as_str(),
+            w.as_str()
+        );
+    }
+    Ok(())
 }
 
 /// The `tt` arguments (without the binary) that [`LocalStation::run`] runs for `model`.

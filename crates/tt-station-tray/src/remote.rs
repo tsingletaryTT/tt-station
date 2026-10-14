@@ -11,7 +11,9 @@ use libttstation::agent_client::{self, AgentClient};
 use libttstation::model::ServingStatus;
 use libttstation::run_options::{RunOptions, RunSchema};
 
-use crate::station::{fits, ModelRow, ServingNow, StationId, StationKind, StationState};
+use crate::station::{
+    fits, remote_options_refusal, ModelRow, ServingNow, StationId, StationKind, StationState,
+};
 
 /// One box, identified by its control-plane base URL.
 pub struct RemoteStation {
@@ -173,6 +175,30 @@ impl RemoteStation {
 
     pub async fn stop(&self) -> Result<()> {
         self.client()?.stop().await
+    }
+
+    /// What can be checked before a run without starting anything: pairing, the model name and
+    /// options, and, when there are options, whether this box takes them at all
+    /// ([`remote_options_refusal`], from `GET /run/schema` and the backend in `GET /config`).
+    /// The box still decides the rest (for example a catalog model refusing a vLLM flag on a
+    /// `tt`-backend box), because only it knows how it classifies the model. Restart calls this
+    /// before it stops the running server.
+    pub async fn check_run(&self, model: &str, options: &RunOptions) -> Result<()> {
+        self.client()?;
+        libttstation::run_options::validate_model_name(model)?;
+        options.validate()?;
+        if options.is_empty() {
+            return Ok(());
+        }
+        let schema = self.schema().await?;
+        let backend = agent_client::get_config(&self.base)
+            .await
+            .ok()
+            .map(|c| c.backend);
+        match remote_options_refusal(!schema.options.is_empty(), backend.as_deref()) {
+            Some(why) => Err(anyhow!("{} {why}", self.name)),
+            None => Ok(()),
+        }
     }
 
     /// The box's serving-container log, last `tail` lines.
