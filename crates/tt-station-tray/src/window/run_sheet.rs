@@ -38,8 +38,8 @@ use libttstation::run_options::{OptionSpec, RunSchema};
 use crate::station::Station;
 
 use super::view_model::{
-    run_gate, schema_note, serving_after, start_enabled, start_label, ActionResult, PreviewTarget,
-    RunForm, RunGate,
+    begin_in_flight, run_gate, schema_note, serving_after, start_enabled, start_label,
+    ActionResult, PreviewTarget, RunForm, RunGate,
 };
 use super::{set_margins, show_result, spawn_call, App};
 
@@ -233,7 +233,15 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
             };
             let was_serving = serving.get();
             let verb = start_label(was_serving);
-            in_flight.set(true);
+            // Cleared (and Start recomputed from the form) when the guard drops: at the end of
+            // the completion callback, or when that callback is dropped uncalled because the
+            // background task panicked or was cancelled.
+            let Some(guard) = begin_in_flight(&in_flight, {
+                let update = update.clone();
+                move || update()
+            }) else {
+                return;
+            };
             btn.set_sensitive(false);
             result.remove_css_class("error");
             result.set_text(&format!(
@@ -245,8 +253,6 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
             let f = force.is_active();
             let app2 = app.clone();
             let result = result.clone();
-            let in_flight = in_flight.clone();
-            let update = update.clone();
             let model = model.clone();
             let serving = serving.clone();
             let btn = btn.clone();
@@ -280,9 +286,9 @@ pub fn open(app: &App, parent: Option<&gtk::Window>, model: &str) {
                     // After a successful Start the next click must replace that serve.
                     serving.set(serving_after(was_serving, r.is_ok()));
                     btn.set_label(start_label(serving.get()));
-                    // Recompute from the form as it is now (it may have been edited meanwhile).
-                    in_flight.set(false);
-                    update();
+                    // Clears the in-flight flag and recomputes Start from the form as it is now
+                    // (it may have been edited meanwhile).
+                    drop(guard);
                     super::stations_pane::refresh_all(&app2);
                 },
             );

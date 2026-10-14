@@ -687,6 +687,41 @@ pub fn start_enabled(gate_allowed: bool, form_valid: bool, in_flight: bool) -> b
     gate_allowed && form_valid && !in_flight
 }
 
+/// The run sheet's in-flight mark for one Start or Restart, taken with [`begin_in_flight`].
+///
+/// Dropping it clears the flag and then runs `on_release` (the sheet recomputes Start's
+/// sensitivity there). The sheet moves it into the completion callback, so the flag is
+/// cleared when the callback finishes, and also when the callback is dropped without being
+/// called (`spawn_call` skips it when the background task panicked or was cancelled), so
+/// Start cannot stay disabled for good.
+pub struct InFlightGuard {
+    flag: std::rc::Rc<std::cell::Cell<bool>>,
+    on_release: Option<Box<dyn FnOnce()>>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.flag.set(false);
+        if let Some(release) = self.on_release.take() {
+            release();
+        }
+    }
+}
+
+/// Set `flag` and return its guard, or `None` when an operation is already in flight.
+pub fn begin_in_flight(
+    flag: &std::rc::Rc<std::cell::Cell<bool>>,
+    on_release: impl FnOnce() + 'static,
+) -> Option<InFlightGuard> {
+    if flag.replace(true) {
+        return None;
+    }
+    Some(InFlightGuard {
+        flag: flag.clone(),
+        on_release: Some(Box::new(on_release)),
+    })
+}
+
 /// The run sheet's button text: "Restart" when the station serves a model (the click then
 /// replaces it), else "Start".
 pub fn start_label(serving: bool) -> &'static str {
@@ -1511,6 +1546,30 @@ mod tests {
             "a failed Start started nothing"
         );
         assert!(serving_after(true, false) && serving_after(true, true));
+    }
+
+    /// Review of the Copilot fixes, minor 8: a completion callback that is dropped without
+    /// being called (the background task panicked or was cancelled) still clears the in-flight
+    /// flag and runs the release hook, so Start does not stay disabled.
+    #[test]
+    fn a_dropped_completion_clears_the_in_flight_flag() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let flag = Rc::new(Cell::new(false));
+        let released = Rc::new(Cell::new(false));
+        let r = released.clone();
+        let guard = begin_in_flight(&flag, move || r.set(true)).expect("not in flight yet");
+        assert!(flag.get());
+        assert!(
+            begin_in_flight(&flag, || {}).is_none(),
+            "a second click while in flight gets no guard"
+        );
+        // The callback owning the guard is dropped uncalled.
+        let callback = move || drop(guard);
+        drop(callback);
+        assert!(!flag.get(), "the flag is cleared");
+        assert!(released.get(), "the release hook ran");
+        assert!(begin_in_flight(&flag, || {}).is_some());
     }
 
     #[test]
