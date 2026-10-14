@@ -489,3 +489,56 @@ async fn a_slow_stop_that_ends_after_a_new_run_keeps_the_new_serve_reported() {
         .unwrap();
     assert_eq!(ep["model"], "model-b", "{ep}");
 }
+
+/// A backend whose stop always answers "a stop is already in progress" as a contention.
+struct BusyStopBackend;
+
+impl ServingBackend for BusyStopBackend {
+    fn start_forcing(
+        &self,
+        _model: &str,
+        _force: bool,
+    ) -> anyhow::Result<libttstation::model::Endpoint> {
+        anyhow::bail!("not used")
+    }
+
+    fn stop(&self, _model: &str) -> anyhow::Result<()> {
+        Err(anyhow::Error::new(
+            tt_station_agentd::gozer::Contention::new(
+                "tt backend: a stop is already in progress (waited 60s); try again when it \
+                 finishes",
+            ),
+        ))
+    }
+
+    fn status(&self) -> anyhow::Result<ServingStatus> {
+        Ok(ServingStatus::Idle)
+    }
+}
+
+/// Review fix round 2, minor 2: a stop refused because another stop is still running is a
+/// conflict with the box's state, so `/stop` answers 409 with the reason (a retry can work),
+/// the way `/run` already answers a contention.
+#[tokio::test]
+async fn a_stop_refused_because_another_stop_runs_is_409() {
+    let backend: Arc<dyn ServingBackend> = Arc::new(BusyStopBackend);
+    let state = AppState::new("qb2-lab".to_string(), "4xBH".to_string(), backend);
+    let base = serve(state.clone()).await;
+    let client = reqwest::Client::new();
+    let token = pair(&client, &state, &base).await;
+    let resp = client
+        .post(format!("{base}/stop"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("a stop is already in progress"),
+        "{body}"
+    );
+}

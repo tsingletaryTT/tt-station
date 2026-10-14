@@ -859,11 +859,13 @@ impl TtBackend {
             .wait_timeout_while(held, self.stop_wait, |busy| *busy)
             .expect("stop_serial mutex poisoned");
         if *held {
-            return Err(anyhow::anyhow!(
+            // A `Contention`: the box's state conflicts with the request and a retry can work,
+            // so `/stop` and `/run` answer 409.
+            return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
                 "tt backend: a stop is already in progress (waited {:?}); try again when it \
                  finishes",
                 self.stop_wait
-            ));
+            ))));
         }
         *held = true;
         Ok(StopTurn(&self.stop_serial))
@@ -1117,8 +1119,16 @@ impl ServingBackend for TtBackend {
         // (4) Swap: stop what this backend is already serving and give back its lease, so the
         // new lease is not requested while the old one is still held. Stop first, release
         // second (the release resets chips).
-        self.stop_inner("", None)
-            .context("tt backend: failed to stop the previous serve before starting a new one")?;
+        self.stop_inner("", None).map_err(|err| {
+            // A busy stop turn passes through unchanged, so `/run` shows its reason with 409.
+            if err.is::<crate::gozer::Contention>() {
+                err
+            } else {
+                err.context(
+                    "tt backend: failed to stop the previous serve before starting a new one",
+                )
+            }
+        })?;
 
         // (5) Lease. The guard releases on drop, which covers every failure exit below. Only
         // the success path disarms it.
@@ -3400,6 +3410,8 @@ mod tests {
             let started = std::time::Instant::now();
             let second = b.stop("");
             let waited = started.elapsed();
+            // A start's swap behind the same parked stop gives up the same way.
+            let swap = b.start("Qwen3-8B");
             let early_log = runner.log();
             resume.wait();
             first.join().unwrap().unwrap();
@@ -3407,6 +3419,16 @@ mod tests {
             assert!(
                 err.to_string().contains("a stop is already in progress"),
                 "{err:#}"
+            );
+            // A conflict with the box's state, so the routes answer 409 (review fix round 2).
+            let is_contention =
+                |e: &anyhow::Error| e.chain().any(|c| c.is::<crate::gozer::Contention>());
+            assert!(is_contention(&err), "{err:#}");
+            let swap = swap.expect_err("the swap must give up while the stop runs");
+            assert!(is_contention(&swap), "{swap:#}");
+            assert!(
+                swap.to_string().contains("a stop is already in progress"),
+                "the route shows the outer message: {swap}"
             );
             assert!(waited < Duration::from_secs(5), "{waited:?}");
             assert!(

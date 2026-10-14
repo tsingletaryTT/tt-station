@@ -1910,10 +1910,12 @@ async fn stop_model(
     // and then this stop must leave that serve's status alone.
     let generation = state.serve_generation();
 
+    // A contention (the `tt` backend: another stop still holds the stop turn) answers 409
+    // with its reason, as `/run` does; every other failure stays a 500.
     tokio::task::spawn_blocking(move || backend.stop(&model))
         .await
         .map_err(|join_err| backend_error(anyhow::anyhow!("stop task panicked: {join_err}")))?
-        .map_err(backend_error)?;
+        .map_err(contention_aware_error)?;
 
     if !state.set_idle_if_unchanged(generation) {
         eprintln!(
