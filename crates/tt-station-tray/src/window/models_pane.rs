@@ -204,22 +204,32 @@ pub fn build(app: &App) -> gtk::Widget {
     detail_label.set_xalign(0.0);
     detail_label.set_yalign(0.0);
     detail_label.set_wrap(true);
-    // Bound the label's width request and let it break inside long words (model ids such as
-    // `org/very-long-model-name` have no spaces). Without these limits a wrapping label inside
-    // the `gtk::Paned` below reported a different minimum height when measured with and without
-    // a width, and GTK logged "GtkPaned ... reports a minimum height of 191, but minimum height
-    // for width of 1048576 is 229. Expect overlapping widgets." when the window opened.
+    // Let the label break inside long words (model ids such as `org/very-long-model-name` have
+    // no spaces) and bound its width request.
     detail_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     detail_label.set_width_chars(24);
     detail_label.set_max_width_chars(48);
     detail_label.set_selectable(true);
+    // The label sits in a vertical-only ScrolledWindow so the detail pane's minimum height does
+    // not depend on its width. A wrapping label placed straight in the `gtk::Paned` below made
+    // the Paned report one minimum height when measured without a width and a larger one for a
+    // given width (the label wraps onto more lines at the narrow width the Paned gives its end
+    // child), and GTK logged "GtkPaned ... reports a minimum height of 286, but minimum height
+    // for width of 1048576 is 381. Expect overlapping widgets." each time a model was selected.
+    let detail_scroll = gtk::ScrolledWindow::builder()
+        .child(&detail_label)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .min_content_height(120)
+        .vexpand(true)
+        .build();
     let run = gtk::Button::with_label("Run...");
     run.set_sensitive(false);
     let chosen: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
     detail_box.set_size_request(280, -1);
     set_margins(&detail_box, 8);
-    detail_box.append(&detail_label);
+    detail_box.append(&detail_scroll);
     detail_box.append(&run);
 
     {
