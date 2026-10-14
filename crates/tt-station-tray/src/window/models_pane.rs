@@ -201,6 +201,14 @@ pub fn build(app: &App) -> gtk::Widget {
     detail_label.set_xalign(0.0);
     detail_label.set_yalign(0.0);
     detail_label.set_wrap(true);
+    // Bound the label's width request and let it break inside long words (model ids such as
+    // `org/very-long-model-name` have no spaces). Without these limits a wrapping label inside
+    // the `gtk::Paned` below reported a different minimum height when measured with and without
+    // a width, and GTK logged "GtkPaned ... reports a minimum height of 191, but minimum height
+    // for width of 1048576 is 229. Expect overlapping widgets." when the window opened.
+    detail_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    detail_label.set_width_chars(24);
+    detail_label.set_max_width_chars(48);
     detail_label.set_selectable(true);
     let run = gtk::Button::with_label("Run...");
     run.set_sensitive(false);
@@ -290,6 +298,10 @@ pub fn build(app: &App) -> gtk::Widget {
     body.set_start_child(Some(&list_scroll));
     body.set_end_child(Some(&detail_box));
     body.set_resize_end_child(false);
+    // Neither side may shrink below its own minimum, so the Paned's minimum size is the sum of
+    // its children's and the detail pane's text never overlaps the list.
+    body.set_shrink_start_child(false);
+    body.set_shrink_end_child(false);
     body.set_vexpand(true);
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
