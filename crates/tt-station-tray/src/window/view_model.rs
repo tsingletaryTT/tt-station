@@ -161,9 +161,41 @@ pub struct PerfContext<'a> {
 }
 
 /// The reference numbers for `row` in `ctx`, when there are any.
+///
+/// Only rows whose `source` is `tt-inference-server` (the official catalog, as
+/// `tt --json model list` labels it) are looked up. A Hub bundle or a local folder is a
+/// different build of a model, so a released model's targets say nothing about it even when
+/// the names match.
 pub fn model_perf(row: &ModelRow, ctx: Option<PerfContext<'_>>) -> Option<PerfSummary> {
     let ctx = ctx?;
+    if !row.source.eq_ignore_ascii_case("tt-inference-server") {
+        return None;
+    }
     perf::summary(ctx.table, &row.name, row.hf_repo.as_deref(), ctx.mesh)
+}
+
+/// One-line legend for the Models page: a tooltip on the list, and appended to the model count
+/// when the page has a reference table.
+pub const PERF_LEGEND: &str =
+    "Reference numbers are tt-inference-server targets, not measurements from this machine.";
+
+/// The Models page's count line, with [`PERF_LEGEND`] appended when reference numbers are
+/// shown (`perf_shown`).
+pub fn models_status(shown: usize, total: usize, perf_shown: bool) -> String {
+    let base = format!("{shown} of {total} models shown");
+    if perf_shown {
+        format!("{base}. {PERF_LEGEND}")
+    } else {
+        base
+    }
+}
+
+/// Where the model named `chosen` sits in the list after a regroup, so the page can keep it
+/// selected when reference numbers arrive after the rows. `names` holds one entry per list
+/// line: the model name, or `None` for a heading.
+pub fn reselect(names: &[Option<&str>], chosen: Option<&str>) -> Option<usize> {
+    let chosen = chosen?;
+    names.iter().position(|n| *n == Some(chosen))
 }
 
 /// One model's line in the Models list: name, kind, source, `cached`, and the reference
@@ -779,11 +811,11 @@ mod tests {
         );
         assert_eq!(
             model_line(&r, Some(ctx)),
-            "    gemma-4-31B-it  ·  llm  ·  tt-inference-server  ·  ~37 tok/s/user"
+            "    gemma-4-31B-it  ·  llm  ·  tt-inference-server  ·  target 37 tok/s/user"
         );
         // The row's hf_repo reaches the lookup: this name alone matches nothing in the file.
         let by_repo = catalog("Qwen 3 32B (display name)", Some("Qwen/Qwen3-32B"));
-        assert!(model_line(&by_repo, Some(ctx)).ends_with("  ·  ~37 tok/s/user"));
+        assert!(model_line(&by_repo, Some(ctx)).ends_with("  ·  target 37 tok/s/user"));
     }
 
     #[test]
@@ -811,6 +843,58 @@ mod tests {
         let text = model_detail(&r, "g", None);
         assert!(!text.contains("eference"), "{text}");
         assert!(!model_line(&r, None).contains("tok/s"));
+    }
+
+    #[test]
+    fn only_catalog_rows_get_reference_numbers() {
+        let table = perf::parse(PERF_HF, Some("0.22.0")).unwrap();
+        let ctx = PerfContext {
+            table: &table,
+            mesh: "p300x2",
+        };
+        // A Hub bundle whose repo id equals a released model's key still gets nothing.
+        let bundle = ModelRow {
+            hf_repo: Some("Qwen/Qwen3-32B".into()),
+            ..row("Qwen/Qwen3-32B", None, "HuggingFace", false, true)
+        };
+        assert_eq!(model_perf(&bundle, Some(ctx)), None);
+        assert!(!model_line(&bundle, Some(ctx)).contains("tok/s"));
+        let catalog_row = catalog("Qwen3-32B", Some("Qwen/Qwen3-32B"));
+        assert!(model_perf(&catalog_row, Some(ctx)).is_some());
+    }
+
+    /// The page shows rows from `models()` alone first, then attaches the table when it
+    /// arrives and redraws. Both renderings come from the same functions the GTK code binds.
+    #[test]
+    fn rows_render_before_perf_and_gain_the_suffix_when_it_arrives() {
+        let r = catalog("gemma-4-31B-it", Some("google/gemma-4-31B-it"));
+        assert_eq!(
+            model_line(&r, None),
+            "    gemma-4-31B-it  ·  llm  ·  tt-inference-server"
+        );
+        assert_eq!(models_status(16, 107, false), "16 of 107 models shown");
+        let table = perf::parse(PERF_HF, Some("0.22.0")).unwrap();
+        let ctx = PerfContext {
+            table: &table,
+            mesh: "p300x2",
+        };
+        assert_eq!(
+            model_line(&r, Some(ctx)),
+            "    gemma-4-31B-it  ·  llm  ·  tt-inference-server  ·  target 37 tok/s/user"
+        );
+        assert_eq!(
+            models_status(16, 107, true),
+            "16 of 107 models shown. Reference numbers are tt-inference-server targets, not \
+             measurements from this machine."
+        );
+    }
+
+    #[test]
+    fn the_selected_model_stays_selected_after_a_regroup() {
+        let names = [None, Some("a"), Some("gemma-4-31B-it"), None, Some("b")];
+        assert_eq!(reselect(&names, Some("gemma-4-31B-it")), Some(2));
+        assert_eq!(reselect(&names, Some("gone")), None);
+        assert_eq!(reselect(&names, None), None);
     }
 
     #[test]

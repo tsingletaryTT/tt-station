@@ -477,7 +477,7 @@ pub fn smoke_check() -> anyhow::Result<()> {
         };
         let line = view_model::model_line(&gemma, ctx);
         ensure!(
-            line.ends_with("  ·  ~37 tok/s/user"),
+            line.ends_with("  ·  target 37 tok/s/user"),
             "perf row suffix missing: {line}"
         );
         let detail = view_model::model_detail(&gemma, "Runs on this station", ctx);

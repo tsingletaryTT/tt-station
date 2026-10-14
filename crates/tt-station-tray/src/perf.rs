@@ -56,7 +56,9 @@ pub struct BenchConfig {
     /// Whether the entry declares `data_parallel`. Such entries describe a data-parallel
     /// deployment (several model replicas on one device), and tt-inference-server uses them only
     /// when the model spec sets `data_parallel_size`. The tray cannot see the model spec, so it
-    /// skips them.
+    /// skips them. The cost: for a model that `tt serve` does run data-parallel (the 0.22.0
+    /// file's Qwen3-32B galaxy entries describe `data_parallel: 4`), the tray shows the
+    /// non-data-parallel entry, which tt-inference-server itself would ignore for that run.
     pub data_parallel: bool,
     /// Target kind (`theoretical`, `measured`, ...) to its numeric metrics. Null and non-numeric
     /// values are dropped at parse time.
@@ -203,8 +205,10 @@ fn last_segment(s: &str) -> &str {
 /// 1. a key equal to `hf_repo`;
 /// 2. a key equal to `name`;
 /// 3. the same two comparisons ignoring ASCII case;
-/// 4. a key whose last path segment equals the last segment of `hf_repo` or of `name`,
-///    ignoring case (this is what maps an HF id onto a 0.18-style short key).
+/// 4. a short key (one with no `/`, as in the 0.18-style files) equal to the last segment of
+///    `hf_repo` or of `name`, ignoring case. This maps `google/gemma-4-31B-it` onto the 0.18
+///    key `gemma-4-31b-it`. Keys that carry an organisation never match this way, so a
+///    community repo `someuser/Qwen3-32B` does not get `Qwen/Qwen3-32B`'s numbers.
 ///
 /// Exact matches come before case-folded ones because the 0.22.0 file holds both
 /// `google/gemma-4-31b-it` and `gemma-4-31B-it`, and the catalog's `gemma-4-31B-it` is the
@@ -226,7 +230,7 @@ fn find_model<'a>(perf: &'a PerfRef, name: &str, hf_repo: Option<&str>) -> Optio
         let seg = last_segment(w);
         if let Some(k) = keys
             .iter()
-            .find(|k| last_segment(k).eq_ignore_ascii_case(seg))
+            .find(|k| !k.contains('/') && k.eq_ignore_ascii_case(seg))
         {
             return Some(k);
         }
@@ -385,18 +389,42 @@ fn source_name(version: Option<&str>) -> String {
 }
 
 /// The short text appended to a model's list row, for LLM-like models with data:
-/// `  ·  ~37 tok/s/user`, or `  ·  ~400 tok/s total at 32 users` when the file has no
-/// single-user rate. `None` for other models. The separator matches the rest of the row.
+/// `  ·  target 37 tok/s/user`, or `  ·  target 400 tok/s total at 32 users` when the file has
+/// no single-user rate. The row names the figure as a target (see [`target_word`]) because the
+/// file's own comments put real speed well below its `theoretical` ceiling (0.35 of it on
+/// Galaxy and 0.48 on T3K for Qwen3-32B). `None` for other models. The separator matches the
+/// rest of the row.
 pub fn row_suffix(s: &PerfSummary) -> Option<String> {
     let PerfBody::Text { single, aggregate } = &s.body else {
         return None;
     };
-    if let Some(t) = single.as_ref().and_then(|s| s.tput_user) {
-        return Some(format!("  ·  ~{} tok/s/user", num(t)));
+    if let Some(u) = single.as_ref().filter(|u| u.tput_user.is_some()) {
+        let t = u.tput_user.unwrap_or_default();
+        return Some(format!(
+            "  ·  {} {} tok/s/user",
+            target_word(&u.kind),
+            num(t)
+        ));
     }
-    aggregate
-        .as_ref()
-        .map(|a| format!("  ·  ~{} tok/s total at {} users", num(a.tput), a.users))
+    aggregate.as_ref().map(|a| {
+        format!(
+            "  ·  {} {} tok/s total at {} users",
+            target_word(&a.kind),
+            num(a.tput),
+            a.users
+        )
+    })
+}
+
+/// The word in a list row that says a figure is a reference target: `target` for the file's
+/// `theoretical` kind, and `<kind> target` for any other kind (`measured target`), so the row
+/// never reads like a speed measured on this machine.
+fn target_word(kind: &str) -> String {
+    if kind == "theoretical" {
+        "target".to_string()
+    } else {
+        format!("{kind} target")
+    }
 }
 
 /// `1 user` or `32 users`.
@@ -665,6 +693,8 @@ mod tests {
 
     #[test]
     fn matches_hf_repo_case_insensitively() {
+        // Only the case fold can match: the key has an organisation (no short-key step) and
+        // the name `x` matches nothing.
         assert!(summary(&hf(), "x", Some("QWEN/qwen3-32b"), "p300x2").is_some());
         // Two keys share a last segment; the case-folded full id picks the right one before
         // the last-segment fallback could pick the first.
@@ -684,12 +714,14 @@ mod tests {
     }
 
     #[test]
-    fn matches_by_short_name_case_insensitively() {
-        let s = summary(&short(), "LLAMA-3.1-8B-INSTRUCT", None, "n150").unwrap();
+    fn matches_by_name_case_insensitively() {
+        // The name (no hf_repo) differs from the key `Qwen/Qwen3-32B` only in case. The key has
+        // an organisation, so the short-key step cannot rescue it: only the case fold matches.
+        let s = summary(&hf(), "qwen/qwen3-32b", None, "p300x2").unwrap();
         let PerfBody::Text { single, .. } = s.body else {
             panic!()
         };
-        assert_eq!(single.unwrap().ttft_ms, Some(51.0));
+        assert_eq!(single.unwrap().ttft_ms, Some(46.0));
     }
 
     #[test]
@@ -704,6 +736,49 @@ mod tests {
         assert_eq!(s.version.as_deref(), Some("0.18.0"));
         // A name with an org prefix and no hf_repo also matches by its last segment.
         assert!(summary(&short(), "meta-llama/Llama-3.1-8B-Instruct", None, "p150").is_some());
+    }
+
+    #[test]
+    fn the_short_key_step_never_crosses_organisations() {
+        let p = parse(
+            r#"{"org-a/M": {"p300x2": [{"isl": 1, "osl": 1, "max_concurrency": 1,
+                  "task_type": "text", "targets": {"theoretical": {"tput_user": 1}}}]}}"#,
+            None,
+        )
+        .unwrap();
+        assert_eq!(summary(&p, "M", Some("org-c/M"), "p300x2"), None);
+        assert_eq!(summary(&p, "org-c/M", None, "p300x2"), None);
+        // A community bundle named after a released model gets nothing either.
+        assert_eq!(
+            summary(
+                &hf(),
+                "someuser/Qwen3-32B",
+                Some("someuser/Qwen3-32B"),
+                "p300x2"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_base_model_key_does_not_match_its_instruct_variant() {
+        // The hf fixture has `meta-llama/Llama-3.1-8B` on p300x2 and no -Instruct entry.
+        assert!(summary(
+            &hf(),
+            "Llama-3.1-8B",
+            Some("meta-llama/Llama-3.1-8B"),
+            "p300x2"
+        )
+        .is_some());
+        assert_eq!(
+            summary(
+                &hf(),
+                "Llama-3.1-8B-Instruct",
+                Some("meta-llama/Llama-3.1-8B-Instruct"),
+                "p300x2"
+            ),
+            None
+        );
     }
 
     #[test]
@@ -812,7 +887,25 @@ mod tests {
     #[test]
     fn row_suffix_text() {
         let s = summary(&short(), "gemma-4-31b-it", None, "p300x2").unwrap();
-        assert_eq!(row_suffix(&s).as_deref(), Some("  ·  ~37 tok/s/user"));
+        assert_eq!(row_suffix(&s).as_deref(), Some("  ·  target 37 tok/s/user"));
+        // Another kind keeps its own name in the row.
+        let m = summary(&synthetic(), "m", None, "p300x2").unwrap();
+        assert_eq!(
+            row_suffix(&m).as_deref(),
+            Some("  ·  measured target 33.5 tok/s/user")
+        );
+        // Only a multi-user figure: the total, still called a target.
+        let agg = parse(
+            r#"{"a": {"p300x2": [{"isl": 128, "osl": 128, "max_concurrency": 32,
+                "task_type": "text", "targets": {"theoretical": {"tput": 400}}}]}}"#,
+            None,
+        )
+        .unwrap();
+        let a = summary(&agg, "a", None, "p300x2").unwrap();
+        assert_eq!(
+            row_suffix(&a).as_deref(),
+            Some("  ·  target 400 tok/s total at 32 users")
+        );
         let img = summary(&short(), "FLUX.1-dev", None, "p300x2").unwrap();
         assert_eq!(row_suffix(&img), None, "no suffix for non-LLM models");
     }
