@@ -284,6 +284,25 @@ pub fn needs_reload(loaded_for: Option<usize>, selected: usize) -> bool {
     loaded_for != Some(selected)
 }
 
+/// The model the selection was made on, with the station whose list it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChosenModel {
+    pub station: StationId,
+    pub model: String,
+}
+
+/// The model "Run..." may open the run sheet for, given what is selected and the station now
+/// selected on the Stations page.
+///
+/// The run sheet runs on the currently selected station. A model picked from another
+/// station's list (the person switched stations and the new list has not replaced the old one
+/// yet) must not be sent there, so it gives `None` and the button stays disabled.
+pub fn run_target<'a>(chosen: Option<&'a ChosenModel>, current: &StationId) -> Option<&'a str> {
+    chosen
+        .filter(|c| c.station == *current)
+        .map(|c| c.model.as_str())
+}
+
 // ---------------------------------------------------------------------------------------------
 // Run sheet
 // ---------------------------------------------------------------------------------------------
@@ -1497,6 +1516,28 @@ mod tests {
             "switched away and back, but a newer load ran"
         );
         assert!(!load_is_current(None, 0, 0), "no load is recorded");
+    }
+
+    /// Copilot review of PR #2: a model chosen from one station's list is never run on
+    /// another station.
+    #[test]
+    fn run_is_offered_only_for_a_model_chosen_on_the_selected_station() {
+        let local = StationId("local".into());
+        let qb = StationId("qb:8765".into());
+        let chosen = ChosenModel {
+            station: local.clone(),
+            model: "Llama-3.1-8B-Instruct".into(),
+        };
+        assert_eq!(
+            run_target(Some(&chosen), &local),
+            Some("Llama-3.1-8B-Instruct")
+        );
+        assert_eq!(
+            run_target(Some(&chosen), &qb),
+            None,
+            "the person switched to the box; the old row must not run there"
+        );
+        assert_eq!(run_target(None, &local), None);
     }
 
     /// The page's load bookkeeping as a tiny state machine, to replay event sequences.

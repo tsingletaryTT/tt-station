@@ -20,6 +20,11 @@
 //! the figures are targets. A box has no table, so its rows and details show no performance
 //! text.
 //!
+//! **Switching stations.** A load first empties the list, so the previous station's rows and an
+//! enabled "Run..." never stay on screen while the next list loads. A selection remembers the
+//! station its list came from, and "Run..." opens the run sheet only when that is the station
+//! now selected ([`view_model::run_target`]).
+//!
 //! Never looked at or clicked: the list's look, scrolling, the heading style, selection and
 //! the filter dropdowns' behaviour.
 
@@ -31,12 +36,12 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 
 use crate::perf::PerfRef;
-use crate::station::ModelRow;
+use crate::station::{ModelRow, StationId};
 
 use super::view_model::{
     filter_choices, group_models, load_is_current, model_detail, model_line, models_status,
-    needs_reload, on_load_dropped, perf_sample_model, reselect, ModelFilter, ModelGroups,
-    PerfContext,
+    needs_reload, on_load_dropped, perf_sample_model, reselect, run_target, ChosenModel,
+    ModelFilter, ModelGroups, PerfContext,
 };
 use super::{set_margins, spawn_call, App};
 
@@ -58,6 +63,9 @@ struct Page {
     entries: RefCell<Vec<Entry>>,
     /// The station index the rows were loaded for, so a station change triggers a reload.
     loaded_for: Cell<Option<usize>>,
+    /// The id of the station whose models `rows` holds, `None` while a load runs. A selection
+    /// records it, so "Run..." can refuse a model from another station's list.
+    rows_for: RefCell<Option<StationId>>,
     strings: gtk::StringList,
     /// The list's selection model, kept here so a redraw can keep the chosen model selected.
     selection: gtk::SingleSelection,
@@ -174,6 +182,7 @@ pub fn build(app: &App) -> gtk::Widget {
         perf: RefCell::new(None),
         entries: RefCell::new(Vec::new()),
         loaded_for: Cell::new(None),
+        rows_for: RefCell::new(None),
         selection: gtk::SingleSelection::new(Some(strings.clone())),
         strings,
         search: gtk::SearchEntry::new(),
@@ -261,7 +270,7 @@ pub fn build(app: &App) -> gtk::Widget {
         .build();
     let run = gtk::Button::with_label("Run...");
     run.set_sensitive(false);
-    let chosen: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let chosen: Rc<RefCell<Option<ChosenModel>>> = Rc::new(RefCell::new(None));
     let detail_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
     detail_box.set_size_request(280, -1);
     set_margins(&detail_box, 8);
@@ -279,8 +288,12 @@ pub fn build(app: &App) -> gtk::Widget {
                 Some(Entry::Model(r, group)) => {
                     let text = page.with_perf(|ctx| model_detail(&r, group, ctx));
                     detail_label.set_text(&text);
-                    *chosen.borrow_mut() = Some(r.name.clone());
-                    run.set_sensitive(true);
+                    let station = page.rows_for.borrow().clone();
+                    *chosen.borrow_mut() = station.map(|station| ChosenModel {
+                        station,
+                        model: r.name.clone(),
+                    });
+                    run.set_sensitive(chosen.borrow().is_some());
                 }
                 _ => {
                     detail_label.set_text("Select a model to see its details.");
@@ -293,7 +306,10 @@ pub fn build(app: &App) -> gtk::Widget {
     {
         let app = app.clone();
         run.connect_clicked(move |b| {
-            let Some(model) = chosen.borrow().clone() else {
+            // Only a model chosen on the station the run sheet will use (the selected one).
+            let current = app.current().0.id();
+            let Some(model) = run_target(chosen.borrow().as_ref(), &current).map(str::to_string)
+            else {
                 return;
             };
             let parent = b.root().and_then(|r| r.downcast::<gtk::Window>().ok());
@@ -370,6 +386,13 @@ fn load(app: &App, page: &Rc<Page>) {
     let i = app.selected.get();
     page.loaded_for.set(Some(i));
     let (station, _) = app.current();
+    // Clear the previous list first, so no row (and no enabled "Run...") from another station
+    // stays on screen while this one loads. Emptying the list unselects, which clears the
+    // chosen model and disables "Run..." through the selection handler.
+    *page.rows_for.borrow_mut() = None;
+    page.selection.set_selected(gtk::INVALID_LIST_POSITION);
+    page.rows.borrow_mut().clear();
+    page.regroup();
     page.status.set_text("Loading models...");
     let page = page.clone();
     let app2 = app.clone();
@@ -404,6 +427,7 @@ fn load(app: &App, page: &Rc<Page>) {
                     let sr: Vec<&str> = s.iter().map(String::as_str).collect();
                     let sample = perf_sample_model(&rows).map(str::to_string);
                     *page.rows.borrow_mut() = rows;
+                    *page.rows_for.borrow_mut() = Some(station2.id());
                     page.mesh_known.set(mesh.is_some());
                     *page.mesh.borrow_mut() = mesh;
                     page.kind.set_model(Some(&gtk::StringList::new(&kr)));
