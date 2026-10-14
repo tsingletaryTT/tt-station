@@ -84,8 +84,10 @@ next push. Pushing needs SSH or a token with the `workflow` scope (the branch ed
 `.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md` and fill the PR number in here.
 **Models page reference performance and GtkPaned fix (2026-10-14, after `4596d11`).** The Models
 page shows tt-inference-server's `model_performance_reference.json` targets for this machine
-(`crate::perf`): a `~N tok/s/user` row suffix and a detail block labelled "not measured on this
-machine" with the tt-inference-server version; the checkout comes from one `tt serve --dry-run`.
+(`crate::perf`): a `target N tok/s/user` row suffix (catalog rows only), a legend on the count
+line, and a detail block labelled "not measured on this machine" with the tt-inference-server
+version. The checkout comes from one `tt serve --device <mesh> --dry-run` (5 s limit, fetched
+after the rows are shown; a miss is remembered for 5 minutes).
 Boxes show nothing until the agent's `/models` gains a `perf` field. The `GtkPaned ... minimum
 height` CRITICAL came from the wrapping detail label; it now sits in a vertical-only
 ScrolledWindow, and a live walk of all three pages logged none. Report:

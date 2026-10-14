@@ -91,13 +91,20 @@ says so in the heading of every block.
 * **Source file.** `model_performance_reference.json` in a tt-inference-server checkout:
   `reference_config/benchmarking/benchmark_targets/` (0.22.x, keys are Hugging Face ids) or
   `benchmarking/benchmark_targets/` (0.18.x, keys are short names). The tray takes the checkout
-  from the `run.py` path in one `tt --json serve <catalog model> --dry-run` (read-only; nothing
-  starts), so the numbers come from the version `tt serve` would run. If that fails it uses the
+  from the `run.py` path in one `tt --json serve <catalog model> --device <mesh> --dry-run`, so
+  the numbers come from the version `tt serve` would run. The dry run is read-only: tt returns
+  the plan before any preflight, install or container start, and with `--device` it also skips
+  its own `tt-smi` auto-detection, so it reads nothing from the device. It gets 5 seconds. If it
+  fails or times out the tray uses the
   newest `~/.local/share/tenstorrent/tools/tt-inference-server-v*/src` that has the file. If
   there is no file, the page shows no numbers and reports no error. The version in the label
   comes from the checkout's `VERSION` file, else from the `tt-inference-server-vX` directory name.
-* **What is shown.** A list row gets a suffix such as `  ·  ~37 tok/s/user`. The detail pane
-  gets a block such as:
+* **What is shown.** A list row gets a suffix such as `  ·  target 37 tok/s/user` (a kind
+  other than `theoretical` keeps its name: `measured target ...`). The row says "target"
+  because the file's own comments put real speed at 0.35 to 0.48 of its `theoretical` ceiling.
+  While numbers are shown, the count line under the filters adds: "Reference numbers are
+  tt-inference-server targets, not measurements from this machine." The detail pane gets a
+  block such as:
 
   ```
   Reference performance on p300x2 (tt-inference-server 0.22.0 targets, not measured on this machine)
@@ -112,19 +119,29 @@ says so in the heading of every block.
   file's own metric names (`rtr`, `tput_prefill`, `e2el_ms`, ...) and no list suffix. A model
   with no entry for this mesh shows `No reference numbers for <mesh> in tt-inference-server
   <version>.`
-* **Matching rules.** A model is found by its `hf_repo`, then its name: exact first, then
-  ignoring case, then by the last path segment. Only the device entry equal to the station's
+* **Matching rules.** Only rows whose source is `tt-inference-server` (the official catalog)
+  are looked up; a Hub bundle or local folder never gets a released model's numbers. A model is
+  found by its `hf_repo`, then its name: exact first, then ignoring case, then the last path
+  segment against a short key (one with no `/`, as in the 0.18 files). A key with an
+  organisation only matches the full id, so `someuser/Qwen3-32B` does not get
+  `Qwen/Qwen3-32B`'s numbers, and there is no prefix matching (`Llama-3.1-8B-Instruct` does not
+  get `Llama-3.1-8B`'s numbers). Only the device entry equal to the station's
   mesh is used; numbers are never borrowed or scaled from another device. Entries that declare
   `data_parallel` are skipped, because tt-inference-server uses them only when the model spec
-  sets `data_parallel_size`, which the tray cannot see. When a configuration has a `measured`
+  sets `data_parallel_size`, which the tray cannot see. So for a model that `tt serve` does run
+  data-parallel (the 0.22.0 Qwen3-32B galaxy entries describe `data_parallel: 4`), the tray
+  shows the non-data-parallel entry, which tt-inference-server would ignore for that run. When a configuration has a `measured`
   target (only on such data-parallel entries in 0.22.0 so far) it is preferred over
   `theoretical`, and the label names whichever kind was used.
 * **Local station only.** A paired box shows no numbers: the agent's `/models` does not carry
   them. The next step would be an additive `perf` field on the agent's `/models`, filled from
   the box's own checkout by the same `crate::perf` code.
-* **Cost.** The first page load runs one extra `tt` dry run and parses the file (about 200 KB)
-  on the tokio blocking pool, so the GTK thread does not wait for it. The parsed table is cached for the life of
-  the tray, so later loads start no process for it.
+* **Cost.** The rows appear as soon as `tt model list` answers. The table is fetched in a
+  second task afterwards: one `tt` dry run plus a parse of the file (about 200 KB) on the tokio
+  blocking pool, so neither the GTK thread nor the list waits for it. When it arrives the list
+  is redrawn and the selected model stays selected. A found table is cached for the life of
+  the tray. A miss (no file anywhere) is remembered for 5 minutes, so a machine without
+  tt-inference-server runs at most one dry run per 5 minutes, then looks again.
 
 Code: `crates/tt-station-tray/src/perf.rs` (pure parse, lookup and formatting, unit-tested
 against small real snippets in `tests/fixtures/perf_reference_*.json`),
@@ -208,10 +225,16 @@ Verified:
   page's `gtk::Paned`, so its height depended on the width the Paned gave it. The label now
   sits in a vertical-only `ScrolledWindow`. The tray was relaunched, the window opened with
   `Activate`, and the Stations, Models and Logs pages and five model rows were selected through
-  AT-SPI selection (no button was pressed). The previous build logged 21 CRITICAL lines during
-  that walk; the fixed build logged none in about 70 s. Read back through AT-SPI on this box
-  (`p300x2`, tt-inference-server 0.22.0 via `tt` 1.0.1): `gemma-4-31B-it` shows
-  `~37 tok/s/user` and the 1-user and 32-user lines, `Llama-3.1-8B-Instruct` shows "No
+  AT-SPI selection (no button was pressed). The previous build logged 26 CRITICAL lines
+  (`tray7.log`: 20 during the walk and 6 on the final reselect); the fixed build logged none in
+  about 70 s. After review round 1 (row suffix wording, perf loaded after the rows) the same
+  walk again logged none. Read back through AT-SPI on this box
+  (`p300x2`, tt-inference-server 0.22.0 via `tt` 1.0.1), after review round 1: the rows read
+  `gemma-4-31B-it  ·  llm  ·  tt-inference-server  ·  target 37 tok/s/user`,
+  `Llama-3.1-8B  ·  llm  ·  tt-inference-server  ·  target 125 tok/s/user`,
+  `Llama-3.1-8B-Instruct  ·  llm  ·  tt-inference-server` and
+  `whisper-large-v3  ·  audio  ·  tt-inference-server`, and the count line carries the legend.
+  In the detail pane `gemma-4-31B-it` shows the 1-user and 32-user lines, `Llama-3.1-8B-Instruct` shows "No
   reference numbers for p300x2 in tt-inference-server 0.22.0.", `whisper-large-v3` shows
   `asr, 1 user: rtr 16, tput_user 62, ttft_ms 1900 (theoretical)`, and `bge-m3` shows its
   embedding line. A screenshot of the window showed the block wrapped inside the detail pane.
@@ -236,6 +259,11 @@ Not verified:
     `sudo chown ttuser /tmp/tt-gozer/history.jsonl`.
 * **Reference performance** was not checked against a remote station (it shows none by design),
   against a machine with only a 0.18.x checkout (covered by unit tests only), or on GNOME/XFCE.
+  The live check did not catch the table arriving while a row was already selected (the table
+  arrived before the walk began); that path is covered only by the `reselect` unit test. The
+  `--device` argument and the 5-second limit are tested against a fake `tt` only.
+* **Models page layout:** resizing the window, dragging the Paned divider, and a long "Could
+  not list models" error in the count line were not tried.
 * **Nothing has been tested on `franklinstower`**, the intended second machine.
 * **A `.deb` has not been built or installed** from these packaging files.
 * **Ubuntu 22.04 (jammy) has not been built.** The crate enables no `gtk4` `v4_*` feature, so
