@@ -139,6 +139,11 @@ struct Inner {
     /// from scratch -- `status` only round-trips the model name, not the
     /// full `Endpoint` a backend chose to return.
     endpoint: Mutex<Option<Endpoint>>,
+    /// Bumped by every `set_serving` and `set_serving_if_idle`, always while `status` is
+    /// locked. `/stop` reads it before it calls the backend and goes idle afterwards only if it
+    /// is unchanged ([`AppState::set_idle_if_unchanged`]): a `/run` that finished while a slow
+    /// stop was still running owns the status, and the stop must not report it idle.
+    serve_generation: std::sync::atomic::AtomicU64,
     /// The real serving backend (Docker or dstack, chosen on the command
     /// line -- see `make_backend` in `serving/mod.rs`) that `/run`/`/stop`
     /// delegate to. `Arc<dyn ServingBackend>` rather than `Box` so route
@@ -352,6 +357,7 @@ impl AppState {
                 name,
                 chips,
                 status: Mutex::new(ServingStatus::Idle),
+                serve_generation: std::sync::atomic::AtomicU64::new(0),
                 endpoint: Mutex::new(None),
                 backend,
                 pending_pairs: Mutex::new(HashMap::new()),
@@ -949,8 +955,45 @@ impl AppState {
             let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
             *status = new_status.clone();
             *stored_endpoint = Some(endpoint);
+            self.bump_serve_generation();
         }
         self.advertise_status(&new_status);
+        true
+    }
+
+    /// Called with `status` locked, by every path that records a serve.
+    fn bump_serve_generation(&self) {
+        self.inner
+            .serve_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The serve generation, read under the `status` lock (see `serve_generation`).
+    fn serve_generation(&self) -> u64 {
+        let _status = self.inner.status.lock().expect("status mutex poisoned");
+        self.inner
+            .serve_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// `set_idle`, but only when no serve was recorded since `generation` was read, checked
+    /// and set under the `status` lock. Returns whether it went idle.
+    fn set_idle_if_unchanged(&self, generation: u64) -> bool {
+        {
+            let mut status = self.inner.status.lock().expect("status mutex poisoned");
+            if self
+                .inner
+                .serve_generation
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != generation
+            {
+                return false;
+            }
+            let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
+            *status = ServingStatus::Idle;
+            *stored_endpoint = None;
+        }
+        self.advertise_status(&ServingStatus::Idle);
         true
     }
 
@@ -991,6 +1034,7 @@ impl AppState {
             let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
             *status = new_status.clone();
             *stored_endpoint = Some(endpoint);
+            self.bump_serve_generation();
         }
         self.advertise_status(&new_status);
     }
@@ -1862,13 +1906,20 @@ async fn stop_model(
     // serving there's no name to pass, so hand it an empty placeholder.
     let model = state.current_model().unwrap_or_default();
     let backend = state.backend();
+    // Read before the backend call: a `/run` that completes while this stop runs bumps it,
+    // and then this stop must leave that serve's status alone.
+    let generation = state.serve_generation();
 
     tokio::task::spawn_blocking(move || backend.stop(&model))
         .await
         .map_err(|join_err| backend_error(anyhow::anyhow!("stop task panicked: {join_err}")))?
         .map_err(backend_error)?;
 
-    state.set_idle();
+    if !state.set_idle_if_unchanged(generation) {
+        eprintln!(
+            "tt-station-agentd: a new serve was recorded while this stop ran; keeping its status"
+        );
+    }
     Ok(Json(serde_json::json!({})))
 }
 
