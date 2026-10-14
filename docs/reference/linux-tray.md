@@ -16,13 +16,11 @@ Its pull request targets `experiments/egpu`, so the review shows only the Linux 
 #1 first and delete its branch; GitHub then retargets the stacked PR to `main`. A build for another machine clones the
 branch directly (`git clone -b feat/linux-tray git@github.com:tsingletaryTT/tt-station.git`).
 The branch edits `.github/workflows/`, so pushing it needs a credential with the `workflow`
-scope (an SSH key, or `gh auth refresh -h github.com -s workflow`). The owner pushed
-`feat/linux-tray` on 2026-10-14: `origin/feat/linux-tray` is at `4596d11` (tray icon and
-left-click fix), so everything up to and including the agent-defaults and docs commits is on
-`origin`. Commits made after `4596d11` (the GtkPaned fixes, reference performance on the Models
-page, and these docs) are local until the next push. The stacked PR is not opened yet; its
-description is drafted in `.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md` on the box
-that built it.
+scope (an SSH key, or `gh auth refresh -h github.com -s workflow`). The stacked pull request is
+**#2** (`feat/linux-tray` into `experiments/egpu`, opened 2026-10-14,
+https://github.com/tsingletaryTT/tt-station/pull/2). The branch was pushed on 2026-10-14 with
+every commit up to the Models page reference performance work (`beaa04c`); later commits are
+local until the next push.
 
 ## Stations
 

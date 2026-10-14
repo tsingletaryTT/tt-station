@@ -76,12 +76,12 @@ polls readiness on `127.0.0.1` and advertises the LAN address in endpoints. `--p
 **Branches and review (as of 2026-10-14).** The branches stack: `main` <- `experiments/egpu`
 (PR #1, open) <- `feat/linux-tray`. `feat/linux-tray` was cut from `experiments/egpu`, so its PR
 targets `experiments/egpu`. When #1 merges and its branch is deleted, GitHub retargets the
-stacked PR to `main`. The owner pushed `feat/linux-tray` on 2026-10-14: `origin/feat/linux-tray`
-is at `4596d11` (tray icon and left-click fix), so everything up to and including the
-agent-defaults and docs commits is on `origin`. Commits made after `4596d11` are local until the
-next push. Pushing needs SSH or a token with the `workflow` scope (the branch edits
-`.github/workflows/`). The stacked PR is not opened yet: open it with the body drafted in
-`.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md` and fill the PR number in here.
+stacked PR to `main`. The stacked PR is **#2** (`feat/linux-tray` into `experiments/egpu`, opened
+2026-10-14, https://github.com/tsingletaryTT/tt-station/pull/2; its description is kept in
+`.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md` on the box that built it). The branch
+was pushed on 2026-10-14 with every commit up to the Models page reference performance work
+(`beaa04c`); later commits are local until the next push. Pushing needs SSH or a token with the
+`workflow` scope (the branch edits `.github/workflows/`).
 **Models page reference performance and GtkPaned fix (2026-10-14, after `4596d11`).** The Models
 page shows tt-inference-server's `model_performance_reference.json` targets for this machine
 (`crate::perf`): a `target N tok/s/user` row suffix (catalog rows only), a legend on the count
