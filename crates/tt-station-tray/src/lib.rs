@@ -14,6 +14,7 @@ pub mod launchers;
 pub mod local;
 pub mod menu_model;
 pub mod pairing_flow;
+pub mod perf;
 pub mod registry;
 pub mod remote;
 pub mod sni_host;
