@@ -79,9 +79,9 @@ targets `experiments/egpu`. When #1 merges and its branch is deleted, GitHub ret
 stacked PR to `main`. The stacked PR is **#2** (`feat/linux-tray` into `experiments/egpu`, opened
 2026-10-14, https://github.com/tsingletaryTT/tt-station/pull/2; its description is kept in
 `.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md` on the box that built it). The branch
-was pushed on 2026-10-14 with every commit up to the Models page reference performance work
-(`beaa04c`); later commits are local until the next push. Pushing needs SSH or a token with the
-`workflow` scope (the branch edits `.github/workflows/`).
+was pushed on 2026-10-14, including every Copilot-review fix (`origin/feat/linux-tray` was at
+`11777c3` when those fixes went up); commits made after that are local until the next push.
+Pushing needs SSH or a token with the `workflow` scope (the branch edits `.github/workflows/`).
 **Models page reference performance and GtkPaned fix (2026-10-14, after `4596d11`).** The Models
 page shows tt-inference-server's `model_performance_reference.json` targets for this machine
 (`crate::perf`): a `target N tok/s/user` row suffix (catalog rows only), a legend on the count
@@ -94,7 +94,9 @@ ScrolledWindow, and a live walk of all three pages logged none. Report:
 `.superpowers/sdd/2026-10-05-linux-tray/perf-and-paned-report.md`.
 Copilot review of PR #2 (2026-10-14): 7 inline comments plus the summary claim. Each matched
 the code and was fixed test-first (`c0ba10b`..`f47d0c5`), then an independent review added a
-second and third round (`14bf6da` onward). All local, not pushed. Fixed: agentd `tt` backend
+second and third round (`14bf6da` onward). All pushed on 2026-10-14, and a reply was posted on
+each of the seven threads plus one PR comment for the summary claim (threads left open for the
+reviewer to resolve). Fixed: agentd `tt` backend
 stop/lease races (serve epoch; stops take turns with a 60 s wait, then 409; a stop requested
 before a start never acts on it), `/stop` route keeps a newer serve's status (all backends),
 `/run/schema` 404 = empty schema, token-change rebuild, local stop by exit status and tt's JSON

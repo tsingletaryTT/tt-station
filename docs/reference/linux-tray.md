@@ -18,9 +18,9 @@ branch directly (`git clone -b feat/linux-tray git@github.com:tsingletaryTT/tt-s
 The branch edits `.github/workflows/`, so pushing it needs a credential with the `workflow`
 scope (an SSH key, or `gh auth refresh -h github.com -s workflow`). The stacked pull request is
 **#2** (`feat/linux-tray` into `experiments/egpu`, opened 2026-10-14,
-https://github.com/tsingletaryTT/tt-station/pull/2). The branch was pushed on 2026-10-14 with
-every commit up to the Models page reference performance work (`beaa04c`); later commits are
-local until the next push.
+https://github.com/tsingletaryTT/tt-station/pull/2). The branch was pushed on 2026-10-14, and
+that push included every fix made for the Copilot review below (`origin/feat/linux-tray` was at
+`11777c3`); commits made after that are local until the next push.
 
 GitHub Copilot reviewed #2 on 2026-10-14 (seven inline comments and one summary claim). Each
 claim matched the code. The fixes were written test-first in local commits `c0ba10b` to
