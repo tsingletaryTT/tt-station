@@ -44,6 +44,12 @@ use super::ServingBackend;
 pub struct DstackBackend;
 
 impl ServingBackend for DstackBackend {
+    /// Name used in `OptionsUnsupported` errors. This backend keeps the
+    /// refusing default `start_with_options`, so it rejects any run option.
+    fn backend_name(&self) -> &'static str {
+        "dstack"
+    }
+
     /// Always fails: dstack integration isn't implemented yet. Fails loudly
     /// (rather than silently no-op'ing "success") so a caller can't
     /// mistake a stub for a working backend -- e.g. accidentally shipping

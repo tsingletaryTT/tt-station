@@ -89,6 +89,41 @@ enum Command {
         /// Chip inventory string returned from `/status`.
         #[arg(long, default_value = "4xBH")]
         chips: String,
+
+        /// Test hook: answer every `POST /run` with `409 Conflict` and this text as the
+        /// error, the way the real agent does when another tenant holds the chips (the text
+        /// names the holder). Absent = runs succeed.
+        #[arg(long = "run-conflict")]
+        run_conflict: Option<String>,
+
+        /// With `--run-conflict`: refuse only the first N runs, then accept (so a test can
+        /// see a refusal followed by a success). Default: refuse every run.
+        #[arg(long = "run-conflict-count", default_value_t = u32::MAX)]
+        run_conflict_count: u32,
+
+        /// Test hook: use this exact pairing code. `POST /pair/init` prints it and
+        /// `POST /pair/complete` answers `401` for any other code, like the real agent.
+        /// Absent = the old behaviour (a random printed code that is never checked).
+        #[arg(long = "pair-code")]
+        pair_code: Option<String>,
+
+        /// Test hook: report this MAC in `/status`, as a real agent reports its NIC's MAC.
+        /// Absent = no `mac` key (the default, because a fake MAC is a misleading Wake target).
+        #[arg(long = "mac")]
+        mac: Option<String>,
+
+        /// Test hook: after `POST /run {model}`, report the served id as `<prefix><model>` in
+        /// `/endpoint` and `/run`'s answer, the way a real vLLM often serves
+        /// `meta-llama/Llama-3.1-8B-Instruct` for the run name `Llama-3.1-8B-Instruct`.
+        /// Absent = the served id is the run name.
+        #[arg(long = "served-id-prefix")]
+        served_id_prefix: Option<String>,
+
+        /// Test hook: the resolved backend `/config` reports, and how `POST /run` treats
+        /// options. Default `runpy`, the real agent's default, which refuses any run options
+        /// with 400. `tt` accepts them and refuses only those the model cannot take.
+        #[arg(long = "backend", default_value = "runpy")]
+        backend: String,
     },
 }
 
@@ -107,7 +142,28 @@ async fn main() -> Result<()> {
             ctrl_port,
             name,
             chips,
-        } => serve(ctrl_port, name, chips).await,
+            run_conflict,
+            run_conflict_count,
+            pair_code,
+            mac,
+            served_id_prefix,
+            backend,
+        } => {
+            serve(
+                ctrl_port,
+                name,
+                chips,
+                run_conflict,
+                run_conflict_count,
+                pair_code,
+                ServeHooks {
+                    mac,
+                    served_id_prefix,
+                    backend,
+                },
+            )
+            .await
+        }
     }
 }
 
@@ -204,6 +260,26 @@ struct Inner {
     ctrl_port: u16,
     status: ServingStatus,
     endpoint: Option<Endpoint>,
+    /// The `options` object of the most recent `POST /run`, verbatim (not
+    /// validated), echoed by `/status` as `last_run_options`. `None` until a
+    /// run arrives, and reset to `None` by a run that sent no options, so a
+    /// test can tell "options arrived on the wire" from "none were sent".
+    last_run_options: Option<serde_json::Value>,
+    /// When set, `POST /run` answers `409` with this text (see `--run-conflict`).
+    run_conflict: Option<String>,
+    /// How many more runs the conflict applies to.
+    run_conflict_left: u32,
+    /// When set, the only pairing code `POST /pair/complete` accepts (see `--pair-code`).
+    pair_code: Option<String>,
+    /// How many `POST /pair/complete` requests arrived, accepted or not. Echoed by `/status`
+    /// as `pair_complete_calls` so a test can prove a client never sent one.
+    pair_complete_calls: u32,
+    /// MAC reported by `/status` (see `--mac`).
+    mac: Option<String>,
+    /// Prefix added to the run name to form the served id (see `--served-id-prefix`).
+    served_id_prefix: String,
+    /// The backend `/config` reports (see `--backend`).
+    backend: String,
 }
 
 #[derive(Clone)]
@@ -217,7 +293,31 @@ impl MockState {
             ctrl_port,
             status: ServingStatus::Idle,
             endpoint: None,
+            last_run_options: None,
+            run_conflict: None,
+            run_conflict_left: u32::MAX,
+            pair_code: None,
+            pair_complete_calls: 0,
+            mac: None,
+            served_id_prefix: String::new(),
+            backend: "runpy".to_string(),
         })))
+    }
+
+    /// Make `POST /run` answer `409 Conflict` with `text` as the error.
+    fn with_run_conflict(self, text: Option<String>, count: u32) -> Self {
+        {
+            let mut inner = self.lock();
+            inner.run_conflict = text;
+            inner.run_conflict_left = count;
+        }
+        self
+    }
+
+    /// Require this pairing code (see `--pair-code`).
+    fn with_pair_code(self, code: Option<String>) -> Self {
+        self.lock().pair_code = code;
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -248,6 +348,15 @@ struct StatusResponse {
     /// (Task 3.5) -- keeps the two mock surfaces consistent with each other
     /// and with the canned `/telemetry` frame below (also 4 boards).
     device_mesh: Option<String>,
+    /// Mock-only test hook (the real agent has no such field): the `options`
+    /// of the last `POST /run`, or `null`. Lets a test prove a client's
+    /// options reached the server unchanged.
+    last_run_options: Option<serde_json::Value>,
+    /// Mock-only test hook: how many `POST /pair/complete` requests arrived.
+    pair_complete_calls: u32,
+    /// The NIC MAC, only when `--mac` was given (the real agent's field of the same name).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mac: Option<String>,
 }
 
 async fn get_status(State(state): State<MockState>) -> Json<StatusResponse> {
@@ -257,6 +366,9 @@ async fn get_status(State(state): State<MockState>) -> Json<StatusResponse> {
         chips: inner.chips.clone(),
         status: inner.status.to_txt(),
         device_mesh: Some("p300x2".to_string()),
+        last_run_options: inner.last_run_options.clone(),
+        pair_complete_calls: inner.pair_complete_calls,
+        mac: inner.mac.clone(),
     })
 }
 
@@ -266,20 +378,23 @@ struct PairInitResponse {
 }
 
 /// `POST /pair/init`: mint a fixed `pair_id` and print a code the way a
-/// box's screen would. The pair_id is fixed (not tracked/validated) because
-/// `pair/complete` below accepts any code for any pair_id -- there's nothing
-/// to correlate.
-async fn pair_init() -> Json<PairInitResponse> {
-    let code: u32 = rand::rng().random_range(0..1_000_000);
-    println!("mock-box: pairing code: {code:06}");
+/// box's screen would (the `--pair-code` value when given, else random). The pair_id is
+/// fixed (not tracked) because there's nothing to correlate: `pair/complete` checks only
+/// the code, and only when `--pair-code` was given.
+async fn pair_init(State(state): State<MockState>) -> Json<PairInitResponse> {
+    let code = match state.lock().pair_code.clone() {
+        Some(fixed) => fixed,
+        None => format!("{:06}", rand::rng().random_range(0..1_000_000u32)),
+    };
+    println!("mock-box: pairing code: {code}");
     Json(PairInitResponse {
         pair_id: "mock-pair".to_string(),
     })
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)] // fields accepted for shape-compatibility with the real agent; unused (see module doc)
 struct PairCompleteRequest {
+    #[allow(dead_code)] // accepted for shape-compatibility; the mock has a single fixed pair_id
     pair_id: String,
     code: String,
 }
@@ -289,19 +404,69 @@ struct PairCompleteResponse {
     token: String,
 }
 
-/// `POST /pair/complete`: accepts ANY `pair_id`/`code` and returns a fixed
-/// token. Real pairing (Task 7) validates both against what `/pair/init`
+/// `POST /pair/complete`: returns a fixed token. Accepts ANY code unless `--pair-code` was
+/// given, in which case any other code is a 401. Real pairing (Task 7) validates both against what `/pair/init`
 /// minted; the mock skips that entirely so the e2e test doesn't need to
 /// scrape a printed code out of a child process's stdout.
-async fn pair_complete(Json(_req): Json<PairCompleteRequest>) -> Json<PairCompleteResponse> {
-    Json(PairCompleteResponse {
+async fn pair_complete(
+    State(state): State<MockState>,
+    Json(req): Json<PairCompleteRequest>,
+) -> Result<Json<PairCompleteResponse>, StatusCode> {
+    // With `--pair-code`, a wrong code is refused with 401 like the real agent. Without it
+    // every code is accepted.
+    let mut inner = state.lock();
+    inner.pair_complete_calls += 1;
+    if let Some(expected) = inner.pair_code.as_deref() {
+        if req.code != expected {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+    Ok(Json(PairCompleteResponse {
         token: "mock-token".to_string(),
-    })
+    }))
 }
 
 #[derive(Deserialize)]
 struct RunRequest {
     model: String,
+    /// Validated like the real agent before anything changes (see
+    /// [`check_run_options`]), then recorded verbatim for `last_run_options`.
+    /// `force` is ignored (serde skips unknown fields).
+    #[serde(default)]
+    options: Option<serde_json::Value>,
+}
+
+/// The real agent's answer to `POST /run` options, before it touches its running serve:
+/// options that do not parse are a 400 naming the field (the route's check); a backend other
+/// than `tt` refuses any non-empty options (`OptionsUnsupported`); the `tt` backend refuses
+/// options the model cannot take (`serve_argv_for`). The mock has no `tt`, so it classifies a
+/// model with a `/` as a tt-model bundle and anything else as a catalog model.
+fn check_run_options(
+    backend: &str,
+    model: &str,
+    options: Option<&serde_json::Value>,
+) -> std::result::Result<(), String> {
+    use libttstation::run_options::{serve_argv_for, RunOptions, ServeTarget};
+    let opts = match options.filter(|v| !v.is_null()) {
+        None => return Ok(()),
+        Some(v) => RunOptions::from_value(v).map_err(|e| format!("{}: {}", e.field, e.message))?,
+    };
+    if opts.is_empty() {
+        return Ok(());
+    }
+    if backend != "tt" {
+        return Err(format!(
+            "the {backend} backend does not support run options"
+        ));
+    }
+    let target = if model.contains('/') {
+        ServeTarget::Bundle
+    } else {
+        ServeTarget::Catalog
+    };
+    serve_argv_for(target, model, 20000, &opts)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -316,16 +481,39 @@ struct RunResponse {
 async fn run_model(
     State(state): State<MockState>,
     Json(req): Json<RunRequest>,
-) -> Json<RunResponse> {
+) -> Result<Json<RunResponse>, (StatusCode, Json<serde_json::Value>)> {
     let mut inner = state.lock();
+    if let Some(text) = inner.run_conflict.clone() {
+        if inner.run_conflict_left > 0 {
+            inner.run_conflict_left = inner.run_conflict_left.saturating_sub(1);
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": text })),
+            ));
+        }
+    }
+    // Like the real agent: refuse bad options before the running serve is touched.
+    if let Err(error) = check_run_options(&inner.backend, &req.model, req.options.as_ref()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error })),
+        ));
+    }
     let endpoint = Endpoint {
         base_url: format!("http://127.0.0.1:{}/v1", inner.ctrl_port),
-        model: req.model.clone(),
+        model: format!("{}{}", inner.served_id_prefix, req.model),
         requires_key: false,
     };
     inner.status = ServingStatus::Serving(req.model);
     inner.endpoint = Some(endpoint.clone());
-    Json(RunResponse { endpoint })
+    inner.last_run_options = req.options.filter(|v| !v.is_null());
+    Ok(Json(RunResponse { endpoint }))
+}
+
+/// `GET /run/schema`: the real schema from `libttstation`, the same one the
+/// real agent serves.
+async fn run_schema_mock() -> Json<libttstation::run_options::RunSchema> {
+    Json(libttstation::run_options::run_schema())
 }
 
 /// `POST /stop`: go back to idle.
@@ -358,22 +546,25 @@ async fn get_models() -> Json<ModelsResponse> {
     })
 }
 
-/// `GET /config`: a fixed, canned `ConfigSummary` -- doesn't consult
-/// `MockState` at all (there's no real config-file/profile resolution behind
-/// this mock, unlike `tt-station-agentd::routes::get_config`, Task 5), just
-/// enough shape for `tt-station config` (and its e2e test, Task 6) to exercise the
-/// unauthed discover -> config flow with no real agent/hardware. The
-/// `active_profile: "mock"` value is what that e2e test asserts on.
-async fn get_config() -> Json<ConfigSummary> {
+/// `GET /config`: a canned `ConfigSummary` (there's no real
+/// config-file/profile resolution behind this mock, unlike
+/// `tt-station-agentd::routes::get_config`, Task 5), just enough shape for
+/// `tt-station config` (and its e2e test, Task 6) to exercise the unauthed
+/// discover -> config flow with no real agent/hardware. The
+/// `active_profile: "mock"` value is what that e2e test asserts on. Only
+/// `backend` comes from `MockState` (`--backend`, default `runpy`).
+async fn get_config(State(state): State<MockState>) -> Json<ConfigSummary> {
+    let backend = state.lock().backend.clone();
     Json(ConfigSummary {
         active_profile: Some("mock".to_string()),
         available_profiles: vec!["mock".to_string()],
-        backend: "runpy".to_string(),
+        backend,
         serving_host: "127.0.0.1".to_string(),
         serving_port: 8000,
         serving_image: None,
         tt_inference_repo: None,
         tt_device: None,
+        ..Default::default()
     })
 }
 
@@ -699,6 +890,7 @@ fn app(state: MockState) -> Router {
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
         .route("/run", post(run_model))
+        .route("/run/schema", get(run_schema_mock))
         .route("/stop", post(stop_model))
         .route("/endpoint", get(get_endpoint))
         .route("/leases", get(get_leases))
@@ -713,12 +905,39 @@ fn app(state: MockState) -> Router {
         .with_state(state)
 }
 
+/// The `serve` test hooks that only change what the mock reports (grouped to keep `serve`'s
+/// argument list short).
+struct ServeHooks {
+    /// See `--mac`.
+    mac: Option<String>,
+    /// See `--served-id-prefix`.
+    served_id_prefix: Option<String>,
+    /// See `--backend`.
+    backend: String,
+}
+
 /// Bind `ctrl_port` and serve the fake control API + fake vLLM endpoint
 /// until the process is killed. No graceful-shutdown handling (unlike
 /// `tt-station-agentd`) -- this is a disposable test fixture, normally
 /// killed outright by whatever spawned it (see `crates/tt-station/tests/e2e_mock.rs`).
-async fn serve(ctrl_port: u16, name: String, chips: String) -> Result<()> {
-    let state = MockState::new(name.clone(), chips, ctrl_port);
+async fn serve(
+    ctrl_port: u16,
+    name: String,
+    chips: String,
+    run_conflict: Option<String>,
+    run_conflict_count: u32,
+    pair_code: Option<String>,
+    hooks: ServeHooks,
+) -> Result<()> {
+    let state = MockState::new(name.clone(), chips, ctrl_port)
+        .with_run_conflict(run_conflict, run_conflict_count)
+        .with_pair_code(pair_code);
+    {
+        let mut inner = state.lock();
+        inner.mac = hooks.mac;
+        inner.served_id_prefix = hooks.served_id_prefix.unwrap_or_default();
+        inner.backend = hooks.backend;
+    }
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", ctrl_port))
         .await
         .with_context(|| format!("failed to bind control port {ctrl_port}"))?;
@@ -730,4 +949,141 @@ async fn serve(ctrl_port: u16, name: String, chips: String) -> Result<()> {
         .context("mock-box HTTP server failed")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Round-trips `libttstation::agent_client` against this mock's router,
+    //! served in-process on an ephemeral port, to prove run options survive
+    //! the wire.
+
+    use super::*;
+    use libttstation::agent_client::{get_run_schema, get_status, AgentClient};
+    use libttstation::run_options::RunOptions;
+
+    /// A mock whose backend takes run options (`tt`), so options reach `last_run_options`.
+    async fn start() -> String {
+        start_with("tt").await
+    }
+
+    async fn start_with(backend: &str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state = MockState::new("mock".into(), "4xBH".into(), addr.port());
+        state.lock().backend = backend.to_string();
+        let router = app(state);
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn last_options(base: &str) -> serde_json::Value {
+        let v = reqwest::get(format!("{base}/status"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        v["last_run_options"].clone()
+    }
+
+    #[tokio::test]
+    async fn run_with_options_puts_the_options_on_the_wire() {
+        let base = start().await;
+        let client = AgentClient::new(base.clone(), "mock-token");
+        let options = RunOptions {
+            port: Some(20001),
+            offline: true,
+            ..RunOptions::default()
+        };
+        client.run_with_options("m", false, &options).await.unwrap();
+
+        assert_eq!(
+            last_options(&base).await,
+            serde_json::to_value(&options).unwrap(),
+            "mock must see exactly the options the client sent"
+        );
+        assert_eq!(last_options(&base).await["port"], 20001);
+    }
+
+    #[tokio::test]
+    async fn run_without_options_leaves_last_run_options_null() {
+        let base = start().await;
+        let client = AgentClient::new(base.clone(), "mock-token");
+        // Set some first, so a later plain run is seen to clear them.
+        let options = RunOptions {
+            port: Some(20001),
+            ..RunOptions::default()
+        };
+        client.run_with_options("m", false, &options).await.unwrap();
+        client.run("m", false).await.unwrap();
+
+        assert!(last_options(&base).await.is_null());
+        // /status still parses with the client's own type (extra key ignored).
+        get_status(&base).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_schema_is_served() {
+        let base = start().await;
+        let schema = get_run_schema(&base).await.unwrap();
+        assert!(schema.options.iter().any(|o| o.name == "device"));
+    }
+
+    async fn status_of(base: &str) -> String {
+        reqwest::get(format!("{base}/status"))
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()["status"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    /// Like the real agent's default backend, a `runpy` mock refuses non-empty options with a
+    /// 400 and leaves its running serve alone.
+    #[tokio::test]
+    async fn a_runpy_mock_refuses_options_and_keeps_serving() {
+        let base = start_with("runpy").await;
+        let client = AgentClient::new(base.clone(), "mock-token");
+        client.run("old", false).await.unwrap();
+        let options = RunOptions {
+            port: Some(20001),
+            ..RunOptions::default()
+        };
+        let err = client
+            .run_with_options("new", false, &options)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not support run options"), "{err}");
+        assert_eq!(status_of(&base).await, "serving:old");
+    }
+
+    /// A `tt` mock refuses options the model cannot take (a vLLM flag on a catalog model)
+    /// before it touches the running serve, as the agent's `tt` backend does.
+    #[tokio::test]
+    async fn a_tt_mock_refuses_a_vllm_flag_on_a_catalog_model_and_keeps_serving() {
+        let base = start().await;
+        let client = AgentClient::new(base.clone(), "mock-token");
+        client.run("old", false).await.unwrap();
+        let options = RunOptions::from_value(
+            &serde_json::json!({ "vllm_args": [{ "flag": "max-model-len", "value": "4096" }] }),
+        )
+        .unwrap();
+        assert!(client
+            .run_with_options("Llama-3.1-8B-Instruct", false, &options)
+            .await
+            .is_err());
+        assert_eq!(status_of(&base).await, "serving:old");
+        // A bundle takes it.
+        client
+            .run_with_options("org/bundle", false, &options)
+            .await
+            .unwrap();
+        assert_eq!(status_of(&base).await, "serving:org/bundle");
+    }
 }

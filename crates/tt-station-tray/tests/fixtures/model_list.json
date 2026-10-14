@@ -1,0 +1,131 @@
+{
+  "device": "p300x2",
+  "scope": "all",
+  "models": [
+    {
+      "name": "diffusiongemma-26B-A4B-it",
+      "hf_repo": "google/diffusiongemma-26B-A4B-it",
+      "model_type": "llm",
+      "engines": [
+        "vLLM"
+      ],
+      "tt_model_id": "diffusiongemma-26B-A4B-it",
+      "hardware": [
+        "p150x4",
+        "p300x2"
+      ],
+      "param_count": 4,
+      "min_disk_gb": 28,
+      "min_ram_gb": 10.0,
+      "cached": false,
+      "cache_size_bytes": null,
+      "source": "tt-inference-server",
+      "type": "llm"
+    },
+    {
+      "name": "gemma-4-31B-it",
+      "hf_repo": "google/gemma-4-31B-it",
+      "model_type": "llm",
+      "engines": [
+        "vLLM"
+      ],
+      "tt_model_id": "gemma-4-31B-it",
+      "hardware": [
+        "p150x4",
+        "p300x2"
+      ],
+      "param_count": 31,
+      "min_disk_gb": 82,
+      "min_ram_gb": 77.5,
+      "cached": false,
+      "cache_size_bytes": null,
+      "source": "tt-inference-server",
+      "type": "llm"
+    },
+    {
+      "name": "bge-m3",
+      "hf_repo": "BAAI/bge-m3",
+      "model_type": "embedding",
+      "engines": [
+        "forge"
+      ],
+      "tt_model_id": "bge-m3",
+      "hardware": [
+        "p300x2"
+      ],
+      "param_count": null,
+      "min_disk_gb": 15,
+      "min_ram_gb": 6.0,
+      "cached": false,
+      "cache_size_bytes": null,
+      "source": "tt-inference-server",
+      "type": "embedding"
+    },
+    {
+      "name": "Adartras/qwen3.6-a3b-blackhole",
+      "source": "HuggingFace",
+      "kind": "container",
+      "engine": "vllm-plugin",
+      "arch": [
+        "blackhole"
+      ],
+      "hardware": [
+        "p150"
+      ],
+      "downloads": 0,
+      "installed": false,
+      "weights_repo": null,
+      "weights_bytes": null,
+      "type": null,
+      "engines": [
+        "vllm-plugin"
+      ],
+      "cached": false,
+      "cache_size_bytes": null
+    },
+    {
+      "name": "changh95/qwen3.8-27b-p150x2",
+      "source": "HuggingFace",
+      "kind": "container",
+      "engine": "vllm-plugin",
+      "arch": [
+        "blackhole"
+      ],
+      "hardware": [
+        "p150x2"
+      ],
+      "downloads": 0,
+      "installed": true,
+      "weights_repo": "Qwen/Qwen3.8-27B",
+      "weights_bytes": 55586114863,
+      "type": null,
+      "engines": [
+        "vllm-plugin"
+      ],
+      "cached": true,
+      "cache_size_bytes": 55586114863
+    },
+    {
+      "name": "changh95/qwen3.8-27b-dflash2-p300x2",
+      "source": "local",
+      "kind": "container",
+      "engine": "vllm-plugin",
+      "arch": [
+        "blackhole"
+      ],
+      "hardware": [
+        "p300x2"
+      ],
+      "downloads": null,
+      "installed": true,
+      "weights_repo": "Qwen/Qwen3.8-27B",
+      "weights_bytes": 55586114863,
+      "type": null,
+      "engines": [
+        "vllm-plugin"
+      ],
+      "cached": true,
+      "cache_size_bytes": 55586114863
+    }
+  ]
+}

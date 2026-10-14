@@ -14,11 +14,35 @@ pub mod discovery;
 pub mod docker;
 pub mod dstack;
 pub mod runpy;
+pub mod tt;
 
 use std::time::Duration;
 
 use anyhow::Result;
-use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
+use libttstation::model::{Endpoint, ModelsResponse, ServingEntry, ServingStatus};
+use libttstation::run_options::RunOptions;
+
+/// Returned by the default [`ServingBackend::start_with_options`] when the
+/// caller asked for options the backend has no way to apply.
+///
+/// It is a distinct type so `POST /run` can find it by walking the error
+/// chain (`err.chain().any(|c| c.is::<OptionsUnsupported>())`) and answer
+/// `400` (the client asked for something this box cannot do) instead of `500`.
+/// Matching the type survives any `.context(..)` added on the way up; matching
+/// the message text would not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionsUnsupported {
+    /// Which backend refused, from [`ServingBackend::backend_name`].
+    pub backend: &'static str,
+}
+
+impl std::fmt::Display for OptionsUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the {} backend does not support run options", self.backend)
+    }
+}
+
+impl std::error::Error for OptionsUnsupported {}
 
 /// Starts, stops, and reports on model-serving for a box.
 ///
@@ -58,6 +82,41 @@ pub trait ServingBackend: Send + Sync {
     /// {"force": true}`.
     fn start_forced(&self, model: &str) -> Result<Endpoint> {
         self.start_forcing(model, true)
+    }
+
+    /// Start serving `model` with per-request [`RunOptions`] (`POST /run`'s
+    /// `options`).
+    ///
+    /// **Default behaviour.** With empty options this is exactly
+    /// [`ServingBackend::start_forcing`], so a backend that knows nothing about
+    /// options keeps working for every client that sends none. With any option
+    /// set it returns [`OptionsUnsupported`], because silently ignoring a
+    /// requested port or flag would serve something other than what was asked
+    /// for. A backend that can apply options overrides this method.
+    ///
+    /// The caller is expected to have validated `options` already (the route
+    /// builds it with `RunOptions::from_value`).
+    fn start_with_options(
+        &self,
+        model: &str,
+        force: bool,
+        options: &RunOptions,
+    ) -> Result<Endpoint> {
+        if options.is_empty() {
+            self.start_forcing(model, force)
+        } else {
+            Err(OptionsUnsupported {
+                backend: self.backend_name(),
+            }
+            .into())
+        }
+    }
+
+    /// Short stable name of this backend (`"runpy"`, `"docker"`, `"dstack"`),
+    /// used in error messages such as [`OptionsUnsupported`]. Defaults to
+    /// `"unknown"` so test doubles need not implement it.
+    fn backend_name(&self) -> &'static str {
+        "unknown"
     }
 
     /// Stop serving `model`. Idempotent where the underlying tooling allows
@@ -208,6 +267,46 @@ pub trait ServingBackend: Send + Sync {
     /// still a stub). `RunPyBackend` is the one backend that overrides
     /// this, since `run.py`'s `model_spec.json` is an actual catalog to
     /// read.
+    /// `GET /serving` entries this backend knows from its own records, or `None` when it
+    /// keeps none.
+    ///
+    /// `/serving` normally comes from docker discovery (`discovery::discover_serving`), which
+    /// only recognises tt-inference-server images. A backend whose serves look different (the
+    /// `tt` backend: tt-model images are `tt-model/<name>:<tag>`) reports them here, and the
+    /// route merges them with discovery (see `discovery::merge_serving`): an entry from here
+    /// wins over a discovered entry on the same host port. `None` or an empty list leaves
+    /// `/serving` as discovery alone. Must not fail: a backend that cannot read its records
+    /// returns `None`.
+    ///
+    /// Default `None`: runpy, docker and dstack keep the discovery-only behaviour.
+    fn serving_entries(&self) -> Option<Vec<ServingEntry>> {
+        None
+    }
+
+    /// A serve this backend can see running on its own serving port although the agent has
+    /// no record of it, typically one started before an agent restart. When `Some`, the route
+    /// records it as serving (so `/status`, `/endpoint` and `/stop` see it). A backend that
+    /// returns `Some` must also be able to stop that serve through `stop`.
+    ///
+    /// Called by `AppState` only while the stored status is idle, before `/status`, `/endpoint`
+    /// and `/stop`. Must not fail and must not report a serve that is still coming up.
+    ///
+    /// Default `None`: runpy, docker and dstack keep their behaviour, where a fresh agent
+    /// process reports idle until its own `/run`.
+    fn discover_own_serve(&self) -> Option<Endpoint> {
+        None
+    }
+
+    /// True while a `start` is in flight. `GET /status` reports it as `starting: true`, so a
+    /// client can tell "idle" from "bringing a model up" (the stored status stays idle until
+    /// `start` returns). Must be cheap: it is read on every `/status`.
+    ///
+    /// Default `false`: runpy, docker and dstack do not report it, and `/status` omits the
+    /// field for them, as before.
+    fn is_starting(&self) -> bool {
+        false
+    }
+
     fn list_models(&self) -> Result<ModelsResponse> {
         Ok(ModelsResponse {
             release_version: None,
@@ -243,12 +342,12 @@ pub(crate) fn poll_until_healthy(
 
 /// Construct a `ServingBackend` for the given `--backend` CLI choice.
 ///
-/// `"runpy"`, `"docker"`, and `"dstack"` are the only recognized kinds;
+/// `"runpy"`, `"docker"`, `"tt"` and `"dstack"` are the only recognized kinds;
 /// anything else is an error rather than a silent fallback, since a typo'd
 /// backend name should fail loudly at startup rather than quietly serving
 /// nothing.
 ///
-/// `docker_config`/`runpy_config` are each only meaningful for their own
+/// `docker_config`/`runpy_config`/`tt_config` are each only meaningful for their own
 /// backend (dstack's stub needs neither); both are threaded through here
 /// rather than the individual fields being hardcoded so the CLI wiring in
 /// `main.rs` has a single function to call regardless of which backend was
@@ -278,9 +377,15 @@ pub fn make_backend(
     kind: &str,
     docker_config: docker::DockerConfig,
     runpy_config: runpy::RunPyConfig,
+    tt_config: tt::TtConfig,
     gozer: Option<crate::gozer::Capability>,
 ) -> Result<Box<dyn ServingBackend>> {
     match kind {
+        // Delegates to the official `tt` CLI (`serving/tt.rs`). Not the default: `runpy`
+        // stays the default until this backend is proven on real hardware.
+        "tt" => Ok(Box::new(
+            tt::TtBackend::new(tt_config, Box::new(docker::RealCommandRunner)).with_gozer(gozer),
+        )),
         "runpy" => Ok(Box::new(
             runpy::RunPyBackend::new(runpy_config, Box::new(docker::RealCommandRunner))
                 .with_gozer(gozer),
@@ -312,11 +417,12 @@ mod tests {
     }
 
     #[test]
-    fn make_backend_constructs_runpy_docker_and_dstack() {
+    fn make_backend_constructs_runpy_docker_tt_and_dstack() {
         assert!(make_backend(
             "runpy",
             docker::DockerConfig::default(),
             runpy::RunPyConfig::default(),
+            tt::TtConfig::default(),
             None
         )
         .is_ok());
@@ -324,6 +430,15 @@ mod tests {
             "docker",
             docker::DockerConfig::default(),
             runpy::RunPyConfig::default(),
+            tt::TtConfig::default(),
+            None
+        )
+        .is_ok());
+        assert!(make_backend(
+            "tt",
+            docker::DockerConfig::default(),
+            runpy::RunPyConfig::default(),
+            tt::TtConfig::default(),
             None
         )
         .is_ok());
@@ -331,6 +446,7 @@ mod tests {
             "dstack",
             docker::DockerConfig::default(),
             runpy::RunPyConfig::default(),
+            tt::TtConfig::default(),
             None
         )
         .is_ok());
@@ -352,11 +468,12 @@ mod tests {
     /// the caller passed `Some`.
     #[test]
     fn make_backend_hands_the_capability_to_the_backend_it_builds() {
-        for kind in ["runpy", "docker"] {
+        for kind in ["runpy", "docker", "tt"] {
             let backend = make_backend(
                 kind,
                 docker::DockerConfig::default(),
                 runpy::RunPyConfig::default(),
+                tt::TtConfig::default(),
                 Some(capability()),
             )
             .expect("backend should construct");
@@ -374,11 +491,12 @@ mod tests {
     /// in its pre-leasing state.
     #[test]
     fn make_backend_without_a_capability_leaves_leasing_off() {
-        for kind in ["runpy", "docker", "dstack"] {
+        for kind in ["runpy", "docker", "tt", "dstack"] {
             let backend = make_backend(
                 kind,
                 docker::DockerConfig::default(),
                 runpy::RunPyConfig::default(),
+                tt::TtConfig::default(),
                 None,
             )
             .expect("backend should construct");
@@ -399,6 +517,7 @@ mod tests {
             "dstack",
             docker::DockerConfig::default(),
             runpy::RunPyConfig::default(),
+            tt::TtConfig::default(),
             Some(capability()),
         )
         .expect("dstack backend should construct");
@@ -414,6 +533,7 @@ mod tests {
             "bogus",
             docker::DockerConfig::default(),
             runpy::RunPyConfig::default(),
+            tt::TtConfig::default(),
             None,
         ) {
             Err(err) => assert!(err.to_string().contains("bogus")),

@@ -1163,6 +1163,7 @@ fn dstack_ignores_a_gozer_capability() {
         "dstack",
         DockerConfig::default(),
         tt_station_agentd::serving::runpy::RunPyConfig::default(),
+        tt_station_agentd::serving::tt::TtConfig::default(),
         Some(gozer_capability()),
     )
     .expect("dstack backend should construct");

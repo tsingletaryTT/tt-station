@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::authkeys;
 use crate::pairing;
-use crate::serving::discovery::discover_serving;
+use crate::serving::discovery::{discover_serving, merge_serving};
 use crate::serving::docker::{CommandRunner, RealCommandRunner};
 use crate::serving::ServingBackend;
 use crate::telemetry;
@@ -51,12 +51,13 @@ const DEFAULT_TELEMETRY_INTERVAL_MS: u64 = 1000;
 const DEFAULT_TT_SMI_BIN: &str = "tt-smi";
 
 /// Default serving host baked into `GET /serving` `base_url`s when `AppState`
-/// isn't told otherwise. Mirrors `main.rs`'s `--serving-host` default.
+/// isn't told otherwise. A fixed fallback for an `AppState` built without
+/// `with_serving_config`; `main.rs` resolves the real default (the box's LAN address) itself.
 const DEFAULT_SERVING_HOST: &str = "127.0.0.1";
 
 /// Default serving port `GET /serving` treats as the agent's own, when
-/// `AppState` isn't told otherwise. Mirrors `main.rs`'s `--serving-port`
-/// default.
+/// `AppState` isn't told otherwise. A fixed fallback for tests; `main.rs`
+/// resolves the real default (20000 for the `tt` backend, else 8000) itself.
 const DEFAULT_SERVING_PORT: u16 = 8000;
 
 /// TTL on the cached `gozer status --json` parse shared by `GET /leases`
@@ -138,6 +139,11 @@ struct Inner {
     /// from scratch -- `status` only round-trips the model name, not the
     /// full `Endpoint` a backend chose to return.
     endpoint: Mutex<Option<Endpoint>>,
+    /// Bumped by every `set_serving` and `set_serving_if_idle`, always while `status` is
+    /// locked. `/stop` reads it before it calls the backend and goes idle afterwards only if it
+    /// is unchanged ([`AppState::set_idle_if_unchanged`]): a `/run` that finished while a slow
+    /// stop was still running owns the status, and the stop must not report it idle.
+    serve_generation: std::sync::atomic::AtomicU64,
     /// The real serving backend (Docker or dstack, chosen on the command
     /// line -- see `make_backend` in `serving/mod.rs`) that `/run`/`/stop`
     /// delegate to. `Arc<dyn ServingBackend>` rather than `Box` so route
@@ -351,6 +357,7 @@ impl AppState {
                 name,
                 chips,
                 status: Mutex::new(ServingStatus::Idle),
+                serve_generation: std::sync::atomic::AtomicU64::new(0),
                 endpoint: Mutex::new(None),
                 backend,
                 pending_pairs: Mutex::new(HashMap::new()),
@@ -374,6 +381,7 @@ impl AppState {
                     serving_image: None,
                     tt_inference_repo: None,
                     tt_device: None,
+                    ..Default::default()
                 },
                 ssh_authorized_keys_path: PathBuf::new(),
                 ssh_user: "ttuser".to_string(),
@@ -875,15 +883,23 @@ impl AppState {
     /// `set_idle()` so `/status`, `/endpoint`, AND the mDNS advertisement all
     /// stop lying, then returns the corrected status.
     ///
-    /// The docker probe (delegated to the backend) only runs when the stored
-    /// status is `Serving` (the only state that can be stale-positive); an
-    /// `Idle` status returns immediately without touching the backend, keeping
-    /// the common idle poll cheap. The probe is blocking I/O, so it runs on
+    /// The stale-positive check (`backend.reconciled_status`) only runs when the
+    /// stored status is `Serving`. An `Idle` status instead asks the backend
+    /// whether a serve of its own is running anyway (below). That is free for
+    /// runpy, docker and dstack (their `discover_own_serve` is the default
+    /// `None`); the `tt` backend answers from `tt --json model ps` through a
+    /// short cache with a hard timeout, so an idle poll costs at most one `ps`
+    /// run per cache period. Both calls are blocking I/O, so they run on
     /// `spawn_blocking` (like `/serving`).
+    ///
+    /// **Idle, but something of ours is running.** A fresh agent process starts idle even when
+    /// its backend's serve outlived the previous process. So while the stored status is idle,
+    /// this first asks the backend ([`AppState::adopt_backend_serve`]). Only the `tt` backend
+    /// answers; for the others it is a no-op and the idle path is unchanged.
     async fn reconciled_status(&self) -> ServingStatus {
         let stored = self.status();
         if !matches!(stored, ServingStatus::Serving(_)) {
-            return stored;
+            return self.adopt_backend_serve().await.unwrap_or(stored);
         }
         let backend = self.backend();
         let reconciled = tokio::task::spawn_blocking(move || backend.reconciled_status())
@@ -899,6 +915,86 @@ impl AppState {
             self.set_idle();
         }
         reconciled
+    }
+
+    /// While the stored status is idle, ask the backend whether a serve of its own is running
+    /// anyway (`ServingBackend::discover_own_serve`), and if so record it with `set_serving`,
+    /// so `/status`, `/endpoint` and `/stop` act on it. Returns the new status when one was
+    /// adopted. Off the async runtime, since the `tt` backend runs `tt model ps`.
+    async fn adopt_backend_serve(&self) -> Option<ServingStatus> {
+        if !matches!(self.status(), ServingStatus::Idle) {
+            return None;
+        }
+        let backend = self.backend();
+        let endpoint = tokio::task::spawn_blocking(move || backend.discover_own_serve())
+            .await
+            .ok()
+            .flatten()?;
+        eprintln!(
+            "tt-station-agentd: found a serve of this backend already running: {} at {}",
+            endpoint.model, endpoint.base_url
+        );
+        let status = ServingStatus::Serving(endpoint.model.clone());
+        // Only if still idle: a `/run` or `/stop` that finished while the backend was being
+        // asked owns the status now, and a stale adoption must not overwrite it.
+        if !self.set_serving_if_idle(endpoint) {
+            return None;
+        }
+        Some(status)
+    }
+
+    /// `set_serving`, but only when the stored status is still `Idle`, checked and set under
+    /// the same lock. Returns whether it set anything.
+    fn set_serving_if_idle(&self, endpoint: Endpoint) -> bool {
+        let new_status = ServingStatus::Serving(endpoint.model.clone());
+        {
+            let mut status = self.inner.status.lock().expect("status mutex poisoned");
+            if !matches!(*status, ServingStatus::Idle) {
+                return false;
+            }
+            let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
+            *status = new_status.clone();
+            *stored_endpoint = Some(endpoint);
+            self.bump_serve_generation();
+        }
+        self.advertise_status(&new_status);
+        true
+    }
+
+    /// Called with `status` locked, by every path that records a serve.
+    fn bump_serve_generation(&self) {
+        self.inner
+            .serve_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The serve generation, read under the `status` lock (see `serve_generation`).
+    fn serve_generation(&self) -> u64 {
+        let _status = self.inner.status.lock().expect("status mutex poisoned");
+        self.inner
+            .serve_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// `set_idle`, but only when no serve was recorded since `generation` was read, checked
+    /// and set under the `status` lock. Returns whether it went idle.
+    fn set_idle_if_unchanged(&self, generation: u64) -> bool {
+        {
+            let mut status = self.inner.status.lock().expect("status mutex poisoned");
+            if self
+                .inner
+                .serve_generation
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != generation
+            {
+                return false;
+            }
+            let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
+            *status = ServingStatus::Idle;
+            *stored_endpoint = None;
+        }
+        self.advertise_status(&ServingStatus::Idle);
+        true
     }
 
     /// Snapshot the currently-serving `Endpoint`, or `None` if idle.
@@ -938,6 +1034,7 @@ impl AppState {
             let mut stored_endpoint = self.inner.endpoint.lock().expect("endpoint mutex poisoned");
             *status = new_status.clone();
             *stored_endpoint = Some(endpoint);
+            self.bump_serve_generation();
         }
         self.advertise_status(&new_status);
     }
@@ -1364,6 +1461,12 @@ struct StatusResponse {
     /// never a guessed version or a fabricated board count for hardware
     /// this agent never actually asked gozer about.
     leasing: LeasingSummary,
+    /// `true` while the backend is bringing a model up (`ServingBackend::is_starting`; only the
+    /// `tt` backend reports it). `status` stays `idle` until the start returns, so this is how
+    /// a client tells "idle" from "starting". Omitted when false, so the body is byte-for-byte
+    /// what older clients (the Mac app, `tt-station --json status`) already decode.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    starting: bool,
 }
 
 async fn get_status(
@@ -1381,6 +1484,7 @@ async fn get_status(
         device_mesh: state.device_mesh().map(str::to_string),
         mac: state.mac().map(str::to_string),
         leasing,
+        starting: state.backend().is_starting(),
     })
 }
 
@@ -1582,6 +1686,16 @@ struct RunRequest {
     /// polite, refusing behaviour.
     #[serde(default)]
     force: bool,
+    /// Optional per-request serve settings (see `libttstation::run_options`).
+    ///
+    /// Deliberately typed `Option<serde_json::Value>` rather than
+    /// `Option<RunOptions>`: a malformed `options` would then fail inside
+    /// axum's `Json` extractor and answer `422` with serde's wording, with no
+    /// field name. Keeping it raw lets `run_model` hand it to
+    /// `RunOptions::from_value` and answer `400 "<field>: <message>"`.
+    /// Absent (every pre-options client) or `null` means no options.
+    #[serde(default)]
+    options: Option<serde_json::Value>,
 }
 
 /// JSON body returned by `POST /run` on success.
@@ -1637,8 +1751,18 @@ fn contention_aware_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse
     backend_error(err)
 }
 
-/// `POST /run { "model": "...", "force": <bool> }` (bearer-guarded): ask the
-/// backend to start serving `model`.
+/// `POST /run { "model": "...", "force": <bool>, "options": {..} }`
+/// (bearer-guarded): ask the backend to start serving `model`.
+///
+/// `options` (optional; absent or `null` means none, so older clients are
+/// unaffected) carries per-request serve settings: device, port, profile,
+/// offline, workflow and allowlisted vLLM flags. It is parsed and validated
+/// here by `RunOptions::from_value` BEFORE the backend is touched, so a bad
+/// value answers `400 {"error": "<field>: <message>"}` and starts nothing. A
+/// backend that cannot apply options (it keeps the refusing default
+/// `ServingBackend::start_with_options`) answers `400` naming the backend,
+/// but only when options were actually set. The advertised options are listed
+/// by `GET /run/schema`.
 ///
 /// `force` (default `false`, so an older client is unaffected) is
 /// `tt-station run --force`: serve even though the box's chips are held by somebody
@@ -1664,25 +1788,86 @@ async fn run_model(
     let model = req.model;
     let force = req.force;
 
-    // `start`/`start_forced` rather than one call with a bool, so the
-    // unforced path through this route is exactly the call every pre-`--force`
-    // caller (and every argv pin) already makes.
-    let result = tokio::task::spawn_blocking(move || {
-        if force {
-            backend.start_forced(&model)
-        } else {
-            backend.start(&model)
-        }
-    })
-    .await
-    .map_err(|join_err| backend_error(anyhow::anyhow!("run task panicked: {join_err}")))?;
+    // The model name reaches backend command lines (`tt serve <model>`, gozer's
+    // `--who`), so it is checked like an option: 400 naming `model`, nothing
+    // started. Backends that use it (the `tt` backend) check it again.
+    libttstation::run_options::validate_model_name(&model).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("{}: {}", e.field, e.message),
+            }),
+        )
+    })?;
+
+    // Validate before touching the backend. `null` and absent both mean "no
+    // options". The error text is `<field>: <message>` so a UI can point at
+    // the offending input.
+    let options = match req.options.as_ref().filter(|v| !v.is_null()) {
+        None => libttstation::run_options::RunOptions::default(),
+        Some(v) => libttstation::run_options::RunOptions::from_value(v).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("{}: {}", e.field, e.message),
+                }),
+            )
+        })?,
+    };
+
+    // One call for every combination: the trait's default
+    // `start_with_options` forwards empty options to `start_forcing`, which is
+    // what `start`/`start_forced` do too, so the no-options path is unchanged.
+    let result =
+        tokio::task::spawn_blocking(move || backend.start_with_options(&model, force, &options))
+            .await
+            .map_err(|join_err| {
+                backend_error(anyhow::anyhow!("run task panicked: {join_err}"))
+            })?;
 
     // A contended box answers 409 (naming the board and the holder), not
-    // 500 -- see `contention_aware_error`.
-    let endpoint = result.map_err(contention_aware_error)?;
+    // 500 -- see `contention_aware_error`. A backend that cannot apply the
+    // requested options answers 400 naming itself. A backend that refuses one
+    // particular option for this model (the `tt` backend refuses vLLM flags for
+    // a catalog model, because `tt serve` would) returns an `OptionError`, which
+    // answers 400 in the same `<field>: <message>` form as a validation failure,
+    // so a UI can point at the input either way.
+    let endpoint = result.map_err(|err| {
+        if let Some(option_err) = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<libttstation::run_options::OptionError>())
+        {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("{}: {}", option_err.field, option_err.message),
+                }),
+            )
+        } else if err
+            .chain()
+            .any(|cause| cause.is::<crate::serving::OptionsUnsupported>())
+        {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: err.to_string(),
+                }),
+            )
+        } else {
+            contention_aware_error(err)
+        }
+    })?;
     state.set_serving(endpoint.clone());
 
     Ok(Json(RunResponse { endpoint }))
+}
+
+/// `GET /run/schema` (unauthed): the options `POST /run` accepts, as
+/// `libttstation::run_options::RunSchema`, so a client can build a form
+/// without hard-coding the list. It describes what the agent validates; it
+/// does not promise the active backend will apply them (see `POST /run`).
+async fn run_schema_route() -> Json<libttstation::run_options::RunSchema> {
+    Json(libttstation::run_options::run_schema())
 }
 
 /// `POST /stop` (bearer-guarded): ask the backend to stop serving.
@@ -1712,18 +1897,31 @@ async fn stop_model(
         }
     );
 
+    // A serve that outlived a previous agent process is recorded first, so the
+    // backend is told what to stop (a no-op for backends other than `tt`).
+    state.adopt_backend_serve().await;
+
     // Model name is only used for logging by backends that track one;
     // `RunPyBackend::stop` ignores the argument entirely. When nothing is
     // serving there's no name to pass, so hand it an empty placeholder.
     let model = state.current_model().unwrap_or_default();
     let backend = state.backend();
+    // Read before the backend call: a `/run` that completes while this stop runs bumps it,
+    // and then this stop must leave that serve's status alone.
+    let generation = state.serve_generation();
 
+    // A contention (the `tt` backend: another stop still holds the stop turn) answers 409
+    // with its reason, as `/run` does; every other failure stays a 500.
     tokio::task::spawn_blocking(move || backend.stop(&model))
         .await
         .map_err(|join_err| backend_error(anyhow::anyhow!("stop task panicked: {join_err}")))?
-        .map_err(backend_error)?;
+        .map_err(contention_aware_error)?;
 
-    state.set_idle();
+    if !state.set_idle_if_unchanged(generation) {
+        eprintln!(
+            "tt-station-agentd: a new serve was recorded while this stop ran; keeping its status"
+        );
+    }
     Ok(Json(serde_json::json!({})))
 }
 
@@ -2182,10 +2380,18 @@ async fn get_serving(
     let serving_host = state.serving_host().to_string();
     let serving_port = state.serving_port();
     let status = state.status();
+    let backend = state.backend();
 
+    // The backend's own entries (the `tt` backend reads `tt model ps`) merged
+    // with docker discovery; one server seen by both is listed once, as the
+    // backend reports it. See `ServingBackend::serving_entries`.
     let serving = tokio::task::spawn_blocking(move || {
         let runner = RealCommandRunner;
-        discover_serving(&runner, &serving_host, serving_port, &status)
+        let own = backend.serving_entries().unwrap_or_default();
+        merge_serving(
+            own,
+            discover_serving(&runner, &serving_host, serving_port, &status),
+        )
     })
     .await
     // A join failure (the blocking task panicked) is reported as "nothing
@@ -2569,6 +2775,7 @@ pub fn app(state: AppState) -> Router {
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
         .route("/run", post(run_model))
+        .route("/run/schema", get(run_schema_route))
         .route("/stop", post(stop_model))
         .route("/reset", post(reset))
         .route("/power", post(power))
@@ -2740,5 +2947,54 @@ mod logs_query_tests {
             parse_logs_query(Some("tail=notanumber")),
             ("container".to_string(), crate::logs::DEFAULT_TAIL)
         );
+    }
+}
+
+#[cfg(test)]
+mod adopt_backend_serve_tests {
+    use super::*;
+    use std::sync::{Arc, OnceLock};
+
+    fn ep(model: &str, port: u16) -> Endpoint {
+        Endpoint {
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            model: model.to_string(),
+            requires_key: false,
+        }
+    }
+
+    /// A backend that reports an old serve, but only after a concurrent `/run` has recorded a
+    /// new one: its `discover_own_serve` calls `set_serving` on the agent first. That is the
+    /// race where a stale adoption could overwrite a fresh `/run`.
+    struct RacingBackend {
+        state: OnceLock<AppState>,
+    }
+
+    impl crate::serving::ServingBackend for RacingBackend {
+        fn start_forcing(&self, _model: &str, _force: bool) -> anyhow::Result<Endpoint> {
+            unreachable!()
+        }
+        fn stop(&self, _model: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn status(&self) -> anyhow::Result<ServingStatus> {
+            Ok(ServingStatus::Idle)
+        }
+        fn discover_own_serve(&self) -> Option<Endpoint> {
+            self.state.get().unwrap().set_serving(ep("from-run", 20011));
+            Some(ep("stale", 20010))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stale_adoption_does_not_overwrite_a_concurrent_run() {
+        let backend = Arc::new(RacingBackend {
+            state: OnceLock::new(),
+        });
+        let state = AppState::new("qb2-lab".into(), "4xBH".into(), backend.clone());
+        let _ = backend.state.set(state.clone());
+        assert_eq!(state.adopt_backend_serve().await, None);
+        assert_eq!(state.status(), ServingStatus::Serving("from-run".into()));
+        assert_eq!(state.endpoint().unwrap().base_url, "http://127.0.0.1:20011/v1");
     }
 }

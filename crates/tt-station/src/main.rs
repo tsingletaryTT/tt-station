@@ -56,15 +56,17 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use libttstation::agent_client::{AgentClient, SshRevokeBy};
 use libttstation::discovery::{
-    aggregate, manual::ManualProvider, mdns::MdnsProvider, DiscoveryProvider,
+    aggregate,
+    manual::{manual_status_fetch, ManualProvider},
+    mdns::MdnsProvider,
+    DiscoveryProvider,
 };
 use libttstation::model::{
     BoxRecord, ConfigSummary, Endpoint, LeaseList, LogsInfo, ModelsResponse, ServingList,
-    ServingStatus, StatusInfo,
+    StatusInfo,
 };
 use libttstation::pairing::{pair_complete, pair_init};
-use libttstation::secrets::{default_store, FileStore, SecretStore};
-use serde::Deserialize;
+use libttstation::secrets::SecretStore;
 
 mod console;
 
@@ -647,80 +649,6 @@ fn cmd_discover(hosts: &[String], no_mdns: bool, timeout_ms: u64) -> Result<Vec<
     Ok(aggregate(&providers, Duration::from_millis(timeout_ms)))
 }
 
-/// Build the `reqwest::blocking::Client` used to probe a manual host's
-/// `/status`. Both the overall request timeout and the TCP connect timeout
-/// are set to `timeout` -- without this, `reqwest::blocking::get` uses no
-/// request timeout at all and falls back to the OS's default TCP connect
-/// timeout (on the order of minutes) when a host is routable but not
-/// answering, which makes `tt-station discover --host <dead-ip>:<port> --timeout-ms
-/// <n>` hang far longer than `--timeout-ms` promises. Split out as its own
-/// function so it's unit-testable without making a real network call.
-fn build_probe_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
-        .timeout(timeout)
-        .connect_timeout(timeout)
-        .build()
-        .context("building HTTP client for manual host probe")
-}
-
-/// The `fetch` closure `ManualProvider` calls per configured host: a plain
-/// blocking `GET /status`, decoded into a `BoxRecord`. Blocking (not async)
-/// because `ManualProvider::discover` is a synchronous trait method -- see
-/// the module doc for why that's fine here (no runtime is active when
-/// `discover` runs).
-///
-/// `timeout` is the same duration as `discover`'s `--timeout-ms`: a manual
-/// probe shouldn't get to hang longer than mDNS browsing is allowed to run.
-fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> Result<BoxRecord> {
-    #[derive(Deserialize)]
-    struct StatusResponse {
-        name: String,
-        chips: String,
-        status: String,
-        /// (Task 3) The box's detected device-mesh label -- see
-        /// `tt-station-agentd::routes::StatusResponse::device_mesh`. Missing
-        /// or `null` on the wire both deserialize to `None` here (serde
-        /// treats an absent `Option<T>` field as `None`, same as an explicit
-        /// `null`), so this stays compatible with any `/status` responder
-        /// that predates Task 2 (e.g. `mock-box`).
-        device_mesh: Option<String>,
-        /// (Task 3) The box's detected primary NIC MAC -- see
-        /// `tt-station-agentd::routes::StatusResponse::mac`. Same
-        /// missing/`null` -> `None` back-compat reasoning as `device_mesh`.
-        mac: Option<String>,
-    }
-
-    let url = format!("http://{host}:{port}/status");
-    let client = build_probe_client(timeout)?;
-    let resp: StatusResponse = client
-        .get(&url)
-        .send()
-        .with_context(|| format!("GET {url}"))?
-        .error_for_status()
-        .with_context(|| format!("GET {url}"))?
-        .json()
-        .with_context(|| format!("parsing response from {url}"))?;
-
-    Ok(BoxRecord {
-        name: resp.name,
-        host: host.to_string(),
-        ctrl_port: port,
-        chips: resp.chips,
-        status: ServingStatus::from_txt(&resp.status)?,
-        // `/status` doesn't report an API version; manual hosts are assumed
-        // to speak the same API version this CLI does.
-        apiver: 1,
-        // This IS the "per-box status probe" `discover` already runs for
-        // manual hosts (mDNS-discovered boxes have no such probe -- see
-        // `libttstation::model::txt_decode`), so it's the one discover path
-        // that can populate `device_mesh` from real data instead of `None`.
-        device_mesh: resp.device_mesh,
-        // Same "this IS the per-box probe" reasoning as `device_mesh` above,
-        // applied to the box's detected primary NIC MAC (Task 3).
-        mac: resp.mac,
-    })
-}
-
 /// `tt-station pair <host:port> [--enable-ssh]`: run the pairing handshake and store
 /// the resulting token under `host` in the `SecretStore`. Returns the token
 /// (so the caller can decide how much of it to print) and, when
@@ -1248,12 +1176,7 @@ fn home_dir() -> Result<PathBuf> {
 /// `libttstation::secrets::default_store()` otherwise (Keychain on macOS,
 /// `FileStore` under `$XDG_CONFIG_HOME`/`~/.config` elsewhere).
 fn build_store() -> Result<Box<dyn SecretStore>> {
-    if let Ok(dir) = std::env::var("TT_CONFIG_DIR") {
-        return Ok(Box::new(FileStore::new(
-            PathBuf::from(dir).join("secrets.json"),
-        )));
-    }
-    Ok(default_store())
+    Ok(libttstation::secrets::store_from_env())
 }
 
 // ---------------------------------------------------------------------
@@ -1791,6 +1714,9 @@ fn print_ssh_revoke(key_path: &std::path::Path, json: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // These helpers moved to `libttstation::discovery::manual`; the tests below still cover them.
+    use libttstation::discovery::manual::build_probe_client;
+    use libttstation::model::ServingStatus;
 
     #[test]
     fn parse_host_port_splits_on_last_colon() {
