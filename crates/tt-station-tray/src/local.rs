@@ -27,7 +27,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
 use libttstation::official_tt::{not_official_message, parse_version, resolve_bin};
@@ -37,6 +37,7 @@ use libttstation::run_options::{
 use serde::Deserialize;
 use tokio::process::Command;
 
+use crate::perf::{self, PerfRef};
 use crate::station::{fits, ModelRow, ServingNow, StationId, StationKind, StationState};
 
 /// Port used for `tt serve --port` when the options do not set one. It matches the default the
@@ -60,6 +61,14 @@ pub struct LocalStation {
     /// field of `tt --json model list` the first time [`LocalStation::models`] runs, so that
     /// polling [`LocalStation::state`] does not have to list the whole catalog each time.
     mesh: Mutex<Option<String>>,
+    /// Where the official CLI installs tt-inference-server checkouts
+    /// (`~/.local/share/tenstorrent/tools`), searched by [`LocalStation::perf_reference`] when
+    /// the dry run does not name a checkout. `None` when `HOME` is unset.
+    tools_dir: Option<PathBuf>,
+    /// The parsed reference performance table, once one was found. Only a success is cached: a
+    /// failed lookup is retried on the next call (one dry run per Models page load), so a
+    /// checkout installed while the tray runs is picked up.
+    perf: Mutex<Option<Arc<PerfRef>>>,
 }
 
 impl LocalStation {
@@ -70,7 +79,17 @@ impl LocalStation {
             name: "This machine".to_string(),
             default_port: DEFAULT_SERVE_PORT,
             mesh: Mutex::new(None),
+            tools_dir: std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".local/share/tenstorrent/tools")),
+            perf: Mutex::new(None),
         }
+    }
+
+    /// Search `dir` instead of `~/.local/share/tenstorrent/tools` for tt-inference-server
+    /// checkouts when the dry run names none (tests).
+    pub fn with_tools_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.tools_dir = Some(dir.into());
+        self
     }
 
     /// A local station using the binary `official_tt::resolve_bin` finds: the
@@ -240,6 +259,7 @@ impl LocalStation {
                     kind: text("type").or_else(|| text("model_type")),
                     source: text("source").unwrap_or_else(|| "tt catalog".to_string()),
                     cached: m.get("cached").and_then(|c| c.as_bool()).unwrap_or(false),
+                    hf_repo: text("hf_repo"),
                     hardware,
                     name,
                 })
@@ -320,6 +340,39 @@ impl LocalStation {
         validate_model_name(model)?;
         self.vet().await?;
         self.tt_json(&["--json", "serve", model, "--dry-run"]).await
+    }
+
+    /// tt-inference-server's reference performance table ([`crate::perf`]) from the checkout
+    /// `tt serve` would use, or `None`.
+    ///
+    /// The checkout is the directory of the `run.py` in the argv of
+    /// `tt --json serve <sample_model> --dry-run` (read-only; nothing starts). When there is no
+    /// sample, the dry run fails, or its checkout has no reference file, the newest
+    /// `tt-inference-server-v*/src` under the tools directory that has one is used instead. The
+    /// file is read and parsed on a blocking-pool thread, never on the caller's (GTK) thread,
+    /// and a success is cached for the life of this station, so later calls start no process.
+    pub async fn perf_reference(&self, sample_model: Option<&str>) -> Option<Arc<PerfRef>> {
+        if let Some(p) = self.perf.lock().expect("perf mutex poisoned").clone() {
+            return Some(p);
+        }
+        let mut checkout = None;
+        if let Some(model) = sample_model {
+            if let Ok(plan) = self.serve_plan(model).await {
+                checkout =
+                    perf::checkout_from_plan(&plan).filter(|c| perf::reference_path(c).is_some());
+            }
+        }
+        if checkout.is_none() {
+            checkout = self.tools_dir.as_deref().and_then(perf::newest_checkout);
+        }
+        let checkout = checkout?;
+        let table = tokio::task::spawn_blocking(move || perf::load(&checkout))
+            .await
+            .ok()
+            .flatten()
+            .map(Arc::new)?;
+        *self.perf.lock().expect("perf mutex poisoned") = Some(table.clone());
+        Some(table)
     }
 
     /// Pick the server `stop` and `logs` act on. Rules:

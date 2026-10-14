@@ -28,6 +28,7 @@ use serde_json::{json, Map, Value};
 
 use crate::local::{local_serve_argv, DEFAULT_SERVE_PORT};
 use crate::menu_model::Dot;
+use crate::perf::{self, PerfRef, PerfSummary};
 use crate::registry::KnownStation;
 use crate::station::{ModelRow, StationId, StationState};
 
@@ -147,6 +148,77 @@ pub fn filter_choices(rows: &[ModelRow]) -> (Vec<String>, Vec<String>) {
     let sources: std::collections::BTreeSet<String> =
         rows.iter().map(|r| r.source.clone()).collect();
     (kinds.into_iter().collect(), sources.into_iter().collect())
+}
+
+/// What the Models page needs to show reference performance: the station's parsed
+/// tt-inference-server table and its mesh. The page has one only for a station that has both
+/// (today: this machine, once its mesh is known and a reference file was found). With none,
+/// the page shows no performance text at all.
+#[derive(Debug, Clone, Copy)]
+pub struct PerfContext<'a> {
+    pub table: &'a PerfRef,
+    pub mesh: &'a str,
+}
+
+/// The reference numbers for `row` in `ctx`, when there are any.
+pub fn model_perf(row: &ModelRow, ctx: Option<PerfContext<'_>>) -> Option<PerfSummary> {
+    let ctx = ctx?;
+    perf::summary(ctx.table, &row.name, row.hf_repo.as_deref(), ctx.mesh)
+}
+
+/// One model's line in the Models list: name, kind, source, `cached`, and the reference
+/// tokens-per-second suffix ([`perf::row_suffix`]) when the table has numbers for it.
+pub fn model_line(row: &ModelRow, ctx: Option<PerfContext<'_>>) -> String {
+    let mut s = format!("    {}", row.name);
+    if let Some(k) = &row.kind {
+        s.push_str(&format!("  ·  {k}"));
+    }
+    s.push_str(&format!("  ·  {}", row.source));
+    if row.cached {
+        s.push_str("  ·  cached");
+    }
+    if let Some(suffix) = model_perf(row, ctx).as_ref().and_then(perf::row_suffix) {
+        s.push_str(&suffix);
+    }
+    s
+}
+
+/// The detail pane text for `row` in group `group`: its fields, then (when `ctx` is given)
+/// either the reference performance block ([`perf::detail_block`]) or a line saying the table
+/// has no numbers for this mesh ([`perf::no_data_line`]). Without `ctx` nothing about
+/// performance is shown, because there is nothing true to say.
+pub fn model_detail(row: &ModelRow, group: &str, ctx: Option<PerfContext<'_>>) -> String {
+    let hw = if row.hardware.is_empty() {
+        "(not listed)".to_string()
+    } else {
+        row.hardware.join(", ")
+    };
+    let mut s = format!(
+        "{}\n\nGroup: {group}\nKind: {}\nSource: {}\nHardware: {hw}\nWeights cached: {}",
+        row.name,
+        row.kind.as_deref().unwrap_or("(not reported)"),
+        row.source,
+        if row.cached { "yes" } else { "no" },
+    );
+    if let Some(ctx) = ctx {
+        let block = match model_perf(row, Some(ctx)) {
+            Some(summary) => perf::detail_block(&summary),
+            None => perf::no_data_line(ctx.mesh, ctx.table.version.as_deref()),
+        };
+        s.push_str("\n\n");
+        s.push_str(&block);
+    }
+    s
+}
+
+/// A catalog model name for the one `tt serve --dry-run` that tells
+/// [`crate::local::LocalStation::perf_reference`] which tt-inference-server checkout `tt` uses:
+/// the first row whose source is `tt-inference-server`. `None` when there is none (the lookup
+/// then falls back to the newest installed checkout).
+pub fn perf_sample_model(rows: &[ModelRow]) -> Option<&str> {
+    rows.iter()
+        .find(|r| r.source.eq_ignore_ascii_case("tt-inference-server"))
+        .map(|r| r.name.as_str())
 }
 
 /// Whether a model list fetched for station `i` may still be shown.
@@ -662,12 +734,94 @@ mod tests {
     fn row(name: &str, kind: Option<&str>, source: &str, cached: bool, fits: bool) -> ModelRow {
         ModelRow {
             name: name.to_string(),
+            hf_repo: None,
             kind: kind.map(str::to_string),
             source: source.to_string(),
             hardware: vec!["p300x2".to_string()],
             cached,
             fits,
         }
+    }
+
+    // --- Reference performance on the Models page -----------------------------------------
+
+    const PERF_HF: &str = include_str!("../../tests/fixtures/perf_reference_hf.json");
+
+    fn catalog(name: &str, hf: Option<&str>) -> ModelRow {
+        ModelRow {
+            hf_repo: hf.map(str::to_string),
+            ..row(name, Some("llm"), "tt-inference-server", false, true)
+        }
+    }
+
+    #[test]
+    fn the_selected_models_detail_carries_its_reference_block() {
+        let table = perf::parse(PERF_HF, Some("0.22.0")).unwrap();
+        let ctx = PerfContext {
+            table: &table,
+            mesh: "p300x2",
+        };
+        let r = catalog("gemma-4-31B-it", Some("google/gemma-4-31B-it"));
+        let text = model_detail(&r, "Runs on this station", Some(ctx));
+        assert!(
+            text.starts_with("gemma-4-31B-it\n\nGroup: Runs on this station\n"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                "\n\nReference performance on p300x2 (tt-inference-server 0.22.0 targets, not \
+                 measured on this machine)\n\
+                 1 user, 128 in / 128 out: 46 ms to first token, 37 tok/s per user (theoretical)\n\
+                 32 users, 128 in / 128 out: 400 tok/s total (theoretical)\n\
+                 \"theoretical\" is the ceiling the file sets for this hardware."
+            ),
+            "{text}"
+        );
+        assert_eq!(
+            model_line(&r, Some(ctx)),
+            "    gemma-4-31B-it  ·  llm  ·  tt-inference-server  ·  ~37 tok/s/user"
+        );
+        // The row's hf_repo reaches the lookup: this name alone matches nothing in the file.
+        let by_repo = catalog("Qwen 3 32B (display name)", Some("Qwen/Qwen3-32B"));
+        assert!(model_line(&by_repo, Some(ctx)).ends_with("  ·  ~37 tok/s/user"));
+    }
+
+    #[test]
+    fn a_model_without_numbers_says_so_and_gets_no_suffix() {
+        let table = perf::parse(PERF_HF, Some("0.22.0")).unwrap();
+        let ctx = PerfContext {
+            table: &table,
+            mesh: "p300x2",
+        };
+        let r = catalog(
+            "Llama-3.1-8B-Instruct",
+            Some("meta-llama/Llama-3.1-8B-Instruct"),
+        );
+        assert!(model_detail(&r, "g", Some(ctx))
+            .ends_with("\n\nNo reference numbers for p300x2 in tt-inference-server 0.22.0."));
+        assert_eq!(
+            model_line(&r, Some(ctx)),
+            "    Llama-3.1-8B-Instruct  ·  llm  ·  tt-inference-server"
+        );
+    }
+
+    #[test]
+    fn without_a_perf_context_nothing_about_performance_is_shown() {
+        let r = catalog("gemma-4-31B-it", Some("google/gemma-4-31B-it"));
+        let text = model_detail(&r, "g", None);
+        assert!(!text.contains("eference"), "{text}");
+        assert!(!model_line(&r, None).contains("tok/s"));
+    }
+
+    #[test]
+    fn the_sample_model_is_the_first_catalog_row() {
+        let rows = vec![
+            row("a/bundle", None, "HuggingFace", false, true),
+            row("Cat-1", None, "tt-inference-server", false, true),
+            row("Cat-2", None, "tt-inference-server", false, true),
+        ];
+        assert_eq!(perf_sample_model(&rows), Some("Cat-1"));
+        assert_eq!(perf_sample_model(&rows[..1]), None);
     }
 
     /// 60 rows: names `Model-00` .. `Model-59`, cycling kind, source, cached and fits so that

@@ -502,7 +502,9 @@ pub fn checkout_from_plan(plan: &serde_json::Value) -> Option<PathBuf> {
         .iter()
         .filter_map(|a| a.as_str())
         .map(Path::new)
-        .find(|p| p.file_name().is_some_and(|f| f == "run.py"))
+        // tt prints absolute paths. A bare `run.py` has an empty parent, which would turn into
+        // a lookup relative to the tray's working directory.
+        .find(|p| p.is_absolute() && p.file_name().is_some_and(|f| f == "run.py"))
         .and_then(|p| p.parent())
         .map(Path::to_path_buf)
 }
@@ -891,6 +893,12 @@ mod tests {
         let bundle = serde_json::json!({"argv": ["/h/bin/tt-model", "serve", "a/b"]});
         assert_eq!(checkout_from_plan(&bundle), None);
         assert_eq!(checkout_from_plan(&serde_json::json!({})), None);
+        let relative = serde_json::json!({"argv": ["python3", "run.py"]});
+        assert_eq!(
+            checkout_from_plan(&relative),
+            None,
+            "relative run.py is not a checkout"
+        );
     }
 
     #[test]

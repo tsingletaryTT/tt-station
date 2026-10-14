@@ -411,7 +411,9 @@ pub fn set_margins(w: &impl IsA<gtk::Widget>, m: i32) {
 /// The headless check behind `tt-station-tray --smoke`. Never touches GTK or a display.
 ///
 /// It builds a registry in a fresh temporary directory, adds and saves a station, reloads it,
-/// groups a small fixture of model rows, and builds a run form and its preview. It returns an
+/// groups a small fixture of model rows, builds a run form and its preview, and runs the Models
+/// page's reference performance path (parse, lookup, row suffix, detail block) against a small
+/// fixture of tt-inference-server's `model_performance_reference.json` compiled into the binary. It returns an
 /// error naming the first thing that did not hold. It proves the window's logic links and runs
 /// in the shipped binary; it proves nothing about the widgets.
 pub fn smoke_check() -> anyhow::Result<()> {
@@ -431,6 +433,7 @@ pub fn smoke_check() -> anyhow::Result<()> {
 
         let row = |name: &str, source: &str, fits: bool| ModelRow {
             name: name.into(),
+            hf_repo: None,
             kind: Some("llm".into()),
             source: source.into(),
             hardware: vec!["p300x2".into()],
@@ -457,6 +460,38 @@ pub fn smoke_check() -> anyhow::Result<()> {
         if preview != "tt serve Llama-3.1-8B-Instruct --port 20001" {
             bail!("unexpected preview: {preview}");
         }
+
+        // Reference performance: the fixture is a real 0.18.0 snippet with short-name keys.
+        let table = crate::perf::parse(
+            include_str!("../../tests/fixtures/perf_reference_short.json"),
+            Some("0.18.0"),
+        )
+        .ok_or_else(|| anyhow::anyhow!("perf fixture did not parse"))?;
+        let ctx = Some(view_model::PerfContext {
+            table: &table,
+            mesh: "p300x2",
+        });
+        let gemma = ModelRow {
+            hf_repo: Some("google/gemma-4-31B-it".into()),
+            ..row("gemma-4-31B-it", "tt-inference-server", true)
+        };
+        let line = view_model::model_line(&gemma, ctx);
+        ensure!(
+            line.ends_with("  ·  ~37 tok/s/user"),
+            "perf row suffix missing: {line}"
+        );
+        let detail = view_model::model_detail(&gemma, "Runs on this station", ctx);
+        ensure!(
+            detail.contains(
+                "Reference performance on p300x2 (tt-inference-server 0.18.0 targets, not \
+                 measured on this machine)"
+            ),
+            "perf detail block missing: {detail}"
+        );
+        ensure!(
+            crate::perf::parse("{not json", None).is_none(),
+            "malformed perf JSON parsed"
+        );
         Ok(())
     })();
     let _ = std::fs::remove_dir_all(&dir);

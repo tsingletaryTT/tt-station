@@ -24,6 +24,8 @@ struct Opts {
     serve_fails: bool,
     /// `model ps` exits 5.
     ps_fails: bool,
+    /// File `serve <model> --dry-run` prints.
+    dry: PathBuf,
 }
 
 impl Default for Opts {
@@ -32,6 +34,7 @@ impl Default for Opts {
             ps: fixture("model_ps.json"),
             serve_fails: false,
             ps_fails: false,
+            dry: fixture("dry_run_catalog.json"),
         }
     }
 }
@@ -91,7 +94,7 @@ esac
         list = fixture("model_list.json").display(),
         ps_line = ps_line,
         serve_line = serve_line,
-        dry = fixture("dry_run_catalog.json").display(),
+        dry = o.dry.display(),
     );
     std::fs::write(&script, body).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -517,7 +520,128 @@ async fn local_run_refuses_non_server_workflows_before_tt_runs() {
             .await
             .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("workflow") && msg.contains(w.as_str()), "{msg}");
+        assert!(
+            msg.contains("workflow") && msg.contains(w.as_str()),
+            "{msg}"
+        );
         assert!(!log.exists(), "tt ran: {:?}", calls(&log));
     }
+}
+
+// --- Reference performance (crate::perf) through LocalStation ---------------------------------
+
+/// A fake tt-inference-server checkout `<root>/tt-inference-server-v<ver>/src` holding the
+/// short-name fixture in the 0.22 layout and a `VERSION` file. Returns the `src` path.
+fn fake_checkout(root: &Path, ver: &str) -> PathBuf {
+    let src = root.join(format!("tt-inference-server-v{ver}/src"));
+    let dir = src.join("reference_config/benchmarking/benchmark_targets");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(
+        fixture("perf_reference_short.json"),
+        dir.join("model_performance_reference.json"),
+    )
+    .unwrap();
+    std::fs::write(src.join("VERSION"), format!("{ver}\n")).unwrap();
+    src
+}
+
+/// A dry-run plan whose argv runs `<checkout>/run.py`, like the official CLI prints.
+fn dry_plan(dir: &Path, checkout: &Path) -> PathBuf {
+    let p = dir.join("dry.json");
+    let plan = serde_json::json!({
+        "model": "gemma-4-31B-it",
+        "argv": [checkout.join("../venv/bin/python"), checkout.join("run.py"), "--model", "gemma-4-31B-it"],
+    });
+    std::fs::write(&p, plan.to_string()).unwrap();
+    p
+}
+
+#[tokio::test]
+async fn perf_reference_comes_from_the_checkout_the_dry_run_names_and_is_cached() {
+    let dir = tempfile::tempdir().unwrap();
+    let named = fake_checkout(&dir.path().join("elsewhere"), "0.21.0");
+    // A newer checkout in the tools directory must lose to the one the dry run names.
+    let tools = dir.path().join("tools");
+    fake_checkout(&tools, "0.99.0");
+    let (script, log) = fake_tt_with(
+        dir.path(),
+        "tt 1.0.1",
+        Opts {
+            dry: dry_plan(dir.path(), &named),
+            ..Opts::default()
+        },
+    );
+    let s = Station::Local(LocalStation::new(&script).with_tools_dir(&tools));
+    let table = s
+        .perf_reference(Some("gemma-4-31B-it"))
+        .await
+        .expect("table");
+    assert_eq!(table.version.as_deref(), Some("0.21.0"));
+    assert!(table.models.contains_key("gemma-4-31b-it"));
+    assert!(calls(&log).contains(&"--json serve gemma-4-31B-it --dry-run".to_string()));
+
+    let before = calls(&log).len();
+    let again = s
+        .perf_reference(Some("gemma-4-31B-it"))
+        .await
+        .expect("cached");
+    assert!(
+        std::sync::Arc::ptr_eq(&table, &again),
+        "second call reuses the parsed table"
+    );
+    assert_eq!(
+        calls(&log).len(),
+        before,
+        "a cached table starts no process"
+    );
+}
+
+#[tokio::test]
+async fn perf_reference_falls_back_to_the_newest_installed_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let tools = dir.path().join("tools");
+    fake_checkout(&tools, "0.9.0");
+    fake_checkout(&tools, "0.18.0");
+    // The default dry-run fixture's argv has a relative `run.py`, which names no checkout.
+    let (script, _) = fake_tt(dir.path(), "tt 1.0.1");
+    let s = Station::Local(LocalStation::new(&script).with_tools_dir(&tools));
+    let table = s
+        .perf_reference(Some("Llama-3.1-8B-Instruct"))
+        .await
+        .expect("table");
+    assert_eq!(table.version.as_deref(), Some("0.18.0"));
+    // No sample model at all also falls back.
+    let s = Station::Local(LocalStation::new(&script).with_tools_dir(&tools));
+    assert!(s.perf_reference(None).await.is_some());
+}
+
+#[tokio::test]
+async fn perf_reference_is_none_when_no_file_exists_anywhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, _) = fake_tt(dir.path(), "tt 1.0.1");
+    let s = Station::Local(LocalStation::new(&script).with_tools_dir(dir.path().join("empty")));
+    assert!(s
+        .perf_reference(Some("Llama-3.1-8B-Instruct"))
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_box_has_no_perf_reference() {
+    // The agent's /models carries no reference numbers; nothing is requested or invented.
+    let s = Station::Remote(tt_station_tray::remote::RemoteStation::new(
+        "http://127.0.0.1:9".to_string(),
+        "nowhere",
+        None,
+    ));
+    assert!(s.perf_reference(Some("anything")).await.is_none());
+}
+
+#[tokio::test]
+async fn local_models_carry_hf_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let (script, _) = fake_tt(dir.path(), "tt 1.0.1");
+    let rows = station(&script).models().await.unwrap();
+    let g = rows.iter().find(|r| r.name == "gemma-4-31B-it").unwrap();
+    assert_eq!(g.hf_repo.as_deref(), Some("google/gemma-4-31B-it"));
 }

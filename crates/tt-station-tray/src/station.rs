@@ -79,6 +79,11 @@ pub struct StationState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelRow {
     pub name: String,
+    /// The Hugging Face repo id (`google/gemma-4-31B-it`) when the source reports one. `tt
+    /// model list` does for catalog models; a box's agent does not. Used to find the model in
+    /// tt-inference-server's reference performance table ([`crate::perf`]).
+    #[serde(default)]
+    pub hf_repo: Option<String>,
     /// Model type (`llm`, `embedding`, ...) when the source says. Hub bundles often do not.
     pub kind: Option<String>,
     /// Where the model comes from (`tt-inference-server`, `HuggingFace`, `local`, or `box` for a
@@ -198,6 +203,23 @@ impl Station {
         match self {
             Station::Local(s) => s.serve_plan(model).await.map(Some),
             Station::Remote(_) => Ok(None),
+        }
+    }
+
+    /// tt-inference-server's reference performance table for this station, or `None`.
+    ///
+    /// For this machine it comes from the checkout `tt serve` would use (see
+    /// [`LocalStation::perf_reference`]); `sample_model` is any catalog model name, used for the
+    /// one `tt serve --dry-run` that names the checkout. For a box it is always `None`: the
+    /// agent's `/models` does not carry reference numbers yet, and the tray does not invent
+    /// them. Never fails; a missing or malformed file is `None`.
+    pub async fn perf_reference(
+        &self,
+        sample_model: Option<&str>,
+    ) -> Option<std::sync::Arc<crate::perf::PerfRef>> {
+        match self {
+            Station::Local(s) => s.perf_reference(sample_model).await,
+            Station::Remote(_) => None,
         }
     }
 

@@ -139,6 +139,7 @@ impl RemoteStation {
             .map(|m| ModelRow {
                 fits: fits(&m.devices, mesh.as_deref()),
                 name: m.name,
+                hf_repo: None,
                 kind: None,
                 source: "box".to_string(),
                 hardware: m.devices,

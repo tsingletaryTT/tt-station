@@ -9,20 +9,30 @@
 //! The spec's detail pane shows `tt model info` data. No `Station` method returns that yet, so
 //! the detail pane shows the fields of [`ModelRow`] (kind, source, hardware, cached, fit).
 //!
+//! **Reference performance.** For this machine the page also shows tt-inference-server's
+//! reference targets ([`crate::perf`]): a short tokens-per-second suffix on list rows and a
+//! labelled block in the detail pane, both built by [`view_model::model_line`] and
+//! [`view_model::model_detail`]. The table is found and parsed by
+//! [`Station::perf_reference`](crate::station::Station::perf_reference) inside the page's load
+//! task, on the tokio runtime and never on the GTK thread, and is cached by the station. A box
+//! has no table, so its rows and details show no performance text.
+//!
 //! Never looked at or clicked: the list's look, scrolling, the heading style, selection and
 //! the filter dropdowns' behaviour.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gtk::prelude::*;
 use gtk4 as gtk;
 
+use crate::perf::PerfRef;
 use crate::station::ModelRow;
 
 use super::view_model::{
-    filter_choices, group_models, load_is_current, needs_reload, on_load_dropped, ModelFilter,
-    ModelGroups,
+    filter_choices, group_models, load_is_current, model_detail, model_line, needs_reload,
+    on_load_dropped, perf_sample_model, ModelFilter, ModelGroups, PerfContext,
 };
 use super::{set_margins, spawn_call, App};
 
@@ -37,6 +47,10 @@ enum Entry {
 struct Page {
     rows: RefCell<Vec<ModelRow>>,
     mesh_known: Cell<bool>,
+    /// The loaded station's mesh, for the reference performance lookup.
+    mesh: RefCell<Option<String>>,
+    /// The loaded station's reference performance table, when it has one (this machine only).
+    perf: RefCell<Option<Arc<PerfRef>>>,
     entries: RefCell<Vec<Entry>>,
     /// The station index the rows were loaded for, so a station change triggers a reload.
     loaded_for: Cell<Option<usize>>,
@@ -52,6 +66,18 @@ const ALL_KINDS: &str = "All kinds";
 const ALL_SOURCES: &str = "All sources";
 
 impl Page {
+    /// Run `f` with the reference performance context for the loaded station: `Some` only when
+    /// both a table and a mesh are known.
+    fn with_perf<R>(&self, f: impl FnOnce(Option<PerfContext<'_>>) -> R) -> R {
+        let perf = self.perf.borrow();
+        let mesh = self.mesh.borrow();
+        let ctx = match (perf.as_deref(), mesh.as_deref()) {
+            (Some(table), Some(mesh)) => Some(PerfContext { table, mesh }),
+            _ => None,
+        };
+        f(ctx)
+    }
+
     /// The filter as the widgets show it now.
     fn filter(&self) -> ModelFilter {
         let pick = |d: &gtk::DropDown| -> Option<String> {
@@ -76,7 +102,8 @@ impl Page {
             entries.push(Entry::Heading(format!("{heading} ({})", rows.len())));
             entries.extend(rows.iter().cloned().map(|r| Entry::Model(r, heading)));
         }
-        let lines: Vec<String> = entries.iter().map(line).collect();
+        let lines: Vec<String> =
+            self.with_perf(|ctx| entries.iter().map(|e| line(e, ctx)).collect());
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         *self.entries.borrow_mut() = entries;
         self.strings.splice(0, self.strings.n_items(), &refs);
@@ -92,38 +119,12 @@ impl Page {
     }
 }
 
-/// The text of one list line.
-fn line(e: &Entry) -> String {
+/// The text of one list line (the model text comes from [`view_model::model_line`]).
+fn line(e: &Entry, ctx: Option<PerfContext<'_>>) -> String {
     match e {
         Entry::Heading(h) => h.clone(),
-        Entry::Model(r, _) => {
-            let mut s = format!("    {}", r.name);
-            if let Some(k) = &r.kind {
-                s.push_str(&format!("  ·  {k}"));
-            }
-            s.push_str(&format!("  ·  {}", r.source));
-            if r.cached {
-                s.push_str("  ·  cached");
-            }
-            s
-        }
+        Entry::Model(r, _) => model_line(r, ctx),
     }
-}
-
-/// The detail pane text for a model.
-fn detail(r: &ModelRow, group: &str) -> String {
-    let hw = if r.hardware.is_empty() {
-        "(not listed)".to_string()
-    } else {
-        r.hardware.join(", ")
-    };
-    format!(
-        "{}\n\nGroup: {group}\nKind: {}\nSource: {}\nHardware: {hw}\nWeights cached: {}",
-        r.name,
-        r.kind.as_deref().unwrap_or("(not reported)"),
-        r.source,
-        if r.cached { "yes" } else { "no" },
-    )
 }
 
 pub fn build(app: &App) -> gtk::Widget {
@@ -134,6 +135,8 @@ pub fn build(app: &App) -> gtk::Widget {
     let page = Rc::new(Page {
         rows: RefCell::new(Vec::new()),
         mesh_known: Cell::new(false),
+        mesh: RefCell::new(None),
+        perf: RefCell::new(None),
         entries: RefCell::new(Vec::new()),
         loaded_for: Cell::new(None),
         strings: gtk::StringList::new(&[]),
@@ -228,7 +231,8 @@ pub fn build(app: &App) -> gtk::Widget {
             let entry = page.entries.borrow().get(sel.selected() as usize).cloned();
             match entry {
                 Some(Entry::Model(r, group)) => {
-                    detail_label.set_text(&detail(&r, group));
+                    let text = page.with_perf(|ctx| model_detail(&r, group, ctx));
+                    detail_label.set_text(&text);
                     *chosen.borrow_mut() = Some(r.name.clone());
                     run.set_sensitive(true);
                 }
@@ -327,9 +331,16 @@ fn load(app: &App, page: &Rc<Page>) {
             let models = station.models().await;
             // Read the mesh after `models()`: the local station learns it from `tt model list`.
             let mesh = station.state().await.mesh;
-            (models, mesh)
+            // The reference performance table: one `tt serve --dry-run` and one file parse the
+            // first time, cached by the station afterwards; always `None` for a box.
+            let sample = models
+                .as_ref()
+                .ok()
+                .and_then(|rows| perf_sample_model(rows).map(str::to_string));
+            let perf = station.perf_reference(sample.as_deref()).await;
+            (models, mesh, perf)
         },
-        move |(models, mesh)| {
+        move |(models, mesh, perf)| {
             // Drop a result that arrived after the person switched station or a newer load
             // started; showing it would let "Run..." send this station's model elsewhere.
             if !load_is_current(page.loaded_for.get(), app2.selected.get(), i) {
@@ -349,12 +360,15 @@ fn load(app: &App, page: &Rc<Page>) {
                     let sr: Vec<&str> = s.iter().map(String::as_str).collect();
                     *page.rows.borrow_mut() = rows;
                     page.mesh_known.set(mesh.is_some());
+                    *page.mesh.borrow_mut() = mesh;
+                    *page.perf.borrow_mut() = perf;
                     page.kind.set_model(Some(&gtk::StringList::new(&kr)));
                     page.source.set_model(Some(&gtk::StringList::new(&sr)));
                     page.regroup();
                 }
                 Err(e) => {
                     page.rows.borrow_mut().clear();
+                    *page.perf.borrow_mut() = None;
                     page.regroup();
                     page.status
                         .set_text(&format!("Could not list models: {e:#}"));
