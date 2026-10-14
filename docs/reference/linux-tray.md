@@ -25,9 +25,12 @@ local until the next push.
 GitHub Copilot reviewed #2 on 2026-10-14 (seven inline comments and one summary claim). Each
 claim matched the code. The fixes were written test-first in local commits `c0ba10b` to
 `f47d0c5`, and an independent review of those added a second round (`14bf6da` onward):
-* agentd's `tt` backend: a slow stop no longer releases a newer serve's lease or reports it
-  idle; stops run one at a time (a stop waits at most 60 s for an earlier one, then fails
-  with "a stop is already in progress");
+* agentd's `tt` backend: a slow stop no longer releases the lease of a serve recorded while it
+  ran; `/stop`s and the swap at the start of a `/run` take turns (a stop waits at most 60 s for
+  an earlier one, then answers 409 "a stop is already in progress"); a stop requested before a
+  `/run` but given its turn after that run's swap no longer stops the model being started;
+* agentd's `/stop` route (every backend): a slow stop that ends after a newer `/run` no longer
+  reports that serve as idle;
 * an agent without `/run/schema` gets a default run;
 * a new pairing token rebuilds the tray's station;
 * a local stop is judged by its exit status, and a failing local `tt` command shows tt's JSON
@@ -39,10 +42,26 @@ claim matched the code. The fixes were written test-first in local commits `c0ba
   and turns into Restart after a successful Start;
 * Restart checks the replacement before anything is stopped (see "Run options").
 
-Gaps that remain: a Restart can still lose the old serve when the new one fails after the
-stop for a reason no check can see in advance (no chips, a failing container); a box paired in
-the CLI under one host spelling and listed in the tray under another is still unpaired in the
-tray; none of the window fixes was exercised on a display. The triage is in
+Gaps that remain:
+* A Restart can still lose the old serve when the new one fails after the stop for a reason
+  no check can see in advance (no chips, a failing container).
+* A stop that waits more than 60 s for an earlier one (a hung `tt model stop`) gives up with
+  409; so does a `/run` whose swap waits that long.
+* When a `/run` aborts because of a `/stop`, the start stops its own container outside the
+  stop turn (`fail_after_serve`), so a hinted `/stop` of the same model can run
+  `tt model stop` at the same moment. Both stops end in `docker stop`, which waits for the
+  container to exit, so the start's lease release (and gozer's chip reset) follows the exit.
+  For a tt-model bundle, `tt-model stop` may then run its own `tt-smi -r` after a dirty
+  shutdown, which can overlap gozer's reset. Taking the turn there would make an aborting start
+  wait behind a parked stop, so this is left open.
+* `/status` reconciliation (`reconciled_status` in routes.rs) still calls `set_idle`
+  unconditionally when the backend reports idle, so it can race a `/run` the same way `/stop`
+  did before; a follow-up.
+* A box paired in the CLI under one host spelling and listed in the tray under another is
+  still unpaired in the tray.
+* None of the window fixes was exercised on a display.
+
+The triage is in
 `.superpowers/sdd/2026-10-05-linux-tray/copilot-review-triage.md` (local, gitignored).
 
 ## Stations

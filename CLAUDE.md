@@ -94,13 +94,16 @@ ScrolledWindow, and a live walk of all three pages logged none. Report:
 `.superpowers/sdd/2026-10-05-linux-tray/perf-and-paned-report.md`.
 Copilot review of PR #2 (2026-10-14): 7 inline comments plus the summary claim. Each matched
 the code and was fixed test-first (`c0ba10b`..`f47d0c5`), then an independent review added a
-second round (`14bf6da` onward). All local, not pushed. Fixed: agentd `tt` backend stop/lease
-race (serve epoch, one stop at a time with a 60 s wait, `/stop` keeps a newer serve's status),
+second and third round (`14bf6da` onward). All local, not pushed. Fixed: agentd `tt` backend
+stop/lease races (serve epoch; stops take turns with a 60 s wait, then 409; a stop requested
+before a start never acts on it), `/stop` route keeps a newer serve's status (all backends),
 `/run/schema` 404 = empty schema, token-change rebuild, local stop by exit status and tt's JSON
 error text, Models page station switch, pairing case, Start in-flight guard and Restart after a
 successful Start, Restart pre-check (`Station::replace`; a `tt`-backend box gets only `/run`).
-Still open: a Restart loses the old serve when the new one fails for a reason no check sees;
-CLI-vs-tray host spelling; no window fix seen on a display. Draft replies:
+Still open (listed in docs/reference/linux-tray.md): a Restart loses the old serve when the new
+one fails for a reason no check sees; an aborting start's own stop runs outside the stop turn;
+`reconciled_status`'s unconditional `set_idle`; CLI-vs-tray host spelling; no window fix seen
+on a display. Draft replies:
 `.superpowers/sdd/2026-10-05-linux-tray/copilot-replies-draft.md` (not posted).
 Owner to do for franklinstower: install and start `tt-station-agentd` and send the pairing code;
 say whether the session is GNOME or KDE; authorize an SSH key if we are to test over SSH;
