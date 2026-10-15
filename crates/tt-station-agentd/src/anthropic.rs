@@ -159,7 +159,10 @@ pub fn to_openai(req: &Value, model: &str) -> Value {
 
 fn stop_reason(finish: Option<&str>, has_tools: bool) -> &'static str {
     match finish {
-        Some("tool_calls") => "tool_use",
+        // vLLM can say `tool_calls` with no call in the reply (gpt-oss declining
+        // under tool_choice "required"); "tool_use" with nothing to run would
+        // leave the client waiting on a call that isn't there.
+        Some("tool_calls") if has_tools => "tool_use",
         Some("length") => "max_tokens",
         Some("stop") if has_tools => "tool_use",
         _ => "end_turn",
@@ -1044,6 +1047,15 @@ mod tests {
         assert_eq!(text(s.chunk(&c("Hi <think>hmm</think>there"))), "Hi there");
         assert_eq!(text(s.chunk(&c(" and <think>still"))), " and ");
         assert_eq!(text(s.chunk(&c(" thinking</think> done"))), " done");
+    }
+
+    #[test]
+    fn a_tool_calls_finish_without_a_call_ends_the_turn() {
+        let resp = json!({ "choices": [{ "finish_reason": "tool_calls", "message": { "content": "I can't do that with these tools." } }], "usage": {} });
+        assert_eq!(from_openai(&resp, "m")["stop_reason"], "end_turn");
+        let mut s = Stream::new("m");
+        s.chunk(&json!({ "choices": [{ "delta": { "content": "I can't." }, "finish_reason": "tool_calls" }] }));
+        assert!(s.finish().join("").contains("\"stop_reason\":\"end_turn\""));
     }
 
     #[test]
