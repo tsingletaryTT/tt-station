@@ -508,3 +508,52 @@ mod signed_out_tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::*;
+    use libttstation::model::Endpoint;
+    use std::time::Instant;
+
+    #[test]
+    fn port_from_base_url_parses_the_common_shapes() {
+        assert_eq!(port_from_base_url("http://host:8003/v1"), Some(8003));
+        assert_eq!(port_from_base_url("http://127.0.0.1:8000/v1"), Some(8000));
+        // No port at all.
+        assert_eq!(port_from_base_url("http://host/v1"), None);
+        // No scheme separator.
+        assert_eq!(port_from_base_url("host:8003/v1"), None);
+        // Non-numeric "port".
+        assert_eq!(port_from_base_url("http://host:abc/v1"), None);
+    }
+
+    #[test]
+    fn resolve_metrics_port_prefers_stored_endpoint_over_configured_default() {
+        // No endpoint stored (idle box) -> falls back to the configured
+        // serving port.
+        let state = AppState::new(
+            "qb2-lab".to_string(),
+            "4xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_serving_config("127.0.0.1".to_string(), 9000);
+        assert_eq!(resolve_metrics_port(&state), 9000);
+
+        // Once something is (recorded as) serving, its endpoint's own port
+        // wins over the agent's configured default.
+        state.set_serving(Endpoint {
+            base_url: "http://127.0.0.1:8003/v1".to_string(),
+            model: "meta-llama/Llama-3.1-8B-Instruct".to_string(),
+            requires_key: false,
+        });
+        assert_eq!(resolve_metrics_port(&state), 8003);
+    }
+
+    #[test]
+    fn the_recorder_reads_the_chips_every_thirty_seconds_on_its_own() {
+        assert!(chips_due(None), "the first tick reads them");
+        assert!(!chips_due(Some(Instant::now())));
+        assert!(!chips_due(Some(Instant::now() - METRICS_INTERVAL * 5)));
+        assert!(chips_due(Some(Instant::now() - CHIPS_INTERVAL)));
+    }
+}

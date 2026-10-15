@@ -2358,3 +2358,171 @@ mod pair_init_tests {
         assert!(state.pair_init_allowed(ip(9), 1061));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cached_snapshot_dedupes_tt_smi_within_ttl() {
+        // Stub `tt-smi`: a script that records one run (appends a byte to a
+        // counter file) and prints a minimal snapshot. Two `cached_snapshot`
+        // calls within the TTL must execute it only ONCE — the whole point of
+        // the shared cache (N clients → ~one tt-smi per interval, not one each).
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ttsmi-dedup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let counter = dir.join("count");
+        let _ = std::fs::remove_file(&counter);
+        let script = dir.join("tt-smi-stub.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf x >> '{c}'\nprintf '{{\"device_info\":[]}}'\n",
+                c = counter.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // 10s TTL so both calls land in the same window.
+        let state = AppState::new(
+            "t".to_string(),
+            "1xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_telemetry_config(script.to_string_lossy().into_owned(), 10_000);
+
+        let a = state.cached_snapshot().await.unwrap();
+        let b = state.cached_snapshot().await.unwrap();
+        assert_eq!(a, b, "second call reuses the cached snapshot");
+        let runs = std::fs::read(&counter).map(|v| v.len()).unwrap_or(0);
+        assert_eq!(
+            runs, 1,
+            "tt-smi ran once within the TTL, not per call (got {runs})"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_telemetry_viewers_share_one_tt_smi() {
+        // Eight `/telemetry` sockets ticking at once (each tick is a
+        // `cached_snapshot`) run tt-smi once between them, not once each.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ttsmi-herd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let counter = dir.join("count");
+        let _ = std::fs::remove_file(&counter);
+        let script = dir.join("tt-smi-stub.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf x >> '{c}'\nsleep 0.3\nprintf '{{\"device_info\":[]}}'\n",
+                c = counter.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let state = AppState::new(
+            "t".to_string(),
+            "1xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_telemetry_config(script.to_string_lossy().into_owned(), 1_000);
+        let ticks: Vec<_> = (0..8)
+            .map(|_| {
+                let st = state.clone();
+                tokio::spawn(async move { st.cached_snapshot().await.is_ok() })
+            })
+            .collect();
+        for t in ticks {
+            assert!(t.await.unwrap());
+        }
+        let runs = std::fs::read(&counter).map(|v| v.len()).unwrap_or(0);
+        assert_eq!(runs, 1, "eight viewers, one tt-smi (got {runs})");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_power_command_runs_the_configured_command() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ttpower-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("ran");
+        let _ = std::fs::remove_file(&marker);
+        let script = dir.join("fake-power.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf x >> '{m}'\n", m = marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Through sh, not exec'd directly: another test forking while this
+        // file is still open for writing makes exec fail with "Text file busy".
+        let cmd = vec!["/bin/sh".to_string(), script.to_string_lossy().into_owned()];
+
+        let state = AppState::new(
+            "t".to_string(),
+            "1xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_power_config(cmd.clone(), cmd.clone(), cmd.clone(), cmd.clone());
+
+        state
+            .run_power_command(crate::power::PowerAction::Reboot, false)
+            .expect("power command runs");
+        assert!(marker.exists(), "configured power command was executed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn pending(tool: &str, age: Duration) -> crate::assistant::PendingAction {
+        crate::assistant::PendingAction {
+            tool: tool.to_string(),
+            args: serde_json::json!({}),
+            summary: String::new(),
+            created: Instant::now() - age,
+        }
+    }
+
+    fn bare_state() -> AppState {
+        AppState::new(
+            "t".to_string(),
+            "1xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+    }
+
+    #[test]
+    fn pending_actions_are_taken_once_and_expire_after_the_ttl() {
+        let state = bare_state();
+        let fresh = state.insert_pending_action(pending("stop_model", Duration::ZERO));
+        let stale = state.insert_pending_action(pending(
+            "stop_model",
+            crate::assistant::PENDING_TTL + Duration::from_secs(1),
+        ));
+        assert!(state.take_pending_action(&stale).is_none(), "expired");
+        assert_eq!(
+            state.take_pending_action(&fresh).unwrap().tool,
+            "stop_model"
+        );
+        assert!(state.take_pending_action(&fresh).is_none(), "consumed");
+    }
+
+    #[test]
+    fn pending_actions_are_capped_by_evicting_the_oldest() {
+        let state = bare_state();
+        let oldest = state.insert_pending_action(pending("run_model", Duration::from_secs(60)));
+        let mut rest = Vec::new();
+        for _ in 0..crate::assistant::MAX_PENDING {
+            rest.push(state.insert_pending_action(pending("stop_model", Duration::ZERO)));
+        }
+        assert!(
+            state.take_pending_action(&oldest).is_none(),
+            "oldest evicted"
+        );
+        for id in rest {
+            assert!(state.take_pending_action(&id).is_some());
+        }
+    }
+}

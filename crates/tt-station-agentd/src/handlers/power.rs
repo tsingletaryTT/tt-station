@@ -237,3 +237,29 @@ pub(crate) async fn power_info(
             .unwrap_or_else(|_| crate::power::readiness_blocking("ttuser", &std::env::temp_dir())),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn power_success_status_is_202_for_machine_ops_200_for_reset_chips() {
+        use crate::power::PowerAction;
+        assert_eq!(
+            power_success_status(PowerAction::ResetChips),
+            StatusCode::OK
+        );
+        assert_eq!(
+            power_success_status(PowerAction::Suspend),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            power_success_status(PowerAction::Reboot),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            power_success_status(PowerAction::Shutdown),
+            StatusCode::ACCEPTED
+        );
+    }
+}
