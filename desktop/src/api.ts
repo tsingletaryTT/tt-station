@@ -30,6 +30,10 @@ declare global {
       removeBox?: (id: string) => Promise<unknown>;
       /** The pairing screen (find a box on the network). */
       showConnect?: () => Promise<void>;
+      /** Where this computer keeps its box tokens: the OS keychain, or (no keychain) an owner-only file. */
+      tokenStorage?: () => Promise<{ protected: boolean; where: string | null; backend: string }>;
+      /** This computer was removed from the box: forget its token and show the connect screen. */
+      signedOut?: () => Promise<void>;
       /** The box's command line from this computer, over SSH with TT Station's own key. */
       ssh?: (what: "terminal" | "vscode" | "command") => Promise<{ ok: boolean; error?: string; command?: string; user?: string; host?: string }>;
       platform?: string;
@@ -253,6 +257,19 @@ export interface Job {
 }
 
 export interface Person { id: string; name: string }
+/** A computer or phone paired with the box (`GET /devices`); never its token. */
+export interface PairedDevice {
+  id: string;
+  name: string;
+  platform: string | null;
+  /** Unix seconds; null for a device paired before the box kept track. */
+  paired: number | null;
+  last_used: number;
+  /** Unix seconds: signed out then unless used before. */
+  expires: number;
+  /** The device asking. */
+  this_device: boolean;
+}
 export interface Schedule { id: string; mode: string; time: string; days: number[]; enabled: boolean }
 
 export interface OrchardRun {

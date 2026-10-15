@@ -18,7 +18,7 @@ export default defineConfig({
       ["/status", "/serve", "/modes", "/run", "/stop", "/tt", "/telemetry", "/assistant", "/metrics", "/doctor",
        "/events", "/clients", "/connect", "/keys", "/orchard", "/jobs", "/people", "/schedules", "/energy",
        "/remote", "/power", "/software", "/lab", "/generate", "/creations", "/docs", "/memories", "/logs",
-       "/leases", "/coserve", "/bench", "/pair"].map((p) => [p, { target: "http://127.0.0.1:8765", ws: true }]),
+       "/leases", "/coserve", "/bench", "/pair", "/devices"].map((p) => [p, { target: "http://127.0.0.1:8765", ws: true }]),
     ),
   },
 });

@@ -51,11 +51,7 @@ pub const MAX_PEOPLE: usize = 12;
 const MAX_NAME: usize = 40;
 
 fn digest(token: &str) -> String {
-    ring::digest::digest(&ring::digest::SHA256, token.as_bytes())
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::sessions::token_digest(token)
 }
 
 fn now() -> u64 {
@@ -168,6 +164,23 @@ impl People {
         removed
     }
 
+    /// Forget whose the device with this token digest was (it was signed out).
+    pub fn forget_phone(&self, token_sha256: &str) {
+        let mut book = self.book.lock().expect("people mutex");
+        if book.phones.remove(token_sha256).is_some() {
+            self.save(&book);
+        }
+    }
+
+    /// Forget every device's person (the box was reset); the people stay.
+    pub fn forget_all_phones(&self) {
+        let mut book = self.book.lock().expect("people mutex");
+        if !book.phones.is_empty() {
+            book.phones.clear();
+            self.save(&book);
+        }
+    }
+
     /// Make the phone with this token someone's (or no one's).
     pub fn assign(&self, token: &str, person: Option<&str>) -> Result<(), String> {
         let mut book = self.book.lock().expect("people mutex");
@@ -204,16 +217,16 @@ pub struct Who {
 }
 
 impl FromRequestParts<AppState> for Who {
-    type Rejection = StatusCode;
+    type Rejection = crate::routes::AuthRejection;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, StatusCode> {
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+        crate::routes::BearerAuth::from_request_parts(parts, state).await?;
         let token = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .filter(|t| state.is_valid_token(t))
-            .ok_or(StatusCode::UNAUTHORIZED)?
+            .unwrap_or_default()
             .to_string();
         let person = state.people().for_token(&token);
         Ok(Who { token, person })

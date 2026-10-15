@@ -538,19 +538,22 @@ pub struct TermQuery {
 /// `GET /coding/term` (WebSocket): a session's terminal.
 pub(crate) async fn term_ws(ws: WebSocketUpgrade, State(state): State<AppState>, headers: axum::http::HeaderMap, Query(q): Query<TermQuery>) -> Response {
     // The token in a header, not the URL (crate::routes::ws_token).
-    if !crate::routes::ws_token(&headers).is_some_and(|t| state.is_valid_token(&t)) {
+    let Some(token) = crate::routes::ws_token(&headers).filter(|t| state.is_valid_token(t)) else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
+    // Removing this device (or resetting the box) closes its terminal too.
+    let signed_out = state.signed_out(token);
     let ws = ws.protocols([crate::routes::WS_PROTOCOL]);
     if !valid_id(&q.session) || load(&state, &q.session).is_none() {
         return (StatusCode::NOT_FOUND, "no such session").into_response();
     }
     let path = sock(&state, &q.session);
     let (cols, rows) = (q.cols.unwrap_or(120).clamp(40, 400), q.rows.unwrap_or(36).clamp(10, 200));
-    ws.on_upgrade(move |socket| bridge(socket, path, cols, rows))
+    ws.on_upgrade(move |socket| bridge(socket, path, cols, rows, signed_out))
 }
 
-async fn bridge(mut socket: WebSocket, path: PathBuf, cols: u16, rows: u16) {
+async fn bridge(mut socket: WebSocket, path: PathBuf, cols: u16, rows: u16, signed_out: impl std::future::Future<Output = ()>) {
+    tokio::pin!(signed_out);
     let conn = match tokio::net::UnixStream::connect(&path).await {
         Ok(c) => c,
         Err(_) => {
@@ -563,6 +566,10 @@ async fn bridge(mut socket: WebSocket, path: PathBuf, cols: u16, rows: u16) {
     let mut buf = vec![0u8; 65536];
     loop {
         tokio::select! {
+            () = &mut signed_out => {
+                let _ = socket.send(Message::Close(Some(crate::routes::signed_out_frame()))).await;
+                break;
+            }
             n = rd.read(&mut buf) => {
                 match n {
                     Ok(0) | Err(_) => break,

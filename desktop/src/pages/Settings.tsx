@@ -12,9 +12,9 @@ import { Select } from "@tenstorrent/vesper/select";
 import { Badge } from "@tenstorrent/vesper/badge";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { useModal, Modal } from "@tenstorrent/vesper/modal";
-import { del, delWith, get, type Mode, patch, type Person, post, put, type Schedule } from "../api";
+import { ago, boxName, del, delWith, get, type Mode, patch, type PairedDevice, type Person, post, put, type Schedule } from "../api";
 import { ThemeSwitcher } from "@tenstorrent/vesper/theme-switcher";
-import { Card, copyText, Eyebrow, Page, readable, Spark, toastError, toastOk, usePoll } from "../ui";
+import { Card, copyText, Empty, Eyebrow, Page, readable, Spark, toastError, toastOk, usePoll } from "../ui";
 import { Speaker, type VoiceStatus } from "../voice";
 import { ask, askText } from "../dialog";
 
@@ -25,7 +25,7 @@ const SECTIONS: { id: Section; label: string; hint: string }[] = [
   { id: "models", label: "Models", hint: "Which models the box uses" },
   { id: "power", label: "Power and energy", hint: "Power, schedules, energy use" },
   { id: "people", label: "People", hint: "You and your household" },
-  { id: "phone", label: "Pairing and security", hint: "Phones, other computers, SSH keys, encryption" },
+  { id: "phone", label: "Pairing and security", hint: "Devices, phones, other computers, SSH keys, encryption" },
   { id: "about", label: "About", hint: "Software on the box" },
 ];
 
@@ -88,6 +88,7 @@ function Desktop() {
         <Switch label="Open TT Station when I log in (it waits in the tray)" checked={atLogin}
           onChange={async (e) => setAtLogin(await window.ttDesktop!.startAtLogin(e.target.checked))} />
       )}
+      <TokenStorage />
       <div className="list">
         {[["Ctrl 1 – 8", "Jump between places"], ["Ctrl Enter", "Make (in Studio)"]].map(([k, v]) => (
           <div key={k} className="list-row"><span className="kbd">{k}</span><span className="muted">{v}</span></div>
@@ -99,6 +100,35 @@ function Desktop() {
 }
 
 /** A key press → a GNOME binding, or null for a lone modifier. */
+type Storage = { protected: boolean; where: string | null; backend: string };
+
+/** Where this computer keeps its sign-in for each box (the desktop app only). */
+function useTokenStorage() {
+  const [storage, setStorage] = useState<Storage | null>(null);
+  useEffect(() => { window.ttDesktop?.tokenStorage?.().then(setStorage).catch(() => setStorage(null)); }, []);
+  return storage;
+}
+
+function TokenStorage() {
+  const storage = useTokenStorage();
+  if (!storage) return null;
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <div className="row-between wrap" style={{ gap: 12 }}>
+        <span>Sign-in to your boxes</span>
+        {storage.protected
+          ? <span className="muted">Encrypted in {storage.where}</span>
+          : <Badge size="sm" subtle variant="warning">Not in a keychain</Badge>}
+      </div>
+      {!storage.protected && (
+        <Typography variant="copy-xs" className="muted">
+          This computer has no keychain TT Station can use{storage.backend === "basic_text" ? " (no login keyring is running)" : ""}, so its sign-in tokens are kept in files only your account can read. Anyone who can sign in as you here could copy them.
+        </Typography>
+      )}
+    </div>
+  );
+}
+
 function bindingOf(e: KeyboardEvent): string | null {
   const code = e.code;
   let key: string | null = null;
@@ -322,7 +352,7 @@ function Household() {
           <div key={p.id} className="list-row">
             <span className="grow">{p.name}{list?.me === p.id && <Badge size="sm" subtle variant="mint" style={{ marginLeft: 8 }}>you</Badge>}</span>
             <Button size="xs" variant="ghost" onClick={async () => { const n = await askText(`Rename ${p.name}`, p.name); if (n) run(() => patch(`/people/${p.id}`, { name: n })); }}>Rename</Button>
-            <Button size="xs" variant="ghost" onClick={async () => { if (await ask(`Remove ${p.name}?`, { body: "Their pairing stops working and Tori forgets what she remembered about them.", confirm: "Remove", danger: true })) run(() => del(`/people/${p.id}`)); }}>Remove</Button>
+            <Button size="xs" variant="ghost" onClick={async () => { if (await ask(`Remove ${p.name}?`, { body: "Tori forgets what she remembered about them. Their phone or computer stays paired: remove it under Pairing and security → Devices.", confirm: "Remove", danger: true })) run(() => del(`/people/${p.id}`)); }}>Remove</Button>
           </div>
         ))}
       </div>
@@ -433,6 +463,8 @@ function Phone() {
   const mm = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
   return (
     <>
+      <Devices />
+
       <Card>
         <Eyebrow>Pair your iPhone</Eyebrow>
         <Typography variant="copy-sm" className="muted">
@@ -650,6 +682,85 @@ function IdleCard() {
       ) : mins != null && mins >= 1 ? (
         <span className="muted" style={{ fontSize: 12 }}>The model's been idle for {mins} min.</span>
       ) : null}
+    </Card>
+  );
+}
+
+const pairedOn = (unix: number) => new Date(unix * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+
+/**
+ * Every computer and phone that can control this box, each signed out on its
+ * own. The box keeps a device for 90 days after it was last used; removing
+ * one stops its next request and closes any terminal it has open.
+ */
+function Devices() {
+  const devices = usePoll(() => get<{ devices: PairedDevice[]; idle_expiry_days: number }>("/devices"), 30000);
+  const storage = useTokenStorage();
+  const [onBox, setOnBox] = useState(false);
+  useEffect(() => { window.ttDesktop?.boxes?.().then((b) => setOnBox(b.current === "local")).catch(() => {}); }, []);
+  const here = window.ttDesktop ? "This computer" : "This browser";
+  const remove = async (d: PairedDevice) => {
+    const body = !d.this_device
+      ? `${d.name} stops working with ${boxName} right away, and any terminal it has open closes. To use it with this box again, pair it again.`
+      : onBox
+        ? "TT Station on this box signs out and shows the connect screen. Because it runs on the box itself, it can sign in again without a code: pick this device there."
+        : `This computer stops working with ${boxName} right away and goes back to the connect screen. To use the box again, pair it again.`;
+    if (!(await ask(d.this_device ? `Sign ${here.toLowerCase()} out?` : `Remove ${d.name}?`, { body, confirm: d.this_device ? "Sign out" : "Remove", danger: true }))) return;
+    try {
+      await del(`/devices/${encodeURIComponent(d.id)}`);
+    } catch (e) { toastError(e); return; }
+    if (!d.this_device) { toastOk(`${d.name} was removed.`); devices.refresh(); return; }
+    if (window.ttDesktop?.signedOut) { await window.ttDesktop.signedOut(); return; }
+    // A browser on the box (development): forget the pasted token.
+    try { localStorage.removeItem("tt.token"); } catch { /* private */ }
+    window.location.reload();
+  };
+  const days = devices.data?.idle_expiry_days ?? 90;
+  const now = Date.now() / 1000;
+  const list = devices.data?.devices ?? [];
+  return (
+    <Card>
+      <Eyebrow>Devices</Eyebrow>
+      <Typography variant="copy-sm" className="muted">
+        Computers and phones that can use and control this box. Remove any you don't recognize or no longer use; a device unused for {days} days is signed out automatically.
+      </Typography>
+      {devices.error && !devices.data ? (
+        <div className="row-between wrap" style={{ gap: 12 }}>
+          <span className="muted">Couldn't load the devices: {devices.error}</span>
+          <Button size="sm" variant="ghost" onClick={devices.refresh}>Try again</Button>
+        </div>
+      ) : !devices.data ? (
+        <span className="muted" style={{ fontSize: 13 }}>Loading…</span>
+      ) : list.length === 0 ? (
+        <Empty title="No devices are paired">Pair a phone or another computer below.</Empty>
+      ) : (
+        <div className="list">
+          {list.map((d) => {
+            const left = Math.ceil((d.expires - now) / 86400);
+            return (
+              <div key={d.id} className="list-row">
+                <div className="grow">
+                  <b>{d.name}</b>
+                  {d.this_device && <Badge size="sm" subtle variant="mint" style={{ marginLeft: 8 }}>{here}</Badge>}
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    {[d.platform,
+                      d.paired != null ? `paired ${pairedOn(d.paired)}` : "pairing date not recorded",
+                      d.this_device ? "in use now" : `last used ${ago(d.last_used)}`,
+                      !d.this_device && left <= 14 ? `signs out in ${left} day${left === 1 ? "" : "s"} unless used` : null,
+                    ].filter(Boolean).join(" · ")}
+                  </div>
+                </div>
+                <Button size="xs" variant="ghost" onClick={() => remove(d)}>{d.this_device ? "Sign out" : "Remove"}</Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {storage && !storage.protected && (
+        <Typography variant="copy-xs" className="muted">
+          {here}'s own sign-in isn't in a keychain: it's kept in a file only your account can read (Settings → General → This app).
+        </Typography>
+      )}
     </Card>
   );
 }

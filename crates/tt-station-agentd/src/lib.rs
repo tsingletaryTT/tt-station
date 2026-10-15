@@ -59,6 +59,7 @@ pub mod routes;
 pub mod safegit;
 pub mod schedules;
 pub mod serving;
+pub mod sessions;
 pub mod telemetry;
 pub mod tls;
 pub mod toplike_term;

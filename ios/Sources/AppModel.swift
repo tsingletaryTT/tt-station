@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 enum AppTab: Hashable {
     case assistant, create, box, models, settings
@@ -126,7 +127,10 @@ final class AppModel {
             // The QR came from the box's own screen, so its fingerprint is the one
             // to trust: this client only accepts a certificate that matches it.
             let client = try AgentClient(host: host, pin: pin)
-            let result = try await client.pairComplete(pairID: pairID, code: code)
+            // iOS 16+ reports a generic "iPhone" here unless the app has Apple's
+            // device-name entitlement: still honest, and the list shows when it paired.
+            let result = try await client.pairComplete(pairID: pairID, code: code,
+                                                       name: UIDevice.current.name, platform: "iOS")
             paired(box, token: result.token)
             await sendSSHKey(to: box)
         } catch AgentError.http(let status, _) where status == 401 || status == 404 || status == 410 {
