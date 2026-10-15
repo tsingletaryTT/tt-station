@@ -130,10 +130,12 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
 /// (the GTK panel and `tt-station config` want to show "what will this box actually
 /// serve with" before/without a pairing existing), so there's no bearer
 /// token to hang an `AgentClient` off of yet.
-pub async fn get_config(base: &str) -> anyhow::Result<ConfigSummary> {
+///
+/// `token`: the stored pairing token when there is one. The box answers its own
+/// unauthenticated requests, but from another machine it needs the token.
+pub async fn get_config(base: &str, token: Option<&str>) -> anyhow::Result<ConfigSummary> {
     let url = join(base, "config");
-    let resp = reqwest::Client::new()
-        .get(&url)
+    let resp = with_token(reqwest::Client::new().get(&url), token)
         .send()
         .await?
         .error_for_status()
@@ -154,16 +156,25 @@ pub async fn get_config(base: &str) -> anyhow::Result<ConfigSummary> {
 /// logs` a box it never bothered to pair with), so there's no bearer token to
 /// hang an `AgentClient` off of yet. `join` doesn't know about query strings,
 /// so the `?source=&tail=` suffix is appended directly onto its output.
-pub async fn get_logs(base: &str, source: &str, tail: usize) -> anyhow::Result<LogsInfo> {
+///
+/// `token`: as for [`get_config`].
+pub async fn get_logs(base: &str, source: &str, tail: usize, token: Option<&str>) -> anyhow::Result<LogsInfo> {
     let url = format!("{}?source={source}&tail={tail}", join(base, "logs"));
-    let resp = reqwest::Client::new()
-        .get(&url)
+    let resp = with_token(reqwest::Client::new().get(&url), token)
         .send()
         .await?
         .error_for_status()
         .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
 
     Ok(resp.json().await?)
+}
+
+/// The request with the pairing token on it, when there is one.
+fn with_token(request: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
+    match token {
+        Some(t) => request.bearer_auth(t),
+        None => request,
+    }
 }
 
 /// `POST /reset` (bearer-guarded): ask the agent at `base` to return the box

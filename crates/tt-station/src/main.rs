@@ -907,15 +907,14 @@ async fn cmd_status(host: &str) -> Result<StatusInfo> {
     libttstation::agent_client::get_status(&base).await
 }
 
-/// `tt-station config --host <host:port>`: UNAUTHED, like `cmd_status`/`cmd_models`/
-/// `cmd_serving` -- the agent's `GET /config` has no `BearerAuth` extractor
-/// (Task 5), so this calls `libttstation::agent_client::get_config` directly
-/// instead of going through `authed_client()`. Lets an operator (or the GTK
+/// `tt-station config --host <host:port>`: sends the stored pairing token when
+/// there is one (the box answers itself without one, but from another machine
+/// `GET /config` needs it), and still works unpaired on the box itself. Lets an operator (or the GTK
 /// panel/Mac app) see "what will this box actually serve with" even against
 /// a box `tt-station pair` was never run against.
 async fn cmd_config(host: &str) -> Result<ConfigSummary> {
     let base = format!("http://{host}");
-    libttstation::agent_client::get_config(&base).await
+    libttstation::agent_client::get_config(&base, stored_token(host).as_deref()).await
 }
 
 /// `tt-station endpoint --host <host:port>`.
@@ -940,19 +939,16 @@ async fn cmd_leases(host: &str) -> Result<LeaseList> {
     authed_client(host)?.list_leases().await
 }
 
-/// `tt-station logs --host <host:port> [--source <source>] [--tail <n>]`: UNAUTHED,
-/// like `cmd_status`/`cmd_serving` -- the agent's `GET /logs` has no
-/// `BearerAuth` extractor (Task 2), so this calls
-/// `libttstation::agent_client::get_logs` directly instead of going through
-/// `authed_client()`. This is the one-shot snapshot path; `--follow` instead
+/// `tt-station logs --host <host:port> [--source <source>] [--tail <n>]`: sends
+/// the stored pairing token when there is one, like `cmd_config`. This is the one-shot snapshot path; `--follow` instead
 /// takes `cmd_logs_follow` below.
 async fn cmd_logs(host: &str, source: &str, tail: usize) -> Result<LogsInfo> {
     let base = format!("http://{host}");
-    libttstation::agent_client::get_logs(&base, source, tail).await
+    libttstation::agent_client::get_logs(&base, source, tail, stored_token(host).as_deref()).await
 }
 
 /// `tt-station logs --follow --host <host:port> [--source <source>] [--tail <n>]`:
-/// connect to the agent's `GET /logs/stream` WebSocket (Task 2, UNAUTHED like
+/// connect to the agent's `GET /logs/stream` WebSocket (token in a header, like
 /// `/logs` itself), which replays the trailing `tail` lines and then pushes
 /// one text frame per new line as they're written -- and print each frame to
 /// stdout as it arrives until the connection closes (agent shutdown/restart)
@@ -968,8 +964,17 @@ async fn cmd_logs_follow(host: &str, source: &str, tail: usize) -> Result<()> {
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
 
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let url = format!("ws://{host}/logs/stream?source={source}&tail={tail}");
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+    let mut request = url.as_str().into_client_request().with_context(|| format!("bad address {url}"))?;
+    // From another machine the box wants the pairing token (in a header, never the URL).
+    if let Some(token) = stored_token(host) {
+        request.headers_mut().insert(
+            "Authorization",
+            format!("Bearer {token}").parse().context("token isn't a valid header value")?,
+        );
+    }
+    let (ws_stream, _) = tokio_tungstenite::connect_async(request)
         .await
         .with_context(|| format!("failed to connect to {url}"))?;
     let (_write, mut read) = ws_stream.split();
@@ -1268,6 +1273,11 @@ async fn cmd_ask_confirm(
     authed_client(host)?
         .assistant_confirm(action_id, approve)
         .await
+}
+
+/// The pairing token stored for `host`, if `tt-station pair` was run against it.
+fn stored_token(host: &str) -> Option<String> {
+    build_store().ok()?.get(host).ok().flatten()
 }
 
 fn authed_client(host: &str) -> Result<AgentClient> {

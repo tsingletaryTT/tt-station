@@ -608,13 +608,33 @@ async fn get_logs_parses_logs_info_with_no_auth_header() {
         .mount(&server)
         .await;
 
-    let logs = get_logs(&server.uri(), "container", 50)
+    let logs = get_logs(&server.uri(), "container", 50, None)
         .await
         .expect("get_logs() should succeed against a mocked 200 response");
 
     assert_eq!(logs.source, "container");
     assert_eq!(logs.origin.as_deref(), Some("/mock/vllm.log"));
     assert_eq!(logs.lines, vec!["mock line 1", "mock line 2"]);
+}
+
+/// With a stored pairing token, `get_logs` sends it: from another machine the
+/// box's `/logs` wants one.
+#[tokio::test]
+async fn get_logs_sends_the_token_when_given() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/logs"))
+        .and(header("authorization", "Bearer tok-123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "source": "container", "origin": null, "lines": []
+        })))
+        .mount(&server)
+        .await;
+
+    get_logs(&server.uri(), "container", 10, Some("tok-123"))
+        .await
+        .expect("get_logs() with a token should succeed");
 }
 
 /// (Task 3) `ssh_authorize(public_key, label)` should POST

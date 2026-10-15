@@ -7,8 +7,9 @@
 //! terminal emulator. So TT Station shows exactly tt-toplike's own views,
 //! fed by this agent's `/telemetry` -- nothing is re-drawn or imitated.
 //!
-//! Query: `token` (a pairing token: browsers can't set headers on a socket),
-//! `mode` (one of [`MODES`]), `cols`, `rows`. Messages from the client:
+//! Auth: a pairing token in an `Authorization` header or, from a browser
+//! (which can't set headers on a socket), a `tt-token.<token>` subprotocol;
+//! never in the URL. Query: `mode` (one of [`MODES`]), `cols`, `rows`. Messages from the client:
 //! `{"type":"input","data":"v"}` (keys, as a terminal sends them) and
 //! `{"type":"resize","cols":N,"rows":N}`. The server sends the terminal's
 //! output as binary frames. Only the tt-toplike binary runs, with fixed
