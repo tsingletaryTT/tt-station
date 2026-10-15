@@ -448,16 +448,28 @@ impl ToolCheck {
         ToolCheck { model: Some(served_model.to_string()), schemas, open: HashMap::new() }
     }
 
-    /// The tool `name` means: itself, or the one tool it matches ignoring case.
+    /// The tool `name` means: itself, or the one tool it matches ignoring case,
+    /// once gpt-oss's own syntax is taken off it. With its tokens stripped, a
+    /// name can arrive as `Read<|channel|>commentary`, `functions.Read` or
+    /// `Readjson` (the agent reliability eval saw these at every context
+    /// length). Only a name that then is a real tool counts.
     fn resolve(&self, name: &str) -> Option<String> {
-        if self.schemas.contains_key(name) {
-            return Some(name.to_string());
+        let bare = name.split("<|").next().unwrap_or(name).trim();
+        let bare = bare.strip_prefix("functions.").unwrap_or(bare);
+        let mut tries = vec![name, bare];
+        if let Some(b) = bare.strip_suffix("json").filter(|b| !b.is_empty()) {
+            tries.push(b);
         }
-        let mut alike = self.schemas.keys().filter(|k| k.eq_ignore_ascii_case(name));
-        match (alike.next(), alike.next()) {
-            (Some(only), None) => Some(only.clone()),
-            _ => None,
+        for t in tries {
+            if self.schemas.contains_key(t) {
+                return Some(t.to_string());
+            }
+            let mut alike = self.schemas.keys().filter(|k| k.eq_ignore_ascii_case(t));
+            if let (Some(only), None) = (alike.next(), alike.next()) {
+                return Some(only.clone());
+            }
         }
+        None
     }
 
     /// The name to show a client at the start of a call, before its input is in.
@@ -1129,6 +1141,22 @@ mod tests {
         assert!(!s.finished());
         s.chunk(&json!({ "choices": [{ "delta": {}, "finish_reason": "tool_calls" }] }));
         assert!(s.finished());
+    }
+
+    #[test]
+    fn tool_names_lose_leftover_harmony_syntax() {
+        let tools = json!([
+            { "name": "Read", "input_schema": { "type": "object" } },
+            { "name": "Grep", "input_schema": { "type": "object" } },
+        ]);
+        let check = ToolCheck::new(&tools, "m");
+        assert_eq!(check.resolve("Read<|channel|>commentary").as_deref(), Some("Read"));
+        assert_eq!(check.resolve("functions.Grep").as_deref(), Some("Grep"));
+        assert_eq!(check.resolve("Readjson").as_deref(), Some("Read"));
+        assert_eq!(check.resolve("read").as_deref(), Some("Read"));
+        // Never a guess: what's left must be a real tool.
+        assert_eq!(check.resolve("Search<|channel|>commentary"), None);
+        assert_eq!(check.resolve("json"), None);
     }
 
     #[test]
