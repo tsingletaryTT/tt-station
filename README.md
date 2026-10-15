@@ -42,7 +42,7 @@ shows. Add `--enable-ssh` to also install your Mac's public key for keyless acce
 ```bash
 cargo build --release -p tt-station
 tt-station discover
-tt-station pair qb2-lab.local:8765 --enable-ssh   # enter the code shown on the box
+tt-station pair qb2-lab.local:8765 --enable-ssh   # check the fingerprint, enter the code shown on the box
 ```
 
 **Run a model and grab the endpoint** — `tt-station run` waits until the box reports healthy

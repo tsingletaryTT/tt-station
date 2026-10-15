@@ -136,9 +136,9 @@ and cheap insurance costs nothing.
 tt-station logs --host <host:port> [--source container|run] [--tail N] [--follow]
 ```
 
-Works unpaired on the box itself. **Known gap:** the CLI's `config`/`logs` calls (`libttstation::agent_client::get_config`/`get_logs`
-and the `--follow` WebSocket) don't send a stored token yet, so from another machine they get
-`401` until the CLI is updated; on the box itself they work unpaired.
+Works unpaired on the box itself (plain HTTP / `ws://` on `127.0.0.1`). From another
+machine both calls send the stored pairing token, over HTTPS / `wss://` checked against the
+box's pinned certificate (see [CLI HTTPS and pinning](cli-https-pinning.md)).
 
 - No `--follow` (default): one `GET /logs` call, printed as plain lines (`origin` header
   line, then one line per log line) — or the whole `LogsInfo` object as JSON under the
