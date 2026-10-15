@@ -21,7 +21,7 @@
 //! pure-ish and trivially unit-testable with canned `tt-smi -s` JSON, with no
 //! real `tt-smi` binary or subprocess involved (see the tests below). In
 //! production the runner is `serving::docker::RealCommandRunner::run` (see
-//! `routes.rs`), the same argv-style, no-shell command seam every other
+//! `state.rs`'s `collect_snapshot`), the same argv-style, no-shell command seam every other
 //! backend call already goes through.
 
 use anyhow::Result;

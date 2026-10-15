@@ -480,7 +480,7 @@ pub struct DockerBackend {
 ///
 /// **The pairing is the point, and it is a safety property, not bookkeeping.**
 /// `stop(model)` derives a container name from its argument, but
-/// `routes.rs::stop_model` passes `state.current_model().unwrap_or_default()`
+/// `handlers/serving.rs::stop_model` passes `state.current_model().unwrap_or_default()`
 /// -- the EMPTY STRING whenever `AppState` has no recorded model, which a
 /// `POST /reset` (a no-op for this backend, but it does `set_idle()`) leaves
 /// it in while the container is still running. Stopping `tt-inference-` finds
@@ -556,12 +556,12 @@ impl DockerBackend {
     /// shrink the ~20s production timeout down to milliseconds without
     /// touching the production defaults or sleeping for real in a unit
     /// test. Gated the same way `AppState`'s test-only accessors are (see
-    /// `routes.rs`): compiled in for this crate's own unit tests, or for
+    /// `state.rs`): compiled in for this crate's own unit tests, or for
     /// downstream integration tests via the `test-hooks` feature (already
     /// turned on for `cargo test` by this crate's Cargo.toml).
     /// Test-only: overwrite the recorded lease, modelling a CONCURRENT
     /// `start` whose success handover stored ITS lease while this call was
-    /// mid-swap (`routes.rs`'s `run_model` does not serialize `start`).
+    /// mid-swap (`handlers/serving.rs`'s `run_model` does not serialize `start`).
     ///
     /// That interleaving is the only way to reach `release_observed_lease`'s
     /// compare-and-take mismatch branch, and it is the branch that stands
@@ -891,7 +891,7 @@ impl DockerBackend {
     /// below is a COMPARE-AND-TAKE against exactly that observation -- see
     /// `release_observed_lease`. The window matters here more than anywhere:
     /// a `docker ps` and a `docker stop` run between the observation and the
-    /// release, and `routes.rs`'s `run_model` does not serialize `start`.
+    /// release, and `handlers/serving.rs`'s `run_model` does not serialize `start`.
     fn stop_and_release_held_lease(&self) -> Result<()> {
         let observed = self
             .lease
@@ -920,7 +920,7 @@ impl DockerBackend {
     ///
     /// `release_lease` (below) releases whatever is in the slot, which is right
     /// for `/stop`: whatever is held is what the caller asked to stop. It is
-    /// WRONG for the swap, because `routes.rs`'s `run_model` does not serialize
+    /// WRONG for the swap, because `handlers/serving.rs`'s `run_model` does not serialize
     /// `start`, so two overlapping `POST /run`s interleave like this:
     ///
     /// 1. T1 enters the swap and observes lease `L1`.
@@ -1371,7 +1371,7 @@ impl ServingBackend for DockerBackend {
     /// its behalf, in that order.
     ///
     /// **When a lease is held, the RECORDED container is what gets stopped
-    /// and the `model` argument is ignored.** It has to be: `routes.rs`
+    /// and the `model` argument is ignored.** It has to be: `handlers/serving.rs`
     /// passes `state.current_model().unwrap_or_default()` -- the empty string
     /// once anything has cleared `AppState`'s model, which `POST /reset` does
     /// while leaving this backend's container running (the trait's default
@@ -1418,7 +1418,7 @@ impl ServingBackend for DockerBackend {
         // `let _ = docker stop <name>`. It discards the result so that
         // stopping an already-stopped/missing container (which `docker stop`
         // reports as a non-zero exit) stays the no-op
-        // `ServingBackend::stop`'s contract requires -- `routes.rs` calls this
+        // `ServingBackend::stop`'s contract requires -- `handlers/serving.rs` calls this
         // unconditionally, even while idle, so a "nothing to stop" failure
         // must not become a 500.
         //

@@ -196,7 +196,7 @@ impl ProcessSampler {
             processes: procs,
             // `ProcessSampler` only ever produces the process list -- the
             // inference view is folded in separately by `telemetry_stream`
-            // (see `routes.rs`), which owns the `InferenceSampler` and sets
+            // (see `handlers/telemetry.rs`), which owns the `InferenceSampler` and sets
             // this field on the `TtToplike` before `enrich_frame` runs.
             inference: None,
         }

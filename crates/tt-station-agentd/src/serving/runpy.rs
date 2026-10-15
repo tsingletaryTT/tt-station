@@ -583,7 +583,7 @@ impl RunPyBackend {
 
     /// Test-only: overwrite the recorded lease id, modelling a CONCURRENT
     /// `start` whose success handover stored ITS lease while this call was
-    /// mid-swap (`routes.rs`'s `run_model` does not serialize `start`).
+    /// mid-swap (`handlers/serving.rs`'s `run_model` does not serialize `start`).
     ///
     /// That interleaving is the only way to reach `release_observed_lease`'s
     /// compare-and-take mismatch branch, and it is the branch that stands
@@ -841,7 +841,7 @@ impl RunPyBackend {
     ///
     /// `release_lease` (above) releases whatever is in the slot, which is
     /// right for `/stop`: whatever is held is what the caller asked to stop.
-    /// It is WRONG for the swap, because `routes.rs`'s `run_model` does not
+    /// It is WRONG for the swap, because `handlers/serving.rs`'s `run_model` does not
     /// serialize `start`, so two overlapping `POST /run`s interleave like
     /// this:
     ///
@@ -2016,7 +2016,7 @@ impl ServingBackend for RunPyBackend {
         // stopped at that point, and the lease stays recorded so a repeated
         // `/stop` retries the release.
         //
-        // NOTE: this also covers the power path (`routes.rs`'s
+        // NOTE: this also covers the power path (`state/hardware.rs`'s
         // `run_power_command` best-effort stop before suspend/reboot/
         // shutdown), which goes through this exact method.
         self.release_lease()
@@ -2068,7 +2068,7 @@ impl ServingBackend for RunPyBackend {
                 self.config.service_port,
             );
             // One decision, made in `ForeignLeases::resolve` so this path and
-            // `routes.rs`'s `reset-chips` cannot drift: refuse on BOTH
+            // `handlers/power.rs`'s `reset-chips` cannot drift: refuse on BOTH
             // "someone else holds chips" and "I could not find out" -- unless
             // forced, in which case proceed and log the override.
             match verdict.resolve(force) {

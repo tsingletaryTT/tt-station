@@ -115,7 +115,7 @@ pub trait ServingBackend: Send + Sync {
     /// after the agent itself restarted.
     ///
     /// NOTE: this is a deliberate, currently-unused seam. `AppState` tracks
-    /// its own `status` (updated by `routes.rs`'s `set_serving`/`set_idle`
+    /// its own `status` (updated by `state/serving.rs`'s `set_serving`/`set_idle`
     /// on every successful `/run`/`/stop`), and `GET /status` reads that,
     /// not this method -- nothing in `tt-station-agentd` calls
     /// `ServingBackend::status()` today. It's here ahead of the dstack

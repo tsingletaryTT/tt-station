@@ -396,7 +396,7 @@ pub struct PendingAction {
     pub created: Instant,
 }
 
-/// Everything that can make an assistant route fail. `routes.rs` maps each
+/// Everything that can make an assistant route fail. `handlers/assistant.rs` maps each
 /// variant to an HTTP status (see `assistant_error` there).
 #[derive(Debug)]
 pub enum AssistantError {

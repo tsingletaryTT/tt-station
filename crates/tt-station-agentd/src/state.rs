@@ -89,7 +89,7 @@ pub const PAIR_INITS_PER_MINUTE: usize = 20;
 /// Implemented for real by `tt-station-agentd`'s `main.rs`
 /// (`MdnsStatusAdvertiser`, which re-registers the mDNS `ServiceInfo` with
 /// the daemon it already created for the boot-time advertisement) and left
-/// as a trait here -- rather than `routes.rs`/`AppState` depending on
+/// as a trait here -- rather than `AppState` depending on
 /// `mdns_sd` directly -- so tests can swap in a fake that just records what
 /// it was told, without any real network I/O.
 pub trait StatusAdvertiser: Send + Sync {

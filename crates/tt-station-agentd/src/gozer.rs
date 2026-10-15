@@ -596,7 +596,7 @@ struct StatusChip {
 /// parse, `snapshot_leases` yields `None`, and the guards refuse.
 ///
 /// `GET /leases` already absorbs that `None` via `unwrap_or_default()`
-/// (see `routes.rs`'s `gozer_snapshot`), so the strictness costs nothing
+/// (see `state/hardware.rs`'s `gozer_snapshot`), so the strictness costs nothing
 /// there: an unreadable payload reports zero leases, exactly as an
 /// unreadable one always did.
 #[derive(Debug, Default, Deserialize)]
@@ -686,7 +686,7 @@ pub fn contention_detail(
 /// `status`'s own payload already carries `grain` and each chip's `board`
 /// serial (see `StatusReport`/`StatusChip`), so `boards`/`max_concurrent`
 /// fall out of the same parse `snapshot_leases` does for `leases` -- one
-/// shell-out, one cache entry (see `routes.rs`'s `AppState::gozer_snapshot`),
+/// shell-out, one cache entry (see `state/hardware.rs`'s `AppState::gozer_snapshot`),
 /// serving both routes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LeaseSnapshot {
@@ -700,7 +700,7 @@ pub struct LeaseSnapshot {
 /// Best-effort throughout, mirroring `contention_detail`: a `status` that
 /// fails to run, exits non-zero (including `16` mutex-stuck -- see the
 /// design doc's failure-modes table), or returns unparseable JSON all yield
-/// `None`. The caller (`routes.rs`'s `GET /leases` and `/status`'s
+/// `None`. The caller (`handlers/status.rs`'s `GET /leases` and `/status`'s
 /// `leasing` field) treats `None` as "nothing to report right now" rather
 /// than an error -- gozer misbehaving must never turn either route into a
 /// 5xx.
@@ -817,7 +817,7 @@ fn split_who(who: &str) -> Option<(u16, &str)> {
 /// tenant who does not exist.
 ///
 /// Reachable even after `start` learned to release its own lease before
-/// acquiring: two concurrent `POST /run`s are not serialised (`routes.rs`'s
+/// acquiring: two concurrent `POST /run`s are not serialised (`handlers/serving.rs`'s
 /// `run_model`), and an adopted lease from a previous process can be reaped
 /// out from under this one -- both leave a `tt-station:<own port>:` lease
 /// held that this backend has no in-memory record of.

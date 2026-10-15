@@ -3,7 +3,7 @@
 //! correlates a `/pair/init` call with the matching `/pair/complete` call,
 //! and the bearer token minted once pairing succeeds.
 //!
-//! Kept in its own module (rather than inline in `routes.rs`) so all the
+//! Kept in its own module (rather than inline in the handlers) so all the
 //! actual randomness for the agent lives in one place that's easy to audit
 //! -- and easy to swap later (e.g. if `rand`'s OS-backed default RNG ever
 //! needs to change) without touching handler logic.

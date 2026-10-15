@@ -7,7 +7,7 @@
 //! 7/9/10 and extend `AppState` rather than replacing it).
 //!
 //! Keep this file to bootstrap only: parse args, build state, spawn mDNS,
-//! serve. Route handlers live in `routes.rs`.
+//! serve. The route table is `router.rs`; handlers live in `handlers/` and the feature modules.
 
 use std::sync::Arc;
 
@@ -473,7 +473,7 @@ fn config_summary(rc: &config::ResolvedConfig) -> libttstation::model::ConfigSum
 
 /// How long `detect_startup_device_mesh` waits for `<tt_smi_bin> -s` before
 /// giving up and reporting `device_mesh: None`. `tt-smi` is "known to flake
-/// under serving load" (see `telemetry_stream`'s doc comment in routes.rs)
+/// under serving load" (see `telemetry_stream`'s doc comment in handlers/telemetry.rs)
 /// and this codebase documents wedged mesh ethernet cores as a live
 /// possibility on this hardware -- a hang here must not become a hang of
 /// the whole daemon (see this fn's doc comment).
@@ -482,12 +482,12 @@ const STARTUP_DEVICE_MESH_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// Detect this box's device-mesh label by running `<tt_smi_bin> -s` once at
 /// startup, through the same `RealCommandRunner` argv-style command seam
 /// `GET /telemetry` uses (see `telemetry::snapshot`/`collect_snapshot` in
-/// routes.rs) -- reusing that seam rather than inventing a second subprocess
+/// state.rs) -- reusing that seam rather than inventing a second subprocess
 /// call for `tt-smi`.
 ///
 /// Bounded, not just non-fatal: the blocking `RealCommandRunner::run` call
 /// runs on `tokio::task::spawn_blocking` (same off-the-runtime discipline as
-/// `collect_snapshot` in routes.rs) wrapped in `tokio::time::timeout(
+/// `collect_snapshot` in state.rs) wrapped in `tokio::time::timeout(
 /// STARTUP_DEVICE_MESH_TIMEOUT, ..)`, so a hung `tt-smi` (a real possibility
 /// on this hardware -- wedged mesh ethernet cores, or the flakiness
 /// `telemetry_stream` also guards against) can delay agent startup by AT
@@ -1107,7 +1107,7 @@ async fn main() -> Result<()> {
     // `Arc::get_mut`). No-op for every existing route -- purely additive.
     let state = state.with_telemetry_config(rc.tt_smi_bin.clone(), rc.telemetry_interval_ms);
 
-    // Configure the additive `GET /serving` discovery route (see routes.rs):
+    // Configure the additive `GET /serving` discovery route (see handlers/status.rs):
     // the serving host baked into discovered endpoints' `base_url`, and the
     // agent's own serving port used to classify `agent` vs `external`. Applied
     // here, before any clone of `state` exists, for the same sole-owner reason
@@ -1115,14 +1115,14 @@ async fn main() -> Result<()> {
     // `Arc::get_mut`). No-op for every existing route -- purely additive.
     let state = state.with_serving_config(rc.serving_host.clone(), rc.serving_port);
 
-    // Configure the additive `GET /config` route (see routes.rs): a redacted
+    // Configure the additive `GET /config` route (see handlers/status.rs): a redacted
     // snapshot of the fully-resolved config, built once here from `rc` so it
     // can never drift from what the backend/state above were actually built
     // from. Applied here, before any clone of `state` exists, for the same
     // sole-owner reason the other `with_*` builders above are.
     let state = state.with_config_summary(config_summary(&rc));
 
-    // Configure the additive `GET /logs` route (see routes.rs): only the
+    // Configure the additive `GET /logs` route (see handlers/logs.rs): only the
     // runpy backend writes `workflow_logs/{docker_server,run_logs}` under the
     // tt-inference-server checkout, so this is deliberately gated on
     // `rc.backend == "runpy"` -- other backends (dstack, docker) leave the
@@ -1257,7 +1257,7 @@ async fn main() -> Result<()> {
     };
 
     // Configure the additive `POST`/`DELETE /ssh/authorize` routes (Task 2,
-    // see routes.rs): which account's `authorized_keys` a paired client's
+    // see handlers/ssh.rs): which account's `authorized_keys` a paired client's
     // key lands in. Applied here, before any clone of `state` exists, for
     // the same sole-owner reason the other `with_*` builders above are.
     // `--ssh-user` overrides the account; unset, it defaults to this
@@ -1265,7 +1265,7 @@ async fn main() -> Result<()> {
     let (ssh_user, ssh_authorized_keys_path) = resolve_ssh_target(cli.ssh_user.clone());
     let state = state.with_ssh_target(ssh_authorized_keys_path, ssh_user);
 
-    // Configure the additive `POST /power` route (Task 2, see routes.rs):
+    // Configure the additive `POST /power` route (Task 2, see handlers/power.rs):
     // the four command vectors `run_power_command` shells out to. Only
     // applied when the operator gave at least one `--power-*-cmd` flag --
     // otherwise `AppState::new_inner`'s built-in defaults (`tt-smi -r` /
@@ -1303,7 +1303,7 @@ async fn main() -> Result<()> {
 
     // Detect this box's device mesh ONCE at startup (not per-request): run
     // `tt-smi -s` through the exact same command seam `GET /telemetry` uses
-    // (`RealCommandRunner`, see `collect_snapshot` in routes.rs) and map its
+    // (`RealCommandRunner`, see `collect_snapshot` in state.rs) and map its
     // stdout through `device::detect_device_mesh`. Reported on `/status` so
     // a client (Task 3's `tt-station --json status`) can rank models by hardware fit
     // without its own `tt-smi` access. ANY failure here (binary missing,
@@ -1914,7 +1914,7 @@ mod startup_wiring_tests {
         // Deliberately in this SAME test function rather than its own, and
         // not for brevity: `#[test]`s in one binary run on parallel threads,
         // and this crate already has a load-sensitive `ETXTBSY` flake from
-        // exactly that shape (`routes.rs`'s
+        // exactly that shape (`state.rs`'s
         // `run_power_command_runs_the_configured_command` writes an
         // executable and spawns it). A sibling test that spawns anything
         // concurrently with `write_stub_gozer` above can inherit the

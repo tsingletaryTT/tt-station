@@ -713,7 +713,7 @@ impl InferenceSampler {
     /// One tick. `scrape_body` is `Some(text)` when the `/metrics` HTTP GET
     /// returned 200 (whatever the body -- `parse_vllm_metrics` decides if
     /// it's usable), or `None` when the GET itself failed (connection
-    /// refused, timeout, non-200 status -- see `routes.rs`'s scrape call
+    /// refused, timeout, non-200 status -- see `handlers/telemetry.rs`'s scrape call
     /// site). Returns the `Option<InferenceInfo>` to set on this tick's
     /// `TtToplike`, and updates the held previous-counters state for the
     /// NEXT tick's rate math (only when this tick actually produced fresh
