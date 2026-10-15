@@ -4873,6 +4873,18 @@ pub fn app(state: AppState) -> Router {
         .route("/jobs/{id}", axum::routing::delete(crate::jobs::delete_job))
         .route("/jobs/{id}/run", post(crate::jobs::post_run_now))
         .route("/jobs/{id}/result", get(crate::jobs::get_result))
+        .route("/jobs/{id}/share", post(crate::jobs::post_share))
+        .route(
+            "/data/settings",
+            get(crate::export::get_settings).put(crate::export::put_settings),
+        )
+        .route("/export", post(crate::export::post_export))
+        .route(
+            "/import",
+            post(crate::export::post_import).layer(axum::extract::DefaultBodyLimit::max(
+                crate::export::MAX_IMPORT_BYTES as usize,
+            )),
+        )
         .route("/app", get(crate::app_ui::get_app_root))
         .route("/app/", get(crate::app_ui::get_app_root))
         .route("/app/{*rel}", get(crate::app_ui::get_app_path))

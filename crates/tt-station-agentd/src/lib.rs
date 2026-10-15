@@ -26,6 +26,7 @@ pub mod doctor;
 pub mod download;
 pub mod embeddings;
 pub mod evals;
+pub mod export;
 pub mod favorites;
 pub mod fsio;
 pub mod gateway;

@@ -139,6 +139,37 @@ impl Schedules {
         Ok(())
     }
 
+    /// Add or update schedules from an export (`crate::export`), by id:
+    /// returns (added, updated). One for a mode this box doesn't have, or past
+    /// [`MAX_SCHEDULES`], is left out.
+    pub fn merge_imported(&self, incoming: Vec<Schedule>) -> (usize, usize) {
+        let mut items = self.items.lock().expect("schedules mutex");
+        let (mut added, mut updated) = (0, 0);
+        for s in incoming {
+            if !crate::export::safe_id(&s.id) || Self::check(&s.mode, &s.time, &s.days).is_err() {
+                continue;
+            }
+            let len = items.len();
+            match items.iter_mut().find(|x| x.id == s.id) {
+                Some(cur) if *cur != s => {
+                    *cur = s;
+                    updated += 1;
+                }
+                Some(_) => {}
+                None if len < MAX_SCHEDULES => {
+                    items.push(s);
+                    added += 1;
+                }
+                None => {}
+            }
+        }
+        if added + updated > 0 {
+            items.sort_by(|a, b| a.time.cmp(&b.time));
+            self.save(&items);
+        }
+        (added, updated)
+    }
+
     pub fn add(&self, mode: &str, time: &str, days: Vec<u8>) -> Result<Schedule, String> {
         Self::check(mode, time, &days)?;
         let mut items = self.items.lock().expect("schedules mutex");

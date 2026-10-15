@@ -1417,6 +1417,8 @@ async fn main() -> Result<()> {
     tokio::spawn(tt_station_agentd::notify::watch_forever(state.clone()));
     tokio::spawn(tt_station_agentd::doctor::nightly_forever(state.clone()));
     tokio::spawn(tt_station_agentd::jobs::run_forever(state.clone()));
+    // Deletes old transcripts and reports when the owner set a retention.
+    tokio::spawn(tt_station_agentd::export::retention_forever(state.clone()));
     tokio::spawn(tt_station_agentd::orchard::watch_forever(state.clone()));
     tokio::spawn(tt_station_agentd::bringup::watch_forever(state.clone()));
     tokio::spawn(tt_station_agentd::community::readopt(state.clone()));

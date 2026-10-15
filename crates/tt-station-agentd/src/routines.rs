@@ -206,6 +206,41 @@ fn with_routines<T>(state: &AppState, f: impl FnOnce(&mut Vec<Routine>) -> T) ->
     out
 }
 
+/// Add or update routines from an export (`crate::export`), by id: returns
+/// (added, updated). What each may do without asking is kept to [`ACTIONS`],
+/// and its next run is worked out again here.
+pub(crate) fn merge_imported(state: &AppState, incoming: Vec<Routine>) -> (usize, usize) {
+    with_routines(state, |list| {
+        let (mut added, mut updated) = (0, 0);
+        for mut r in incoming {
+            if !crate::export::safe_id(&r.id) {
+                continue;
+            }
+            r.allowed.retain(|a| ACTIONS.contains(&a.as_str()));
+            r.next_run = None;
+            match list.iter_mut().find(|x| x.id == r.id) {
+                Some(cur) => {
+                    r.next_run = cur.next_run;
+                    if serde_json::to_value(&*cur).ok() != serde_json::to_value(&r).ok() {
+                        *cur = r;
+                        updated += 1;
+                    }
+                }
+                None => {
+                    list.push(r);
+                    added += 1;
+                }
+            }
+        }
+        (added, updated)
+    })
+}
+
+/// The routines as they are now (for an export's preview).
+pub(crate) fn list(state: &AppState) -> Vec<Routine> {
+    with_routines(state, |l| l.clone())
+}
+
 fn run_path(state: &AppState, id: &str) -> PathBuf {
     dir(state).join("runs").join(format!("{id}.json"))
 }

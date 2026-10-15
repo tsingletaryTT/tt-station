@@ -97,6 +97,35 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     result
 }
 
+/// [`write_atomic`] from a reader, for contents too big to hold in memory (a
+/// recording restored from an export). Returns the bytes written.
+pub fn write_atomic_from(path: &Path, mut from: impl io::Read, mode: u32) -> io::Result<u64> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    std::fs::create_dir_all(&parent)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?
+        .to_string_lossy()
+        .into_owned();
+    let tmp = parent.join(format!(".{name}.tmp-{}", random_suffix()));
+    let result = (|| {
+        let mut file = open_new(&tmp, mode)?;
+        let n = io::copy(&mut from, &mut file)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        sync_dir(&parent)?;
+        Ok(n)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// [`write_atomic`] of `value` as pretty JSON.
 pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T, mode: u32) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
@@ -230,6 +259,21 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
         write_json(&path, &serde_json::json!({ "a": 1 }), PRIVATE).unwrap();
         assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn write_atomic_from_streams_into_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a/input.ogg");
+        let n = write_atomic_from(&path, &b"0123456789"[..], PRIVATE).unwrap();
+        assert_eq!(n, 10);
+        assert_eq!(std::fs::read(&path).unwrap(), b"0123456789");
+        #[cfg(unix)]
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
     }
 
     #[test]
