@@ -8,7 +8,6 @@
 // last one read. Tori starts them too ("research …").
 
 import { useEffect, useMemo, useState } from "react";
-import { strToU8, zipSync } from "fflate";
 import { Button } from "@tenstorrent/vesper/button";
 import { Icon } from "@tenstorrent/vesper/icons";
 import { TextArea } from "@tenstorrent/vesper/text-area";
@@ -24,6 +23,8 @@ import remarkGfm from "remark-gfm";
 import { ago, del, duration, get, post } from "../api";
 import { Card, copyText, Eyebrow, MoreMenu, Page, toastError, toastOk, usePoll } from "../ui";
 import { askText } from "../dialog";
+import { fileName, reportFiles, zipFiles, type ReportText } from "../reports";
+import { deleteWithUndo, UNDO_MS } from "../undo";
 import { navigate } from "../App";
 
 type Depth = "quick" | "standard" | "deep";
@@ -52,8 +53,6 @@ const EXAMPLES = [
 
 const live = (s: string) => s === "running" || s === "queued";
 const mine = (u: string) => u.startsWith("file://") || u.startsWith("doc:");
-/** A report's file name, from its title. */
-const fileName = (title: string, ext: string) => `${title.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "report"}.${ext}`;
 const save = (blob: Blob, name: string) => {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -61,8 +60,6 @@ const save = (blob: Blob, name: string) => {
   a.click();
   URL.revokeObjectURL(a.href);
 };
-/** How long a deleted report can be brought back before it's removed from the box. */
-const UNDO_MS = 8000;
 const domain = (u: string) => { if (mine(u)) return "Your Library"; try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return u; } };
 
 export function Research() {
@@ -79,32 +76,31 @@ export function Research() {
 
   const started = (j: Job) => { setPicked(j.id); setAsking(false); list.refresh(); };
   const remove = (j: Job) => {
-    setGone((g) => [...g, j.id]);
-    setPicked(null);
-    const later = window.setTimeout(async () => {
-      try { await del(`/research/${j.id}`); list.refresh(); }
-      catch (e) { setGone((g) => g.filter((x) => x !== j.id)); toastError(e); }
-    }, UNDO_MS);
+    const undo = deleteWithUndo({
+      hide: () => { setGone((g) => [...g, j.id]); setPicked(null); },
+      show: () => setGone((g) => g.filter((x) => x !== j.id)),
+      remove: () => del(`/research/${j.id}`),
+      removed: list.refresh,
+      failed: toastError,
+    });
     addToast({ content: "Report deleted.", timeout: UNDO_MS, action: {
       content: "Undo", altText: "Bring the report back",
-      handler: () => { window.clearTimeout(later); setGone((g) => g.filter((x) => x !== j.id)); setPicked(j.id); },
+      handler: () => { undo(); setPicked(j.id); },
     } });
   };
   const ready = jobs.filter((j) => j.state === "done");
   const downloadAll = async () => {
     setZipping(true);
     try {
-      const files: Record<string, Uint8Array> = {};
+      const reports: ReportText[] = [];
       for (const j of ready) {
         const d = await get<Detail>(`/research/${j.id}`);
-        if (!d.report) continue;
-        let name = fileName(d.plan?.title ?? j.question, "md");
-        for (let n = 2; name in files; n++) name = fileName(`${d.plan?.title ?? j.question} ${n}`, "md");
-        files[name] = strToU8(d.report);
+        reports.push({ title: d.plan?.title ?? j.question, text: d.report });
       }
+      const files = reportFiles(reports);
       const count = Object.keys(files).length;
       if (!count) { toastError(new Error("None of the finished reports has any text yet.")); return; }
-      save(new Blob([zipSync(files) as BlobPart], { type: "application/zip" }), `research-reports-${new Date().toISOString().slice(0, 10)}.zip`);
+      save(new Blob([zipFiles(files) as BlobPart], { type: "application/zip" }), `research-reports-${new Date().toISOString().slice(0, 10)}.zip`);
       toastOk(`${count} report${count === 1 ? "" : "s"} downloaded as a zip.`);
     } catch (e) { toastError(e); } finally { setZipping(false); }
   };
