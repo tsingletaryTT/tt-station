@@ -90,7 +90,7 @@ async function call(base, method, route, { token, body, headers = {}, timeout = 
 // ---------------------------------------------------------------- other boxes
 //
 // Another QuietBox is added with the pairing link from its own TT Station
-// (Settings → Pairing and security → Pair another computer): it carries the
+// (Settings → Devices and pairing → Pair a device → Another computer): it carries the
 // box's HTTPS port and its certificate's fingerprint, which every connection
 // to it is checked against (the box's certificate is its own, not a CA's).
 

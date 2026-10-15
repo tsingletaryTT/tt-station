@@ -10,7 +10,7 @@ import { get, type PairedDevice } from "./api";
 import { usePoll } from "./ui";
 
 /** Shown beside a control only an owner can use. */
-export const OWNER_ONLY = "Only an owner of this box can change this. An owner can make this device one in Settings → Pairing and security → Devices.";
+export const OWNER_ONLY = "Only an owner of this box can change this. An owner can make this device one in Settings → Devices and pairing.";
 
 /** Shown where something would run on the box as the box's own account (outside the sandbox). */
 export const OWNER_ONLY_HOST = "Only an owner of this box can use this: it runs on the box as the box's own account, outside the sandbox, where it could reach the box's keys and settings. Code works in a sandbox, and members can use it.";

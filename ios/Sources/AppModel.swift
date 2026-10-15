@@ -85,7 +85,7 @@ final class AppModel {
     }
 
     /// Handle a `ttstation://pair?...` link (the QR TT Station shows on the box in
-    /// Settings → Pairing and security, opened by the Camera app): pair with no typing.
+    /// Settings → Devices and pairing, opened by the Camera app): pair with no typing.
     /// The link carries the box's HTTPS port (`tls`) and certificate fingerprint
     /// (`fp`); pairing happens over HTTPS pinned to that fingerprint, so a link
     /// without them is refused.
@@ -109,12 +109,12 @@ final class AppModel {
               let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return }
         func value(_ key: String) -> String? { items.first { $0.name == key }?.value.flatMap { $0.isEmpty ? nil : $0 } }
         guard let host = value("host"), let pairID = value("pair"), let code = value("code") else {
-            linkError = "That pairing code is incomplete. Show it again in TT Station on the box (Settings → Pairing and security)."
+            linkError = "That pairing code is incomplete. Show it again in TT Station on the box (Settings → Devices and pairing)."
             return
         }
         guard let tls = value("tls").flatMap(Int.init), (1...65535).contains(tls),
               let fp = value("fp")?.lowercased(), Self.isSHA256Hex(fp) else {
-            linkError = "That pairing code doesn't carry the box's security certificate, so TT Station can't connect securely. Update TT Station on the box, then scan the code in Settings → Pairing and security."
+            linkError = "That pairing code doesn't carry the box's security certificate, so TT Station can't connect securely. Update TT Station on the box, then scan the code in Settings → Devices and pairing."
             return
         }
         let port = value("port").flatMap(Int.init) ?? 8765
@@ -134,7 +134,7 @@ final class AppModel {
             paired(box, token: result.token)
             await sendSSHKey(to: box)
         } catch AgentError.http(let status, _) where status == 401 || status == 404 || status == 410 {
-            linkError = "That code has expired. Show a new one in TT Station on the box (Settings → Pairing and security)."
+            linkError = "That code has expired. Show a new one in TT Station on the box (Settings → Devices and pairing)."
         } catch {
             linkError = error.localizedDescription
         }

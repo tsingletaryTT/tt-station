@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-// Settings: the desktop app, power, the household, schedules, energy, remote
-// access, your data and the box's software.
+// Settings: the desktop app, power, the household, devices and pairing (the
+// one place for it: the box switcher and the connect screen point here),
+// security, your data and the box's software. `/app/settings#<section>` opens
+// a section.
+//
+// Schedules are routines now (Routines → Switch the box's mode), and energy
+// use is on Hardware; the Power section points to both.
 
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@tenstorrent/vesper/button";
@@ -12,45 +17,39 @@ import { Select } from "@tenstorrent/vesper/select";
 import { Badge } from "@tenstorrent/vesper/badge";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { useModal, Modal } from "@tenstorrent/vesper/modal";
-import { ago, ApiError, type AuditEntry, authHeader, boxName, bytes, del, delWith, get, type Mode, patch, type PairedDevice, type Person, post, put, type Schedule, upload } from "../api";
+import { ago, ApiError, type AuditEntry, authHeader, boxName, bytes, del, delWith, get, patch, type PairedDevice, type Person, post, put, upload } from "../api";
 import { changesSomething, type DataSettings, describePreview, exportFileName, type ImportPreview, RETENTION_CHOICES, retentionDays, retentionValue } from "../yourdata";
 import { OWNER_ONLY, useOwner } from "../role";
 import { ThemeSwitcher } from "@tenstorrent/vesper/theme-switcher";
-import { Card, copyText, Empty, Eyebrow, Page, readable, Spark, toastError, toastOk, usePoll } from "../ui";
+import { Card, copyText, Empty, Eyebrow, Page, readable, toastError, toastOk, usePoll } from "../ui";
+import { navigate } from "../App";
+import { type Section, SECTIONS, sectionFrom } from "../settingsSections";
 import { Speaker, type VoiceStatus } from "../voice";
 import { ask, askText } from "../dialog";
 import { DevToolsSetting } from "../DevToolsSetting";
 import { AllowedActionsSetting } from "../AllowedActionsSetting";
-import { deleteWithUndo, UNDO_MS } from "../undo";
-import { addToast } from "@tenstorrent/vesper/toast";
-
-type Section = "general" | "tori" | "models" | "power" | "people" | "data" | "phone" | "about";
-const SECTIONS: { id: Section; label: string; hint: string }[] = [
-  { id: "general", label: "General", hint: "This app, start at login, keys" },
-  { id: "tori", label: "Assistant (Tori) and voice", hint: "Shortcut, voice, speed" },
-  { id: "models", label: "Models", hint: "Which models the box uses" },
-  { id: "power", label: "Power and energy", hint: "Power, schedules, energy use" },
-  { id: "people", label: "People", hint: "You and your household" },
-  { id: "data", label: "Your data", hint: "Recordings, how long things are kept, export and import" },
-  { id: "phone", label: "Pairing and security", hint: "Devices, phones, other computers, SSH keys, encryption, activity" },
-  { id: "about", label: "About", hint: "Software on the box" },
-];
 
 export function Settings() {
   const [section, setSection] = useState<Section>(() => {
-    try {
-      const saved = localStorage.getItem("tt.settings.section") as Section | null;
-      return saved && SECTIONS.some((x) => x.id === saved) ? saved : "general";
-    } catch { return "general"; }
+    const linked = sectionFrom(location.hash);
+    if (linked) return linked;
+    try { return sectionFrom(localStorage.getItem("tt.settings.section")) ?? "general"; } catch { return "general"; }
   });
   useEffect(() => { try { localStorage.setItem("tt.settings.section", section); } catch { /* private */ } }, [section]);
+  // A link to a section while Settings is open (Needs you, the box switcher).
+  useEffect(() => {
+    const onHash = () => { const s = sectionFrom(location.hash); if (s) setSection(s); };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   const current = SECTIONS.find((x) => x.id === section) ?? SECTIONS[0];
   return (
     <Page title="Settings">
       <div className="settings">
         <nav className="settings-nav" aria-label="Settings sections">
           {SECTIONS.map((x) => (
-            <button key={x.id} className={x.id === section ? "on" : ""} aria-current={x.id === section ? "page" : undefined} onClick={() => setSection(x.id)}>
+            <button key={x.id} className={x.id === section ? "on" : ""} aria-current={x.id === section ? "page" : undefined}
+              onClick={() => { setSection(x.id); history.replaceState(null, "", `/app/settings#${x.id}`); }}>
               <span>{x.label}</span>
               <span className="muted">{x.hint}</span>
             </button>
@@ -61,10 +60,11 @@ export function Settings() {
           {section === "general" && <Desktop />}
           {section === "tori" && <><ToriCard /><Voice /></>}
           {section === "models" && <ModelPrefs />}
-          {section === "power" && <><Power /><IdleCard /><AfterPowerCut /><Schedules /><Energy /></>}
+          {section === "power" && <><Power /><IdleCard /><AfterPowerCut /><MovedFromPower /></>}
           {section === "people" && <Household />}
           {section === "data" && <YourData />}
-          {section === "phone" && <Phone />}
+          {section === "devices" && <Pairing />}
+          {section === "security" && <SecurityAndActivity />}
           {section === "about" && <><Updates /><Software /></>}
         </div>
       </div>
@@ -355,7 +355,7 @@ function Household() {
   return (
     <Card>
       <Eyebrow>You and your household</Eyebrow>
-      <Typography variant="copy-sm" className="muted">Each person gets their own memories with the assistant. A person is just a name on the box. You can pick someone no other device belongs to yet; to share a person between devices, an owner sets it under Pairing and security → Devices.</Typography>
+      <Typography variant="copy-sm" className="muted">Each person gets their own memories with the assistant. A person is just a name on the box. You can pick someone no other device belongs to yet; to share a person between devices, an owner sets it under Devices and pairing.</Typography>
       {list && (
         <Select value={list.me ?? "anyone"} onValueChange={(v) => run(() => put("/people/me", { person: v === "anyone" ? null : v }))}
           options={[{ label: "This computer is: anyone (shared)", value: "anyone" }, ...list.people.map((p) => ({ label: `This computer is: ${p.name}`, value: p.id }))]} />
@@ -365,7 +365,7 @@ function Household() {
           <div key={p.id} className="list-row">
             <span className="grow">{p.name}{list?.me === p.id && <Badge size="sm" subtle variant="mint" style={{ marginLeft: 8 }}>you</Badge>}</span>
             <Button size="xs" variant="ghost" disabled={!owner} title={owner ? undefined : OWNER_ONLY} onClick={async () => { const n = await askText(`Rename ${p.name}`, p.name); if (n) run(() => patch(`/people/${p.id}`, { name: n })); }}>Rename</Button>
-            <Button size="xs" variant="ghost" disabled={!owner} title={owner ? undefined : OWNER_ONLY} onClick={async () => { if (await ask(`Remove ${p.name}?`, { body: "Tori forgets what she remembered about them. Their phone or computer stays paired: remove it under Pairing and security → Devices.", confirm: "Remove", danger: true })) run(() => del(`/people/${p.id}`)); }}>Remove</Button>
+            <Button size="xs" variant="ghost" disabled={!owner} title={owner ? undefined : OWNER_ONLY} onClick={async () => { if (await ask(`Remove ${p.name}?`, { body: "Tori forgets what she remembered about them. Their phone or computer stays paired: remove it under Devices and pairing.", confirm: "Remove", danger: true })) run(() => del(`/people/${p.id}`)); }}>Remove</Button>
           </div>
         ))}
       </div>
@@ -377,71 +377,27 @@ function Household() {
   );
 }
 
-const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-function Schedules() {
-  const schedules = usePoll(() => get<{ schedules: Schedule[] }>("/schedules"), 30000);
-  const modes = usePoll(() => get<{ modes: Mode[] }>("/modes"), 60000);
-  const [mode, setMode] = useState("chat");
-  const [time, setTime] = useState("08:00");
-  const [days, setDays] = useState<number[]>([1, 2, 3, 4, 5]);
-  const title = (id: string) => modes.data?.modes.find((m) => m.id === id)?.title ?? id;
-  const set = async (fn: () => Promise<{ schedules: Schedule[] }>) => { try { schedules.setData(await fn()); } catch (e) { toastError(e); } };
-  const [gone, setGone] = useState<string[]>([]);
-  const remove = (s: Schedule) => {
-    const undo = deleteWithUndo({
-      hide: () => setGone((g) => [...g, s.id]),
-      show: () => setGone((g) => g.filter((x) => x !== s.id)),
-      remove: async () => schedules.setData(await del<{ schedules: Schedule[] }>(`/schedules/${s.id}`)),
-      removed: () => setGone((g) => g.filter((x) => x !== s.id)),
-      failed: toastError,
-    });
-    addToast({ content: `Schedule for ${s.time} deleted.`, timeout: UNDO_MS, action: { content: "Undo", altText: "Bring the schedule back", handler: undo } });
-  };
+/** Where Schedules and Energy went: one place each, elsewhere. */
+function MovedFromPower() {
   return (
     <Card>
-      <Eyebrow>Schedules</Eyebrow>
-      <Typography variant="copy-sm" className="muted">Switch the box's mode at set times. Never interrupts a silicon check, a bring-up or a transcription.</Typography>
+      <Eyebrow>Looking for schedules or energy?</Eyebrow>
       <div className="list">
-        {(schedules.data?.schedules ?? []).filter((s) => !gone.includes(s.id)).map((s) => (
-          <div key={s.id} className="list-row">
-            <span className="mono" style={{ fontSize: 18 }}>{s.time}</span>
-            <div className="grow"><b>{title(s.mode)}</b><div className="muted" style={{ fontSize: 12 }}>{s.days.map((d) => DAYS[d]).join(" ")}</div></div>
-            <Switch size="sm" aria-label={`${s.time} schedule on`} checked={s.enabled} onChange={(e) => set(() => patch(`/schedules/${s.id}`, { enabled: e.target.checked }))} />
-            <Button size="xs" variant="ghost" aria-label={`Delete the ${s.time} schedule`} onClick={() => remove(s)}>Delete</Button>
+        <div className="list-row">
+          <div className="grow">
+            <b>Switching modes at set times</b>
+            <div className="muted" style={{ fontSize: 12 }}>It's a routine now, and your schedules have already moved over. In Routines, choose New routine, then Switch the box's mode.</div>
           </div>
-        ))}
-      </div>
-      <div className="row wrap">
-        <Select size="sm" value={mode} onValueChange={(v) => setMode(v ?? "chat")} options={(modes.data?.modes ?? []).map((m) => ({ label: m.title, value: m.id }))} />
-        <div style={{ width: 120 }}><TextInput size="sm" type="time" value={time} onChange={(e) => setTime(e.target.value)} /></div>
-        <div className="row" style={{ gap: 4 }}>
-          {DAYS.map((d, i) => (
-            <button key={d} className={`kbd`} aria-label={d} aria-pressed={days.includes(i)} style={{ cursor: "pointer", background: days.includes(i) ? "var(--vesper-teal-400)" : "transparent", color: "var(--vesper-text-primary)" }}
-              onClick={() => setDays((x) => (x.includes(i) ? x.filter((y) => y !== i) : [...x, i].sort()))}>{d[0]}</button>
-          ))}
+          <Button size="sm" variant="subtle" onClick={() => navigate("routines")}>Open Routines</Button>
         </div>
-        <Button size="sm" variant="subtle" disabled={!days.length} onClick={() => set(() => post("/schedules", { mode, time, days }))}>Add</Button>
+        <div className="list-row">
+          <div className="grow">
+            <b>Energy use</b>
+            <div className="muted" style={{ fontSize: 12 }}>It's on Hardware now, next to the chips' power: today, this month and each day, with what it costs.</div>
+          </div>
+          <Button size="sm" variant="subtle" onClick={() => navigate("hardware", "energy")}>Open Hardware</Button>
+        </div>
       </div>
-    </Card>
-  );
-}
-
-function Energy() {
-  const report = usePoll(() => get<{ months: { month: string; energy_kwh: number; tokens: number }[]; days: { day: string; energy_kwh: number }[] }>("/energy"), 60000);
-  const [price, setPrice] = useState(() => Number(localStorage.getItem("tt.price") ?? "0.15"));
-  useEffect(() => { localStorage.setItem("tt.price", String(price)); }, [price]);
-  const month = report.data?.months.at(-1);
-  return (
-    <Card>
-      <Eyebrow>Energy</Eyebrow>
-      <div className="row-between">
-        <div className="stat"><div className="stat-value">{(month?.energy_kwh ?? 0).toFixed(1)}<span className="stat-unit">kWh this month</span></div>
-          <div className="stat-sub">≈ ${((month?.energy_kwh ?? 0) * price).toFixed(2)} at ${price.toFixed(2)}/kWh</div></div>
-        <div style={{ width: 110 }}><TextInput size="sm" type="number" value={String(price)} onChange={(e) => setPrice(Number(e.target.value) || 0)} /></div>
-      </div>
-      <Spark title="Energy per day" axis values={(report.data?.days ?? []).map((d) => d.energy_kwh)} labels={(report.data?.days ?? []).map((d) => d.day)} height={60} format={(v) => `${v.toFixed(1)} kWh`} />
-      <span className="muted" style={{ fontSize: 12 }}>Daily kWh over the last month, from the chips' own power readings.</span>
     </Card>
   );
 }
@@ -454,62 +410,31 @@ interface SshKey { label: string; type: string; added: string | null; raw: strin
 const grouped = (hex: string) => hex.match(/.{1,4}/g)?.join(" ") ?? hex;
 
 /**
- * Pairing an iPhone, securely: the QR holds a one-time code and the box's
- * certificate fingerprint, so the phone talks to the box only over HTTPS
- * pinned to that certificate. The phone makes its own SSH key and sends only
- * the public half; the private key never leaves the phone.
+ * Devices and pairing, the one place for it: the devices that can use this
+ * box, pairing a phone or another computer, adding another box to this app,
+ * and the SSH keys pairing adds. The box switcher and the connect screen on
+ * other computers point here.
  */
-function Phone() {
+function Pairing() {
   const owner = useOwner();
-  const [qr, setQr] = useState<PairQr | null>(null);
-  const [left, setLeft] = useState(0);
-  const security = usePoll(() => get<Security>("/security"), 30000);
   const ssh = usePoll(() => get<{ keys: SshKey[]; user: string }>("/ssh/info"), 10000);
-  useEffect(() => {
-    if (!qr) return;
-    const t = window.setInterval(() => setLeft((n) => { if (n <= 1) { setQr(null); return 0; } return n - 1; }), 1000);
-    return () => window.clearInterval(t);
-  }, [qr]);
-  const show = async () => {
-    try { const r = await post<PairQr>("/pair/qr"); setQr(r); setLeft(r.expires_in_s); } catch (e) { toastError(e); }
-  };
   const revoke = async (k: SshKey) => {
     if (!(await ask(`Remove ${k.label}'s SSH key?`, { body: "That device can no longer sign in to the box over SSH. It can be added again by pairing.", confirm: "Remove", danger: true }))) return;
     try { await delWith("/ssh/authorize", { label: k.raw }); toastOk("Removed."); ssh.refresh(); } catch (e) { toastError(e); }
   };
-  const setLanHttp = async (on: boolean) => {
-    if (on && !(await ask("Allow unencrypted connections from other computers?", {
-      body: "Apps on other computers could then use the box's API (/v1) over plain HTTP, readable by anyone on your network. Phones always use encrypted HTTPS either way.",
-      confirm: "Allow", danger: true,
-    }))) return;
-    try { await post("/security", { lan_http: on }); security.refresh(); } catch (e) { toastError(e); }
-  };
-  const fp = security.data?.tls?.sha256;
-  const mm = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
   return (
     <>
       <Devices />
-
-      <Card>
-        <Eyebrow>Pair your iPhone</Eyebrow>
-        <Typography variant="copy-sm" className="muted">
-          Scan with the iPhone's Camera. TT Station on the phone connects to this box only over encrypted HTTPS, pinned to this box's certificate, and creates its own SSH key: just the public half comes here.
-        </Typography>
-        {qr ? (
-          <div className="row" style={{ gap: 16, alignItems: "flex-start" }}>
-            {qr.qr_svg && <img src={`data:image/svg+xml;utf8,${encodeURIComponent(qr.qr_svg)}`} alt="Pairing QR code" style={{ width: 200, height: 200, borderRadius: 10 }} />}
-            <div className="stack" style={{ gap: 6 }}>
-              <span>Works once, for {mm}.</span>
-              <span className="muted" style={{ fontSize: 12 }}>The phone must be on the same network ({qr.host}).</span>
-              <span className="muted" style={{ fontSize: 12 }}>It checks the box's certificate: <code>{grouped(qr.fingerprint)}…</code></span>
-              <div><Button size="sm" variant="ghost" onClick={() => setQr(null)}>Hide</Button></div>
-            </div>
+      <PairDevice />
+      {window.ttDesktop?.showConnect && (
+        <Card>
+          <Eyebrow>Another box</Eyebrow>
+          <div className="row-between wrap" style={{ gap: 12 }}>
+            <Typography variant="copy-sm" className="muted">Use another QuietBox from this app too. Switch between them from the box name at the top of the sidebar.</Typography>
+            <Button size="sm" variant="subtle" onClick={() => void window.ttDesktop!.showConnect!()}>Add another box…</Button>
           </div>
-        ) : <div><Button onClick={show}>Show the pairing code</Button></div>}
-      </Card>
-
-      <PairComputer />
-
+        </Card>
+      )}
       <Card>
         <Eyebrow>SSH keys this box trusts</Eyebrow>
         <div className="list">
@@ -523,7 +448,79 @@ function Phone() {
         </div>
         {!owner && <Typography variant="copy-xs" className="muted">{OWNER_ONLY}</Typography>}
       </Card>
+    </>
+  );
+}
 
+/**
+ * Pairing a phone or another computer. An iPhone scans a QR that holds a
+ * one-time code and the box's certificate fingerprint, so it talks to the box
+ * only over HTTPS pinned to that certificate (it makes its own SSH key and
+ * sends only the public half). Another computer finds the box by itself and
+ * signs in with the box's account, or pastes a one-time link.
+ */
+function PairDevice() {
+  const [what, setWhat] = useState<"phone" | "computer">("phone");
+  return (
+    <Card>
+      <div className="row-between wrap" style={{ gap: 12 }}>
+        <Eyebrow>Pair a device</Eyebrow>
+        <div className="pill-tabs" role="tablist" aria-label="What to pair">
+          <button role="tab" aria-selected={what === "phone"} className={what === "phone" ? "on" : ""} onClick={() => setWhat("phone")}>An iPhone</button>
+          <button role="tab" aria-selected={what === "computer"} className={what === "computer" ? "on" : ""} onClick={() => setWhat("computer")}>Another computer</button>
+        </div>
+      </div>
+      {what === "phone" ? <PairPhone /> : <PairComputer />}
+    </Card>
+  );
+}
+
+function PairPhone() {
+  const [qr, setQr] = useState<PairQr | null>(null);
+  const [left, setLeft] = useState(0);
+  useEffect(() => {
+    if (!qr) return;
+    const t = window.setInterval(() => setLeft((n) => { if (n <= 1) { setQr(null); return 0; } return n - 1; }), 1000);
+    return () => window.clearInterval(t);
+  }, [qr]);
+  const show = async () => {
+    try { const r = await post<PairQr>("/pair/qr"); setQr(r); setLeft(r.expires_in_s); } catch (e) { toastError(e); }
+  };
+  const mm = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+  return (
+    <>
+      <Typography variant="copy-sm" className="muted">
+        Scan with the iPhone's Camera. TT Station on the phone connects to this box only over encrypted HTTPS, pinned to this box's certificate, and creates its own SSH key: just the public half comes here.
+      </Typography>
+      {qr ? (
+        <div className="row" style={{ gap: 16, alignItems: "flex-start" }}>
+          {qr.qr_svg && <img src={`data:image/svg+xml;utf8,${encodeURIComponent(qr.qr_svg)}`} alt="Pairing QR code" style={{ width: 200, height: 200, borderRadius: 10 }} />}
+          <div className="stack" style={{ gap: 6 }}>
+            <span>Works once, for {mm}.</span>
+            <span className="muted" style={{ fontSize: 12 }}>The phone must be on the same network ({qr.host}).</span>
+            <span className="muted" style={{ fontSize: 12 }}>It checks the box's certificate: <code>{grouped(qr.fingerprint)}…</code></span>
+            <div><Button size="sm" variant="ghost" onClick={() => setQr(null)}>Hide</Button></div>
+          </div>
+        </div>
+      ) : <div><Button onClick={show}>Show the pairing code</Button></div>}
+    </>
+  );
+}
+
+/** Encryption and the activity log (owners). */
+function SecurityAndActivity() {
+  const owner = useOwner();
+  const security = usePoll(() => get<Security>("/security"), 30000);
+  const setLanHttp = async (on: boolean) => {
+    if (on && !(await ask("Allow unencrypted connections from other computers?", {
+      body: "Apps on other computers could then use the box's API (/v1) over plain HTTP, readable by anyone on your network. Phones always use encrypted HTTPS either way.",
+      confirm: "Allow", danger: true,
+    }))) return;
+    try { await post("/security", { lan_http: on }); security.refresh(); } catch (e) { toastError(e); }
+  };
+  const fp = security.data?.tls?.sha256;
+  return (
+    <>
       <Card>
         <Eyebrow>Encryption</Eyebrow>
         <div className="list">
@@ -540,8 +537,9 @@ function Phone() {
         </div>
         {!owner && <Typography variant="copy-xs" className="muted">{OWNER_ONLY}</Typography>}
       </Card>
-
-      {owner && <ActivityLog />}
+      {owner ? <ActivityLog /> : (
+        <Card><Eyebrow>Activity log</Eyebrow><Typography variant="copy-sm" className="muted">Only owners can read the box's activity log.</Typography></Card>
+      )}
     </>
   );
 }
@@ -807,7 +805,7 @@ function YourData() {
       <Card>
         <Eyebrow>Take your data with you</Eyebrow>
         <Typography variant="copy-sm" className="muted">
-          One file with your research reports, transcripts (and recordings you kept), memories, people, routines, schedules, settings, model check-ups, Code sessions' details and image prompts. It never includes passwords, keys or the box's pairings, so devices pair again on a new box.
+          One file with your research reports, transcripts (and recordings you kept), memories, people, routines (mode switches included), settings, model check-ups, Code sessions' details and image prompts. It never includes passwords, keys or the box's pairings, so devices pair again on a new box.
         </Typography>
         <div className="row" style={{ gap: 8 }}>
           <Button size="sm" disabled={!owner || busy !== null} onClick={exportAll}>{busy === "export" ? "Exporting…" : "Export"}</Button>
@@ -1012,11 +1010,10 @@ function PairComputer() {
   const address = connect.data?.urls.map((u) => { try { return new URL(u.url).hostname; } catch { return ""; } }).find((h) => /^\d+\.\d+\.\d+\.\d+$/.test(h));
   const copy = async () => {
     if (!link) return;
-    await copyText(link.link, "Copied. Paste it in TT Station on the other computer: the device name at the top left → Add another device.");
+    await copyText(link.link, "Copied. Paste it in TT Station on the other computer, on its connect screen (Have a pairing link?).");
   };
   return (
-    <Card>
-      <Eyebrow>Pair another computer</Eyebrow>
+    <>
       <Typography variant="copy-sm" className="muted">
         For TT Station's desktop app on another computer (a Mac, say). It finds this device on the network by itself
         {address ? <>, or type its address: <code>{address}</code></> : null}. Then sign in with your account on this device, as you would over SSH.
@@ -1031,6 +1028,6 @@ function PairComputer() {
           <span className="muted" style={{ fontSize: 12 }}>Works once, for {Math.floor(link.left / 60)}:{String(link.left % 60).padStart(2, "0")}.</span>
         </div>
       ) : <div><Button variant="subtle" onClick={make}>Make a pairing link</Button></div>}
-    </Card>
+    </>
   );
 }

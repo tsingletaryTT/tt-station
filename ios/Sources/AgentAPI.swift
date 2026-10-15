@@ -691,7 +691,7 @@ enum AgentError: LocalizedError {
         switch self {
         case .http(401, _): return "This phone isn't paired with the box any more. Pair again."
         case .insecure:
-            return "Pair again to connect securely: scan the pairing code shown in TT Station on the box (Settings → Pairing and security)."
+            return "Pair again to connect securely: scan the pairing code shown in TT Station on the box (Settings → Devices and pairing)."
         case .http(_, let message): return message
         case .notPaired: return "Pair with the box first."
         case .badHost(let host): return "Can't make an address from \"\(host)\"."
