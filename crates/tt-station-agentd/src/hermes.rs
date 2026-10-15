@@ -12,7 +12,8 @@
 //! watches for Hermes to start using the box.
 //!
 //! - `GET /hermes`: installed? installing? configured? what model.
-//! - `POST /hermes/install`: run Nous's installer in the background.
+//! - `POST /hermes/install`: run Nous's installer in the background (a pinned
+//!   version, checked against its sha256 before it runs).
 //! - `POST /hermes/key`: the box's address and an app key, to paste into Hermes.
 //! - `POST /hermes/open`: open the desktop app; its own setup takes it from there.
 
@@ -28,7 +29,60 @@ use crate::routes::{AppState, BearerAuth, Phase};
 
 type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
-const INSTALLER: &str = "https://hermes-agent.nousresearch.com/install.sh";
+/// Nous's installer, pinned (2026-10-15): `scripts/install.sh` at this commit of
+/// NousResearch/hermes-agent -- byte for byte what
+/// hermes-agent.nousresearch.com/install.sh served that day -- and the same
+/// commit for the checkout it makes (`--commit`). The download is checked
+/// against [`INSTALLER_SHA256`] before anything runs; a mismatch is refused.
+/// To bump: pick a commit on `main`, fetch its `scripts/install.sh`, read it,
+/// and put the commit and the file's `sha256sum` here (see
+/// docs/reference/pinned-dependencies.md). The installer still fetches its own
+/// tools (uv, Python, Node packages) by version from their usual places.
+const INSTALLER_COMMIT: &str = "046094df28b712f62a5e3c728a9e59da05dcbf1e";
+const INSTALLER_SHA256: &str = "f4cdb0e20f1aca2c3871a76b962fd4db61510f549cf973759c753ac13349beb5";
+
+fn installer_url() -> String {
+    format!("https://raw.githubusercontent.com/NousResearch/hermes-agent/{INSTALLER_COMMIT}/scripts/install.sh")
+}
+
+/// The installer is the one this code pins, or why not.
+fn verify_installer(body: &[u8], want_sha256: &str) -> Result<(), String> {
+    let got: String = ring::digest::digest(&ring::digest::SHA256, body).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    if got.eq_ignore_ascii_case(want_sha256) {
+        Ok(())
+    } else {
+        Err(format!(
+            "The Hermes installer that downloaded isn't the one TT Station knows (sha256 {got}, expected {want_sha256}), so it wasn't run. \
+             Update TT Station, or install Hermes yourself from hermes-agent.nousresearch.com."
+        ))
+    }
+}
+
+/// Download the pinned installer, check it, and keep it where only this
+/// account can read or change it until it runs.
+async fn fetch_installer(dir: &Path) -> Result<PathBuf, (StatusCode, Json<Value>)> {
+    let body = reqwest::Client::new()
+        .get(installer_url())
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Couldn't download the Hermes installer: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Couldn't download the Hermes installer: {e}")))?;
+    verify_installer(&body, INSTALLER_SHA256).map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    let path = dir.join("install.sh");
+    let _ = std::fs::remove_file(&path);
+    let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+        f.write_all(&body)
+    };
+    write().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(path)
+}
 const INSTALL_UNIT: &str = "tt-station-hermes-install";
 const DESKTOP_UNIT: &str = "tt-station-hermes-desktop";
 /// Hermes refuses models with less working memory than this.
@@ -209,7 +263,12 @@ pub(crate) async fn get_hermes(State(state): State<AppState>, _auth: BearerAuth)
 
 /// `POST /hermes/install`: Nous's installer, unattended (its terminal wizard is
 /// skipped; the desktop app's own setup replaces it), with the desktop app.
-/// Into `~/.hermes`; no sudo.
+/// Into `~/.hermes`; no sudo. The installer is a pinned version, checked
+/// before it runs (see [`INSTALLER_COMMIT`]).
+///
+/// Any paired device may ask: there's no owner-only extractor yet. When one
+/// lands (`OwnerAuth`, with roles), this route should take it -- it runs a
+/// downloaded program as the box's account.
 pub(crate) async fn post_install(State(state): State<AppState>, _auth: BearerAuth) -> Reply {
     if unit_active(INSTALL_UNIT) {
         return Ok(Json(json!({ "installing": true })));
@@ -219,8 +278,10 @@ pub(crate) async fn post_install(State(state): State<AppState>, _auth: BearerAut
     let (log, exit) = (dir.join("install.log"), dir.join("install.exit"));
     let _ = std::fs::write(&log, "");
     let _ = std::fs::remove_file(&exit);
+    let installer = fetch_installer(&dir).await?;
     let script = format!(
-        "curl -fsSL {INSTALLER} | bash -s -- --non-interactive --include-desktop; echo $? > '{}'",
+        "bash '{}' --commit {INSTALLER_COMMIT} --non-interactive --include-desktop; echo $? > '{}'",
+        installer.display(),
         exit.display()
     );
     let path = format!("{}:{}", home().join(".local/bin").display(), std::env::var("PATH").unwrap_or_default());
@@ -345,6 +406,23 @@ mod tests {
         assert!(is_box("http://localhost:8765/v1/", 8765));
         assert!(!is_box("http://127.0.0.1:8000/v1", 8765));
         assert!(!is_box("https://openrouter.ai/api/v1", 8765));
+    }
+
+    #[test]
+    fn only_the_pinned_installer_runs() {
+        let body = b"#!/usr/bin/env bash\necho hermes\n";
+        let sha = "c1f5b5b6a8b0e6b8b6f0e8b9c6d7c9a1f3b8e2a7d0c4b5e6f7a8b9c0d1e2f3a4";
+        let real: String = ring::digest::digest(&ring::digest::SHA256, body).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        assert!(verify_installer(body, &real).is_ok());
+        assert!(verify_installer(body, &real.to_uppercase()).is_ok());
+        let refused = verify_installer(body, sha).unwrap_err();
+        assert!(refused.contains("wasn't run") && refused.contains(&real), "{refused}");
+        assert!(verify_installer(b"#!/usr/bin/env bash\necho hermes!\n", &real).is_err(), "one byte changed");
+        // The pin itself: a full sha256, and the same commit for the file and the checkout.
+        assert_eq!(INSTALLER_SHA256.len(), 64);
+        assert!(INSTALLER_SHA256.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(INSTALLER_COMMIT.len(), 40);
+        assert!(installer_url().contains(INSTALLER_COMMIT));
     }
 
     #[test]
