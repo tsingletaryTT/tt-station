@@ -2,14 +2,21 @@
 
 Hand the box a long recording and walk away. Jobs live in `$TT_CONFIG_DIR/jobs/<id>/`
 (`job.json`, `input.<ext>`, transcripts), run oldest first one at a time, and survive the
-app closing and the agent restarting (a job interrupted mid-run goes back in line).
+app closing and the agent restarting: a job interrupted mid-run goes back in line and picks
+up at the next chunk (`progress.json` holds the chunks done and their segments, written
+before each chunk counts; a different cut of the recording starts over).
+
+Each job remembers the paired device that started it (`started_by`, `started_by_name`;
+none for the box itself and the recorder). Members see their own jobs and the `shared`
+ones; owners see every job. Someone else's job answers `404` everywhere.
 
 ## Routes (authed)
 
 | Route | |
 |---|---|
-| `POST /jobs/transcribe?name=meeting.m4a&when=now\|tonight&documents=true` | Body: the recording (anything ffmpeg reads; streamed to disk, ≤ 4 GB). `201` with the job. |
-| `GET /jobs` | Newest first: `{id, kind, title, when, status, done, total, duration_s, created, started, finished, error, to_documents, restore}` |
+| `POST /jobs/transcribe?name=meeting.m4a&when=now\|tonight&documents=true&keep_audio=true&shared=true` | Body: the recording (anything ffmpeg reads; streamed to disk, ≤ 4 GB). `201` with the job. `documents` and `keep_audio` default to the household's data settings (both off); `shared` to off. |
+| `GET /jobs` | Newest first, the ones this caller may see: `{id, kind, title, when, status, done, total, duration_s, created, started, finished, error, to_documents, keep_audio, restore, started_by?, started_by_name?, shared}` |
+| `POST /jobs/{id}/share` `{shared}` | Share a job and its transcript with everyone on the box, or stop (its starter or an owner). Audited. |
 | `POST /jobs/{id}/run` | The owner's go-ahead to switch the box now. |
 | `GET /jobs/{id}/result?format=txt\|srt\|json` | The transcript (also the partial one while running). |
 | `DELETE /jobs/{id}` | Cancel a running job or delete a finished one. |
@@ -34,9 +41,11 @@ recording with ffmpeg into 270 s, 16 kHz mono PCM WAV pieces (~8.6 MB each), POS
 multipart to `/v1/audio/transcriptions` (`response_format=verbose_json`,
 `return_timestamps=true`), shifts each piece's segment times by its offset, and writes
 `transcript.txt` (`[hh:mm:ss] text`, updated after every piece), `.srt` and `.json`. When it
-finishes: the transcript is added to the owner's documents as `Transcript: <name>` (so the
-assistant's `search_documents` can answer questions about it) and a `job_done` notification
-goes out.
+finishes: the recording (`input.<ext>`) is deleted unless the job (or, when it didn't say,
+the household's `keep_audio` setting) keeps it; the transcript is added to the shared Library
+as `Transcript: <name>` only when the job asked (`documents=true`) or the household's
+`transcripts_to_library` is on; and a `job_done` notification goes out. See
+[your-data.md](your-data.md) for those settings, retention and export.
 
 ## Recording on the phone
 
@@ -52,7 +61,8 @@ The file is deleted only once the box has it; a failed or dismissed upload stays
 `recorder.rs` records the box's default microphone and whatever its default
 output is playing (PipeWire's `@DEFAULT_MONITOR@`), mixed to 16 kHz mono Opus,
 straight into a new job directory. Stopping queues it as an ordinary
-`transcribe` job.
+`transcribe` job. The recorder doesn't say who started it or what they chose, so its jobs
+are owners-only (until shared) and take the household's audio and Library defaults.
 
 - `GET /record`: `{microphone, speakers, recording}`; while recording,
   `recording` has `seconds`, the devices in use and live levels (`mic_db`,

@@ -32,13 +32,13 @@ reproduced at the end of this file.
 ## Rust crates (shipped in `tt-station`, `tt-station-agentd`, `mock-box`)
 
 Normal and build dependencies of the workspace crates (dev-dependencies excluded),
-all target platforms, as `cargo tree` resolves features. 276 crates.
+all target platforms, as `cargo tree` resolves features. 283 crates.
 
-- MIT OR Apache-2.0: 158
-- MIT: 55
+- MIT OR Apache-2.0: 161
+- MIT: 56
 - Unicode-3.0: 18
 - Apache-2.0 OR MIT: 12
-- MIT/Apache-2.0: 6
+- MIT/Apache-2.0: 7
 - Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT: 5
 - Unlicense OR MIT: 3
 - Apache-2.0 OR ISC OR MIT: 2
@@ -46,6 +46,7 @@ all target platforms, as `cargo tree` resolves features. 276 crates.
 - BSD-2-Clause OR Apache-2.0 OR MIT: 2
 - ISC: 2
 - (MIT OR Apache-2.0) AND Unicode-3.0: 1
+- 0BSD OR MIT OR Apache-2.0: 1
 - Apache-2.0: 1
 - Apache-2.0 / MIT: 1
 - Apache-2.0 AND ISC: 1
@@ -55,10 +56,12 @@ all target platforms, as `cargo tree` resolves features. 276 crates.
 - MIT AND BSD-3-Clause: 1
 - MIT OR Apache-2.0 OR LGPL-2.1-or-later: 1
 - MIT OR BSD-3-Clause: 1
+- MIT OR Zlib OR Apache-2.0: 1
 - Zlib: 1
 
 | Package | Version | License | Repository |
 |---|---|---|---|
+| adler2 | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | https://github.com/oyvindln/adler2 |
 | aho-corasick | 1.1.4 | Unlicense OR MIT | https://github.com/BurntSushi/aho-corasick |
 | allocator-api2 | 0.2.21 | MIT OR Apache-2.0 | https://github.com/zakarumych/allocator-api2 |
 | anstream | 1.0.0 | MIT OR Apache-2.0 | https://github.com/rust-cli/anstyle |
@@ -93,6 +96,7 @@ all target platforms, as `cargo tree` resolves features. 276 crates.
 | core-foundation | 0.9.4 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | cpufeatures | 0.2.17 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
+| crc32fast | 1.5.2 | MIT OR Apache-2.0 | https://github.com/srijs/rust-crc32fast |
 | critical-section | 1.2.0 | MIT OR Apache-2.0 | https://github.com/rust-embedded/critical-section |
 | crossbeam-deque | 0.8.6 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crossbeam-epoch | 0.9.18 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
@@ -114,7 +118,9 @@ all target platforms, as `cargo tree` resolves features. 276 crates.
 | equivalent | 1.0.2 | Apache-2.0 OR MIT | https://github.com/indexmap-rs/equivalent |
 | errno | 0.3.14 | MIT OR Apache-2.0 | https://github.com/lambda-fairy/rust-errno |
 | fastrand | 2.4.1 | Apache-2.0 OR MIT | https://github.com/smol-rs/fastrand |
+| filetime | 0.2.29 | MIT/Apache-2.0 | https://github.com/alexcrichton/filetime |
 | find-msvc-tools | 0.1.9 | MIT OR Apache-2.0 | https://github.com/rust-lang/cc-rs |
+| flate2 | 1.1.10 | MIT OR Apache-2.0 | https://github.com/rust-lang/flate2-rs |
 | flume | 0.12.0 | Apache-2.0/MIT | https://github.com/zesterer/flume |
 | fnv | 1.0.7 | Apache-2.0 / MIT | https://github.com/servo/rust-fnv |
 | foldhash | 0.2.0 | Zlib | https://github.com/orlp/foldhash |
@@ -175,6 +181,7 @@ all target platforms, as `cargo tree` resolves features. 276 crates.
 | memchr | 2.8.2 | Unlicense OR MIT | https://github.com/BurntSushi/memchr |
 | mime | 0.3.17 | MIT OR Apache-2.0 | https://github.com/hyperium/mime |
 | mime_guess | 2.0.5 | MIT | https://github.com/abonander/mime_guess |
+| miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 | https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide |
 | mio | 1.2.1 | MIT | https://github.com/tokio-rs/mio |
 | ntapi | 0.4.3 | Apache-2.0 OR MIT | https://github.com/MSxDOS/ntapi |
 | num-conv | 0.2.2 | MIT OR Apache-2.0 | https://github.com/jhpratt/num-conv |
@@ -236,6 +243,7 @@ all target platforms, as `cargo tree` resolves features. 276 crates.
 | signal-hook | 0.3.18 | Apache-2.0/MIT | https://github.com/vorner/signal-hook |
 | signal-hook-mio | 0.2.5 | MIT OR Apache-2.0 | https://github.com/vorner/signal-hook |
 | signal-hook-registry | 1.4.8 | MIT OR Apache-2.0 | https://github.com/vorner/signal-hook |
+| simd-adler32 | 0.3.10 | MIT | https://github.com/mcountryman/simd-adler32 |
 | slab | 0.4.12 | MIT | https://github.com/tokio-rs/slab |
 | smallvec | 1.15.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-smallvec |
 | socket-pktinfo | 0.4.0 | MIT | https://github.com/pixsper/socket-pktinfo |
@@ -251,6 +259,7 @@ all target platforms, as `cargo tree` resolves features. 276 crates.
 | sync_wrapper | 1.0.2 | Apache-2.0 | https://github.com/Actyx/sync_wrapper |
 | synstructure | 0.13.2 | MIT | https://github.com/mystor/synstructure |
 | sysinfo | 0.32.1 | MIT | https://github.com/GuillaumeGomez/sysinfo |
+| tar | 0.4.46 | MIT OR Apache-2.0 | https://github.com/composefs/tar-rs |
 | thiserror | 1.0.69 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | thiserror | 2.0.18 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | thiserror-impl | 1.0.69 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |

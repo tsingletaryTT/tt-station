@@ -26,6 +26,16 @@
 //!
 //! - `GET /evals`, `POST /evals`, `POST /evals/stop`
 //! - `GET /evals/{id}`, `DELETE /evals/{id}`
+//!
+//! An evaluation in progress is saved after each step (the speed benchmark,
+//! then each category). If the agent restarts mid-way, [`resume`] picks it up
+//! at the next category when the same model is serving again (an agent restart
+//! leaves the model running, and it's adopted). Otherwise -- a different
+//! model, or nothing serving within a few minutes -- it's marked `interrupted`,
+//! keeping the categories it finished, and isn't used for recommendations.
+//! Resuming is better than starting over because a full check-up is tens of
+//! minutes of chip time; falling back to `interrupted` keeps it honest, since
+//! scores from two different models must never be mixed.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -118,6 +128,16 @@ pub struct Eval {
     /// The agent reliability measurements, per prompt size.
     #[serde(default)]
     pub reliability: Option<crate::reliability::Report>,
+    /// Agent reliability was asked for (so a resumed run still does it).
+    #[serde(default)]
+    pub agent: bool,
+    /// How many times it was picked up again after an agent restart.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub resumed: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 static CURRENT: LazyLock<Mutex<Option<Eval>>> = LazyLock::new(|| Mutex::new(None));
@@ -133,20 +153,15 @@ fn save(state: &AppState, e: &Eval) {
 
 /// Writes an evaluation where [`all`] finds it (`evals/<id>.json`).
 pub fn save_in(d: &std::path::Path, e: &Eval) {
-    let _ = std::fs::create_dir_all(d);
-    let _ = std::fs::write(
-        d.join(format!("{}.json", e.id)),
-        serde_json::to_vec_pretty(e).unwrap_or_default(),
-    );
+    crate::fsio::save_json(&d.join(format!("{}.json", e.id)), e, crate::fsio::PRIVATE);
 }
 
 /// Every graded request of an agent reliability run, next to it (`evals/raw/<id>.json`).
 pub fn save_trials(d: &std::path::Path, id: &str, trials: &[crate::reliability::Trial]) {
-    let raw = d.join("raw");
-    let _ = std::fs::create_dir_all(&raw);
-    let _ = std::fs::write(
-        raw.join(format!("{id}.json")),
-        serde_json::to_vec_pretty(trials).unwrap_or_default(),
+    crate::fsio::save_json(
+        &d.join("raw").join(format!("{id}.json")),
+        trials,
+        crate::fsio::PRIVATE,
     );
 }
 
@@ -159,12 +174,19 @@ fn valid_id(id: &str) -> bool {
 }
 
 pub fn all(state: &AppState) -> Vec<Eval> {
-    let mut out: Vec<Eval> = std::fs::read_dir(dir(state))
+    all_in(&dir(state))
+}
+
+/// Every evaluation saved in `d` (one `<id>.json` each), newest first. A file
+/// that won't parse is moved aside rather than dropped (`crate::fsio`).
+pub fn all_in(d: &std::path::Path) -> Vec<Eval> {
+    let mut out: Vec<Eval> = std::fs::read_dir(d)
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|e| std::fs::read(e.path()).ok())
-        .filter_map(|b| serde_json::from_slice(&b).ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
+        .filter_map(|p| crate::fsio::read_json_or_backup(&p))
         .collect();
     out.sort_by_key(|e: &Eval| std::cmp::Reverse(e.started));
     out
@@ -173,6 +195,119 @@ pub fn all(state: &AppState) -> Vec<Eval> {
 fn progress(f: impl FnOnce(&mut Eval)) {
     if let Some(e) = CURRENT.lock().expect("evals").as_mut() {
         f(e);
+    }
+}
+
+/// Save the evaluation in progress as it stands, so a restart can resume it.
+fn checkpoint(state: &AppState) {
+    let current = CURRENT.lock().expect("evals").clone();
+    if let Some(e) = current {
+        save(state, &e);
+    }
+}
+
+/// The categories an evaluation runs, in order: (key, what it says meanwhile).
+pub const CATEGORIES: [(&str, &str); 5] = [
+    ("tools", "Testing tool use"),
+    ("code", "Testing code"),
+    ("reasoning", "Testing reasoning"),
+    ("instructions", "Testing instructions"),
+    ("long", "Testing long documents"),
+];
+
+/// What to do with an evaluation that was running when the agent stopped.
+#[derive(Debug, PartialEq)]
+pub enum AfterRestart {
+    /// The same model is serving: carry on at the next category.
+    Resume,
+    /// Something else (or nothing) is serving: keep what it finished.
+    Interrupt,
+}
+
+pub fn after_restart(saved: &Eval, serving: Option<&str>) -> AfterRestart {
+    if serving == Some(saved.model.as_str()) {
+        AfterRestart::Resume
+    } else {
+        AfterRestart::Interrupt
+    }
+}
+
+/// Mark an evaluation cut short by a restart, keeping its finished categories.
+pub fn interrupt(e: &mut Eval) {
+    e.status = "interrupted".into();
+    e.finished = Some(now());
+    e.activity = None;
+    e.overall = None;
+    e.error = Some(format!(
+        "TT Station restarted during this check-up and {} wasn't serving afterwards; \
+         {} of {} tests finished.",
+        short(&e.model),
+        e.categories.iter().filter(|c| c.key != "agent").count(),
+        CATEGORIES.len()
+    ));
+}
+
+/// At agent start: an evaluation that was running is resumed or marked
+/// interrupted (see the module docs). Waits a few minutes for the model that
+/// was serving to be adopted first.
+pub async fn resume(state: AppState) {
+    resume_within(state, Duration::from_secs(180)).await
+}
+
+/// [`resume`], waiting at most `wait` for the model to be serving again.
+pub async fn resume_within(state: AppState, wait: Duration) {
+    let saved: Vec<Eval> = all(&state)
+        .into_iter()
+        .filter(|e| e.status == "running")
+        .collect();
+    if saved.is_empty() {
+        return;
+    }
+    let deadline = Instant::now() + wait;
+    let mut serving = state.endpoint();
+    while Instant::now() < deadline
+        && !saved
+            .iter()
+            .any(|e| serving.as_ref().is_some_and(|ep| ep.model == e.model))
+    {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        serving = state.endpoint();
+    }
+    // The newest one may carry on; any other is interrupted.
+    let mut resumable: Option<Eval> = None;
+    for mut e in saved {
+        if resumable.is_none()
+            && after_restart(&e, serving.as_ref().map(|ep| ep.model.as_str()))
+                == AfterRestart::Resume
+        {
+            resumable = Some(e);
+            continue;
+        }
+        interrupt(&mut e);
+        save(&state, &e);
+    }
+    let Some(mut e) = resumable else { return };
+    let Some(ep) = serving else { return };
+    {
+        let mut cur = CURRENT.lock().expect("evals");
+        if cur.as_ref().is_some_and(|c| c.status == "running") {
+            drop(cur);
+            interrupt(&mut e);
+            save(&state, &e);
+            return;
+        }
+        e.resumed += 1;
+        e.activity = Some("Picking up where it left off".into());
+        *cur = Some(e.clone());
+    }
+    eprintln!(
+        "tt-station-agentd: evaluation {}: resuming after {} of {} tests",
+        e.id,
+        e.categories.len(),
+        CATEGORIES.len()
+    );
+    if let Err(why) = drive(&state, &ep.base_url, &ep.model, e.context, e.agent).await {
+        eprintln!("tt-station-agentd: evaluation: {why}");
     }
 }
 
@@ -852,20 +987,44 @@ pub async fn run(state: &AppState, agent: bool) -> Result<Eval, String> {
             status: "running".into(),
             context,
             activity: Some("Measuring speed".into()),
+            agent,
             ..Default::default()
         });
     }
+    checkpoint(state);
+    drive(state, &ep.base_url, &ep.model, context, agent).await
+}
+
+/// Run (or carry on) the evaluation in [`CURRENT`] to the end, and save it.
+async fn drive(
+    state: &AppState,
+    base_url: &str,
+    model: &str,
+    context: Option<u64>,
+    agent: bool,
+) -> Result<Eval, String> {
     STOP.store(false, Ordering::SeqCst);
     let m = Arc::new(Model {
-        http: reqwest::Client::builder()
+        http: match reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(600))
             .build()
-            .map_err(|e| e.to_string())?,
-        url: crate::assistant::chat_completions_url(&ep.base_url),
-        model: ep.model.clone(),
+        {
+            Ok(c) => c,
+            Err(e) => {
+                if let Some(mut cur) = CURRENT.lock().expect("evals").take() {
+                    cur.status = "failed".into();
+                    cur.finished = Some(now());
+                    cur.error = Some(e.to_string());
+                    save(state, &cur);
+                }
+                return Err(e.to_string());
+            }
+        },
+        url: crate::assistant::chat_completions_url(base_url),
+        model: model.to_string(),
     });
-    let result = steps(state, &m, &ep.base_url, context, agent).await;
+    let result = steps(state, &m, base_url, context, agent).await;
     let mut e = CURRENT.lock().expect("evals").take().unwrap_or_default();
     e.finished = Some(now());
     e.activity = None;
@@ -909,40 +1068,54 @@ async fn steps(
             Ok(())
         }
     };
-    match crate::bench::run(state).await {
-        Ok(b) => progress(|e| {
-            e.speed = Speed {
-                ttft_s: b.ttft_s,
-                single_tps: b.single_tps,
-                batch_tps: b.batch_tps,
-                wh_per_million_tokens: b.wh_per_million_tokens,
-            }
-        }),
-        Err(why) if why.contains("already") => {}
-        Err(why) => return Err(why),
+    // What a resumed evaluation already has.
+    let (measured, done): (bool, Vec<String>) = CURRENT
+        .lock()
+        .expect("evals")
+        .as_ref()
+        .map(|e| {
+            (
+                e.speed.single_tps.is_some() || e.speed.ttft_s.is_some(),
+                e.categories.iter().map(|c| c.key.clone()).collect(),
+            )
+        })
+        .unwrap_or_default();
+    if !measured {
+        match crate::bench::run(state).await {
+            Ok(b) => progress(|e| {
+                e.speed = Speed {
+                    ttft_s: b.ttft_s,
+                    single_tps: b.single_tps,
+                    batch_tps: b.batch_tps,
+                    wh_per_million_tokens: b.wh_per_million_tokens,
+                }
+            }),
+            Err(why) if why.contains("already") => {}
+            Err(why) => return Err(why),
+        }
+        checkpoint(state);
     }
     stop()?;
     // Fail fast when the model doesn't answer at all.
     m.ask("Say OK.", 5).await?;
-    for (label, which) in [
-        ("Testing tool use", 0),
-        ("Testing code", 1),
-        ("Testing reasoning", 2),
-        ("Testing instructions", 3),
-        ("Testing long documents", 4),
-    ] {
+    for (key, label) in CATEGORIES {
+        if done.iter().any(|d| d == key) {
+            continue;
+        }
         stop()?;
         progress(|e| e.activity = Some(label.into()));
-        let c = match which {
-            0 => tool_use(m).await,
-            1 => code(m).await,
-            2 => reasoning(m).await,
-            3 => instructions(m).await,
+        let c = match key {
+            "tools" => tool_use(m).await,
+            "code" => code(m).await,
+            "reasoning" => reasoning(m).await,
+            "instructions" => instructions(m).await,
             _ => long_context(m, context).await,
         };
         progress(|e| e.categories.push(c));
+        // Each finished category survives a restart.
+        checkpoint(state);
     }
-    if !agent {
+    if !agent || done.iter().any(|d| d == "agent") {
         return Ok(());
     }
     stop()?;
@@ -1230,9 +1403,13 @@ pub fn recommend(evals: &[Eval]) -> Vec<Pick> {
 
 /// `GET /evals`: past evaluations (newest first), the one running, and picks.
 pub(crate) async fn get_evals(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
-    let evals = all(&state);
-    let picks = recommend(&evals);
     let running = CURRENT.lock().expect("evals").clone();
+    // The one running is saved as it goes; it's shown as `running`, not twice.
+    let evals: Vec<Eval> = all(&state)
+        .into_iter()
+        .filter(|e| running.as_ref().is_none_or(|r| r.id != e.id))
+        .collect();
+    let picks = recommend(&evals);
     let serving = state.endpoint().map(|e| e.model);
     Json(
         json!({ "evals": evals, "running": running, "recommendations": picks, "serving": serving }),
@@ -1292,10 +1469,8 @@ pub(crate) async fn get_eval(
     if !valid_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "Bad id."));
     }
-    let b = std::fs::read(dir(&state).join(format!("{id}.json")))
-        .map_err(|_| err(StatusCode::NOT_FOUND, "No such evaluation."))?;
-    let e: Eval = serde_json::from_slice(&b)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let e: Eval = crate::fsio::read_json_or_backup(&dir(&state).join(format!("{id}.json")))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such evaluation."))?;
     Ok(Json(json!({ "eval": e })))
 }
 
@@ -1446,5 +1621,82 @@ mod tests {
             65_536,
             "the fallback is 64K"
         );
+    }
+
+    #[test]
+    fn evaluations_are_saved_whole_and_temp_or_broken_files_are_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path().join("evals");
+        let e = Eval {
+            id: "1-abc".into(),
+            model: "m".into(),
+            started: 5,
+            status: "done".into(),
+            ..Default::default()
+        };
+        save_in(&d, &e);
+        save_trials(&d, "1-abc", &[]);
+        std::fs::write(d.join(".2-x.json.tmp-00ff"), b"{").unwrap();
+        std::fs::write(d.join("3-bad.json"), b"{\"id\":").unwrap();
+        let all = all_in(&d);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "1-abc");
+        assert!(d.join("raw/1-abc.json").is_file());
+        assert!(
+            !d.join("3-bad.json").exists(),
+            "moved aside, not left to be overwritten"
+        );
+    }
+
+    #[test]
+    fn a_restart_resumes_the_same_model_and_interrupts_otherwise() {
+        let e = Eval {
+            id: "1-a".into(),
+            model: "Qwen3-32B".into(),
+            status: "running".into(),
+            categories: vec![category("tools", "Tool use", vec![])],
+            ..Default::default()
+        };
+        assert_eq!(after_restart(&e, Some("Qwen3-32B")), AfterRestart::Resume);
+        assert_eq!(
+            after_restart(&e, Some("Llama-3.3-70B")),
+            AfterRestart::Interrupt
+        );
+        assert_eq!(after_restart(&e, None), AfterRestart::Interrupt);
+        let mut cut = e.clone();
+        interrupt(&mut cut);
+        assert_eq!(cut.status, "interrupted");
+        assert_eq!(cut.categories.len(), 1, "finished categories are kept");
+        assert!(cut.error.as_deref().unwrap().contains("1 of 5"));
+        assert!(recommend(&[cut]).is_empty(), "never used for picks");
+    }
+
+    #[tokio::test]
+    async fn an_evaluation_cut_short_with_nothing_serving_is_marked_interrupted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_config_dir(tmp.path().to_path_buf());
+        let e = Eval {
+            id: "7-cut".into(),
+            model: "Qwen3-32B".into(),
+            started: 1,
+            status: "running".into(),
+            categories: vec![
+                category("tools", "Tool use", vec![]),
+                category("code", "Code", vec![]),
+            ],
+            ..Default::default()
+        };
+        save(&state, &e);
+        resume_within(state.clone(), Duration::ZERO).await;
+        let back = all(&state);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].status, "interrupted");
+        assert_eq!(back[0].categories.len(), 2);
+        assert!(back[0].finished.is_some());
     }
 }

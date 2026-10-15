@@ -192,22 +192,53 @@ static ROUTINES: LazyLock<Mutex<Option<Vec<Routine>>>> = LazyLock::new(|| Mutex:
 fn with_routines<T>(state: &AppState, f: impl FnOnce(&mut Vec<Routine>) -> T) -> T {
     let mut held = ROUTINES.lock().expect("routines");
     let list = held.get_or_insert_with(|| {
-        std::fs::read(dir(state).join("routines.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+        crate::fsio::read_json_or_backup(&dir(state).join("routines.json")).unwrap_or_default()
     });
     let before = serde_json::to_vec(&*list).unwrap_or_default();
     let out = f(list);
-    let after = serde_json::to_vec_pretty(&*list).unwrap_or_default();
     if serde_json::to_vec(&*list).unwrap_or_default() != before {
-        let _ = std::fs::create_dir_all(dir(state));
-        let tmp = dir(state).join("routines.json.tmp");
-        if std::fs::write(&tmp, after).is_ok() {
-            let _ = std::fs::rename(&tmp, dir(state).join("routines.json"));
-        }
+        crate::fsio::save_json(
+            &dir(state).join("routines.json"),
+            &*list,
+            crate::fsio::PRIVATE,
+        );
     }
     out
+}
+
+/// Add or update routines from an export (`crate::export`), by id: returns
+/// (added, updated). What each may do without asking is kept to [`ACTIONS`],
+/// and its next run is worked out again here.
+pub(crate) fn merge_imported(state: &AppState, incoming: Vec<Routine>) -> (usize, usize) {
+    with_routines(state, |list| {
+        let (mut added, mut updated) = (0, 0);
+        for mut r in incoming {
+            if !crate::export::safe_id(&r.id) {
+                continue;
+            }
+            r.allowed.retain(|a| ACTIONS.contains(&a.as_str()));
+            r.next_run = None;
+            match list.iter_mut().find(|x| x.id == r.id) {
+                Some(cur) => {
+                    r.next_run = cur.next_run;
+                    if serde_json::to_value(&*cur).ok() != serde_json::to_value(&r).ok() {
+                        *cur = r;
+                        updated += 1;
+                    }
+                }
+                None => {
+                    list.push(r);
+                    added += 1;
+                }
+            }
+        }
+        (added, updated)
+    })
+}
+
+/// The routines as they are now (for an export's preview).
+pub(crate) fn list(state: &AppState) -> Vec<Routine> {
+    with_routines(state, |l| l.clone())
 }
 
 fn run_path(state: &AppState, id: &str) -> PathBuf {
@@ -218,11 +249,7 @@ fn run_path(state: &AppState, id: &str) -> PathBuf {
 static LIVE: LazyLock<Mutex<HashMap<String, Run>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn save_run(state: &AppState, run: &Run) {
-    let path = run_path(state, &run.id);
-    if let Some(d) = path.parent() {
-        let _ = std::fs::create_dir_all(d);
-    }
-    let _ = std::fs::write(&path, serde_json::to_vec_pretty(run).unwrap_or_default());
+    crate::fsio::save_json(&run_path(state, &run.id), run, crate::fsio::PRIVATE);
     LIVE.lock()
         .expect("routines")
         .insert(run.id.clone(), run.clone());
@@ -244,9 +271,7 @@ fn load_run(state: &AppState, id: &str) -> Option<Run> {
     if let Some(r) = LIVE.lock().expect("routines").get(id) {
         return Some(r.clone());
     }
-    std::fs::read(run_path(state, id))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
+    crate::fsio::read_json_or_backup(&run_path(state, id))
 }
 
 /// All runs on disk, newest first.
@@ -255,8 +280,9 @@ fn all_runs(state: &AppState) -> Vec<Run> {
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|e| std::fs::read(e.path()).ok())
-        .filter_map(|b| serde_json::from_slice::<Run>(&b).ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
+        .filter_map(|p| crate::fsio::read_json_or_backup::<Run>(&p))
         .map(|r| {
             LIVE.lock()
                 .expect("routines")
@@ -1702,5 +1728,44 @@ mod tests {
         // Older runs on disk have no queue.
         let old: Run = serde_json::from_value(json!({ "id": "1-a", "routine": "r", "name": "n", "trigger": "manual", "started": 1, "status": "done" })).unwrap();
         assert!(old.queued.is_empty());
+    }
+
+    #[test]
+    fn runs_are_written_whole_and_a_broken_one_is_set_aside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_config_dir(tmp.path().to_path_buf());
+        let run: Run = serde_json::from_value(json!({ "id": "9-atomic", "routine": "r", "name": "n", "trigger": "manual", "started": 7, "status": "done" })).unwrap();
+        save_run(&state, &run);
+        let runs = tmp.path().join("routines/runs");
+        // A crash mid-write leaves a temp file and a half-written run.
+        std::fs::write(runs.join(".9-x.json.tmp-0123"), b"{").unwrap();
+        std::fs::write(runs.join("9-broken.json"), b"{\"id\": ").unwrap();
+        let all = all_runs(&state);
+        assert_eq!(all.len(), 1, "only the whole run is listed");
+        assert_eq!(all[0].id, "9-atomic");
+        let names: Vec<String> = std::fs::read_dir(&runs)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with("9-broken.json.corrupt-")),
+            "{names:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(runs.join("9-atomic.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 }

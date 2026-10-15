@@ -15,9 +15,15 @@
 //! - Whisper takes at most 5 minutes of audio per request, so recordings are cut
 //!   with ffmpeg into 4.5-minute 16 kHz mono pieces, transcribed in order, and
 //!   stitched back with their timestamps shifted.
-//! - When it's done: a notification, a transcript (text, SRT, JSON), and the
-//!   transcript added to the owner's documents so the assistant can answer
-//!   questions about the meeting.
+//! - When it's done: a notification and a transcript (text, SRT, JSON). The
+//!   recording itself is deleted unless the person chose to keep it
+//!   (`keep_audio`, else the household's `crate::export::DataSettings`), and the
+//!   transcript goes into the shared Library only when asked (`documents`, else
+//!   the household default, off).
+//! - Progress is kept per chunk (`progress.json`), so an agent restart resumes
+//!   at the next chunk instead of starting the recording over.
+//! - Each job remembers the device that started it. Members see their own jobs
+//!   and the ones shared with the household; owners see all (see [`visible`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -28,7 +34,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::routes::{AppState, BearerAuth, ErrorResponse, Phase};
+use crate::routes::{AppState, CallerAuth, ErrorResponse, Phase};
 
 /// Longest piece sent to Whisper. tt-media-server documents 300 s with
 /// preprocessing, but the live server transcribes only the first 60 s of a
@@ -122,16 +128,75 @@ pub struct Job {
     pub started: Option<u64>,
     pub finished: Option<u64>,
     pub error: Option<String>,
-    /// Add the result to the owner's documents.
-    #[serde(default = "yes")]
-    pub to_documents: bool,
+    /// Add the transcript to the shared Library. `None`: the household default
+    /// when it finishes ([`crate::export::DataSettings::transcripts_to_library`]).
+    #[serde(default)]
+    pub to_documents: Option<bool>,
+    /// Keep the recording after it's transcribed. `None`: the household
+    /// default ([`crate::export::DataSettings::keep_audio`], off).
+    #[serde(default)]
+    pub keep_audio: Option<bool>,
     /// The mode the queue switched away from, to put back afterwards.
     #[serde(default)]
     pub restore: Option<String>,
+    /// The paired device that started it; `None` for the box itself (and the
+    /// recorder, which doesn't say), which only owners see unless shared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<String>,
+    /// That device's name, for lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by_name: Option<String>,
+    /// Shared with everyone on the box, not just its starter and the owners.
+    #[serde(default)]
+    pub shared: bool,
 }
 
-fn yes() -> bool {
-    true
+/// How a new job was asked for: the per-job choices (each `None` falls back to
+/// the household default) and who asked.
+#[derive(Debug, Clone, Default)]
+pub struct NewJob {
+    pub to_documents: Option<bool>,
+    pub keep_audio: Option<bool>,
+    pub started_by: Option<String>,
+    pub started_by_name: Option<String>,
+    pub shared: bool,
+}
+
+/// Whether `caller` may see (and act on) `job`: owners see every job; anyone
+/// else their own and the shared ones.
+pub(crate) fn visible(job: &Job, caller: &crate::routes::Caller) -> bool {
+    caller.owner()
+        || job.shared
+        || (job.started_by.is_some() && job.started_by == caller.device_id())
+}
+
+/// Chunk-by-chunk progress of a transcription, kept beside the job so a
+/// restart picks up at the next chunk. `offsets` are the pieces' start times:
+/// cutting is deterministic, and a different cut (a changed input, or a newer
+/// agent cutting differently) means starting over.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Progress {
+    pub offsets: Vec<f64>,
+    pub done: usize,
+    pub segments: Vec<Segment>,
+}
+
+/// Where a transcription picks up: the chunks already done and their segments,
+/// when the saved progress was made from the same cut; else from the start.
+pub fn resume_point(saved: Option<Progress>, offsets: &[f64]) -> (usize, Vec<Segment>) {
+    match saved {
+        Some(p)
+            if p.offsets.len() == offsets.len()
+                && p.done <= offsets.len()
+                && p.offsets
+                    .iter()
+                    .zip(offsets)
+                    .all(|(a, b)| (a - b).abs() < 1e-3) =>
+        {
+            (p.done, p.segments)
+        }
+        _ => (0, Vec::new()),
+    }
 }
 
 fn unix_now() -> u64 {
@@ -257,7 +322,8 @@ impl std::fmt::Debug for Jobs {
 }
 
 impl Jobs {
-    /// Load the queue from `dir`. Jobs interrupted mid-run go back in line.
+    /// Load the queue from `dir`. Jobs interrupted mid-run go back in line,
+    /// keeping the chunks they'd finished (see [`Progress`]).
     pub fn open(dir: impl Into<PathBuf>) -> Jobs {
         let dir = dir.into();
         let mut jobs: Vec<Job> = std::fs::read_dir(&dir)
@@ -270,7 +336,6 @@ impl Jobs {
         for job in &mut jobs {
             if matches!(job.status, JobStatus::Running | JobStatus::Switching) {
                 job.status = JobStatus::Queued;
-                job.done = 0;
             }
         }
         jobs.sort_by_key(|j| j.created);
@@ -322,8 +387,25 @@ impl Jobs {
         Some(job)
     }
 
-    /// Queue a job whose input file is already at `input`.
+    /// Queue a job whose input file is already in [`Jobs::job_dir`]. For callers
+    /// that don't know who asked or what they chose (the recorder): `true`
+    /// leaves the Library and the audio to the household defaults, `false`
+    /// keeps the transcript out of the Library.
     pub fn add(&self, id: String, kind: &str, title: &str, when: When, to_documents: bool) -> Job {
+        self.add_with(
+            id,
+            kind,
+            title,
+            when,
+            NewJob {
+                to_documents: (!to_documents).then_some(false),
+                ..NewJob::default()
+            },
+        )
+    }
+
+    /// Queue a job whose input file is already in [`Jobs::job_dir`].
+    pub fn add_with(&self, id: String, kind: &str, title: &str, when: When, new: NewJob) -> Job {
         let job = Job {
             id,
             kind: kind.to_string(),
@@ -337,8 +419,12 @@ impl Jobs {
             started: None,
             finished: None,
             error: None,
-            to_documents,
+            to_documents: new.to_documents,
+            keep_audio: new.keep_audio,
             restore: None,
+            started_by: new.started_by,
+            started_by_name: new.started_by_name,
+            shared: new.shared,
         };
         self.save(&job);
         self.jobs
@@ -375,6 +461,46 @@ impl Jobs {
             .expect("jobs mutex poisoned")
             .iter()
             .any(|c| c == id)
+    }
+
+    /// Whether any job is waiting or running.
+    pub fn has_pending(&self) -> bool {
+        self.next().is_some()
+    }
+
+    /// Delete finished jobs (done, failed, cancelled) that finished before
+    /// `cutoff` (unix seconds), with their files. Returns how many went.
+    pub fn expire(&self, cutoff: u64) -> usize {
+        let old: Vec<String> = self
+            .list()
+            .into_iter()
+            .filter(|j| {
+                matches!(
+                    j.status,
+                    JobStatus::Done | JobStatus::Failed | JobStatus::Cancelled
+                ) && j.finished.unwrap_or(j.created) < cutoff
+            })
+            .map(|j| j.id)
+            .collect();
+        for id in &old {
+            self.remove(id);
+        }
+        old.len()
+    }
+
+    /// Pick up a job whose folder was just written (an import): load its
+    /// `job.json` and add or replace it in the queue. Only finished jobs are
+    /// taken, so an import never starts work.
+    pub fn adopt(&self, id: &str) -> Option<Job> {
+        let job: Job = crate::fsio::read_json_or_backup(&self.job_dir(id).join("job.json"))?;
+        if job.id != id || job.status != JobStatus::Done {
+            return None;
+        }
+        let mut jobs = self.jobs.lock().expect("jobs mutex poisoned");
+        jobs.retain(|j| j.id != id);
+        jobs.push(job.clone());
+        jobs.sort_by_key(|j| j.created);
+        Some(job)
     }
 
     /// The next job to work on, oldest first.
@@ -678,11 +804,23 @@ async fn transcribe(state: &AppState, jobs: &Jobs, job: Job, base: &str) {
             return;
         }
     };
+    let offsets: Vec<f64> = chunks.iter().map(|p| p.offset).collect();
+    let progress_path = dir.join("progress.json");
+    let (start, mut segments) =
+        resume_point(crate::fsio::read_json_or_backup(&progress_path), &offsets);
+    if start > 0 {
+        eprintln!(
+            "tt-station-agentd: job {}: resuming at chunk {} of {}",
+            job.id,
+            start + 1,
+            chunks.len()
+        );
+    }
     jobs.update(&job.id, |j| {
         j.status = JobStatus::Running;
         j.started.get_or_insert(unix_now());
         j.total = chunks.len() as u32;
-        j.done = 0;
+        j.done = start as u32;
         j.duration_s = length;
     });
 
@@ -693,8 +831,7 @@ async fn transcribe(state: &AppState, jobs: &Jobs, job: Job, base: &str) {
     let on_cpu = crate::voice::cpu_whisper().await.as_deref() == Some(base);
     let api_key =
         std::env::var("TT_MEDIA_API_KEY").unwrap_or_else(|_| "your-secret-key".to_string());
-    let mut segments: Vec<Segment> = Vec::new();
-    for (i, piece) in chunks.iter().enumerate() {
+    for (i, piece) in chunks.iter().enumerate().skip(start) {
         let chunk = &piece.path;
         if jobs.is_cancelled(&job.id) {
             let _ = std::fs::remove_dir_all(&chunk_dir);
@@ -750,13 +887,23 @@ async fn transcribe(state: &AppState, jobs: &Jobs, job: Job, base: &str) {
         match answer {
             Ok(value) => {
                 segments.extend(segments_from_whisper(&value, offset, piece.length));
-                jobs.update(&job.id, |j| j.done = i as u32 + 1);
-                // Keep partial results, so a long job shows progress.
+                // The chunk is on disk before it counts, so a restart resumes
+                // after it (and never skips one).
+                let progress = Progress {
+                    offsets: offsets.clone(),
+                    done: i + 1,
+                    segments: segments.clone(),
+                };
                 let (path, partial) = (dir.join("transcript.txt"), to_text(&segments));
+                let progress_file = progress_path.clone();
                 let _ = tokio::task::spawn_blocking(move || {
-                    crate::fsio::write_atomic(&path, partial.as_bytes(), crate::fsio::PRIVATE)
+                    use crate::fsio::{write_atomic, write_json, PRIVATE};
+                    let _ = write_json(&progress_file, &progress, PRIVATE);
+                    // Keep partial results, so a long job shows progress.
+                    write_atomic(&path, partial.as_bytes(), PRIVATE)
                 })
                 .await;
+                jobs.update(&job.id, |j| j.done = i as u32 + 1);
             }
             Err(e) => {
                 jobs.update(&job.id, |j| {
@@ -769,6 +916,7 @@ async fn transcribe(state: &AppState, jobs: &Jobs, job: Job, base: &str) {
         }
     }
     let _ = std::fs::remove_dir_all(&chunk_dir);
+    let _ = std::fs::remove_file(&progress_path);
     let text = to_text(&segments);
     // What was said in a meeting: readable by the box's user only.
     let transcript_json = serde_json::to_vec_pretty(
@@ -788,7 +936,14 @@ async fn transcribe(state: &AppState, jobs: &Jobs, job: Job, base: &str) {
         let _ = write_atomic(&folder.join("transcript.json"), &transcript_json, PRIVATE);
     })
     .await;
-    if job.to_documents && !text.is_empty() {
+    let household = crate::export::settings(state);
+    // The recording was only needed to make the transcript.
+    let keep_audio = job.keep_audio.unwrap_or(household.keep_audio);
+    if !keep_audio {
+        let _ = std::fs::remove_file(&input);
+    }
+    let to_documents = job.to_documents.unwrap_or(household.transcripts_to_library);
+    if to_documents && !text.is_empty() {
         if let Some(docs) = state.docs() {
             let name = format!("Transcript: {}", job.title);
             let now = unix_now();
@@ -798,6 +953,8 @@ async fn transcribe(state: &AppState, jobs: &Jobs, job: Job, base: &str) {
     let done = jobs.update(&job.id, |j| {
         j.status = JobStatus::Done;
         j.finished = Some(unix_now());
+        j.to_documents = Some(to_documents);
+        j.keep_audio = Some(keep_audio);
     });
     if let Some(done) = done {
         let minutes = done
@@ -811,7 +968,7 @@ async fn transcribe(state: &AppState, jobs: &Jobs, job: Job, base: &str) {
                 "{}{} transcribed on your box.{}",
                 done.title,
                 minutes,
-                if done.to_documents {
+                if to_documents {
                     " Ask the assistant about it."
                 } else {
                     ""
@@ -835,20 +992,40 @@ fn queue(state: &AppState) -> Result<std::sync::Arc<Jobs>, (StatusCode, Json<Err
         .ok_or_else(|| err(StatusCode::CONFLICT, "This agent has no job queue."))
 }
 
+/// The job `id`, if `caller` may see it; else `404`, the same as a job that
+/// doesn't exist (a member doesn't learn other people's job ids).
+fn job_for(
+    jobs: &Jobs,
+    id: &str,
+    caller: &crate::routes::Caller,
+) -> Result<Job, (StatusCode, Json<ErrorResponse>)> {
+    jobs.get(id)
+        .filter(|j| visible(j, caller))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such job."))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UploadQuery {
     pub name: String,
     #[serde(default)]
     pub when: Option<String>,
+    /// Add the transcript to the shared Library (default: the household's).
     #[serde(default)]
     pub documents: Option<bool>,
+    /// Keep the recording after it's transcribed (default: the household's).
+    #[serde(default)]
+    pub keep_audio: Option<bool>,
+    /// Let everyone on the box see the job and its transcript.
+    #[serde(default)]
+    pub shared: Option<bool>,
 }
 
-/// `POST /jobs/transcribe?name=meeting.m4a&when=now|tonight` (authed), body =
-/// the recording (any format ffmpeg reads). `201` with the job.
+/// `POST /jobs/transcribe?name=meeting.m4a&when=now|tonight[&documents=true]
+/// [&keep_audio=true][&shared=true]` (authed), body = the recording (any format
+/// ffmpeg reads). `201` with the job.
 pub(crate) async fn post_transcribe(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     axum::extract::Query(q): axum::extract::Query<UploadQuery>,
     body: axum::body::Body,
 ) -> Result<(StatusCode, Json<Job>), (StatusCode, Json<ErrorResponse>)> {
@@ -906,28 +1083,75 @@ pub(crate) async fn post_transcribe(
         let _ = tokio::fs::remove_dir_all(&dir).await;
         return Err(err(StatusCode::BAD_REQUEST, "The upload was empty."));
     }
-    let job = jobs.add(id, "transcribe", &title, when, q.documents.unwrap_or(true));
+    let new = NewJob {
+        to_documents: q.documents,
+        keep_audio: q.keep_audio,
+        started_by: caller.device_id(),
+        started_by_name: caller.device.as_ref().map(|d| d.name.clone()),
+        shared: q.shared.unwrap_or(false),
+    };
+    let job = jobs.add_with(id, "transcribe", &title, when, new);
     Ok((StatusCode::CREATED, Json(job)))
 }
 
-/// `GET /jobs` (authed): newest first.
+/// `GET /jobs` (authed): newest first; a member's own and the shared ones,
+/// every job for an owner.
 pub(crate) async fn get_jobs(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let jobs = queue(&state)?;
-    Ok(Json(json!({ "jobs": jobs.list() })))
+    let mine: Vec<Job> = jobs
+        .list()
+        .into_iter()
+        .filter(|j| visible(j, &caller))
+        .collect();
+    Ok(Json(json!({ "jobs": mine })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ShareBody {
+    pub shared: bool,
+}
+
+/// `POST /jobs/{id}/share` `{shared}` (authed): share a job and its transcript
+/// with everyone on the box, or stop. Its starter or an owner.
+pub(crate) async fn post_share(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    CallerAuth(caller): CallerAuth,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<ShareBody>,
+) -> Result<Json<Job>, (StatusCode, Json<ErrorResponse>)> {
+    let jobs = queue(&state)?;
+    let job = job_for(&jobs, &id, &caller)?;
+    let starter = job.started_by.is_some() && job.started_by == caller.device_id();
+    if !(caller.owner() || starter) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "Only whoever started this job, or an owner, can share it.",
+        ));
+    }
+    let job = jobs
+        .update(&id, |j| j.shared = body.shared)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such job."))?;
+    crate::audit::record_as(
+        &state,
+        &caller.actor(),
+        "job_share",
+        &id,
+        if body.shared { "shared" } else { "private" },
+    );
+    Ok(Json(job))
 }
 
 /// `POST /jobs/{id}/run` (authed): the owner's go-ahead to switch the box now.
 pub(crate) async fn post_run_now(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let jobs = queue(&state)?;
-    jobs.get(&id)
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such job."))?;
+    job_for(&jobs, &id, &caller)?;
     GO_AHEAD.lock().expect("go mutex").push(id.clone());
     jobs.update(&id, |j| {
         if j.status == JobStatus::Waiting {
@@ -940,10 +1164,11 @@ pub(crate) async fn post_run_now(
 /// `DELETE /jobs/{id}` (authed): cancel or delete.
 pub(crate) async fn delete_job(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let jobs = queue(&state)?;
+    job_for(&jobs, &id, &caller)?;
     if jobs.remove(&id) {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -961,7 +1186,7 @@ pub struct ResultQuery {
 /// the partial one while it runs).
 pub(crate) async fn get_result(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     axum::extract::Path(id): axum::extract::Path<String>,
     axum::extract::Query(q): axum::extract::Query<ResultQuery>,
 ) -> axum::response::Response {
@@ -969,7 +1194,7 @@ pub(crate) async fn get_result(
     let Ok(jobs) = queue(&state) else {
         return err(StatusCode::CONFLICT, "No job queue.").into_response();
     };
-    if jobs.get(&id).is_none() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+    if job_for(&jobs, &id, &caller).is_err() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
         return err(StatusCode::NOT_FOUND, "No such job.").into_response();
     }
     let (file, content_type) = match q.format.as_deref() {
@@ -1001,8 +1226,12 @@ mod tests {
             started: None,
             finished: None,
             error: None,
-            to_documents: true,
+            to_documents: None,
+            keep_audio: None,
             restore: None,
+            started_by: None,
+            started_by_name: None,
+            shared: false,
         }
     }
 
@@ -1066,7 +1295,8 @@ mod tests {
         });
         let reopened = Jobs::open(&dir);
         let back = reopened.get("abc123").unwrap();
-        assert_eq!((back.status, back.done), (JobStatus::Queued, 0));
+        // Back in line, keeping the chunks it had done (see `Progress`).
+        assert_eq!((back.status, back.done), (JobStatus::Queued, 3));
         assert!(reopened.remove("abc123"));
         assert!(Jobs::open(&dir).list().is_empty());
         let _ = std::fs::remove_dir_all(dir);
@@ -1101,5 +1331,124 @@ mod tests {
     fn night_window() {
         assert!(in_night_window(1) && in_night_window(5));
         assert!(!in_night_window(0) && !in_night_window(6) && !in_night_window(14));
+    }
+
+    fn device(id: &str, owner: bool) -> crate::routes::Caller {
+        crate::routes::Caller {
+            local: false,
+            device: Some(crate::sessions::Session {
+                id: id.into(),
+                token_sha256: String::new(),
+                name: id.into(),
+                platform: None,
+                created: None,
+                last_used: 0,
+                owner,
+            }),
+        }
+    }
+
+    #[test]
+    fn members_see_their_own_and_shared_jobs_owners_see_all() {
+        let mut mine = job(When::Now);
+        mine.started_by = Some("phone-a".into());
+        let mut theirs = mine.clone();
+        theirs.started_by = Some("phone-b".into());
+        let mut boxes = mine.clone();
+        boxes.started_by = None; // the recorder, or the box itself
+        let (a, owner) = (device("phone-a", false), device("laptop", true));
+        assert!(visible(&mine, &a));
+        assert!(!visible(&theirs, &a), "someone else's");
+        assert!(!visible(&boxes, &a), "the box's own: owners only");
+        theirs.shared = true;
+        assert!(visible(&theirs, &a), "shared with the household");
+        for j in [&mine, &theirs, &boxes] {
+            assert!(visible(j, &owner));
+        }
+        let local = crate::routes::Caller {
+            local: true,
+            device: None,
+        };
+        assert!(visible(&boxes, &local), "the box's own user is an owner");
+    }
+
+    #[test]
+    fn a_restart_resumes_after_the_last_saved_chunk() {
+        let offsets = [0.0, 55.0, 110.0];
+        let seg = |t: f64| Segment {
+            start: t,
+            end: t + 1.0,
+            text: format!("at {t}"),
+        };
+        let saved = Progress {
+            offsets: offsets.to_vec(),
+            done: 2,
+            segments: vec![seg(0.0), seg(55.0)],
+        };
+        let (start, segments) = resume_point(Some(saved.clone()), &offsets);
+        assert_eq!((start, segments.len()), (2, 2));
+        // Cut differently (another input, another cutter): start over.
+        assert_eq!(resume_point(Some(saved.clone()), &[0.0, 50.0, 110.0]).0, 0);
+        assert_eq!(resume_point(Some(saved), &[0.0, 55.0]).0, 0);
+        assert_eq!(resume_point(None, &offsets).0, 0);
+    }
+
+    #[test]
+    fn old_finished_jobs_expire_and_imported_ones_are_adopted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jobs = Jobs::open(tmp.path());
+        for (id, status, finished) in [
+            ("old", JobStatus::Done, 100),
+            ("new", JobStatus::Done, 10_000),
+            ("oldrun", JobStatus::Queued, 0),
+        ] {
+            jobs.add(id.into(), "transcribe", "t", When::Now, true);
+            jobs.update(id, |j| {
+                j.status = status;
+                j.finished = (finished > 0).then_some(finished);
+                j.created = 50;
+            });
+        }
+        assert_eq!(jobs.expire(5_000), 1);
+        assert!(jobs.get("old").is_none() && !tmp.path().join("old").exists());
+        assert!(jobs.get("new").is_some());
+        assert!(
+            jobs.get("oldrun").is_some(),
+            "unfinished work is never expired"
+        );
+        assert!(jobs.has_pending());
+
+        // A job folder written by an import is picked up; an unfinished one isn't.
+        let mut imported = job(When::Now);
+        imported.id = "imp".into();
+        imported.status = JobStatus::Done;
+        crate::fsio::write_json(&tmp.path().join("imp/job.json"), &imported, 0o600).unwrap();
+        assert!(jobs.adopt("imp").is_some());
+        assert!(jobs.get("imp").is_some());
+        imported.id = "imp2".into();
+        imported.status = JobStatus::Queued;
+        crate::fsio::write_json(&tmp.path().join("imp2/job.json"), &imported, 0o600).unwrap();
+        assert!(jobs.adopt("imp2").is_none());
+    }
+
+    #[test]
+    fn the_recorder_s_jobs_leave_library_and_audio_to_the_household() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jobs = Jobs::open(tmp.path());
+        let j = jobs.add("r1".into(), "transcribe", "Meeting", When::Now, true);
+        assert_eq!((j.to_documents, j.keep_audio), (None, None));
+        let j = jobs.add("r2".into(), "transcribe", "Meeting", When::Now, false);
+        assert_eq!(j.to_documents, Some(false));
+        // Older job files said `to_documents: true`: they still read.
+        let old: Job = serde_json::from_value(json!({
+            "id": "o", "kind": "transcribe", "title": "t", "when": "now", "status": "done",
+            "done": 1, "total": 1, "duration_s": null, "created": 1, "started": null,
+            "finished": 2, "error": null, "to_documents": true
+        }))
+        .unwrap();
+        assert_eq!(
+            (old.to_documents, old.keep_audio, old.shared),
+            (Some(true), None, false)
+        );
     }
 }

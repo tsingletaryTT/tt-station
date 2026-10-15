@@ -132,6 +132,38 @@ impl People {
         Ok(person)
     }
 
+    /// Add or rename people from an export (`crate::export`), by id: returns
+    /// (added, updated). Which devices are whose isn't part of an export, so
+    /// that stays as it is here. Past [`MAX_PEOPLE`] the rest are left out.
+    pub fn merge_imported(&self, incoming: Vec<Person>) -> (usize, usize) {
+        let mut book = self.book.lock().expect("people mutex");
+        let (mut added, mut updated) = (0, 0);
+        for p in incoming {
+            let name: String = p.name.trim().chars().take(MAX_NAME).collect();
+            if name.is_empty() || !crate::export::safe_id(&p.id) {
+                continue;
+            }
+            let p = Person { name, ..p };
+            let len = book.people.len();
+            match book.people.iter_mut().find(|x| x.id == p.id) {
+                Some(cur) if *cur != p => {
+                    *cur = p;
+                    updated += 1;
+                }
+                Some(_) => {}
+                None if len < MAX_PEOPLE => {
+                    book.people.push(p);
+                    added += 1;
+                }
+                None => {}
+            }
+        }
+        if added + updated > 0 {
+            self.save(&book);
+        }
+        (added, updated)
+    }
+
     pub fn rename(&self, id: &str, name: &str) -> Result<Person, String> {
         let name: String = name.trim().chars().take(MAX_NAME).collect();
         if name.is_empty() {

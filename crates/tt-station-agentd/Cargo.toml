@@ -55,6 +55,10 @@ regex = "1.12"
 # Decoding images the assistant makes in chat (src/creations.rs).
 base64 = "0.22"
 rand_core = { version = "0.6", features = ["getrandom"] }
+# `POST /export` and `POST /import` (src/export.rs): the person's data as a
+# .tar.gz. No xattrs: an export carries file contents only, never metadata.
+tar = { version = "0.4", default-features = false }
+flate2 = "1"
 
 [features]
 # Compiled in for `cargo test` (see the self-dependency below) so

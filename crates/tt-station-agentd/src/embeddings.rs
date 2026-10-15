@@ -85,17 +85,11 @@ fn settings_path(state: &AppState) -> std::path::PathBuf {
 
 /// The model each service is set to serve (absent: off).
 fn settings(state: &AppState) -> HashMap<String, String> {
-    std::fs::read(settings_path(state))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    crate::fsio::read_json_or_backup(&settings_path(state)).unwrap_or_default()
 }
 
 fn save(state: &AppState, s: &HashMap<String, String>) {
-    let _ = std::fs::write(
-        settings_path(state),
-        serde_json::to_vec_pretty(s).unwrap_or_default(),
-    );
+    crate::fsio::save_json(&settings_path(state), s, crate::fsio::PRIVATE);
 }
 
 /// A service's setup: its step, and why it failed if it did.
@@ -499,5 +493,33 @@ mod tests {
         assert_eq!(out["results"][0]["index"], 2);
         assert_eq!(out["results"][1]["document"]["text"], "b");
         assert_eq!(out["results"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn settings_survive_a_broken_file_by_setting_it_aside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_config_dir(tmp.path().to_path_buf());
+        let mut s = HashMap::new();
+        s.insert("embed".to_string(), "BAAI/bge".to_string());
+        save(&state, &s);
+        assert_eq!(settings(&state), s);
+        std::fs::write(settings_path(&state), b"{\"embed\": ").unwrap();
+        assert!(settings(&state).is_empty());
+        let aside = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("embeddings.json.corrupt-")
+            })
+            .count();
+        assert_eq!(aside, 1);
     }
 }

@@ -114,6 +114,38 @@ impl Memories {
         Ok(memory)
     }
 
+    /// Add or update memories from an export (`crate::export`), by id: returns
+    /// (added, updated). Past [`MAX_MEMORIES`] the rest are left out.
+    pub fn merge_imported(&self, incoming: Vec<Memory>) -> (usize, usize) {
+        let mut items = self.items.lock().expect("memories mutex poisoned");
+        let (mut added, mut updated) = (0, 0);
+        for m in incoming {
+            let text: String = m.text.trim().chars().take(MAX_CHARS).collect();
+            if text.is_empty() || !crate::export::safe_id(&m.id) {
+                continue;
+            }
+            let m = Memory { text, ..m };
+            let len = items.len();
+            match items.iter_mut().find(|x| x.id == m.id) {
+                Some(cur) if *cur != m => {
+                    *cur = m;
+                    updated += 1;
+                }
+                Some(_) => {}
+                None if len < MAX_MEMORIES => {
+                    items.push(m);
+                    added += 1;
+                }
+                None => {}
+            }
+        }
+        drop(items);
+        if added + updated > 0 {
+            self.save();
+        }
+        (added, updated)
+    }
+
     /// Forget by id, or every memory containing `text` (case-insensitive).
     /// Returns what was forgotten.
     pub fn forget(&self, id_or_text: &str, person: Option<&str>) -> Vec<Memory> {
