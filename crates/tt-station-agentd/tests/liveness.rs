@@ -6,6 +6,8 @@
 //! missed one-token checks, and `ok` again once it answers. A stub OpenAI server
 //! plays the model; a flag makes its completions hang.
 
+mod support;
+
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -116,8 +118,13 @@ async fn a_hung_model_turns_degraded_and_recovers_when_it_answers() {
     assert_eq!(health["restart"], "/doctor/fix/restart_model");
     // Still the served model: older clients keep parsing `status`.
     assert_eq!(s["status"], "serving:Qwen/Qwen3-32B");
+    // `/serve` needs a paired device.
+    let token = support::pair(&base, &state).await;
     assert_eq!(
-        reqwest::get(format!("{base}/serve"))
+        reqwest::Client::new()
+            .get(format!("{base}/serve"))
+            .bearer_auth(&token)
+            .send()
             .await
             .unwrap()
             .json::<Value>()

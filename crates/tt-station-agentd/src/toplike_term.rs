@@ -65,7 +65,7 @@ pub struct TermQuery {
     pub rows: Option<u16>,
 }
 
-/// `GET /toplike` (unauthed, like `/telemetry`): whether tt-toplike is installed and its views.
+/// `GET /toplike` (paired, like `/telemetry`): whether tt-toplike is installed and its views.
 pub(crate) async fn get_toplike() -> axum::Json<Value> {
     axum::Json(serde_json::json!({
         "installed": binary().is_some(),

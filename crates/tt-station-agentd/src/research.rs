@@ -962,13 +962,15 @@ enum ExplainEvent {
 /// stops the model.
 pub(crate) async fn post_explain(
     State(state): State<AppState>,
-    _auth: BearerAuth,
+    who: crate::people::Who,
     UrlPath(id): UrlPath<String>,
     Json(body): Json<ExplainBody>,
 ) -> Result<axum::response::sse::Sse<impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>, (StatusCode, Json<Value>)> {
     if !valid_id(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such report."));
     }
+    // Removing the device ends the stream (and so stops the model).
+    let signed_out = state.signed_out(who.token);
     let (selection, mode, question) = checked(body)?;
     let job = load_job(&state, &id).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
     let folder = dir(&state, &id);
@@ -1096,6 +1098,7 @@ pub(crate) async fn post_explain(
         let e = rx.recv().await?;
         Some((Ok(axum::response::sse::Event::default().data(serde_json::to_string(&e).unwrap_or_default())), rx))
     });
+    let events = futures_util::StreamExt::take_until(events, Box::pin(signed_out));
     Ok(axum::response::sse::Sse::new(events).keep_alive(axum::response::sse::KeepAlive::default()))
 }
 

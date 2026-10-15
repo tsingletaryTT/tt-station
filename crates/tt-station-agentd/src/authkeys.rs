@@ -248,9 +248,11 @@ pub fn revoke(path: &Path, which: &Revoke) -> anyhow::Result<()> {
 }
 
 /// Whether a stored `authorized_keys` line matches the given revoke target:
-/// either its key blob equals the target blob, or its LAST
-/// whitespace-separated token is *exactly* the `ttstation:<label>` marker
-/// that [`authorize`] appends.
+/// either its key blob equals the target blob *and* it carries a
+/// `ttstation:` marker (a key a person added by hand, or another program's,
+/// is never TT Station's to remove, even with the same key material), or its
+/// LAST whitespace-separated token is *exactly* the `ttstation:<label>`
+/// marker that [`authorize`] appends.
 ///
 /// This must be a full-token match, not a substring match: a naive
 /// `ends_with("ttstation:{label}")` would also match a line whose comment
@@ -260,7 +262,10 @@ pub fn revoke(path: &Path, which: &Revoke) -> anyhow::Result<()> {
 /// unrelated line get silently revoked.
 fn line_matches(line: &str, which: &Revoke) -> bool {
     match which {
-        Revoke::Blob(blob) => key_blob(line) == Some(blob.as_str()),
+        Revoke::Blob(blob) => {
+            key_blob(line) == Some(blob.as_str())
+                && line.split_whitespace().last().is_some_and(|t| t.starts_with("ttstation:"))
+        }
         Revoke::Label(label) => {
             let marker = format!("ttstation:{label}");
             line.split_whitespace().last() == Some(marker.as_str())
@@ -429,6 +434,16 @@ mod tests {
         assert!(!body.contains("AAAADROP"));
         // revoking absent is ok
         assert!(revoke(&p, &Revoke::Label("nope".into())).is_ok());
+    }
+
+    #[test]
+    fn revoke_by_blob_leaves_keys_tt_station_did_not_add() {
+        let p = tmp("revoke-blob");
+        // The same key, added by hand and by TT Station.
+        fs::write(&p, "ssh-ed25519 AAAASAME jane@mac\nssh-ed25519 AAAASAME jane@mac ttstation:phone\n").unwrap();
+        revoke(&p, &Revoke::Blob("AAAASAME".into())).unwrap();
+        let body = fs::read_to_string(&p).unwrap();
+        assert_eq!(body, "ssh-ed25519 AAAASAME jane@mac\n", "only the ttstation: line goes");
     }
 
     // --- Security-review fixes (commit b009fe5 findings) -----------------

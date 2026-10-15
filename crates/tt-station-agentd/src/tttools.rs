@@ -223,13 +223,16 @@ fn pip_name(pkg_ver: &str) -> &str {
 /// every time, so no restart is needed: the next call uses the new version.
 pub(crate) async fn post_cli_update(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     body: Option<Json<CliUpdateBody>>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let dry_run = body.is_some_and(|b| b.dry_run);
     let tt = tt(&state)?;
     if !dry_run && !matches!(state.lifecycle().phase, crate::routes::Phase::Idle | crate::routes::Phase::Serving | crate::routes::Phase::Failed) {
         return Err(err(StatusCode::CONFLICT, "A model is starting or stopping, and that uses tt. Update once it's done."));
+    }
+    if !dry_run {
+        crate::audit::record(&state, "update_tt_cli", "", "started");
     }
     tokio::task::spawn_blocking(move || {
         let check = tt.run_json(&["self", "update", "--check"]).map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;

@@ -229,6 +229,8 @@ export interface AppKey {
   /** The first characters, so keys can be told apart (the secret is shown once, at creation). */
   hint: string;
   created: number;
+  /** Unix seconds after which it stops working; null never (absent from older agents). */
+  expires?: number | null;
   last_used: number | null;
   requests: number;
   limits: { requests_per_minute: number | null; tokens_per_day: number | null };
@@ -269,7 +271,13 @@ export interface PairedDevice {
   expires: number;
   /** The device asking. */
   this_device: boolean;
+  /** Manages the box (absent from agents before roles). */
+  owner?: boolean;
+  /** Whose device it is (`/people`), if anyone's. */
+  person?: string | null;
 }
+/** One line of the box's activity log (`GET /audit`, owners). */
+export interface AuditEntry { ts: number; device_id: string | null; device_name: string; action: string; target: string; result: string }
 export interface Schedule { id: string; mode: string; time: string; days: number[]; enabled: boolean }
 
 export interface OrchardRun {
@@ -562,7 +570,8 @@ export function watchTelemetry(full: boolean, onFrame: (chips: Chip[], error: st
   let retry: number | undefined;
   const open = () => {
     const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/telemetry${full ? "" : "?view=lite"}`;
-    ws = new WebSocket(url);
+    // The box takes paired callers only; the token rides as a subprotocol.
+    ws = new WebSocket(url, wsProtocols());
     ws.onmessage = (m) => {
       try {
         const { chips, error, extras } = parseFrame(JSON.parse(m.data));

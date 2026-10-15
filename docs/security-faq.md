@@ -101,32 +101,62 @@ announced as a box event (desktop notification and phone push).
 
 ## What can someone on my network do?
 
-Endpoints split cleanly into **unauthenticated reads** (informational, work without pairing)
-and **authenticated actions** (need a valid bearer token):
+Almost nothing without pairing. Every route needs a paired device (or the box's own user,
+see below) **except** this short list, which is what a device needs to find the box and pair:
 
-| Endpoint | Auth? | What it exposes / does |
-|---|---|---|
-| `GET /status` | none | box name, chips, device mesh, serving state |
-| `GET /models` | none | which models this box can serve |
-| `GET /serving` | none | live `/v1` endpoints on the box (incl. external ones) |
-| `GET /config` | none | resolved serving config (profile, image, host/port — **no secrets**) |
-| `GET /telemetry` (WebSocket) | none | live `tt-smi` chip telemetry **+ a process list** (pid, name, **command line**, cpu/mem) |
-| `GET /logs` | none | tail of the box's serving/run.py log (`?source=container\|run`, redacted) — see `docs/reference/logs.md` |
-| `GET /logs/stream` (WebSocket) | none | live-follow of the same log |
-| `POST /pair/init` · `/pair/complete` | none | start/finish pairing (needs the on-screen code) |
-| `POST /run` · `/stop` · `/reset` | **bearer** | start/stop a model; reset the box |
-| `GET /endpoint` | **bearer** | the serving `/v1` URL |
-| `POST` / `DELETE /ssh/authorize` | **bearer** | add / remove an SSH public key |
+| Endpoint | What it exposes / does |
+|---|---|
+| `GET /status` | box name, chips, device mesh, serving state |
+| `GET /tls` | the HTTPS port and the certificate fingerprint to pin |
+| `POST /pair/init` · `/pair/complete` | start/finish pairing (needs the code shown on the owner's screens) |
+| `POST /pair/offer` | pairing for the box's own user (needs the agent's `local-secret` file) |
+| `GET /app/…` | the desktop app's pages (no data in them) |
 
-**Without pairing**, a LAN peer can *read* a fair amount (what the box is, what it's
-serving, live telemetry) but **cannot run, stop, reset, or SSH.** With a valid token, they
-can control serving and reset the box. That's the whole security model: reads are open,
-writes need the token.
+The model API (`/v1/…`) checks its own credential, an app key, and a bring-up run's driver
+checks its run secret. The agent enforces this as a default-deny layer, and a test walks
+every route in the router to check that each one is either on the list above or answers
+`401` without credentials (`tests/access_control.rs`).
 
-> **One thing worth knowing:** the telemetry stream (unauthenticated) now includes a
-> **process list with command lines**. On a trusted LAN that's just convenient monitoring
-> — but don't pass secrets as command-line arguments to processes on the box (good practice
-> anyway), since those args are visible to anything on your LAN that reads `/telemetry`.
+**The box's own user.** A program on the box that connects over plain HTTP is trusted
+without pairing (the console, the panel, tt-toplike) only if it runs as the agent's own
+account: the agent looks the connection up in `/proc/net/tcp` and checks its owner's uid.
+Another account on the box, root, or a container on the host network gets no such trust.
+
+## Owners and members
+
+Each paired device is an **owner** or a **member**.
+
+- **Owners** manage the box: they see and remove other devices, make other devices owners
+  (or members again), add and remove SSH keys, make/change/revoke app keys, use power
+  (sleep, restart, shut down, reset chips), install or undo updates, reset the box, change
+  the security settings, answer bring-up approvals, rename or remove people, and read the
+  activity log.
+- **Members** use the box: chat, research, Code, the studio, the library, their own
+  memories, Code and routine approvals, starting and stopping models.
+
+Who is an owner: the first device the box ever pairs, the desktop app on the box itself and
+anything paired with `tt-station-agentd pair` (both use the box user's local secret), and any
+device an owner promotes. The box always keeps at least one owner. On upgrading, devices
+paired before roles become members, except the box's own desktop app, which becomes (or
+re-pairs as) an owner by itself, so nobody is locked out.
+
+Being a person on the box (Settings → People) means seeing that person's memories, so a
+member can only claim a person no other device belongs to yet; sharing a person between
+devices is an owner's call (Settings → Pairing and security → Devices). A member's "forget
+everything" forgets its own memories, not the household's.
+
+**Live telemetry** lists the box's processes; for members, each command line is cut to the
+executable's name. Removing a device closes its open terminals, log and telemetry streams
+and chat streams at once.
+
+## Activity log
+
+The box keeps an append-only log of who did what (`~/.config/tt-station/audit.jsonl`,
+`0600`, rotated at 10 MB, five files kept): pairing, removed devices, owner changes, resets,
+SSH and app keys, power, security settings, updates, answered approvals, model starts and
+stops, and every owner-only request a member was refused. It records device ids and names,
+never tokens or keys. Owners read it in Settings → Pairing and security → Activity log, or
+`GET /audit`.
 
 ### Apps from the store (Connect)
 
@@ -194,6 +224,11 @@ header in the clear. This is fine on a LAN you trust (the same trust you already
 say, a printer or a NAS admin page), and it keeps setup zero-config. It is **not** okay
 across an untrusted network — so don't expose the port to the internet. If you need remote
 access, put it behind a VPN or Tailscale (see [hardening](#hardening-checklist)).
+
+**How are app keys stored?**
+As SHA-256 digests in `~/.config/tt-station/app-keys.json` (`0600`): a key is shown once,
+when it's made. New keys are 256 random bits and can be given an expiry. Over plain HTTP the
+model API takes app keys only; a paired device's own token works there over HTTPS only.
 
 **Is the model API (`/v1`) itself protected?**
 By default, **no** — the agent launches the model server with `--no-auth`, so anyone who

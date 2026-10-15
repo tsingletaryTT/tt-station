@@ -26,6 +26,24 @@
 //!   "platform": "macOS", "created": 1760000000, "last_used": 1760500000}]}
 //! ```
 //!
+//! Each device is an *owner* or a *member*. Owners manage the box: they see
+//! and remove other devices, make other devices owners, and hold SSH keys,
+//! app keys, power, updates, reset and the security settings. Members use
+//! it. The first device ever paired is an owner, and so is anything paired
+//! with the box user's local secret (`/pair/offer`: the desktop app on the
+//! box itself, or `tt-station-agentd pair`); everything else pairs as a
+//! member until an owner promotes it. The box remembers that its first owner
+//! was taken (`owner_claimed`), so removing every owner doesn't hand the
+//! role to whoever pairs next; the desktop app on the box can always pair
+//! again as an owner.
+//!
+//! Stores from before roles (version 2 and the raw-token array) carry no
+//! roles. On first load the box's own desktop app -- the session whose token
+//! is in the `desktop-token` file beside the store, when that file holds it
+//! in the clear -- becomes an owner, and every other device a member. A
+//! desktop app whose token is sealed in the keychain notices it's a member
+//! and pairs again through its local secret, which makes it an owner.
+//!
 //! Before device tracking the same file was a JSON array of raw tokens.
 //! [`Sessions::open`] converts that in place on first load: every old token
 //! keeps working, now as a hashed session named [`MIGRATED_NAME`], and the
@@ -56,7 +74,8 @@ pub const TOUCH_WRITE_INTERVAL_S: u64 = 60 * 60;
 /// device holds each one, and when it paired, were never recorded.
 pub const MIGRATED_NAME: &str = "Paired before device tracking";
 
-const STORE_VERSION: u32 = 2;
+/// 3: roles (`owner`, `owner_claimed`). 2: device sessions.
+const STORE_VERSION: u32 = 3;
 const MAX_NAME: usize = 60;
 const MAX_PLATFORM: usize = 30;
 
@@ -77,6 +96,9 @@ pub struct Session {
     pub created: Option<u64>,
     /// Unix seconds.
     pub last_used: u64,
+    /// Manages the box (see the module docs); `false` is a member.
+    #[serde(default)]
+    pub owner: bool,
 }
 
 impl Session {
@@ -118,11 +140,15 @@ impl AuthFailure {
 struct StoreFile {
     version: u32,
     sessions: Vec<Session>,
+    /// Some device has been an owner: the next pairing isn't automatically one.
+    #[serde(default)]
+    owner_claimed: bool,
 }
 
 #[derive(Default)]
 struct Table {
     sessions: Vec<Session>,
+    owner_claimed: bool,
     /// `last_used` as last written to disk, by device id: what the write
     /// throttle compares against.
     on_disk: std::collections::HashMap<String, u64>,
@@ -204,7 +230,10 @@ pub fn default_name(now: u64) -> String {
 /// What a store file held.
 enum Loaded {
     Missing,
-    Current(Vec<Session>),
+    /// Sessions with roles.
+    Current(Vec<Session>, bool),
+    /// Version 2: sessions from before roles.
+    Unroled(Vec<Session>),
     /// The pre-device-tracking format: a JSON array of raw tokens.
     Legacy(Vec<String>),
     Unreadable,
@@ -223,7 +252,10 @@ fn read_store(path: &Path) -> Loaded {
         }
     };
     if let Ok(file) = serde_json::from_str::<StoreFile>(&contents) {
-        return Loaded::Current(file.sessions);
+        if file.version < STORE_VERSION {
+            return Loaded::Unroled(file.sessions);
+        }
+        return Loaded::Current(file.sessions, file.owner_claimed);
     }
     if let Ok(tokens) = serde_json::from_str::<Vec<String>>(&contents) {
         return Loaded::Legacy(tokens);
@@ -234,12 +266,34 @@ fn read_store(path: &Path) -> Loaded {
     Loaded::Unreadable
 }
 
+/// The digest of the box's own desktop app's token, when the `desktop-token`
+/// file beside the store holds it in the clear (a keychain-sealed one,
+/// `ttsafe1:…`, can't be read here). Only ever compared, never kept.
+fn desktop_token_digest(store: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(store.with_file_name("desktop-token")).ok()?;
+    let token = text.trim();
+    (!token.is_empty() && !token.starts_with("ttsafe")).then(|| token_digest(token))
+}
+
+/// Roles for sessions from before roles: the box's own desktop app is an
+/// owner, every other device a member (see the module docs).
+fn assign_first_roles(sessions: &mut [Session], desktop: Option<&str>) {
+    for s in sessions.iter_mut() {
+        s.owner = desktop.is_some_and(|d| constant_time_eq(d.as_bytes(), s.token_sha256.as_bytes()));
+    }
+}
+
 impl Sessions {
     fn with(path: Option<PathBuf>, sessions: Vec<Session>) -> Self {
+        Self::with_roles(path, sessions, false)
+    }
+
+    fn with_roles(path: Option<PathBuf>, sessions: Vec<Session>, owner_claimed: bool) -> Self {
         let on_disk = sessions.iter().map(|s| (s.id.clone(), s.last_used)).collect();
+        let owner_claimed = owner_claimed || sessions.iter().any(|s| s.owner);
         Sessions {
             path,
-            table: Mutex::new(Table { sessions, on_disk }),
+            table: Mutex::new(Table { sessions, owner_claimed, on_disk }),
             write_lock: Mutex::new(()),
             revocations: tokio::sync::watch::Sender::new(0),
         }
@@ -263,13 +317,33 @@ impl Sessions {
     pub(crate) fn open_at(path: PathBuf, now: u64) -> Self {
         match read_store(&path) {
             Loaded::Missing | Loaded::Unreadable => Self::with(Some(path), Vec::new()),
-            Loaded::Current(sessions) => {
+            Loaded::Current(sessions, owner_claimed) => {
                 let live: Vec<Session> = sessions.into_iter().filter(|s| !s.expired_at(now)).collect();
-                Self::with(Some(path), live)
+                Self::with_roles(Some(path), live, owner_claimed)
+            }
+            Loaded::Unroled(sessions) => {
+                // A box that was paired before has had its first owner, whoever
+                // it was: the next pairing from the network is a member.
+                let claimed = !sessions.is_empty();
+                let mut live: Vec<Session> = sessions.into_iter().filter(|s| !s.expired_at(now)).collect();
+                assign_first_roles(&mut live, desktop_token_digest(&path).as_deref());
+                let owners = live.iter().filter(|s| s.owner).count();
+                let upgraded = Self::with_roles(Some(path.clone()), live, claimed);
+                match upgraded.save() {
+                    Ok(()) => eprintln!(
+                        "tt-station-agentd: paired devices now have roles: {owners} owner(s), {} member(s). The desktop app on this box can always pair again as an owner.",
+                        upgraded.len() - owners
+                    ),
+                    Err(e) => eprintln!(
+                        "tt-station-agentd: couldn't save device roles to {} ({e:#}); they'll be worked out again on the next start",
+                        path.display()
+                    ),
+                }
+                upgraded
             }
             Loaded::Legacy(tokens) => {
                 let mut seen = std::collections::HashSet::new();
-                let sessions: Vec<Session> = tokens
+                let mut sessions: Vec<Session> = tokens
                     .iter()
                     .filter(|t| !t.is_empty() && seen.insert(t.as_str()))
                     .map(|t| Session {
@@ -281,9 +355,12 @@ impl Sessions {
                         // The idle clock starts at the upgrade: the old file
                         // never said when a token was last used.
                         last_used: now,
+                        owner: false,
                     })
                     .collect();
-                let migrated = Self::with(Some(path.clone()), sessions);
+                assign_first_roles(&mut sessions, desktop_token_digest(&path).as_deref());
+                let claimed = !sessions.is_empty();
+                let migrated = Self::with_roles(Some(path.clone()), sessions, claimed);
                 // The old file stays in place until the new one is complete,
                 // and the swap is one rename: a failure here leaves the old
                 // tokens on disk (and working, in memory), to migrate again
@@ -353,6 +430,20 @@ impl Sessions {
         Ok(id)
     }
 
+    /// The live session `token` belongs to, without counting a use.
+    pub fn session_for(&self, token: &str) -> Option<Session> {
+        let now = unix_now();
+        let table = self.table.lock().expect("sessions mutex poisoned");
+        Self::find(&table, token)
+            .map(|i| table.sessions[i].clone())
+            .filter(|s| !s.expired_at(now))
+    }
+
+    /// One live session by device id.
+    pub fn get(&self, id: &str) -> Option<Session> {
+        self.list().into_iter().find(|s| s.id == id)
+    }
+
     /// Whether `token` still names a live session, without counting a use.
     pub fn is_live(&self, token: &str) -> bool {
         let now = unix_now();
@@ -366,23 +457,61 @@ impl Sessions {
         Self::find(&table, token).map(|i| table.sessions[i].id.clone())
     }
 
-    /// Record a new pairing for `token` and persist it.
-    pub fn pair(&self, token: &str, name: Option<&str>, platform: Option<&str>) -> Session {
-        self.pair_at(token, name, platform, unix_now())
+    /// Record a new pairing for `token` and persist it. It's an owner when
+    /// `owner` is asked for (paired with the local secret) or when it's the
+    /// first device the box ever paired; a member otherwise.
+    pub fn pair(&self, token: &str, name: Option<&str>, platform: Option<&str>, owner: bool) -> Session {
+        self.pair_as(token, name, platform, owner, unix_now())
     }
 
+    /// [`Self::pair`] with no owner asked for (tests).
+    #[cfg(test)]
     pub(crate) fn pair_at(&self, token: &str, name: Option<&str>, platform: Option<&str>, now: u64) -> Session {
-        let session = Session {
-            id: crate::pairing::issue_device_id(),
-            token_sha256: token_digest(token),
-            name: clean_label(name, MAX_NAME).unwrap_or_else(|| default_name(now)),
-            platform: clean_label(platform, MAX_PLATFORM),
-            created: Some(now),
-            last_used: now,
+        self.pair_as(token, name, platform, false, now)
+    }
+
+    pub(crate) fn pair_as(&self, token: &str, name: Option<&str>, platform: Option<&str>, owner: bool, now: u64) -> Session {
+        let session = {
+            let mut table = self.table.lock().expect("sessions mutex poisoned");
+            let session = Session {
+                id: crate::pairing::issue_device_id(),
+                token_sha256: token_digest(token),
+                name: clean_label(name, MAX_NAME).unwrap_or_else(|| default_name(now)),
+                platform: clean_label(platform, MAX_PLATFORM),
+                created: Some(now),
+                last_used: now,
+                owner: owner || !table.owner_claimed,
+            };
+            table.owner_claimed |= session.owner;
+            table.sessions.push(session.clone());
+            session
         };
-        self.table.lock().expect("sessions mutex poisoned").sessions.push(session.clone());
         self.persist("save a new pairing");
         session
+    }
+
+    /// Make a device an owner, or a member again. The last owner can't be
+    /// made a member: someone must be able to manage the box.
+    pub fn set_owner(&self, id: &str, owner: bool) -> Result<Session, String> {
+        let now = unix_now();
+        let changed = {
+            let mut table = self.table.lock().expect("sessions mutex poisoned");
+            let owners = table.sessions.iter().filter(|s| s.owner && !s.expired_at(now)).count();
+            let s = table
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == id && !s.expired_at(now))
+                .ok_or_else(|| "No such device. It may have been removed.".to_string())?;
+            if s.owner && !owner && owners <= 1 {
+                return Err("This is the box's only owner. Make another device an owner first.".to_string());
+            }
+            s.owner = owner;
+            let s = s.clone();
+            table.owner_claimed |= owner;
+            s
+        };
+        self.persist("save a device's role");
+        Ok(changed)
     }
 
     /// Add a session as-is (tests: one with a chosen `last_used`).
@@ -431,6 +560,8 @@ impl Sessions {
             let n = table.sessions.len();
             table.sessions.clear();
             table.on_disk.clear();
+            // Back to never paired: the next device is the first owner again.
+            table.owner_claimed = false;
             n
         };
         self.revocations.send_modify(|n| *n += 1);
@@ -475,10 +606,14 @@ impl Sessions {
             return Ok(());
         };
         let _guard = self.write_lock.lock().expect("token-store write lock poisoned");
-        let snapshot: Vec<Session> = self.table.lock().expect("sessions mutex poisoned").sessions.clone();
+        let (snapshot, owner_claimed) = {
+            let table = self.table.lock().expect("sessions mutex poisoned");
+            (table.sessions.clone(), table.owner_claimed)
+        };
         let json = serde_json::to_string_pretty(&StoreFile {
             version: STORE_VERSION,
             sessions: snapshot.clone(),
+            owner_claimed,
         })?;
         write_private(path, &json)?;
         let mut table = self.table.lock().expect("sessions mutex poisoned");
@@ -698,6 +833,88 @@ mod tests {
             let next = Sessions::open_at(path, T0);
             assert!(next.authenticate_at("old-token", T0).is_ok(), "and is converted next start");
         }
+    }
+
+    #[test]
+    fn the_first_device_is_an_owner_and_the_rest_members() {
+        let (_dir, path) = temp_store();
+        let sessions = Sessions::open_at(path.clone(), T0);
+        assert!(sessions.pair_at("a", None, None, T0).owner, "first ever");
+        assert!(!sessions.pair_at("b", None, None, T0).owner);
+        assert!(sessions.pair_as("c", None, None, true, T0).owner, "paired with the local secret");
+        // Removing every owner doesn't hand the role to the next pairing...
+        for s in sessions.list_at(T0).into_iter().filter(|s| s.owner) {
+            sessions.revoke(&s.id);
+        }
+        assert!(!sessions.pair_at("d", None, None, T0).owner);
+        // ...not even after a restart.
+        let reloaded = Sessions::open_at(path, T0);
+        assert!(!reloaded.pair_at("e", None, None, T0).owner);
+        // A reset is a fresh box: its next device is the first owner again.
+        reloaded.revoke_all();
+        assert!(reloaded.pair_at("f", None, None, T0).owner);
+    }
+
+    #[test]
+    fn the_last_owner_stays_one() {
+        let sessions = Sessions::in_memory();
+        let a = sessions.pair_at("a", None, None, unix_now());
+        let b = sessions.pair_at("b", None, None, unix_now());
+        assert!(sessions.set_owner(&a.id, false).is_err());
+        assert!(sessions.set_owner(&b.id, true).unwrap().owner);
+        assert!(!sessions.set_owner(&a.id, false).unwrap().owner);
+        assert!(sessions.set_owner(&b.id, false).is_err());
+        assert!(sessions.set_owner("nope", true).is_err());
+    }
+
+    /// A version-2 store (sessions, no roles) with the desktop app's token in
+    /// the clear beside it.
+    fn unroled_store(desktop_token: Option<&str>) -> (tempfile::TempDir, PathBuf) {
+        let (dir, path) = temp_store();
+        let s = |id: &str, tok: &str| format!(r#"{{"id":"{id}","token_sha256":"{}","name":"{id}","created":{T0},"last_used":{T0}}}"#, token_digest(tok));
+        std::fs::write(&path, format!(r#"{{"version":2,"sessions":[{},{}]}}"#, s("desktop", "desk-tok"), s("phone", "phone-tok"))).unwrap();
+        if let Some(t) = desktop_token {
+            std::fs::write(path.with_file_name("desktop-token"), t).unwrap();
+        }
+        (dir, path)
+    }
+
+    #[test]
+    fn stores_from_before_roles_make_the_box_desktop_the_owner() {
+        let (_dir, path) = unroled_store(Some("desk-tok\n"));
+        let sessions = Sessions::open_at(path.clone(), T0);
+        let by = |id: &str| sessions.list_at(T0).into_iter().find(|s| s.id == id).unwrap();
+        assert!(by("desktop").owner);
+        assert!(!by("phone").owner, "other devices are members until promoted");
+        assert!(!sessions.pair_at("new", None, None, T0).owner, "the box was paired before: no free owner");
+        // Written back with roles, and the desktop's token itself isn't copied in.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains("desk-tok"));
+        let file: StoreFile = serde_json::from_str(&on_disk).unwrap();
+        assert_eq!(file.version, STORE_VERSION);
+        assert!(file.owner_claimed);
+        assert!(Sessions::open_at(path, T0).list_at(T0).iter().any(|s| s.id == "desktop" && s.owner));
+    }
+
+    #[test]
+    fn a_sealed_desktop_token_leaves_every_old_device_a_member() {
+        // The desktop app pairs again with its local secret, as an owner.
+        let (_dir, path) = unroled_store(Some("ttsafe1:AAAA"));
+        let sessions = Sessions::open_at(path, T0);
+        assert!(sessions.list_at(T0).iter().all(|s| !s.owner));
+        assert!(sessions.pair_as("desk-2", None, None, true, T0).owner);
+        let (_dir, path) = unroled_store(None);
+        assert!(Sessions::open_at(path, T0).list_at(T0).iter().all(|s| !s.owner));
+    }
+
+    #[test]
+    fn raw_token_files_give_the_desktop_token_ownership_too() {
+        let (_dir, path) = temp_store();
+        std::fs::write(&path, r#"["desk-tok","phone-tok"]"#).unwrap();
+        std::fs::write(path.with_file_name("desktop-token"), "desk-tok").unwrap();
+        let sessions = Sessions::open_at(path, T0);
+        let desk = sessions.authenticate_at("desk-tok", T0).unwrap();
+        assert!(sessions.list_at(T0).iter().all(|s| s.owner == (s.id == desk)));
     }
 
     #[test]

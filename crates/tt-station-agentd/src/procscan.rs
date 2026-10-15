@@ -60,6 +60,14 @@ pub struct ProcInfo {
     pub mem_bytes: u64,
 }
 
+/// A command line cut to its executable's name (`/usr/bin/python3 -m vllm
+/// --api-key …` -> `python3`), for telemetry viewers who aren't the box's
+/// owners: arguments can hold paths, prompts and secrets.
+pub fn redact_cmd(cmd: &str) -> String {
+    let exe = cmd.split_whitespace().next().unwrap_or("");
+    exe.rsplit('/').next().unwrap_or("").to_string()
+}
+
 /// True if any of a pid's fd symlink targets points at a Tenstorrent device
 /// node. Pure (takes the already-readlink'd targets) so it's testable without
 /// a real /proc.
@@ -221,6 +229,13 @@ fn pid_holds_tt_device(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacted_commands_keep_only_the_executable_name() {
+        assert_eq!(redact_cmd("/usr/bin/python3 -m vllm --api-key sk-secret /home/jane/notes"), "python3");
+        assert_eq!(redact_cmd("run.py"), "run.py");
+        assert_eq!(redact_cmd(""), "");
+    }
 
     fn proc(pid: u32, cpu: f32, uses_tt: bool) -> ProcInfo {
         ProcInfo {

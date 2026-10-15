@@ -68,7 +68,7 @@ async fn stub_vllm() -> String {
 }
 
 /// The box, serving the stand-in, and an app key for it.
-async fn harness() -> (reqwest::Client, String, String) {
+async fn harness() -> (reqwest::Client, String, String, String) {
     let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(Idle));
     state.adopt_serving(Endpoint {
         base_url: stub_vllm().await,
@@ -106,7 +106,7 @@ async fn harness() -> (reqwest::Client, String, String) {
         .json()
         .await
         .unwrap();
-    (client, base, minted["key"].as_str().unwrap().to_string())
+    (client, base, minted["key"].as_str().unwrap().to_string(), done["token"].as_str().unwrap().to_string())
 }
 
 fn request(stream: bool) -> Value {
@@ -124,7 +124,7 @@ fn request(stream: bool) -> Value {
 
 #[tokio::test]
 async fn tool_calls_are_checked_mended_and_counted() {
-    let (client, base, key) = harness().await;
+    let (client, base, key, token) = harness().await;
 
     let m: Value = client
         .post(format!("{base}/v1/messages"))
@@ -162,7 +162,10 @@ async fn tool_calls_are_checked_mended_and_counted() {
     );
     assert!(sse.contains("\"name\":\"Search\""));
 
-    let now: Value = reqwest::get(format!("{base}/metrics/now"))
+    let now: Value = client
+        .get(format!("{base}/metrics/now"))
+        .bearer_auth(&token)
+        .send()
         .await
         .unwrap()
         .json()

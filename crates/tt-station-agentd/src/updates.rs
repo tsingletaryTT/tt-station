@@ -519,7 +519,7 @@ fn refuse_source() -> Result<(), (StatusCode, Json<Value>)> {
 }
 
 /// `POST /updates/install {version?}`: the newest release, or `version`.
-pub(crate) async fn post_install(State(state): State<AppState>, _auth: BearerAuth, Json(b): Json<InstallBody>) -> Reply {
+pub(crate) async fn post_install(State(state): State<AppState>, _owner: crate::routes::OwnerAuth, Json(b): Json<InstallBody>) -> Reply {
     refuse_source()?;
     if WORK.lock().expect("updates").is_some() {
         return Err(err(StatusCode::CONFLICT, "An update is already going."));
@@ -533,6 +533,7 @@ pub(crate) async fn post_install(State(state): State<AppState>, _auth: BearerAut
     if release.version == VERSION {
         return Err(err(StatusCode::CONFLICT, format!("{VERSION} is already running.")));
     }
+    crate::audit::record(&state, "update_install", &release.version, "started");
     let st = state.clone();
     tokio::spawn(async move {
         working(Some(&format!("Getting {}", release.version)));
@@ -552,7 +553,7 @@ pub(crate) async fn post_install(State(state): State<AppState>, _auth: BearerAut
 }
 
 /// `POST /updates/undo`: back to the version before the last switch.
-pub(crate) async fn post_undo(State(state): State<AppState>, _auth: BearerAuth) -> Reply {
+pub(crate) async fn post_undo(State(state): State<AppState>, _owner: crate::routes::OwnerAuth) -> Reply {
     refuse_source()?;
     let h = history();
     let last = h.last().filter(|c| c.status == "done").ok_or_else(|| err(StatusCode::CONFLICT, "There's no update to undo."))?;
@@ -561,7 +562,9 @@ pub(crate) async fn post_undo(State(state): State<AppState>, _auth: BearerAuth) 
             return Err(err(StatusCode::GONE, format!("{v} isn't on the box any more.")));
         }
     }
-    switch(&state, last.to.clone(), last.from.clone()).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let switched = switch(&state, last.to.clone(), last.from.clone());
+    crate::audit::record(&state, "update_undo", last.from.as_deref().unwrap_or("the packaged version"), if switched.is_ok() { "ok" } else { "failed" });
+    switched.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(json!({ "switching": true })))
 }
 

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 use serde_json::Value;
 use tt_station_agentd::history::{ChipPoint, Point};
-use tt_station_agentd::routes::{app, AppState};
+use tt_station_agentd::routes::{local_http_app, AppState};
 use tt_station_agentd::serving::ServingBackend;
 
 struct Idle;
@@ -60,7 +60,11 @@ async fn serve_with_history() -> String {
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+    // The box's own plain HTTP (a program on the box, as this account):
+    // dashboards read it there without pairing.
+    tokio::spawn(async move {
+        axum::serve(listener, local_http_app(state).into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap()
+    });
     base
 }
 

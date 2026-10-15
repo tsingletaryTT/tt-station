@@ -966,14 +966,17 @@ pub struct NetworkBody {
 /// `PUT /apps/{id}/network {open}`: Open to the network, or back to the box
 /// only. Takes effect the next time it's started (a running app keeps its
 /// address until then); the reply is the app as `GET /apps` shows it.
+/// Owners only: it decides who on the network can reach the app.
 pub(crate) async fn put_network(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _auth: crate::routes::OwnerAuth,
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(body): Json<NetworkBody>,
 ) -> Reply {
     let def = app(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such app."))?;
-    tokio::task::spawn_blocking(move || {
+    let action = if body.open { "app_network_open" } else { "app_network_close" };
+    let audit_state = state.clone();
+    let done = tokio::task::spawn_blocking(move || {
         if body.open {
             match def.share {
                 Share::Never(why) => return Err(err(StatusCode::CONFLICT, format!("{} stays on the box. {why}", def.name))),
@@ -991,7 +994,9 @@ pub(crate) async fn put_network(
         Ok(Json(describe(&state, def)))
     })
     .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::audit::record(&audit_state, action, &id, if done.is_ok() { "ok" } else { "refused" });
+    done
 }
 
 pub(crate) async fn delete_app(

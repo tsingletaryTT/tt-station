@@ -1,5 +1,5 @@
 //! Integration test for `GET /logs/stream` -- the WebSocket log-follow
-//! endpoint (unauthed, like `GET /logs`/`GET /telemetry`).
+//! endpoint (the box itself or a paired device, like `GET /logs`).
 //!
 //! It starts the real axum `Router` (via `app()`) on an ephemeral port, with
 //! `AppState` pointed at a temp directory standing in for a

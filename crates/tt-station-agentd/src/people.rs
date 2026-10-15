@@ -9,10 +9,17 @@
 //! - `GET /people`: everyone, and who this phone is (`me`).
 //! - `POST /people {name, me}`: add someone; `me: true` also makes this phone theirs.
 //! - `PUT /people/me {person}`: this phone is that person's (or `null`: no one in particular).
-//! - `PATCH /people/{id} {name}`, `DELETE /people/{id}` (their memories go with them).
+//! - `PATCH /people/{id} {name}`, `DELETE /people/{id}` (their memories go
+//!   with them): owners only.
 //!
 //! Phones are told apart by their pairing token, stored here only as a
 //! SHA-256 digest.
+//!
+//! Being someone means reading their memories, so a device can't just say
+//! who it is: a member may make itself a person nobody's device has yet
+//! (adding them, or claiming one no device belongs to). Making a device the
+//! person another device already belongs to takes an owner -- from that
+//! owner's own device here, or for any device with `PUT /devices/{id}/person`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -173,20 +180,38 @@ impl People {
 
     /// Make the phone with this token someone's (or no one's).
     pub fn assign(&self, token: &str, person: Option<&str>) -> Result<(), String> {
+        self.assign_digest(&digest(token), person)
+    }
+
+    /// [`Self::assign`] for the device whose token has this digest.
+    pub fn assign_digest(&self, token_sha256: &str, person: Option<&str>) -> Result<(), String> {
         let mut book = self.book.lock().expect("people mutex");
         match person {
             Some(id) => {
                 if !book.people.iter().any(|p| p.id == id) {
                     return Err("No such person.".into());
                 }
-                book.phones.insert(digest(token), id.to_string());
+                book.phones.insert(token_sha256.to_string(), id.to_string());
             }
             None => {
-                book.phones.remove(&digest(token));
+                book.phones.remove(token_sha256);
             }
         }
         self.save(&book);
         Ok(())
+    }
+
+    /// Who the device whose token has this digest belongs to.
+    pub fn person_of_digest(&self, token_sha256: &str) -> Option<Person> {
+        let book = self.book.lock().expect("people mutex");
+        let id = book.phones.get(token_sha256)?;
+        book.people.iter().find(|p| &p.id == id).cloned()
+    }
+
+    /// The token digests of the devices that are `person`'s.
+    pub fn digests_of(&self, person: &str) -> Vec<String> {
+        let book = self.book.lock().expect("people mutex");
+        book.phones.iter().filter(|(_, p)| *p == person).map(|(d, _)| d.clone()).collect()
     }
 }
 
@@ -233,6 +258,26 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) 
     (status, Json(json!({ "error": msg.into() })))
 }
 
+/// Whether the caller may make its own device `person`'s: an owner always; a
+/// member only when no other live device is that person's already.
+fn may_claim(state: &AppState, who: &Who, person: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    let sessions = state.sessions();
+    let mine = digest(&who.token);
+    if sessions.session_for(&who.token).is_some_and(|s| s.owner) {
+        return Ok(());
+    }
+    let taken = state.people().digests_of(person);
+    let live = sessions.list();
+    if live.iter().any(|s| s.token_sha256 != mine && taken.contains(&s.token_sha256)) {
+        let name = state.people().get(person).map(|p| p.name).unwrap_or_else(|| "That person".into());
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            format!("{name} already has a phone or computer on this box. To make this device {name}'s too, ask an owner: Settings → Pairing and security → Devices."),
+        ));
+    }
+    Ok(())
+}
+
 fn listing(state: &AppState, me: Option<&Person>) -> Value {
     json!({ "people": state.people().list(), "me": me.map(|p| p.id.clone()) })
 }
@@ -261,6 +306,8 @@ pub(crate) async fn post_person(
         .add(&req.name)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let me = if req.me {
+        // An existing name is that person: claiming them is as for `PUT /people/me`.
+        may_claim(&state, &who, &person.id)?;
         state
             .people()
             .assign(&who.token, Some(&person.id))
@@ -282,6 +329,9 @@ pub(crate) async fn put_me(
     who: Who,
     Json(req): Json<MeRequest>,
 ) -> Reply {
+    if let Some(id) = req.person.as_deref() {
+        may_claim(&state, &who, id)?;
+    }
     state
         .people()
         .assign(&who.token, req.person.as_deref())
@@ -297,6 +347,7 @@ pub struct Rename {
 
 pub(crate) async fn patch_person(
     axum::extract::State(state): axum::extract::State<AppState>,
+    _owner: crate::routes::OwnerAuth,
     who: Who,
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<Rename>,
@@ -311,12 +362,15 @@ pub(crate) async fn patch_person(
 
 pub(crate) async fn delete_person(
     axum::extract::State(state): axum::extract::State<AppState>,
+    _owner: crate::routes::OwnerAuth,
     who: Who,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Reply {
+    let name = state.people().get(&id).map(|p| p.name).unwrap_or_default();
     if !state.people().remove(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such person."));
     }
+    crate::audit::record(&state, "person_remove", &format!("{name} ({id})"), "ok");
     state.memories().forget_person(&id);
     let me = who.person.filter(|p| p.id != id);
     Ok(Json(listing(&state, me.as_ref())))

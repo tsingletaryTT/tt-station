@@ -1443,8 +1443,10 @@ struct AgentClient {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONEncoder().encode(body)
         }
-        if authed {
-            guard let token else { throw AgentError.notPaired }
+        // The box answers only paired callers (all but `/status` and pairing),
+        // so the token goes on every request once there is one.
+        if authed, token == nil { throw AgentError.notPaired }
+        if let token {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         let data: Data

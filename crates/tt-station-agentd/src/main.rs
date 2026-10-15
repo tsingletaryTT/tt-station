@@ -1174,6 +1174,8 @@ async fn main() -> Result<()> {
     let state = state.with_people(tt_station_agentd::people::People::open(
         config_dir().join("people.json"),
     ));
+    // Who did what to the box, kept on disk (see `audit`).
+    let state = state.with_audit(tt_station_agentd::audit::AuditLog::open(config_dir().join("audit.jsonl")));
     // Scheduled modes (see `schedules`).
     let state = state.with_schedules(tt_station_agentd::schedules::Schedules::open(
         config_dir().join("schedules.json"),

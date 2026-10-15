@@ -330,7 +330,7 @@ pub async fn start(state: &AppState, id: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// `GET /modes` (unauthed, like `/serve`).
+/// `GET /modes` (the box itself or a paired device, like `/serve`).
 pub(crate) async fn get_modes(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Json<Value> {
@@ -344,7 +344,9 @@ pub(crate) async fn post_mode(
     _auth: BearerAuth,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<ErrorResponse>)> {
-    match start(&state, &id).await {
+    let started = start(&state, &id).await;
+    crate::audit::record(&state, "mode_switch", &id, match &started { Ok(true) => "starting", Ok(false) => "already_active", Err(_) => "failed" });
+    match started {
         Ok(true) => Ok((
             StatusCode::ACCEPTED,
             Json(json!({ "status": "starting", "mode": id })),

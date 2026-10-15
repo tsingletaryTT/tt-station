@@ -1840,7 +1840,9 @@ pub struct DecideBody {
 
 /// `POST /bringup/codex/runs/{id}/approvals/{aid}` (authed): a person decides.
 pub(crate) async fn post_decide(
-    _auth: BearerAuth,
+    State(state): State<AppState>,
+    // Bring-up runs commands on the box itself, root ones too: an owner's call.
+    _owner: crate::routes::OwnerAuth,
     UrlPath((id, aid)): UrlPath<(String, String)>,
     Json(body): Json<DecideBody>,
 ) -> Reply {
@@ -1853,7 +1855,9 @@ pub(crate) async fn post_decide(
         return Err(err(StatusCode::NOT_FOUND, "That request is gone (the run stopped?)."));
     };
     a.decision = Some(decision.clone());
+    let what = format!("{id}: {}", a.command.as_deref().unwrap_or(&a.why));
     drop(all);
+    crate::audit::record(&state, "bringup_approval", &what, &decision);
     approvals_changed();
     Ok(Json(json!({ "decision": decision })))
 }

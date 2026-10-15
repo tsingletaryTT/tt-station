@@ -327,7 +327,7 @@ fn choices_blocking(state: &AppState) -> (Vec<Choice>, Vec<Choice>) {
     (chat, image)
 }
 
-/// `GET /coserve` (unauthed, like `/serve`): whether the box can split, the
+/// `GET /coserve` (paired, like `/serve`): whether the box can split, the
 /// layout, what each slot is doing, and the models that fit a slot.
 pub(crate) async fn get_coserve(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -382,6 +382,7 @@ pub(crate) async fn post_coserve(
     if let Some(reason) = unavailable(&state) {
         return Err(err(StatusCode::CONFLICT, reason));
     }
+    crate::audit::record(&state, "model_switch", &format!("{} + {}", req.chat, req.image.as_deref().unwrap_or("nothing")), "requested");
     let companion = state.companion().expect("checked by unavailable");
     let busy = |p: Phase| matches!(p, Phase::Starting | Phase::Stopping);
     if busy(state.lifecycle().phase) || busy(companion.lifecycle().phase) {
