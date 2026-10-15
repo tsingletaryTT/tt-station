@@ -39,6 +39,9 @@ pub struct AppDef {
     pub name: &'static str,
     pub blurb: &'static str,
     pub category: &'static str,
+    /// `name:tag@sha256:…`: pulled by digest, so a moved tag can't change what
+    /// runs (the tag is for people). Pinned 2026-10-15; bumping them:
+    /// docs/reference/pinned-dependencies.md.
     pub image: &'static str,
     /// Host port → container port.
     pub port: u16,
@@ -94,7 +97,7 @@ pub const APPS: &[AppDef] = &[
         name: "LobeChat",
         blurb: "A polished chat app with plugins, agents and file chat.",
         category: "Chat",
-        image: "lobehub/lobe-chat:latest",
+        image: "lobehub/lobe-chat:latest@sha256:b2d2454525523d9f0a19c79661f83ec45f13363dbadd5c1180887e77af35d872",
         port: 3020,
         container_port: 3210,
         data: "/app/data",
@@ -119,7 +122,7 @@ pub const APPS: &[AppDef] = &[
         name: "Jupyter",
         blurb: "Notebooks with an OpenAI client already pointed at the box.",
         category: "Build",
-        image: "quay.io/jupyter/minimal-notebook:latest",
+        image: "quay.io/jupyter/minimal-notebook:latest@sha256:877180014994396eb0857d3bad2dfedfb704fffccf54be4d1b7b50a43093f188",
         port: 3021,
         container_port: 8888,
         data: "/home/jovyan/work",
@@ -131,7 +134,7 @@ pub const APPS: &[AppDef] = &[
         command: Some(&[
             "bash",
             "-c",
-            "pip install -q openai && exec start-notebook.py",
+            "pip install -q openai==3.26.1 && exec start-notebook.py",
         ]),
         share: Share::Never("It runs any code you type, as the box: it stays on the box. Other computers open it through TT Station (an SSH tunnel)."),
         url_suffix: "/lab?token={token}",
@@ -148,7 +151,7 @@ pub const APPS: &[AppDef] = &[
         name: "n8n",
         blurb: "Automations: wire the box's model into email, calendars, webhooks and more.",
         category: "Automate",
-        image: "docker.n8n.io/n8nio/n8n:latest",
+        image: "docker.n8n.io/n8nio/n8n:latest@sha256:dd580fe1ab6e99e85bc66f2acf8bc8c5e9409fbe61b2e2803c5024403ef52833",
         port: 3022,
         container_port: 5678,
         data: "/home/node/.n8n",
@@ -172,7 +175,7 @@ pub const APPS: &[AppDef] = &[
         name: "Flowise",
         blurb: "Build AI agents and RAG flows visually, on the box's model.",
         category: "Build",
-        image: "flowiseai/flowise:latest",
+        image: "flowiseai/flowise:latest@sha256:cf880b17b1290fbaebebc76c33954bde67b3775aff95feec72a1d060cc81e43d",
         port: 3023,
         container_port: 3000,
         data: "/root/.flowise",
@@ -196,7 +199,7 @@ pub const APPS: &[AppDef] = &[
         name: "SearXNG",
         blurb: "A private search engine on the box: it asks Google, Bing and others for you, with no account. Research apps search through it.",
         category: "Research",
-        image: "searxng/searxng:latest",
+        image: "searxng/searxng:latest@sha256:5903efa50bc6b99293fa059f7a0ff37eddd910210196af77d02e5536ccdfb387",
         port: 3024,
         container_port: 8080,
         data: "/var/cache/searxng",
@@ -218,7 +221,7 @@ pub const APPS: &[AppDef] = &[
         name: "Local Deep Research",
         blurb: "Ask a hard question; it plans, searches the web, arXiv and PubMed, reads, and writes a cited report. All on the box.",
         category: "Research",
-        image: "localdeepresearch/local-deep-research:latest",
+        image: "localdeepresearch/local-deep-research:latest@sha256:ce95481a35d3eebc2c1ae7bd34fad426108c3fb8d1a22f66c9e772276869c2f0",
         port: 3025,
         container_port: 5000,
         data: "/data",
@@ -250,7 +253,7 @@ pub const APPS: &[AppDef] = &[
         name: "Vane",
         blurb: "An answer engine like Perplexity (formerly Perplexica): quick, cited answers from the web, with its own private search built in.",
         category: "Research",
-        image: "itzcrazykns1337/vane:latest",
+        image: "itzcrazykns1337/vane:latest@sha256:0b61bf0d4470e9f2a9c71f794b72fab6e5a612177172770684c158a461f6896e",
         port: 3026,
         container_port: 3000,
         data: "/home/vane/data",
@@ -271,7 +274,7 @@ pub const APPS: &[AppDef] = &[
         name: "ComfyUI",
         blurb: "Node-based image and video workflows. It runs on the box's CPU (ComfyUI doesn't support Tenstorrent chips yet), so large models are slow; Studio makes FLUX images on the chips.",
         category: "Images",
-        image: "yanwk/comfyui-boot:cpu",
+        image: "yanwk/comfyui-boot:cpu@sha256:c54d7d0d744672654b0ec6b3bc02c569fb4f5eaef86ff2dac099a6e9dc231f97",
         port: 3027,
         container_port: 8188,
         data: "/root",
@@ -292,7 +295,7 @@ pub const APPS: &[AppDef] = &[
         name: "Langflow",
         blurb: "Build agents and RAG pipelines visually, on the box's model, and serve them as APIs.",
         category: "Build",
-        image: "langflowai/langflow:latest",
+        image: "langflowai/langflow:latest@sha256:a0396e089eb97fa471ef8affc492b8c56abb3758040a5ddaa80814b0abad15bf",
         port: 3028,
         container_port: 7860,
         data: "/app/langflow",
@@ -321,7 +324,7 @@ pub const APPS: &[AppDef] = &[
         name: "Crawl4AI",
         blurb: "Turns any web page into clean text for AI, with a playground to try it and tools agents can call. Uses the box's model to pull out structured data.",
         category: "Research",
-        image: "unclecode/crawl4ai:0.9.4",
+        image: "unclecode/crawl4ai:0.9.4@sha256:9021b3cb5c6f12570bbcd5395638495e0a06969b3148e377b953d174af2ebc9b",
         port: 3029,
         container_port: 11235,
         data: "/data",
@@ -346,7 +349,7 @@ pub const APPS: &[AppDef] = &[
         name: "Scrapling",
         blurb: "A stealthy web scraper that agents use as a tool (an MCP server): it gets past pages that block simple fetching.",
         category: "Automate",
-        image: "pyd4vinci/scrapling:0.4.15",
+        image: "pyd4vinci/scrapling:0.4.15@sha256:1bacbc8ec90b3090d462e12f6555e241daf0dfeb684ab326ffa09d52d8226e69",
         port: 3030,
         container_port: 8000,
         data: "/data",
@@ -367,7 +370,7 @@ pub const APPS: &[AppDef] = &[
         name: "OpenHands",
         blurb: "An AI software engineer: give it a task in a project and it writes, runs and fixes the code, step by step, where you can watch.",
         category: "Code",
-        image: "ghcr.io/openhands/agent-canvas:latest",
+        image: "ghcr.io/openhands/agent-canvas:latest@sha256:91b7a217dcbefe8c10562523b043458ed1dfaf8ba770194b319fe754cee03f23",
         port: 3031,
         container_port: 8000,
         data: "/home/openhands/.openhands",
@@ -392,7 +395,7 @@ pub const APPS: &[AppDef] = &[
         name: "OpenClaw",
         blurb: "Your own AI assistant that you message from WhatsApp, Telegram, Slack or Discord, running on the box's model.",
         category: "Agents",
-        image: "openclaw/openclaw:2026.9.3",
+        image: "openclaw/openclaw:2026.9.3@sha256:6cb72e1599b3b76e2ea3dcc2f4dd7f112247367fbecadfcdee8caa7423f4989b",
         port: 3032,
         container_port: 18789,
         data: "/home/node/.openclaw",
@@ -414,7 +417,7 @@ pub const APPS: &[AppDef] = &[
         name: "LightRAG",
         blurb: "Upload documents and ask questions: it maps how the facts in them connect (a knowledge graph) and answers from it, with the box's model and embeddings.",
         category: "Research",
-        image: "ghcr.io/hkuds/lightrag:v1.5.7",
+        image: "ghcr.io/hkuds/lightrag:v1.5.7@sha256:5bdbd524931b011df246fe20888d110cef691e6804c12cde636a2b746d7de27e",
         port: 3033,
         container_port: 9621,
         data: "/app/data",
@@ -1046,6 +1049,19 @@ mod tests {
             matches!(app("localdeepresearch").unwrap().share, Share::Never(_)),
             "it spends the box's model key for whoever reaches it: never on the network"
         );
+    }
+
+    #[test]
+    fn every_image_is_pinned_by_digest() {
+        let images = APPS.iter().map(|a| (a.id, a.image)).chain([("voice-speak", crate::voice::SPEAK.image), ("voice-listen", crate::voice::LISTEN.image)]);
+        for (id, image) in images {
+            let (name, digest) = image.split_once("@sha256:").unwrap_or_else(|| panic!("{id}: {image} isn't pinned by digest"));
+            assert!(digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{id}: {digest}");
+            assert!(name.rsplit('/').next().unwrap().contains(':'), "{id}: keep the tag for people reading it ({name})");
+        }
+        // Jupyter's start command installs the OpenAI client: a fixed version.
+        let jupyter = app("jupyter").unwrap().command.unwrap().join(" ");
+        assert!(jupyter.contains("openai=="), "{jupyter}");
     }
 
     #[test]
