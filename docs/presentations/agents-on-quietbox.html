@@ -1,0 +1,436 @@
+<title>Agents on QuietBox 2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one 16:9 slide at a time on wide screens (arrow keys / buttons), a plain scrolling column on phones. Vesper's forest-teal palette, both themes. */
+:root {
+  --bg: #eef6f6; --slide: #f8fcfb; --surface: #e8f2f1; --line: #d0e1e0;
+  --fg: #050f0e; --muted: #344b49; --faint: #51706d;
+  --accent: #176782; --fill: #1b8eb1; --mint: #227767; --amber: #986f16; --red: #cb2c0b; --pink: #91306c;
+  --dot: rgba(5,15,14,.06);
+  --display: "Inter Tight", "Inter", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #050f0e; --slide: #0b1817; --surface: #13201e; --line: #233431;
+  --fg: #e7f0ee; --muted: #b3ccc8; --faint: #7d9b97;
+  --accent: #46afd2; --fill: #1a8fb2; --mint: #39c6ac; --amber: #ffb71b; --red: #f37358; --pink: #f17ec5;
+  --dot: rgba(231,240,238,.05); color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #050f0e; --slide: #0b1817; --surface: #13201e; --line: #233431;
+  --fg: #e7f0ee; --muted: #b3ccc8; --faint: #7d9b97;
+  --accent: #46afd2; --fill: #1a8fb2; --mint: #39c6ac; --amber: #ffb71b; --red: #f37358; --pink: #f17ec5;
+  --dot: rgba(231,240,238,.05); color-scheme: dark; }
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--display); font-size: 16px; line-height: 1.45;
+  background-image: radial-gradient(var(--dot) 1px, transparent 1.2px); background-size: 24px 24px; }
+.deck { height: 100%; display: grid; place-items: center; padding-inline: 16px; padding-block: 16px 64px; }
+.slide { display: none; width: min(100%, calc((100vh - 96px) * 16 / 9)); aspect-ratio: 16 / 9; max-width: 100%;
+  background: var(--slide); border: 1px solid var(--line); border-radius: 16px; padding: clamp(20px, 3.2vw, 48px);
+  overflow: hidden; position: relative; container-type: size; }
+.slide.on { display: flex; flex-direction: column; gap: 2.2cqh; }
+.slide > * { min-width: 0; }
+.kicker { font-family: var(--mono); font-size: max(11px, 1.55cqh); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+h1 { font-weight: 500; font-size: 7.4cqh; line-height: 1.05; margin: 0; text-wrap: balance; letter-spacing: -.01em; }
+h2 { font-weight: 500; font-size: 4.9cqh; line-height: 1.1; margin: 0; text-wrap: balance; }
+h3 { font-weight: 600; font-size: 2.5cqh; margin: 0; }
+p, li { font-size: 2.45cqh; color: var(--muted); margin: 0; }
+ul { margin: 0; padding-left: 1.2em; display: grid; gap: .9cqh; }
+b, strong { color: var(--fg); font-weight: 600; }
+code, .mono { font-family: var(--mono); font-size: .92em; }
+code { background: var(--surface); padding: .05em .35em; border-radius: 4px; color: var(--fg); }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.grow { flex: 1; min-height: 0; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 3cqw; flex: 1; min-height: 0; }
+.cols.w { grid-template-columns: 1.35fr 1fr; }
+.cols3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2cqw; }
+.card { background: var(--surface); border-radius: 10px; padding: 2.2cqh 1.6cqw; display: flex; flex-direction: column; gap: 1cqh; }
+.big { font-family: var(--mono); font-size: 6.4cqh; font-weight: 500; line-height: 1; font-variant-numeric: tabular-nums; }
+.big small { font-size: .42em; color: var(--faint); font-weight: 400; }
+.foot { position: absolute; left: clamp(20px, 3.2vw, 48px); right: clamp(20px, 3.2vw, 48px); bottom: 2cqh; display: flex; justify-content: space-between;
+  font-family: var(--mono); font-size: max(10px, 1.35cqh); color: var(--faint); }
+.pill { display: inline-block; font-family: var(--mono); font-size: max(10px, 1.45cqh); padding: .1em .6em; border-radius: 99px; border: 1px solid currentColor; white-space: nowrap; }
+.crit { color: var(--red); } .high { color: var(--pink); } .med { color: var(--amber); } .low { color: var(--faint); } .ok { color: var(--mint); }
+table { border-collapse: collapse; width: 100%; font-size: 2.15cqh; }
+th { text-align: left; font-family: var(--mono); font-weight: 500; font-size: max(10px, 1.45cqh); letter-spacing: .06em; text-transform: uppercase; color: var(--faint); padding: .6cqh .8cqw; border-bottom: 1px solid var(--line); }
+td { padding: .75cqh .8cqw; border-bottom: 1px solid var(--line); color: var(--muted); vertical-align: top; }
+td.r, th.r { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: 0; }
+.flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1.2cqw; }
+.step { border-top: 3px solid var(--fill); padding-top: 1.2cqh; display: flex; flex-direction: column; gap: .6cqh; }
+.step .n { font-family: var(--mono); font-size: 1.6cqh; color: var(--accent); }
+.step p { font-size: 2.05cqh; }
+svg text { font-family: var(--mono); }
+.note { font-size: 1.85cqh; color: var(--faint); }
+
+.nav { position: fixed; left: 0; right: 0; bottom: calc(10px + env(safe-area-inset-bottom, 0px)); display: flex; justify-content: center; gap: 10px; align-items: center; }
+.nav button { font: 500 13px var(--display); color: var(--fg); background: var(--slide); border: 1px solid var(--line); border-radius: 8px; padding: 7px 14px; cursor: pointer; }
+.nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.nav .count { font: 12px var(--mono); color: var(--faint); min-width: 60px; text-align: center; font-variant-numeric: tabular-nums; }
+
+/* Phones and narrow windows: every slide in one readable column. */
+@media (max-width: 760px) {
+  .deck { display: block; height: auto; padding-block: 16px 24px; }
+  .slide, .slide.on { display: flex; flex-direction: column; aspect-ratio: auto; width: 100%; container-type: normal; margin-bottom: 16px; gap: 12px; padding: 20px; overflow: visible; }
+  h1 { font-size: 30px; } h2 { font-size: 22px; } h3 { font-size: 16px; }
+  p, li { font-size: 15px; } .kicker { font-size: 11px; } table { font-size: 13px; } th { font-size: 10px; }
+  .big { font-size: 30px; } .note { font-size: 12px; } .step p { font-size: 14px; } .step .n { font-size: 12px; }
+  .cols, .cols.w, .cols3, .flow { grid-template-columns: 1fr; gap: 12px; }
+  .card { padding: 14px; gap: 6px; }
+  .foot { position: static; font-size: 10px; }
+  .tablewrap { overflow-x: auto; }
+  .nav { display: none; }
+}
+@media (prefers-reduced-motion: no-preference) { .slide.on { animation: in .18s ease-out; } @keyframes in { from { opacity: .4; } to { opacity: 1; } } }
+</style>
+
+<main class="deck" id="deck">
+
+<section class="slide" id="s1" aria-label="Title">
+  <div class="kicker">TT Station · QuietBox 2 · October 2026</div>
+  <div class="grow" style="display:flex;flex-direction:column;justify-content:center;gap:3cqh">
+    <h1>Making local coding agents dependable on QuietBox 2</h1>
+    <p style="max-width:62ch;font-size:2.9cqh">Why a coding agent on gpt-oss-20b stopped mid-task, what we measured, what we changed in the agent, the apps and the box, and what's still open.</p>
+  </div>
+  <div class="cols3">
+    <div class="card"><span class="big num">300</span><p>graded tool calls across 6 session lengths, on the box's own model</p></div>
+    <div class="card"><span class="big num">12<small>/12</small></span><p>security review findings fixed and tested, plus box network hardening</p></div>
+    <div class="card"><span class="big num">725</span><p>automated tests passing (agent 673, desktop 52). Before: 20–29 agent tests failing, no desktop tests</p></div>
+  </div>
+  <div class="foot"><span>jberkowitz@tenstorrent.com</span><span>1 / 13</span></div>
+</section>
+
+<section class="slide" id="s2" aria-label="The problem">
+  <div class="kicker">The problem</div>
+  <h2>Code sessions on gpt-oss-20b worked for hours, then stopped mid-task</h2>
+  <div class="cols w">
+    <div class="stack" style="display:flex;flex-direction:column;gap:1.6cqh">
+      <p>One real session made <b>513 tool calls that worked</b>. At <b class="num">85–87K</b> tokens of context, the model started writing its tool calls as plain text instead of making them:</p>
+      <div class="card" style="font-family:var(--mono);font-size:1.9cqh;color:var(--fg);word-break:break-all">assistantcommentary to=functions.Read json{"file_path":"desktop/src/pages/Code.tsx","line_start":470,"line_end":520}</div>
+      <p>The agent passed that text on as a finished reply, so nothing ran and the turn ended. In the same stretch it invented a <code>Search</code> tool and <code>line_start</code> parameters.</p>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:1.6cqh">
+      <h3>Root causes</h3>
+      <ul>
+        <li><b>Format drift late in long sessions.</b> gpt-oss's own tool-call syntax ("harmony") leaks as text once context is long.</li>
+        <li><b>No safety net in our translator</b> between Claude Code's API and vLLM's.</li>
+        <li><b>Sessions never compacted early.</b> They ran toward the 131K window, deep into the range where the model degrades.</li>
+      </ul>
+      <p class="note">The model server was configured correctly: the same requests, made directly, parsed 10 of 10 times.</p>
+    </div>
+  </div>
+  <div class="foot"><span>Problem</span><span>2 / 13</span></div>
+</section>
+
+<section class="slide" id="s3" aria-label="Where Tenstorrent wins">
+  <div class="kicker">Hardware lens</div>
+  <h2>On 4 Blackhole chips, decode speed is set by fixed cost per layer, not bandwidth</h2>
+  <div class="cols">
+    <div style="display:flex;flex-direction:column;gap:1.4cqh">
+      <p>A roofline planner, calibrated against two runs measured on this QuietBox, decode tokens/s per user:</p>
+      <table>
+        <thead><tr><th>Model</th><th class="r">Planner</th><th class="r">Measured</th></tr></thead>
+        <tbody>
+          <tr><td>gpt-oss-20b, 4 chips</td><td class="r">160</td><td class="r">152–158</td></tr>
+          <tr><td>Dense 27B + drafter</td><td class="r">44</td><td class="r">41–44</td></tr>
+          <tr><td>Dense 27B on 1× H100 (paper)</td><td class="r">140</td><td class="r">–</td></tr>
+          <tr><td>TT-native MoE design</td><td class="r">180</td><td class="r">–</td></tr>
+          <tr><td>… with multi-token prediction</td><td class="r">~390</td><td class="r">–</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:1.4cqh">
+      <h3>What that means for model choice</h3>
+      <ul>
+        <li><b>Mixture-of-experts with few active, 4-bit experts</b> fits the hardware. gpt-oss-20b already is that.</li>
+        <li><b>Fewer, wider layers</b> beat deep, narrow ones: each layer pays dispatch plus Ethernet collectives.</li>
+        <li><b>Dense models are the wrong fight</b> against HBM GPUs on decode.</li>
+        <li><b>Prefix caching matters more than raw decode</b> for agents. Code re-reads its context about 160 tokens for every one it writes.</li>
+      </ul>
+      <p class="note">Planner rows without a measurement are projections. Quality isn't modelled.</p>
+    </div>
+  </div>
+  <div class="foot"><span>Hardware lens</span><span>3 / 13</span></div>
+</section>
+
+<section class="slide" id="s4" aria-label="Reliability measurement">
+  <div class="kicker">Measured</div>
+  <h2>Valid tool calls hold near 86% up to 64K tokens, then fall to about 70%</h2>
+  <div class="cols w">
+    <div style="min-height:0">
+      <svg viewBox="0 0 560 300" width="100%" height="100%" role="img" aria-label="Valid tool-call rate by prompt size with 95% confidence intervals">
+        <g font-size="11" fill="var(--faint)">
+          <line x1="50" x2="545" y1="30" y2="30" stroke="var(--line)"/><text x="42" y="34" text-anchor="end">100%</text>
+          <line x1="50" x2="545" y1="51" y2="51" stroke="var(--amber)" stroke-dasharray="4 4"/><text x="545" y="45" text-anchor="end" fill="var(--amber)">95% target</text>
+          <line x1="50" x2="545" y1="135" y2="135" stroke="var(--line)"/><text x="42" y="139" text-anchor="end">75%</text>
+          <line x1="50" x2="545" y1="240" y2="240" stroke="var(--line)"/><text x="42" y="244" text-anchor="end">50%</text>
+        </g>
+        <!-- y = 240 - (v-50)*4.2 -->
+        <g>
+          <rect x="65"  y="88.8"  width="56" height="151.2" rx="3" fill="var(--fill)"/>
+          <rect x="145" y="72"    width="56" height="168"   rx="3" fill="var(--fill)"/>
+          <rect x="225" y="105.6" width="56" height="134.4" rx="3" fill="var(--fill)"/>
+          <rect x="305" y="80.4"  width="56" height="159.6" rx="3" fill="var(--fill)"/>
+          <rect x="385" y="147.6" width="56" height="92.4"  rx="3" fill="var(--amber)"/>
+          <rect x="465" y="156"   width="56" height="84"    rx="3" fill="var(--amber)"/>
+        </g>
+        <g stroke="var(--fg)" stroke-width="1.5" fill="none">
+          <path d="M93 59.4V139.2M87 59.4h12M87 139.2h12"/>
+          <path d="M173 46.8V118.2M167 46.8h12M167 118.2h12"/>
+          <path d="M253 72.0V160.2M247 72.0h12M247 160.2h12"/>
+          <path d="M333 55.2V130.8M327 55.2h12M327 130.8h12"/>
+          <path d="M413 101.4V206.4M407 101.4h12M407 206.4h12"/>
+          <path d="M493 109.8V214.8M487 109.8h12M487 214.8h12"/>
+        </g>
+        <g font-size="12" fill="var(--fg)" text-anchor="middle" font-weight="500">
+          <text x="93" y="260">86%</text><text x="173" y="260">90%</text><text x="253" y="260">82%</text><text x="333" y="260">88%</text><text x="413" y="260">72%</text><text x="493" y="260">70%</text>
+        </g>
+        <g font-size="11" fill="var(--faint)" text-anchor="middle">
+          <text x="93" y="282">8K</text><text x="173" y="282">16K</text><text x="253" y="282">32K</text><text x="333" y="282">64K</text><text x="413" y="282">96K</text><text x="493" y="282">120K</text>
+        </g>
+      </svg>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:1.4cqh">
+      <p>Claude Code-shaped requests through our own translator, 50 per size, on gpt-oss-20b on the box. Whiskers are 95% intervals.</p>
+      <ul>
+        <li><b>No size reached 95% valid.</b> So Code keeps compacting at 64K on this model, now backed by data rather than a guess.</li>
+        <li><b>Past 64K the main failure is invented parameters</b> (14–22%), mostly <code>line_start</code> for <code>offset</code>.</li>
+        <li><b>Garbled tool names</b> (<code>Read&lt;|channel|&gt;commentary</code>) appear at every size. We now repair them; on this data, 8K–16K would reach about 92%.</li>
+        <li>Compaction now uses each model's measured window when a check-up finds one.</li>
+      </ul>
+      <p class="note">Synthetic sessions; first reply only (Claude Code's retry after an error isn't scored); one model.</p>
+    </div>
+  </div>
+  <div class="foot"><span>Measured</span><span>4 / 13</span></div>
+</section>
+
+<section class="slide" id="s5" aria-label="Agent loop fixes">
+  <div class="kicker">Fixed in the agent</div>
+  <h2>A safety net between Claude Code and the model, that never guesses</h2>
+  <div class="cols">
+    <div style="display:flex;flex-direction:column;gap:1.4cqh">
+      <h3>What the translator does now</h3>
+      <ul>
+        <li><b>Rescues tool calls written as text</b> and turns them back into real calls, streamed or not.</li>
+        <li><b>Checks every call against the tool's schema</b>: name, required fields, types, unknown fields.</li>
+        <li><b>Repairs only what can't change meaning</b>: tool-name case, leftover gpt-oss syntax on a real name, <code>"470"</code> for a number, JSON in a string.</li>
+        <li><b>Ends the turn cleanly</b> when vLLM says "tool call" but sends none.</li>
+        <li><b>Counts calls</b> as valid, repaired, invalid or leaked, per model.</li>
+      </ul>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:1.4cqh">
+      <h3>What it deliberately doesn't do</h3>
+      <ul>
+        <li><b>No renaming parameters</b> (<code>line_start</code> → <code>offset</code>). That would change what a call does. Claude Code's error tells the model, and it retries.</li>
+        <li><b>No forcing a tool call on every turn.</b> An agent has to be able to answer in plain text.</li>
+      </ul>
+      <h3 style="margin-top:1cqh">Compaction</h3>
+      <p>Sessions summarize at <b class="num">64K</b> tokens, or at the window a model's measured check-up recommends. A live meter in Code shows how close a session is.</p>
+    </div>
+  </div>
+  <div class="foot"><span>Fixed in the agent</span><span>5 / 13</span></div>
+</section>
+
+<section class="slide" id="s6" aria-label="vLLM finding">
+  <div class="kicker">Finding for upstream</div>
+  <h2>vLLM doesn't hold gpt-oss tool calls to their schema, in any mode</h2>
+  <div class="cols w">
+    <div>
+      <table>
+        <thead><tr><th>tool_choice</th><th class="r">Args fit schema</th><th>What else we saw</th></tr></thead>
+        <tbody>
+          <tr><td><code>auto</code></td><td class="r">92%</td><td>Today's setting</td></tr>
+          <tr><td><code>auto</code> + strict</td><td class="r">88%</td><td>Strict flag has no effect</td></tr>
+          <tr><td><code>required</code></td><td class="r">96%</td><td>3 of 12 replies were plain text anyway</td></tr>
+          <tr><td>named tool</td><td class="r">88%</td><td>7 of 24 called a different tool</td></tr>
+        </tbody>
+      </table>
+      <p class="note" style="margin-top:1.4cqh">144 requests on gpt-oss-20b, vLLM 0.26.0.dev4, 24 per mode on everyday tasks. <code>line_start</code> came back even with a named Read tool. <code>response_format</code> with a JSON schema <i>is</i> enforced, so the gap is in vLLM's gpt-oss tool path.</p>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:1.4cqh">
+      <h3>Decision</h3>
+      <ul>
+        <li><b>Keep <code>auto</code></b>, the only mode that lets the agent answer in text.</li>
+        <li><b>Check in our translator</b>, where we control it.</li>
+        <li><b>Raise it with vLLM</b>, with the script and numbers in <code>docs/notes/tool-call-constrained-decoding.md</code>.</li>
+      </ul>
+      <p class="note">Latency was 6–10 s per request in every mode; it tracks output length, not mode.</p>
+    </div>
+  </div>
+  <div class="foot"><span>Finding for upstream</span><span>6 / 13</span></div>
+</section>
+
+<section class="slide" id="s7" aria-label="Product changes">
+  <div class="kicker">In the apps</div>
+  <h2>What people see in TT Station</h2>
+  <div class="cols3" style="flex:1;align-content:start">
+    <div class="card"><h3>Code: speed and context</h3><p>A strip per session: context used against the compaction point, time to first token, decode speed, prefix-cache state. Warns as a session nears compaction.</p></div>
+    <div class="card"><h3>Code: choose the model</h3><p>A picker showing each model's window, prefix caching and measured speed. Switching is confirmed first, because it stops the model for everyone and resets the chips.</p></div>
+    <div class="card"><h3>Research: explain, simplify, ask</h3><p>Select text in a report and get a short answer grounded in that report, with its citations. Web-sourced report text is treated as untrusted; answers are text only.</p></div>
+    <div class="card"><h3>Model check-ups</h3><p>Agent reliability is an optional part of a check-up (+15 min) and sets where Code compacts for that model.</p></div>
+    <div class="card"><h3>Everyday polish</h3><p>Light, dark or system theme. Undo for deleting a report. Download all reports as one zip. Copy buttons only say "Copied" when it worked.</p></div>
+    <div class="card"><h3>Devices</h3><p>A list of signed-in devices with Remove, and sessions that expire after 90 idle days (slide 10).</p></div>
+  </div>
+  <div class="foot"><span>In the apps</span><span>7 / 13</span></div>
+</section>
+
+<section class="slide" id="s8" aria-label="Security review">
+  <div class="kicker">Security review</div>
+  <h2>12 findings, all confirmed and fixed, each with a test</h2>
+  <div class="tablewrap grow" style="min-height:0">
+    <table>
+      <thead><tr><th style="width:11%">Severity</th><th style="width:41%">Finding</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill crit">Critical</span></td><td>A Code sandbox could get commands run on the box via git hooks/config</td><td><code>.git</code> read-only in the sandbox; host git runs with every program-running setting pinned off</td></tr>
+        <tr><td><span class="pill high">High</span></td><td>Web pages could steer Tori's acting tools without a confirm</td><td>Recording, approvals and opening URLs always ask; after reading the web, every acting tool asks</td></tr>
+        <tr><td><span class="pill high">High</span></td><td>Desktop windows holding the box token could navigate to any site</td><td>Exact-origin checks, navigation locked to the box, every IPC handler checks its caller</td></tr>
+        <tr><td><span class="pill high">High</span></td><td>A crafted pairing link could inject shell/SSH config on the user's computer</td><td>Host, name and user validated and shell-quoted</td></tr>
+        <tr><td><span class="pill med">Medium</span></td><td>Model server and an app open to the LAN with no key</td><td>Published on 127.0.0.1; reach them through the keyed gateway</td></tr>
+        <tr><td><span class="pill med">Medium</span></td><td>Web-fetch SSRF guard bypass (DNS rebinding, IPv4-in-IPv6)</td><td>Private addresses refused at connect time</td></tr>
+        <tr><td><span class="pill med">Medium</span></td><td>Bring-up auto-approval matched sibling folders and unknown tools</td><td>Real path containment; unknown tools ask</td></tr>
+        <tr><td><span class="pill low">Low ×5</span></td><td>Open log/config routes, global pairing limit, secrets in process lists, tokens in URLs, no CSP</td><td>Auth + Host check, per-address limits, secrets by name only, header tokens, CSP on every page</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="foot"><span>Security review</span><span>8 / 13</span></div>
+</section>
+
+<section class="slide" id="s9" aria-label="Remote access">
+  <div class="kicker">Remote access</div>
+  <h2>How a computer connects to the box</h2>
+  <div class="flow">
+    <div class="step"><span class="n">Find</span><p>The app finds the box on the local network (mDNS) and reads its TLS certificate.</p></div>
+    <div class="step"><span class="n">Prove</span><p>A pairing code shown on the box, or an SSH key the computer already has. Passwords no longer work over SSH.</p></div>
+    <div class="step"><span class="n">Cross-check</span><p>Over SSH the box reports its certificate again; a mismatch stops pairing as a possible impostor.</p></div>
+    <div class="step"><span class="n">Issue</span><p>A 256-bit token for that one device, stored on the box only as a hash.</p></div>
+    <div class="step"><span class="n">Use</span><p>Every request is HTTPS (TLS 1.3, AES-256-GCM) pinned to that box's exact certificate.</p></div>
+  </div>
+  <div class="cols" style="margin-top:1cqh">
+    <div style="display:flex;flex-direction:column;gap:1.2cqh">
+      <h3>Already strong</h3>
+      <ul>
+        <li>Certificate pinning: no certificate authority can vouch for an impostor.</li>
+        <li>Modern SSH, including post-quantum key exchange. Passwords never stored.</li>
+        <li>iPhone keeps its token in the iOS Keychain.</li>
+      </ul>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:1.2cqh">
+      <h3>Below enterprise expectations, before this work</h3>
+      <ul>
+        <li>Sessions never expired and could only be revoked all at once.</li>
+        <li>SSH password login open to the network; no firewall, no lockout.</li>
+        <li>Desktop token in a plain file. No SSO or MFA.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="foot"><span>Remote access</span><span>9 / 13</span></div>
+</section>
+
+<section class="slide" id="s10" aria-label="Remote access hardening">
+  <div class="kicker">Remote access, hardened</div>
+  <h2>Per-device sessions, key-only SSH, a firewall and a lockout</h2>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th style="width:24%">Change</th><th>What it does</th><th style="width:16%">Status</th></tr></thead>
+      <tbody>
+        <tr><td><b>Per-device sessions</b></td><td>Each device gets its own session: named, hashed at rest, expiring after 90 idle days. Settings → Devices lists them; Remove signs one out immediately.</td><td id="st-sessions"><span class="pill med">In review</span></td></tr>
+        <tr><td><b>Keychain on desktop</b></td><td>Box tokens encrypted with the OS keychain (Electron safeStorage); the app says so plainly when a Linux desktop has no keyring.</td><td id="st-keychain"><span class="pill med">In review</span></td></tr>
+        <tr><td><b>Key-only SSH</b></td><td>No passwords or root over SSH; 3 tries per connection. Paired computers already hold keys.</td><td><span class="pill ok">Live on box</span></td></tr>
+        <tr><td><b>Firewall</b></td><td>Only SSH, TT Station HTTPS and discovery from the network; the box's own Docker networks allowed.</td><td><span class="pill ok">Live on box</span></td></tr>
+        <tr><td><b>Lockout</b></td><td>5 failed SSH sign-ins in 10 minutes bans an address for an hour. The stock rule watched the wrong service name on Ubuntu; fixed and verified.</td><td><span class="pill ok">Live on box</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">Any box can get the same: <code>sudo deploy/harden-box.sh</code>, documented with checks and undo in <code>docs/reference/box-hardening.md</code>. New computers now pair with a code instead of a password.</p>
+  <div class="foot"><span>Remote access, hardened</span><span>10 / 13</span></div>
+</section>
+
+<section class="slide" id="s11" aria-label="Quality">
+  <div class="kicker">Quality</div>
+  <h2>From a failing suite to every check green, in CI</h2>
+  <div class="cols3">
+    <div class="card"><span class="big num">673</span><p>agent tests passing. 20–29 were failing before, depending on order: a rate limit shared across test harnesses.</p></div>
+    <div class="card"><span class="big num">52</span><p>desktop tests where there were none: clipboard, theme, report export, undo, explain helpers, Electron input checks.</p></div>
+    <div class="card"><span class="big num">1</span><p>real bug the new tests caught before anyone hit it: "Download all" froze on two long identical titles.</p></div>
+  </div>
+  <ul>
+    <li><b>CI</b> now typechecks, tests and builds the desktop app on every change.</li>
+    <li><b>Tests never touch the chips:</b> hardware commands are stubbed, because some agent tests otherwise run a real reset.</li>
+    <li><b>Security fixes are proven by tests</b>, e.g. a repo planted with hooks, fsmonitor, filters and a pager runs none of them.</li>
+  </ul>
+  <div class="foot"><span>Quality</span><span>11 / 13</span></div>
+</section>
+
+<section class="slide" id="s12" aria-label="Open decisions">
+  <div class="kicker">Open decisions</div>
+  <h2>What needs a call before a wider rollout</h2>
+  <div class="cols">
+    <div style="display:flex;flex-direction:column;gap:1.2cqh">
+      <h3>Security</h3>
+      <ul>
+        <li><b>Store apps on the LAN without login</b>: Langflow (its auto-login can run code), Flowise, n8n, LightRAG. Box-only by default, or behind the gateway?</li>
+        <li><b>Routines</b> can still let web text drive memory and pre-approved actions.</li>
+        <li><b>After a web read, a model could leak data</b> through the URL of a later fetch.</li>
+        <li><b>SSO and MFA</b> for company-managed boxes.</li>
+      </ul>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:1.2cqh">
+      <h3>Product and engineering</h3>
+      <ul>
+        <li><b>Where this lands</b>: all of it is local commits on <code>jberkowitz/mobile-voice</code>; nothing is pushed.</li>
+        <li><b>Not yet verified live</b>: iOS build, macOS keychain, Electron click-through, the explain route end to end.</li>
+        <li><b>Cached-token numbers</b> need <code>--enable-prompt-tokens-details</code> on the model server.</li>
+        <li><b>Recovery isn't scored</b>: the eval grades first replies, not Claude Code's retry.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="foot"><span>Open decisions</span><span>12 / 13</span></div>
+</section>
+
+<section class="slide" id="s13" aria-label="Next">
+  <div class="kicker">Next</div>
+  <h2>The biggest remaining levers</h2>
+  <div class="cols3" style="flex:1;align-content:start">
+    <div class="card"><h3>Speculative decoding for gpt-oss</h3><p>The planner's biggest single lever, about 2× decode. Needs a small trained draft head (GPU time) and serving support.</p></div>
+    <div class="card"><h3>A second model alongside</h3><p>A drafter, embeddings or router sharing the box. Blocked on chip leasing (gozer) allowing a companion slot.</p></div>
+    <div class="card"><h3>Score recovery, not just first replies</h3><p>Extend the reliability eval to multi-turn sessions so compaction targets what users actually feel.</p></div>
+    <div class="card"><h3>Prefix caching for Code by default</h3><p>Route Code to a model whose server caches prefixes; the picker already shows which do.</p></div>
+    <div class="card"><h3>Upstream the vLLM gap</h3><p>Schema-constrained tool arguments for gpt-oss would remove most invalid calls at the source.</p></div>
+    <div class="card"><h3>Enterprise identity</h3><p>SSO, MFA and audit export on top of the per-device sessions.</p></div>
+  </div>
+  <div class="foot"><span>Next</span><span>13 / 13</span></div>
+</section>
+
+</main>
+
+<nav class="nav" aria-label="Slides">
+  <button type="button" id="prev" aria-label="Previous slide">← Prev</button>
+  <span class="count" id="count" aria-live="polite">1 / 13</span>
+  <button type="button" id="next" aria-label="Next slide">Next →</button>
+</nav>
+
+<script>
+(() => {
+  const slides = [...document.querySelectorAll(".slide")];
+  let i = 0;
+  const fromHash = () => { const m = /^#s(\d+)$/.exec(location.hash); return m ? Math.min(slides.length, Math.max(1, +m[1])) - 1 : 0; };
+  const show = (n) => {
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach((s, k) => s.classList.toggle("on", k === i));
+    document.getElementById("count").textContent = `${i + 1} / ${slides.length}`;
+    try { history.replaceState(null, "", `#s${i + 1}`); } catch (e) {}
+  };
+  document.getElementById("prev").onclick = () => show(i - 1);
+  document.getElementById("next").onclick = () => show(i + 1);
+  document.addEventListener("keydown", (e) => {
+    if (e.target.closest && e.target.closest("input, textarea")) return;
+    if (["ArrowRight", "PageDown", " "].includes(e.key)) { e.preventDefault(); show(i + 1); }
+    if (["ArrowLeft", "PageUp"].includes(e.key)) { e.preventDefault(); show(i - 1); }
+    if (e.key === "Home") show(0);
+    if (e.key === "End") show(slides.length - 1);
+  });
+  show(fromHash());
+})();
+</script>
