@@ -806,11 +806,19 @@ pub(crate) async fn get_doctor(
 }
 
 /// `POST /doctor/fix/{fix}` (authed): apply a safe fix, then re-check.
+/// `reset_chips` is an owner's, like `POST /power` `reset-chips`: it runs the
+/// same whole-box reset.
 pub(crate) async fn post_fix(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
+    crate::routes::CallerAuth(caller): crate::routes::CallerAuth,
     axum::extract::Path(fix): axum::extract::Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    if fix == "reset_chips" && !caller.owner() {
+        let what = format!("POST /doctor/fix/{fix}");
+        crate::audit::record_as(&state, &caller.actor(), "denied", &what, "denied");
+        return Err(err(StatusCode::FORBIDDEN, crate::routes::OWNER_ONLY));
+    }
     if let Some(holder) = state.chips_holder() {
         return Err(err(StatusCode::CONFLICT, holder));
     }
