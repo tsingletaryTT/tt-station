@@ -388,7 +388,7 @@ How to work well here:\n\
 }
 
 /// Whether a project has Jupyter notebooks (a quick look, skipping the usual bulk).
-fn has_notebooks(root: &Path) -> bool {
+pub(crate) fn has_notebooks(root: &Path) -> bool {
     let mut stack = vec![(root.to_path_buf(), 0)];
     let mut seen = 0;
     while let Some((dir, depth)) = stack.pop() {
@@ -428,66 +428,30 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
     if !cj.exists() {
         let _ = std::fs::write(&cj, r#"{"hasCompletedOnboarding": true}"#);
     }
-    // Claude Code compacts its history before this: smaller contexts keep each step fast
-    // (the whole conversation is read again at every step).
-    // The whole conversation is read again at every step, so a smaller window keeps
-    // steps fast; too small, and a real task fills it faster than it can summarize
-    // (Claude Code stops: "Autocompact is thrashing").
-    let context = crate::coding::check(state).await["context"].as_u64().unwrap_or(131_072).min(131_072);
-    // Its answers fit in what's left of the context: Claude Code asks for large
-    // output budgets by default, and prompt plus budget past the context is refused.
-    let output = (context / 4).clamp(4096, 16_384);
+    // Claude Code compacts its history before the window is full: smaller contexts
+    // keep each step fast (the whole conversation is read again at every step); too
+    // small, and a real task fills it faster than it can summarize (Claude Code
+    // stops: "Autocompact is thrashing"). See `coding::code_window`.
+    let context = crate::coding::check(state).await["context"].as_u64();
+    let (tuning, tuned_env) = crate::coding::claude_tuning(state, context, Path::new(&s.folder), !s.sandbox);
     let mut args: Vec<String> = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
         "--permission-prompt-tool", "stdio", "--permission-mode", mode(&s.policy, s.sandbox)].iter().map(|a| a.to_string()).collect();
     args.push("--append-system-prompt".into());
     args.push(setting(s.sandbox));
-    // Only the tools coding needs here. Claude Code offers about twenty (agents,
-    // schedules, worktrees, messages, plan mode…) that can't help in this window,
-    // and every one is described in the prompt the model re-reads at each step.
-    // No web from the sandbox: it has no internet.
-    let mut tools = vec!["Bash", "Read", "Edit", "Write"];
-    // Its description costs ~450 tokens at every step: only for projects with notebooks.
-    if has_notebooks(Path::new(&s.folder)) {
-        tools.push("NotebookEdit");
-    }
-    if !s.sandbox {
-        tools.extend(["WebFetch", "WebSearch"]);
-    }
-    args.push("--tools".into());
-    args.push(tools.join(","));
+    args.extend(tuning);
     if let Some(c) = &s.claude_session {
         args.push("--resume".into());
         args.push(c.clone());
     }
-    let envs: Vec<(String, String)> = vec![
+    let mut envs: Vec<(String, String)> = tuned_env;
+    envs.extend([
         ("ANTHROPIC_AUTH_TOKEN".into(), key),
-        ("ANTHROPIC_API_KEY".into(), String::new()),
-        ("ANTHROPIC_MODEL".into(), "quietbox".into()),
-        ("ANTHROPIC_DEFAULT_OPUS_MODEL".into(), "quietbox".into()),
-        ("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), "quietbox".into()),
-        ("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), "quietbox".into()),
-        ("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), context.to_string()),
-        // Summarize long before the window is full: past some size a local model
-        // starts inventing tools and writing its calls as text. Where, is measured
-        // per model (the agent reliability eval); 64K when it hasn't been.
-        ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), context.min(crate::evals::compact_window(state, state.endpoint().map(|e| e.model).as_deref())).to_string()),
-        ("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), output.to_string()),
-        // No single file read or command output may take a big bite of the context:
-        // a large file is read in parts (offset, limit) instead.
-        ("CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS".into(), "8000".into()),
-        ("BASH_MAX_OUTPUT_LENGTH".into(), "15000".into()),
         // So the box knows which session a model request is for (its activity line).
         ("ANTHROPIC_CUSTOM_HEADERS".into(), format!("x-tt-session: {}", s.id)),
-        ("DISABLE_TELEMETRY".into(), "1".into()),
-        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into()),
-        ("DISABLE_AUTOUPDATER".into(), "1".into()),
         ("MAX_THINKING_TOKENS".into(), if s.think { "6000".into() } else { "0".into() }),
-        // No per-request header line at the top of the system prompt: it changes every
-        // request, so the server could never reuse (prefix-cache) the conversation's start.
-        ("CLAUDE_CODE_ATTRIBUTION_HEADER".into(), "0".into()),
         // No __pycache__ folders showing up as "changes" after every test run.
         ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
-    ];
+    ]);
     let container = format!("tt-code-{}", s.id);
     let port = state.ctrl_port();
     let cmd = if s.sandbox {

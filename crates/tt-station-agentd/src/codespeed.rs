@@ -439,13 +439,6 @@ async fn served_context(model: &str, base_url: &str) -> Option<u64> {
     c
 }
 
-/// The window Code sessions get and where they compact, from the model's
-/// context: the same figures `workspace.rs` launches Claude Code with.
-pub fn window_and_compaction(context: Option<u64>) -> (u64, u64) {
-    let window = context.unwrap_or(131_072).min(131_072);
-    (window, window.min(crate::coding::COMPACT_WINDOW))
-}
-
 // ---------------------------------------------------------------- choosing the model
 
 /// What choosing a model for Code would do.
@@ -517,7 +510,8 @@ pub(crate) async fn get_speed(State(state): State<AppState>, _auth: BearerAuth, 
         Some(e) => (served_context(&e.model, &e.base_url).await, Some(prefix_cache(&e.model, &e.base_url).await)),
         None => (None, None),
     };
-    let (window, compact_at) = window_and_compaction(context);
+    // The same figures Claude Code was launched with (`coding::code_window`).
+    let (window, compact_at) = crate::coding::code_window(&state, context);
     Ok(Json(json!({
         "model": endpoint.as_ref().map(|e| e.model.clone()),
         "window": window,
@@ -723,14 +717,6 @@ mod tests {
         let m = measured("test-ring-model").unwrap();
         assert_eq!(m.decode_tps.len(), SAMPLES);
         assert_eq!(median_f(&m.decode_tps), Some(19.0));
-    }
-
-    #[test]
-    fn the_window_and_compaction_follow_the_launch() {
-        assert_eq!(window_and_compaction(Some(131_072)), (131_072, crate::coding::COMPACT_WINDOW));
-        assert_eq!(window_and_compaction(Some(262_144)), (131_072, crate::coding::COMPACT_WINDOW));
-        assert_eq!(window_and_compaction(Some(32_768)), (32_768, 32_768));
-        assert_eq!(window_and_compaction(None), (131_072, crate::coding::COMPACT_WINDOW));
     }
 
     #[test]
