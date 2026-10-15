@@ -160,7 +160,7 @@ async fn active(state: &AppState) -> Option<bool> {
 /// Things on the box that are using the model even between requests.
 fn working(state: &AppState) -> bool {
     let code = crate::workspace::any_busy();
-    let routine = crate::routines::is_running();
+    let routine = crate::routines::is_running(state);
     let _ = state;
     code || routine
 }

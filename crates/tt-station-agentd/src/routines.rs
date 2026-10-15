@@ -40,7 +40,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path as UrlPath, State};
@@ -183,14 +183,33 @@ pub struct Run {
 
 // ---------------------------------------------------------------- storage
 
+/// What routines keep for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// The routines, loaded from disk on first use.
+    routines: Mutex<Option<Vec<Routine>>>,
+    /// Runs in progress, kept here and written through to disk.
+    live: Mutex<HashMap<String, Run>>,
+    /// Runs asked to stop.
+    stop: Mutex<std::collections::HashSet<String>>,
+    /// Runs waiting on the person's answer, and where to send it.
+    decisions: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    /// The run going on now (one at a time).
+    current: Mutex<Option<String>>,
+    /// One answer at a time, so a step is never run twice.
+    answering: Mutex<()>,
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().routines
+}
+
 fn dir(state: &AppState) -> PathBuf {
     state.config_dir().join("routines")
 }
 
-static ROUTINES: LazyLock<Mutex<Option<Vec<Routine>>>> = LazyLock::new(|| Mutex::new(None));
-
 fn with_routines<T>(state: &AppState, f: impl FnOnce(&mut Vec<Routine>) -> T) -> T {
-    let mut held = ROUTINES.lock().expect("routines");
+    let mut held = mine(state).routines.lock().expect("routines");
     let list = held.get_or_insert_with(|| {
         crate::fsio::read_json_or_backup(&dir(state).join("routines.json")).unwrap_or_default()
     });
@@ -245,18 +264,18 @@ fn run_path(state: &AppState, id: &str) -> PathBuf {
     dir(state).join("runs").join(format!("{id}.json"))
 }
 
-/// Runs in progress, kept here and written through to disk.
-static LIVE: LazyLock<Mutex<HashMap<String, Run>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
 fn save_run(state: &AppState, run: &Run) {
     crate::fsio::save_json(&run_path(state, &run.id), run, crate::fsio::PRIVATE);
-    LIVE.lock()
+    mine(state)
+        .live
+        .lock()
         .expect("routines")
         .insert(run.id.clone(), run.clone());
 }
 
 fn update_run(state: &AppState, id: &str, f: impl FnOnce(&mut Run)) -> Option<Run> {
-    let mut run = LIVE
+    let mut run = mine(state)
+        .live
         .lock()
         .expect("routines")
         .get(id)
@@ -268,7 +287,7 @@ fn update_run(state: &AppState, id: &str, f: impl FnOnce(&mut Run)) -> Option<Ru
 }
 
 fn load_run(state: &AppState, id: &str) -> Option<Run> {
-    if let Some(r) = LIVE.lock().expect("routines").get(id) {
+    if let Some(r) = mine(state).live.lock().expect("routines").get(id) {
         return Some(r.clone());
     }
     crate::fsio::read_json_or_backup(&run_path(state, id))
@@ -284,7 +303,9 @@ fn all_runs(state: &AppState) -> Vec<Run> {
         .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
         .filter_map(|p| crate::fsio::read_json_or_backup::<Run>(&p))
         .map(|r| {
-            LIVE.lock()
+            mine(state)
+                .live
+                .lock()
                 .expect("routines")
                 .get(&r.id)
                 .cloned()
@@ -700,7 +721,7 @@ async fn wait_until_ready(state: &AppState, run_id: &str, minutes: u64) -> (bool
     // A start that's just been asked for may not show as starting for a moment.
     tokio::time::sleep(Duration::from_secs(5)).await;
     loop {
-        if stopping(run_id) {
+        if stopping(state, run_id) {
             return (false, "Stopped.".into());
         }
         let life = state.lifecycle();
@@ -750,7 +771,7 @@ async fn wait_for_download(
 ) -> (bool, String) {
     let deadline = Instant::now() + Duration::from_secs(minutes * 60);
     loop {
-        if stopping(run_id) {
+        if stopping(state, run_id) {
             return (false, "Stopped.".into());
         }
         let Json(c) = crate::community::get_community(State(state.clone()), BearerAuth).await;
@@ -803,15 +824,8 @@ async fn wait_for_download(
 
 // ---------------------------------------------------------------- running
 
-static STOP: LazyLock<Mutex<std::collections::HashSet<String>>> =
-    LazyLock::new(|| Mutex::new(Default::default()));
-static DECISIONS: LazyLock<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-/// The run going on now (one at a time).
-static CURRENT: Mutex<Option<String>> = Mutex::new(None);
-
-fn stopping(run_id: &str) -> bool {
-    STOP.lock().expect("routines").contains(run_id)
+fn stopping(state: &AppState, run_id: &str) -> bool {
+    mine(state).stop.lock().expect("routines").contains(run_id)
 }
 
 fn set_activity(state: &AppState, run_id: &str, what: &str) {
@@ -846,7 +860,7 @@ The routine, \"{}\":\n{}",
 
 /// Starts a run of `r` in the background; refuses if one is going.
 fn start(state: &AppState, r: &Routine, trigger: &str) -> Result<Run, String> {
-    let mut current = CURRENT.lock().expect("routines");
+    let mut current = mine(state).current.lock().expect("routines");
     if let Some(id) = current.as_ref() {
         let name = load_run(state, id).map(|r| r.name).unwrap_or_default();
         return Err(format!(
@@ -880,7 +894,7 @@ fn start(state: &AppState, r: &Routine, trigger: &str) -> Result<Run, String> {
         let outcome = execute(&st, &rt, &id).await;
         let (status, report) = match outcome {
             Ok(report) => ("done", report),
-            Err(e) if stopping(&id) => ("stopped", format!("Stopped. {e}")),
+            Err(e) if stopping(&st, &id) => ("stopped", format!("Stopped. {e}")),
             Err(e) => ("failed", e),
         };
         let waiting = load_run(&st, &id).map(|r| r.queued).unwrap_or_default();
@@ -892,8 +906,8 @@ fn start(state: &AppState, r: &Routine, trigger: &str) -> Result<Run, String> {
             r.pending = None;
             r.activity = None;
         });
-        STOP.lock().expect("routines").remove(&id);
-        *CURRENT.lock().expect("routines") = None;
+        mine(&st).stop.lock().expect("routines").remove(&id);
+        *mine(&st).current.lock().expect("routines") = None;
         prune_runs(&st);
         if let Some(run) = run {
             let headline = headline(&report);
@@ -931,7 +945,7 @@ async fn execute(state: &AppState, r: &Routine, run_id: &str) -> Result<String, 
     let tools = tools();
     let client = reqwest::Client::new();
     for round in 0..=MAX_ROUNDS {
-        if stopping(run_id) {
+        if stopping(state, run_id) {
             return Err("Stopped by you.".into());
         }
         // A model to think with (one may be starting after a switch).
@@ -1058,15 +1072,15 @@ async fn execute(state: &AppState, r: &Routine, run_id: &str) -> Result<String, 
 }
 
 /// Whether a routine is running now.
-pub(crate) fn is_running() -> bool {
-    CURRENT.lock().expect("routines").is_some()
+pub(crate) fn is_running(state: &AppState) -> bool {
+    mine(state).current.lock().expect("routines").is_some()
 }
 
 /// What routines are waiting on the person for (`GET /approvals`): the
 /// running one's question, and steps queued after a web read.
 pub(crate) fn pending_approvals(state: &AppState) -> Vec<Value> {
     let mut out = Vec::new();
-    let current = CURRENT.lock().expect("routines").clone();
+    let current = mine(state).current.lock().expect("routines").clone();
     if let Some(run) = current.as_deref().and_then(|id| load_run(state, id)) {
         if let Some(p) = run.pending {
             out.push(json!({ "id": format!("routine:{}", run.id), "kind": "routine", "run": run.id, "where": run.name, "summary": p.summary, "tool": p.tool, "input": p.args, "since": p.since, "can_always": false }));
@@ -1134,9 +1148,6 @@ fn waiting_note(queued: &[Queued]) -> String {
     note
 }
 
-/// One answer at a time, so a step is never run twice.
-static ANSWERING: Mutex<()> = Mutex::new(());
-
 /// The person's answer to a queued step: declined, or run now (in the background).
 pub(crate) fn answer_queued(
     state: &AppState,
@@ -1144,7 +1155,7 @@ pub(crate) fn answer_queued(
     n: usize,
     allow: bool,
 ) -> Result<String, (StatusCode, Json<Value>)> {
-    let _one = ANSWERING.lock().expect("routines");
+    let _one = mine(state).answering.lock().expect("routines");
     if !valid_id(run_id) {
         return Err(err(StatusCode::NOT_FOUND, "No such run."));
     }
@@ -1208,7 +1219,8 @@ async fn ask_person(
 ) -> Option<bool> {
     let summary = action_summary(tool, args);
     let (tx, rx) = tokio::sync::oneshot::channel();
-    DECISIONS
+    mine(state)
+        .decisions
         .lock()
         .expect("routines")
         .insert(run_id.to_string(), tx);
@@ -1232,7 +1244,7 @@ async fn ask_person(
         run.pending = None;
         run.activity = None;
     });
-    answer.filter(|_| !stopping(run_id))
+    answer.filter(|_| !stopping(state, run_id))
 }
 
 /// Runs scheduled routines when they're due. Started once, at agent start.
@@ -1248,7 +1260,7 @@ pub async fn schedule_forever(state: AppState) {
         run.activity = None;
         run.report = Some("TT Station restarted while this was running, so it stopped.".into());
         save_run(&state, &run);
-        LIVE.lock().expect("routines").remove(&run.id);
+        mine(&state).live.lock().expect("routines").remove(&run.id);
     }
     loop {
         let due: Vec<Routine> = with_routines(&state, |list| {
@@ -1326,7 +1338,7 @@ fn view(state: &AppState, r: &Routine) -> Value {
 /// `GET /routines`
 pub(crate) async fn get_routines(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
     let list = with_routines(&state, |l| l.clone());
-    let current = CURRENT.lock().expect("routines").clone();
+    let current = mine(&state).current.lock().expect("routines").clone();
     Json(json!({
         "routines": list.iter().map(|r| view(&state, r)).collect::<Vec<_>>(),
         "running": current.and_then(|id| load_run(&state, &id)),
@@ -1424,7 +1436,8 @@ pub(crate) async fn delete_routine(
     _auth: BearerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
-    if CURRENT
+    if mine(&state)
+        .current
         .lock()
         .expect("routines")
         .as_ref()
@@ -1506,7 +1519,8 @@ pub(crate) async fn post_approve(
     UrlPath(run): UrlPath<String>,
     Json(d): Json<Decision>,
 ) -> Reply {
-    let tx = DECISIONS
+    let tx = mine(&state)
+        .decisions
         .lock()
         .expect("routines")
         .remove(&run)
@@ -1530,9 +1544,18 @@ pub(crate) async fn post_stop(
     if load_run(&state, &run).is_none_or(|r| r.finished.is_some()) {
         return Err(err(StatusCode::CONFLICT, "It isn't running."));
     }
-    STOP.lock().expect("routines").insert(run.clone());
+    mine(&state)
+        .stop
+        .lock()
+        .expect("routines")
+        .insert(run.clone());
     // Waiting for an answer: the stop is the answer.
-    if let Some(tx) = DECISIONS.lock().expect("routines").remove(&run) {
+    if let Some(tx) = mine(&state)
+        .decisions
+        .lock()
+        .expect("routines")
+        .remove(&run)
+    {
         let _ = tx.send(false);
     }
     set_activity(&state, &run, "Stopping after the current step");

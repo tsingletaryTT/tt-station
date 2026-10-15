@@ -108,6 +108,14 @@ pub struct AppState {
     inner: Arc<Inner>,
 }
 
+/// Mutable state modules keep for the life of one agent. It lives on
+/// `AppState` rather than in process-wide statics so that every `AppState`
+/// (each test's, too) has its own.
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    pub(crate) routines: crate::routines::PerAgent,
+}
+
 /// The actual state data, held once behind the `Arc` in `AppState`.
 ///
 /// Fields beyond what Task 6 needs (a pairing-token set for Task 7, a real
@@ -351,6 +359,8 @@ struct Inner {
     bringup_busy: std::sync::atomic::AtomicBool,
     /// Whether the served chat model answers (`crate::liveness`).
     liveness: Arc<crate::liveness::Liveness>,
+    /// What modules keep for the life of this agent.
+    per_agent: PerAgent,
 }
 
 /// The serving lifecycle `GET /serve` reports. `/status` only ever says `idle`
@@ -555,6 +565,7 @@ impl AppState {
                 chips_resetting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 bringup_busy: std::sync::atomic::AtomicBool::new(false),
                 liveness: Arc::new(crate::liveness::Liveness::default()),
+                per_agent: PerAgent::default(),
                 creations: crate::creations::Creations::new(
                     std::env::temp_dir()
                         .join(format!("tt-station-creations-{}", std::process::id())),
@@ -700,6 +711,11 @@ impl AppState {
     /// The box user's local secret, when `POST /pair/offer` is enabled.
     pub(crate) fn local_secret(&self) -> Option<&str> {
         self.inner.local_secret.as_deref()
+    }
+
+    /// What modules keep for the life of this agent (see [`PerAgent`]).
+    pub(crate) fn per_agent(&self) -> &PerAgent {
+        &self.inner.per_agent
     }
 
     /// Attach the co-serving companion slot. Same contract as the other `with_*`.
