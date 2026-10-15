@@ -796,9 +796,15 @@ mod tests {
         }];
         let bc = classify(Some(&cat), &live, Some("p300x2"), false);
         let e8 = bc.runs_here.iter().find(|e| e.id == "qwen3-8b").unwrap();
-        assert!(e8.available_now && e8.downloaded, "live+downloaded → both true: {e8:?}");
+        assert!(
+            e8.available_now && e8.downloaded,
+            "live+downloaded → both true: {e8:?}"
+        );
         let e32 = bc.runs_here.iter().find(|e| e.id == "qwen3-32b").unwrap();
-        assert!(!e32.available_now && !e32.downloaded, "catalog-only → neither: {e32:?}");
+        assert!(
+            !e32.available_now && !e32.downloaded,
+            "catalog-only → neither: {e32:?}"
+        );
 
         // A live-only append also carries downloaded through.
         let live2 = vec![ModelInfo {
@@ -807,8 +813,15 @@ mod tests {
             downloaded: true,
         }];
         let bc2 = classify(Some(&cat), &live2, Some("p300x2"), false);
-        let only = bc2.runs_here.iter().find(|e| e.id == "some/Unlisted-Model").unwrap();
-        assert!(only.downloaded, "live-only downloaded model → downloaded:true: {only:?}");
+        let only = bc2
+            .runs_here
+            .iter()
+            .find(|e| e.id == "some/Unlisted-Model")
+            .unwrap();
+        assert!(
+            only.downloaded,
+            "live-only downloaded model → downloaded:true: {only:?}"
+        );
     }
 
     #[test]

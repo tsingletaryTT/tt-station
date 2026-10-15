@@ -43,22 +43,55 @@ pub struct Answer {
 }
 
 /// `POST /approvals/answer {id, allow, always?}`
-pub(crate) async fn post_answer(State(state): State<AppState>, auth: BearerAuth, Json(a): Json<Answer>) -> Reply {
-    crate::audit::record(&state, "approval", &a.id, if a.allow { "allowed" } else { "declined" });
+pub(crate) async fn post_answer(
+    State(state): State<AppState>,
+    auth: BearerAuth,
+    Json(a): Json<Answer>,
+) -> Reply {
+    crate::audit::record(
+        &state,
+        "approval",
+        &a.id,
+        if a.allow { "allowed" } else { "declined" },
+    );
     let mut parts = a.id.splitn(3, ':');
     match (parts.next(), parts.next(), parts.next()) {
         (Some("code"), Some(session), Some(request_id)) => {
-            let body = crate::workspace::Approve { request_id: request_id.to_string(), allow: a.allow, always: a.always };
-            crate::workspace::post_approve(State(state), auth, UrlPath(session.to_string()), Json(body)).await
+            let body = crate::workspace::Approve {
+                request_id: request_id.to_string(),
+                allow: a.allow,
+                always: a.always,
+            };
+            crate::workspace::post_approve(
+                State(state),
+                auth,
+                UrlPath(session.to_string()),
+                Json(body),
+            )
+            .await
         }
         (Some("routine"), Some(run), Some(n)) => {
-            let n: usize = n.parse().map_err(|_| (StatusCode::BAD_REQUEST, Json(json!({ "error": "Unknown approval." }))))?;
+            let n: usize = n.parse().map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "Unknown approval." })),
+                )
+            })?;
             let done = crate::routines::answer_queued(&state, run, n, a.allow)?;
             Ok(Json(json!({ "ok": true, "status": done })))
         }
         (Some("routine"), Some(run), None) => {
-            crate::routines::post_approve(State(state), auth, UrlPath(run.to_string()), Json(crate::routines::Decision { allow: a.allow })).await
+            crate::routines::post_approve(
+                State(state),
+                auth,
+                UrlPath(run.to_string()),
+                Json(crate::routines::Decision { allow: a.allow }),
+            )
+            .await
         }
-        _ => Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "Unknown approval." })))),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Unknown approval." })),
+        )),
     }
 }

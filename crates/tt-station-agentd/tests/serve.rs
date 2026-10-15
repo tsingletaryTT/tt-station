@@ -301,7 +301,10 @@ async fn two_concurrent_serves_start_the_box_once() {
     assert_eq!(codes, [202, 409], "{} / {}", a.1, b.1);
     let refused = if a.0 == 409 { &a.1 } else { &b.1 };
     assert!(
-        refused["error"].as_str().unwrap().contains("already starting"),
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("already starting"),
         "{refused}"
     );
     assert_eq!(h.wait_phase("serving").await["phase"], "serving");
@@ -317,7 +320,12 @@ async fn two_concurrent_runs_start_the_box_once() {
     );
     let mut codes = [a.0, b.0];
     codes.sort();
-    assert!(codes == [200, 409] || codes == [202, 409], "{codes:?}: {} / {}", a.1, b.1);
+    assert!(
+        codes == [200, 409] || codes == [202, 409],
+        "{codes:?}: {} / {}",
+        a.1,
+        b.1
+    );
     assert_eq!(h.wait_phase("serving").await["phase"], "serving");
     assert_eq!(h.starts.load(Ordering::SeqCst), 1);
 }
@@ -329,7 +337,10 @@ async fn a_refused_start_releases_its_claim() {
     let h = Harness::with_slow_catalog("Qwen/Qwen3-32B", 10, 0.0).await;
     let (s, b) = h.post("/serve", json!({ "model": "Missing-1B" })).await;
     assert_eq!(s, 409, "{b}");
-    assert!(b["error"].as_str().unwrap().contains("isn't downloaded"), "{b}");
+    assert!(
+        b["error"].as_str().unwrap().contains("isn't downloaded"),
+        "{b}"
+    );
     assert_eq!(h.get("/serve").await.1["phase"], "idle");
     let (s, b) = h.post("/serve", json!({ "model": "Qwen3-32B" })).await;
     assert_eq!(s, 202, "{b}");

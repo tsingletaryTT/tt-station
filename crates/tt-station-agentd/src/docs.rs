@@ -135,13 +135,24 @@ impl DocStore {
 
     /// Passages of a document, for embedding.
     pub fn passages(&self, id: &str) -> Option<Vec<String>> {
-        self.docs.lock().expect("docs mutex poisoned").iter().find(|d| d.id == id).map(|d| d.passages.clone())
+        self.docs
+            .lock()
+            .expect("docs mutex poisoned")
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.passages.clone())
     }
 
     /// Documents still without meaning vectors (ids).
     pub fn without_vectors(&self) -> Vec<String> {
         let have = self.vectors.lock().expect("docs mutex poisoned");
-        self.docs.lock().expect("docs mutex poisoned").iter().filter(|d| !have.contains_key(&d.id) && !d.passages.is_empty()).map(|d| d.id.clone()).collect()
+        self.docs
+            .lock()
+            .expect("docs mutex poisoned")
+            .iter()
+            .filter(|d| !have.contains_key(&d.id) && !d.passages.is_empty())
+            .map(|d| d.id.clone())
+            .collect()
     }
 
     /// How many passages have meaning vectors, of all.
@@ -149,13 +160,18 @@ impl DocStore {
         let have = self.vectors.lock().expect("docs mutex poisoned");
         let docs = self.docs.lock().expect("docs mutex poisoned");
         let total = docs.iter().map(|d| d.passages.len()).sum();
-        let done = docs.iter().filter(|d| have.contains_key(&d.id)).map(|d| d.passages.len()).sum();
+        let done = docs
+            .iter()
+            .filter(|d| have.contains_key(&d.id))
+            .map(|d| d.passages.len())
+            .sum();
         (done, total)
     }
 
     /// Stores a document's meaning vectors (one per passage, in order).
     pub fn set_vectors(&self, id: &str, vectors: Vec<Vec<f32>>) -> std::io::Result<()> {
-        let mut bytes = Vec::with_capacity(vectors.len() * vectors.first().map_or(0, Vec::len) * 4 + 4);
+        let mut bytes =
+            Vec::with_capacity(vectors.len() * vectors.first().map_or(0, Vec::len) * 4 + 4);
         bytes.extend_from_slice(&(vectors.first().map_or(0, Vec::len) as u32).to_le_bytes());
         for v in &vectors {
             for x in v {
@@ -163,12 +179,23 @@ impl DocStore {
             }
         }
         std::fs::write(self.dir.join(format!("{id}.vec")), bytes)?;
-        self.vectors.lock().expect("docs mutex poisoned").insert(id.to_string(), vectors);
+        self.vectors
+            .lock()
+            .expect("docs mutex poisoned")
+            .insert(id.to_string(), vectors);
         Ok(())
     }
 
     /// Adds (or replaces) a file from a Library folder.
-    pub fn add_file(&self, source: &str, name: &str, path: &str, mtime: u64, text: &str, now: u64) -> std::io::Result<String> {
+    pub fn add_file(
+        &self,
+        source: &str,
+        name: &str,
+        path: &str,
+        mtime: u64,
+        text: &str,
+        now: u64,
+    ) -> std::io::Result<String> {
         self.remove_path(source, path);
         let doc = Document {
             id: crate::pairing::issue_pair_id(),
@@ -181,16 +208,28 @@ impl DocStore {
             mtime,
         };
         std::fs::create_dir_all(&self.dir)?;
-        std::fs::write(self.path(&doc.id), serde_json::to_vec(&doc).map_err(std::io::Error::other)?)?;
+        std::fs::write(
+            self.path(&doc.id),
+            serde_json::to_vec(&doc).map_err(std::io::Error::other)?,
+        )?;
         let id = doc.id.clone();
-        self.docs.lock().expect("docs mutex poisoned").insert(0, doc);
+        self.docs
+            .lock()
+            .expect("docs mutex poisoned")
+            .insert(0, doc);
         Ok(id)
     }
 
     /// Removes the document for one file of a Library folder.
     pub fn remove_path(&self, source: &str, path: &str) {
-        let ids: Vec<String> = self.docs.lock().expect("docs mutex poisoned").iter()
-            .filter(|d| d.source.as_deref() == Some(source) && d.path.as_deref() == Some(path)).map(|d| d.id.clone()).collect();
+        let ids: Vec<String> = self
+            .docs
+            .lock()
+            .expect("docs mutex poisoned")
+            .iter()
+            .filter(|d| d.source.as_deref() == Some(source) && d.path.as_deref() == Some(path))
+            .map(|d| d.id.clone())
+            .collect();
         for id in ids {
             self.delete(&id);
         }
@@ -198,7 +237,11 @@ impl DocStore {
 
     /// Removes everything from one Library folder.
     pub fn remove_source(&self, source: &str) -> usize {
-        let ids: Vec<String> = self.from_source(source).into_iter().map(|(id, _, _)| id).collect();
+        let ids: Vec<String> = self
+            .from_source(source)
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
         for id in &ids {
             self.delete(id);
         }
@@ -265,7 +308,13 @@ impl DocStore {
     /// Keyword (BM25) ranking, blended with meaning when `query_vector` is given
     /// (a weighted blend of the two scores): "pets" also finds the
     /// passage about "animals", and an exact name still ranks first.
-    pub fn search_hybrid(&self, query: &str, query_vector: Option<&[f32]>, top_k: usize, in_document: Option<&str>) -> Vec<Hit> {
+    pub fn search_hybrid(
+        &self,
+        query: &str,
+        query_vector: Option<&[f32]>,
+        top_k: usize,
+        in_document: Option<&str>,
+    ) -> Vec<Hit> {
         let docs = self.docs.lock().expect("docs mutex poisoned");
         let vectors = self.vectors.lock().expect("docs mutex poisoned");
         let filter = in_document.map(str::to_lowercase);
@@ -394,7 +443,16 @@ fn read_vectors(path: &Path, passages: usize) -> Option<Vec<Vec<f32>>> {
     if dim == 0 || bytes.len() != 4 + passages * dim * 4 {
         return None;
     }
-    Some(bytes[4..].chunks_exact(dim * 4).map(|c| c.chunks_exact(4).map(|f| f32::from_le_bytes([f[0], f[1], f[2], f[3]])).collect()).collect())
+    Some(
+        bytes[4..]
+            .chunks_exact(dim * 4)
+            .map(|c| {
+                c.chunks_exact(4)
+                    .map(|f| f32::from_le_bytes([f[0], f[1], f[2], f[3]]))
+                    .collect()
+            })
+            .collect(),
+    )
 }
 
 /// Split text into ~[`PASSAGE_CHARS`] passages on paragraph/sentence boundaries,

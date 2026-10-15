@@ -3546,14 +3546,26 @@ fn runpy_start_binds_the_model_port_to_loopback_when_run_py_can() {
         let runner = FakeRunner::new(0);
         let mut cfg = config(host, 8080);
         cfg.repo_dir = repo.path().display().to_string();
-        RunPyBackend::new(cfg, Box::new(runner.clone())).start("llama3").expect("start should succeed");
+        RunPyBackend::new(cfg, Box::new(runner.clone()))
+            .start("llama3")
+            .expect("start should succeed");
         let commands = runner.commands();
         let cmd = find_runpy_cmd(&commands).clone();
-        cmd.iter().position(|a| a == "--bind-host").map(|i| cmd[i + 1].clone())
+        cmd.iter()
+            .position(|a| a == "--bind-host")
+            .map(|i| cmd[i + 1].clone())
     };
     let new = Some(r#"parser.add_argument("--bind-host", type=str, default="0.0.0.0")"#);
     assert_eq!(launch("127.0.0.1", new).as_deref(), Some("127.0.0.1"));
     assert_eq!(launch("localhost", new).as_deref(), Some("127.0.0.1"));
-    assert_eq!(launch("192.168.1.20", new), None, "advertised on the network: published there");
-    assert_eq!(launch("127.0.0.1", Some("# an older run.py")), None, "an older run.py can't take it");
+    assert_eq!(
+        launch("192.168.1.20", new),
+        None,
+        "advertised on the network: published there"
+    );
+    assert_eq!(
+        launch("127.0.0.1", Some("# an older run.py")),
+        None,
+        "an older run.py can't take it"
+    );
 }

@@ -237,14 +237,10 @@ async fn alerts_are_pushed_to_registered_phones() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(pushes
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|p| p.0 == LIVE
-            && p.3["event"] == emitted.seq
-            && p.3["aps"]["alert"]["title"] == "A download finished"
-            && !p.3.to_string().contains("FLUX")));
+    assert!(pushes.lock().unwrap().iter().any(|p| p.0 == LIVE
+        && p.3["event"] == emitted.seq
+        && p.3["aps"]["alert"]["title"] == "A download finished"
+        && !p.3.to_string().contains("FLUX")));
 
     let power: Value = client
         .get(format!("{base}/power/info"))
@@ -304,7 +300,12 @@ async fn a_pairing_push_never_carries_the_code() {
     let spaced = format!("{} {}", &code[..3], &code[3..]);
     let mut pushed = None;
     for _ in 0..100 {
-        pushed = pushes.lock().unwrap().iter().find(|p| p.0 == LIVE && p.3["aps"]["alert"]["title"] == "A computer is asking to pair").map(|p| p.3.clone());
+        pushed = pushes
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.0 == LIVE && p.3["aps"]["alert"]["title"] == "A computer is asking to pair")
+            .map(|p| p.3.clone());
         if pushed.is_some() {
             break;
         }
@@ -312,10 +313,19 @@ async fn a_pairing_push_never_carries_the_code() {
     }
     let pushed = pushed.expect("the phone is told someone is asking");
     let text = pushed.to_string();
-    assert!(!text.contains(&code) && !text.contains(&spaced), "no code through Apple: {text}");
+    assert!(
+        !text.contains(&code) && !text.contains(&spaced),
+        "no code through Apple: {text}"
+    );
     assert!(!text.contains("Sam"), "nor who is asking: {text}");
-    assert_eq!(pushed["aps"]["alert"]["title"], "A computer is asking to pair");
-    assert!(pushed["aps"]["alert"]["body"].as_str().unwrap().contains("Open TT Station to see the code"));
+    assert_eq!(
+        pushed["aps"]["alert"]["title"],
+        "A computer is asking to pair"
+    );
+    assert!(pushed["aps"]["alert"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("Open TT Station to see the code"));
     assert!(pushed.get("data").is_none());
 
     // TT Station reads the code from the box itself.
@@ -328,7 +338,14 @@ async fn a_pairing_push_never_carries_the_code() {
         .json()
         .await
         .unwrap();
-    let last = events["events"].as_array().unwrap().iter().rev().find(|e| e["kind"] == "pairing").unwrap().clone();
+    let last = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|e| e["kind"] == "pairing")
+        .unwrap()
+        .clone();
     assert!(last["title"].as_str().unwrap().contains(&spaced), "{last}");
     assert!(last["title"].as_str().unwrap().contains("Sam's MacBook"));
 }

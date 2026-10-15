@@ -55,7 +55,12 @@ pub struct LabBody {
 /// `[user@]host`, as tt-orchard accepts it.
 fn valid_host(h: &str) -> bool {
     let (user, host) = h.split_once('@').unwrap_or(("", h));
-    let part = |s: &str| !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+    let part = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 64
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    };
     (user.is_empty() || part(user)) && part(host) && !host.starts_with('-')
 }
 
@@ -78,7 +83,10 @@ impl LabBody {
                 return Err(format!("{p:?} isn't a directory path."));
             }
         }
-        for v in [&self.python, &self.test_python, &self.gozer].into_iter().flatten() {
+        for v in [&self.python, &self.test_python, &self.gozer]
+            .into_iter()
+            .flatten()
+        {
             if !v.trim().is_empty() && !plain(v.trim()) {
                 return Err(format!("{v:?} isn't a usable command or path."));
             }
@@ -90,11 +98,19 @@ impl LabBody {
 /// `text` with TT Station's `[lab]` table replaced (or removed with `None`).
 /// Refuses a `[lab]` table someone wrote by hand: that one is theirs to edit.
 pub fn set_lab(text: &str, lab: Option<&LabBody>) -> Result<String, String> {
-    let hand_written = text.lines().any(|l| l.trim() == "[lab]" || (l.trim_start().starts_with("[lab]") && !l.ends_with(MARK)));
+    let hand_written = text.lines().any(|l| {
+        l.trim() == "[lab]" || (l.trim_start().starts_with("[lab]") && !l.ends_with(MARK))
+    });
     if hand_written {
-        return Err("bringup.toml already has a [lab] table written by hand; edit it there.".into());
+        return Err(
+            "bringup.toml already has a [lab] table written by hand; edit it there.".into(),
+        );
     }
-    let mut out: Vec<String> = text.lines().filter(|l| !l.ends_with(MARK)).map(str::to_string).collect();
+    let mut out: Vec<String> = text
+        .lines()
+        .filter(|l| !l.ends_with(MARK))
+        .map(str::to_string)
+        .collect();
     while out.last().is_some_and(|l| l.trim().is_empty()) {
         out.pop();
     }
@@ -104,11 +120,21 @@ pub fn set_lab(text: &str, lab: Option<&LabBody>) -> Result<String, String> {
         out.push(format!("[lab] {MARK}"));
         out.push(format!("host = {} {MARK}", q(&lab.host)));
         out.push(format!("root = {} {MARK}", q(&lab.root)));
-        let path: Vec<String> = lab.path.iter().map(|p| p.trim()).filter(|p| !p.is_empty()).map(q).collect();
+        let path: Vec<String> = lab
+            .path
+            .iter()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(q)
+            .collect();
         if !path.is_empty() {
             out.push(format!("path = [{}] {MARK}", path.join(", ")));
         }
-        for (key, v) in [("python", &lab.python), ("test_python", &lab.test_python), ("gozer", &lab.gozer)] {
+        for (key, v) in [
+            ("python", &lab.python),
+            ("test_python", &lab.test_python),
+            ("gozer", &lab.gozer),
+        ] {
             if let Some(v) = v.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
                 out.push(format!("{key} = {} {MARK}", q(v)));
             }
@@ -118,11 +144,16 @@ pub fn set_lab(text: &str, lab: Option<&LabBody>) -> Result<String, String> {
 }
 
 fn config_path(o: &Orchard) -> Option<PathBuf> {
-    o.info_blocking(true)["config"]["path"].as_str().map(PathBuf::from)
+    o.info_blocking(true)["config"]["path"]
+        .as_str()
+        .map(PathBuf::from)
 }
 
 fn setup_dir(o: &Orchard) -> PathBuf {
-    o.log_path("lab-setup").parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir)
+    o.log_path("lab-setup")
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 fn unit_active(unit: &str) -> bool {
@@ -134,13 +165,18 @@ fn unit_active(unit: &str) -> bool {
 }
 
 /// `GET /orchard/lab`.
-pub(crate) async fn get_lab(axum::extract::State(state): axum::extract::State<AppState>, _auth: BearerAuth) -> Reply {
+pub(crate) async fn get_lab(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Reply {
     let o = need(&state)?;
     let v = blocking(move || {
         let info = o.info_blocking(false);
         let dir = setup_dir(&o);
         let log = crate::orchard::tail(&dir.join("lab-setup.log"), 40);
-        let exit = std::fs::read_to_string(dir.join("lab-setup.exit")).ok().map(|t| t.trim().to_string());
+        let exit = std::fs::read_to_string(dir.join("lab-setup.exit"))
+            .ok()
+            .map(|t| t.trim().to_string());
         json!({
             "lab": info["config"]["lab"],
             "packaging": info["config"]["package_format"].is_string(),
@@ -185,12 +221,23 @@ pub(crate) async fn put_lab(
 }
 
 /// `POST /orchard/lab/check`: every check `tt-orchard lab setup --check` makes.
-pub(crate) async fn post_check(axum::extract::State(state): axum::extract::State<AppState>, _auth: BearerAuth) -> Reply {
+pub(crate) async fn post_check(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Reply {
     let o = need(&state)?;
-    let v = tokio::time::timeout(Duration::from_secs(300), blocking(move || o.bridge(&["lab-check"])))
-        .await
-        .map_err(|_| err(StatusCode::GATEWAY_TIMEOUT, "Checking the lab took too long (is it reachable over ssh?)."))??
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    let v = tokio::time::timeout(
+        Duration::from_secs(300),
+        blocking(move || o.bridge(&["lab-check"])),
+    )
+    .await
+    .map_err(|_| {
+        err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "Checking the lab took too long (is it reachable over ssh?).",
+        )
+    })??
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
     if let Some(e) = v["error"].as_str() {
         return Err(err(StatusCode::CONFLICT, e.to_string()));
     }
@@ -199,7 +246,10 @@ pub(crate) async fn post_check(axum::extract::State(state): axum::extract::State
 
 /// `POST /orchard/lab/setup`: `tt-orchard lab setup --yes` (it never runs sudo
 /// and never touches a lease; what it can't fix, it says how to).
-pub(crate) async fn post_setup(axum::extract::State(state): axum::extract::State<AppState>, _auth: BearerAuth) -> Reply {
+pub(crate) async fn post_setup(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Reply {
     if unit_active(SETUP_UNIT) {
         return Ok((StatusCode::OK, Json(json!({ "running": true }))));
     }
@@ -230,7 +280,12 @@ mod tests {
     use super::*;
 
     fn lab() -> LabBody {
-        LabBody { host: "node4".into(), root: "/srv/orchard".into(), path: vec!["~/.local/bin".into()], ..Default::default() }
+        LabBody {
+            host: "node4".into(),
+            root: "/srv/orchard".into(),
+            path: vec!["~/.local/bin".into()],
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -253,9 +308,24 @@ mod tests {
     #[test]
     fn checks_what_it_writes() {
         assert!(lab().check().is_ok());
-        assert!(LabBody { host: "-oProxyCommand=x".into(), ..lab() }.check().is_err());
-        assert!(LabBody { root: "srv/orchard".into(), ..lab() }.check().is_err());
-        assert!(LabBody { root: "/srv/\"x".into(), ..lab() }.check().is_err());
+        assert!(LabBody {
+            host: "-oProxyCommand=x".into(),
+            ..lab()
+        }
+        .check()
+        .is_err());
+        assert!(LabBody {
+            root: "srv/orchard".into(),
+            ..lab()
+        }
+        .check()
+        .is_err());
+        assert!(LabBody {
+            root: "/srv/\"x".into(),
+            ..lab()
+        }
+        .check()
+        .is_err());
         assert!(valid_host("me@node4"));
     }
 }

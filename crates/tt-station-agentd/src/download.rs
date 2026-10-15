@@ -39,7 +39,9 @@ pub fn hub_dir() -> PathBuf {
 
 /// Bytes of `repo` on the box.
 pub fn repo_on_disk(hub: &Path, repo: &str) -> u64 {
-    let blobs = hub.join(format!("models--{}", repo.replace('/', "--"))).join("blobs");
+    let blobs = hub
+        .join(format!("models--{}", repo.replace('/', "--")))
+        .join("blobs");
     let now = SystemTime::now();
     std::fs::read_dir(blobs)
         .into_iter()
@@ -49,7 +51,11 @@ pub fn repo_on_disk(hub: &Path, repo: &str) -> u64 {
             // Follows a link into the shared store.
             let m = std::fs::metadata(e.path()).ok().filter(|m| m.is_file())?;
             if e.file_name().to_string_lossy().ends_with(".incomplete") {
-                let age = m.modified().ok().and_then(|t| now.duration_since(t).ok()).unwrap_or_default();
+                let age = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| now.duration_since(t).ok())
+                    .unwrap_or_default();
                 if age > STALE {
                     return None;
                 }
@@ -100,12 +106,18 @@ pub fn unlink_small_files(hub: &Path, repo: &str) -> usize {
     let repo_dir = hub.join(format!("models--{}", repo.replace('/', "--")));
     let snapshots = repo_dir.join("snapshots");
     let mut copied = 0;
-    for e in std::fs::read_dir(repo_dir.join("blobs")).into_iter().flatten().flatten() {
+    for e in std::fs::read_dir(repo_dir.join("blobs"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         let path = e.path();
         if !e.file_type().is_ok_and(|t| t.is_symlink()) {
             continue;
         }
-        let Ok(target) = std::fs::canonicalize(&path) else { continue };
+        let Ok(target) = std::fs::canonicalize(&path) else {
+            continue;
+        };
         if !std::fs::metadata(&target).is_ok_and(|m| m.is_file()) {
             continue;
         }
@@ -118,7 +130,12 @@ pub fn unlink_small_files(hub: &Path, repo: &str) -> usize {
             let _ = std::fs::remove_file(&tmp);
         }
     }
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&snapshots).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&snapshots)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
     while let Some(dir) = dirs.pop() {
         for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let path = e.path();
@@ -130,7 +147,9 @@ pub fn unlink_small_files(hub: &Path, repo: &str) -> usize {
             if !kind.is_symlink() {
                 continue;
             }
-            let Ok(target) = std::fs::canonicalize(&path) else { continue };
+            let Ok(target) = std::fs::canonicalize(&path) else {
+                continue;
+            };
             if !std::fs::metadata(&target).is_ok_and(|m| m.is_file() && m.len() < SMALL) {
                 continue;
             }
@@ -146,7 +165,8 @@ pub fn unlink_small_files(hub: &Path, repo: &str) -> usize {
     copied
 }
 
-static TOTALS: LazyLock<Mutex<HashMap<String, (Instant, Option<u64>)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static TOTALS: LazyLock<Mutex<HashMap<String, (Instant, Option<u64>)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The full size of `repo` on the Hub, if known yet. The first ask looks it up
 /// in the background (on the caller's runtime), so callers never wait on the network.
@@ -163,7 +183,10 @@ pub fn repo_total(repo: &str) -> Option<u64> {
         let repo = repo.to_string();
         rt.spawn(async move {
             let n = fetch_total(&repo).await;
-            TOTALS.lock().expect("totals").insert(repo, (Instant::now(), n));
+            TOTALS
+                .lock()
+                .expect("totals")
+                .insert(repo, (Instant::now(), n));
         });
     }
     None
@@ -171,28 +194,41 @@ pub fn repo_total(repo: &str) -> Option<u64> {
 
 /// Records a size learned elsewhere (a package's details).
 pub fn know_total(repo: &str, bytes: u64) {
-    TOTALS.lock().expect("totals").insert(repo.to_string(), (Instant::now(), Some(bytes)));
+    TOTALS
+        .lock()
+        .expect("totals")
+        .insert(repo.to_string(), (Instant::now(), Some(bytes)));
 }
 
 async fn fetch_total(repo: &str) -> Option<u64> {
     let mut req = reqwest::Client::new()
-        .get(format!("https://huggingface.co/api/models/{repo}?blobs=true"))
+        .get(format!(
+            "https://huggingface.co/api/models/{repo}?blobs=true"
+        ))
         .timeout(Duration::from_secs(15));
     if let Some(t) = crate::bringup::hf_token() {
         req = req.bearer_auth(t);
     }
     let v: Value = req.send().await.ok()?.json().await.ok()?;
-    let n: u64 = v["siblings"].as_array()?.iter().filter_map(|s| s["size"].as_u64()).sum();
+    let n: u64 = v["siblings"]
+        .as_array()?
+        .iter()
+        .filter_map(|s| s["size"].as_u64())
+        .sum();
     (n > 0).then_some(n)
 }
 
-static SAMPLES: LazyLock<Mutex<HashMap<String, VecDeque<(Instant, u64)>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static SAMPLES: LazyLock<Mutex<HashMap<String, VecDeque<(Instant, u64)>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Bytes per second over the last few seconds of `key`'s download, given what's done now.
 fn speed(key: &str, done: u64) -> Option<f64> {
     let now = Instant::now();
     let mut all = SAMPLES.lock().expect("samples");
-    all.retain(|_, s| s.back().is_some_and(|(t, _)| now.duration_since(*t) < Duration::from_secs(1800)));
+    all.retain(|_, s| {
+        s.back()
+            .is_some_and(|(t, _)| now.duration_since(*t) < Duration::from_secs(1800))
+    });
     let s = all.entry(key.to_string()).or_default();
     // Started over (files removed): the history no longer applies.
     if s.back().is_some_and(|(_, b)| *b > done) {
@@ -202,7 +238,10 @@ fn speed(key: &str, done: u64) -> Option<f64> {
     if s.len() > 2000 {
         s.pop_front();
     }
-    while s.len() > 2 && s.front().is_some_and(|(t, _)| now.duration_since(*t) > WINDOW) {
+    while s.len() > 2
+        && s.front()
+            .is_some_and(|(t, _)| now.duration_since(*t) > WINDOW)
+    {
         s.pop_front();
     }
     let (t0, b0) = *s.front()?;
@@ -217,7 +256,9 @@ pub fn progress(key: &str, done: u64, total: Option<u64>) -> Value {
     let rate = speed(key, done);
     // Never past the end: a cache can hold a little more than the repo lists.
     let done = total.map_or(done, |t| done.min(t));
-    let percent = total.filter(|t| *t > 0).map(|t| (done as f64 / t as f64 * 1000.0).round() / 10.0);
+    let percent = total
+        .filter(|t| *t > 0)
+        .map(|t| (done as f64 / t as f64 * 1000.0).round() / 10.0);
     let eta = match (total, rate) {
         (Some(t), Some(r)) if r > 64_000.0 => Some(((t - done) as f64 / r).round() as u64),
         _ => None,
@@ -281,7 +322,8 @@ mod tests {
         let old = blobs.join("jkl.5678.incomplete");
         std::fs::write(&old, vec![1u8; 9000]).unwrap();
         let f = std::fs::File::options().write(true).open(&old).unwrap();
-        f.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
         assert_eq!(repo_on_disk(&hub, "org/m"), 5500);
         assert_eq!(repo_on_disk(&hub, "org/missing"), 0);
         let _ = std::fs::remove_dir_all(&hub);
@@ -303,22 +345,48 @@ mod tests {
         std::os::unix::fs::symlink("../../blobs/weights", snap.join("model.safetensors")).unwrap();
         // A blob kept in the shared store, linked from the repo's blobs.
         std::fs::create_dir_all(hub.join("blobs/ab")).unwrap();
-        std::fs::File::create(hub.join("blobs/ab/shard")).unwrap().set_len(SMALL + 1).unwrap(); // sparse
+        std::fs::File::create(hub.join("blobs/ab/shard"))
+            .unwrap()
+            .set_len(SMALL + 1)
+            .unwrap(); // sparse
         std::os::unix::fs::symlink("../../blobs/ab/shard", repo.join("blobs/shard")).unwrap();
-        std::os::unix::fs::symlink("../../blobs/shard", snap.join("model-00001.safetensors")).unwrap();
+        std::os::unix::fs::symlink("../../blobs/shard", snap.join("model-00001.safetensors"))
+            .unwrap();
         assert_eq!(unlink_small_files(&hub, "org/m"), 3); // the shard's link, then the two small snapshot files
         use std::os::unix::fs::MetadataExt;
         let shard = std::fs::symlink_metadata(repo.join("blobs/shard")).unwrap();
         assert!(shard.is_file(), "one link from the snapshot, not two");
-        assert_eq!(shard.ino(), std::fs::metadata(hub.join("blobs/ab/shard")).unwrap().ino(), "the same file, no copy");
+        assert_eq!(
+            shard.ino(),
+            std::fs::metadata(hub.join("blobs/ab/shard")).unwrap().ino(),
+            "the same file, no copy"
+        );
         // The snapshot's link to a weight stays a link; it reads the weights.
-        assert!(std::fs::symlink_metadata(snap.join("model-00001.safetensors")).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::metadata(snap.join("model-00001.safetensors")).unwrap().len(), SMALL + 1);
+        assert!(
+            std::fs::symlink_metadata(snap.join("model-00001.safetensors"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::metadata(snap.join("model-00001.safetensors"))
+                .unwrap()
+                .len(),
+            SMALL + 1
+        );
         let tok = std::fs::symlink_metadata(snap.join("tokenizer.json")).unwrap();
         assert!(tok.is_file() && !tok.file_type().is_symlink());
-        assert_eq!(std::fs::read(snap.join("tokenizer.json")).unwrap(), b"{\"tokenizer\": 1}");
-        assert!(std::fs::symlink_metadata(snap.join("sub/config.json")).unwrap().is_file());
-        assert!(std::fs::symlink_metadata(snap.join("model.safetensors")).unwrap().file_type().is_symlink());
+        assert_eq!(
+            std::fs::read(snap.join("tokenizer.json")).unwrap(),
+            b"{\"tokenizer\": 1}"
+        );
+        assert!(std::fs::symlink_metadata(snap.join("sub/config.json"))
+            .unwrap()
+            .is_file());
+        assert!(std::fs::symlink_metadata(snap.join("model.safetensors"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
         // Nothing left to do the second time; a missing repo is fine.
         assert_eq!(unlink_small_files(&hub, "org/m"), 0);
         assert_eq!(unlink_small_files(&hub, "org/missing"), 0);

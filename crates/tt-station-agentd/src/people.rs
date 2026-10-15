@@ -211,7 +211,11 @@ impl People {
     /// The token digests of the devices that are `person`'s.
     pub fn digests_of(&self, person: &str) -> Vec<String> {
         let book = self.book.lock().expect("people mutex");
-        book.phones.iter().filter(|(_, p)| *p == person).map(|(d, _)| d.clone()).collect()
+        book.phones
+            .iter()
+            .filter(|(_, p)| *p == person)
+            .map(|(d, _)| d.clone())
+            .collect()
     }
 }
 
@@ -234,7 +238,10 @@ pub struct Who {
 impl FromRequestParts<AppState> for Who {
     type Rejection = crate::routes::AuthRejection;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         crate::routes::BearerAuth::from_request_parts(parts, state).await?;
         let token = parts
             .headers
@@ -268,8 +275,15 @@ fn may_claim(state: &AppState, who: &Who, person: &str) -> Result<(), (StatusCod
     }
     let taken = state.people().digests_of(person);
     let live = sessions.list();
-    if live.iter().any(|s| s.token_sha256 != mine && taken.contains(&s.token_sha256)) {
-        let name = state.people().get(person).map(|p| p.name).unwrap_or_else(|| "That person".into());
+    if live
+        .iter()
+        .any(|s| s.token_sha256 != mine && taken.contains(&s.token_sha256))
+    {
+        let name = state
+            .people()
+            .get(person)
+            .map(|p| p.name)
+            .unwrap_or_else(|| "That person".into());
         return Err(err(
             StatusCode::FORBIDDEN,
             format!("{name} already has a phone or computer on this box. To make this device {name}'s too, ask an owner: Settings → Pairing and security → Devices."),

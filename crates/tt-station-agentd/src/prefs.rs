@@ -84,7 +84,11 @@ async fn ollama_models() -> Vec<String> {
     let v: Value = res.json().await.unwrap_or_default();
     v["models"]
         .as_array()
-        .map(|a| a.iter().filter_map(|m| m["name"].as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m["name"].as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -106,7 +110,9 @@ pub(crate) async fn get_prefs(
     let mut choices = json!({ "chat": [], "image": [], "video": [], "speech": [] });
     for m in catalog.iter().filter(|m| m.supported) {
         let kind = kind_of(&m.model_type, &m.name);
-        let Some(list) = choices.get_mut(kind).and_then(Value::as_array_mut) else { continue };
+        let Some(list) = choices.get_mut(kind).and_then(Value::as_array_mut) else {
+            continue;
+        };
         list.push(json!({
             "name": m.name,
             "ready": matches!(m.weights, crate::ttcli::Weights::Complete | crate::ttcli::Weights::Container),
@@ -154,7 +160,12 @@ pub(crate) async fn put_prefs(
     set(&mut prefs.video, body.video);
     set(&mut prefs.transcribe, body.transcribe);
     set(&mut prefs.cpu_chat, body.cpu_chat);
-    save(&state, &prefs).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e })))?;
+    save(&state, &prefs).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )
+    })?;
     Ok(Json(prefs))
 }
 
@@ -173,7 +184,10 @@ mod tests {
 
     #[test]
     fn prefs_pick_by_kind() {
-        let p = ModelPrefs { chat: Some("Llama-3.3-70B-Instruct".into()), ..Default::default() };
+        let p = ModelPrefs {
+            chat: Some("Llama-3.3-70B-Instruct".into()),
+            ..Default::default()
+        };
         assert_eq!(p.for_kind("chat"), Some("Llama-3.3-70B-Instruct"));
         assert_eq!(p.for_kind("images"), None);
     }

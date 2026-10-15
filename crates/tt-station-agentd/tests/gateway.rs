@@ -243,7 +243,12 @@ async fn app_keys_unlock_an_openai_api_that_follows_both_models() {
         .await
         .unwrap();
     // Plain HTTP is offered only on the box itself; the network gets HTTPS.
-    let urls: Vec<&str> = connect["urls"].as_array().unwrap().iter().filter_map(|u| u["url"].as_str()).collect();
+    let urls: Vec<&str> = connect["urls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|u| u["url"].as_str())
+        .collect();
     assert!(urls.iter().any(|u| u.starts_with("http://127.0.0.1:")));
     assert!(!urls.iter().any(|u| u.starts_with("http://qb2-lab.local:")));
     assert_eq!(connect["keys"][0]["requests"], 4);

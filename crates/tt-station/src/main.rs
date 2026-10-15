@@ -966,12 +966,17 @@ async fn cmd_logs_follow(host: &str, source: &str, tail: usize) -> Result<()> {
 
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let url = format!("ws://{host}/logs/stream?source={source}&tail={tail}");
-    let mut request = url.as_str().into_client_request().with_context(|| format!("bad address {url}"))?;
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .with_context(|| format!("bad address {url}"))?;
     // From another machine the box wants the pairing token (in a header, never the URL).
     if let Some(token) = stored_token(host) {
         request.headers_mut().insert(
             "Authorization",
-            format!("Bearer {token}").parse().context("token isn't a valid header value")?,
+            format!("Bearer {token}")
+                .parse()
+                .context("token isn't a valid header value")?,
         );
     }
     let (ws_stream, _) = tokio_tungstenite::connect_async(request)

@@ -158,7 +158,12 @@ pub async fn get_config(base: &str, token: Option<&str>) -> anyhow::Result<Confi
 /// so the `?source=&tail=` suffix is appended directly onto its output.
 ///
 /// `token`: as for [`get_config`].
-pub async fn get_logs(base: &str, source: &str, tail: usize, token: Option<&str>) -> anyhow::Result<LogsInfo> {
+pub async fn get_logs(
+    base: &str,
+    source: &str,
+    tail: usize,
+    token: Option<&str>,
+) -> anyhow::Result<LogsInfo> {
     let url = format!("{}?source={source}&tail={tail}", join(base, "logs"));
     let resp = with_token(reqwest::Client::new().get(&url), token)
         .send()

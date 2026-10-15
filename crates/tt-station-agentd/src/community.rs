@@ -39,7 +39,9 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) 
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/root"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/root"))
 }
 
 fn tt_model() -> Option<PathBuf> {
@@ -48,15 +50,27 @@ fn tt_model() -> Option<PathBuf> {
 }
 
 fn need_tt_model() -> Result<PathBuf, (StatusCode, Json<Value>)> {
-    tt_model().ok_or_else(|| err(StatusCode::CONFLICT, "tt-model (tt-model-manager) isn't installed on this box."))
+    tt_model().ok_or_else(|| {
+        err(
+            StatusCode::CONFLICT,
+            "tt-model (tt-model-manager) isn't installed on this box.",
+        )
+    })
 }
 
 /// The manifest `tt-model pull` keeps for a package
 /// (`~/.cache/tt-model/pulled/<org>__<name>/`; `tt-kernel` on a box from before the rename).
 fn pulled_manifest(id: &str) -> Option<Value> {
     let cache = home().join(".cache");
-    let root = [cache.join("tt-model"), cache.join("tt-kernel")].into_iter().find(|d| d.is_dir())?;
-    let bytes = std::fs::read(root.join("pulled").join(id.replacen('/', "__", 1)).join("tt_kernel_manifest.json")).ok()?;
+    let root = [cache.join("tt-model"), cache.join("tt-kernel")]
+        .into_iter()
+        .find(|d| d.is_dir())?;
+    let bytes = std::fs::read(
+        root.join("pulled")
+            .join(id.replacen('/', "__", 1))
+            .join("tt_kernel_manifest.json"),
+    )
+    .ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -82,7 +96,14 @@ pub fn extra_vllm_args(manifest: Option<&Value>) -> Vec<String> {
 /// `org/name` with the characters Hugging Face allows, nothing else.
 fn valid_id(id: &str) -> bool {
     let mut parts = id.split('/');
-    let ok = |p: Option<&str>| p.is_some_and(|p| !p.is_empty() && p.len() <= 96 && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)));
+    let ok = |p: Option<&str>| {
+        p.is_some_and(|p| {
+            !p.is_empty()
+                && p.len() <= 96
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+        })
+    };
     ok(parts.next()) && ok(parts.next()) && parts.next().is_none() && !id.contains("..")
 }
 
@@ -95,11 +116,18 @@ fn work_dir(state: &AppState, id: &str) -> PathBuf {
 }
 
 fn unit(id: &str) -> String {
-    format!("tt-station-pull-{}", slug(id).replace('.', "-").to_lowercase())
+    format!(
+        "tt-station-pull-{}",
+        slug(id).replace('.', "-").to_lowercase()
+    )
 }
 
 fn unit_active(unit: &str) -> bool {
-    Command::new("systemctl").args(["--user", "is-active", "--quiet", unit]).status().map(|s| s.success()).unwrap_or(false)
+    Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", unit])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn strip_ansi(s: &str) -> String {
@@ -130,7 +158,13 @@ fn failure_line(path: &Path) -> Option<String> {
     let lines: Vec<String> = text
         .lines()
         .flat_map(|l| l.split('\r'))
-        .map(|l| strip_ansi(l).trim().trim_matches(|c: char| "│╭╮╰╯─ ".contains(c)).trim().to_string())
+        .map(|l| {
+            strip_ansi(l)
+                .trim()
+                .trim_matches(|c: char| "│╭╮╰╯─ ".contains(c))
+                .trim()
+                .to_string()
+        })
         .filter(|l| !l.is_empty())
         .collect();
     lines
@@ -153,7 +187,13 @@ fn last_line(path: &Path) -> Option<String> {
 /// Will a package needing `chips` chips described as `hardware` run here?
 pub fn fits(chips: Option<u64>, hardware: &str) -> (bool, String) {
     let h = hardware.to_lowercase();
-    if h.contains("galaxy") || h.contains("t3k") || h.contains("tg") || h.contains("wormhole") || h.starts_with("n150") || h.starts_with("n300") {
+    if h.contains("galaxy")
+        || h.contains("t3k")
+        || h.contains("tg")
+        || h.contains("wormhole")
+        || h.starts_with("n150")
+        || h.starts_with("n300")
+    {
         return (false, format!("Made for {hardware}, not this box."));
     }
     match chips {
@@ -168,7 +208,15 @@ pub fn fits(chips: Option<u64>, hardware: &str) -> (bool, String) {
 /// A fit guess from a package's name alone (the catalog listing has no more).
 fn fit_from_name(id: &str) -> (Option<bool>, String) {
     let n = id.to_lowercase();
-    for (tag, chips) in [("p300x2", 4), ("p150x4", 4), ("qb2", 4), ("blackholex4", 4), ("p150x2", 2), ("p300", 2), ("p150", 1)] {
+    for (tag, chips) in [
+        ("p300x2", 4),
+        ("p150x4", 4),
+        ("qb2", 4),
+        ("blackholex4", 4),
+        ("p150x2", 2),
+        ("p300", 2),
+        ("p150", 1),
+    ] {
         if n.contains(tag) {
             let (ok, label) = fits(Some(chips), tag);
             return (Some(ok), label);
@@ -296,17 +344,25 @@ fn starting(state: &AppState, life: &crate::routes::Lifecycle) -> Option<Value> 
     }
     let (id, _) = serving(state).filter(|_| matches!(life.phase, Phase::Starting))?;
     let since = prep.filter(|p| p.id == id).map_or(life.since, |p| p.since);
-    let step = last_line(&work_dir(state, &id).join("serve.log")).unwrap_or_else(|| "Starting the container".into());
+    let step = last_line(&work_dir(state, &id).join("serve.log"))
+        .unwrap_or_else(|| "Starting the container".into());
     Some(json!({ "id": id, "since": since, "step": step, "stalled_s": stalled_s() }))
 }
 
 /// Fetched lists, by scope (`catalog` | `all`): when, and what.
-static CATALOG: std::sync::LazyLock<Mutex<HashMap<bool, (Instant, u64, Vec<Value>)>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static CATALOG: std::sync::LazyLock<Mutex<HashMap<bool, (Instant, u64, Vec<Value>)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A community package (from the last catalog listings fetched) whose name is
 /// this model's: someone has already packaged it to run here.
 pub fn package_for(model: &str) -> Option<String> {
-    let norm = |s: &str| s.rsplit('/').next().unwrap_or(s).to_ascii_lowercase().replace(['_', '.'], "-");
+    let norm = |s: &str| {
+        s.rsplit('/')
+            .next()
+            .unwrap_or(s)
+            .to_ascii_lowercase()
+            .replace(['_', '.'], "-")
+    };
     let want = norm(model);
     let lists = CATALOG.lock().expect("community");
     lists
@@ -315,7 +371,11 @@ pub fn package_for(model: &str) -> Option<String> {
         .filter_map(|m| m["id"].as_str())
         .find(|id| {
             let have = norm(id);
-            have == want || have.strip_suffix("-blackhole").or_else(|| have.strip_suffix("-p150")).is_some_and(|h| h == want)
+            have == want
+                || have
+                    .strip_suffix("-blackhole")
+                    .or_else(|| have.strip_suffix("-p150"))
+                    .is_some_and(|h| h == want)
         })
         .map(str::to_string)
 }
@@ -332,12 +392,17 @@ pub struct CatalogQuery {
 
 /// `GET /community/catalog[?all=true][&refresh=true]`: community packages for
 /// Blackhole, from Hugging Face via `tt-model search` (kept 10 minutes).
-pub(crate) async fn get_catalog(_auth: BearerAuth, axum::extract::Query(q): axum::extract::Query<CatalogQuery>) -> Reply {
+pub(crate) async fn get_catalog(
+    _auth: BearerAuth,
+    axum::extract::Query(q): axum::extract::Query<CatalogQuery>,
+) -> Reply {
     let bin = need_tt_model()?;
     if !q.refresh {
         if let Some((at, fetched, items)) = CATALOG.lock().expect("catalog").get(&q.all).cloned() {
             if at.elapsed() < Duration::from_secs(600) {
-                return Ok(Json(json!({ "models": items, "fetched_at": fetched, "all": q.all })));
+                return Ok(Json(
+                    json!({ "models": items, "fetched_at": fetched, "all": q.all }),
+                ));
             }
         }
     }
@@ -352,8 +417,12 @@ pub(crate) async fn get_catalog(_auth: BearerAuth, axum::extract::Query(q): axum
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let list: Vec<Value> = serde_json::from_slice(&out.stdout)
-        .map_err(|_| err(StatusCode::BAD_GATEWAY, "Couldn't read the community catalog (is the box online?)."))?;
+    let list: Vec<Value> = serde_json::from_slice(&out.stdout).map_err(|_| {
+        err(
+            StatusCode::BAD_GATEWAY,
+            "Couldn't read the community catalog (is the box online?).",
+        )
+    })?;
     let items: Vec<Value> = list
         .into_iter()
         .filter_map(|m| {
@@ -365,16 +434,25 @@ pub(crate) async fn get_catalog(_auth: BearerAuth, axum::extract::Query(q): axum
             }))
         })
         .collect();
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    CATALOG.lock().expect("catalog").insert(all, (Instant::now(), now, items.clone()));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    CATALOG
+        .lock()
+        .expect("catalog")
+        .insert(all, (Instant::now(), now, items.clone()));
     if q.refresh {
         // Details too: a package may have been re-published since.
         INFO.lock().expect("info").clear();
     }
-    Ok(Json(json!({ "models": items, "fetched_at": now, "all": all })))
+    Ok(Json(
+        json!({ "models": items, "fetched_at": now, "all": all }),
+    ))
 }
 
-static INFO: std::sync::LazyLock<Mutex<HashMap<String, (Instant, Value)>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static INFO: std::sync::LazyLock<Mutex<HashMap<String, (Instant, Value)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The JSON manifest `tt-model info` prints, and its verdict line.
 fn parse_info(text: &str) -> (Option<Value>, Option<(bool, String)>) {
@@ -400,26 +478,53 @@ fn parse_info(text: &str) -> (Option<Value>, Option<(bool, String)>) {
         }
         None
     });
-    let verdict = clean.lines().rev().map(str::trim).find(|l| l.starts_with('✓') || l.starts_with('✗') || l.starts_with('!')).map(|l| {
-        (l.starts_with('✓'), l.trim_start_matches(['✓', '✗', '!']).trim().to_string())
-    });
+    let verdict = clean
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| l.starts_with('✓') || l.starts_with('✗') || l.starts_with('!'))
+        .map(|l| {
+            (
+                l.starts_with('✓'),
+                l.trim_start_matches(['✓', '✗', '!']).trim().to_string(),
+            )
+        });
     (manifest, verdict)
 }
 
 /// Sum of a Hugging Face repo's file sizes (bytes), or None.
 async fn repo_bytes(client: &reqwest::Client, repo: &str, token: Option<&str>) -> Option<u64> {
-    let mut req = client.get(format!("https://huggingface.co/api/models/{repo}?blobs=true")).timeout(Duration::from_secs(15));
+    let mut req = client
+        .get(format!(
+            "https://huggingface.co/api/models/{repo}?blobs=true"
+        ))
+        .timeout(Duration::from_secs(15));
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
     let v: Value = req.send().await.ok()?.json().await.ok()?;
-    Some(v["siblings"].as_array()?.iter().filter_map(|s| s["size"].as_u64()).sum())
+    Some(
+        v["siblings"]
+            .as_array()?
+            .iter()
+            .filter_map(|s| s["size"].as_u64())
+            .sum(),
+    )
 }
 
 /// Can this box's Hugging Face token download `repo`? (Gated models need the
 /// license accepted on the website first.) None when it can't tell.
-async fn weights_access(client: &reqwest::Client, repo: &str, token: Option<&str>) -> (bool, Option<bool>) {
-    let meta: Value = match client.get(format!("https://huggingface.co/api/models/{repo}")).timeout(Duration::from_secs(15)).send().await {
+async fn weights_access(
+    client: &reqwest::Client,
+    repo: &str,
+    token: Option<&str>,
+) -> (bool, Option<bool>) {
+    let meta: Value = match client
+        .get(format!("https://huggingface.co/api/models/{repo}"))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+    {
         Ok(r) => r.json().await.unwrap_or(Value::Null),
         Err(_) => return (false, None),
     };
@@ -427,9 +532,13 @@ async fn weights_access(client: &reqwest::Client, repo: &str, token: Option<&str
     if !gated {
         return (false, Some(true));
     }
-    let Some(t) = token else { return (true, Some(false)) };
+    let Some(t) = token else {
+        return (true, Some(false));
+    };
     let ok = client
-        .head(format!("https://huggingface.co/{repo}/resolve/main/config.json"))
+        .head(format!(
+            "https://huggingface.co/{repo}/resolve/main/config.json"
+        ))
         .bearer_auth(t)
         .timeout(Duration::from_secs(15))
         .send()
@@ -441,17 +550,32 @@ async fn weights_access(client: &reqwest::Client, repo: &str, token: Option<&str
 
 /// Free space where Hugging Face weights and Docker images land (the home disk).
 fn disk_free() -> Option<u64> {
-    let out = Command::new("df").args(["--output=avail", "-B1"]).arg(home()).output().ok()?;
-    String::from_utf8_lossy(&out.stdout).lines().nth(1)?.trim().parse().ok()
+    let out = Command::new("df")
+        .args(["--output=avail", "-B1"])
+        .arg(home())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .nth(1)?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Where a package download is: `tt-model pull --with-weights` fetches the
 /// package into a temporary folder, loads its container image into Docker, then
 /// fetches the weights into the Hugging Face cache. Its log says which step it's on.
 fn pull_step(log: &str) -> (&'static str, Option<String>) {
-    let lines: Vec<String> = log.lines().flat_map(|l| l.split('\r')).map(|l| strip_ansi(l).trim().to_string()).collect();
+    let lines: Vec<String> = log
+        .lines()
+        .flat_map(|l| l.split('\r'))
+        .map(|l| strip_ansi(l).trim().to_string())
+        .collect();
     let weights = lines.iter().find_map(|l| {
-        let rest = l.strip_prefix("weights ").or_else(|| l.strip_prefix("✓ weights "))?;
+        let rest = l
+            .strip_prefix("weights ")
+            .or_else(|| l.strip_prefix("✓ weights "))?;
         Some(rest.split(['@', ' ']).next()?.to_string()).filter(|r| r.contains('/'))
     });
     let step = if lines.iter().any(|l| l.starts_with("✓ weights ")) {
@@ -471,7 +595,10 @@ fn package_download_dir() -> Option<PathBuf> {
     std::fs::read_dir(std::env::temp_dir())
         .ok()?
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("tmp") && e.path().join(".cache/huggingface").is_dir())
+        .filter(|e| {
+            e.file_name().to_string_lossy().starts_with("tmp")
+                && e.path().join(".cache/huggingface").is_dir()
+        })
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
         .filter(|(t, _)| t.elapsed().is_ok_and(|d| d < Duration::from_secs(6 * 3600)))
         .max_by_key(|(t, _)| *t)
@@ -487,14 +614,23 @@ fn pull_progress(id: &str, log: &Path) -> Value {
             rt.spawn(info(id.to_string()));
         }
     }
-    let weights = from_log.or_else(|| details.as_ref().and_then(|d| d["weights"].as_str().map(str::to_string)));
+    let weights = from_log.or_else(|| {
+        details
+            .as_ref()
+            .and_then(|d| d["weights"].as_str().map(str::to_string))
+    });
     let package_total = crate::download::repo_total(id);
     let weights_total = weights.as_deref().and_then(crate::download::repo_total);
     let package_done = match step {
-        "package" => package_download_dir().map(|d| crate::download::dir_bytes(&d)).unwrap_or(0),
+        "package" => package_download_dir()
+            .map(|d| crate::download::dir_bytes(&d))
+            .unwrap_or(0),
         _ => package_total.unwrap_or(0),
     };
-    let weights_done = weights.as_deref().map(|w| crate::download::repo_on_disk(&crate::download::hub_dir(), w)).unwrap_or(0);
+    let weights_done = weights
+        .as_deref()
+        .map(|w| crate::download::repo_on_disk(&crate::download::hub_dir(), w))
+        .unwrap_or(0);
     // A package without weights of its own has nothing more to fetch.
     let no_weights = details.as_ref().is_some_and(|d| d["weights"].is_null());
     let total = match (package_total, weights_total) {
@@ -502,14 +638,21 @@ fn pull_progress(id: &str, log: &Path) -> Value {
         (Some(p), None) if no_weights => Some(p),
         _ => None,
     };
-    let mut p = crate::download::progress(&format!("community:{id}"), package_done + weights_done, total);
+    let mut p = crate::download::progress(
+        &format!("community:{id}"),
+        package_done + weights_done,
+        total,
+    );
     p["step"] = json!(step);
     p["weights"] = json!(weights);
     p
 }
 
 /// `GET /community/info/{ns}/{name}`: one package, in a person's terms.
-pub(crate) async fn get_info(_auth: BearerAuth, UrlPath((ns, name)): UrlPath<(String, String)>) -> Reply {
+pub(crate) async fn get_info(
+    _auth: BearerAuth,
+    UrlPath((ns, name)): UrlPath<(String, String)>,
+) -> Reply {
     info(format!("{ns}/{name}")).await
 }
 
@@ -525,14 +668,29 @@ async fn info(id: String) -> Reply {
     }
     let bin = need_tt_model()?;
     let i = id.clone();
-    let out = tokio::task::spawn_blocking(move || Command::new(bin).args(["info", &i]).stdin(Stdio::null()).output())
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let out = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["info", &i])
+            .stdin(Stdio::null())
+            .output()
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     let (manifest, verdict) = parse_info(&text);
     let Some(m) = manifest else {
-        return Err(err(StatusCode::BAD_GATEWAY, format!("Couldn't read {id}'s details: {}", text.lines().last().unwrap_or("no answer"))));
+        return Err(err(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "Couldn't read {id}'s details: {}",
+                text.lines().last().unwrap_or("no answer")
+            ),
+        ));
     };
     let serve = &m["container"]["serve"];
     let hardware = serve["hardware"].as_str().unwrap_or("").to_string();
@@ -543,7 +701,10 @@ async fn info(id: String) -> Reply {
     let client = reqwest::Client::new();
     let package_bytes = repo_bytes(&client, &id, token.as_deref()).await;
     let (weights_bytes, (gated, access)) = match &weights {
-        Some(w) => (repo_bytes(&client, w, token.as_deref()).await, weights_access(&client, w, token.as_deref()).await),
+        Some(w) => (
+            repo_bytes(&client, w, token.as_deref()).await,
+            weights_access(&client, w, token.as_deref()).await,
+        ),
         None => (None, (false, Some(true))),
     };
     let v = json!({
@@ -567,7 +728,9 @@ async fn info(id: String) -> Reply {
     if let (Some(w), Some(n)) = (&weights, weights_bytes) {
         crate::download::know_total(w, n);
     }
-    INFO.lock().expect("info").insert(id, (Instant::now(), v.clone()));
+    INFO.lock()
+        .expect("info")
+        .insert(id, (Instant::now(), v.clone()));
     Ok(Json(v))
 }
 
@@ -582,7 +745,11 @@ pub struct IdBody {
 }
 
 /// `POST /community/pull`: download a package and its weights, in the background.
-pub(crate) async fn post_pull(State(state): State<AppState>, _auth: BearerAuth, Json(body): Json<IdBody>) -> Reply {
+pub(crate) async fn post_pull(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    Json(body): Json<IdBody>,
+) -> Reply {
     if !valid_id(&body.id) {
         return Err(err(StatusCode::BAD_REQUEST, "That isn't a package name."));
     }
@@ -594,42 +761,68 @@ pub(crate) async fn post_pull(State(state): State<AppState>, _auth: BearerAuth, 
     // Room for it? Checked before anything starts, from its details (cached
     // when the app just showed them). Unknown sizes or free space refuse nothing.
     if let Ok(Json(details)) = info(body.id.clone()).await {
-        let here = details["weights"]
-            .as_str()
-            .map_or(0, |w| crate::download::repo_on_disk(&crate::download::hub_dir(), w));
-        if let (Some(need), Some(free)) = (crate::download::package_need(&details, here), disk_free()) {
+        let here = details["weights"].as_str().map_or(0, |w| {
+            crate::download::repo_on_disk(&crate::download::hub_dir(), w)
+        });
+        if let (Some(need), Some(free)) =
+            (crate::download::package_need(&details, here), disk_free())
+        {
             let name = body.id.rsplit('/').next().unwrap_or(&body.id);
-            crate::download::check_room(name, need, free).map_err(|e| err(StatusCode::CONFLICT, e))?;
+            crate::download::check_room(name, need, free)
+                .map_err(|e| err(StatusCode::CONFLICT, e))?;
         }
     }
     let dir = work_dir(&state, &body.id);
-    std::fs::create_dir_all(&dir).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let (log, exit) = (dir.join("pull.log"), dir.join("pull.exit"));
     let _ = std::fs::write(&log, "");
     let _ = std::fs::remove_file(&exit);
     let _ = std::fs::remove_file(dir.join("paused"));
     let q = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
-    let script = format!("{} pull {} --with-weights; echo $? > {}", q(&bin.display().to_string()), q(&body.id), q(&exit.display().to_string()));
-    let path = format!("{}:{}", home().join(".local/bin").display(), std::env::var("PATH").unwrap_or_default());
+    let script = format!(
+        "{} pull {} --with-weights; echo $? > {}",
+        q(&bin.display().to_string()),
+        q(&body.id),
+        q(&exit.display().to_string())
+    );
+    let path = format!(
+        "{}:{}",
+        home().join(".local/bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let mut cmd = Command::new("systemd-run");
     cmd.args(["--user", "--collect", "--quiet"])
         .arg(format!("--unit={u}"))
-        .arg(format!("--property=StandardOutput=append:{}", log.display()))
+        .arg(format!(
+            "--property=StandardOutput=append:{}",
+            log.display()
+        ))
         .arg(format!("--property=StandardError=append:{}", log.display()))
         .arg(format!("--setenv=PATH={path}"));
     if let Some(t) = crate::bringup::hf_token() {
         // The value from systemd-run's environment, not its command line.
         cmd.arg("--setenv=HF_TOKEN").env("HF_TOKEN", t);
     }
-    let out = cmd.args(["sh", "-c", &script]).stdin(Stdio::null()).output().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let out = cmd
+        .args(["sh", "-c", &script])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !out.status.success() {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, String::from_utf8_lossy(&out.stderr).trim().to_string()));
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
     }
     // Its size and its weights' size, for the progress bar.
     tokio::spawn(info(body.id.clone()));
     state.notifier().record(crate::notify::Draft {
         kind: "model",
-        title: format!("Downloading {}", body.id.rsplit('/').next().unwrap_or(&body.id)),
+        title: format!(
+            "Downloading {}",
+            body.id.rsplit('/').next().unwrap_or(&body.id)
+        ),
         body: "A community model, with its weights. Start it from Models when it's done.".into(),
     });
     Ok(Json(json!({ "pulling": true })))
@@ -638,7 +831,11 @@ pub(crate) async fn post_pull(State(state): State<AppState>, _auth: BearerAuth, 
 /// `POST /community/pull/pause {id}`: stop a download, keeping what it has. Every
 /// finished file stays; a resume (`POST /community/pull`) picks up from there and
 /// redoes only the files that were partway through.
-pub(crate) async fn post_pause(State(state): State<AppState>, _auth: BearerAuth, Json(body): Json<IdBody>) -> Reply {
+pub(crate) async fn post_pause(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    Json(body): Json<IdBody>,
+) -> Reply {
     if !valid_id(&body.id) {
         return Err(err(StatusCode::BAD_REQUEST, "That isn't a package name."));
     }
@@ -648,13 +845,21 @@ pub(crate) async fn post_pause(State(state): State<AppState>, _auth: BearerAuth,
     }
     let dir = work_dir(&state, &body.id);
     let _ = std::fs::write(dir.join("paused"), now_secs().to_string());
-    let out = tokio::task::spawn_blocking(move || Command::new("systemctl").args(["--user", "stop", &u]).stdin(Stdio::null()).output())
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let out = tokio::task::spawn_blocking(move || {
+        Command::new("systemctl")
+            .args(["--user", "stop", &u])
+            .stdin(Stdio::null())
+            .output()
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !out.status.success() {
         let _ = std::fs::remove_file(dir.join("paused"));
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, String::from_utf8_lossy(&out.stderr).trim().to_string()));
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
     }
     Ok(Json(json!({ "paused": true })))
 }
@@ -669,26 +874,46 @@ pub struct CancelBody {
 
 /// `POST /community/pull/cancel {id, delete_files}`: stop a download (running or
 /// paused) and forget it; with `delete_files`, free the space its weights took.
-pub(crate) async fn post_cancel(State(state): State<AppState>, _auth: BearerAuth, Json(body): Json<CancelBody>) -> Reply {
+pub(crate) async fn post_cancel(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    Json(body): Json<CancelBody>,
+) -> Reply {
     if !valid_id(&body.id) {
         return Err(err(StatusCode::BAD_REQUEST, "That isn't a package name."));
     }
     let id = body.id.clone();
     let dir = work_dir(&state, &id);
-    let weights = pull_step(&std::fs::read_to_string(dir.join("pull.log")).unwrap_or_default()).1
-        .or_else(|| INFO.lock().expect("info").get(&id).and_then(|(_, v)| v["weights"].as_str().map(str::to_string)));
+    let weights = pull_step(&std::fs::read_to_string(dir.join("pull.log")).unwrap_or_default())
+        .1
+        .or_else(|| {
+            INFO.lock()
+                .expect("info")
+                .get(&id)
+                .and_then(|(_, v)| v["weights"].as_str().map(str::to_string))
+        });
     let freed = tokio::task::spawn_blocking(move || {
         let u = unit(&id);
         if unit_active(&u) {
-            let _ = Command::new("systemctl").args(["--user", "stop", &u]).stdin(Stdio::null()).status();
+            let _ = Command::new("systemctl")
+                .args(["--user", "stop", &u])
+                .stdin(Stdio::null())
+                .status();
         }
         for f in ["pull.log", "pull.exit", "paused"] {
             let _ = std::fs::remove_file(dir.join(f));
         }
-        let Some(w) = weights.filter(|_| body.delete_files) else { return Ok(0) };
+        let Some(w) = weights.filter(|_| body.delete_files) else {
+            return Ok(0);
+        };
         // Not if another package on the box needs the same weights.
-        if installed().iter().any(|p| p["id"] != id.as_str() && p["weights"] == w.as_str()) {
-            return Err("Another model on the box uses the same weights, so they were kept.".to_string());
+        if installed()
+            .iter()
+            .any(|p| p["id"] != id.as_str() && p["weights"] == w.as_str())
+        {
+            return Err(
+                "Another model on the box uses the same weights, so they were kept.".to_string(),
+            );
         }
         Ok(delete_repo(&crate::download::hub_dir(), &w))
     })
@@ -696,7 +921,9 @@ pub(crate) async fn post_cancel(State(state): State<AppState>, _auth: BearerAuth
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     match freed {
         Ok(n) => Ok(Json(json!({ "cancelled": true, "freed_bytes": n }))),
-        Err(why) => Ok(Json(json!({ "cancelled": true, "freed_bytes": 0, "kept": why }))),
+        Err(why) => Ok(Json(
+            json!({ "cancelled": true, "freed_bytes": 0, "kept": why }),
+        )),
     }
 }
 
@@ -706,7 +933,10 @@ fn delete_repo(hub: &Path, repo: &str) -> u64 {
     let root = hub.join(format!("models--{}", repo.replace('/', "--")));
     let canon = |p: &Path| std::fs::canonicalize(p).ok();
     let targets = |blobs: &Path| -> Vec<PathBuf> {
-        std::fs::read_dir(blobs).into_iter().flatten().flatten()
+        std::fs::read_dir(blobs)
+            .into_iter()
+            .flatten()
+            .flatten()
             .filter(|e| e.file_type().is_ok_and(|t| t.is_symlink()))
             .filter_map(|e| canon(&e.path()))
             .collect()
@@ -721,7 +951,10 @@ fn delete_repo(hub: &Path, repo: &str) -> u64 {
     let mut freed = crate::download::dir_bytes(&root);
     let _ = std::fs::remove_dir_all(&root);
     let store = canon(hub).unwrap_or_else(|| hub.to_path_buf());
-    for t in mine.into_iter().filter(|t| !others.contains(t) && t.starts_with(&store)) {
+    for t in mine
+        .into_iter()
+        .filter(|t| !others.contains(t) && t.starts_with(&store))
+    {
         freed += std::fs::metadata(&t).map(|m| m.len()).unwrap_or(0);
         let _ = std::fs::remove_file(&t);
     }
@@ -764,9 +997,17 @@ pub(crate) fn serving_package(state: &AppState, life: &crate::routes::Lifecycle)
 fn current(state: &AppState, life: &crate::routes::Lifecycle) -> Option<String> {
     let (id, model) = serving(state)?;
     match life.phase {
-        Phase::Starting => (life.model.as_deref().map_or(true, |m| same_model(m, &model))).then_some(id),
+        Phase::Starting => (life
+            .model
+            .as_deref()
+            .map_or(true, |m| same_model(m, &model)))
+        .then_some(id),
         Phase::Serving => {
-            let served = life.served_id.as_deref().or(life.model.as_deref()).unwrap_or("");
+            let served = life
+                .served_id
+                .as_deref()
+                .or(life.model.as_deref())
+                .unwrap_or("");
             if same_model(served, &model) {
                 Some(id)
             } else {
@@ -793,16 +1034,29 @@ fn set_serving(state: &AppState, now: Option<(String, String)>) {
 }
 
 /// `POST /community/serve`: run a downloaded package on the chips; Chat picks it up.
-pub(crate) async fn post_serve(State(state): State<AppState>, _auth: BearerAuth, Json(body): Json<IdBody>) -> Reply {
+pub(crate) async fn post_serve(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    Json(body): Json<IdBody>,
+) -> Reply {
     if !valid_id(&body.id) {
         return Err(err(StatusCode::BAD_REQUEST, "That isn't a package name."));
     }
     let bin = need_tt_model()?;
-    let Some(pkg) = installed().into_iter().find(|p| p["id"] == body.id.as_str()) else {
+    let Some(pkg) = installed()
+        .into_iter()
+        .find(|p| p["id"] == body.id.as_str())
+    else {
         return Err(err(StatusCode::NOT_FOUND, "Download it first."));
     };
     if pkg["fits"] == false {
-        return Err(err(StatusCode::CONFLICT, pkg["fit"].as_str().unwrap_or("It doesn't fit this box.").to_string()));
+        return Err(err(
+            StatusCode::CONFLICT,
+            pkg["fit"]
+                .as_str()
+                .unwrap_or("It doesn't fit this box.")
+                .to_string(),
+        ));
     }
     if let Some(holder) = state.chips_holder() {
         return Err(err(StatusCode::CONFLICT, holder));
@@ -812,11 +1066,14 @@ pub(crate) async fn post_serve(State(state): State<AppState>, _auth: BearerAuth,
     if let Some(w) = pkg["weights"].as_str() {
         let (complete, have, need) = crate::native_vllm::weights_complete(w);
         if !complete && !body.anyway {
-            return Err((StatusCode::CONFLICT, Json(json!({
-                "error": if need > 0 { format!("Only {have} of its {need} weight files are on the box. Download the rest first (with progress), then start it: starting now would download them inside the model while the chips sit idle.") }
-                         else { "Its weights aren't on the box yet. Download them first (with progress), then start it.".to_string() },
-                "needs_weights": true, "have": have, "need": need,
-            }))));
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": if need > 0 { format!("Only {have} of its {need} weight files are on the box. Download the rest first (with progress), then start it: starting now would download them inside the model while the chips sit idle.") }
+                             else { "Its weights aren't on the box yet. Download them first (with progress), then start it.".to_string() },
+                    "needs_weights": true, "have": have, "need": need,
+                })),
+            ));
         }
     }
     let life = state.lifecycle();
@@ -824,21 +1081,37 @@ pub(crate) async fn post_serve(State(state): State<AppState>, _auth: BearerAuth,
         if !body.stop_serving {
             return Err((
                 StatusCode::CONFLICT,
-                Json(json!({ "error": "Starting it replaces what's serving now. Stop it first?", "needs_stop": true })),
+                Json(
+                    json!({ "error": "Starting it replaces what's serving now. Stop it first?", "needs_stop": true }),
+                ),
             ));
         }
     }
     if let Some((id, _)) = STOPPING.lock().expect("community").clone() {
-        return Err(err(StatusCode::CONFLICT, format!("{} is still stopping (its chips are being reset). Try again in a minute.", short_id(&id))));
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!(
+                "{} is still stopping (its chips are being reset). Try again in a minute.",
+                short_id(&id)
+            ),
+        ));
     }
     if let Some(p) = preparing().filter(|p| !p.launched && p.error.is_none()) {
-        return Err(err(StatusCode::CONFLICT, format!("{} is already starting.", short_id(&p.id))));
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!("{} is already starting.", short_id(&p.id)),
+        ));
     }
-    let replace = !matches!(life.phase, Phase::Idle | Phase::Failed) || crate::coserve::is_split(&state);
+    let replace =
+        !matches!(life.phase, Phase::Idle | Phase::Failed) || crate::coserve::is_split(&state);
     set_preparing(Some(Prep {
         id: body.id.clone(),
         since: now_secs(),
-        step: if replace { "Stopping the model that's serving".into() } else { "Resetting the chips".into() },
+        step: if replace {
+            "Stopping the model that's serving".into()
+        } else {
+            "Resetting the chips".into()
+        },
         launched: false,
         error: None,
     }));
@@ -849,7 +1122,10 @@ pub(crate) async fn post_serve(State(state): State<AppState>, _auth: BearerAuth,
     let started = body.id.clone();
     tokio::spawn(async move {
         if let Err(e) = launch(&state, &body.id, &bin, model, short, replace).await {
-            eprintln!("tt-station-agentd: community: {} didn't start: {e}", body.id);
+            eprintln!(
+                "tt-station-agentd: community: {} didn't start: {e}",
+                body.id
+            );
             update_preparing(&body.id, |p| p.error = Some(e.clone()));
             state.notifier().emit(crate::notify::Draft {
                 kind: "model_failed",
@@ -883,13 +1159,21 @@ fn set_preparing(p: Option<Prep>) {
 }
 
 fn update_preparing(id: &str, f: impl FnOnce(&mut Prep)) {
-    if let Some(p) = PREP.lock().expect("community").as_mut().filter(|p| p.id == id) {
+    if let Some(p) = PREP
+        .lock()
+        .expect("community")
+        .as_mut()
+        .filter(|p| p.id == id)
+    {
         f(p);
     }
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn short_id(id: &str) -> &str {
@@ -900,7 +1184,12 @@ fn short_id(id: &str) -> &str {
 /// package's default is made for other hardware and one of its profiles is made
 /// for this box (2x p300c). None to keep the default.
 fn profile_for_this_box(listing: &str) -> Option<String> {
-    let mine = |hw: &str| matches!(hw.to_ascii_lowercase().as_str(), "p300x2" | "qb2" | "quietbox2");
+    let mine = |hw: &str| {
+        matches!(
+            hw.to_ascii_lowercase().as_str(),
+            "p300x2" | "qb2" | "quietbox2"
+        )
+    };
     // "  • c32k (default)  p150x4 · P150x4  seqs None · len -"
     let rows: Vec<(String, bool, String)> = strip_ansi(listing)
         .lines()
@@ -919,8 +1208,15 @@ fn profile_for_this_box(listing: &str) -> Option<String> {
     if rows.iter().any(|(_, default, hw)| *default && mine(hw)) {
         return None;
     }
-    let fits: Vec<&String> = rows.iter().filter(|(_, _, hw)| mine(hw)).map(|(n, _, _)| n).collect();
-    fits.iter().find(|n| n.contains("quietbox2") || n.contains("qb2")).or(fits.first()).map(|n| n.to_string())
+    let fits: Vec<&String> = rows
+        .iter()
+        .filter(|(_, _, hw)| mine(hw))
+        .map(|(n, _, _)| n)
+        .collect();
+    fits.iter()
+        .find(|n| n.contains("quietbox2") || n.contains("qb2"))
+        .or(fits.first())
+        .map(|n| n.to_string())
 }
 
 /// The starts of a package's container names (`tt-model-<name>-<profile>`). The
@@ -952,16 +1248,30 @@ async fn container_up(id: &str) -> bool {
         .args(["ps", "--format", "{{.Names}}"])
         .output()
         .await
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| prefixes.iter().any(|p| l.starts_with(p.as_str()))))
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| prefixes.iter().any(|p| l.starts_with(p.as_str())))
+        })
         .unwrap_or(false)
 }
 
 /// Stop what's serving (if asked), reset the chips, and start `tt-model serve`
 /// under the serving unit. Errors are what to tell the person.
-async fn launch(state: &AppState, id: &str, bin: &Path, model: String, short: String, replace: bool) -> Result<(), String> {
+async fn launch(
+    state: &AppState,
+    id: &str,
+    bin: &Path,
+    model: String,
+    short: String,
+    replace: bool,
+) -> Result<(), String> {
     if replace {
         crate::coserve::leave_split(state).await;
-        state.stop_serving().await.map_err(|e| format!("Couldn't stop the model that was serving: {e:#}"))?;
+        state
+            .stop_serving()
+            .await
+            .map_err(|e| format!("Couldn't stop the model that was serving: {e:#}"))?;
         update_preparing(id, |p| p.step = "Resetting the chips".into());
     }
     // Always a full reset before a start, even right after a stop. Stopping a
@@ -981,7 +1291,12 @@ async fn launch(state: &AppState, id: &str, bin: &Path, model: String, short: St
     // just stopped to be gone, or this start would find the chips "in use".
     for _ in 0..60 {
         let held = tokio::process::Command::new("docker")
-            .args(["ps", "-q", "--filter", "label=org.tenstorrent.tt-model.devices"])
+            .args([
+                "ps",
+                "-q",
+                "--filter",
+                "label=org.tenstorrent.tt-model.devices",
+            ])
             .output()
             .await
             .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
@@ -989,7 +1304,9 @@ async fn launch(state: &AppState, id: &str, bin: &Path, model: String, short: St
         if !held {
             break;
         }
-        update_preparing(id, |p| p.step = "Waiting for the last model to let go of the chips".into());
+        update_preparing(id, |p| {
+            p.step = "Waiting for the last model to let go of the chips".into()
+        });
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
     // Leases from a start before this one (an agent restart, a reboot) belong to
@@ -1002,35 +1319,57 @@ async fn launch(state: &AppState, id: &str, bin: &Path, model: String, short: St
     // boards may default to another one (sjettTT's Flash Next defaults to 4x p150).
     let profile = {
         let (bin, id) = (bin.to_path_buf(), id.to_string());
-        tokio::task::spawn_blocking(move || Command::new(bin).args(["profiles", &id]).stdin(Stdio::null()).output())
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .and_then(|o| profile_for_this_box(&String::from_utf8_lossy(&o.stdout)))
+        tokio::task::spawn_blocking(move || {
+            Command::new(bin)
+                .args(["profiles", &id])
+                .stdin(Stdio::null())
+                .output()
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|o| profile_for_this_box(&String::from_utf8_lossy(&o.stdout)))
     };
     // Small files (tokenizer, config) as real copies rather than cache links:
     // some packages' servers check their tokenizer files and refuse a link.
     {
         let weights = model.clone();
-        let _ = tokio::task::spawn_blocking(move || crate::download::unlink_small_files(&crate::download::hub_dir(), &weights)).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::download::unlink_small_files(&crate::download::hub_dir(), &weights)
+        })
+        .await;
     }
     let dir = work_dir(state, id);
     let _ = std::fs::create_dir_all(&dir);
     let log = dir.join("serve.log");
     let _ = std::fs::write(&log, ""); // this start's lines only, so the card shows its steps
-    let path = format!("{}:{}", home().join(".local/bin").display(), std::env::var("PATH").unwrap_or_default());
+    let path = format!(
+        "{}:{}",
+        home().join(".local/bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     // In the foreground under the serving unit: stopping the unit stops the container cleanly.
     let mut cmd = Command::new("systemd-run");
     cmd.args(["--user", "--collect", "--quiet"])
         .arg(format!("--unit={}", crate::orchard::HARVEST_UNIT))
-        .arg(format!("--property=StandardOutput=append:{}", log.display()))
+        .arg(format!(
+            "--property=StandardOutput=append:{}",
+            log.display()
+        ))
         .arg(format!("--property=StandardError=append:{}", log.display()))
         .arg(format!("--setenv=PATH={path}"));
     if let Some(t) = crate::bringup::hf_token() {
         // The value from systemd-run's environment, not its command line.
         cmd.arg("--setenv=HF_TOKEN").env("HF_TOKEN", t);
     }
-    cmd.arg(bin).args(["serve", id, "--local-only", "--no-update-check", "--port", &state.serving_port().to_string()]);
+    cmd.arg(bin).args([
+        "serve",
+        id,
+        "--local-only",
+        "--no-update-check",
+        "--port",
+        &state.serving_port().to_string(),
+    ]);
     if let Some(p) = &profile {
         cmd.args(["--profile", p]);
     }
@@ -1041,7 +1380,10 @@ async fn launch(state: &AppState, id: &str, bin: &Path, model: String, short: St
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(format!("Couldn't start it: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "Couldn't start it: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     set_serving(state, Some((id.to_string(), model.clone())));
     crate::orchard::adopt_when_serving(state, state.serving_port(), model);
@@ -1071,15 +1413,22 @@ pub fn last_good(state: &AppState) -> Option<String> {
     v["id"].as_str().map(str::to_string)
 }
 
-static RESTART: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<(String, String, u64)>> = std::sync::OnceLock::new();
+static RESTART: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<(String, String, u64)>> =
+    std::sync::OnceLock::new();
 
 /// Starts the last good model again after a stuck start was stopped (see `recover`).
 pub async fn restarter(state: AppState) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String, u64)>();
     let _ = RESTART.set(tx);
     while let Some((stuck, back, minutes)) = rx.recv().await {
-        let body = IdBody { id: back.clone(), stop_serving: true, anyway: false };
-        let ok = post_serve(State(state.clone()), BearerAuth, Json(body)).await.is_ok();
+        let body = IdBody {
+            id: back.clone(),
+            stop_serving: true,
+            anyway: false,
+        };
+        let ok = post_serve(State(state.clone()), BearerAuth, Json(body))
+            .await
+            .is_ok();
         state.notifier().emit(crate::notify::Draft {
             kind: "model_failed",
             title: format!("{} got stuck starting", short_id(&stuck)),
@@ -1099,7 +1448,8 @@ async fn recover(state: &AppState, stuck: &str, minutes: u64) {
     if let Err(e) = state.stop_serving().await {
         eprintln!("tt-station-agentd: community: couldn't stop {stuck}: {e:#}");
     }
-    let back = last_good(state).filter(|g| g != stuck && installed().iter().any(|p| p["id"] == g.as_str()));
+    let back = last_good(state)
+        .filter(|g| g != stuck && installed().iter().any(|p| p["id"] == g.as_str()));
     match (&back, RESTART.get()) {
         // Started by the restarter: a start can't start one from inside its own watch.
         (Some(g), Some(tx)) => {
@@ -1125,7 +1475,13 @@ static STALL: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 /// How long the starting package has shown no progress, once that's past
 /// `STALL_AFTER` (seconds); None while it's moving, or nothing is starting.
 pub fn stalled_s() -> Option<u64> {
-    STALL.lock().expect("community").as_ref().map(|(_, at)| at.elapsed()).filter(|d| *d >= STALL_AFTER).map(|d| d.as_secs())
+    STALL
+        .lock()
+        .expect("community")
+        .as_ref()
+        .map(|(_, at)| at.elapsed())
+        .filter(|d| *d >= STALL_AFTER)
+        .map(|d| d.as_secs())
 }
 
 /// Signs that a start is getting somewhere, which a hung one doesn't give:
@@ -1134,19 +1490,41 @@ pub fn stalled_s() -> Option<u64> {
 /// call spun a whole core for 23 minutes.)
 async fn boot_progress(id: &str, since: u64) -> (bool, u64) {
     let prefixes = container_prefixes(id);
-    let names = tokio::process::Command::new("docker").args(["ps", "--format", "{{.Names}}"]).output().await
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    let names = tokio::process::Command::new("docker")
+        .args(["ps", "--format", "{{.Names}}"])
+        .output()
+        .await
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
     let mut printed = false;
-    if let Some(name) = names.lines().find(|l| prefixes.iter().any(|p| l.starts_with(p.as_str()))) {
-        let out = tokio::process::Command::new("docker").args(["logs", "--since", &since.to_string(), name]).output().await;
+    if let Some(name) = names
+        .lines()
+        .find(|l| prefixes.iter().any(|p| l.starts_with(p.as_str())))
+    {
+        let out = tokio::process::Command::new("docker")
+            .args(["logs", "--since", &since.to_string(), name])
+            .output()
+            .await;
         if let Ok(o) = out {
-            let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
-            printed = text.lines().any(|l| !l.trim().is_empty() && !l.contains("starting_still"));
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            printed = text
+                .lines()
+                .any(|l| !l.trim().is_empty() && !l.contains("starting_still"));
         }
     }
-    let cache = container_prefixes(id).last().map(|p| home().join(".cache/tt-model").join(p.trim_start_matches("tt-model-")));
+    let cache = container_prefixes(id).last().map(|p| {
+        home()
+            .join(".cache/tt-model")
+            .join(p.trim_start_matches("tt-model-"))
+    });
     let bytes = match cache {
-        Some(dir) => tokio::task::spawn_blocking(move || crate::download::dir_bytes(&dir)).await.unwrap_or(0),
+        Some(dir) => tokio::task::spawn_blocking(move || crate::download::dir_bytes(&dir))
+            .await
+            .unwrap_or(0),
         None => 0,
     };
     (printed, bytes)
@@ -1160,7 +1538,9 @@ async fn watch_boot(state: AppState, id: String) {
     loop {
         tokio::time::sleep(Duration::from_secs(10)).await;
         let life = state.lifecycle();
-        if !matches!(life.phase, Phase::Starting) || serving(&state).map(|(i, _)| i) != Some(id.clone()) {
+        if !matches!(life.phase, Phase::Starting)
+            || serving(&state).map(|(i, _)| i) != Some(id.clone())
+        {
             *STALL.lock().expect("community") = None;
             return;
         }
@@ -1179,7 +1559,10 @@ async fn watch_boot(state: AppState, id: String) {
                         *stall = Some((id.clone(), Instant::now()));
                         None
                     } else {
-                        stall.as_ref().filter(|(i, _)| *i == id).map(|(_, at)| at.elapsed())
+                        stall
+                            .as_ref()
+                            .filter(|(i, _)| *i == id)
+                            .map(|(_, at)| at.elapsed())
                     }
                 };
                 if let Some(quiet) = quiet {
@@ -1201,7 +1584,8 @@ async fn watch_boot(state: AppState, id: String) {
             continue;
         }
         *STALL.lock().expect("community") = None;
-        let line = failure_line(&work_dir(&state, &id).join("serve.log")).unwrap_or_else(|| "tt-model stopped".into());
+        let line = failure_line(&work_dir(&state, &id).join("serve.log"))
+            .unwrap_or_else(|| "tt-model stopped".into());
         let msg = format!("It stopped while starting: {line}");
         eprintln!("tt-station-agentd: community: {id}: {msg}");
         set_serving(&state, None);
@@ -1219,23 +1603,39 @@ async fn watch_boot(state: AppState, id: String) {
 /// serving in its container. Take it back as the served model if it still
 /// answers; forget it if it doesn't.
 pub async fn readopt(state: AppState) {
-    let Some((id, model)) = serving(&state) else { return };
+    let Some((id, model)) = serving(&state) else {
+        return;
+    };
     if !matches!(state.lifecycle().phase, Phase::Idle | Phase::Failed) {
         return;
     }
     let base = format!("http://127.0.0.1:{}/v1", state.serving_port());
-    let answered: Option<Value> = match reqwest::Client::new().get(format!("{base}/models")).timeout(Duration::from_secs(5)).send().await {
+    let answered: Option<Value> = match reqwest::Client::new()
+        .get(format!("{base}/models"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+    {
         Ok(r) if r.status().is_success() => r.json().await.ok(),
         _ => None,
     };
     // Something else on the port (another model started since) isn't ours.
-    let served_id = answered.as_ref().and_then(|v| v["data"][0]["id"].as_str().map(str::to_string));
+    let served_id = answered
+        .as_ref()
+        .and_then(|v| v["data"][0]["id"].as_str().map(str::to_string));
     let answered = answered.filter(|_| served_id.as_deref().is_some_and(|s| same_model(s, &model)));
     match answered {
         Some(v) => {
-            let served = v["data"][0]["id"].as_str().map(str::to_string).unwrap_or(model);
+            let served = v["data"][0]["id"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or(model);
             let short = served.rsplit('/').next().unwrap_or(&served).to_string();
-            state.adopt_serving(libttstation::model::Endpoint { base_url: base, model: served, requires_key: false });
+            state.adopt_serving(libttstation::model::Endpoint {
+                base_url: base,
+                model: served,
+                requires_key: false,
+            });
             eprintln!("tt-station-agentd: community: {id} is still serving; adopted it");
             // Its chips too, if no lease covers them yet (a no-op when they're already ours).
             if !leases_file(&state).exists() {
@@ -1264,7 +1664,9 @@ pub async fn readopt(state: AppState) {
 /// unit isn't enough. `tt-model stop` sends SIGTERM first, so the chips close
 /// cleanly. Called whenever the agent stops serving.
 pub async fn stop_package(state: &AppState) {
-    let Some((id, _)) = serving(state) else { return };
+    let Some((id, _)) = serving(state) else {
+        return;
+    };
     set_serving(state, None);
     *STOPPING.lock().expect("community") = Some((id.clone(), now_secs()));
     let leases = take_leases(state);
@@ -1272,10 +1674,18 @@ pub async fn stop_package(state: &AppState) {
     // tt-smi readings meanwhile (they fail, and they slow the resets down).
     let _paused = state.pause_readings();
     if let Some(bin) = tt_model() {
-        let out = tokio::process::Command::new(bin).args(["stop", &id]).stdin(Stdio::null()).output().await;
+        let out = tokio::process::Command::new(bin)
+            .args(["stop", &id])
+            .stdin(Stdio::null())
+            .output()
+            .await;
         match out {
             Ok(o) => {
-                let said = strip_ansi(&format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)));
+                let said = strip_ansi(&format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                ));
                 if !o.status.success() {
                     eprintln!("tt-station-agentd: couldn't stop {id}: {}", said.trim());
                 }
@@ -1284,7 +1694,10 @@ pub async fn stop_package(state: &AppState) {
                 // can leave them unusable until the box restarts.
                 if said.contains("did not exit on SIGTERM") {
                     let failed = said.contains("did NOT complete") || said.contains("NOT reset");
-                    eprintln!("tt-station-agentd: community: {id} had to be force-stopped (reset {})", if failed { "failed" } else { "ran" });
+                    eprintln!(
+                        "tt-station-agentd: community: {id} had to be force-stopped (reset {})",
+                        if failed { "failed" } else { "ran" }
+                    );
                     state.notifier().emit(crate::notify::Draft {
                         kind: "model_failed",
                         title: format!("{} had to be force-stopped", short_id(&id)),
@@ -1319,11 +1732,19 @@ static STOPPING: Mutex<Option<(String, u64)>> = Mutex::new(None);
 static JUST_RESET: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn chips_just_reset() -> bool {
-    JUST_RESET.lock().expect("community").take().is_some_and(|t| t.elapsed() < Duration::from_secs(120))
+    JUST_RESET
+        .lock()
+        .expect("community")
+        .take()
+        .is_some_and(|t| t.elapsed() < Duration::from_secs(120))
 }
 
 async fn release_lease(lease: &str) -> bool {
-    let out = tokio::process::Command::new("gozer").args(["release", lease, "--json"]).stdin(Stdio::null()).output().await;
+    let out = tokio::process::Command::new("gozer")
+        .args(["release", lease, "--json"])
+        .stdin(Stdio::null())
+        .output()
+        .await;
     let ok = out.is_ok_and(|o| o.status.success());
     if !ok {
         eprintln!("tt-station-agentd: community: couldn't release lease {lease}; `gozer reconcile` clears it");
@@ -1333,7 +1754,10 @@ async fn release_lease(lease: &str) -> bool {
 
 /// `meta-models/Muse-Glimmer-30B` → `Muse-Glimmer-30B`, for the lease's `who`.
 fn model_short(pkg: &Value) -> String {
-    let m = pkg["weights"].as_str().or(pkg["id"].as_str()).unwrap_or("community-model");
+    let m = pkg["weights"]
+        .as_str()
+        .or(pkg["id"].as_str())
+        .unwrap_or("community-model");
     m.rsplit('/').next().unwrap_or(m).to_string()
 }
 
@@ -1343,7 +1767,10 @@ fn leases_file(state: &AppState) -> PathBuf {
 
 fn take_leases(state: &AppState) -> Vec<String> {
     let file = leases_file(state);
-    let ids: Vec<String> = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let ids: Vec<String> = std::fs::read(&file)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
     let _ = std::fs::remove_file(file);
     ids
 }
@@ -1354,11 +1781,17 @@ fn take_leases(state: &AppState) -> Vec<String> {
 /// under this agent's own `tt-station:<port>:<model>` name, the same as the
 /// models it serves itself; stopping the package releases them.
 async fn adopt_chips(state: AppState, id: String, model: String) {
-    let who = format!("{}{}:{model}", crate::gozer::WHO_PREFIX, state.serving_port());
+    let who = format!(
+        "{}{}:{model}",
+        crate::gozer::WHO_PREFIX,
+        state.serving_port()
+    );
     let deadline = Instant::now() + Duration::from_secs(45 * 60);
     while Instant::now() < deadline {
         // Stopped, failed or replaced meanwhile: nothing to adopt.
-        if serving(&state).map(|(i, _)| i) != Some(id.clone()) || matches!(state.lifecycle().phase, Phase::Idle | Phase::Failed) {
+        if serving(&state).map(|(i, _)| i) != Some(id.clone())
+            || matches!(state.lifecycle().phase, Phase::Idle | Phase::Failed)
+        {
             return;
         }
         let status: Option<Value> = tokio::process::Command::new("gozer")
@@ -1368,9 +1801,19 @@ async fn adopt_chips(state: AppState, id: String, model: String) {
             .await
             .ok()
             .and_then(|o| serde_json::from_slice(&o.stdout).ok());
-        let chips: Vec<&Value> = status.as_ref().and_then(|s| s["chips"].as_array()).into_iter().flatten().collect();
+        let chips: Vec<&Value> = status
+            .as_ref()
+            .and_then(|s| s["chips"].as_array())
+            .into_iter()
+            .flatten()
+            .collect();
         // Already ours (an earlier adopt, before an agent restart): done.
-        if !chips.is_empty() && leases_file(&state).exists() && chips.iter().all(|c| c["who"].as_str() == Some(who.as_str())) {
+        if !chips.is_empty()
+            && leases_file(&state).exists()
+            && chips
+                .iter()
+                .all(|c| c["who"].as_str() == Some(who.as_str()))
+        {
             return;
         }
         // One adopt per board (gozer leases whole boards) whose chips a process holds unleased.
@@ -1389,20 +1832,43 @@ async fn adopt_chips(state: AppState, id: String, model: String) {
             for b in &boards {
                 let bdf = b.split_whitespace().nth(1).unwrap_or("");
                 let out = tokio::process::Command::new("gozer")
-                    .args(["adopt", "--json", "--who", &who, "--reason", &format!("community model {id}"), bdf])
+                    .args([
+                        "adopt",
+                        "--json",
+                        "--who",
+                        &who,
+                        "--reason",
+                        &format!("community model {id}"),
+                        bdf,
+                    ])
                     .stdin(Stdio::null())
                     .output()
                     .await;
-                match out.ok().and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok()) {
-                    Some(v) if v["adopted"] == true => ids.extend(v["lease_id"].as_str().map(str::to_string)),
-                    Some(v) => eprintln!("tt-station-agentd: community: couldn't adopt {bdf} for {id}: {v}"),
-                    None => eprintln!("tt-station-agentd: community: gozer adopt {bdf} gave no answer"),
+                match out
+                    .ok()
+                    .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
+                {
+                    Some(v) if v["adopted"] == true => {
+                        ids.extend(v["lease_id"].as_str().map(str::to_string))
+                    }
+                    Some(v) => eprintln!(
+                        "tt-station-agentd: community: couldn't adopt {bdf} for {id}: {v}"
+                    ),
+                    None => {
+                        eprintln!("tt-station-agentd: community: gozer adopt {bdf} gave no answer")
+                    }
                 }
             }
             if !ids.is_empty() {
-                let mut all: Vec<String> = std::fs::read(leases_file(&state)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+                let mut all: Vec<String> = std::fs::read(leases_file(&state))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default();
                 all.extend(ids.iter().cloned());
-                let _ = std::fs::write(leases_file(&state), serde_json::to_vec(&all).unwrap_or_default());
+                let _ = std::fs::write(
+                    leases_file(&state),
+                    serde_json::to_vec(&all).unwrap_or_default(),
+                );
                 eprintln!("tt-station-agentd: community: {id} now holds its chips under gozer lease(s) {}", ids.join(", "));
                 return;
             }
@@ -1424,16 +1890,27 @@ fn reply_ok(content: &str) -> bool {
 async fn check_replies(state: AppState, id: String) {
     let deadline = Instant::now() + Duration::from_secs(3600);
     while !matches!(state.lifecycle().phase, Phase::Serving) {
-        if Instant::now() > deadline || matches!(state.lifecycle().phase, Phase::Idle | Phase::Failed) {
+        if Instant::now() > deadline
+            || matches!(state.lifecycle().phase, Phase::Idle | Phase::Failed)
+        {
             return;
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
     let base = format!("http://127.0.0.1:{}/v1", state.serving_port());
     let client = reqwest::Client::new();
-    let model = client.get(format!("{base}/models")).timeout(Duration::from_secs(10)).send().await.ok();
+    let model = client
+        .get(format!("{base}/models"))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .ok();
     let model = match model {
-        Some(r) => r.json::<Value>().await.ok().and_then(|v| v["data"][0]["id"].as_str().map(str::to_string)),
+        Some(r) => r
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v["data"][0]["id"].as_str().map(str::to_string)),
         None => None,
     };
     let Some(model) = model else { return };
@@ -1445,15 +1922,26 @@ async fn check_replies(state: AppState, id: String) {
         .send()
         .await;
     let content = match reply {
-        Ok(r) => r.json::<Value>().await.ok().map(|v| v["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string()),
+        Ok(r) => r.json::<Value>().await.ok().map(|v| {
+            v["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        }),
         Err(_) => None,
     };
     let ok = content.as_deref().is_some_and(reply_ok);
     let sample: String = content.unwrap_or_default().chars().take(160).collect();
-    let _ = std::fs::write(work_dir(&state, &id).join("check.json"), json!({ "ok": ok, "sample": sample }).to_string());
+    let _ = std::fs::write(
+        work_dir(&state, &id).join("check.json"),
+        json!({ "ok": ok, "sample": sample }).to_string(),
+    );
     if ok {
         // The model to go back to when a later start gets stuck.
-        let _ = std::fs::write(last_good_file(&state), json!({ "id": id, "at": now_secs() }).to_string());
+        let _ = std::fs::write(
+            last_good_file(&state),
+            json!({ "id": id, "at": now_secs() }).to_string(),
+        );
     }
     if !ok {
         eprintln!("tt-station-agentd: community: {id} answered a test message badly: {sample:?}");
@@ -1467,25 +1955,44 @@ async fn check_replies(state: AppState, id: String) {
 
 /// `DELETE /community/{ns}/{name}`: remove a downloaded package (its weights stay
 /// in the Hugging Face cache, shared with other models).
-pub(crate) async fn delete_package(State(state): State<AppState>, _auth: BearerAuth, UrlPath((ns, name)): UrlPath<(String, String)>) -> Reply {
+pub(crate) async fn delete_package(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath((ns, name)): UrlPath<(String, String)>,
+) -> Reply {
     let id = format!("{ns}/{name}");
     if !valid_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "That isn't a package name."));
     }
     let life = state.lifecycle();
-    if current(&state, &life).as_deref() == Some(id.as_str())
-    {
+    if current(&state, &life).as_deref() == Some(id.as_str()) {
         return Err(err(StatusCode::CONFLICT, "It's serving. Stop it first."));
     }
     let bin = need_tt_model()?;
     let i = id.clone();
-    let out = tokio::task::spawn_blocking(move || Command::new(bin).args(["rm", &i]).stdin(Stdio::null()).output())
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let out = tokio::task::spawn_blocking(move || {
+        Command::new(bin)
+            .args(["rm", &i])
+            .stdin(Stdio::null())
+            .output()
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !out.status.success() {
-        let text = strip_ansi(&format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)));
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, text.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("couldn't remove it").to_string()));
+        let text = strip_ansi(&format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            text.lines()
+                .filter(|l| !l.trim().is_empty())
+                .last()
+                .unwrap_or("couldn't remove it")
+                .to_string(),
+        ));
     }
     let _ = std::fs::remove_dir_all(work_dir(&state, &id));
     Ok(Json(json!({ "removed": id })))
@@ -1498,18 +2005,39 @@ mod tests {
     #[test]
     fn asks_vllm_plugin_packages_for_cached_token_counts() {
         let kind = |k: &str| json!({ "container": { "kind": k, "serve": { "args": [] } } });
-        assert_eq!(extra_vllm_args(Some(&kind("vllm-plugin"))), ["--enable-prompt-tokens-details"]);
-        assert!(extra_vllm_args(Some(&kind("tt-dit-server"))).is_empty(), "not vLLM");
-        assert!(extra_vllm_args(Some(&kind("vllm-fork"))).is_empty(), "loose flags don't reach its vLLM");
+        assert_eq!(
+            extra_vllm_args(Some(&kind("vllm-plugin"))),
+            ["--enable-prompt-tokens-details"]
+        );
+        assert!(
+            extra_vllm_args(Some(&kind("tt-dit-server"))).is_empty(),
+            "not vLLM"
+        );
+        assert!(
+            extra_vllm_args(Some(&kind("vllm-fork"))).is_empty(),
+            "loose flags don't reach its vLLM"
+        );
         assert!(extra_vllm_args(Some(&json!({}))).is_empty());
-        assert!(extra_vllm_args(None).is_empty(), "no manifest, nothing guessed");
+        assert!(
+            extra_vllm_args(None).is_empty(),
+            "no manifest, nothing guessed"
+        );
     }
 
     #[test]
     fn matches_served_ids() {
-        assert!(same_model("meta-models/Muse-Glimmer-30B", "meta-models/Muse-Glimmer-30B"));
-        assert!(same_model("muse-glimmer-30b", "meta-models/Muse-Glimmer-30B"));
-        assert!(!same_model("tt-flux.1-schnell", "meta-models/Muse-Glimmer-30B"));
+        assert!(same_model(
+            "meta-models/Muse-Glimmer-30B",
+            "meta-models/Muse-Glimmer-30B"
+        ));
+        assert!(same_model(
+            "muse-glimmer-30b",
+            "meta-models/Muse-Glimmer-30B"
+        ));
+        assert!(!same_model(
+            "tt-flux.1-schnell",
+            "meta-models/Muse-Glimmer-30B"
+        ));
     }
 
     #[test]
@@ -1529,9 +2057,21 @@ mod tests {
         }
         std::fs::write(hub.join("blobs/aa/only-x"), vec![0u8; 100]).unwrap();
         std::fs::write(hub.join("blobs/aa/shared"), vec![0u8; 50]).unwrap();
-        std::os::unix::fs::symlink("../../blobs/aa/only-x", hub.join("models--a--x/blobs/only-x")).unwrap();
-        std::os::unix::fs::symlink("../../blobs/aa/shared", hub.join("models--a--x/blobs/shared")).unwrap();
-        std::os::unix::fs::symlink("../../blobs/aa/shared", hub.join("models--b--y/blobs/shared")).unwrap();
+        std::os::unix::fs::symlink(
+            "../../blobs/aa/only-x",
+            hub.join("models--a--x/blobs/only-x"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../../blobs/aa/shared",
+            hub.join("models--a--x/blobs/shared"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../../blobs/aa/shared",
+            hub.join("models--b--y/blobs/shared"),
+        )
+        .unwrap();
         std::fs::write(hub.join("models--a--x/blobs/part.incomplete"), vec![0u8; 7]).unwrap();
         assert_eq!(delete_repo(&hub, "a/x"), 107);
         assert!(!hub.join("models--a--x").exists());
@@ -1542,9 +2082,15 @@ mod tests {
 
     #[test]
     fn names_a_package_container_after_its_image() {
-        assert_eq!(image_name("tt-model/qwen3.8-flash-next:6e8c55ef7f2f").as_deref(), Some("qwen3.8-flash-next"));
+        assert_eq!(
+            image_name("tt-model/qwen3.8-flash-next:6e8c55ef7f2f").as_deref(),
+            Some("qwen3.8-flash-next")
+        );
         assert_eq!(image_name("tt-model/x").as_deref(), Some("x"));
-        assert_eq!(image_name("registry.example:5000/tt-model/y:1").as_deref(), Some("y"));
+        assert_eq!(
+            image_name("registry.example:5000/tt-model/y:1").as_deref(),
+            Some("y")
+        );
     }
 
     #[test]
@@ -1553,17 +2099,26 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("serve.log");
         std::fs::write(&log, "  ✓ container started\n╭─ serve x — the container exited ─╮\n│  The engine stopped during boot.   │\n│  Log · ERROR:    RuntimeError: the chat server ended with status 1 │\n│                                    │\n╰────────────────────────────────────╯\n").unwrap();
-        assert_eq!(failure_line(&log).as_deref(), Some("ERROR:    RuntimeError: the chat server ended with status 1"));
+        assert_eq!(
+            failure_line(&log).as_deref(),
+            Some("ERROR:    RuntimeError: the chat server ended with status 1")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn serves_the_profile_made_for_this_box() {
         let flash = "  • c32k (default)  p150x4 · P150x4  seqs None · len -\n  • c64k            p150x4 · P150x4  seqs None · len -\n  • c32k-quietbox   p150x4 · P150x4  seqs None · len -\n  • c32k-quietbox2  p300x2 · P300x2  seqs None · len -\n";
-        assert_eq!(profile_for_this_box(flash).as_deref(), Some("c32k-quietbox2"));
+        assert_eq!(
+            profile_for_this_box(flash).as_deref(),
+            Some("c32k-quietbox2")
+        );
         let ours = "  • fast (default)  p300x2 · P300x2  seqs 1 · len 65536\n  • big  p150x8 · P150x8  seqs 1 · len -\n";
         assert_eq!(profile_for_this_box(ours), None);
-        assert_eq!(profile_for_this_box("  • only (default)  p150x4 · P150x4  seqs None · len -\n"), None);
+        assert_eq!(
+            profile_for_this_box("  • only (default)  p150x4 · P150x4  seqs None · len -\n"),
+            None
+        );
         assert_eq!(profile_for_this_box(""), None);
     }
 
@@ -1572,8 +2127,16 @@ mod tests {
         assert_eq!(pull_step(""), ("package", None));
         assert_eq!(pull_step("docker load tt-model/x:abc…\n").0, "image");
         let log = "✓ docker load tt-model/x:abc  1m 27s\nweights Qwen/Qwen3-Coder-30B-A3B-Instruct@b2cff646 — resuming a partial \ndownload…\n";
-        assert_eq!(pull_step(log), ("weights", Some("Qwen/Qwen3-Coder-30B-A3B-Instruct".to_string())));
-        let done = format!("{log}\u{1b}[32m✓\u{1b}[0m weights Qwen/Qwen3-Coder-30B-A3B-Instruct@b2cff646\n");
+        assert_eq!(
+            pull_step(log),
+            (
+                "weights",
+                Some("Qwen/Qwen3-Coder-30B-A3B-Instruct".to_string())
+            )
+        );
+        let done = format!(
+            "{log}\u{1b}[32m✓\u{1b}[0m weights Qwen/Qwen3-Coder-30B-A3B-Instruct@b2cff646\n"
+        );
         assert_eq!(pull_step(&done).0, "finishing");
     }
 
@@ -1602,6 +2165,9 @@ mod tests {
         let text = "{\n \"device_count\": 4,\n \"name\": \"x {y}\",\n \"container\": {\"serve\": {\"hardware\": \"p300x2\"}}\n}\n\n\u{1b}[32m✓\u{1b}[0m compatible with the local environment\n";
         let (m, v) = parse_info(text);
         assert_eq!(m.unwrap()["device_count"], 4);
-        assert_eq!(v, Some((true, "compatible with the local environment".to_string())));
+        assert_eq!(
+            v,
+            Some((true, "compatible with the local environment".to_string()))
+        );
     }
 }

@@ -193,7 +193,9 @@ fn docker_start_includes_hf_token_env_when_configured() {
         "docker run args should carry --env when a token is configured: {run_cmd:?}"
     );
     assert!(
-        run_cmd.windows(2).any(|w| w[0] == "--env" && w[1] == "HF_TOKEN"),
+        run_cmd
+            .windows(2)
+            .any(|w| w[0] == "--env" && w[1] == "HF_TOKEN"),
         "docker run args should name HF_TOKEN: {run_cmd:?}"
     );
     assert!(

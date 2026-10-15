@@ -194,13 +194,19 @@ impl Companion {
     /// What the companion serves: `chat`, `image`, ...
     pub fn kind(&self) -> &'static str {
         let life = self.lifecycle();
-        let id = self.endpoint().map(|e| e.model).or(life.served_id).or(life.model.clone());
+        let id = self
+            .endpoint()
+            .map(|e| e.model)
+            .or(life.served_id)
+            .or(life.model.clone());
         crate::routes::model_kind(None, id.as_deref())
     }
 
     /// The companion's chat endpoint, when it serves a chat model.
     pub fn chat(&self) -> Option<Endpoint> {
-        (self.lifecycle().phase == Phase::Serving && self.kind() == "chat").then(|| self.endpoint()).flatten()
+        (self.lifecycle().phase == Phase::Serving && self.kind() == "chat")
+            .then(|| self.endpoint())
+            .flatten()
     }
 
     /// The companion's base URL for `kind` generation, when it serves that kind.
@@ -382,7 +388,16 @@ pub(crate) async fn post_coserve(
     if let Some(reason) = unavailable(&state) {
         return Err(err(StatusCode::CONFLICT, reason));
     }
-    crate::audit::record(&state, "model_switch", &format!("{} + {}", req.chat, req.image.as_deref().unwrap_or("nothing")), "requested");
+    crate::audit::record(
+        &state,
+        "model_switch",
+        &format!(
+            "{} + {}",
+            req.chat,
+            req.image.as_deref().unwrap_or("nothing")
+        ),
+        "requested",
+    );
     let companion = state.companion().expect("checked by unavailable");
     let busy = |p: Phase| matches!(p, Phase::Starting | Phase::Stopping);
     if busy(state.lifecycle().phase) || busy(companion.lifecycle().phase) {
@@ -429,10 +444,23 @@ pub(crate) async fn post_coserve(
     let image_model = match (&req.image, &req.second) {
         (Some(i), None) => check(&image, i, "image")?,
         (None, Some(sec)) => {
-            let both: Vec<Choice> = chat.iter().chain(image.iter()).map(|c| Choice { name: c.name.clone(), ready: c.ready, note: c.note }).collect();
+            let both: Vec<Choice> = chat
+                .iter()
+                .chain(image.iter())
+                .map(|c| Choice {
+                    name: c.name.clone(),
+                    ready: c.ready,
+                    note: c.note,
+                })
+                .collect();
             check(&both, sec, "second")?
         }
-        _ => return Err(err(StatusCode::BAD_REQUEST, "Say what the second card serves: `image` or `second`.")),
+        _ => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "Say what the second card serves: `image` or `second`.",
+            ))
+        }
     };
     if image_model.eq_ignore_ascii_case(&chat_model) {
         return Err(err(StatusCode::BAD_REQUEST, "Pick two different models (one model on both cards is the whole box: start it normally)."));

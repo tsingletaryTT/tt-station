@@ -1175,7 +1175,9 @@ async fn main() -> Result<()> {
         config_dir().join("people.json"),
     ));
     // Who did what to the box, kept on disk (see `audit`).
-    let state = state.with_audit(tt_station_agentd::audit::AuditLog::open(config_dir().join("audit.jsonl")));
+    let state = state.with_audit(tt_station_agentd::audit::AuditLog::open(
+        config_dir().join("audit.jsonl"),
+    ));
     // Scheduled modes (see `schedules`).
     let state = state.with_schedules(tt_station_agentd::schedules::Schedules::open(
         config_dir().join("schedules.json"),
@@ -1458,7 +1460,9 @@ async fn main() -> Result<()> {
                 );
                 tokio::spawn(async move {
                     if let Err(e) = axum_server::bind_rustls(addr, config)
-                        .serve(tls_app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                        .serve(
+                            tls_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                        )
                         .await
                     {
                         eprintln!("tt-station-agentd: HTTPS server stopped: {e}");
@@ -1472,10 +1476,13 @@ async fn main() -> Result<()> {
     // Plain HTTP is for the box itself (the desktop app) and its own Docker
     // apps; anything else on the network is sent to HTTPS (`local_http`).
     let http_app = tt_station_agentd::routes::local_http_app(state);
-    axum::serve(listener, http_app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("agent HTTP server failed")?;
+    axum::serve(
+        listener,
+        http_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("agent HTTP server failed")?;
 
     println!("tt-station-agentd: shutdown signal received, unregistering mDNS and exiting");
 

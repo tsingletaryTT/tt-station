@@ -24,7 +24,12 @@ const HERMES_PLUGINS: &[(&str, &str)] = &[("superpowers", "obra/superpowers")];
 
 fn hermes() -> Option<std::path::PathBuf> {
     let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
-    [home.join(".local/bin/hermes"), home.join(".hermes/hermes-agent/venv/bin/hermes")].into_iter().find(|p| p.is_file())
+    [
+        home.join(".local/bin/hermes"),
+        home.join(".hermes/hermes-agent/venv/bin/hermes"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
 }
 
 fn installed_plugins(bin: &std::path::Path) -> String {
@@ -39,9 +44,15 @@ fn installed_plugins(bin: &std::path::Path) -> String {
 /// `GET /skills`.
 pub(crate) async fn get_skills(State(_state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
     let v = tokio::task::spawn_blocking(|| {
-        let Some(bin) = hermes() else { return json!({ "hermes": false, "in_hermes": [] }) };
+        let Some(bin) = hermes() else {
+            return json!({ "hermes": false, "in_hermes": [] });
+        };
         let list = installed_plugins(&bin);
-        let have: Vec<&str> = HERMES_PLUGINS.iter().filter(|(id, _)| list.contains(id)).map(|(id, _)| *id).collect();
+        let have: Vec<&str> = HERMES_PLUGINS
+            .iter()
+            .filter(|(id, _)| list.contains(id))
+            .map(|(id, _)| *id)
+            .collect();
         json!({ "hermes": true, "in_hermes": have })
     })
     .await
@@ -56,21 +67,56 @@ pub(crate) async fn post_hermes(
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let err = |s: StatusCode, m: String| (s, Json(json!({ "error": m })));
-    let (_, repo) = HERMES_PLUGINS.iter().find(|(i, _)| *i == id).ok_or_else(|| err(StatusCode::NOT_FOUND, "Hermes can't install that pack itself; use the commands shown.".into()))?;
-    let bin = hermes().ok_or_else(|| err(StatusCode::CONFLICT, "Hermes Agent isn't installed on this box. Set it up in Connect → Agents first.".into()))?;
+    let (_, repo) = HERMES_PLUGINS
+        .iter()
+        .find(|(i, _)| *i == id)
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "Hermes can't install that pack itself; use the commands shown.".into(),
+            )
+        })?;
+    let bin = hermes().ok_or_else(|| {
+        err(
+            StatusCode::CONFLICT,
+            "Hermes Agent isn't installed on this box. Set it up in Connect → Agents first.".into(),
+        )
+    })?;
     let repo = repo.to_string();
     let out = tokio::time::timeout(
         Duration::from_secs(300),
-        tokio::task::spawn_blocking(move || Command::new(bin).args(["plugins", "install", &repo, "--enable"]).stdin(Stdio::null()).output()),
+        tokio::task::spawn_blocking(move || {
+            Command::new(bin)
+                .args(["plugins", "install", &repo, "--enable"])
+                .stdin(Stdio::null())
+                .output()
+        }),
     )
     .await
-    .map_err(|_| err(StatusCode::GATEWAY_TIMEOUT, "Installing took too long.".into()))?
+    .map_err(|_| {
+        err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "Installing took too long.".into(),
+        )
+    })?
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !out.status.success() {
-        let said = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-        let last = said.lines().map(str::trim).filter(|l| !l.is_empty()).last().unwrap_or("hermes refused").to_string();
-        return Err(err(StatusCode::BAD_GATEWAY, format!("Hermes couldn't install it: {last}")));
+        let said = String::from_utf8_lossy(&out.stderr).to_string()
+            + &String::from_utf8_lossy(&out.stdout);
+        let last = said
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .last()
+            .unwrap_or("hermes refused")
+            .to_string();
+        return Err(err(
+            StatusCode::BAD_GATEWAY,
+            format!("Hermes couldn't install it: {last}"),
+        ));
     }
-    Ok(Json(json!({ "installed": id, "note": "Restart Hermes (close and open it) to load the new skills." })))
+    Ok(Json(
+        json!({ "installed": id, "note": "Restart Hermes (close and open it) to load the new skills." }),
+    ))
 }

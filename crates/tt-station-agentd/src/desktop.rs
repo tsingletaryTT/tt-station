@@ -639,9 +639,18 @@ pub fn find_files(query: &str) -> Result<Value, String> {
 // ---------------------------------------------------------------------
 
 const STATION_PAGES: &[(&str, &str)] = &[
-    ("home", "/"), ("chat", "/chat"), ("studio", "/studio"), ("transcribe", "/studio#transcribe"),
-    ("models", "/models"), ("bringup", "/bringup"), ("hardware", "/hardware"), ("connect", "/connect"),
-    ("settings", "/settings"), ("research", "/research"), ("news", "/discover"), ("code", "/code"),
+    ("home", "/"),
+    ("chat", "/chat"),
+    ("studio", "/studio"),
+    ("transcribe", "/studio#transcribe"),
+    ("models", "/models"),
+    ("bringup", "/bringup"),
+    ("hardware", "/hardware"),
+    ("connect", "/connect"),
+    ("settings", "/settings"),
+    ("research", "/research"),
+    ("news", "/discover"),
+    ("code", "/code"),
 ];
 
 /// Show a TT Station page: the running app listens on a socket in the
@@ -652,7 +661,9 @@ pub fn open_station(page: &str) -> Result<Value, String> {
         .iter()
         .find(|(p, _)| *p == page)
         .ok_or_else(|| format!("TT Station has no \"{page}\" page"))?;
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
     let sock = runtime.join("tt-station-tori.sock");
     let sent = std::os::unix::net::UnixStream::connect(&sock)
         .and_then(|mut s| s.write_all(format!("nav {route}").as_bytes()))

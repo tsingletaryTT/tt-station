@@ -31,7 +31,9 @@ const SITE: &str = "https://docs.tenstorrent.com/tt-awesome/";
 const FRESH: Duration = Duration::from_secs(30 * 60);
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/root"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/root"))
 }
 
 fn cache_file(state: &AppState) -> PathBuf {
@@ -42,15 +44,29 @@ fn cache_file(state: &AppState) -> PathBuf {
 fn release_of(url: &str) -> Option<(String, String)> {
     let rest = url.strip_prefix("https://github.com/")?;
     let mut parts = rest.splitn(5, '/');
-    let (owner, repo, kind, tag_word, tag) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?, parts.next()?);
-    (kind == "releases" && tag_word == "tag").then(|| (format!("{owner}/{repo}"), tag.replace("%2B", "+")))
+    let (owner, repo, kind, tag_word, tag) = (
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+        parts.next()?,
+    );
+    (kind == "releases" && tag_word == "tag")
+        .then(|| (format!("{owner}/{repo}"), tag.replace("%2B", "+")))
 }
 
 /// `v6.7.0`, `ttkmd-2.11.0`, `6.1.0` → [6, 7, 0]. None if it isn't a version.
 fn version_parts(v: &str) -> Option<Vec<u64>> {
     let start = v.find(|c: char| c.is_ascii_digit())?;
-    let core: String = v[start..].chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-    let parts: Vec<u64> = core.split('.').filter(|p| !p.is_empty()).map(|p| p.parse().ok()).collect::<Option<_>>()?;
+    let core: String = v[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let parts: Vec<u64> = core
+        .split('.')
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()?;
     (!parts.is_empty()).then_some(parts)
 }
 
@@ -68,9 +84,16 @@ fn pip_version(package: &str) -> Option<String> {
     let lib = home().join(".tenstorrent-venv/lib");
     let want = format!("{}-", package.replace('-', "_"));
     for py in std::fs::read_dir(lib).ok()?.flatten() {
-        for e in std::fs::read_dir(py.path().join("site-packages")).into_iter().flatten().flatten() {
+        for e in std::fs::read_dir(py.path().join("site-packages"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let name = e.file_name().to_string_lossy().to_string();
-            if let Some(rest) = name.strip_prefix(&want).and_then(|r| r.strip_suffix(".dist-info")) {
+            if let Some(rest) = name
+                .strip_prefix(&want)
+                .and_then(|r| r.strip_suffix(".dist-info"))
+            {
                 return Some(rest.to_string());
             }
         }
@@ -79,15 +102,27 @@ fn pip_version(package: &str) -> Option<String> {
 }
 
 fn command_version(program: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(program).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let out = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
-    text.split_whitespace().find(|w| version_parts(w).is_some()).map(str::to_string)
+    text.split_whitespace()
+        .find(|w| version_parts(w).is_some())
+        .map(str::to_string)
 }
 
 /// The versions of Tenstorrent tools on this box, by GitHub repo.
 fn installed_versions() -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
-    for (repo, pkg) in [("tenstorrent/tt-smi", "tt-smi"), ("tenstorrent/tt-flash", "tt-flash"), ("tenstorrent/tt-umd", "tt-umd"), ("tenstorrent/tt-tools-common", "tt-tools-common")] {
+    for (repo, pkg) in [
+        ("tenstorrent/tt-smi", "tt-smi"),
+        ("tenstorrent/tt-flash", "tt-flash"),
+        ("tenstorrent/tt-umd", "tt-umd"),
+        ("tenstorrent/tt-tools-common", "tt-tools-common"),
+    ] {
         if let Some(v) = pip_version(pkg) {
             out.push((repo, v));
         }
@@ -107,7 +142,12 @@ fn installed_versions() -> Vec<(&'static str, String)> {
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|e| e.file_name().to_string_lossy().strip_prefix("tt-inference-server-").map(str::to_string))
+        .filter_map(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .strip_prefix("tt-inference-server-")
+                .map(str::to_string)
+        })
         .max_by(|a, b| version_parts(a).cmp(&version_parts(b)));
     if let Some(v) = newest {
         out.push(("tenstorrent/tt-inference-server", v));
@@ -122,7 +162,9 @@ fn unlink(s: &str) -> String {
     while let Some(open) = rest.find('[') {
         let after = &rest[open + 1..];
         let Some(close) = after.find("](") else { break };
-        let Some(end) = after[close + 2..].find(')') else { break };
+        let Some(end) = after[close + 2..].find(')') else {
+            break;
+        };
         out.push_str(&rest[..open]);
         out.push_str(&after[..close]);
         rest = &after[close + 2 + end + 1..];
@@ -151,15 +193,31 @@ fn shape(feed: &Value, versions: &[(&str, String)]) -> Vec<Value> {
         if !url.starts_with("https://") {
             continue; // links open outside the app: https only
         }
-        let tags: Vec<String> = i["tags"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(str::to_string)).collect();
-        let kind = ["release", "entry", "article"].into_iter().find(|k| tags.iter().any(|t| t == k)).unwrap_or("entry");
+        let tags: Vec<String> = i["tags"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| t.as_str().map(str::to_string))
+            .collect();
+        let kind = ["release", "entry", "article"]
+            .into_iter()
+            .find(|k| tags.iter().any(|t| t == k))
+            .unwrap_or("entry");
         let release = (kind == "release").then(|| release_of(&url)).flatten();
         let mine = release.as_ref().and_then(|(repo, tag)| {
-            versions.iter().find(|(r, _)| r.eq_ignore_ascii_case(repo)).map(|(_, v)| (v.clone(), behind(v, tag)))
+            versions
+                .iter()
+                .find(|(r, _)| r.eq_ignore_ascii_case(repo))
+                .map(|(_, v)| (v.clone(), behind(v, tag)))
         });
         let topics: Vec<&String> = tags
             .iter()
-            .filter(|t| !matches!(t.as_str(), "release" | "entry" | "article" | "official" | "community" | "affiliated"))
+            .filter(|t| {
+                !matches!(
+                    t.as_str(),
+                    "release" | "entry" | "article" | "official" | "community" | "affiliated"
+                )
+            })
             .collect();
         items.push(json!({
             "id": i["id"], "url": url, "kind": kind,
@@ -187,7 +245,12 @@ pub(crate) async fn get_discover(State(state): State<AppState>, _auth: BearerAut
             return Json(v);
         }
     }
-    let fetched: Option<Value> = match reqwest::Client::new().get(FEED).timeout(Duration::from_secs(20)).send().await {
+    let fetched: Option<Value> = match reqwest::Client::new()
+        .get(FEED)
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+    {
         Ok(r) if r.status().is_success() => r.json().await.ok(),
         _ => None,
     };
@@ -199,11 +262,21 @@ pub(crate) async fn get_discover(State(state): State<AppState>, _auth: BearerAut
             (Some(f), false)
         }
         // Offline (or the feed is down): the last good copy, marked as such.
-        _ => (std::fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok()), true),
+        _ => (
+            std::fs::read(&file)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok()),
+            true,
+        ),
     };
-    let updated = std::fs::metadata(&file).and_then(|m| m.modified()).ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs());
-    let versions = tokio::task::spawn_blocking(installed_versions).await.unwrap_or_default();
+    let updated = std::fs::metadata(&file)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    let versions = tokio::task::spawn_blocking(installed_versions)
+        .await
+        .unwrap_or_default();
     let v = json!({
         "items": feed.as_ref().map(|f| shape(f, &versions)).unwrap_or_default(),
         "updated": updated, "stale": stale, "available": feed.is_some(),
@@ -225,7 +298,10 @@ mod tests {
             release_of("https://github.com/tenstorrent/tt-smi/releases/tag/v6.7.0"),
             Some(("tenstorrent/tt-smi".into(), "v6.7.0".into()))
         );
-        assert_eq!(release_of("https://github.com/tenstorrent/tt-operator"), None);
+        assert_eq!(
+            release_of("https://github.com/tenstorrent/tt-operator"),
+            None
+        );
     }
 
     #[test]
@@ -252,6 +328,9 @@ mod tests {
         assert_eq!(items[0]["update"], true);
         assert_eq!(items[0]["installed"], "6.1.0");
         assert!(items[0].get("content_html").is_none());
-        assert_eq!(unlink("usage ([#32](https://github.com/x/y/pull/32)) now"), "usage (#32) now");
+        assert_eq!(
+            unlink("usage ([#32](https://github.com/x/y/pull/32)) now"),
+            "usage (#32) now"
+        );
     }
 }

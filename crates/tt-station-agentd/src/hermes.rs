@@ -47,7 +47,11 @@ fn installer_url() -> String {
 
 /// The installer is the one this code pins, or why not.
 fn verify_installer(body: &[u8], want_sha256: &str) -> Result<(), String> {
-    let got: String = ring::digest::digest(&ring::digest::SHA256, body).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    let got: String = ring::digest::digest(&ring::digest::SHA256, body)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     if got.eq_ignore_ascii_case(want_sha256) {
         Ok(())
     } else {
@@ -67,17 +71,31 @@ async fn fetch_installer(dir: &Path) -> Result<PathBuf, (StatusCode, Json<Value>
         .send()
         .await
         .and_then(|r| r.error_for_status())
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Couldn't download the Hermes installer: {e}")))?
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Couldn't download the Hermes installer: {e}"),
+            )
+        })?
         .bytes()
         .await
-        .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("Couldn't download the Hermes installer: {e}")))?;
+        .map_err(|e| {
+            err(
+                StatusCode::BAD_GATEWAY,
+                format!("Couldn't download the Hermes installer: {e}"),
+            )
+        })?;
     verify_installer(&body, INSTALLER_SHA256).map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
     let path = dir.join("install.sh");
     let _ = std::fs::remove_file(&path);
     let write = || -> std::io::Result<()> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
         f.write_all(&body)
     };
     write().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -93,7 +111,9 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) 
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/root"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/root"))
 }
 
 fn hermes_home() -> PathBuf {
@@ -102,13 +122,21 @@ fn hermes_home() -> PathBuf {
 
 /// The `hermes` command, where the installer publishes it.
 fn hermes_bin() -> Option<PathBuf> {
-    [home().join(".local/bin/hermes"), hermes_home().join("bin/hermes"), hermes_home().join("hermes-agent/venv/bin/hermes")]
-        .into_iter()
-        .find(|p| p.is_file())
+    [
+        home().join(".local/bin/hermes"),
+        hermes_home().join("bin/hermes"),
+        hermes_home().join("hermes-agent/venv/bin/hermes"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
 }
 
 fn unit_active(unit: &str) -> bool {
-    Command::new("systemctl").args(["--user", "is-active", "--quiet", unit]).status().map(|s| s.success()).unwrap_or(false)
+    Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", unit])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn work_dir(state: &AppState) -> PathBuf {
@@ -164,25 +192,37 @@ async fn serving(state: &AppState) -> Option<(String, Option<u64>)> {
         .await
         .ok()?;
     let first = &models["data"][0];
-    let id = first["id"].as_str().map(str::to_string).or(life.served_id.clone())?;
+    let id = first["id"]
+        .as_str()
+        .map(str::to_string)
+        .or(life.served_id.clone())?;
     Some((id, first["max_model_len"].as_u64()))
 }
 
 /// The box's own names, for telling whether Hermes already points here.
 fn box_hosts() -> Vec<String> {
-    let name = std::fs::read_to_string("/etc/hostname").unwrap_or_default().trim().to_string();
+    let name = std::fs::read_to_string("/etc/hostname")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     let mut hosts = vec!["127.0.0.1".to_string(), "localhost".into(), "[::1]".into()];
     if !name.is_empty() {
         hosts.extend([name.clone(), format!("{name}.local")]);
     }
-    let ips = Command::new("hostname").arg("-I").output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    let ips = Command::new("hostname")
+        .arg("-I")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
     hosts.extend(ips.split_whitespace().map(str::to_string));
     hosts
 }
 
 /// Does this base URL reach the box's own gateway?
 fn is_box(base: &str, port: u16) -> bool {
-    let rest = base.trim_start_matches("http://").trim_start_matches("https://");
+    let rest = base
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
     let hostport = rest.split('/').next().unwrap_or("");
     let (host, p) = hostport.rsplit_once(':').unwrap_or((hostport, ""));
     p == port.to_string() && box_hosts().iter().any(|h| h.eq_ignore_ascii_case(host))
@@ -213,7 +253,11 @@ fn settings() -> Option<(String, String, String)> {
             }
         }
     }
-    Some((provider.unwrap_or_else(|| "auto".into()), model.unwrap_or_default(), base.unwrap_or_default()))
+    Some((
+        provider.unwrap_or_else(|| "auto".into()),
+        model.unwrap_or_default(),
+        base.unwrap_or_default(),
+    ))
 }
 
 /// Is Hermes set to use this box's models (any of its addresses)?
@@ -267,13 +311,17 @@ pub(crate) async fn get_hermes(State(state): State<AppState>, _auth: BearerAuth)
 /// before it runs (see [`INSTALLER_COMMIT`]).
 ///
 /// Owners only: it runs a downloaded program as the box's account.
-pub(crate) async fn post_install(State(state): State<AppState>, _owner: crate::routes::OwnerAuth) -> Reply {
+pub(crate) async fn post_install(
+    State(state): State<AppState>,
+    _owner: crate::routes::OwnerAuth,
+) -> Reply {
     crate::audit::record(&state, "hermes_install", "hermes", "started");
     if unit_active(INSTALL_UNIT) {
         return Ok(Json(json!({ "installing": true })));
     }
     let dir = work_dir(&state);
-    std::fs::create_dir_all(&dir).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let (log, exit) = (dir.join("install.log"), dir.join("install.exit"));
     let _ = std::fs::write(&log, "");
     let _ = std::fs::remove_file(&exit);
@@ -283,11 +331,18 @@ pub(crate) async fn post_install(State(state): State<AppState>, _owner: crate::r
         installer.display(),
         exit.display()
     );
-    let path = format!("{}:{}", home().join(".local/bin").display(), std::env::var("PATH").unwrap_or_default());
+    let path = format!(
+        "{}:{}",
+        home().join(".local/bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let out = Command::new("systemd-run")
         .args(["--user", "--collect", "--quiet"])
         .arg(format!("--unit={INSTALL_UNIT}"))
-        .arg(format!("--property=StandardOutput=append:{}", log.display()))
+        .arg(format!(
+            "--property=StandardOutput=append:{}",
+            log.display()
+        ))
         .arg(format!("--property=StandardError=append:{}", log.display()))
         .arg(format!("--setenv=PATH={path}"))
         .arg(format!("--setenv=HOME={}", home().display()))
@@ -296,7 +351,10 @@ pub(crate) async fn post_install(State(state): State<AppState>, _owner: crate::r
         .output()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !out.status.success() {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, String::from_utf8_lossy(&out.stderr).trim().to_string()));
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
     }
     Ok(Json(json!({ "installing": true })))
 }
@@ -304,16 +362,30 @@ pub(crate) async fn post_install(State(state): State<AppState>, _owner: crate::r
 /// Hermes's own TT Station app key, as `{id, secret}` (minted once, kept here
 /// so the guide can show it again while the person pastes it into Hermes).
 fn stored_key(state: &AppState) -> Option<(String, String)> {
-    let v: Value = serde_json::from_slice(&std::fs::read(work_dir(state).join("app-key.json")).ok()?).ok()?;
-    let (id, secret) = (v["id"].as_str()?.to_string(), v["secret"].as_str()?.to_string());
+    let v: Value =
+        serde_json::from_slice(&std::fs::read(work_dir(state).join("app-key.json")).ok()?).ok()?;
+    let (id, secret) = (
+        v["id"].as_str()?.to_string(),
+        v["secret"].as_str()?.to_string(),
+    );
     // Revoked in Connect since: forget it.
-    state.app_keys().list().iter().any(|k| k.id == id).then_some((id, secret))
+    state
+        .app_keys()
+        .list()
+        .iter()
+        .any(|k| k.id == id)
+        .then_some((id, secret))
 }
 
 /// Requests the box has had with Hermes's key: more than none means it's connected.
 fn key_requests(state: &AppState) -> Option<u64> {
     let (id, _) = stored_key(state)?;
-    state.app_keys().list().iter().find(|k| k.id == id).map(|k| k.requests)
+    state
+        .app_keys()
+        .list()
+        .iter()
+        .find(|k| k.id == id)
+        .map(|k| k.requests)
 }
 
 /// `POST /hermes/key`: what to paste into Hermes's "Local / custom endpoint":
@@ -323,12 +395,22 @@ pub(crate) async fn post_key(State(state): State<AppState>, _auth: BearerAuth) -
     if let Some((_, secret)) = stored_key(&state) {
         return Ok(Json(json!({ "base_url": base, "api_key": secret })));
     }
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let (summary, secret) = state.app_keys().create("Hermes Agent", now).map_err(|e| err(StatusCode::CONFLICT, e))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (summary, secret) = state
+        .app_keys()
+        .create("Hermes Agent", now)
+        .map_err(|e| err(StatusCode::CONFLICT, e))?;
     let dir = work_dir(&state);
     let _ = std::fs::create_dir_all(&dir);
     let file = dir.join("app-key.json");
-    std::fs::write(&file, json!({ "id": summary.id, "secret": secret }).to_string()).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    std::fs::write(
+        &file,
+        json!({ "id": summary.id, "secret": secret }).to_string(),
+    )
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -340,48 +422,74 @@ pub(crate) async fn post_key(State(state): State<AppState>, _auth: BearerAuth) -
 /// Has `hermes desktop` built its app yet (it builds on first launch)?
 fn desktop_built() -> bool {
     let dir = hermes_home().join("hermes-agent/apps/desktop");
-    ["release", "out", "dist-electron"].iter().any(|d| dir.join(d).is_dir())
+    ["release", "out", "dist-electron"]
+        .iter()
+        .any(|d| dir.join(d).is_dir())
 }
 
 /// Is Hermes Desktop open, however it was started (TT Station, the app menu)?
 fn desktop_running() -> bool {
     let app = hermes_home().join("hermes-agent/apps/desktop");
     let app = app.to_string_lossy();
-    std::fs::read_dir("/proc").into_iter().flatten().flatten().any(|e| {
-        e.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit())
-            && std::fs::read(e.path().join("cmdline")).is_ok_and(|c| {
-                let first = c.split(|b| *b == 0).next().unwrap_or(&[]);
-                let first = String::from_utf8_lossy(first);
-                first.starts_with(app.as_ref()) && first.ends_with("/Hermes")
-            })
-    }) || unit_active(DESKTOP_UNIT)
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .chars()
+                .all(|c| c.is_ascii_digit())
+                && std::fs::read(e.path().join("cmdline")).is_ok_and(|c| {
+                    let first = c.split(|b| *b == 0).next().unwrap_or(&[]);
+                    let first = String::from_utf8_lossy(first);
+                    first.starts_with(app.as_ref()) && first.ends_with("/Hermes")
+                })
+        })
+        || unit_active(DESKTOP_UNIT)
 }
 
 /// `POST /hermes/open`: open Hermes Desktop on the box's screen. Its own
 /// first-run setup takes it from there (TT Station's guide shows what to enter).
 pub(crate) async fn post_open(State(state): State<AppState>, _auth: BearerAuth) -> Reply {
-    let bin = hermes_bin().ok_or_else(|| err(StatusCode::CONFLICT, "Hermes Agent isn't installed yet."))?;
+    let bin = hermes_bin()
+        .ok_or_else(|| err(StatusCode::CONFLICT, "Hermes Agent isn't installed yet."))?;
     if !crate::desktop::has_session() {
-        return Err(err(StatusCode::CONFLICT, "Nobody is signed in to the box's desktop, so there's nowhere to open Hermes."));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Nobody is signed in to the box's desktop, so there's nowhere to open Hermes.",
+        ));
     }
     if desktop_running() {
         // Launching it again, the way its icon does, hands over to the running
         // copy, which restores and focuses its window (Electron's second-instance).
         let id = "com.nousresearch.hermes.desktop";
         let raised = tokio::task::spawn_blocking(move || {
-            crate::scope::command("gtk-launch", &[id]).stdin(Stdio::null()).output().is_ok_and(|o| o.status.success())
+            crate::scope::command("gtk-launch", &[id])
+                .stdin(Stdio::null())
+                .output()
+                .is_ok_and(|o| o.status.success())
         })
         .await
         .unwrap_or(false);
-        return Ok(Json(json!({ "opened": true, "already_open": true, "raised": raised })));
+        return Ok(Json(
+            json!({ "opened": true, "already_open": true, "raised": raised }),
+        ));
     }
     let log = work_dir(&state).join("desktop.log");
     let _ = std::fs::create_dir_all(work_dir(&state));
-    let path = format!("{}:{}", home().join(".local/bin").display(), std::env::var("PATH").unwrap_or_default());
+    let path = format!(
+        "{}:{}",
+        home().join(".local/bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let out = Command::new("systemd-run")
         .args(["--user", "--collect", "--quiet"])
         .arg(format!("--unit={DESKTOP_UNIT}"))
-        .arg(format!("--property=StandardOutput=append:{}", log.display()))
+        .arg(format!(
+            "--property=StandardOutput=append:{}",
+            log.display()
+        ))
         .arg(format!("--property=StandardError=append:{}", log.display()))
         .arg(format!("--setenv=PATH={path}"))
         .arg(&bin)
@@ -390,9 +498,17 @@ pub(crate) async fn post_open(State(state): State<AppState>, _auth: BearerAuth) 
         .output()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !out.status.success() {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't open it: {}", String::from_utf8_lossy(&out.stderr).trim())));
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "couldn't open it: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
     }
-    Ok(Json(json!({ "opened": true, "building": !desktop_built() })))
+    Ok(Json(
+        json!({ "opened": true, "building": !desktop_built() }),
+    ))
 }
 
 #[cfg(test)]
@@ -411,12 +527,22 @@ mod tests {
     fn only_the_pinned_installer_runs() {
         let body = b"#!/usr/bin/env bash\necho hermes\n";
         let sha = "c1f5b5b6a8b0e6b8b6f0e8b9c6d7c9a1f3b8e2a7d0c4b5e6f7a8b9c0d1e2f3a4";
-        let real: String = ring::digest::digest(&ring::digest::SHA256, body).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        let real: String = ring::digest::digest(&ring::digest::SHA256, body)
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert!(verify_installer(body, &real).is_ok());
         assert!(verify_installer(body, &real.to_uppercase()).is_ok());
         let refused = verify_installer(body, sha).unwrap_err();
-        assert!(refused.contains("wasn't run") && refused.contains(&real), "{refused}");
-        assert!(verify_installer(b"#!/usr/bin/env bash\necho hermes!\n", &real).is_err(), "one byte changed");
+        assert!(
+            refused.contains("wasn't run") && refused.contains(&real),
+            "{refused}"
+        );
+        assert!(
+            verify_installer(b"#!/usr/bin/env bash\necho hermes!\n", &real).is_err(),
+            "one byte changed"
+        );
         // The pin itself: a full sha256, and the same commit for the file and the checkout.
         assert_eq!(INSTALLER_SHA256.len(), 64);
         assert!(INSTALLER_SHA256.chars().all(|c| c.is_ascii_hexdigit()));

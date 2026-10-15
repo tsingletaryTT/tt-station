@@ -232,7 +232,10 @@ mod tests {
 
     #[test]
     fn redacted_commands_keep_only_the_executable_name() {
-        assert_eq!(redact_cmd("/usr/bin/python3 -m vllm --api-key sk-secret /home/jane/notes"), "python3");
+        assert_eq!(
+            redact_cmd("/usr/bin/python3 -m vllm --api-key sk-secret /home/jane/notes"),
+            "python3"
+        );
         assert_eq!(redact_cmd("run.py"), "run.py");
         assert_eq!(redact_cmd(""), "");
     }

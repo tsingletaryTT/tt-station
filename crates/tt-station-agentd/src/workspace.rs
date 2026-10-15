@@ -53,11 +53,16 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) 
 }
 
 fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// Bump the tag when DOCKERFILE changes: the next sandbox session builds the new one.
@@ -132,7 +137,11 @@ fn load(state: &AppState, id: &str) -> Option<Session> {
 }
 
 fn save(state: &AppState, s: &Session) {
-    crate::fsio::save_json(&dir(state, &s.id).join("session.json"), s, crate::fsio::PRIVATE);
+    crate::fsio::save_json(
+        &dir(state, &s.id).join("session.json"),
+        s,
+        crate::fsio::PRIVATE,
+    );
 }
 
 /// Changes a session on disk under one lock: two writers (an approval's "Always"
@@ -153,11 +162,19 @@ fn event(state: &AppState, id: &str, mut e: Value) {
     use std::io::Write;
     let path = dir(state, id).join("events.jsonl");
     let mut seqs = SEQ.lock().expect("code");
-    let seq = seqs.entry(id.to_string()).or_insert_with(|| std::fs::read_to_string(&path).map(|t| t.lines().count() as u64).unwrap_or(0));
+    let seq = seqs.entry(id.to_string()).or_insert_with(|| {
+        std::fs::read_to_string(&path)
+            .map(|t| t.lines().count() as u64)
+            .unwrap_or(0)
+    });
     *seq += 1;
     e["seq"] = json!(*seq);
     e["ts"] = json!(now());
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{e}");
     }
 }
@@ -166,7 +183,8 @@ fn event(state: &AppState, id: &str, mut e: Value) {
 /// byte offset just past its line)`, a few per session (more than one app may
 /// be watching). A poll that carries on from one reads only what was added
 /// since, not the whole file.
-static READ_TO: LazyLock<Mutex<HashMap<String, Vec<ReadTo>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static READ_TO: LazyLock<Mutex<HashMap<String, Vec<ReadTo>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 /// `(seq of the last event read, byte offset just past its line)`.
 type ReadTo = (u64, u64);
 const READ_POINTS: usize = 4;
@@ -175,10 +193,22 @@ fn events_after(state: &AppState, id: &str, after: u64) -> Vec<Value> {
     let path = dir(state, id).join("events.jsonl");
     // Carry on from the latest place a read ended at or before `after`.
     let from = (after > 0)
-        .then(|| READ_TO.lock().expect("code").get(id).and_then(|points| points.iter().filter(|(seq, _)| *seq <= after).max().copied()))
+        .then(|| {
+            READ_TO.lock().expect("code").get(id).and_then(|points| {
+                points
+                    .iter()
+                    .filter(|(seq, _)| *seq <= after)
+                    .max()
+                    .copied()
+            })
+        })
         .flatten();
-    let read = from.and_then(|(seq, offset)| events_from(&path, seq, offset, after)).or_else(|| events_from(&path, 0, 0, after));
-    let Some((events, end)) = read else { return vec![] };
+    let read = from
+        .and_then(|(seq, offset)| events_from(&path, seq, offset, after))
+        .or_else(|| events_from(&path, 0, 0, after));
+    let Some((events, end)) = read else {
+        return vec![];
+    };
     if let Some(end) = end {
         let mut all = READ_TO.lock().expect("code");
         let points = all.entry(id.to_string()).or_default();
@@ -198,7 +228,12 @@ fn events_after(state: &AppState, id: &str, after: u64) -> Vec<Value> {
 /// (`None`: nothing there). Only whole lines are read: one being written is
 /// left for the next read. `None` when the file isn't what the offset expects
 /// (rewritten, say).
-fn events_from(path: &Path, seq: u64, offset: u64, after: u64) -> Option<(Vec<Value>, Option<ReadTo>)> {
+fn events_from(
+    path: &Path,
+    seq: u64,
+    offset: u64,
+    after: u64,
+) -> Option<(Vec<Value>, Option<ReadTo>)> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -214,11 +249,18 @@ fn events_from(path: &Path, seq: u64, offset: u64, after: u64) -> Option<(Vec<Va
     let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
     let text = String::from_utf8_lossy(&bytes[..whole]);
     let lines: Vec<&str> = text.lines().collect();
-    let seq_of = |l: &str| serde_json::from_str::<Value>(l).ok().and_then(|e| e["seq"].as_u64());
+    let seq_of = |l: &str| {
+        serde_json::from_str::<Value>(l)
+            .ok()
+            .and_then(|e| e["seq"].as_u64())
+    };
     if offset > 0 && lines.first().is_some_and(|l| seq_of(l) != Some(seq + 1)) {
         return None;
     }
-    let end = lines.last().and_then(|l| seq_of(l)).map(|last| (last, offset + whole as u64));
+    let end = lines
+        .last()
+        .and_then(|l| seq_of(l))
+        .map(|last| (last, offset + whole as u64));
     // Lines up to `after` aren't wanted: skip them unread.
     let events = lines
         .iter()
@@ -280,7 +322,10 @@ impl Proc {
     /// The questions waiting for the person, kept on disk for the same reason.
     fn save_pending(&self) {
         let pending: HashMap<String, (String, Value)> = self.pending.lock().expect("code").clone();
-        let _ = std::fs::write(self.home.join("holder.pending.json"), serde_json::to_vec(&pending).unwrap_or_default());
+        let _ = std::fs::write(
+            self.home.join("holder.pending.json"),
+            serde_json::to_vec(&pending).unwrap_or_default(),
+        );
     }
 }
 
@@ -291,7 +336,8 @@ fn holder_unit(id: &str) -> String {
 
 const HOLDER_PY: &str = include_str!("code_holder.py");
 
-static PROCS: LazyLock<Mutex<HashMap<String, Arc<Proc>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static PROCS: LazyLock<Mutex<HashMap<String, Arc<Proc>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn proc_of(id: &str) -> Option<Arc<Proc>> {
     PROCS.lock().expect("code").get(id).cloned()
@@ -306,46 +352,80 @@ fn forget_proc(id: &str, p: &Arc<Proc>) {
 }
 
 /// Sessions whose Claude Code is being started right now (busy, for the window).
-static STARTING: LazyLock<Mutex<std::collections::HashSet<String>>> = LazyLock::new(|| Mutex::new(Default::default()));
+static STARTING: LazyLock<Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(Default::default()));
 
 /// One start at a time per session: two messages at once must not start two Claude Codes.
 fn start_lock(id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-    LOCKS.lock().expect("code").entry(id.to_string()).or_default().clone()
+    static LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    LOCKS
+        .lock()
+        .expect("code")
+        .entry(id.to_string())
+        .or_default()
+        .clone()
 }
 
 /// Claude Code's program, and the package folder it lives in (mounted into the sandbox).
 fn claude_bin() -> Option<(PathBuf, PathBuf)> {
-    let candidates = [home().join(".local/bin/claude"), PathBuf::from("/usr/local/bin/claude"), PathBuf::from("/usr/bin/claude")];
-    let real = candidates.iter().find(|p| p.exists()).and_then(|p| std::fs::canonicalize(p).ok())?;
-    let pkg = real.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(|| real.parent().unwrap_or(Path::new("/")).to_path_buf());
+    let candidates = [
+        home().join(".local/bin/claude"),
+        PathBuf::from("/usr/local/bin/claude"),
+        PathBuf::from("/usr/bin/claude"),
+    ];
+    let real = candidates
+        .iter()
+        .find(|p| p.exists())
+        .and_then(|p| std::fs::canonicalize(p).ok())?;
+    let pkg = real
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| real.parent().unwrap_or(Path::new("/")).to_path_buf());
     Some((real, pkg))
 }
 
 /// The box's own Node.js (for JavaScript and TypeScript projects), mounted read-only into the sandbox.
 fn node_home() -> Option<PathBuf> {
-    [home().join(".local/share/node/current"), PathBuf::from("/usr/local/lib/nodejs")]
-        .iter()
-        .filter_map(|p| std::fs::canonicalize(p).ok())
-        .find(|p| p.join("bin/node").is_file())
+    [
+        home().join(".local/share/node/current"),
+        PathBuf::from("/usr/local/lib/nodejs"),
+    ]
+    .iter()
+    .filter_map(|p| std::fs::canonicalize(p).ok())
+    .find(|p| p.join("bin/node").is_file())
 }
 
 fn docker_ok(args: &[&str]) -> bool {
-    std::process::Command::new("docker").args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    std::process::Command::new("docker")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// (image built, gate running: this version, for this port)
 fn sandbox_ready(port: u16) -> (bool, bool) {
-    let image = docker_ok(&["image", "inspect", IMAGE]) && docker_ok(&["volume", "inspect", CARGO_VOLUME]);
+    let image =
+        docker_ok(&["image", "inspect", IMAGE]) && docker_ok(&["volume", "inspect", CARGO_VOLUME]);
     let want = format!("true {GATE_VERSION}:{port}");
     let gate = std::process::Command::new("docker")
-        .args(["inspect", "-f", "{{.State.Running}} {{index .Config.Labels \"tt-station.gate\"}}", GATE])
+        .args([
+            "inspect",
+            "-f",
+            "{{.State.Running}} {{index .Config.Labels \"tt-station.gate\"}}",
+            GATE,
+        ])
         .output()
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == want);
     (image, gate)
 }
 
-static SETUP: LazyLock<Mutex<Option<(String, Option<String>)>>> = LazyLock::new(|| Mutex::new(None));
+static SETUP: LazyLock<Mutex<Option<(String, Option<String>)>>> =
+    LazyLock::new(|| Mutex::new(None));
 /// One setup at a time, whoever asks (the Set up button, a first message).
 static SETTING_UP: AtomicBool = AtomicBool::new(false);
 
@@ -353,16 +433,28 @@ static SETTING_UP: AtomicBool = AtomicBool::new(false);
 /// recorded for the Code window either way, and the next try starts afresh.
 async fn ensure_sandbox(port: u16) -> Result<(), String> {
     loop {
-        if SETTING_UP.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-            let r = tokio::task::spawn_blocking(move || setup_sandbox(port)).await.map_err(|e| e.to_string()).and_then(|r| r);
-            *SETUP.lock().expect("code") = r.as_ref().err().map(|e| ("Failed".to_string(), Some(e.clone())));
+        if SETTING_UP
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let r = tokio::task::spawn_blocking(move || setup_sandbox(port))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+            *SETUP.lock().expect("code") = r
+                .as_ref()
+                .err()
+                .map(|e| ("Failed".to_string(), Some(e.clone())));
             SETTING_UP.store(false, Ordering::SeqCst);
             return r;
         }
         // Someone else is setting it up: wait for them, then see how it went.
         tokio::time::sleep(Duration::from_secs(2)).await;
         if !SETTING_UP.load(Ordering::SeqCst) {
-            if tokio::task::spawn_blocking(move || sandbox_ready(port)).await.is_ok_and(|(i, g)| i && g) {
+            if tokio::task::spawn_blocking(move || sandbox_ready(port))
+                .await
+                .is_ok_and(|(i, g)| i && g)
+            {
                 return Ok(());
             }
             if let Some((_, Some(e))) = SETUP.lock().expect("code").clone() {
@@ -391,20 +483,44 @@ fn setup_sandbox(port: u16) -> Result<(), String> {
         }
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
         if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("the build failed").to_string());
+            return Err(String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("the build failed")
+                .to_string());
         }
     }
     // The Rust build volume, owned by the sandbox's user.
     if !docker_ok(&["volume", "inspect", CARGO_VOLUME]) {
         if !docker_ok(&["volume", "create", CARGO_VOLUME])
-            || !docker_ok(&["run", "--rm", "--user", "0", "-v", &format!("{CARGO_VOLUME}:/v"), IMAGE, "chown", "1000:1000", "/v"])
+            || !docker_ok(&[
+                "run",
+                "--rm",
+                "--user",
+                "0",
+                "-v",
+                &format!("{CARGO_VOLUME}:/v"),
+                IMAGE,
+                "chown",
+                "1000:1000",
+                "/v",
+            ])
         {
             return Err("couldn't make the sandbox's build volume".into());
         }
     }
     step("Starting the gate");
     // The sandbox's network has no address on the box and no way out: only the gate is on it.
-    if !docker_ok(&["network", "inspect", NETWORK]) && !docker_ok(&["network", "create", "--internal", "-o", "com.docker.network.bridge.inhibit_ipv4=true", NETWORK]) {
+    if !docker_ok(&["network", "inspect", NETWORK])
+        && !docker_ok(&[
+            "network",
+            "create",
+            "--internal",
+            "-o",
+            "com.docker.network.bridge.inhibit_ipv4=true",
+            NETWORK,
+        ])
+    {
         return Err("couldn't make the sandbox's network".into());
     }
     let _ = docker_ok(&["network", "create", "tt-apps"]);
@@ -413,14 +529,43 @@ fn setup_sandbox(port: u16) -> Result<(), String> {
         let _ = docker_ok(&["rm", "-f", GATE]);
         let label = format!("tt-station.gate={GATE_VERSION}:{port}");
         let target = format!("TARGET=http://host.docker.internal:{port}");
-        if !docker_ok(&["pull", "-q", "node:22-alpine"]) && !docker_ok(&["image", "inspect", "node:22-alpine"]) {
+        if !docker_ok(&["pull", "-q", "node:22-alpine"])
+            && !docker_ok(&["image", "inspect", "node:22-alpine"])
+        {
             return Err("couldn't download the gate's image".into());
         }
         let ok = docker_ok(&[
-            "run", "-d", "--name", GATE, "--restart", "unless-stopped", "--label", "tt-station.service=code-gate", "--label", &label,
-            "--network", "tt-apps", "--add-host", "host.docker.internal:host-gateway", "--read-only", "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges", "--memory", "256m", "--pids-limit", "64", "--user", "node",
-            "-e", &target, "node:22-alpine", "node", "-e", GATE_JS,
+            "run",
+            "-d",
+            "--name",
+            GATE,
+            "--restart",
+            "unless-stopped",
+            "--label",
+            "tt-station.service=code-gate",
+            "--label",
+            &label,
+            "--network",
+            "tt-apps",
+            "--add-host",
+            "host.docker.internal:host-gateway",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--memory",
+            "256m",
+            "--pids-limit",
+            "64",
+            "--user",
+            "node",
+            "-e",
+            &target,
+            "node:22-alpine",
+            "node",
+            "-e",
+            GATE_JS,
         ]) && docker_ok(&["network", "connect", "--alias", "box", NETWORK, GATE]);
         if !ok {
             return Err("couldn't start the gate".into());
@@ -461,7 +606,12 @@ pub(crate) fn has_notebooks(root: &Path) -> bool {
             if name.ends_with(".ipynb") {
                 return true;
             }
-            if depth < 4 && !name.starts_with('.') && !["node_modules", "target", "venv", ".venv", "dist", "build"].contains(&name.as_ref()) && e.file_type().is_ok_and(|t| t.is_dir()) {
+            if depth < 4
+                && !name.starts_with('.')
+                && !["node_modules", "target", "venv", ".venv", "dist", "build"]
+                    .contains(&name.as_ref())
+                && e.file_type().is_ok_and(|t| t.is_dir())
+            {
                 stack.push((e.path(), depth + 1));
             }
         }
@@ -479,8 +629,15 @@ fn mode(policy: &str, sandbox: bool) -> &'static str {
 
 /// Start Claude Code for a session (resuming its conversation if it had one).
 async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
-    let (bin, pkg) = claude_bin().ok_or("Code's agent engine isn't installed on the box (npm i -g @anthropic-ai/claude-code).")?;
-    let key = tokio::task::spawn_blocking({ let st = state.clone(); move || crate::coding::key(&st) }).await.map_err(|e| e.to_string())??;
+    let (bin, pkg) = claude_bin().ok_or(
+        "Code's agent engine isn't installed on the box (npm i -g @anthropic-ai/claude-code).",
+    )?;
+    let key = tokio::task::spawn_blocking({
+        let st = state.clone();
+        move || crate::coding::key(&st)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     let cfg = dir(state, &s.id).join("claude");
     std::fs::create_dir_all(&cfg).map_err(|e| e.to_string())?;
     let cj = cfg.join(".claude.json");
@@ -492,9 +649,24 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
     // small, and a real task fills it faster than it can summarize (Claude Code
     // stops: "Autocompact is thrashing"). See `coding::code_window`.
     let context = crate::coding::check(state).await["context"].as_u64();
-    let (tuning, tuned_env) = crate::coding::claude_tuning(state, context, Path::new(&s.folder), !s.sandbox);
-    let mut args: Vec<String> = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-        "--permission-prompt-tool", "stdio", "--permission-mode", mode(&s.policy, s.sandbox)].iter().map(|a| a.to_string()).collect();
+    let (tuning, tuned_env) =
+        crate::coding::claude_tuning(state, context, Path::new(&s.folder), !s.sandbox);
+    let mut args: Vec<String> = [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--permission-prompt-tool",
+        "stdio",
+        "--permission-mode",
+        mode(&s.policy, s.sandbox),
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect();
     args.push("--append-system-prompt".into());
     args.push(setting(s.sandbox));
     args.extend(tuning);
@@ -506,52 +678,136 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
     envs.extend([
         ("ANTHROPIC_AUTH_TOKEN".into(), key),
         // So the box knows which session a model request is for (its activity line).
-        ("ANTHROPIC_CUSTOM_HEADERS".into(), format!("x-tt-session: {}", s.id)),
-        ("MAX_THINKING_TOKENS".into(), if s.think { "6000".into() } else { "0".into() }),
+        (
+            "ANTHROPIC_CUSTOM_HEADERS".into(),
+            format!("x-tt-session: {}", s.id),
+        ),
+        (
+            "MAX_THINKING_TOKENS".into(),
+            if s.think { "6000".into() } else { "0".into() },
+        ),
         // No __pycache__ folders showing up as "changes" after every test run.
         ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
     ]);
     let container = format!("tt-code-{}", s.id);
     let port = state.ctrl_port();
     let cmd = if s.sandbox {
-        let (image, gate) = tokio::task::spawn_blocking(move || sandbox_ready(port)).await.unwrap_or((false, false));
+        let (image, gate) = tokio::task::spawn_blocking(move || sandbox_ready(port))
+            .await
+            .unwrap_or((false, false));
         if !image || !gate {
             ensure_sandbox(port).await?;
         }
-        let _ = tokio::process::Command::new("docker").args(["rm", "-f", &container]).output().await;
-        let inner_bin = format!("/opt/claude-code/{}", bin.strip_prefix(&pkg).map(|p| p.display().to_string()).unwrap_or_else(|_| "claude".into()));
+        let _ = tokio::process::Command::new("docker")
+            .args(["rm", "-f", &container])
+            .output()
+            .await;
+        let inner_bin = format!(
+            "/opt/claude-code/{}",
+            bin.strip_prefix(&pkg)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "claude".into())
+        );
         let mut c = tokio::process::Command::new("docker");
-        c.args(["run", "-i", "--rm", "--name", &container, "--label", "tt-station.service=code",
-            "--network", NETWORK, "--read-only", "--tmpfs", "/tmp:size=2g", "--tmpfs", "/home/coder:uid=1000,gid=1000,size=1g",
-            "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512", "--memory", "8g", "--cpus", "8",
-            "-v", &format!("{}:/work", s.folder),
-            "-v", &format!("{}:/opt/claude-code:ro", pkg.display()),
-            "-v", &format!("{}:/home/coder/.tt-claude", cfg.display()),
-            "-e", "CLAUDE_CONFIG_DIR=/home/coder/.tt-claude", "-e", "ANTHROPIC_BASE_URL=http://box:8765", "-e", "HOME=/home/coder"]);
+        c.args([
+            "run",
+            "-i",
+            "--rm",
+            "--name",
+            &container,
+            "--label",
+            "tt-station.service=code",
+            "--network",
+            NETWORK,
+            "--read-only",
+            "--tmpfs",
+            "/tmp:size=2g",
+            "--tmpfs",
+            "/home/coder:uid=1000,gid=1000,size=1g",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "512",
+            "--memory",
+            "8g",
+            "--cpus",
+            "8",
+            "-v",
+            &format!("{}:/work", s.folder),
+            "-v",
+            &format!("{}:/opt/claude-code:ro", pkg.display()),
+            "-v",
+            &format!("{}:/home/coder/.tt-claude", cfg.display()),
+            "-e",
+            "CLAUDE_CONFIG_DIR=/home/coder/.tt-claude",
+            "-e",
+            "ANTHROPIC_BASE_URL=http://box:8765",
+            "-e",
+            "HOME=/home/coder",
+        ]);
         // The project's git directories go in read-only: the model can read
         // history, but can't change how git behaves when the box runs it
         // (crate::safegit). Commits are made from Changes, outside.
         let read_only = git_dirs(Path::new(&s.folder));
         for (rel, _) in &read_only {
-            c.arg("-v").arg(format!("{}:/work/{rel}:ro", Path::new(&s.folder).join(rel).display()));
+            c.arg("-v").arg(format!(
+                "{}:/work/{rel}:ro",
+                Path::new(&s.folder).join(rel).display()
+            ));
         }
         let ro: Vec<PathBuf> = read_only.into_iter().filter_map(|(_, d)| d).collect();
-        std::fs::write(dir(state, &s.id).join(GIT_RO), serde_json::to_vec(&ro).unwrap_or_default()).map_err(|e| e.to_string())?;
+        std::fs::write(
+            dir(state, &s.id).join(GIT_RO),
+            serde_json::to_vec(&ro).unwrap_or_default(),
+        )
+        .map_err(|e| e.to_string())?;
         // The box's Rust toolchain and downloaded crates, read-only, offline; builds
         // go to their own volume.
         let (rustup, cargo) = (home().join(".rustup"), home().join(".cargo"));
         if rustup.is_dir() && cargo.join("bin").is_dir() {
-            c.args(["-v", &format!("{}:/opt/rustup:ro", rustup.display()), "-v", &format!("{}:/opt/cargo-bin:ro", cargo.join("bin").display())]);
+            c.args([
+                "-v",
+                &format!("{}:/opt/rustup:ro", rustup.display()),
+                "-v",
+                &format!("{}:/opt/cargo-bin:ro", cargo.join("bin").display()),
+            ]);
             if cargo.join("registry").is_dir() {
-                c.args(["-v", &format!("{}:/home/coder/.cargo/registry:ro", cargo.join("registry").display())]);
+                c.args([
+                    "-v",
+                    &format!(
+                        "{}:/home/coder/.cargo/registry:ro",
+                        cargo.join("registry").display()
+                    ),
+                ]);
             }
-            c.args(["-v", &format!("{CARGO_VOLUME}:/cargo-target"),
-                "-e", "RUSTUP_HOME=/opt/rustup", "-e", "CARGO_HOME=/home/coder/.cargo", "-e", "CARGO_TARGET_DIR=/cargo-target", "-e", "CARGO_NET_OFFLINE=true",
-                "-e", "PATH=/opt/cargo-bin:/usr/local/bin:/usr/bin:/bin"]);
+            c.args([
+                "-v",
+                &format!("{CARGO_VOLUME}:/cargo-target"),
+                "-e",
+                "RUSTUP_HOME=/opt/rustup",
+                "-e",
+                "CARGO_HOME=/home/coder/.cargo",
+                "-e",
+                "CARGO_TARGET_DIR=/cargo-target",
+                "-e",
+                "CARGO_NET_OFFLINE=true",
+                "-e",
+                "PATH=/opt/cargo-bin:/usr/local/bin:/usr/bin:/bin",
+            ]);
         }
         if let Some(node) = node_home() {
-            c.args(["-v", &format!("{}:/opt/node:ro", node.display()),
-                "-e", "PATH=/opt/cargo-bin:/opt/node/bin:/usr/local/bin:/usr/bin:/bin", "-e", "npm_config_cache=/tmp/npm-cache", "-e", "npm_config_offline=true"]);
+            c.args([
+                "-v",
+                &format!("{}:/opt/node:ro", node.display()),
+                "-e",
+                "PATH=/opt/cargo-bin:/opt/node/bin:/usr/local/bin:/usr/bin:/bin",
+                "-e",
+                "npm_config_cache=/tmp/npm-cache",
+                "-e",
+                "npm_config_offline=true",
+            ]);
         }
         // Names only: docker takes each value from its own environment (the
         // holder's spec), so the model key never shows in a process list.
@@ -565,7 +821,10 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
         c.args(&args)
             .current_dir(&s.folder)
             .env("CLAUDE_CONFIG_DIR", &cfg)
-            .env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{}", state.ctrl_port()));
+            .env(
+                "ANTHROPIC_BASE_URL",
+                format!("http://127.0.0.1:{}", state.ctrl_port()),
+            );
         for (k, v) in &envs {
             c.env(k, v);
         }
@@ -577,8 +836,19 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
     let home = dir(state, &s.id);
     let unit = holder_unit(&s.id);
     let std_cmd = cmd.as_std();
-    let argv: Vec<String> = std::iter::once(std_cmd.get_program()).chain(std_cmd.get_args()).map(|a| a.to_string_lossy().to_string()).collect();
-    let env: HashMap<String, String> = std_cmd.get_envs().filter_map(|(k, v)| Some((k.to_string_lossy().to_string(), v?.to_string_lossy().to_string()))).collect();
+    let argv: Vec<String> = std::iter::once(std_cmd.get_program())
+        .chain(std_cmd.get_args())
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
+    let env: HashMap<String, String> = std_cmd
+        .get_envs()
+        .filter_map(|(k, v)| {
+            Some((
+                k.to_string_lossy().to_string(),
+                v?.to_string_lossy().to_string(),
+            ))
+        })
+        .collect();
     let cwd = std_cmd.get_current_dir().map(|d| d.display().to_string());
     let socket = home.join("holder.sock");
     let spec = json!({
@@ -588,8 +858,15 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&spec_path).map_err(|e| e.to_string())?;
-        f.write_all(spec.to_string().as_bytes()).map_err(|e| e.to_string())?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&spec_path)
+            .map_err(|e| e.to_string())?;
+        f.write_all(spec.to_string().as_bytes())
+            .map_err(|e| e.to_string())?;
     }
     let script = root(state).join("code_holder.py");
     std::fs::write(&script, HOLDER_PY).map_err(|e| e.to_string())?;
@@ -597,10 +874,24 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
     for f in ["holder.busy", "holder.pending.json", "holder.seen"] {
         let _ = std::fs::remove_file(home.join(f));
     }
-    let _ = tokio::process::Command::new("systemctl").args(["--user", "stop", &unit]).output().await;
-    let path = format!("{}:{}", home_dir_bin(), std::env::var("PATH").unwrap_or_default());
+    let _ = tokio::process::Command::new("systemctl")
+        .args(["--user", "stop", &unit])
+        .output()
+        .await;
+    let path = format!(
+        "{}:{}",
+        home_dir_bin(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let out = tokio::process::Command::new("systemd-run")
-        .args(["--user", "--collect", "--quiet", &format!("--unit={unit}"), &format!("--setenv=PATH={path}"), "python3"])
+        .args([
+            "--user",
+            "--collect",
+            "--quiet",
+            &format!("--unit={unit}"),
+            &format!("--setenv=PATH={path}"),
+            "python3",
+        ])
         .arg(&script)
         .arg(&spec_path)
         .stdin(Stdio::null())
@@ -608,7 +899,10 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
         .await
         .map_err(|e| format!("couldn't start the agent: {e}"))?;
     if !out.status.success() {
-        return Err(format!("couldn't start the agent: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "couldn't start the agent: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     for _ in 0..100 {
         if socket.exists() {
@@ -616,7 +910,17 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    attach(state, &s.id, unit, s.sandbox.then(|| container.clone()), s.think, 0, false, HashMap::new()).await
+    attach(
+        state,
+        &s.id,
+        unit,
+        s.sandbox.then(|| container.clone()),
+        s.think,
+        0,
+        false,
+        HashMap::new(),
+    )
+    .await
 }
 
 fn home_dir_bin() -> String {
@@ -625,12 +929,25 @@ fn home_dir_bin() -> String {
 
 /// Connects to a session's holder and reads Claude Code from line `seen` on.
 #[allow(clippy::too_many_arguments)]
-async fn attach(state: &AppState, id: &str, unit: String, container: Option<String>, think: bool, seen: u64, busy: bool,
-    pending: HashMap<String, (String, Value)>) -> Result<Arc<Proc>, String> {
+async fn attach(
+    state: &AppState,
+    id: &str,
+    unit: String,
+    container: Option<String>,
+    think: bool,
+    seen: u64,
+    busy: bool,
+    pending: HashMap<String, (String, Value)>,
+) -> Result<Arc<Proc>, String> {
     let home = dir(state, id);
-    let stream = tokio::net::UnixStream::connect(home.join("holder.sock")).await.map_err(|e| format!("couldn't reach the agent's holder: {e}"))?;
+    let stream = tokio::net::UnixStream::connect(home.join("holder.sock"))
+        .await
+        .map_err(|e| format!("couldn't reach the agent's holder: {e}"))?;
     let (read, mut write) = stream.into_split();
-    write.write_all(format!("ATTACH {seen}\n").as_bytes()).await.map_err(|e| e.to_string())?;
+    write
+        .write_all(format!("ATTACH {seen}\n").as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
     let proc = Arc::new(Proc {
         stdin: tokio::sync::Mutex::new(write),
         pending: Mutex::new(pending),
@@ -646,7 +963,10 @@ async fn attach(state: &AppState, id: &str, unit: String, container: Option<Stri
         buf: Mutex::new(Streamed::default()),
         interrupted: AtomicBool::new(false),
     });
-    PROCS.lock().expect("code").insert(id.to_string(), proc.clone());
+    PROCS
+        .lock()
+        .expect("code")
+        .insert(id.to_string(), proc.clone());
     let st = state.clone();
     let id = id.to_string();
     let p = proc.clone();
@@ -671,16 +991,34 @@ async fn attach(state: &AppState, id: &str, unit: String, container: Option<Stri
         if !p.inited.load(Ordering::SeqCst) {
             // It never started: say why (from what it printed), not "send a message to carry on".
             let why = std::fs::read_to_string(dir(&st, &id).join("stderr.log")).unwrap_or_default();
-            let why = why.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("it exited before saying anything").to_string();
+            let why = why
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("it exited before saying anything")
+                .to_string();
             if why.contains("No conversation found") {
                 update(&st, &id, |s| s.claude_session = None);
-                event(&st, &id, json!({ "kind": "error", "text": "Its earlier conversation couldn't be found, so the next message starts a fresh one in this project." }));
+                event(
+                    &st,
+                    &id,
+                    json!({ "kind": "error", "text": "Its earlier conversation couldn't be found, so the next message starts a fresh one in this project." }),
+                );
             } else {
-                event(&st, &id, json!({ "kind": "error", "text": format!("The agent didn't start: {why}") }));
+                event(
+                    &st,
+                    &id,
+                    json!({ "kind": "error", "text": format!("The agent didn't start: {why}") }),
+                );
             }
             p.set_busy(false);
         } else if p.take_busy() {
-            event(&st, &id, json!({ "kind": "error", "text": "The agent stopped in the middle of the turn. Send a message to carry on." }));
+            event(
+                &st,
+                &id,
+                json!({ "kind": "error", "text": "The agent stopped in the middle of the turn. Send a message to carry on." }),
+            );
         }
         event(&st, &id, json!({ "kind": "idle" }));
     });
@@ -706,7 +1044,11 @@ fn flush(state: &AppState, id: &str, p: &Proc) {
 fn stream(state: &AppState, id: &str, p: &Proc, text: &str, thinking: bool) {
     let due = {
         let mut b = p.buf.lock().expect("code");
-        if thinking { b.thinking.push_str(text) } else { b.text.push_str(text) }
+        if thinking {
+            b.thinking.push_str(text)
+        } else {
+            b.text.push_str(text)
+        }
         b.at.is_none_or(|t| t.elapsed() >= Duration::from_millis(150))
     };
     if due {
@@ -717,10 +1059,20 @@ fn stream(state: &AppState, id: &str, p: &Proc, text: &str, thinking: bool) {
 /// Requests nobody can answer any more (the turn ended, it was stopped, Claude
 /// Code withdrew them or exited): no longer waiting, in the window and the list.
 fn expire_pending(state: &AppState, id: &str, p: &Proc) {
-    let gone: Vec<String> = p.pending.lock().expect("code").drain().map(|(k, _)| k).collect();
+    let gone: Vec<String> = p
+        .pending
+        .lock()
+        .expect("code")
+        .drain()
+        .map(|(k, _)| k)
+        .collect();
     p.save_pending();
     for rid in gone {
-        event(state, id, json!({ "kind": "decided", "request_id": rid, "allow": false, "always": false, "expired": true }));
+        event(
+            state,
+            id,
+            json!({ "kind": "decided", "request_id": rid, "allow": false, "always": false, "expired": true }),
+        );
     }
 }
 
@@ -747,22 +1099,31 @@ async fn running(state: &AppState, id: &str) -> Result<Arc<Proc>, String> {
 
 async fn send(p: &Proc, v: &Value) -> Result<(), String> {
     let mut w = p.stdin.lock().await;
-    w.write_all(format!("{v}\n").as_bytes()).await.map_err(|e| e.to_string())?;
+    w.write_all(format!("{v}\n").as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
     w.flush().await.map_err(|e| e.to_string())
 }
 
 /// Shell syntax that runs more than the command it starts with (a chain, a pipe,
 /// a substitution, a redirect): such a command is only ever allowed exactly.
 fn compound(cmd: &str) -> bool {
-    ["&&", "||", ";", "|", "$(", "`", ">", "<", "\n", "&"].iter().any(|t| cmd.contains(t))
+    ["&&", "||", ";", "|", "$(", "`", ">", "<", "\n", "&"]
+        .iter()
+        .any(|t| cmd.contains(t))
 }
 
 /// Commands whose name alone is safe to always allow: they read, list or test.
 /// (Not `find`: `-delete` and `-exec` change things.)
-const READ_ONLY: &[&str] = &["ls", "cat", "head", "tail", "wc", "grep", "rg", "tree", "pwd", "echo", "pytest", "diff", "stat", "file", "which", "du", "sort", "uniq", "cut", "nl"];
+const READ_ONLY: &[&str] = &[
+    "ls", "cat", "head", "tail", "wc", "grep", "rg", "tree", "pwd", "echo", "pytest", "diff",
+    "stat", "file", "which", "du", "sort", "uniq", "cut", "nl",
+];
 /// Tools whose first word means nothing alone: always allowed by their first two
 /// words (`npm test`, `cargo build`, `git status`), or three for `python3 -m pytest`.
-const BY_SUBCOMMAND: &[&str] = &["npm", "npx", "cargo", "make", "go", "git", "uv", "pnpm", "yarn"];
+const BY_SUBCOMMAND: &[&str] = &[
+    "npm", "npx", "cargo", "make", "go", "git", "uv", "pnpm", "yarn",
+];
 
 /// What "Always" remembers for a tool use, or None when it can't be remembered
 /// safely. Edits are one rule. A command is remembered by its name when that's
@@ -799,7 +1160,9 @@ fn always_rule(tool: &str, input: &Value) -> Option<String> {
 /// Does one of the session's "Always" rules cover this tool use?
 fn allowed_by(rules: &[String], tool: &str, input: &Value) -> bool {
     match tool {
-        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => rules.iter().any(|r| r == "edits" || r == tool),
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => {
+            rules.iter().any(|r| r == "edits" || r == tool)
+        }
         "Bash" => {
             let cmd = input["command"].as_str().unwrap_or("").trim();
             rules.iter().any(|r| {
@@ -807,8 +1170,12 @@ fn allowed_by(rules: &[String], tool: &str, input: &Value) -> bool {
                     return exact == cmd;
                 }
                 // A prefix rule never covers a chained or redirected command.
-                let Some(prefix) = r.strip_prefix("Bash:") else { return false };
-                !compound(cmd) && !prefix.is_empty() && (cmd == prefix || cmd.starts_with(&format!("{prefix} ")))
+                let Some(prefix) = r.strip_prefix("Bash:") else {
+                    return false;
+                };
+                !compound(cmd)
+                    && !prefix.is_empty()
+                    && (cmd == prefix || cmd.starts_with(&format!("{prefix} ")))
             })
         }
         other => rules.iter().any(|r| r == other),
@@ -820,14 +1187,25 @@ fn edited_file(s: &Session, tool: &str, input: &Value) -> Option<String> {
     if !matches!(tool, "Edit" | "MultiEdit" | "Write" | "NotebookEdit") {
         return None;
     }
-    let path = input["file_path"].as_str().or_else(|| input["notebook_path"].as_str())?;
-    let root = if s.sandbox { "/work/".to_string() } else { format!("{}/", s.folder.trim_end_matches('/')) };
+    let path = input["file_path"]
+        .as_str()
+        .or_else(|| input["notebook_path"].as_str())?;
+    let root = if s.sandbox {
+        "/work/".to_string()
+    } else {
+        format!("{}/", s.folder.trim_end_matches('/'))
+    };
     let rel = path.strip_prefix(&root)?.trim_start_matches('/');
     (!rel.is_empty() && !rel.split('/').any(|c| c == "..")).then(|| rel.to_string())
 }
 
 fn short_tool(name: &str, input: &Value) -> String {
-    let file = |k: &str| input[k].as_str().map(|p| p.trim_start_matches("/work/").to_string()).unwrap_or_default();
+    let file = |k: &str| {
+        input[k]
+            .as_str()
+            .map(|p| p.trim_start_matches("/work/").to_string())
+            .unwrap_or_default()
+    };
     match name {
         "Bash" => format!("Run `{}`", input["command"].as_str().unwrap_or("")),
         "Edit" | "MultiEdit" => format!("Edit {}", file("file_path")),
@@ -843,7 +1221,10 @@ async fn handle(state: &AppState, id: &str, p: &Arc<Proc>, m: Value) {
     // events stay in the order they happened.
     let streamed = m["type"] == "stream_event"
         && m["event"]["type"] == "content_block_delta"
-        && matches!(m["event"]["delta"]["type"].as_str(), Some("text_delta" | "thinking_delta"));
+        && matches!(
+            m["event"]["delta"]["type"].as_str(),
+            Some("text_delta" | "thinking_delta")
+        );
     if !streamed {
         flush(state, id, p);
     }
@@ -857,15 +1238,33 @@ async fn handle(state: &AppState, id: &str, p: &Arc<Proc>, m: Value) {
             }
         }
         Some("system") if m["subtype"] == "api_retry" => {
-            let (n, of) = (m["attempt"].as_u64().unwrap_or(0), m["max_retries"].as_u64().unwrap_or(0));
-            let why = m["error_status"].as_u64().map(|c| format!(" (it answered {c})")).unwrap_or_default();
-            event(state, id, json!({ "kind": "notice", "text": format!("The model isn't answering{why}; trying again ({n} of {of})…") }));
+            let (n, of) = (
+                m["attempt"].as_u64().unwrap_or(0),
+                m["max_retries"].as_u64().unwrap_or(0),
+            );
+            let why = m["error_status"]
+                .as_u64()
+                .map(|c| format!(" (it answered {c})"))
+                .unwrap_or_default();
+            event(
+                state,
+                id,
+                json!({ "kind": "notice", "text": format!("The model isn't answering{why}; trying again ({n} of {of})…") }),
+            );
         }
         Some("system") if m["subtype"] == "compact_boundary" => {
-            event(state, id, json!({ "kind": "notice", "text": "The conversation got long, so it summarized what came before to make room." }));
+            event(
+                state,
+                id,
+                json!({ "kind": "notice", "text": "The conversation got long, so it summarized what came before to make room." }),
+            );
         }
         Some("system") if m["subtype"] == "permission_denied" => {
-            event(state, id, json!({ "kind": "notice", "text": format!("Not allowed: {}", m["tool_name"].as_str().unwrap_or("a tool")) }));
+            event(
+                state,
+                id,
+                json!({ "kind": "notice", "text": format!("Not allowed: {}", m["tool_name"].as_str().unwrap_or("a tool")) }),
+            );
         }
         Some("stream_event") => {
             let e = &m["event"];
@@ -880,7 +1279,11 @@ async fn handle(state: &AppState, id: &str, p: &Arc<Proc>, m: Value) {
                 }
             }
             if e["type"] == "content_block_start" && e["content_block"]["type"] == "tool_use" {
-                event(state, id, json!({ "kind": "preparing", "name": e["content_block"]["name"] }));
+                event(
+                    state,
+                    id,
+                    json!({ "kind": "preparing", "name": e["content_block"]["name"] }),
+                );
             }
             if e["type"] == "message_start" {
                 // Busy whenever Claude Code is working, however the turn began (a queued
@@ -892,12 +1295,23 @@ async fn handle(state: &AppState, id: &str, p: &Arc<Proc>, m: Value) {
         Some("assistant") => {
             for c in m["message"]["content"].as_array().into_iter().flatten() {
                 match c["type"].as_str() {
-                    Some("text") if !c["text"].as_str().unwrap_or("").trim().is_empty() => event(state, id, json!({ "kind": "text", "text": c["text"] })),
+                    Some("text") if !c["text"].as_str().unwrap_or("").trim().is_empty() => {
+                        event(state, id, json!({ "kind": "text", "text": c["text"] }))
+                    }
                     Some("tool_use") => {
-                        if let (Some(tid), Some(file)) = (c["id"].as_str(), load(state, id).and_then(|s| edited_file(&s, c["name"].as_str().unwrap_or(""), &c["input"]))) {
+                        if let (Some(tid), Some(file)) = (
+                            c["id"].as_str(),
+                            load(state, id).and_then(|s| {
+                                edited_file(&s, c["name"].as_str().unwrap_or(""), &c["input"])
+                            }),
+                        ) {
                             p.edits.lock().expect("code").insert(tid.to_string(), file);
                         }
-                        event(state, id, json!({ "kind": "tool", "id": c["id"], "name": c["name"], "input": c["input"] }))
+                        event(
+                            state,
+                            id,
+                            json!({ "kind": "tool", "id": c["id"], "name": c["name"], "input": c["input"] }),
+                        )
                     }
                     _ => {}
                 }
@@ -908,18 +1322,32 @@ async fn handle(state: &AppState, id: &str, p: &Arc<Proc>, m: Value) {
                 if c["type"] == "tool_result" {
                     let text = match &c["content"] {
                         Value::String(s) => s.clone(),
-                        Value::Array(a) => a.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n"),
+                        Value::Array(a) => a
+                            .iter()
+                            .filter_map(|b| b["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
                         _ => String::new(),
                     };
-                    let text: String = if text.len() > 20_000 { format!("{}\n[…cut]", text.chars().take(20_000).collect::<String>()) } else { text };
-                    let file = c["tool_use_id"].as_str().and_then(|t| p.edits.lock().expect("code").remove(t));
+                    let text: String = if text.len() > 20_000 {
+                        format!("{}\n[…cut]", text.chars().take(20_000).collect::<String>())
+                    } else {
+                        text
+                    };
+                    let file = c["tool_use_id"]
+                        .as_str()
+                        .and_then(|t| p.edits.lock().expect("code").remove(t));
                     if let Some(file) = file.filter(|_| c["is_error"] != true) {
                         let mut turn = p.turn.lock().expect("code");
                         if !turn.contains(&file) {
                             turn.push(file);
                         }
                     }
-                    event(state, id, json!({ "kind": "tool_result", "id": c["tool_use_id"], "output": text, "is_error": c["is_error"] == true }));
+                    event(
+                        state,
+                        id,
+                        json!({ "kind": "tool_result", "id": c["tool_use_id"], "output": text, "is_error": c["is_error"] == true }),
+                    );
                 }
             }
         }
@@ -932,13 +1360,27 @@ async fn handle(state: &AppState, id: &str, p: &Arc<Proc>, m: Value) {
                 let _ = send(p, &json!({ "type": "control_response", "response": { "subtype": "success", "request_id": rid, "response": { "behavior": "allow", "updatedInput": input } } })).await;
                 return;
             }
-            p.pending.lock().expect("code").insert(rid.clone(), (tool.clone(), input.clone()));
+            p.pending
+                .lock()
+                .expect("code")
+                .insert(rid.clone(), (tool.clone(), input.clone()));
             p.save_pending();
-            event(state, id, json!({ "kind": "approval", "request_id": rid, "tool": tool, "input": input, "summary": short_tool(&tool, &input),
-                "rule": always_rule(&tool, &input) }));
+            event(
+                state,
+                id,
+                json!({ "kind": "approval", "request_id": rid, "tool": tool, "input": input, "summary": short_tool(&tool, &input),
+                "rule": always_rule(&tool, &input) }),
+            );
             let folder = load(state, id).map(|s| s.title).unwrap_or_default();
             let approval = json!({ "approval": { "id": format!("code:{id}:{rid}"), "kind": "code", "session": id, "request_id": rid, "summary": short_tool(&tool, &input), "can_always": always_rule(&tool, &input).is_some() } });
-            state.notifier().emit_with(crate::notify::Draft { kind: "coding", title: format!("TT Station needs your OK in {folder}"), body: short_tool(&tool, &input) }, Some(approval));
+            state.notifier().emit_with(
+                crate::notify::Draft {
+                    kind: "coding",
+                    title: format!("TT Station needs your OK in {folder}"),
+                    body: short_tool(&tool, &input),
+                },
+                Some(approval),
+            );
         }
         // Claude Code withdrew a question (the turn moved on): nobody needs to answer it.
         Some("control_cancel_request") => {
@@ -946,7 +1388,11 @@ async fn handle(state: &AppState, id: &str, p: &Arc<Proc>, m: Value) {
                 let gone = p.pending.lock().expect("code").remove(rid).is_some();
                 p.save_pending();
                 if gone {
-                    event(state, id, json!({ "kind": "decided", "request_id": rid, "allow": false, "always": false, "expired": true }));
+                    event(
+                        state,
+                        id,
+                        json!({ "kind": "decided", "request_id": rid, "allow": false, "always": false, "expired": true }),
+                    );
                 }
             }
         }
@@ -973,21 +1419,40 @@ async fn handle(state: &AppState, id: &str, p: &Arc<Proc>, m: Value) {
                     Some("error_during_execution") => "Something went wrong while it was working.".into(),
                     _ => String::new(),
                 });
-            event(state, id, json!({ "kind": "done", "ok": ok, "stopped": stopped && !ok,
+            event(
+                state,
+                id,
+                json!({ "kind": "done", "ok": ok, "stopped": stopped && !ok,
                 "duration_ms": m["duration_ms"], "turns": m["num_turns"], "files": files,
                 "input_tokens": m["usage"]["input_tokens"], "output_tokens": m["usage"]["output_tokens"], "text": why,
-                "denied": m["permission_denials"].as_array().map_or(0, Vec::len) }));
+                "denied": m["permission_denials"].as_array().map_or(0, Vec::len) }),
+            );
             if let Some(s) = update(state, id, |s| s.last = now()) {
                 // What this turn edited; failing that (a change made with a shell
                 // command), whatever git sees as changed.
-                let n = if files.is_empty() { crate::safegit::changed_files(Path::new(&s.folder), reach(state, &s).as_ref()).len() } else { files.len() };
+                let n = if files.is_empty() {
+                    crate::safegit::changed_files(Path::new(&s.folder), reach(state, &s).as_ref())
+                        .len()
+                } else {
+                    files.len()
+                };
                 let body = match files.as_slice() {
                     [one] => format!("Edited {one}. Review it in TT Station → Code."),
-                    [] if n > 0 => format!("{n} changed file{} to review in TT Station → Code.", if n == 1 { "" } else { "s" }),
+                    [] if n > 0 => format!(
+                        "{n} changed file{} to review in TT Station → Code.",
+                        if n == 1 { "" } else { "s" }
+                    ),
                     [] => "Done; no files changed.".into(),
-                    many => format!("Edited {} files. Review them in TT Station → Code.", many.len()),
+                    many => format!(
+                        "Edited {} files. Review them in TT Station → Code.",
+                        many.len()
+                    ),
                 };
-                state.notifier().emit(crate::notify::Draft { kind: "coding", title: format!("TT Station finished in {}", s.title), body });
+                state.notifier().emit(crate::notify::Draft {
+                    kind: "coding",
+                    title: format!("TT Station finished in {}", s.title),
+                    body,
+                });
             }
         }
         _ => {}
@@ -999,36 +1464,78 @@ async fn handle(state: &AppState, id: &str, p: &Arc<Proc>, m: Value) {
 /// question still waits). Sandboxes with no holder are leftovers, removed.
 pub async fn resume(state: AppState) {
     let mut kept: Vec<String> = Vec::new();
-    for e in std::fs::read_dir(root(&state)).into_iter().flatten().flatten() {
+    for e in std::fs::read_dir(root(&state))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         let id = e.file_name().to_string_lossy().to_string();
         let Some(s) = load(&state, &id) else { continue };
         let unit = holder_unit(&id);
-        let live = tokio::process::Command::new("systemctl").args(["--user", "is-active", "--quiet", &unit]).status().await.is_ok_and(|x| x.success());
+        let live = tokio::process::Command::new("systemctl")
+            .args(["--user", "is-active", "--quiet", &unit])
+            .status()
+            .await
+            .is_ok_and(|x| x.success());
         if !live || !e.path().join("holder.sock").exists() {
             continue;
         }
         let read = |f: &str| std::fs::read_to_string(e.path().join(f)).unwrap_or_default();
         let seen: u64 = read("holder.seen").trim().parse().unwrap_or(0);
         let busy = read("holder.busy").trim() == "1";
-        let pending: HashMap<String, (String, Value)> = serde_json::from_str(&read("holder.pending.json")).unwrap_or_default();
+        let pending: HashMap<String, (String, Value)> =
+            serde_json::from_str(&read("holder.pending.json")).unwrap_or_default();
         let container = s.sandbox.then(|| format!("tt-code-{id}"));
-        match attach(&state, &id, unit, container.clone(), s.think, seen, busy, pending).await {
+        match attach(
+            &state,
+            &id,
+            unit,
+            container.clone(),
+            s.think,
+            seen,
+            busy,
+            pending,
+        )
+        .await
+        {
             Ok(_) => {
-                eprintln!("tt-station-agentd: code: picked session {id} back up (line {seen}{})", if busy { ", mid-turn" } else { "" });
+                eprintln!(
+                    "tt-station-agentd: code: picked session {id} back up (line {seen}{})",
+                    if busy { ", mid-turn" } else { "" }
+                );
                 kept.extend(container);
             }
-            Err(err) => eprintln!("tt-station-agentd: code: couldn't pick session {id} back up: {err}"),
+            Err(err) => {
+                eprintln!("tt-station-agentd: code: couldn't pick session {id} back up: {err}")
+            }
         }
     }
     let ids = tokio::process::Command::new("docker")
-        .args(["ps", "-a", "--filter", "label=tt-station.service=code", "--format", "{{.Names}}"])
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            "label=tt-station.service=code",
+            "--format",
+            "{{.Names}}",
+        ])
         .output()
         .await
-        .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().map(str::to_string).collect::<Vec<_>>())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     let orphans: Vec<String> = ids.into_iter().filter(|n| !kept.contains(n)).collect();
     if !orphans.is_empty() {
-        let _ = tokio::process::Command::new("docker").arg("rm").arg("-f").args(&orphans).output().await;
+        let _ = tokio::process::Command::new("docker")
+            .arg("rm")
+            .arg("-f")
+            .args(&orphans)
+            .output()
+            .await;
     }
 }
 
@@ -1036,12 +1543,21 @@ pub async fn resume(state: AppState) {
 
 /// Whether any Code session is in the middle of a turn.
 pub(crate) fn any_busy() -> bool {
-    PROCS.lock().expect("code").values().any(|p| p.busy.load(Ordering::SeqCst))
+    PROCS
+        .lock()
+        .expect("code")
+        .values()
+        .any(|p| p.busy.load(Ordering::SeqCst))
 }
 
 /// Every question a Code session is waiting on the person for (`GET /approvals`).
 pub(crate) fn pending_approvals(state: &AppState) -> Vec<Value> {
-    let procs: Vec<(String, Arc<Proc>)> = PROCS.lock().expect("code").iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let procs: Vec<(String, Arc<Proc>)> = PROCS
+        .lock()
+        .expect("code")
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let mut out = Vec::new();
     for (id, p) in procs {
         let title = load(state, &id).map(|s| s.title).unwrap_or_default();
@@ -1073,12 +1589,21 @@ pub(crate) async fn get_code(State(state): State<AppState>, _auth: BearerAuth) -
     let st = state.clone();
     let port = state.ctrl_port();
     let (sessions, sandbox) = tokio::task::spawn_blocking(move || {
-        let mut v: Vec<Session> = std::fs::read_dir(root(&st)).into_iter().flatten().flatten()
-            .filter_map(|e| load(&st, &e.file_name().to_string_lossy())).collect();
+        let mut v: Vec<Session> = std::fs::read_dir(root(&st))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| load(&st, &e.file_name().to_string_lossy()))
+            .collect();
         v.sort_by(|a, b| b.last.max(b.created).cmp(&a.last.max(a.created)));
         let (image, gate) = sandbox_ready(port);
-        (v.iter().map(|s| describe(&st, s)).collect::<Vec<_>>(), json!({ "image": image, "gate": gate }))
-    }).await.unwrap_or_default();
+        (
+            v.iter().map(|s| describe(&st, s)).collect::<Vec<_>>(),
+            json!({ "image": image, "gate": gate }),
+        )
+    })
+    .await
+    .unwrap_or_default();
     let setup = SETUP.lock().expect("code").clone();
     Json(json!({
         "sessions": sessions, "check": check, "claude": claude_bin().is_some(), "home": home(),
@@ -1116,24 +1641,32 @@ const GIT_RO: &str = "git-ro.json";
 /// The project's `.git` (directory or file), or each of its projects' when it's
 /// a folder of projects: relative path, and the directory's real path when it is one.
 fn git_dirs(folder: &Path) -> Vec<(String, Option<PathBuf>)> {
-    let mut v: Vec<String> = projects_inside(folder).into_iter().map(|p| format!("{p}/.git")).collect();
+    let mut v: Vec<String> = projects_inside(folder)
+        .into_iter()
+        .map(|p| format!("{p}/.git"))
+        .collect();
     if folder.join(".git").exists() {
         v = vec![".git".into()];
     }
     // Can't be mounted (crate::coding::allowed_folder).
     v.retain(|r| !r.contains([':', ',', '\n']));
-    v.into_iter().map(|r| {
-        let p = folder.join(&r);
-        let d = p.is_dir().then(|| std::fs::canonicalize(&p).ok()).flatten();
-        (r, d)
-    }).collect()
+    v.into_iter()
+        .map(|r| {
+            let p = folder.join(&r);
+            let d = p.is_dir().then(|| std::fs::canonicalize(&p).ok()).flatten();
+            (r, d)
+        })
+        .collect()
 }
 
 /// What a sandboxed session's model can write, for the git run here (crate::safegit).
 fn reach(state: &AppState, s: &Session) -> Option<crate::safegit::Reach> {
     s.sandbox.then(|| crate::safegit::Reach {
         folder: PathBuf::from(&s.folder),
-        read_only: std::fs::read(dir(state, &s.id).join(GIT_RO)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default(),
+        read_only: std::fs::read(dir(state, &s.id).join(GIT_RO))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -1142,7 +1675,10 @@ fn projects_inside(folder: &Path) -> Vec<String> {
     if folder.join(".git").exists() {
         return vec![];
     }
-    let mut v: Vec<String> = std::fs::read_dir(folder).into_iter().flatten().flatten()
+    let mut v: Vec<String> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
         .filter(|e| e.path().join(".git").exists())
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
@@ -1155,28 +1691,58 @@ fn yes() -> bool {
 }
 
 /// `POST /code/sessions`.
-pub(crate) async fn post_session(State(state): State<AppState>, _auth: BearerAuth, Json(b): Json<NewSession>) -> Reply {
-    let folder = crate::coding::allowed_folder(&b.folder).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+pub(crate) async fn post_session(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    Json(b): Json<NewSession>,
+) -> Reply {
+    let folder =
+        crate::coding::allowed_folder(&b.folder).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let policy = b.policy.unwrap_or_else(|| "ask".into());
     if !["ask", "edits", "auto"].contains(&policy.as_str()) {
-        return Err(err(StatusCode::BAD_REQUEST, "Pick how much it may do without asking."));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Pick how much it may do without asking.",
+        ));
     }
     if policy == "auto" && !b.sandbox {
         return Err(err(StatusCode::BAD_REQUEST, "\"Don't ask\" is only for the sandbox: on the box itself it always asks before commands."));
     }
     let inside = projects_inside(&folder);
     if inside.len() > 1 {
-        return Err((StatusCode::CONFLICT, Json(json!({
-            "error": format!("That folder holds {} projects ({}). Pick one of them: the agent works much better (and faster) in one project.", inside.len(), inside.iter().take(5).cloned().collect::<Vec<_>>().join(", ")),
-            "projects": inside.iter().map(|n| folder.join(n).display().to_string()).collect::<Vec<_>>(),
-        }))));
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!("That folder holds {} projects ({}). Pick one of them: the agent works much better (and faster) in one project.", inside.len(), inside.iter().take(5).cloned().collect::<Vec<_>>().join(", ")),
+                "projects": inside.iter().map(|n| folder.join(n).display().to_string()).collect::<Vec<_>>(),
+            })),
+        ));
     }
     let id = format!("{}-{}", now(), &crate::pairing::issue_pair_id()[..6]);
-    std::fs::create_dir_all(dir(&state, &id)).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let title = folder.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "project".into());
-    let s = Session { id: id.clone(), folder: folder.display().to_string(), title, created: now(), sandbox: b.sandbox, policy, claude_session: None, last: now(), always: vec![], think: b.think };
+    std::fs::create_dir_all(dir(&state, &id))
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let title = folder
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".into());
+    let s = Session {
+        id: id.clone(),
+        folder: folder.display().to_string(),
+        title,
+        created: now(),
+        sandbox: b.sandbox,
+        policy,
+        claude_session: None,
+        last: now(),
+        always: vec![],
+        think: b.think,
+    };
     save(&state, &s);
-    event(&state, &id, json!({ "kind": "start", "sandbox": s.sandbox, "folder": s.folder }));
+    event(
+        &state,
+        &id,
+        json!({ "kind": "start", "sandbox": s.sandbox, "folder": s.folder }),
+    );
     Ok(Json(json!({ "session": describe(&state, &s) })))
 }
 
@@ -1187,7 +1753,12 @@ pub struct After {
 }
 
 /// `GET /code/sessions/{id}?after=N`.
-pub(crate) async fn get_session(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>, Query(q): Query<After>) -> Reply {
+pub(crate) async fn get_session(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+    Query(q): Query<After>,
+) -> Reply {
     if !valid_id(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such session."));
     }
@@ -1218,14 +1789,24 @@ pub struct Message {
 }
 
 /// `POST /code/sessions/{id}/message`.
-pub(crate) async fn post_message(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>, Json(b): Json<Message>) -> Reply {
-    let s = load(&state, &id).filter(|_| valid_id(&id)).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
+pub(crate) async fn post_message(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+    Json(b): Json<Message>,
+) -> Reply {
+    let s = load(&state, &id)
+        .filter(|_| valid_id(&id))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
     let text = b.text.trim().to_string();
     if text.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "Say what to do."));
     }
     if state.endpoint().is_none() {
-        return Err(err(StatusCode::CONFLICT, "No model is serving. Start one in Models first."));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "No model is serving. Start one in Models first.",
+        ));
     }
     // Running already: straight to it.
     if let Some(p) = proc_of(&id).filter(|p| p.think == s.think || p.busy.load(Ordering::SeqCst)) {
@@ -1235,7 +1816,11 @@ pub(crate) async fn post_message(State(state): State<AppState>, _auth: BearerAut
                 let rid = crate::pairing::issue_pair_id();
                 let _ = send(&p, &json!({ "type": "control_request", "request_id": rid, "request": { "subtype": "interrupt" } })).await;
                 expire_pending(&state, &id, &p);
-                event(&state, &id, json!({ "kind": "notice", "text": "Stopping…", "interrupt": true }));
+                event(
+                    &state,
+                    &id,
+                    json!({ "kind": "notice", "text": "Stopping…", "interrupt": true }),
+                );
             }
             for _ in 0..150 {
                 if !p.busy.load(Ordering::SeqCst) {
@@ -1247,9 +1832,18 @@ pub(crate) async fn post_message(State(state): State<AppState>, _auth: BearerAut
         // Mid-turn, Claude Code reads it at its next step, inside the running turn
         // (it doesn't wait for the turn to end): the window shows it there.
         let mid_turn = p.busy.load(Ordering::SeqCst);
-        event(&state, &id, json!({ "kind": "user", "text": text, "mid_turn": mid_turn }));
+        event(
+            &state,
+            &id,
+            json!({ "kind": "user", "text": text, "mid_turn": mid_turn }),
+        );
         p.set_busy(true);
-        if let Err(e) = send(&p, &json!({ "type": "user", "message": { "role": "user", "content": text } })).await {
+        if let Err(e) = send(
+            &p,
+            &json!({ "type": "user", "message": { "role": "user", "content": text } }),
+        )
+        .await
+        {
             // It had just exited: start it again with this message.
             forget_proc(&id, &p);
             start_with(state.clone(), id.clone(), text, s.sandbox);
@@ -1271,8 +1865,15 @@ fn start_with(state: AppState, id: String, text: String, sandbox: bool) {
     tokio::spawn(async move {
         if sandbox && !SETTING_UP.load(Ordering::SeqCst) {
             let port = state.ctrl_port();
-            if !tokio::task::spawn_blocking(move || sandbox_ready(port).0).await.unwrap_or(true) {
-                event(&state, &id, json!({ "kind": "notice", "text": "Setting up the sandbox the first time (a one-time download of about 370 MB)…" }));
+            if !tokio::task::spawn_blocking(move || sandbox_ready(port).0)
+                .await
+                .unwrap_or(true)
+            {
+                event(
+                    &state,
+                    &id,
+                    json!({ "kind": "notice", "text": "Setting up the sandbox the first time (a one-time download of about 370 MB)…" }),
+                );
             }
         }
         let started = running(&state, &id).await;
@@ -1280,14 +1881,27 @@ fn start_with(state: AppState, id: String, text: String, sandbox: bool) {
         match started {
             Ok(p) => {
                 p.set_busy(true);
-                if let Err(e) = send(&p, &json!({ "type": "user", "message": { "role": "user", "content": text } })).await {
+                if let Err(e) = send(
+                    &p,
+                    &json!({ "type": "user", "message": { "role": "user", "content": text } }),
+                )
+                .await
+                {
                     p.set_busy(false);
-                    event(&state, &id, json!({ "kind": "error", "text": format!("Couldn't give it your message: {e}") }));
+                    event(
+                        &state,
+                        &id,
+                        json!({ "kind": "error", "text": format!("Couldn't give it your message: {e}") }),
+                    );
                     event(&state, &id, json!({ "kind": "idle" }));
                 }
             }
             Err(e) => {
-                event(&state, &id, json!({ "kind": "error", "text": format!("Couldn't start the agent: {e}") }));
+                event(
+                    &state,
+                    &id,
+                    json!({ "kind": "error", "text": format!("Couldn't start the agent: {e}") }),
+                );
                 event(&state, &id, json!({ "kind": "idle" }));
             }
         }
@@ -1303,11 +1917,18 @@ pub struct Approve {
 }
 
 /// `POST /code/sessions/{id}/approve`.
-pub(crate) async fn post_approve(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>, Json(b): Json<Approve>) -> Reply {
-    let p = proc_of(&id).ok_or_else(|| err(StatusCode::CONFLICT, "That request isn't waiting any more."))?;
+pub(crate) async fn post_approve(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+    Json(b): Json<Approve>,
+) -> Reply {
+    let p = proc_of(&id)
+        .ok_or_else(|| err(StatusCode::CONFLICT, "That request isn't waiting any more."))?;
     let taken = p.pending.lock().expect("code").remove(&b.request_id);
     p.save_pending();
-    let (tool, input) = taken.ok_or_else(|| err(StatusCode::CONFLICT, "That request isn't waiting any more."))?;
+    let (tool, input) =
+        taken.ok_or_else(|| err(StatusCode::CONFLICT, "That request isn't waiting any more."))?;
     let response = if b.allow {
         json!({ "behavior": "allow", "updatedInput": input })
     } else {
@@ -1322,13 +1943,22 @@ pub(crate) async fn post_approve(State(state): State<AppState>, _auth: BearerAut
             }
         });
     }
-    event(&state, &id, json!({ "kind": "decided", "request_id": b.request_id, "allow": b.allow, "always": rule.is_some() }));
+    event(
+        &state,
+        &id,
+        json!({ "kind": "decided", "request_id": b.request_id, "allow": b.allow, "always": rule.is_some() }),
+    );
     Ok(Json(json!({ "ok": true })))
 }
 
 /// `POST /code/sessions/{id}/interrupt`: stop the current turn.
-pub(crate) async fn post_interrupt(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
-    let p = proc_of(&id).ok_or_else(|| err(StatusCode::CONFLICT, "It isn't working on anything."))?;
+pub(crate) async fn post_interrupt(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
+    let p =
+        proc_of(&id).ok_or_else(|| err(StatusCode::CONFLICT, "It isn't working on anything."))?;
     if !p.busy.load(Ordering::SeqCst) {
         return Ok(Json(json!({ "ok": true, "idle": true })));
     }
@@ -1339,19 +1969,33 @@ pub(crate) async fn post_interrupt(State(state): State<AppState>, _auth: BearerA
     let rid = crate::pairing::issue_pair_id();
     send(&p, &json!({ "type": "control_request", "request_id": rid, "request": { "subtype": "interrupt" } })).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     expire_pending(&state, &id, &p);
-    event(&state, &id, json!({ "kind": "notice", "text": "Stopping…", "interrupt": true }));
+    event(
+        &state,
+        &id,
+        json!({ "kind": "notice", "text": "Stopping…", "interrupt": true }),
+    );
     Ok(Json(json!({ "ok": true })))
 }
 
 fn kill(p: &Proc) {
     if let Some(c) = &p.container {
-        let _ = std::process::Command::new("docker").args(["rm", "-f", c]).stdin(Stdio::null()).output();
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", c])
+            .stdin(Stdio::null())
+            .output();
     }
-    let _ = std::process::Command::new("systemctl").args(["--user", "stop", &p.unit]).stdin(Stdio::null()).output();
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "stop", &p.unit])
+        .stdin(Stdio::null())
+        .output();
 }
 
 /// `POST /code/sessions/{id}/stop`: end Claude Code for this session (the conversation is kept).
-pub(crate) async fn post_stop(State(_state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
+pub(crate) async fn post_stop(
+    State(_state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
     if let Some(p) = proc_of(&id) {
         forget_proc(&id, &p);
         tokio::task::spawn_blocking(move || kill(&p)).await.ok();
@@ -1360,7 +2004,11 @@ pub(crate) async fn post_stop(State(_state): State<AppState>, _auth: BearerAuth,
 }
 
 /// `DELETE /code/sessions/{id}`: forget a session (the project's files stay).
-pub(crate) async fn delete_session(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
+pub(crate) async fn delete_session(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
     if !valid_id(&id) || load(&state, &id).is_none() {
         return Err(err(StatusCode::NOT_FOUND, "No such session."));
     }
@@ -1374,13 +2022,23 @@ pub(crate) async fn delete_session(State(state): State<AppState>, _auth: BearerA
 }
 
 /// Git in the session's project, or a folder in it: see crate::safegit.
-fn git(reach: Option<&crate::safegit::Reach>, folder: &str, args: &[&str]) -> Result<String, String> {
+fn git(
+    reach: Option<&crate::safegit::Reach>,
+    folder: &str,
+    args: &[&str],
+) -> Result<String, String> {
     crate::safegit::git(Path::new(folder), reach, args)
 }
 
 /// `GET /code/sessions/{id}/changes`.
-pub(crate) async fn get_changes(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
-    let s = load(&state, &id).filter(|_| valid_id(&id)).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
+pub(crate) async fn get_changes(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
+    let s = load(&state, &id)
+        .filter(|_| valid_id(&id))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
     let events = dir(&state, &id).join("events.jsonl");
     let r = reach(&state, &s);
     let v = tokio::task::spawn_blocking(move || {
@@ -1417,15 +2075,32 @@ fn edited_changes(r: Option<&crate::safegit::Reach>, s: &Session, events: &Path)
     let mut diff = String::new();
     for rel in &edited_in(s, events) {
         let path = root.join(rel);
-        let Some(dir) = path.parent().map(|d| d.display().to_string()) else { continue };
+        let Some(dir) = path.parent().map(|d| d.display().to_string()) else {
+            continue;
+        };
         let abs = path.display().to_string();
         let status = if !path.exists() {
             "D".to_string()
         } else {
-            match git(r, &dir, &["status", "--porcelain", "--ignore-submodules=all", "--", &abs]) {
+            match git(
+                r,
+                &dir,
+                &[
+                    "status",
+                    "--porcelain",
+                    "--ignore-submodules=all",
+                    "--",
+                    &abs,
+                ],
+            ) {
                 // Committed since, or edited back to how it was.
                 Ok(st) if st.trim().is_empty() => continue,
-                Ok(st) => st.trim().split_whitespace().next().unwrap_or("M").to_string(),
+                Ok(st) => st
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("M")
+                    .to_string(),
                 Err(_) => "M".to_string(),
             }
         };
@@ -1433,11 +2108,19 @@ fn edited_changes(r: Option<&crate::safegit::Reach>, s: &Session, events: &Path)
         if diff.len() > 400_000 {
             continue;
         }
-        match git(r, &dir, &[&["diff"], crate::safegit::DIFF, &["HEAD", "--", &abs]].concat()) {
+        match git(
+            r,
+            &dir,
+            &[&["diff"], crate::safegit::DIFF, &["HEAD", "--", &abs]].concat(),
+        ) {
             Ok(d) if !d.trim().is_empty() => diff.push_str(&d),
             _ => {
-                if let Ok(text) = std::fs::read_to_string(&path).map(|t| t.chars().take(40_000).collect::<String>()) {
-                    diff.push_str(&format!("\ndiff --git a/{rel} b/{rel}\n--- /dev/null\n+++ b/{rel}\n"));
+                if let Ok(text) = std::fs::read_to_string(&path)
+                    .map(|t| t.chars().take(40_000).collect::<String>())
+                {
+                    diff.push_str(&format!(
+                        "\ndiff --git a/{rel} b/{rel}\n--- /dev/null\n+++ b/{rel}\n"
+                    ));
                     for l in text.lines() {
                         diff.push_str(&format!("+{l}\n"));
                     }
@@ -1454,7 +2137,10 @@ fn edited_in(s: &Session, events: &Path) -> Vec<String> {
     let text = std::fs::read_to_string(events).unwrap_or_default();
     let mut pending = HashMap::new();
     let mut out: Vec<String> = Vec::new();
-    for e in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+    for e in text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+    {
         let tid = e["id"].as_str().unwrap_or("").to_string();
         match e["kind"].as_str() {
             Some("tool") => {
@@ -1479,43 +2165,102 @@ pub struct Commit {
 }
 
 /// `POST /code/sessions/{id}/commit`: commit everything that changed.
-pub(crate) async fn post_commit(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>, Json(b): Json<Commit>) -> Reply {
-    let s = load(&state, &id).filter(|_| valid_id(&id)).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
-    let msg = if b.message.trim().is_empty() { "Changes made in TT Station on the QuietBox".to_string() } else { b.message.trim().to_string() };
+pub(crate) async fn post_commit(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+    Json(b): Json<Commit>,
+) -> Reply {
+    let s = load(&state, &id)
+        .filter(|_| valid_id(&id))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
+    let msg = if b.message.trim().is_empty() {
+        "Changes made in TT Station on the QuietBox".to_string()
+    } else {
+        b.message.trim().to_string()
+    };
     let r = reach(&state, &s);
     let out = tokio::task::spawn_blocking(move || {
         let r = r.as_ref();
         // This folder only: in a subfolder of a bigger repository, not everyone else's changes.
         git(r, &s.folder, &["add", "-A", "--", "."])?;
-        git(r, &s.folder, &["-c", "user.name=TT Station", "-c", "user.email=tt-station@localhost", "commit", "-q", "-m", &msg])?;
+        git(
+            r,
+            &s.folder,
+            &[
+                "-c",
+                "user.name=TT Station",
+                "-c",
+                "user.email=tt-station@localhost",
+                "commit",
+                "-q",
+                "-m",
+                &msg,
+            ],
+        )?;
         git(r, &s.folder, &["log", "--oneline", "-1"])
-    }).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?.map_err(|e| err(StatusCode::CONFLICT, e))?;
-    event(&state, &id, json!({ "kind": "notice", "text": format!("Committed: {}", out.trim()) }));
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::CONFLICT, e))?;
+    event(
+        &state,
+        &id,
+        json!({ "kind": "notice", "text": format!("Committed: {}", out.trim()) }),
+    );
     Ok(Json(json!({ "commit": out.trim() })))
 }
 
 /// `POST /code/sessions/{id}/discard`: put every tracked file back as it was at
 /// the last commit, and delete the new files the agent made. Other untracked
 /// files (the person's own, never committed) are left alone.
-pub(crate) async fn post_discard(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
-    let s = load(&state, &id).filter(|_| valid_id(&id)).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
+pub(crate) async fn post_discard(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
+    let s = load(&state, &id)
+        .filter(|_| valid_id(&id))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
     let events = dir(&state, &id).join("events.jsonl");
     let r = reach(&state, &s);
     let removed = tokio::task::spawn_blocking(move || -> Result<usize, String> {
         let r = r.as_ref();
         git(r, &s.folder, &["checkout", "--", "."])?;
         let made: std::collections::HashSet<String> = edited_in(&s, &events).into_iter().collect();
-        let untracked = git(r, &s.folder, &["ls-files", "--others", "--exclude-standard", "--", "."])?;
+        let untracked = git(
+            r,
+            &s.folder,
+            &["ls-files", "--others", "--exclude-standard", "--", "."],
+        )?;
         let mut n = 0;
-        for f in untracked.lines().map(str::trim).filter(|f| made.contains(*f)) {
+        for f in untracked
+            .lines()
+            .map(str::trim)
+            .filter(|f| made.contains(*f))
+        {
             if std::fs::remove_file(Path::new(&s.folder).join(f)).is_ok() {
                 n += 1;
             }
         }
         Ok(n)
-    }).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?.map_err(|e| err(StatusCode::CONFLICT, e))?;
-    let also = if removed > 0 { format!(", and deleted the {removed} new file{} it made", if removed == 1 { "" } else { "s" }) } else { String::new() };
-    event(&state, &id, json!({ "kind": "notice", "text": format!("Put every file back as it was at the last commit{also}.") }));
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::CONFLICT, e))?;
+    let also = if removed > 0 {
+        format!(
+            ", and deleted the {removed} new file{} it made",
+            if removed == 1 { "" } else { "s" }
+        )
+    } else {
+        String::new()
+    };
+    event(
+        &state,
+        &id,
+        json!({ "kind": "notice", "text": format!("Put every file back as it was at the last commit{also}.") }),
+    );
     Ok(Json(json!({ "discarded": true, "removed": removed })))
 }
 
@@ -1526,7 +2271,12 @@ pub struct Settings {
 }
 
 /// `POST /code/sessions/{id}/settings`: `{think}`. Takes effect from the next message.
-pub(crate) async fn post_settings(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>, Json(b): Json<Settings>) -> Reply {
+pub(crate) async fn post_settings(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+    Json(b): Json<Settings>,
+) -> Reply {
     if !valid_id(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such session."));
     }
@@ -1552,11 +2302,17 @@ pub struct Forget {
 }
 
 /// `POST /code/sessions/{id}/forget`: stop always allowing something.
-pub(crate) async fn post_forget(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>, Json(b): Json<Forget>) -> Reply {
+pub(crate) async fn post_forget(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+    Json(b): Json<Forget>,
+) -> Reply {
     if !valid_id(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such session."));
     }
-    let s = update(&state, &id, |s| s.always.retain(|r| r != &b.rule)).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
+    let s = update(&state, &id, |s| s.always.retain(|r| r != &b.rule))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
     Ok(Json(json!({ "always": s.always })))
 }
 
@@ -1566,7 +2322,12 @@ pub struct Rename {
 }
 
 /// `POST /code/sessions/{id}/rename`: give the session a name of your own.
-pub(crate) async fn post_rename(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>, Json(b): Json<Rename>) -> Reply {
+pub(crate) async fn post_rename(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+    Json(b): Json<Rename>,
+) -> Reply {
     if !valid_id(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such session."));
     }
@@ -1575,7 +2336,10 @@ pub(crate) async fn post_rename(State(state): State<AppState>, _auth: BearerAuth
         return Err(err(StatusCode::BAD_REQUEST, "Give it a name."));
     }
     if title.len() > 120 {
-        return Err(err(StatusCode::BAD_REQUEST, "Keep the name under 120 characters."));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Keep the name under 120 characters.",
+        ));
     }
     let s = update(&state, &id, |s| s.title = title.clone())
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
@@ -1587,24 +2351,56 @@ mod tests {
     use super::*;
 
     fn session(folder: &str, sandbox: bool) -> Session {
-        Session { id: "t".into(), folder: folder.into(), title: "t".into(), created: 0, sandbox, policy: "ask".into(), claude_session: None, last: 0, always: vec![], think: false }
+        Session {
+            id: "t".into(),
+            folder: folder.into(),
+            title: "t".into(),
+            created: 0,
+            sandbox,
+            policy: "ask".into(),
+            claude_session: None,
+            last: 0,
+            always: vec![],
+            think: false,
+        }
     }
 
     #[test]
     fn polls_read_only_the_events_added_since_the_last_one() {
         use std::io::Write;
         let home = std::env::temp_dir().join(format!("tt-code-events-{}", std::process::id()));
-        let state = AppState::new("t".into(), "1xBH".into(), Arc::new(crate::serving::dstack::DstackBackend)).with_config_dir(home.clone());
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_config_dir(home.clone());
         let id = "ev-poll";
         std::fs::create_dir_all(dir(&state, id)).unwrap();
-        let seqs = |v: Vec<Value>| v.iter().map(|e| e["seq"].as_u64().unwrap()).collect::<Vec<_>>();
+        let seqs = |v: Vec<Value>| {
+            v.iter()
+                .map(|e| e["seq"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        };
         assert!(events_after(&state, id, 0).is_empty(), "no file yet");
         for n in 0..5 {
-            event(&state, id, json!({ "kind": "delta", "text": n.to_string() }));
+            event(
+                &state,
+                id,
+                json!({ "kind": "delta", "text": n.to_string() }),
+            );
         }
         // No cursor: everything, as before.
         assert_eq!(seqs(events_after(&state, id, 0)), [1, 2, 3, 4, 5]);
-        assert_eq!(READ_TO.lock().unwrap()[id], [(5, std::fs::metadata(dir(&state, id).join("events.jsonl")).unwrap().len())]);
+        assert_eq!(
+            READ_TO.lock().unwrap()[id],
+            [(
+                5,
+                std::fs::metadata(dir(&state, id).join("events.jsonl"))
+                    .unwrap()
+                    .len()
+            )]
+        );
         event(&state, id, json!({ "kind": "delta", "text": "5" }));
         assert_eq!(seqs(events_after(&state, id, 5)), [6]);
         // An earlier cursor (another app) is served too.
@@ -1612,31 +2408,63 @@ mod tests {
         assert!(events_after(&state, id, 6).is_empty());
         // A line still being written waits for the next poll.
         let path = dir(&state, id).join("events.jsonl");
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         write!(f, "{{\"kind\":\"delta\",\"seq\":7").unwrap();
         assert!(events_after(&state, id, 6).is_empty());
         writeln!(f, "}}").unwrap();
         assert_eq!(seqs(events_after(&state, id, 6)), [7]);
         // The file rewritten under it: read from the start again.
-        std::fs::write(&path, "{\"kind\":\"start\",\"seq\":1}\n{\"kind\":\"notice\",\"seq\":2}\n").unwrap();
+        std::fs::write(
+            &path,
+            "{\"kind\":\"start\",\"seq\":1}\n{\"kind\":\"notice\",\"seq\":2}\n",
+        )
+        .unwrap();
         assert_eq!(seqs(events_after(&state, id, 1)), [2]);
         // Rewritten longer: what was at the old place isn't event 8 any more.
-        let lines: String = (1..=30).map(|n| format!("{{\"kind\":\"notice\",\"seq\":{n}}}\n")).collect();
+        let lines: String = (1..=30)
+            .map(|n| format!("{{\"kind\":\"notice\",\"seq\":{n}}}\n"))
+            .collect();
         std::fs::write(&path, lines).unwrap();
-        assert_eq!(seqs(events_after(&state, id, 7)), (8..=30).collect::<Vec<u64>>());
+        assert_eq!(
+            seqs(events_after(&state, id, 7)),
+            (8..=30).collect::<Vec<u64>>()
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn always_rules_never_cover_more_than_they_say() {
         let cmd = |c: &str| json!({ "command": c });
-        assert_eq!(always_rule("Bash", &cmd("pytest -q")).as_deref(), Some("Bash:pytest"));
-        assert_eq!(always_rule("Bash", &cmd("npm test -- --watch=false")).as_deref(), Some("Bash:npm test"));
-        assert_eq!(always_rule("Bash", &cmd("python3 -m pytest tests")).as_deref(), Some("Bash:python3 -m pytest"));
-        assert_eq!(always_rule("Bash", &cmd("cd src && make")).as_deref(), Some("Bash=cd src && make"));
-        assert_eq!(always_rule("Bash", &cmd("rm -rf build")).as_deref(), Some("Bash=rm -rf build"));
+        assert_eq!(
+            always_rule("Bash", &cmd("pytest -q")).as_deref(),
+            Some("Bash:pytest")
+        );
+        assert_eq!(
+            always_rule("Bash", &cmd("npm test -- --watch=false")).as_deref(),
+            Some("Bash:npm test")
+        );
+        assert_eq!(
+            always_rule("Bash", &cmd("python3 -m pytest tests")).as_deref(),
+            Some("Bash:python3 -m pytest")
+        );
+        assert_eq!(
+            always_rule("Bash", &cmd("cd src && make")).as_deref(),
+            Some("Bash=cd src && make")
+        );
+        assert_eq!(
+            always_rule("Bash", &cmd("rm -rf build")).as_deref(),
+            Some("Bash=rm -rf build")
+        );
         assert_eq!(always_rule("Write", &json!({})).as_deref(), Some("edits"));
-        let rules = vec!["Bash:pytest".to_string(), "Bash:git status".to_string(), "Bash=cd src && make".to_string(), "Bash:cd".to_string()];
+        let rules = vec![
+            "Bash:pytest".to_string(),
+            "Bash:git status".to_string(),
+            "Bash=cd src && make".to_string(),
+            "Bash:cd".to_string(),
+        ];
         assert!(allowed_by(&rules, "Bash", &cmd("pytest -x tests/")));
         assert!(allowed_by(&rules, "Bash", &cmd("git status --short")));
         assert!(allowed_by(&rules, "Bash", &cmd("cd src && make")));
@@ -1652,14 +2480,49 @@ mod tests {
     #[test]
     fn knows_which_file_an_edit_changes() {
         let boxed = session("/home/u/code", true);
-        assert_eq!(edited_file(&boxed, "Edit", &json!({ "file_path": "/work/tt-station/desktop/src/ui.tsx" })).as_deref(), Some("tt-station/desktop/src/ui.tsx"));
-        assert_eq!(edited_file(&boxed, "Write", &json!({ "file_path": "/work/new.py" })).as_deref(), Some("new.py"));
-        assert_eq!(edited_file(&boxed, "Read", &json!({ "file_path": "/work/a.py" })), None);
-        assert_eq!(edited_file(&boxed, "Edit", &json!({ "file_path": "/etc/passwd" })), None);
-        assert_eq!(edited_file(&boxed, "Edit", &json!({ "file_path": "/work/../etc/passwd" })), None);
+        assert_eq!(
+            edited_file(
+                &boxed,
+                "Edit",
+                &json!({ "file_path": "/work/tt-station/desktop/src/ui.tsx" })
+            )
+            .as_deref(),
+            Some("tt-station/desktop/src/ui.tsx")
+        );
+        assert_eq!(
+            edited_file(&boxed, "Write", &json!({ "file_path": "/work/new.py" })).as_deref(),
+            Some("new.py")
+        );
+        assert_eq!(
+            edited_file(&boxed, "Read", &json!({ "file_path": "/work/a.py" })),
+            None
+        );
+        assert_eq!(
+            edited_file(&boxed, "Edit", &json!({ "file_path": "/etc/passwd" })),
+            None
+        );
+        assert_eq!(
+            edited_file(
+                &boxed,
+                "Edit",
+                &json!({ "file_path": "/work/../etc/passwd" })
+            ),
+            None
+        );
         let host = session("/home/u/code/", false);
-        assert_eq!(edited_file(&host, "MultiEdit", &json!({ "file_path": "/home/u/code/x/y.rs" })).as_deref(), Some("x/y.rs"));
-        assert_eq!(edited_file(&host, "Edit", &json!({ "file_path": "/home/u/codex/y.rs" })), None);
+        assert_eq!(
+            edited_file(
+                &host,
+                "MultiEdit",
+                &json!({ "file_path": "/home/u/code/x/y.rs" })
+            )
+            .as_deref(),
+            Some("x/y.rs")
+        );
+        assert_eq!(
+            edited_file(&host, "Edit", &json!({ "file_path": "/home/u/codex/y.rs" })),
+            None
+        );
     }
 
     #[test]
@@ -1677,8 +2540,19 @@ mod tests {
             json!({ "kind": "tool", "id": "4", "name": "Write", "input": { "file_path": "/work/a.py" } }),
             json!({ "kind": "tool_result", "id": "4", "is_error": false }),
         ];
-        std::fs::write(&log, lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
-        assert_eq!(edited_in(&session("/x", true), &log), vec!["a.py".to_string()]);
+        std::fs::write(
+            &log,
+            lines
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            edited_in(&session("/x", true), &log),
+            vec!["a.py".to_string()]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1688,7 +2562,13 @@ mod tests {
         let repo = t.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         std::fs::create_dir_all(repo.join("sub/.git")).unwrap();
-        assert_eq!(git_dirs(&repo), vec![(".git".to_string(), Some(std::fs::canonicalize(repo.join(".git")).unwrap()))]);
+        assert_eq!(
+            git_dirs(&repo),
+            vec![(
+                ".git".to_string(),
+                Some(std::fs::canonicalize(repo.join(".git")).unwrap())
+            )]
+        );
         // A folder of projects: each one's; a linked worktree's `.git` file too, with no directory to trust.
         let many = t.path().join("many");
         std::fs::create_dir_all(many.join("a/.git")).unwrap();
@@ -1696,7 +2576,16 @@ mod tests {
         std::fs::write(many.join("b/.git"), "gitdir: /elsewhere\n").unwrap();
         std::fs::create_dir_all(many.join("c")).unwrap();
         let got = git_dirs(&many);
-        assert_eq!(got, vec![("a/.git".to_string(), Some(std::fs::canonicalize(many.join("a/.git")).unwrap())), ("b/.git".to_string(), None)]);
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "a/.git".to_string(),
+                    Some(std::fs::canonicalize(many.join("a/.git")).unwrap())
+                ),
+                ("b/.git".to_string(), None)
+            ]
+        );
         assert!(git_dirs(&t.path().join("none")).is_empty());
     }
 }

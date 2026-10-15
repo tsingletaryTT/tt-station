@@ -49,7 +49,10 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) 
 }
 
 fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 const SANDBOX_IMAGE: &str = "tt-code-sandbox:3";
@@ -74,7 +77,11 @@ pub struct Category {
 
 impl Category {
     pub fn score(&self) -> f64 {
-        if self.total == 0 { 0.0 } else { self.passed as f64 / self.total as f64 }
+        if self.total == 0 {
+            0.0
+        } else {
+            self.passed as f64 / self.total as f64
+        }
     }
 }
 
@@ -127,14 +134,20 @@ fn save(state: &AppState, e: &Eval) {
 /// Writes an evaluation where [`all`] finds it (`evals/<id>.json`).
 pub fn save_in(d: &std::path::Path, e: &Eval) {
     let _ = std::fs::create_dir_all(d);
-    let _ = std::fs::write(d.join(format!("{}.json", e.id)), serde_json::to_vec_pretty(e).unwrap_or_default());
+    let _ = std::fs::write(
+        d.join(format!("{}.json", e.id)),
+        serde_json::to_vec_pretty(e).unwrap_or_default(),
+    );
 }
 
 /// Every graded request of an agent reliability run, next to it (`evals/raw/<id>.json`).
 pub fn save_trials(d: &std::path::Path, id: &str, trials: &[crate::reliability::Trial]) {
     let raw = d.join("raw");
     let _ = std::fs::create_dir_all(&raw);
-    let _ = std::fs::write(raw.join(format!("{id}.json")), serde_json::to_vec_pretty(trials).unwrap_or_default());
+    let _ = std::fs::write(
+        raw.join(format!("{id}.json")),
+        serde_json::to_vec_pretty(trials).unwrap_or_default(),
+    );
 }
 
 pub fn new_id() -> String {
@@ -177,24 +190,47 @@ impl Model {
         body["model"] = json!(self.model);
         body["temperature"] = json!(0.0);
         body["chat_template_kwargs"] = json!({ "enable_thinking": false });
-        let r = self.http.post(&self.url).json(&body).send().await.map_err(|e| format!("couldn't reach the model: {e}"))?;
+        let r = self
+            .http
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("couldn't reach the model: {e}"))?;
         let status = r.status();
-        let v: Value = r.json().await.map_err(|e| format!("unreadable answer: {e}"))?;
+        let v: Value = r
+            .json()
+            .await
+            .map_err(|e| format!("unreadable answer: {e}"))?;
         if !status.is_success() {
-            return Err(format!("{status}: {}", v["error"]["message"].as_str().or(v["message"].as_str()).unwrap_or("")));
+            return Err(format!(
+                "{status}: {}",
+                v["error"]["message"]
+                    .as_str()
+                    .or(v["message"].as_str())
+                    .unwrap_or("")
+            ));
         }
         Ok(v["choices"][0]["message"].clone())
     }
 
     async fn ask(&self, prompt: &str, max_tokens: u32) -> Result<String, String> {
         let m = self.chat(json!({ "messages": [{ "role": "user", "content": prompt }], "max_tokens": max_tokens })).await?;
-        Ok(crate::assistant::strip_think(m["content"].as_str().unwrap_or("")).trim().to_string())
+        Ok(
+            crate::assistant::strip_think(m["content"].as_str().unwrap_or(""))
+                .trim()
+                .to_string(),
+        )
     }
 }
 
 fn clip(s: &str, n: usize) -> String {
     let s = s.replace('\n', " ");
-    if s.chars().count() > n { format!("{}…", s.chars().take(n).collect::<String>()) } else { s }
+    if s.chars().count() > n {
+        format!("{}…", s.chars().take(n).collect::<String>())
+    } else {
+        s
+    }
 }
 
 // ---------------------------------------------------------------- reasoning
@@ -224,13 +260,21 @@ const REASONING: &[(&str, &str, &[&str])] = &[
 fn final_answer(text: &str) -> String {
     let lower = text.to_lowercase();
     let tail = lower.rsplit("answer:").next().unwrap_or(&lower);
-    tail.trim().trim_matches(|c: char| !c.is_alphanumeric()).replace(['$', ',', '*'], "").trim().to_string()
+    tail.trim()
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .replace(['$', ',', '*'], "")
+        .trim()
+        .to_string()
 }
 
 fn answer_matches(text: &str, want: &[&str]) -> bool {
     let a = final_answer(text);
-    let first = a.split(|c: char| c.is_whitespace() || c == '.').next().unwrap_or("");
-    want.iter().any(|w| first == *w || a == *w || a.starts_with(&format!("{w} ")))
+    let first = a
+        .split(|c: char| c.is_whitespace() || c == '.')
+        .next()
+        .unwrap_or("");
+    want.iter()
+        .any(|w| first == *w || a == *w || a.starts_with(&format!("{w} ")))
 }
 
 async fn reasoning(m: &Arc<Model>) -> Category {
@@ -255,14 +299,23 @@ async fn reasoning(m: &Arc<Model>) -> Category {
 }
 
 fn category(key: &str, label: &str, cases: Vec<Case>) -> Category {
-    Category { key: key.into(), label: label.into(), passed: cases.iter().filter(|c| c.ok).count(), total: cases.len(), cases }
+    Category {
+        key: key.into(),
+        label: label.into(),
+        passed: cases.iter().filter(|c| c.ok).count(),
+        total: cases.len(),
+        cases,
+    }
 }
 
 // ---------------------------------------------------------------- instructions
 
 fn strip_fences(s: &str) -> &str {
     let s = s.trim();
-    let s = s.strip_prefix("```json").or_else(|| s.strip_prefix("```")).unwrap_or(s);
+    let s = s
+        .strip_prefix("```json")
+        .or_else(|| s.strip_prefix("```"))
+        .unwrap_or(s);
     s.strip_suffix("```").unwrap_or(s).trim()
 }
 
@@ -319,16 +372,21 @@ async fn instructions(m: &Arc<Model>) -> Category {
         .map(|i| {
             let m = m.clone();
             async move {
-            let (name, q, check) = INSTRUCTIONS[i];
-            let t = Instant::now();
-            let (ok, detail) = match m.ask(q, 300).await {
-                Ok(a) => match check(&a) {
-                    Ok(()) => (true, clip(&a, 80)),
-                    Err(why) => (false, format!("{why}: {}", clip(&a, 80))),
-                },
-                Err(e) => (false, e),
-            };
-            Case { name: name.to_string(), ok, detail, seconds: t.elapsed().as_secs_f64() }
+                let (name, q, check) = INSTRUCTIONS[i];
+                let t = Instant::now();
+                let (ok, detail) = match m.ask(q, 300).await {
+                    Ok(a) => match check(&a) {
+                        Ok(()) => (true, clip(&a, 80)),
+                        Err(why) => (false, format!("{why}: {}", clip(&a, 80))),
+                    },
+                    Err(e) => (false, e),
+                };
+                Case {
+                    name: name.to_string(),
+                    ok,
+                    detail,
+                    seconds: t.elapsed().as_secs_f64(),
+                }
             }
         })
         .buffered(4)
@@ -342,11 +400,36 @@ async fn instructions(m: &Arc<Model>) -> Category {
 fn tools() -> Value {
     let f = |name: &str, desc: &str, props: Value, required: &[&str]| json!({ "type": "function", "function": { "name": name, "description": desc, "parameters": { "type": "object", "properties": props, "required": required } } });
     json!([
-        f("get_weather", "Current weather for a city.", json!({ "city": { "type": "string" }, "unit": { "type": "string", "enum": ["celsius", "fahrenheit"] } }), &["city"]),
-        f("set_timer", "Start a countdown timer.", json!({ "minutes": { "type": "integer" } }), &["minutes"]),
-        f("search_documents", "Search the user's own files and notes.", json!({ "query": { "type": "string" } }), &["query"]),
-        f("send_email", "Send an email for the user.", json!({ "to": { "type": "string" }, "subject": { "type": "string" }, "body": { "type": "string" } }), &["to", "subject", "body"]),
-        f("calculator", "Evaluate an arithmetic expression exactly.", json!({ "expression": { "type": "string" } }), &["expression"]),
+        f(
+            "get_weather",
+            "Current weather for a city.",
+            json!({ "city": { "type": "string" }, "unit": { "type": "string", "enum": ["celsius", "fahrenheit"] } }),
+            &["city"]
+        ),
+        f(
+            "set_timer",
+            "Start a countdown timer.",
+            json!({ "minutes": { "type": "integer" } }),
+            &["minutes"]
+        ),
+        f(
+            "search_documents",
+            "Search the user's own files and notes.",
+            json!({ "query": { "type": "string" } }),
+            &["query"]
+        ),
+        f(
+            "send_email",
+            "Send an email for the user.",
+            json!({ "to": { "type": "string" }, "subject": { "type": "string" }, "body": { "type": "string" } }),
+            &["to", "subject", "body"]
+        ),
+        f(
+            "calculator",
+            "Evaluate an arithmetic expression exactly.",
+            json!({ "expression": { "type": "string" } }),
+            &["expression"]
+        ),
     ])
 }
 
@@ -357,7 +440,14 @@ fn one<'a>(calls: &'a [(String, Value)], name: &str) -> Result<&'a Value, String
     match calls {
         [(n, a)] if n == name => Ok(a),
         [] => Err(format!("didn't call {name}")),
-        _ => Err(format!("called {}", calls.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "))),
+        _ => Err(format!(
+            "called {}",
+            calls
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
     }
 }
 
@@ -370,46 +460,130 @@ fn arg(a: &Value, k: &str) -> String {
 }
 
 const TOOLS: &[(&str, &str, ToolCheck)] = &[
-    ("Weather, with unit", "What's the weather in Paris right now, in celsius?", |c, _| {
-        let a = one(c, "get_weather")?;
-        (arg(a, "city").contains("paris") && arg(a, "unit") == "celsius").then_some(()).ok_or_else(|| format!("arguments {a}"))
-    }),
+    (
+        "Weather, with unit",
+        "What's the weather in Paris right now, in celsius?",
+        |c, _| {
+            let a = one(c, "get_weather")?;
+            (arg(a, "city").contains("paris") && arg(a, "unit") == "celsius")
+                .then_some(())
+                .ok_or_else(|| format!("arguments {a}"))
+        },
+    ),
     ("Timer", "Set a timer for 25 minutes.", |c, _| {
         let a = one(c, "set_timer")?;
-        (a["minutes"].as_f64() == Some(25.0) || a["minutes"] == "25").then_some(()).ok_or_else(|| format!("arguments {a}"))
+        (a["minutes"].as_f64() == Some(25.0) || a["minutes"] == "25")
+            .then_some(())
+            .ok_or_else(|| format!("arguments {a}"))
     }),
-    ("Own documents", "What does my lease say about having pets?", |c, _| {
-        let a = one(c, "search_documents")?;
-        (!arg(a, "query").trim().is_empty()).then_some(()).ok_or_else(|| "empty query".into())
-    }),
-    ("Email", "Email bob@example.com with the subject \"Lunch\" saying I'll be 10 minutes late.", |c, _| {
-        let a = one(c, "send_email")?;
-        (arg(a, "to") == "bob@example.com" && arg(a, "subject").contains("lunch") && arg(a, "body").contains("late")).then_some(()).ok_or_else(|| format!("arguments {a}"))
-    }),
-    ("Calculator", "Use the calculator: what is 1234 × 5678?", |c, _| {
-        let a = one(c, "calculator")?;
-        let e = arg(a, "expression");
-        (e.contains("1234") && e.contains("5678")).then_some(()).ok_or_else(|| format!("arguments {a}"))
-    }),
-    ("Two cities at once", "What's the weather in Tokyo and in Osaka?", |c, _| {
-        let cities: Vec<String> = c.iter().filter(|(n, _)| n == "get_weather").map(|(_, a)| arg(a, "city")).collect();
-        (cities.iter().any(|x| x.contains("tokyo")) && cities.iter().any(|x| x.contains("osaka"))).then_some(()).ok_or_else(|| format!("asked for {}", if cities.is_empty() { "nothing".into() } else { cities.join(", ") }))
-    }),
-    ("No tool for small talk", "Hi! How's your day going?", |c, _| c.is_empty().then_some(()).ok_or_else(|| format!("called {}", c[0].0))),
-    ("No tool for general knowledge", "What's the chemical symbol for gold?", |c, _| c.is_empty().then_some(()).ok_or_else(|| format!("called {}", c[0].0))),
-    ("Converts units", "Set a timer for an hour and a half.", |c, _| {
-        let a = one(c, "set_timer")?;
-        (a["minutes"].as_f64() == Some(90.0) || a["minutes"] == "90").then_some(()).ok_or_else(|| format!("arguments {a}"))
-    }),
-    ("Doesn't invent an address", "Email my landlord that the sink is fixed.", |c, _| match c {
-        [] => Ok(()),
-        [(n, _)] if n == "search_documents" => Ok(()),
-        _ => Err(format!("called {}", c.iter().map(|(n, a)| format!("{n}({a})")).collect::<Vec<_>>().join(", "))),
-    }),
+    (
+        "Own documents",
+        "What does my lease say about having pets?",
+        |c, _| {
+            let a = one(c, "search_documents")?;
+            (!arg(a, "query").trim().is_empty())
+                .then_some(())
+                .ok_or_else(|| "empty query".into())
+        },
+    ),
+    (
+        "Email",
+        "Email bob@example.com with the subject \"Lunch\" saying I'll be 10 minutes late.",
+        |c, _| {
+            let a = one(c, "send_email")?;
+            (arg(a, "to") == "bob@example.com"
+                && arg(a, "subject").contains("lunch")
+                && arg(a, "body").contains("late"))
+            .then_some(())
+            .ok_or_else(|| format!("arguments {a}"))
+        },
+    ),
+    (
+        "Calculator",
+        "Use the calculator: what is 1234 × 5678?",
+        |c, _| {
+            let a = one(c, "calculator")?;
+            let e = arg(a, "expression");
+            (e.contains("1234") && e.contains("5678"))
+                .then_some(())
+                .ok_or_else(|| format!("arguments {a}"))
+        },
+    ),
+    (
+        "Two cities at once",
+        "What's the weather in Tokyo and in Osaka?",
+        |c, _| {
+            let cities: Vec<String> = c
+                .iter()
+                .filter(|(n, _)| n == "get_weather")
+                .map(|(_, a)| arg(a, "city"))
+                .collect();
+            (cities.iter().any(|x| x.contains("tokyo"))
+                && cities.iter().any(|x| x.contains("osaka")))
+            .then_some(())
+            .ok_or_else(|| {
+                format!(
+                    "asked for {}",
+                    if cities.is_empty() {
+                        "nothing".into()
+                    } else {
+                        cities.join(", ")
+                    }
+                )
+            })
+        },
+    ),
+    (
+        "No tool for small talk",
+        "Hi! How's your day going?",
+        |c, _| {
+            c.is_empty()
+                .then_some(())
+                .ok_or_else(|| format!("called {}", c[0].0))
+        },
+    ),
+    (
+        "No tool for general knowledge",
+        "What's the chemical symbol for gold?",
+        |c, _| {
+            c.is_empty()
+                .then_some(())
+                .ok_or_else(|| format!("called {}", c[0].0))
+        },
+    ),
+    (
+        "Converts units",
+        "Set a timer for an hour and a half.",
+        |c, _| {
+            let a = one(c, "set_timer")?;
+            (a["minutes"].as_f64() == Some(90.0) || a["minutes"] == "90")
+                .then_some(())
+                .ok_or_else(|| format!("arguments {a}"))
+        },
+    ),
+    (
+        "Doesn't invent an address",
+        "Email my landlord that the sink is fixed.",
+        |c, _| match c {
+            [] => Ok(()),
+            [(n, _)] if n == "search_documents" => Ok(()),
+            _ => Err(format!(
+                "called {}",
+                c.iter()
+                    .map(|(n, a)| format!("{n}({a})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        },
+    ),
     ("Uses a tool's result", "FOLLOWUP", |c, text| {
-        if !c.is_empty() { return Err(format!("called {} again", c[0].0)) }
+        if !c.is_empty() {
+            return Err(format!("called {} again", c[0].0));
+        }
         let t = text.to_lowercase();
-        (t.contains("coat") || t.contains("warm")).then_some(()).ok_or_else(|| format!("\"{}\"", clip(text, 60)))
+        (t.contains("coat") || t.contains("warm"))
+            .then_some(())
+            .ok_or_else(|| format!("\"{}\"", clip(text, 60)))
     }),
 ];
 
@@ -483,7 +657,12 @@ const CODE: &[(&str, &str, &str)] = &[
 ];
 
 fn python_block(answer: &str) -> String {
-    let mut blocks = answer.split("```").skip(1).step_by(2).map(|b| b.strip_prefix("python").or_else(|| b.strip_prefix("py")).unwrap_or(b).to_string());
+    let mut blocks = answer.split("```").skip(1).step_by(2).map(|b| {
+        b.strip_prefix("python")
+            .or_else(|| b.strip_prefix("py"))
+            .unwrap_or(b)
+            .to_string()
+    });
     blocks.next().unwrap_or_else(|| answer.to_string())
 }
 
@@ -492,25 +671,60 @@ fn python_block(answer: &str) -> String {
 async fn run_python(code: &str, tests: &str) -> Result<(), String> {
     // eval and exec are switched off after the model's code is defined, so its
     // functions can't lean on them (an "evaluator" that calls eval passes nothing).
-    let program = format!("{code}\n\nimport builtins as _b\n_b.eval = _b.exec = None\n{tests}\nprint('ok')\n");
+    let program = format!(
+        "{code}\n\nimport builtins as _b\n_b.eval = _b.exec = None\n{tests}\nprint('ok')\n"
+    );
     let mut cmd = tokio::process::Command::new("docker");
-    cmd.args(["run", "--rm", "-i", "--network", "none", "--memory", "256m", "--pids-limit", "64", "--cpus", "1", "--read-only", "--tmpfs", "/tmp", SANDBOX_IMAGE, "timeout", "10", "python3", "-"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| format!("couldn't start the sandbox: {e}"))?;
+    cmd.args([
+        "run",
+        "--rm",
+        "-i",
+        "--network",
+        "none",
+        "--memory",
+        "256m",
+        "--pids-limit",
+        "64",
+        "--cpus",
+        "1",
+        "--read-only",
+        "--tmpfs",
+        "/tmp",
+        SANDBOX_IMAGE,
+        "timeout",
+        "10",
+        "python3",
+        "-",
+    ])
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .kill_on_drop(true);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("couldn't start the sandbox: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
         let _ = stdin.write_all(program.as_bytes()).await;
     }
-    let out = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output()).await.map_err(|_| "took too long".to_string())?.map_err(|e| e.to_string())?;
+    let out = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .map_err(|_| "took too long".to_string())?
+        .map_err(|e| e.to_string())?;
     if out.status.success() && String::from_utf8_lossy(&out.stdout).contains("ok") {
         Ok(())
     } else {
         let e = String::from_utf8_lossy(&out.stderr);
-        let last = e.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("failed");
-        Err(if last.trim() == "AssertionError" { "a test failed".into() } else { clip(last, 120) })
+        let last = e
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("failed");
+        Err(if last.trim() == "AssertionError" {
+            "a test failed".into()
+        } else {
+            clip(last, 120)
+        })
     }
 }
 
@@ -571,14 +785,30 @@ async fn long_context(m: &Model, context: Option<u64>) -> Category {
     let mut cases = Vec::new();
     for (i, depth) in [0.1, 0.5, 0.9].into_iter().enumerate() {
         let code = 4000 + i * 1111 + 7;
-        let doc = haystack(tokens, depth, &format!("Important: the access code for the blue storage room is {code}."));
+        let doc = haystack(
+            tokens,
+            depth,
+            &format!("Important: the access code for the blue storage room is {code}."),
+        );
         let t = Instant::now();
         let prompt = format!("{doc}\n\nIn the text above, what is the access code for the blue storage room? Answer with just the number.");
         let (ok, detail) = match m.ask(&prompt, 30).await {
-            Ok(a) => (a.contains(&code.to_string()), format!("Answered {}", clip(&a, 40))),
+            Ok(a) => (
+                a.contains(&code.to_string()),
+                format!("Answered {}", clip(&a, 40)),
+            ),
             Err(e) => (false, e),
         };
-        cases.push(Case { name: format!("{}K tokens, fact {}% in", tokens / 1000, (depth * 100.0) as u32), ok, detail, seconds: t.elapsed().as_secs_f64() });
+        cases.push(Case {
+            name: format!(
+                "{}K tokens, fact {}% in",
+                tokens / 1000,
+                (depth * 100.0) as u32
+            ),
+            ok,
+            detail,
+            seconds: t.elapsed().as_secs_f64(),
+        });
     }
     // Two facts far apart that only answer the question together.
     let mut doc = haystack(tokens, 0.3, "Mara's locker is number 4418.");
@@ -591,7 +821,12 @@ async fn long_context(m: &Model, context: Option<u64>) -> Category {
         Ok(a) => (a.contains("9902"), format!("Answered {}", clip(&a, 40))),
         Err(e) => (false, e),
     };
-    cases.push(Case { name: format!("{}K tokens, two facts to connect", tokens / 1000), ok, detail, seconds: t.elapsed().as_secs_f64() });
+    cases.push(Case {
+        name: format!("{}K tokens, two facts to connect", tokens / 1000),
+        ok,
+        detail,
+        seconds: t.elapsed().as_secs_f64(),
+    });
     category("long", "Long documents", cases)
 }
 
@@ -600,7 +835,9 @@ async fn long_context(m: &Model, context: Option<u64>) -> Category {
 /// Evaluates what's serving now. Takes a few minutes; one at a time. Agent
 /// reliability (long Code sessions, about 15 minutes more) only when asked.
 pub async fn run(state: &AppState, agent: bool) -> Result<Eval, String> {
-    let ep = state.endpoint().ok_or("Nothing is serving. Start a chat model, then evaluate it.")?;
+    let ep = state
+        .endpoint()
+        .ok_or("Nothing is serving. Start a chat model, then evaluate it.")?;
     let context = served_context(state).await;
     let id = new_id();
     {
@@ -608,11 +845,23 @@ pub async fn run(state: &AppState, agent: bool) -> Result<Eval, String> {
         if cur.as_ref().is_some_and(|e| e.status == "running") {
             return Err("An evaluation is already running.".into());
         }
-        *cur = Some(Eval { id: id.clone(), model: ep.model.clone(), started: now(), status: "running".into(), context, activity: Some("Measuring speed".into()), ..Default::default() });
+        *cur = Some(Eval {
+            id: id.clone(),
+            model: ep.model.clone(),
+            started: now(),
+            status: "running".into(),
+            context,
+            activity: Some("Measuring speed".into()),
+            ..Default::default()
+        });
     }
     STOP.store(false, Ordering::SeqCst);
     let m = Arc::new(Model {
-        http: reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(600)).build().map_err(|e| e.to_string())?,
+        http: reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(600))
+            .build()
+            .map_err(|e| e.to_string())?,
         url: crate::assistant::chat_completions_url(&ep.base_url),
         model: ep.model.clone(),
     });
@@ -626,7 +875,11 @@ pub async fn run(state: &AppState, agent: bool) -> Result<Eval, String> {
             e.overall = overall(&e.categories);
         }
         Err(why) => {
-            e.status = if STOP.load(Ordering::SeqCst) { "stopped".into() } else { "failed".into() };
+            e.status = if STOP.load(Ordering::SeqCst) {
+                "stopped".into()
+            } else {
+                "failed".into()
+            };
             e.error = Some(why);
         }
     }
@@ -638,20 +891,46 @@ pub async fn run(state: &AppState, agent: bool) -> Result<Eval, String> {
 /// before it existed compare evenly with newer ones.
 fn overall(categories: &[Category]) -> Option<f64> {
     let scored: Vec<&Category> = categories.iter().filter(|c| c.key != "agent").collect();
-    (!scored.is_empty()).then(|| scored.iter().map(|c| c.score()).sum::<f64>() / scored.len() as f64)
+    (!scored.is_empty())
+        .then(|| scored.iter().map(|c| c.score()).sum::<f64>() / scored.len() as f64)
 }
 
-async fn steps(state: &AppState, m: &Arc<Model>, base_url: &str, context: Option<u64>, agent: bool) -> Result<(), String> {
-    let stop = || if STOP.load(Ordering::SeqCst) { Err("Stopped.".to_string()) } else { Ok(()) };
+async fn steps(
+    state: &AppState,
+    m: &Arc<Model>,
+    base_url: &str,
+    context: Option<u64>,
+    agent: bool,
+) -> Result<(), String> {
+    let stop = || {
+        if STOP.load(Ordering::SeqCst) {
+            Err("Stopped.".to_string())
+        } else {
+            Ok(())
+        }
+    };
     match crate::bench::run(state).await {
-        Ok(b) => progress(|e| e.speed = Speed { ttft_s: b.ttft_s, single_tps: b.single_tps, batch_tps: b.batch_tps, wh_per_million_tokens: b.wh_per_million_tokens }),
+        Ok(b) => progress(|e| {
+            e.speed = Speed {
+                ttft_s: b.ttft_s,
+                single_tps: b.single_tps,
+                batch_tps: b.batch_tps,
+                wh_per_million_tokens: b.wh_per_million_tokens,
+            }
+        }),
         Err(why) if why.contains("already") => {}
         Err(why) => return Err(why),
     }
     stop()?;
     // Fail fast when the model doesn't answer at all.
     m.ask("Say OK.", 5).await?;
-    for (label, which) in [("Testing tool use", 0), ("Testing code", 1), ("Testing reasoning", 2), ("Testing instructions", 3), ("Testing long documents", 4)] {
+    for (label, which) in [
+        ("Testing tool use", 0),
+        ("Testing code", 1),
+        ("Testing reasoning", 2),
+        ("Testing instructions", 3),
+        ("Testing long documents", 4),
+    ] {
         stop()?;
         progress(|e| e.activity = Some(label.into()));
         let c = match which {
@@ -668,10 +947,28 @@ async fn steps(state: &AppState, m: &Arc<Model>, base_url: &str, context: Option
     }
     stop()?;
     progress(|e| e.activity = Some("Testing agent reliability".into()));
-    let server = crate::reliability::Server { http: m.http.clone(), base_url: base_url.to_string(), model: m.model.clone(), context };
-    let say = |what: String| progress(|e| e.activity = Some(format!("Testing agent reliability: {what}")));
-    let (report, trials) = crate::reliability::run(&server, &crate::reliability::Options::default(), &say, &|| STOP.load(Ordering::SeqCst)).await?;
-    if let Some(id) = CURRENT.lock().expect("evals").as_ref().map(|e| e.id.clone()) {
+    let server = crate::reliability::Server {
+        http: m.http.clone(),
+        base_url: base_url.to_string(),
+        model: m.model.clone(),
+        context,
+    };
+    let say = |what: String| {
+        progress(|e| e.activity = Some(format!("Testing agent reliability: {what}")))
+    };
+    let (report, trials) = crate::reliability::run(
+        &server,
+        &crate::reliability::Options::default(),
+        &say,
+        &|| STOP.load(Ordering::SeqCst),
+    )
+    .await?;
+    if let Some(id) = CURRENT
+        .lock()
+        .expect("evals")
+        .as_ref()
+        .map(|e| e.id.clone())
+    {
         save_trials(&dir(state), &id, &trials);
     }
     progress(|e| {
@@ -690,24 +987,46 @@ pub fn agent_category(r: &crate::reliability::Report) -> Category {
         .iter()
         .map(|row| {
             let mut wrong = Vec::new();
-            for (n, what) in [(row.leaked, "leaked as text"), (row.invented, "invented a tool"), (row.invalid_args, "bad arguments"), (row.no_call, "no call"), (row.errors, "request failed")] {
+            for (n, what) in [
+                (row.leaked, "leaked as text"),
+                (row.invented, "invented a tool"),
+                (row.invalid_args, "bad arguments"),
+                (row.no_call, "no call"),
+                (row.errors, "request failed"),
+            ] {
                 if n > 0 {
                     wrong.push(format!("{n} {what}"));
                 }
             }
             Case {
                 name: format!("{}K-token session", row.target / 1024),
-                ok: row.trials >= crate::reliability::MIN_TRIALS && row.recovered_rate >= crate::reliability::THRESHOLD,
+                ok: row.trials >= crate::reliability::MIN_TRIALS
+                    && row.recovered_rate >= crate::reliability::THRESHOLD,
                 detail: format!(
                     "{}/{} valid within a retry (95% CI {:.0}–{:.0}%); first replies {}/{} valid{}",
-                    row.within_1_retry, row.trials, 100.0 * row.recovered_ci_low, 100.0 * row.recovered_ci_high, row.valid, row.trials,
-                    if wrong.is_empty() { String::new() } else { format!(" ({})", wrong.join(", ")) }
+                    row.within_1_retry,
+                    row.trials,
+                    100.0 * row.recovered_ci_low,
+                    100.0 * row.recovered_ci_high,
+                    row.valid,
+                    row.trials,
+                    if wrong.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", wrong.join(", "))
+                    }
                 ),
                 seconds: row.median_s.unwrap_or(0.0),
             }
         })
         .collect::<Vec<_>>();
-    Category { key: "agent".into(), label: "Agent reliability".into(), passed: r.rows.iter().map(|x| x.within_1_retry).sum(), total: r.rows.iter().map(|x| x.trials).sum(), cases }
+    Category {
+        key: "agent".into(),
+        label: "Agent reliability".into(),
+        passed: r.rows.iter().map(|x| x.within_1_retry).sum(),
+        total: r.rows.iter().map(|x| x.trials).sum(),
+        cases,
+    }
 }
 
 // ---------------------------------------------------------------- compaction
@@ -732,19 +1051,37 @@ pub fn measured_window(evals: &[Eval], model: &str) -> Option<u64> {
 
 /// Where a Code session on `model` should compact: as measured, else the default.
 pub fn compact_window(state: &AppState, model: Option<&str>) -> u64 {
-    model.and_then(|m| measured_window(&all(state), m)).unwrap_or(DEFAULT_COMPACT_WINDOW)
+    model
+        .and_then(|m| measured_window(&all(state), m))
+        .unwrap_or(DEFAULT_COMPACT_WINDOW)
 }
 
 async fn served_context(state: &AppState) -> Option<u64> {
     let url = format!("http://127.0.0.1:{}/v1/models", state.serving_port());
-    let v: Value = reqwest::Client::new().get(url).timeout(Duration::from_secs(5)).send().await.ok()?.json().await.ok()?;
+    let v: Value = reqwest::Client::new()
+        .get(url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
     v["data"][0]["max_model_len"].as_u64()
 }
 
 /// One line about an evaluation, for a routine's report or a notification.
 pub fn headline(e: &Eval) -> String {
-    let parts: Vec<String> = e.categories.iter().map(|c| format!("{} {}/{}", c.label.to_lowercase(), c.passed, c.total)).collect();
-    let speed = e.speed.single_tps.map(|t| format!(", {t:.0} tok/s")).unwrap_or_default();
+    let parts: Vec<String> = e
+        .categories
+        .iter()
+        .map(|c| format!("{} {}/{}", c.label.to_lowercase(), c.passed, c.total))
+        .collect();
+    let speed = e
+        .speed
+        .single_tps
+        .map(|t| format!(", {t:.0} tok/s"))
+        .unwrap_or_default();
     format!("{}: {}{speed}", short(&e.model), parts.join(", "))
 }
 
@@ -765,34 +1102,125 @@ pub struct Pick {
 pub fn recommend(evals: &[Eval]) -> Vec<Pick> {
     let mut latest: HashMap<&str, &Eval> = HashMap::new();
     // A run of agent reliability alone (`examples/agent_reliability.rs`) has nothing else to compare.
-    for e in evals.iter().filter(|e| e.status == "done" && e.categories.iter().any(|c| c.key != "agent")) {
-        latest.entry(e.model.as_str()).and_modify(|x| if e.started > x.started { *x = e }).or_insert(e);
+    for e in evals
+        .iter()
+        .filter(|e| e.status == "done" && e.categories.iter().any(|c| c.key != "agent"))
+    {
+        latest
+            .entry(e.model.as_str())
+            .and_modify(|x| {
+                if e.started > x.started {
+                    *x = e
+                }
+            })
+            .or_insert(e);
     }
     let models: Vec<&Eval> = latest.into_values().collect();
     if models.is_empty() {
         return vec![];
     }
-    let fastest = models.iter().filter_map(|e| e.speed.single_tps).fold(0.0_f64, f64::max).max(1e-9);
-    let s = |e: &Eval, k: &str| e.categories.iter().find(|c| c.key == k).map_or(0.0, Category::score);
+    let fastest = models
+        .iter()
+        .filter_map(|e| e.speed.single_tps)
+        .fold(0.0_f64, f64::max)
+        .max(1e-9);
+    let s = |e: &Eval, k: &str| {
+        e.categories
+            .iter()
+            .find(|c| c.key == k)
+            .map_or(0.0, Category::score)
+    };
     let speed = |e: &Eval| e.speed.single_tps.unwrap_or(0.0) / fastest;
-    let frac = |e: &Eval, k: &str| e.categories.iter().find(|c| c.key == k).map_or("–".into(), |c| format!("{}/{}", c.passed, c.total));
-    let tps = |e: &Eval| e.speed.single_tps.map_or(String::new(), |t| format!(", {t:.0} tok/s"));
+    let frac = |e: &Eval, k: &str| {
+        e.categories
+            .iter()
+            .find(|c| c.key == k)
+            .map_or("–".into(), |c| format!("{}/{}", c.passed, c.total))
+    };
+    let tps = |e: &Eval| {
+        e.speed
+            .single_tps
+            .map_or(String::new(), |t| format!(", {t:.0} tok/s"))
+    };
     let best = |score: &dyn Fn(&Eval) -> f64, need_ctx: u64| -> Option<&Eval> {
-        models.iter().copied().filter(|e| e.context.unwrap_or(u64::MAX) >= need_ctx).max_by(|a, b| score(a).total_cmp(&score(b)))
+        models
+            .iter()
+            .copied()
+            .filter(|e| e.context.unwrap_or(u64::MAX) >= need_ctx)
+            .max_by(|a, b| score(a).total_cmp(&score(b)))
     };
     let mut out = Vec::new();
-    if let Some(e) = best(&|e| 0.35 * s(e, "tools") + 0.25 * s(e, "reasoning") + 0.2 * s(e, "instructions") + 0.2 * speed(e), 0) {
-        out.push(Pick { use_for: "Chat and Tori", model: e.model.clone(), why: format!("tool use {}, reasoning {}{}", frac(e, "tools"), frac(e, "reasoning"), tps(e)) });
+    if let Some(e) = best(
+        &|e| {
+            0.35 * s(e, "tools")
+                + 0.25 * s(e, "reasoning")
+                + 0.2 * s(e, "instructions")
+                + 0.2 * speed(e)
+        },
+        0,
+    ) {
+        out.push(Pick {
+            use_for: "Chat and Tori",
+            model: e.model.clone(),
+            why: format!(
+                "tool use {}, reasoning {}{}",
+                frac(e, "tools"),
+                frac(e, "reasoning"),
+                tps(e)
+            ),
+        });
     }
-    if let Some(e) = best(&|e| 0.45 * s(e, "code") + 0.35 * s(e, "tools") + 0.2 * speed(e), 32_768) {
-        out.push(Pick { use_for: "Code", model: e.model.clone(), why: format!("code {}, tool use {}{}", frac(e, "code"), frac(e, "tools"), tps(e)) });
+    if let Some(e) = best(
+        &|e| 0.45 * s(e, "code") + 0.35 * s(e, "tools") + 0.2 * speed(e),
+        32_768,
+    ) {
+        out.push(Pick {
+            use_for: "Code",
+            model: e.model.clone(),
+            why: format!(
+                "code {}, tool use {}{}",
+                frac(e, "code"),
+                frac(e, "tools"),
+                tps(e)
+            ),
+        });
     }
-    if let Some(e) = best(&|e| 0.35 * s(e, "long") + 0.35 * s(e, "instructions") + 0.3 * s(e, "reasoning"), 16_384) {
-        out.push(Pick { use_for: "Research", model: e.model.clone(), why: format!("long documents {}, instructions {}{}", frac(e, "long"), frac(e, "instructions"), e.context.map_or(String::new(), |c| format!(", {}K context", c / 1024))) });
+    if let Some(e) = best(
+        &|e| 0.35 * s(e, "long") + 0.35 * s(e, "instructions") + 0.3 * s(e, "reasoning"),
+        16_384,
+    ) {
+        out.push(Pick {
+            use_for: "Research",
+            model: e.model.clone(),
+            why: format!(
+                "long documents {}, instructions {}{}",
+                frac(e, "long"),
+                frac(e, "instructions"),
+                e.context
+                    .map_or(String::new(), |c| format!(", {}K context", c / 1024))
+            ),
+        });
     }
     if models.len() > 1 {
-        if let Some(e) = models.iter().filter(|e| e.speed.single_tps.is_some()).max_by(|a, b| a.speed.single_tps.unwrap_or(0.0).total_cmp(&b.speed.single_tps.unwrap_or(0.0))) {
-            out.push(Pick { use_for: "Speed", model: e.model.clone(), why: format!("{:.0} tok/s for one person, overall {:.0}%", e.speed.single_tps.unwrap_or(0.0), 100.0 * e.overall.unwrap_or(0.0)) });
+        if let Some(e) = models
+            .iter()
+            .filter(|e| e.speed.single_tps.is_some())
+            .max_by(|a, b| {
+                a.speed
+                    .single_tps
+                    .unwrap_or(0.0)
+                    .total_cmp(&b.speed.single_tps.unwrap_or(0.0))
+            })
+        {
+            out.push(Pick {
+                use_for: "Speed",
+                model: e.model.clone(),
+                why: format!(
+                    "{:.0} tok/s for one person, overall {:.0}%",
+                    e.speed.single_tps.unwrap_or(0.0),
+                    100.0 * e.overall.unwrap_or(0.0)
+                ),
+            });
         }
     }
     out
@@ -806,18 +1234,35 @@ pub(crate) async fn get_evals(State(state): State<AppState>, _auth: BearerAuth) 
     let picks = recommend(&evals);
     let running = CURRENT.lock().expect("evals").clone();
     let serving = state.endpoint().map(|e| e.model);
-    Json(json!({ "evals": evals, "running": running, "recommendations": picks, "serving": serving }))
+    Json(
+        json!({ "evals": evals, "running": running, "recommendations": picks, "serving": serving }),
+    )
 }
 
 /// `POST /evals`: evaluate what's serving (in the background).
 /// `POST /evals` (`{"agent": true}` adds agent reliability).
-pub(crate) async fn post_eval(State(state): State<AppState>, _auth: BearerAuth, body: Option<Json<Value>>) -> Reply {
+pub(crate) async fn post_eval(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    body: Option<Json<Value>>,
+) -> Reply {
     let agent = body.is_some_and(|Json(b)| b["agent"] == true);
     if state.endpoint().is_none() {
-        return Err(err(StatusCode::CONFLICT, "Nothing is serving. Start a chat model, then evaluate it."));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Nothing is serving. Start a chat model, then evaluate it.",
+        ));
     }
-    if CURRENT.lock().expect("evals").as_ref().is_some_and(|e| e.status == "running") {
-        return Err(err(StatusCode::CONFLICT, "An evaluation is already running."));
+    if CURRENT
+        .lock()
+        .expect("evals")
+        .as_ref()
+        .is_some_and(|e| e.status == "running")
+    {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "An evaluation is already running.",
+        ));
     }
     let st = state.clone();
     tokio::spawn(async move {
@@ -827,7 +1272,9 @@ pub(crate) async fn post_eval(State(state): State<AppState>, _auth: BearerAuth, 
     });
     // Let it register, so the reply carries it.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    Ok(Json(json!({ "running": CURRENT.lock().expect("evals").clone() })))
+    Ok(Json(
+        json!({ "running": CURRENT.lock().expect("evals").clone() }),
+    ))
 }
 
 /// `POST /evals/stop`
@@ -837,21 +1284,32 @@ pub(crate) async fn post_stop(_auth: BearerAuth) -> Json<Value> {
 }
 
 /// `GET /evals/{id}`
-pub(crate) async fn get_eval(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
+pub(crate) async fn get_eval(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
     if !valid_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "Bad id."));
     }
-    let b = std::fs::read(dir(&state).join(format!("{id}.json"))).map_err(|_| err(StatusCode::NOT_FOUND, "No such evaluation."))?;
-    let e: Eval = serde_json::from_slice(&b).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let b = std::fs::read(dir(&state).join(format!("{id}.json")))
+        .map_err(|_| err(StatusCode::NOT_FOUND, "No such evaluation."))?;
+    let e: Eval = serde_json::from_slice(&b)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "eval": e })))
 }
 
 /// `DELETE /evals/{id}`
-pub(crate) async fn delete_eval(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
+pub(crate) async fn delete_eval(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
     if !valid_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "Bad id."));
     }
-    std::fs::remove_file(dir(&state).join(format!("{id}.json"))).map_err(|_| err(StatusCode::NOT_FOUND, "No such evaluation."))?;
+    std::fs::remove_file(dir(&state).join(format!("{id}.json")))
+        .map_err(|_| err(StatusCode::NOT_FOUND, "No such evaluation."))?;
     Ok(Json(json!({ "deleted": true })))
 }
 
@@ -876,7 +1334,10 @@ mod tests {
 
     #[test]
     fn finds_the_python_and_hides_the_needle() {
-        assert_eq!(python_block("Here:\n```python\ndef f(): pass\n```\nDone").trim(), "def f(): pass");
+        assert_eq!(
+            python_block("Here:\n```python\ndef f(): pass\n```\nDone").trim(),
+            "def f(): pass"
+        );
         assert_eq!(python_block("def f(): pass"), "def f(): pass");
         let h = haystack(2000, 0.5, "NEEDLE");
         assert!(h.len() >= 8000 && h.contains("NEEDLE"));
@@ -886,25 +1347,64 @@ mod tests {
 
     #[test]
     fn recommends_by_what_each_use_needs() {
-        let cat = |key: &str, passed| Category { key: key.into(), label: key.into(), passed, total: 10, cases: vec![] };
-        let mk = |model: &str, tools, code, tps, ctx| Eval {
-            id: model.into(), model: model.into(), started: 1, status: "done".into(), context: Some(ctx),
-            speed: Speed { single_tps: Some(tps), ..Default::default() },
-            categories: vec![cat("tools", tools), cat("code", code), cat("reasoning", 8), cat("instructions", 8), cat("long", 10)],
-            overall: Some(0.8), ..Default::default()
+        let cat = |key: &str, passed| Category {
+            key: key.into(),
+            label: key.into(),
+            passed,
+            total: 10,
+            cases: vec![],
         };
-        let picks = recommend(&[mk("chatty", 10, 3, 80.0, 32_768), mk("coder", 8, 10, 40.0, 65_536), mk("tiny", 2, 2, 200.0, 8192)]);
-        let pick = |u: &str| picks.iter().find(|p| p.use_for == u).map(|p| p.model.as_str());
+        let mk = |model: &str, tools, code, tps, ctx| Eval {
+            id: model.into(),
+            model: model.into(),
+            started: 1,
+            status: "done".into(),
+            context: Some(ctx),
+            speed: Speed {
+                single_tps: Some(tps),
+                ..Default::default()
+            },
+            categories: vec![
+                cat("tools", tools),
+                cat("code", code),
+                cat("reasoning", 8),
+                cat("instructions", 8),
+                cat("long", 10),
+            ],
+            overall: Some(0.8),
+            ..Default::default()
+        };
+        let picks = recommend(&[
+            mk("chatty", 10, 3, 80.0, 32_768),
+            mk("coder", 8, 10, 40.0, 65_536),
+            mk("tiny", 2, 2, 200.0, 8192),
+        ]);
+        let pick = |u: &str| {
+            picks
+                .iter()
+                .find(|p| p.use_for == u)
+                .map(|p| p.model.as_str())
+        };
         assert_eq!(pick("Code"), Some("coder"));
         assert_eq!(pick("Speed"), Some("tiny"));
-        assert_ne!(pick("Research"), Some("tiny"), "8K context is too small for research");
+        assert_ne!(
+            pick("Research"),
+            Some("tiny"),
+            "8K context is too small for research"
+        );
     }
 
     #[test]
     fn compaction_uses_the_latest_measured_window_for_the_model() {
         let mk = |model: &str, started, window: Option<Option<u64>>| Eval {
-            id: format!("{model}-{started}"), model: model.into(), started, status: "done".into(),
-            reliability: window.map(|w| crate::reliability::Report { recommended_window: w, ..Default::default() }),
+            id: format!("{model}-{started}"),
+            model: model.into(),
+            started,
+            status: "done".into(),
+            reliability: window.map(|w| crate::reliability::Report {
+                recommended_window: w,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let evals = vec![
@@ -915,13 +1415,36 @@ mod tests {
             mk("Qwen/Qwen3-32B", 1, Some(None)),
             mk("tiny", 1, Some(Some(8_192))),
         ];
-        assert_eq!(measured_window(&evals, "openai/gpt-oss-20b"), Some(65_536), "the latest run wins");
-        assert_eq!(measured_window(&evals, "Qwen/Qwen3-32B"), None, "nothing held up: no measured window");
+        assert_eq!(
+            measured_window(&evals, "openai/gpt-oss-20b"),
+            Some(65_536),
+            "the latest run wins"
+        );
+        assert_eq!(
+            measured_window(&evals, "Qwen/Qwen3-32B"),
+            None,
+            "nothing held up: no measured window"
+        );
         assert_eq!(measured_window(&evals, "never-tested"), None);
-        assert_eq!(measured_window(&evals, "tiny"), Some(MIN_COMPACT_WINDOW), "never below the floor");
+        assert_eq!(
+            measured_window(&evals, "tiny"),
+            Some(MIN_COMPACT_WINDOW),
+            "never below the floor"
+        );
         let mut stopped = mk("openai/gpt-oss-20b", 9, Some(Some(16_384)));
         stopped.status = "stopped".into();
-        assert_eq!(measured_window(&[evals.clone(), vec![stopped]].concat(), "openai/gpt-oss-20b"), Some(65_536), "an unfinished run doesn't count");
-        assert_eq!(measured_window(&evals, "Qwen/Qwen3-32B").unwrap_or(DEFAULT_COMPACT_WINDOW), 65_536, "the fallback is 64K");
+        assert_eq!(
+            measured_window(
+                &[evals.clone(), vec![stopped]].concat(),
+                "openai/gpt-oss-20b"
+            ),
+            Some(65_536),
+            "an unfinished run doesn't count"
+        );
+        assert_eq!(
+            measured_window(&evals, "Qwen/Qwen3-32B").unwrap_or(DEFAULT_COMPACT_WINDOW),
+            65_536,
+            "the fallback is 64K"
+        );
     }
 }

@@ -260,15 +260,27 @@ async fn pair_init_is_rate_limited_per_agent() {
     let client = reqwest::Client::new();
 
     for _ in 0..5 {
-        let resp = client.post(format!("{base}/pair/init")).send().await.unwrap();
+        let resp = client
+            .post(format!("{base}/pair/init"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
-    let resp = client.post(format!("{base}/pair/init")).send().await.unwrap();
+    let resp = client
+        .post(format!("{base}/pair/init"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["error"].as_str().unwrap().contains("Wait a minute"));
 
     let (_other, other_base) = spawn().await;
-    let resp = client.post(format!("{other_base}/pair/init")).send().await.unwrap();
+    let resp = client
+        .post(format!("{other_base}/pair/init"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 }

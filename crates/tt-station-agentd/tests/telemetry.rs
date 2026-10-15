@@ -93,7 +93,12 @@ async fn telemetry_stream_pushes_verbatim_tt_smi_snapshot() {
     let addr = listener.local_addr().expect("failed to read local addr");
 
     tokio::spawn(async move {
-        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     // Connect a real WebSocket client and read exactly one frame.
@@ -130,13 +135,18 @@ async fn telemetry_stream_pushes_verbatim_tt_smi_snapshot() {
 
 /// One full telemetry frame for `token` (or none) from the network router.
 async fn frame(addr: std::net::SocketAddr, token: Option<&str>) -> Result<serde_json::Value, u16> {
-    let mut req = format!("ws://{addr}/telemetry").into_client_request().unwrap();
+    let mut req = format!("ws://{addr}/telemetry")
+        .into_client_request()
+        .unwrap();
     if let Some(t) = token {
-        req.headers_mut().insert("authorization", format!("Bearer {t}").parse().unwrap());
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {t}").parse().unwrap());
     }
     let (mut ws, _) = match connect_async(req).await {
         Ok(ok) => ok,
-        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => return Err(resp.status().as_u16()),
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+            return Err(resp.status().as_u16())
+        }
         Err(e) => panic!("{e}"),
     };
     let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
@@ -150,8 +160,12 @@ async fn frame(addr: std::net::SocketAddr, token: Option<&str>) -> Result<serde_
 #[tokio::test]
 async fn telemetry_needs_pairing_and_hides_command_lines_from_members() {
     let stub = StubTtSmi::new();
-    let state = AppState::new("qb2-lab".to_string(), "4xBH".to_string(), Arc::new(DstackBackend))
-        .with_telemetry_config(stub.path(), 50);
+    let state = AppState::new(
+        "qb2-lab".to_string(),
+        "4xBH".to_string(),
+        Arc::new(DstackBackend),
+    )
+    .with_telemetry_config(stub.path(), 50);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let router = app(state.clone());
@@ -168,7 +182,10 @@ async fn telemetry_needs_pairing_and_hides_command_lines_from_members() {
     let got = frame(addr, Some(&member)).await.unwrap();
     for p in got["tt_toplike"]["processes"].as_array().unwrap() {
         let cmd = p["cmd"].as_str().unwrap();
-        assert!(!cmd.contains(' ') && !cmd.contains('/'), "a member saw a command line: {cmd}");
+        assert!(
+            !cmd.contains(' ') && !cmd.contains('/'),
+            "a member saw a command line: {cmd}"
+        );
     }
     // An owner still gets the frame (with whole command lines).
     let got = frame(addr, Some(&owner)).await.unwrap();

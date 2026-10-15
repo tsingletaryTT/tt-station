@@ -489,7 +489,10 @@ fn network_file(state: &AppState) -> std::path::PathBuf {
 
 /// The apps the owner has opened to the network.
 fn opened(state: &AppState) -> Vec<String> {
-    std::fs::read(network_file(state)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    std::fs::read(network_file(state))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
 }
 
 /// Whether the owner has opened `def` to the network (never for an app that can't be).
@@ -513,17 +516,28 @@ fn set_open(state: &AppState, id: &str, open: bool) -> Result<(), String> {
 /// Whether `docker inspect`'s port bindings (`{{json .HostConfig.PortBindings}}`)
 /// publish anywhere but the box's own loopback.
 fn published_on_network(bindings: &str) -> bool {
-    let Ok(v) = serde_json::from_str::<Value>(bindings) else { return false };
-    v.as_object().into_iter().flatten().flat_map(|(_, b)| b.as_array().into_iter().flatten()).any(|b| {
-        let ip = b["HostIp"].as_str().unwrap_or("");
-        !(ip.starts_with("127.") || ip == "::1" || ip == "localhost")
-    })
+    let Ok(v) = serde_json::from_str::<Value>(bindings) else {
+        return false;
+    };
+    v.as_object()
+        .into_iter()
+        .flatten()
+        .flat_map(|(_, b)| b.as_array().into_iter().flatten())
+        .any(|b| {
+            let ip = b["HostIp"].as_str().unwrap_or("");
+            !(ip.starts_with("127.") || ip == "::1" || ip == "localhost")
+        })
 }
 
 /// A container as Docker has it: whether it's published on the network, and its environment.
 fn inspect(id: &str) -> Option<(bool, Vec<String>)> {
     let o = Command::new("docker")
-        .args(["inspect", "-f", "{{json .HostConfig.PortBindings}}\n{{range .Config.Env}}{{println .}}{{end}}", &container(id)])
+        .args([
+            "inspect",
+            "-f",
+            "{{json .HostConfig.PortBindings}}\n{{range .Config.Env}}{{println .}}{{end}}",
+            &container(id),
+        ])
         .stdin(Stdio::null())
         .output()
         .ok()
@@ -537,22 +551,33 @@ fn inspect(id: &str) -> Option<(bool, Vec<String>)> {
 /// Whether a container published as `on_network` with `env` is what the app's setting asks for now.
 fn container_matches(def: &AppDef, open: bool, on_network: bool, env: &[String]) -> bool {
     on_network == publish_host(def, open).is_empty()
-        && shared_env(def, open).iter().all(|(k, v)| env.iter().any(|e| *e == format!("{k}={v}")))
+        && shared_env(def, open)
+            .iter()
+            .all(|(k, v)| env.iter().any(|e| *e == format!("{k}={v}")))
 }
 
 /// The value `placeholder` (`{token}`, `{key}`) had when the container was made,
 /// read back out of its environment.
 fn secret_in(def: &AppDef, env: &[String], placeholder: &str) -> Option<String> {
-    def.env.iter().filter(|(_, t)| t.contains(placeholder)).find_map(|(k, t)| {
-        let (pre, post) = t.split_once(placeholder)?;
-        let value = env.iter().find_map(|l| l.strip_prefix(&format!("{k}=")))?;
-        value.strip_prefix(pre)?.strip_suffix(post).filter(|v| !v.is_empty()).map(str::to_string)
-    })
+    def.env
+        .iter()
+        .filter(|(_, t)| t.contains(placeholder))
+        .find_map(|(k, t)| {
+            let (pre, post) = t.split_once(placeholder)?;
+            let value = env.iter().find_map(|l| l.strip_prefix(&format!("{k}=")))?;
+            value
+                .strip_prefix(pre)?
+                .strip_suffix(post)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        })
 }
 
 /// n8n's own answer to "has someone made the owner account yet?" (`GET /rest/settings`).
 fn owner_set_up(settings: &Value) -> Option<bool> {
-    settings["data"]["userManagement"]["showSetupOnFirstLoad"].as_bool().map(|setup_pending| !setup_pending)
+    settings["data"]["userManagement"]["showSetupOnFirstLoad"]
+        .as_bool()
+        .map(|setup_pending| !setup_pending)
 }
 
 /// Asks the running app (on the box) whether its owner account exists.
@@ -569,7 +594,9 @@ fn has_owner(def: &AppDef) -> Option<bool> {
 
 /// The box's address on its network, as another computer would type it.
 fn lan_host(state: &AppState) -> String {
-    crate::pairqr::lan_ipv4().map(|ip| ip.to_string()).unwrap_or_else(|| format!("{}.local", state.name()))
+    crate::pairqr::lan_ipv4()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| format!("{}.local", state.name()))
 }
 
 /// What opening `def` to the network means, for the owner's confirm; or why it can't be.
@@ -630,7 +657,11 @@ static INSTALLS: std::sync::LazyLock<Arc<Installs>> =
 /// Its address: on the network while it's open and published there; otherwise
 /// the box's own (another computer's TT Station tunnels to it).
 fn url_for(state: &AppState, def: &AppDef, token: Option<&str>, on_network: bool) -> String {
-    let host = if on_network { lan_host(state) } else { "127.0.0.1".to_string() };
+    let host = if on_network {
+        lan_host(state)
+    } else {
+        "127.0.0.1".to_string()
+    };
     format!(
         "http://{host}:{}{}",
         def.port,
@@ -643,9 +674,25 @@ fn describe(state: &AppState, def: &AppDef) -> Value {
     let install = INSTALLS.get(def.id);
     // A container that keeps restarting is broken: say so, with what it last said.
     let crash = (docker == "restarting").then(|| {
-        Command::new("docker").args(["logs", "--tail", "5", &container(def.id)]).output().ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr))
-            .and_then(|t| t.lines().map(str::trim).filter(|l| !l.is_empty()).last().map(|l| format!("It keeps stopping: {}", l.chars().take(240).collect::<String>())))
+        Command::new("docker")
+            .args(["logs", "--tail", "5", &container(def.id)])
+            .output()
+            .ok()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr)
+            })
+            .and_then(|t| {
+                t.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .last()
+                    .map(|l| {
+                        format!(
+                            "It keeps stopping: {}",
+                            l.chars().take(240).collect::<String>()
+                        )
+                    })
+            })
             .unwrap_or_else(|| "It keeps stopping right after it starts.".into())
     });
     let install = install.or_else(|| crash.map(|c| ("Failed".to_string(), Some(c))));
@@ -657,11 +704,15 @@ fn describe(state: &AppState, def: &AppDef) -> Value {
         _ => "stopped",
     };
     let inspected = (docker != "missing").then(|| inspect(def.id)).flatten();
-    let token = inspected.as_ref().and_then(|(_, env)| secret_in(def, env, "{token}"));
+    let token = inspected
+        .as_ref()
+        .and_then(|(_, env)| secret_in(def, env, "{token}"));
     let open = is_open(state, def);
     let on_network = inspected.as_ref().is_some_and(|(n, _)| *n);
     // Containers keep the address they were made with until they're next started from here.
-    let restart_to_apply = inspected.as_ref().is_some_and(|(n, env)| !container_matches(def, open, *n, env));
+    let restart_to_apply = inspected
+        .as_ref()
+        .is_some_and(|(n, env)| !container_matches(def, open, *n, env));
     let mut network = network_terms(state, def);
     network["open"] = json!(open);
     network["on_network"] = json!(on_network);
@@ -693,10 +744,17 @@ fn describe(state: &AppState, def: &AppDef) -> Value {
 
 /// `{base}`, `{key}`, `{token}`, `{model}` and `{app:<id>}` filled in.
 fn fill(text: &str, base: &str, key: &str, token: &str, model: &str) -> String {
-    let mut out = text.replace("{base}", base).replace("{key}", key).replace("{token}", token).replace("{model}", model);
+    let mut out = text
+        .replace("{base}", base)
+        .replace("{key}", key)
+        .replace("{token}", token)
+        .replace("{model}", model);
     for other in APPS {
         // On the apps' own network, by container name: reachable from the other apps, not from outside.
-        out = out.replace(&format!("{{app:{}}}", other.id), &format!("http://{}:{}", container(other.id), other.container_port));
+        out = out.replace(
+            &format!("{{app:{}}}", other.id),
+            &format!("http://{}:{}", container(other.id), other.container_port),
+        );
     }
     out
 }
@@ -706,18 +764,31 @@ fn install(state: AppState, def: &'static AppDef) {
     std::thread::spawn(move || {
         // The box's embeddings service, when it needs one: on, and answering.
         if def.needs.contains(&EMBEDDINGS) {
-            INSTALLS.set(def.id, "Setting up embeddings (downloading the model)", None);
+            INSTALLS.set(
+                def.id,
+                "Setting up embeddings (downloading the model)",
+                None,
+            );
             crate::embeddings::ensure_embed(&state);
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
-            let ready = rt.map(|rt| rt.block_on(async {
-                for _ in 0..180 {
-                    if crate::embeddings::ready(&state, &crate::embeddings::EMBED).await.is_some() {
-                        return true;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                }
-                false
-            })).unwrap_or(false);
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let ready = rt
+                .map(|rt| {
+                    rt.block_on(async {
+                        for _ in 0..180 {
+                            if crate::embeddings::ready(&state, &crate::embeddings::EMBED)
+                                .await
+                                .is_some()
+                            {
+                                return true;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        }
+                        false
+                    })
+                })
+                .unwrap_or(false);
             if !ready {
                 return INSTALLS.set(def.id, "Failed", Some("The embeddings service didn't come up. Check it in Models → Embeddings and reranking.".into()));
             }
@@ -726,13 +797,23 @@ fn install(state: AppState, def: &'static AppDef) {
         for need in def.needs.iter().filter_map(|n| app(n)) {
             INSTALLS.set(def.id, &format!("Setting up {}", need.name), None);
             let ready = match docker_state(need.id).as_str() {
-                "missing" => install_blocking(&state, need, &|step| INSTALLS.set(need.id, step, None), None).map(|_| INSTALLS.clear(need.id)),
+                "missing" => install_blocking(
+                    &state,
+                    need,
+                    &|step| INSTALLS.set(need.id, step, None),
+                    None,
+                )
+                .map(|_| INSTALLS.clear(need.id)),
                 "running" => Ok(()),
                 _ => start_existing(&state, need),
             };
             if let Err(e) = ready {
                 INSTALLS.set(need.id, "Failed", Some(e.clone()));
-                return INSTALLS.set(def.id, "Failed", Some(format!("{} didn't start: {e}", need.name)));
+                return INSTALLS.set(
+                    def.id,
+                    "Failed",
+                    Some(format!("{} didn't start: {e}", need.name)),
+                );
             }
         }
         match install_blocking(&state, def, &|step| INSTALLS.set(def.id, step, None), None) {
@@ -768,14 +849,23 @@ pub fn ensure_running(id: &str) -> bool {
     match docker_state(id).as_str() {
         "running" => true,
         "missing" => false,
-        _ => Command::new("docker").args(["start", &container(id)]).stdin(Stdio::null()).output().is_ok_and(|o| o.status.success()),
+        _ => Command::new("docker")
+            .args(["start", &container(id)])
+            .stdin(Stdio::null())
+            .output()
+            .is_ok_and(|o| o.status.success()),
     }
 }
 
 fn run_ok(cmd: &mut Command) -> Result<(), String> {
     match cmd.stdin(Stdio::null()).output() {
         Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().lines().last().unwrap_or("docker failed").to_string()),
+        Ok(o) => Err(String::from_utf8_lossy(&o.stderr)
+            .trim()
+            .lines()
+            .last()
+            .unwrap_or("docker failed")
+            .to_string()),
         Err(e) => Err(format!("docker isn't available: {e}")),
     }
 }
@@ -785,7 +875,12 @@ type Kept = (Option<String>, Option<String>);
 
 /// Pull, key, write its files, run. Blocking. `keep`: re-creating an installed
 /// app (no pull, the same token and key).
-fn install_blocking(state: &AppState, def: &'static AppDef, step: &dyn Fn(&str), keep: Option<Kept>) -> Result<(), String> {
+fn install_blocking(
+    state: &AppState,
+    def: &'static AppDef,
+    step: &dyn Fn(&str),
+    keep: Option<Kept>,
+) -> Result<(), String> {
     let id = def.id;
     if keep.is_none() {
         step("Downloading");
@@ -793,24 +888,40 @@ fn install_blocking(state: &AppState, def: &'static AppDef, step: &dyn Fn(&str),
     }
     step("Starting");
     let (kept_token, kept_key) = keep.unwrap_or_default();
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     // An app key only for apps that call the box's model (SearXNG, ComfyUI… don't).
-    let uses_key = def.show_key || def.env.iter().any(|(_, v)| v.contains("{key}")) || def.files.iter().any(|(_, c)| c.contains("{key}"));
+    let uses_key = def.show_key
+        || def.env.iter().any(|(_, v)| v.contains("{key}"))
+        || def.files.iter().any(|(_, c)| c.contains("{key}"));
     let key = match kept_key {
         Some(k) if uses_key => k,
-        _ if uses_key => state.app_keys().create(&format!("App: {}", def.name), now)?.1,
+        _ if uses_key => {
+            state
+                .app_keys()
+                .create(&format!("App: {}", def.name), now)?
+                .1
+        }
         _ => String::new(),
     };
     let token = kept_token.unwrap_or_else(|| crate::pairing::issue_pair_id()[..16].to_string());
     let base = format!("http://host.docker.internal:{}/v1", state.ctrl_port());
     // The gateway sends any model name to the model that's serving; this one is for apps that list it.
-    let model = state.endpoint().map(|e| e.model).unwrap_or_else(|| "quietbox".into());
+    let model = state
+        .endpoint()
+        .map(|e| e.model)
+        .unwrap_or_else(|| "quietbox".into());
     let dims = crate::embeddings::embed_dims(state).to_string();
     // The box only, unless its owner opened it to the network.
     let open = is_open(state, def);
     let bind = publish_host(def, open);
     // The apps share a private network, so one can reach another (a research app its search engine).
-    let _ = Command::new("docker").args(["network", "create", NETWORK]).stdin(Stdio::null()).output();
+    let _ = Command::new("docker")
+        .args(["network", "create", NETWORK])
+        .stdin(Stdio::null())
+        .output();
     let mut cmd = Command::new("docker");
     cmd.args([
         "run",
@@ -834,9 +945,16 @@ fn install_blocking(state: &AppState, def: &'static AppDef, step: &dyn Fn(&str),
         let dir = state.config_dir().join("apps").join(id);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         for (inside, contents) in def.files {
-            let name = std::path::Path::new(inside).file_name().and_then(|n| n.to_str()).unwrap_or("file");
+            let name = std::path::Path::new(inside)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file");
             let host = dir.join(name);
-            std::fs::write(&host, fill(contents, &base, &key, &token, &model).replace("{embed_dim}", &dims)).map_err(|e| e.to_string())?;
+            std::fs::write(
+                &host,
+                fill(contents, &base, &key, &token, &model).replace("{embed_dim}", &dims),
+            )
+            .map_err(|e| e.to_string())?;
             cmd.args(["-v", &format!("{}:{inside}", host.display())]);
         }
     }
@@ -900,7 +1018,10 @@ pub fn start_or_install(state: &AppState, def: &'static AppDef) -> Result<&'stat
     }
     // A container stuck restarting is replaced with a fresh one (its data volume stays).
     if docker_state(def.id) == "restarting" {
-        let _ = Command::new("docker").args(["rm", "-f", &container(def.id)]).stdin(Stdio::null()).output();
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &container(def.id)])
+            .stdin(Stdio::null())
+            .output();
     }
     if docker_state(def.id) != "missing" {
         start_needs(state, def);
@@ -920,10 +1041,16 @@ pub fn start_or_install(state: &AppState, def: &'static AppDef) -> Result<&'stat
 /// was made with isn't what its setting says now, keeping its data, token and key.
 fn start_existing(state: &AppState, def: &'static AppDef) -> Result<(), String> {
     match inspect(def.id) {
-        Some((on_network, env)) if !container_matches(def, is_open(state, def), on_network, &env) => {
+        Some((on_network, env))
+            if !container_matches(def, is_open(state, def), on_network, &env) =>
+        {
             let token = secret_in(def, &env, "{token}");
-            let key = secret_in(def, &env, "{key}")
-                .or_else(|| std::fs::read_to_string(state.config_dir().join("apps").join(def.id).join("key")).ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty()));
+            let key = secret_in(def, &env, "{key}").or_else(|| {
+                std::fs::read_to_string(state.config_dir().join("apps").join(def.id).join("key"))
+                    .ok()
+                    .map(|k| k.trim().to_string())
+                    .filter(|k| !k.is_empty())
+            });
             run_ok(Command::new("docker").args(["rm", "-f", &container(def.id)]))?;
             install_blocking(state, def, &|_| {}, Some((token, key)))
         }
@@ -977,7 +1104,11 @@ pub(crate) async fn put_network(
     Json(body): Json<NetworkBody>,
 ) -> Reply {
     let def = app(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such app."))?;
-    let action = if body.open { "app_network_open" } else { "app_network_close" };
+    let action = if body.open {
+        "app_network_open"
+    } else {
+        "app_network_close"
+    };
     let audit_state = state.clone();
     let done = tokio::task::spawn_blocking(move || {
         if body.open {
@@ -998,7 +1129,12 @@ pub(crate) async fn put_network(
     })
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    crate::audit::record(&audit_state, action, &id, if done.is_ok() { "ok" } else { "refused" });
+    crate::audit::record(
+        &audit_state,
+        action,
+        &id,
+        if done.is_ok() { "ok" } else { "refused" },
+    );
     done
 }
 
@@ -1043,7 +1179,11 @@ mod tests {
         }
         for a in APPS {
             for n in a.needs {
-                assert!(*n == EMBEDDINGS || app(n).is_some(), "{} needs {n}, which isn't in the catalogue", a.id);
+                assert!(
+                    *n == EMBEDDINGS || app(n).is_some(),
+                    "{} needs {n}, which isn't in the catalogue",
+                    a.id
+                );
             }
         }
         assert!(
@@ -1058,11 +1198,25 @@ mod tests {
 
     #[test]
     fn every_image_is_pinned_by_digest() {
-        let images = APPS.iter().map(|a| (a.id, a.image)).chain([("voice-speak", crate::voice::SPEAK.image), ("voice-listen", crate::voice::LISTEN.image)]);
+        let images = APPS.iter().map(|a| (a.id, a.image)).chain([
+            ("voice-speak", crate::voice::SPEAK.image),
+            ("voice-listen", crate::voice::LISTEN.image),
+        ]);
         for (id, image) in images {
-            let (name, digest) = image.split_once("@sha256:").unwrap_or_else(|| panic!("{id}: {image} isn't pinned by digest"));
-            assert!(digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{id}: {digest}");
-            assert!(name.rsplit('/').next().unwrap().contains(':'), "{id}: keep the tag for people reading it ({name})");
+            let (name, digest) = image
+                .split_once("@sha256:")
+                .unwrap_or_else(|| panic!("{id}: {image} isn't pinned by digest"));
+            assert!(
+                digest.len() == 64
+                    && digest
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "{id}: {digest}"
+            );
+            assert!(
+                name.rsplit('/').next().unwrap().contains(':'),
+                "{id}: keep the tag for people reading it ({name})"
+            );
         }
         // Jupyter's start command installs the OpenAI client: a fixed version.
         let jupyter = app("jupyter").unwrap().command.unwrap().join(" ");
@@ -1072,16 +1226,34 @@ mod tests {
     #[test]
     fn every_app_is_box_only_until_its_owner_opens_it() {
         for a in APPS {
-            assert_eq!(publish_host(a, false), "127.0.0.1:", "{} is box-only by default", a.id);
+            assert_eq!(
+                publish_host(a, false),
+                "127.0.0.1:",
+                "{} is box-only by default",
+                a.id
+            );
             assert!(shared_env(a, false).is_empty(), "{}", a.id);
             match a.share {
-                Share::Never(_) => assert_eq!(publish_host(a, true), "127.0.0.1:", "{} never leaves the box", a.id),
+                Share::Never(_) => assert_eq!(
+                    publish_host(a, true),
+                    "127.0.0.1:",
+                    "{} never leaves the box",
+                    a.id
+                ),
                 _ => assert_eq!(publish_host(a, true), "", "{} opened: every address", a.id),
             }
         }
         // Apps whose first visitor would own them, or that run code with no
         // sign-in, aren't published as-is.
-        for id in ["jupyter", "searxng", "localdeepresearch", "vane", "comfyui", "crawl4ai", "openhands"] {
+        for id in [
+            "jupyter",
+            "searxng",
+            "localdeepresearch",
+            "vane",
+            "comfyui",
+            "crawl4ai",
+            "openhands",
+        ] {
             assert!(matches!(app(id).unwrap().share, Share::Never(_)), "{id}");
         }
         assert!(matches!(app("n8n").unwrap().share, Share::OwnerFirst(_)));
@@ -1089,18 +1261,35 @@ mod tests {
             let a = app(id).unwrap();
             assert!(matches!(a.share, Share::OwnLogin(_)), "{id}");
             // Its sign-in is always in its environment.
-            assert!(a.env.iter().any(|(_, v)| v.contains("{token}")), "{id} has its own secret");
+            assert!(
+                a.env.iter().any(|(_, v)| v.contains("{token}")),
+                "{id} has its own secret"
+            );
         }
     }
 
     #[test]
     fn shared_apps_turn_their_sign_in_on() {
         let langflow = app("langflow").unwrap();
-        assert_eq!(shared_env(langflow, true), &[("LANGFLOW_AUTO_LOGIN", "False")][..], "no auto-login as the superuser");
-        assert!(langflow.env.iter().any(|(k, v)| *k == "LANGFLOW_SUPERUSER_PASSWORD" && v.contains("{token}")));
+        assert_eq!(
+            shared_env(langflow, true),
+            &[("LANGFLOW_AUTO_LOGIN", "False")][..],
+            "no auto-login as the superuser"
+        );
+        assert!(langflow
+            .env
+            .iter()
+            .any(|(k, v)| *k == "LANGFLOW_SUPERUSER_PASSWORD" && v.contains("{token}")));
         let lightrag = app("lightrag").unwrap();
-        assert_eq!(shared_env(lightrag, true), &[("WHITELIST_PATHS", "/health")][..], "its Ollama API behind the sign-in too");
-        assert!(lightrag.env.iter().any(|(k, v)| *k == "AUTH_ACCOUNTS" && v.contains("{token}")));
+        assert_eq!(
+            shared_env(lightrag, true),
+            &[("WHITELIST_PATHS", "/health")][..],
+            "its Ollama API behind the sign-in too"
+        );
+        assert!(lightrag
+            .env
+            .iter()
+            .any(|(k, v)| *k == "AUTH_ACCOUNTS" && v.contains("{token}")));
     }
 
     #[test]
@@ -1113,29 +1302,60 @@ mod tests {
         assert!(published_on_network(everywhere) && published_on_network(v6));
         assert!(!published_on_network("null"));
         let plain = vec!["LANGFLOW_SUPERUSER=langflow".to_string()];
-        let signed_in = vec!["LANGFLOW_SUPERUSER=langflow".to_string(), "LANGFLOW_AUTO_LOGIN=False".to_string()];
+        let signed_in = vec![
+            "LANGFLOW_SUPERUSER=langflow".to_string(),
+            "LANGFLOW_AUTO_LOGIN=False".to_string(),
+        ];
         assert!(container_matches(langflow, false, false, &plain));
         // Published everywhere before this setting existed: made again, box-only.
         assert!(!container_matches(langflow, false, true, &plain));
         // Opened: on the network, with its sign-in on.
         assert!(!container_matches(langflow, true, false, &plain));
-        assert!(!container_matches(langflow, true, true, &plain), "an old open container without its sign-in");
+        assert!(
+            !container_matches(langflow, true, true, &plain),
+            "an old open container without its sign-in"
+        );
         assert!(container_matches(langflow, true, true, &signed_in));
     }
 
     #[test]
     fn a_remade_container_keeps_its_secrets() {
         let lightrag = app("lightrag").unwrap();
-        let env = vec!["AUTH_ACCOUNTS=admin:s3cret".to_string(), "TOKEN_SECRET=s3cret".to_string(), "LLM_BINDING_API_KEY=tt-key".to_string()];
-        assert_eq!(secret_in(lightrag, &env, "{token}").as_deref(), Some("s3cret"), "not admin:s3cret");
-        assert_eq!(secret_in(lightrag, &env, "{key}").as_deref(), Some("tt-key"));
+        let env = vec![
+            "AUTH_ACCOUNTS=admin:s3cret".to_string(),
+            "TOKEN_SECRET=s3cret".to_string(),
+            "LLM_BINDING_API_KEY=tt-key".to_string(),
+        ];
+        assert_eq!(
+            secret_in(lightrag, &env, "{token}").as_deref(),
+            Some("s3cret"),
+            "not admin:s3cret"
+        );
+        assert_eq!(
+            secret_in(lightrag, &env, "{key}").as_deref(),
+            Some("tt-key")
+        );
         assert_eq!(secret_in(app("comfyui").unwrap(), &env, "{token}"), None);
     }
 
     #[test]
     fn n8n_is_shared_only_once_it_has_an_owner() {
-        assert_eq!(owner_set_up(&json!({ "data": { "userManagement": { "showSetupOnFirstLoad": true } } })), Some(false));
-        assert_eq!(owner_set_up(&json!({ "data": { "userManagement": { "showSetupOnFirstLoad": false } } })), Some(true));
-        assert_eq!(owner_set_up(&json!({ "data": {} })), None, "unknown: not shared");
+        assert_eq!(
+            owner_set_up(
+                &json!({ "data": { "userManagement": { "showSetupOnFirstLoad": true } } })
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            owner_set_up(
+                &json!({ "data": { "userManagement": { "showSetupOnFirstLoad": false } } })
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            owner_set_up(&json!({ "data": {} })),
+            None,
+            "unknown: not shared"
+        );
     }
 }

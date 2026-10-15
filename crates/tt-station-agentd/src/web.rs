@@ -152,8 +152,13 @@ pub fn is_private(ip: IpAddr) -> bool {
             let s = v6.segments();
             // An IPv4 address written as IPv6 is that IPv4 address:
             // mapped (::ffff:a.b.c.d), compatible (::a.b.c.d), NAT64 (64:ff9b::a.b.c.d).
-            let embedded = v6.to_ipv4_mapped().or_else(|| (s[..6] == [0; 6]).then(|| v6.to_ipv4()).flatten())
-                .or_else(|| (s[..6] == [0x64, 0xff9b, 0, 0, 0, 0]).then(|| Ipv4Addr::from(((s[6] as u32) << 16) | s[7] as u32)));
+            let embedded = v6
+                .to_ipv4_mapped()
+                .or_else(|| (s[..6] == [0; 6]).then(|| v6.to_ipv4()).flatten())
+                .or_else(|| {
+                    (s[..6] == [0x64, 0xff9b, 0, 0, 0, 0])
+                        .then(|| Ipv4Addr::from(((s[6] as u32) << 16) | s[7] as u32))
+                });
             if let Some(v4) = embedded {
                 return private_v4(v4);
             }
@@ -193,10 +198,19 @@ struct PublicOnly;
 impl reqwest::dns::Resolve for PublicOnly {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         Box::pin(async move {
-            let found: Vec<SocketAddr> = tokio::net::lookup_host((name.as_str(), 0)).await?.collect();
-            let public: Vec<SocketAddr> = found.iter().copied().filter(|a| !is_private(a.ip())).collect();
+            let found: Vec<SocketAddr> =
+                tokio::net::lookup_host((name.as_str(), 0)).await?.collect();
+            let public: Vec<SocketAddr> = found
+                .iter()
+                .copied()
+                .filter(|a| !is_private(a.ip()))
+                .collect();
             if public.is_empty() || public.len() < found.len() {
-                return Err(format!("{} is on a private network; only public pages can be read", name.as_str()).into());
+                return Err(format!(
+                    "{} is on a private network; only public pages can be read",
+                    name.as_str()
+                )
+                .into());
             }
             Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
         })
@@ -235,7 +249,10 @@ pub async fn read(url: &str) -> Result<(String, Option<String>, String), String>
 }
 
 /// [`read`], keeping up to `max_chars` of the page's text (research reads more of a page).
-pub async fn read_limited(url: &str, max_chars: usize) -> Result<(String, Option<String>, String), String> {
+pub async fn read_limited(
+    url: &str,
+    max_chars: usize,
+) -> Result<(String, Option<String>, String), String> {
     let client = client()?;
     let mut current = url.trim().to_string();
     for _ in 0..6 {
@@ -382,14 +399,26 @@ mod tests {
         ] {
             assert!(is_private(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["93.184.216.34", "2606:4700::1111", "::ffff:93.184.216.34", "100.128.0.1", "8.8.8.8"] {
+        for ip in [
+            "93.184.216.34",
+            "2606:4700::1111",
+            "::ffff:93.184.216.34",
+            "100.128.0.1",
+            "8.8.8.8",
+        ] {
             assert!(!is_private(ip.parse().unwrap()), "{ip}");
         }
     }
 
     #[tokio::test]
     async fn read_refuses_the_box_itself() {
-        for url in ["http://127.0.0.1:8765/status", "http://[::ffff:127.0.0.1]:8765/status", "http://localhost:8765/status", "http://0.0.0.0:8765/", "http://169.254.169.254/latest/meta-data/"] {
+        for url in [
+            "http://127.0.0.1:8765/status",
+            "http://[::ffff:127.0.0.1]:8765/status",
+            "http://localhost:8765/status",
+            "http://0.0.0.0:8765/",
+            "http://169.254.169.254/latest/meta-data/",
+        ] {
             assert!(read(url).await.unwrap_err().contains("private"), "{url}");
         }
         assert!(read("file:///etc/passwd")
@@ -418,9 +447,16 @@ mod tests {
                 seen.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         });
-        let r = client().unwrap().get(format!("http://localhost:{port}/")).send().await;
+        let r = client()
+            .unwrap()
+            .get(format!("http://localhost:{port}/"))
+            .send()
+            .await;
         assert!(r.is_err());
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(!hit.load(std::sync::atomic::Ordering::SeqCst), "connected to the box");
+        assert!(
+            !hit.load(std::sync::atomic::Ordering::SeqCst),
+            "connected to the box"
+        );
     }
 }

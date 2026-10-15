@@ -79,7 +79,10 @@ fn same(a: SocketAddr, b: SocketAddr) -> bool {
 /// match, has no answer.
 pub fn owner_of(peer: SocketAddr, entries: &[SocketEntry]) -> Option<u32> {
     let mut uid = None;
-    for e in entries.iter().filter(|e| e.inode != 0 && same(e.local, peer)) {
+    for e in entries
+        .iter()
+        .filter(|e| e.inode != 0 && same(e.local, peer))
+    {
         match uid {
             None => uid = Some(e.uid),
             Some(u) if u == e.uid => {}
@@ -169,8 +172,18 @@ mod tests {
     #[test]
     fn two_accounts_on_one_address_get_no_answer() {
         let e = vec![
-            SocketEntry { local: addr("127.0.0.1:5000"), remote: addr("127.0.0.1:8765"), uid: 1000, inode: 1 },
-            SocketEntry { local: addr("127.0.0.1:5000"), remote: addr("127.0.0.1:9000"), uid: 1001, inode: 2 },
+            SocketEntry {
+                local: addr("127.0.0.1:5000"),
+                remote: addr("127.0.0.1:8765"),
+                uid: 1000,
+                inode: 1,
+            },
+            SocketEntry {
+                local: addr("127.0.0.1:5000"),
+                remote: addr("127.0.0.1:9000"),
+                uid: 1001,
+                inode: 2,
+            },
         ];
         assert_eq!(owner_of(addr("127.0.0.1:5000"), &e), None);
     }

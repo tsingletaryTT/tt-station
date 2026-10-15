@@ -1163,7 +1163,11 @@ impl ServingBackend for DockerBackend {
         // The container's serving port is fixed at `CONTAINER_PORT`; only
         // the host side of the `--publish` mapping is configurable.
         // On loopback unless the endpoint is advertised at a network address (see `loopback_only`).
-        let bind = if super::loopback_only(&self.config.host) { "127.0.0.1:" } else { "" };
+        let bind = if super::loopback_only(&self.config.host) {
+            "127.0.0.1:"
+        } else {
+            ""
+        };
         let publish_mapping = format!("{bind}{}:{}", self.config.host_port, CONTAINER_PORT);
         // `--mount type=bind,src=X,dst=X`: the hugepages path is bind-mounted
         // onto the SAME path inside the container, since that's the path
@@ -1179,7 +1183,11 @@ impl ServingBackend for DockerBackend {
         // By name only: docker takes the value from its own environment
         // (`run_in_dir_with_env` below), so the token never shows in a
         // process list.
-        let hf_token = self.config.hf_token.as_deref().filter(|token| !token.is_empty());
+        let hf_token = self
+            .config
+            .hf_token
+            .as_deref()
+            .filter(|token| !token.is_empty());
 
         // Built as owned `String`s (several pieces are computed at runtime,
         // e.g. `publish_mapping`) then borrowed as `&str` for
@@ -1229,23 +1237,25 @@ impl ServingBackend for DockerBackend {
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let env: Vec<(&str, &str)> = hf_token.map(|t| ("HF_TOKEN", t)).into_iter().collect();
-        self.runner.run_in_dir_with_env(".", &arg_refs, &env).inspect_err(|_| {
-            // `docker run -d` can create a container and still exit non-zero
-            // (it started and immediately died, or the daemon failed part
-            // way through), so this exit can leave one behind. It must be
-            // stopped BEFORE this error unwinds, because unwinding drops the
-            // lease guard and `gozer release` RESETS the released chips --
-            // see `stop_launched_container`.
-            //
-            // Gated on actually HOLDING a lease, not merely on gozer being
-            // installed: the stop exists to protect the release, so it
-            // should depend on the thing it protects. Without a lease the
-            // unleased behaviour stays byte-identical (no stop at all, as
-            // before).
-            if lease.is_some() {
-                self.stop_launched_container(&container_name);
-            }
-        })?;
+        self.runner
+            .run_in_dir_with_env(".", &arg_refs, &env)
+            .inspect_err(|_| {
+                // `docker run -d` can create a container and still exit non-zero
+                // (it started and immediately died, or the daemon failed part
+                // way through), so this exit can leave one behind. It must be
+                // stopped BEFORE this error unwinds, because unwinding drops the
+                // lease guard and `gozer release` RESETS the released chips --
+                // see `stop_launched_container`.
+                //
+                // Gated on actually HOLDING a lease, not merely on gozer being
+                // installed: the stop exists to protect the release, so it
+                // should depend on the thing it protects. Without a lease the
+                // unleased behaviour stays byte-identical (no stop at all, as
+                // before).
+                if lease.is_some() {
+                    self.stop_launched_container(&container_name);
+                }
+            })?;
 
         // `run.py` (and this backend) poll `/health`, not `/v1/models` --
         // see docs/reference/tt-inference-server-docker.md.

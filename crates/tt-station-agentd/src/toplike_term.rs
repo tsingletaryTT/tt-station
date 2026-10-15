@@ -50,9 +50,12 @@ const MAX_SESSIONS: usize = 4;
 static SESSIONS: AtomicUsize = AtomicUsize::new(0);
 
 fn binary() -> Option<String> {
-    std::env::var("TT_TOPLIKE_BIN")
-        .ok()
-        .or_else(|| ["/usr/bin/tt-toplike", "/usr/local/bin/tt-toplike"].iter().find(|p| std::path::Path::new(p).exists()).map(|p| p.to_string()))
+    std::env::var("TT_TOPLIKE_BIN").ok().or_else(|| {
+        ["/usr/bin/tt-toplike", "/usr/local/bin/tt-toplike"]
+            .iter()
+            .find(|p| std::path::Path::new(p).exists())
+            .map(|p| p.to_string())
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,7 +77,12 @@ pub(crate) async fn get_toplike() -> axum::Json<Value> {
 }
 
 /// `GET /toplike/term` (WebSocket; the token in a header, `routes::ws_token`).
-pub(crate) async fn term_ws(ws: WebSocketUpgrade, State(state): State<AppState>, headers: axum::http::HeaderMap, Query(q): Query<TermQuery>) -> Response {
+pub(crate) async fn term_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<TermQuery>,
+) -> Response {
     let Some(token) = crate::routes::ws_token(&headers).filter(|t| state.is_valid_token(t)) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
@@ -82,14 +90,22 @@ pub(crate) async fn term_ws(ws: WebSocketUpgrade, State(state): State<AppState>,
     let signed_out = state.signed_out(token);
     let ws = ws.protocols([crate::routes::WS_PROTOCOL]);
     let Some(bin) = binary() else {
-        return (StatusCode::NOT_FOUND, "tt-toplike isn't installed on this box").into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            "tt-toplike isn't installed on this box",
+        )
+            .into_response();
     };
     let wanted = q.mode.as_deref().unwrap_or("starfield");
     let Some(&(_, mode, keys)) = MODES.iter().find(|(name, _, _)| *name == wanted) else {
         return (StatusCode::BAD_REQUEST, "unknown view").into_response();
     };
     if SESSIONS.load(Ordering::SeqCst) >= MAX_SESSIONS {
-        return (StatusCode::TOO_MANY_REQUESTS, "too many tt-toplike views open").into_response();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many tt-toplike views open",
+        )
+            .into_response();
     }
     let cols = q.cols.unwrap_or(120).clamp(40, 320);
     let rows = q.rows.unwrap_or(40).clamp(12, 120);
@@ -102,14 +118,27 @@ pub(crate) async fn term_ws(ws: WebSocketUpgrade, State(state): State<AppState>,
 }
 
 fn winsize(cols: u16, rows: u16) -> libc::winsize {
-    libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 }
+    libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    }
 }
 
 /// A pseudo-terminal: (master, slave).
 fn openpty(cols: u16, rows: u16) -> std::io::Result<(OwnedFd, OwnedFd)> {
     let (mut master, mut slave) = (0, 0);
     let ws = winsize(cols, rows);
-    let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &ws) };
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &ws,
+        )
+    };
     if rc != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -117,24 +146,45 @@ fn openpty(cols: u16, rows: u16) -> std::io::Result<(OwnedFd, OwnedFd)> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run(mut socket: WebSocket, bin: String, port: u16, mode: &'static str, keys: &'static str, cols: u16, rows: u16, signed_out: impl std::future::Future<Output = ()>) {
+async fn run(
+    mut socket: WebSocket,
+    bin: String,
+    port: u16,
+    mode: &'static str,
+    keys: &'static str,
+    cols: u16,
+    rows: u16,
+    signed_out: impl std::future::Future<Output = ()>,
+) {
     tokio::pin!(signed_out);
     let (master, slave) = match openpty(cols, rows) {
         Ok(p) => p,
         Err(e) => {
-            let _ = socket.send(Message::Text(format!("couldn't open a terminal: {e}").into())).await;
+            let _ = socket
+                .send(Message::Text(
+                    format!("couldn't open a terminal: {e}").into(),
+                ))
+                .await;
             return;
         }
     };
     let stdio = |fd: &OwnedFd| fd.try_clone().map(Stdio::from);
-    let (Ok(i), Ok(o), Ok(e)) = (stdio(&slave), stdio(&slave), stdio(&slave)) else { return };
+    let (Ok(i), Ok(o), Ok(e)) = (stdio(&slave), stdio(&slave), stdio(&slave)) else {
+        return;
+    };
     let mut cmd = Command::new(&bin);
-    cmd.args(["--remote", &format!("127.0.0.1:{port}"), "--mode", mode, "-q"])
-        .env("TERM", "xterm-256color")
-        .env("COLORTERM", "truecolor")
-        .stdin(i)
-        .stdout(o)
-        .stderr(e);
+    cmd.args([
+        "--remote",
+        &format!("127.0.0.1:{port}"),
+        "--mode",
+        mode,
+        "-q",
+    ])
+    .env("TERM", "xterm-256color")
+    .env("COLORTERM", "truecolor")
+    .stdin(i)
+    .stdout(o)
+    .stderr(e);
     unsafe {
         cmd.pre_exec(|| {
             // Its own session, with the terminal as its controlling tty.
@@ -149,7 +199,11 @@ async fn run(mut socket: WebSocket, bin: String, port: u16, mode: &'static str, 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let _ = socket.send(Message::Text(format!("couldn't start tt-toplike: {e}").into())).await;
+            let _ = socket
+                .send(Message::Text(
+                    format!("couldn't start tt-toplike: {e}").into(),
+                ))
+                .await;
             return;
         }
     };
@@ -235,7 +289,15 @@ mod tests {
 
     #[test]
     fn views_map_to_real_modes() {
-        let valid = ["normal", "starfield", "castle", "flow", "arcade", "hivemind", "training"];
+        let valid = [
+            "normal",
+            "starfield",
+            "castle",
+            "flow",
+            "arcade",
+            "hivemind",
+            "training",
+        ];
         for (_, mode, _) in MODES {
             assert!(valid.contains(mode), "{mode}");
         }

@@ -35,7 +35,11 @@ impl Creations {
         let id = crate::pairing::issue_pair_id()[..16].to_string();
         use crate::fsio::{write_atomic, PRIVATE};
         write_atomic(&self.dir.join(format!("{id}.jpg")), &bytes, PRIVATE)?;
-        write_atomic(&self.dir.join(format!("{id}.txt")), prompt.as_bytes(), PRIVATE)?;
+        write_atomic(
+            &self.dir.join(format!("{id}.txt")),
+            prompt.as_bytes(),
+            PRIVATE,
+        )?;
         self.prune();
         Ok(id)
     }

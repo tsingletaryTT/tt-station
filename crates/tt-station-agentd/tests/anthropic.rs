@@ -106,7 +106,12 @@ async fn harness() -> (reqwest::Client, String, String, String) {
         .json()
         .await
         .unwrap();
-    (client, base, minted["key"].as_str().unwrap().to_string(), done["token"].as_str().unwrap().to_string())
+    (
+        client,
+        base,
+        minted["key"].as_str().unwrap().to_string(),
+        done["token"].as_str().unwrap().to_string(),
+    )
 }
 
 fn request(stream: bool) -> Value {

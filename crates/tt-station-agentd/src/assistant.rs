@@ -144,7 +144,13 @@ pub const READ_ONLY_TOOLS: [&str; 20] = [
 ];
 
 /// Names of the tools that only ever become pending actions.
-pub const DISRUPTIVE_TOOLS: [&str; 5] = ["run_model", "stop_model", "reset_chips", "switch_mode", "install_app"];
+pub const DISRUPTIVE_TOOLS: [&str; 5] = [
+    "run_model",
+    "stop_model",
+    "reset_chips",
+    "switch_mode",
+    "install_app",
+];
 
 /// Read-only tools that act -- on the box, the person's computer, a bring-up,
 /// a recording or what Tori remembers -- rather than only look. Once text from
@@ -172,7 +178,9 @@ pub const WEB_TOOLS: [&str; 2] = ["web_search", "read_webpage"];
 /// waits for the person too.
 pub fn fetches_unknown_address(name: &str, args: &Value, turn: &crate::urltrust::Turn) -> bool {
     match name {
-        "read_webpage" | "open_app" => args["url"].as_str().is_some_and(|u| !u.trim().is_empty() && !turn.may_fetch(u)),
+        "read_webpage" | "open_app" => args["url"]
+            .as_str()
+            .is_some_and(|u| !u.trim().is_empty() && !turn.may_fetch(u)),
         _ => false,
     }
 }
@@ -650,7 +658,8 @@ pub async fn offered_tools(state: &AppState, tori: bool) -> Value {
                     "search_documents" => docs,
                     "web_search" | "read_webpage" => web,
                     // The computer is Tori's; the box's chat sticks to the box.
-                    "open_app" | "control_computer" | "open_folder" | "find_files" | "open_station" => tori,
+                    "open_app" | "control_computer" | "open_folder" | "find_files"
+                    | "open_station" => tori,
                     _ => true,
                 })
                 .cloned()
@@ -1723,7 +1732,7 @@ async fn prepare_chat(
                         ep.model
                     )),
                     None => AssistantError::NotServing,
-                })
+                });
             }
         },
     };
@@ -1818,17 +1827,39 @@ Everything about models, chips and the box still acts on the box.";
 
 /// Tools that act on "this computer": on the person's computer when Tori runs
 /// there (`ChatOptions::client`).
-pub const CLIENT_TOOLS: &[&str] = &["open_app", "control_computer", "open_folder", "find_files", "open_station", "start_recording", "stop_recording"];
+pub const CLIENT_TOOLS: &[&str] = &[
+    "open_app",
+    "control_computer",
+    "open_folder",
+    "find_files",
+    "open_station",
+    "start_recording",
+    "stop_recording",
+];
 
-static CLIENT_WAITS: LazyLock<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Value>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static CLIENT_WAITS: LazyLock<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Value>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Has the person's computer run `call` and waits for what happened (30 s at most).
-async fn run_on_client(call: &ToolCall, on_action: &mut (dyn FnMut(&ActionReport) + Send)) -> (Value, ActionReport) {
+async fn run_on_client(
+    call: &ToolCall,
+    on_action: &mut (dyn FnMut(&ActionReport) + Send),
+) -> (Value, ActionReport) {
     let args = call.args.clone().unwrap_or_else(|_| json!({}));
     let id = new_action_id();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    CLIENT_WAITS.lock().expect("client waits").insert(id.clone(), tx);
-    let mut report = ActionReport { id: id.clone(), tool: call.name.clone(), args, status: ActionStatus::OnClient, summary: "On your computer…".into(), images: vec![] };
+    CLIENT_WAITS
+        .lock()
+        .expect("client waits")
+        .insert(id.clone(), tx);
+    let mut report = ActionReport {
+        id: id.clone(),
+        tool: call.name.clone(),
+        args,
+        status: ActionStatus::OnClient,
+        summary: "On your computer…".into(),
+        images: vec![],
+    };
     on_action(&report);
     let answer = tokio::time::timeout(Duration::from_secs(30), rx).await;
     CLIENT_WAITS.lock().expect("client waits").remove(&id);
@@ -1836,7 +1867,14 @@ async fn run_on_client(call: &ToolCall, on_action: &mut (dyn FnMut(&ActionReport
         Ok(Ok(v)) if v["ok"] == true => {
             report.status = ActionStatus::Done;
             report.summary = v["summary"].as_str().unwrap_or("Done").to_string();
-            (if v["result"].is_null() { json!({ "done": report.summary }) } else { v["result"].clone() }, report)
+            (
+                if v["result"].is_null() {
+                    json!({ "done": report.summary })
+                } else {
+                    v["result"].clone()
+                },
+                report,
+            )
         }
         Ok(Ok(v)) => {
             let e = v["error"].as_str().unwrap_or("it didn't work").to_string();
@@ -1847,7 +1885,10 @@ async fn run_on_client(call: &ToolCall, on_action: &mut (dyn FnMut(&ActionReport
         _ => {
             report.status = ActionStatus::Error;
             report.summary = "Your computer didn't answer".into();
-            (json!({ "error": "the person's computer didn't answer (TT Station may be closed there)" }), report)
+            (
+                json!({ "error": "the person's computer didn't answer (TT Station may be closed there)" }),
+                report,
+            )
         }
     }
 }
@@ -1861,7 +1902,10 @@ pub struct ClientResult {
 
 /// `POST /assistant/client-result {id, ok, result?, summary?, error?}`: what a
 /// computer tool did on the person's computer.
-pub(crate) async fn post_client_result(_auth: crate::routes::BearerAuth, axum::Json(r): axum::Json<ClientResult>) -> axum::http::StatusCode {
+pub(crate) async fn post_client_result(
+    _auth: crate::routes::BearerAuth,
+    axum::Json(r): axum::Json<ClientResult>,
+) -> axum::http::StatusCode {
     match CLIENT_WAITS.lock().expect("client waits").remove(&r.id) {
         Some(tx) => {
             let _ = tx.send(r.outcome);
@@ -1914,12 +1958,31 @@ pub async fn quick(
         if pending.is_none() {
             // Nothing of Tori's to confirm: maybe a bring-up is waiting on a yes.
             if crate::bringup::anything_waiting() {
-                let step = Step::Tool("bringup_decide", json!({ "decision": if *yes { "accept" } else { "decline" } }));
-                let call = ToolCall { id: new_action_id(), name: "bringup_decide".into(), args: Ok(step.tool().1) };
+                let step = Step::Tool(
+                    "bringup_decide",
+                    json!({ "decision": if *yes { "accept" } else { "decline" } }),
+                );
+                let call = ToolCall {
+                    id: new_action_id(),
+                    name: "bringup_decide".into(),
+                    args: Ok(step.tool().1),
+                };
                 let (result, report) = run_read_only(state, &call).await;
-                let reply = result["what"].as_str().map(|w| if *yes { format!("Allowed. It's running `{w}` now.") } else { format!("Denied `{w}`. It'll find another way or stop.") })
+                let reply = result["what"]
+                    .as_str()
+                    .map(|w| {
+                        if *yes {
+                            format!("Allowed. It's running `{w}` now.")
+                        } else {
+                            format!("Denied `{w}`. It'll find another way or stop.")
+                        }
+                    })
                     .unwrap_or_else(|| "There's nothing waiting for a yes.".into());
-                return Some(AssistantResponse { reply, actions: vec![report], model: "Tori".into() });
+                return Some(AssistantResponse {
+                    reply,
+                    actions: vec![report],
+                    model: "Tori".into(),
+                });
             }
             return None;
         }
@@ -1939,13 +2002,23 @@ pub async fn quick(
             }
             Step::Confirm(approve) => {
                 let Some(id) = pending.clone() else { continue };
-                let outcome = confirm(state, ConfirmRequest { action_id: id, approve: *approve })
-                    .await
-                    .map(|r| {
-                        let summary = if *approve { r.summary } else { "Okay, I won't.".to_string() };
-                        json!({ "summary": summary })
-                    })
-                    .map_err(|e| format!("{e:?}"));
+                let outcome = confirm(
+                    state,
+                    ConfirmRequest {
+                        action_id: id,
+                        approve: *approve,
+                    },
+                )
+                .await
+                .map(|r| {
+                    let summary = if *approve {
+                        r.summary
+                    } else {
+                        "Okay, I won't.".to_string()
+                    };
+                    json!({ "summary": summary })
+                })
+                .map_err(|e| format!("{e:?}"));
                 done.push((step, outcome));
                 continue;
             }
@@ -1960,14 +2033,17 @@ pub async fn quick(
         let (result, report) = if tool_kind(name) == Some(ToolKind::Disruptive) {
             match propose(state, &call, &current).await {
                 Ok(pair) => pair,
-                Err(e) => (json!({ "error": e }), ActionReport {
-                    id: call.id.clone(),
-                    tool: call.name.clone(),
-                    args: call.args.clone().unwrap_or_default(),
-                    status: ActionStatus::Error,
-                    summary: e,
-                    images: Vec::new(),
-                }),
+                Err(e) => (
+                    json!({ "error": e }),
+                    ActionReport {
+                        id: call.id.clone(),
+                        tool: call.name.clone(),
+                        args: call.args.clone().unwrap_or_default(),
+                        status: ActionStatus::Error,
+                        summary: e,
+                        images: Vec::new(),
+                    },
+                ),
             }
         } else {
             run_read_only(state, &call).await
@@ -1990,7 +2066,10 @@ pub async fn quick(
                         Ok(pair) => Some(pair),
                         Err(_) => propose(
                             state,
-                            &ToolCall { args: Ok(json!({ "mode": "images" })), ..offer },
+                            &ToolCall {
+                                args: Ok(json!({ "mode": "images" })),
+                                ..offer
+                            },
                             &current,
                         )
                         .await
@@ -2187,9 +2266,14 @@ async fn run_tool_calls(
         }
         let args = call.args.as_ref().unwrap_or(&Value::Null);
         let gated = tool_kind(&call.name) == Some(ToolKind::ReadOnly)
-            && (needs_confirmation(&call.name, args, turn.tainted()) || fetches_unknown_address(&call.name, args, turn));
+            && (needs_confirmation(&call.name, args, turn.tainted())
+                || fetches_unknown_address(&call.name, args, turn));
         let result = match tool_kind(&call.name) {
-            Some(ToolKind::ReadOnly) if gated => match park(state, call, client && CLIENT_TOOLS.contains(&call.name.as_str())) {
+            Some(ToolKind::ReadOnly) if gated => match park(
+                state,
+                call,
+                client && CLIENT_TOOLS.contains(&call.name.as_str()),
+            ) {
                 Ok((pending, report)) => {
                     proposed.push((report.tool.clone(), report.args.clone()));
                     on_action(&report);
@@ -2249,24 +2333,44 @@ const ON_CLIENT: &str = "_on_client";
 /// Parks a model's call of an acting tool until the person confirms it (see
 /// [`needs_confirmation`]); `confirm` runs it, or hands it back to the
 /// person's computer when it acts there.
-fn park(state: &AppState, call: &ToolCall, on_client: bool) -> Result<(Value, ActionReport), String> {
-    let args = call.args.clone().map_err(|raw| format!("arguments were not a JSON object: {raw}"))?;
+fn park(
+    state: &AppState,
+    call: &ToolCall,
+    on_client: bool,
+) -> Result<(Value, ActionReport), String> {
+    let args = call
+        .args
+        .clone()
+        .map_err(|raw| format!("arguments were not a JSON object: {raw}"))?;
     let summary = pending_summary(&call.name, &args, "");
     let mut stored = args.clone();
     if call.name == "bringup_decide" {
         // The very request the person is shown, not whatever is waiting when they answer.
-        stored["what"] = json!(crate::bringup::waiting_on().ok_or("the bring-up isn't waiting on anything")?);
+        stored["what"] =
+            json!(crate::bringup::waiting_on().ok_or("the bring-up isn't waiting on anything")?);
     }
     if on_client {
         stored[ON_CLIENT] = json!(true);
     }
-    let id = state.insert_pending_action(PendingAction { tool: call.name.clone(), args: stored, summary: summary.clone(), created: Instant::now() });
+    let id = state.insert_pending_action(PendingAction {
+        tool: call.name.clone(),
+        args: stored,
+        summary: summary.clone(),
+        created: Instant::now(),
+    });
     let result = json!({
         "status": "needs_confirmation",
         "summary": summary,
         "note": "Not done yet. Ask the user to confirm.",
     });
-    let report = ActionReport { id, tool: call.name.clone(), args, status: ActionStatus::NeedsConfirmation, summary, images: Vec::new() };
+    let report = ActionReport {
+        id,
+        tool: call.name.clone(),
+        args,
+        status: ActionStatus::NeedsConfirmation,
+        summary,
+        images: Vec::new(),
+    };
     Ok((result, report))
 }
 
@@ -2469,13 +2573,25 @@ pub(crate) async fn run_read_only(state: &AppState, call: &ToolCall) -> (Value, 
             let c = crate::research::check(state).await;
             let mut todo = Vec::new();
             if c["ok"] != true {
-                todo.push(c["why"].as_str().unwrap_or("a model must be serving").to_string());
+                todo.push(
+                    c["why"]
+                        .as_str()
+                        .unwrap_or("a model must be serving")
+                        .to_string(),
+                );
             }
             if c["search"] != "searxng" {
                 todo.push("search goes to DuckDuckGo; installing SearXNG (install_app searxng) makes it private".to_string());
             }
-            let line = if todo.is_empty() { "Research is ready: a model is serving and search is private.".to_string() } else { format!("To do: {}", todo.join("; ")) };
-            Ok((json!({ "ready": c["ok"], "private_search": c["search"] == "searxng", "model": c["model"], "context": c["context"], "to_do": todo }), line))
+            let line = if todo.is_empty() {
+                "Research is ready: a model is serving and search is private.".to_string()
+            } else {
+                format!("To do: {}", todo.join("; "))
+            };
+            Ok((
+                json!({ "ready": c["ok"], "private_search": c["search"] == "searxng", "model": c["model"], "context": c["context"], "to_do": todo }),
+                line,
+            ))
         }
         "research" => {
             let depth = match args["depth"].as_str() {
@@ -2484,12 +2600,24 @@ pub(crate) async fn run_read_only(state: &AppState, call: &ToolCall) -> (Value, 
                 _ => crate::research::Depth::Standard,
             };
             let question = args["question"].as_str().unwrap_or("").to_string();
-            match crate::research::start(state, crate::research::StartBody { question, depth: Some(depth), parent: None }).await {
+            match crate::research::start(
+                state,
+                crate::research::StartBody {
+                    question,
+                    depth: Some(depth),
+                    parent: None,
+                },
+            )
+            .await
+            {
                 Ok(job) => Ok((
                     json!({ "started": true, "id": job.id, "note": "It runs in the background; the user gets a notification when the report is ready, and can follow it in TT Station's Research page." }),
                     "Started researching it".to_string(),
                 )),
-                Err((_, e)) => Err(e.0["error"].as_str().unwrap_or("couldn't start the research").to_string()),
+                Err((_, e)) => Err(e.0["error"]
+                    .as_str()
+                    .unwrap_or("couldn't start the research")
+                    .to_string()),
             }
         }
         "remember" => remember(state, &args),
@@ -2534,7 +2662,11 @@ pub(crate) async fn run_read_only(state: &AppState, call: &ToolCall) -> (Value, 
             };
             match crate::bringup::decide_waiting(decision) {
                 Some((d, what)) => {
-                    let said = if d == "accept" { format!("Allowed: {what}") } else { format!("Denied: {what}") };
+                    let said = if d == "accept" {
+                        format!("Allowed: {what}")
+                    } else {
+                        format!("Denied: {what}")
+                    };
                     Ok((json!({ "decided": d, "what": what }), said))
                 }
                 None => Err("the bring-up isn't waiting on anything".into()),
@@ -2542,10 +2674,16 @@ pub(crate) async fn run_read_only(state: &AppState, call: &ToolCall) -> (Value, 
         }
         "start_recording" => {
             let title = args["title"].as_str().map(str::to_string);
-            crate::recorder::start(state, crate::recorder::StartBody { title, ..Default::default() })
-                .await
-                .map(|(_, r)| (r.0, "Started recording".to_string()))
-                .map_err(|(_, e)| e.0.error)
+            crate::recorder::start(
+                state,
+                crate::recorder::StartBody {
+                    title,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map(|(_, r)| (r.0, "Started recording".to_string()))
+            .map_err(|(_, e)| e.0.error)
         }
         "stop_recording" => crate::recorder::stop(state, false)
             .await
@@ -2558,7 +2696,10 @@ pub(crate) async fn run_read_only(state: &AppState, call: &ToolCall) -> (Value, 
                 .map_err(|e| e.to_string())
                 .and_then(|r| r)
                 .map(|r| {
-                    let s = format!("Opened {} in TT Station", r["page"].as_str().unwrap_or("it"));
+                    let s = format!(
+                        "Opened {} in TT Station",
+                        r["page"].as_str().unwrap_or("it")
+                    );
                     (r, s)
                 })
         }
@@ -2717,7 +2858,9 @@ async fn search_documents(state: &AppState, args: &Value) -> Result<(Value, Stri
         .docs()
         .ok_or_else(|| "this box has no document store".to_string())?;
     if docs.is_empty() {
-        return Err("the user hasn't uploaded any documents or added any Library folders yet".to_string());
+        return Err(
+            "the user hasn't uploaded any documents or added any Library folders yet".to_string(),
+        );
     }
     let query = args
         .get("query")
@@ -3028,8 +3171,20 @@ pub(crate) async fn propose(
             })
         }
         "install_app" => {
-            let id = raw_args.get("app").and_then(Value::as_str).ok_or("install_app needs an \"app\" argument")?;
-            let def = crate::apps::app(id).ok_or_else(|| format!("there's no app \"{id}\" in the store; the apps are: {}", crate::apps::APPS.iter().map(|a| a.id).collect::<Vec<_>>().join(", ")))?;
+            let id = raw_args
+                .get("app")
+                .and_then(Value::as_str)
+                .ok_or("install_app needs an \"app\" argument")?;
+            let def = crate::apps::app(id).ok_or_else(|| {
+                format!(
+                    "there's no app \"{id}\" in the store; the apps are: {}",
+                    crate::apps::APPS
+                        .iter()
+                        .map(|a| a.id)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
             json!({ "app": def.id, "name": def.name, "blurb": def.blurb })
         }
         _ => json!({}),
@@ -3123,9 +3278,20 @@ pub(crate) async fn confirm(
             ))
         }
         "install_app" => {
-            let id = action.args.get("app").and_then(Value::as_str).unwrap_or("").to_string();
-            let name = action.args.get("name").and_then(Value::as_str).unwrap_or("the app").to_string();
-            let def = crate::apps::app(&id).ok_or_else(|| AssistantError::Backend(anyhow::anyhow!("no app {id}")))?;
+            let id = action
+                .args
+                .get("app")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let name = action
+                .args
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("the app")
+                .to_string();
+            let def = crate::apps::app(&id)
+                .ok_or_else(|| AssistantError::Backend(anyhow::anyhow!("no app {id}")))?;
             let st = state.clone();
             let done = tokio::task::spawn_blocking(move || crate::apps::start_or_install(&st, def))
                 .await
@@ -3133,7 +3299,11 @@ pub(crate) async fn confirm(
                 .map_err(|e| AssistantError::Backend(anyhow::anyhow!(e)))?;
             Ok(respond(
                 ConfirmStatus::Started,
-                if done == "running" { format!("{name} is running. It's in TT Station's Connect page.") } else { format!("Setting up {name}. It takes a minute or two; it's in TT Station's Connect page.") },
+                if done == "running" {
+                    format!("{name} is running. It's in TT Station's Connect page.")
+                } else {
+                    format!("Setting up {name}. It takes a minute or two; it's in TT Station's Connect page.")
+                },
             ))
         }
         "switch_mode" => {
@@ -3195,17 +3365,28 @@ pub(crate) async fn confirm(
         // An acting tool that waited for the person (needs_confirmation).
         name if READ_ONLY_TOOLS.contains(&name) => {
             let mut args = action.args.clone();
-            let on_client = args.as_object_mut().and_then(|a| a.remove(ON_CLIENT)).is_some_and(|v| v == true);
+            let on_client = args
+                .as_object_mut()
+                .and_then(|a| a.remove(ON_CLIENT))
+                .is_some_and(|v| v == true);
             if on_client {
                 return Ok(ConfirmResponse {
                     run: Some(json!({ "tool": name, "args": args })),
                     ..respond(ConfirmStatus::OnClient, action.summary.clone())
                 });
             }
-            if name == "bringup_decide" && crate::bringup::waiting_on().as_deref() != args["what"].as_str() {
-                return Err(AssistantError::Backend(anyhow::anyhow!("the bring-up is no longer waiting on that")));
+            if name == "bringup_decide"
+                && crate::bringup::waiting_on().as_deref() != args["what"].as_str()
+            {
+                return Err(AssistantError::Backend(anyhow::anyhow!(
+                    "the bring-up is no longer waiting on that"
+                )));
             }
-            let call = ToolCall { id: req.action_id.clone(), name: name.to_string(), args: Ok(args) };
+            let call = ToolCall {
+                id: req.action_id.clone(),
+                name: name.to_string(),
+                args: Ok(args),
+            };
             let (_, report) = run_read_only(state, &call).await;
             if report.status == ActionStatus::Error {
                 return Err(AssistantError::Backend(anyhow::anyhow!(report.summary)));
@@ -3228,40 +3409,93 @@ mod tests {
         for t in ["bringup_decide", "start_recording"] {
             assert!(needs_confirmation(t, &none, false), "{t}");
         }
-        assert!(needs_confirmation("open_app", &json!({ "url": "https://x.example" }), false));
-        assert!(!needs_confirmation("open_app", &json!({ "app": "VS Code" }), false));
-        assert!(!needs_confirmation("remember", &json!({ "fact": "x" }), false));
+        assert!(needs_confirmation(
+            "open_app",
+            &json!({ "url": "https://x.example" }),
+            false
+        ));
+        assert!(!needs_confirmation(
+            "open_app",
+            &json!({ "app": "VS Code" }),
+            false
+        ));
+        assert!(!needs_confirmation(
+            "remember",
+            &json!({ "fact": "x" }),
+            false
+        ));
         // Web text in the turn: every acting tool, no looking tool.
         for t in ACTING_TOOLS {
             assert!(needs_confirmation(t, &none, true), "{t}");
             assert_eq!(tool_kind(t), Some(ToolKind::ReadOnly), "{t}");
         }
-        for t in ["box_status", "web_search", "read_webpage", "search_documents", "find_files", "bringup_status", "research_check"] {
+        for t in [
+            "box_status",
+            "web_search",
+            "read_webpage",
+            "search_documents",
+            "find_files",
+            "bringup_status",
+            "research_check",
+        ] {
             assert!(!needs_confirmation(t, &none, true), "{t}");
         }
     }
 
     #[test]
     fn after_web_text_only_known_addresses_are_fetched_unasked() {
-        let mut turn = crate::urltrust::Turn::from_messages(&[json!({ "role": "user", "content": "read https://news.example/a" })]);
+        let mut turn = crate::urltrust::Turn::from_messages(&[
+            json!({ "role": "user", "content": "read https://news.example/a" }),
+        ]);
         let read = |u: &str| json!({ "url": u });
         // Before any web text, nothing about an address waits.
-        assert!(!fetches_unknown_address("read_webpage", &read("https://other.example/?q=x"), &turn));
-        turn.web_result(&json!({ "results": [{ "url": "https://found.example/page" }] }).to_string());
-        assert!(!fetches_unknown_address("read_webpage", &read("https://news.example/a"), &turn));
-        assert!(!fetches_unknown_address("read_webpage", &read("https://found.example/page"), &turn));
-        assert!(fetches_unknown_address("read_webpage", &read("https://found.example/page?leak=hello"), &turn));
-        assert!(fetches_unknown_address("open_app", &read("https://other.example/"), &turn));
+        assert!(!fetches_unknown_address(
+            "read_webpage",
+            &read("https://other.example/?q=x"),
+            &turn
+        ));
+        turn.web_result(
+            &json!({ "results": [{ "url": "https://found.example/page" }] }).to_string(),
+        );
+        assert!(!fetches_unknown_address(
+            "read_webpage",
+            &read("https://news.example/a"),
+            &turn
+        ));
+        assert!(!fetches_unknown_address(
+            "read_webpage",
+            &read("https://found.example/page"),
+            &turn
+        ));
+        assert!(fetches_unknown_address(
+            "read_webpage",
+            &read("https://found.example/page?leak=hello"),
+            &turn
+        ));
+        assert!(fetches_unknown_address(
+            "open_app",
+            &read("https://other.example/"),
+            &turn
+        ));
         assert!(!fetches_unknown_address("box_status", &json!({}), &turn));
-        assert!(pending_summary("read_webpage", &read("https://x.example/?q=1"), "").contains("https://x.example/?q=1"));
+        assert!(
+            pending_summary("read_webpage", &read("https://x.example/?q=1"), "")
+                .contains("https://x.example/?q=1")
+        );
     }
 
     #[tokio::test]
     async fn a_computer_step_runs_on_the_persons_computer_and_comes_back() {
-        let call = ToolCall { id: "c1".into(), name: "find_files".into(), args: Ok(json!({ "name": "resume" })) };
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "find_files".into(),
+            args: Ok(json!({ "name": "resume" })),
+        };
         let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<ActionReport>();
         let task = tokio::spawn(async move {
-            let mut on_action = move |r: &ActionReport| { let _ = seen_tx.send(r.clone()); };
+            let mut on_action = move |r: &ActionReport| {
+                let _ = seen_tx.send(r.clone());
+            };
             run_on_client(&call, &mut on_action).await
         });
         // The step goes out to the person's computer…
@@ -3277,9 +3511,19 @@ mod tests {
         let (result, report) = task.await.unwrap();
         assert_eq!(report.id, out.id, "the same step, now done");
         assert_eq!(report.status, ActionStatus::Done);
-        assert_eq!(result["matches"][0], "/Users/j/resume.pdf", "the model sees what the Mac found");
+        assert_eq!(
+            result["matches"][0], "/Users/j/resume.pdf",
+            "the model sees what the Mac found"
+        );
         // An answer for a step nobody's waiting on goes nowhere.
-        let late = post_client_result(crate::routes::BearerAuth, axum::Json(ClientResult { id: out.id, outcome: json!({ "ok": true }) })).await;
+        let late = post_client_result(
+            crate::routes::BearerAuth,
+            axum::Json(ClientResult {
+                id: out.id,
+                outcome: json!({ "ok": true }),
+            }),
+        )
+        .await;
         assert_eq!(late, axum::http::StatusCode::NOT_FOUND);
     }
 
@@ -3288,7 +3532,10 @@ mod tests {
         let req: AssistantRequest = serde_json::from_value(json!({ "messages": [{ "role": "user", "content": "hi" }], "persona": "tori", "client": "darwin" })).unwrap();
         let opts = req.options(false);
         assert!(opts.tori && opts.client);
-        let on_box: AssistantRequest = serde_json::from_value(json!({ "messages": [{ "role": "user", "content": "hi" }], "persona": "tori" })).unwrap();
+        let on_box: AssistantRequest = serde_json::from_value(
+            json!({ "messages": [{ "role": "user", "content": "hi" }], "persona": "tori" }),
+        )
+        .unwrap();
         assert!(!on_box.options(false).client);
     }
     use libttstation::model::{ModelInfo, ModelsResponse};

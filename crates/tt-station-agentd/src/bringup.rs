@@ -57,7 +57,10 @@ impl Restarting {
 }
 impl Drop for Restarting {
     fn drop(&mut self) {
-        RESTARTING.lock().expect("restarting").retain(|r| r != &self.0);
+        RESTARTING
+            .lock()
+            .expect("restarting")
+            .retain(|r| r != &self.0);
     }
 }
 /// The finish line's stage number (after fast-models-fast's eleven).
@@ -78,14 +81,20 @@ fn unix_now() -> u64 {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
 }
 
 fn which(name: &str) -> Option<String> {
-    let mut dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var("PATH").unwrap_or_default()).collect();
+    let mut dirs: Vec<PathBuf> =
+        std::env::split_paths(&std::env::var("PATH").unwrap_or_default()).collect();
     dirs.extend(["/usr/local/bin", "/usr/bin"].map(PathBuf::from));
     dirs.push(home().join(".local/bin"));
-    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file()).map(|p| p.display().to_string())
+    dirs.into_iter()
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
+        .map(|p| p.display().to_string())
 }
 
 // ---------------------------------------------------------------------
@@ -102,8 +111,14 @@ pub struct CodexEnv {
 
 impl CodexEnv {
     pub fn detect() -> CodexEnv {
-        let repo = std::env::var_os("TT_METAL_HOME").map(PathBuf::from).unwrap_or_else(|| home().join("tt-metal"));
-        CodexEnv { python: repo.join("python_env/bin/python"), repo, codex: std::env::var("CODEX_BIN").ok().or_else(|| which("codex")) }
+        let repo = std::env::var_os("TT_METAL_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join("tt-metal"));
+        CodexEnv {
+            python: repo.join("python_env/bin/python"),
+            repo,
+            codex: std::env::var("CODEX_BIN").ok().or_else(|| which("codex")),
+        }
     }
 
     pub fn runner_ok(&self) -> bool {
@@ -125,18 +140,31 @@ impl CodexEnv {
     }
 
     fn branch(&self) -> Option<String> {
-        let out = Command::new("git").args(["-C"]).arg(&self.repo).args(["rev-parse", "--abbrev-ref", "HEAD"]).output().ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        let out = Command::new("git")
+            .args(["-C"])
+            .arg(&self.repo)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
     fn signed_in(&self) -> bool {
-        let Some(codex) = &self.codex else { return false };
+        let Some(codex) = &self.codex else {
+            return false;
+        };
         Command::new(codex)
             .args(["login", "status"])
             .stdin(Stdio::null())
             .output()
             .map(|o| {
-                let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
                 o.status.success() && text.contains("Logged in")
             })
             .unwrap_or(false)
@@ -164,16 +192,27 @@ pub fn claude_signed_in(bin: &str) -> bool {
 /// "01-functional-decoder.txt" → "Functional decoder".
 pub fn stage_title(path: &Path) -> String {
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    let words = stem.split_once('-').map(|(_, rest)| rest).unwrap_or(stem).replace('-', " ");
+    let words = stem
+        .split_once('-')
+        .map(|(_, rest)| rest)
+        .unwrap_or(stem)
+        .replace('-', " ");
     let words = words.replace("vllm", "vLLM").replace("tti", "TTI");
     let mut c = words.chars();
-    let title = c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default();
+    let title = c
+        .next()
+        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+        .unwrap_or_default();
     title.replacen("VLLM", "vLLM", 1)
 }
 
 /// fast-models-fast's MODEL_DIR: the HF id, lowercased, non-alphanumerics → `_`.
 pub fn model_dir(model: &str) -> String {
-    let safe: String = model.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    let safe: String = model
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
     format!("models/autoports/{safe}")
 }
 
@@ -200,7 +239,10 @@ pub(crate) async fn get_engines(State(state): State<AppState>, _auth: BearerAuth
     })
     .await
     .unwrap_or_default();
-    let ready = codex["installed"] == true && codex["signed_in"] == true && codex["runner"] == true && codex["python"] == true;
+    let ready = codex["installed"] == true
+        && codex["signed_in"] == true
+        && codex["runner"] == true
+        && codex["python"] == true;
     let why_not = if codex["installed"] != true {
         Some("Codex isn't installed.")
     } else if codex["signed_in"] != true {
@@ -250,9 +292,14 @@ pub struct SurveyBody {
 }
 
 pub(crate) fn hf_token() -> Option<String> {
-    std::env::var("HF_TOKEN").ok().filter(|t| !t.is_empty()).or_else(|| {
-        std::fs::read_to_string(home().join(".cache/huggingface/token")).ok().map(|t| t.trim().to_string())
-    })
+    std::env::var("HF_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string(home().join(".cache/huggingface/token"))
+                .ok()
+                .map(|t| t.trim().to_string())
+        })
 }
 
 async fn hf_model(model: &str) -> Result<Value, String> {
@@ -262,7 +309,10 @@ async fn hf_model(model: &str) -> Result<Value, String> {
     if let Some(t) = hf_token() {
         req = req.bearer_auth(t);
     }
-    let res = req.send().await.map_err(|e| format!("couldn't reach Hugging Face: {e}"))?;
+    let res = req
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Hugging Face: {e}"))?;
     match res.status().as_u16() {
         200 => res.json().await.map_err(|e| e.to_string()),
         401 | 403 => Err("That model is gated: accept its license on Hugging Face (with the account whose token is on this box).".into()),
@@ -282,15 +332,23 @@ async fn known_architectures(state: &AppState) -> HashMap<String, Vec<String>> {
         probe
             .tt_cli()
             .and_then(|tt| tt.catalog(probe.device_mesh(), false).ok())
-            .map(|c| c.models.into_iter().filter(|m| m.supported).map(|m| (m.name, m.hf_repo)).collect())
+            .map(|c| {
+                c.models
+                    .into_iter()
+                    .filter(|m| m.supported)
+                    .map(|m| (m.name, m.hf_repo))
+                    .collect()
+            })
             .unwrap_or_default()
     })
     .await
     .unwrap_or_default();
     // repo → architecture, cached (it never changes for a repo).
     let path = arch_cache_path(state);
-    let mut cache: HashMap<String, String> =
-        std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut cache: HashMap<String, String> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
     let mut changed = false;
     for (_, repo) in &catalog {
         let Some(repo) = repo else { continue };
@@ -318,20 +376,43 @@ async fn known_architectures(state: &AppState) -> HashMap<String, Vec<String>> {
 }
 
 /// `POST /bringup/survey` (authed).
-pub(crate) async fn post_survey(State(state): State<AppState>, _auth: BearerAuth, Json(body): Json<SurveyBody>) -> Reply {
-    let model = body.model.trim().trim_start_matches("https://huggingface.co/").trim_end_matches('/').to_string();
+pub(crate) async fn post_survey(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    Json(body): Json<SurveyBody>,
+) -> Reply {
+    let model = body
+        .model
+        .trim()
+        .trim_start_matches("https://huggingface.co/")
+        .trim_end_matches('/')
+        .to_string();
     if !crate::orchard::valid_model(&model) {
-        return Err(err(StatusCode::BAD_REQUEST, "Use a Hugging Face id like org/model-name."));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Use a Hugging Face id like org/model-name.",
+        ));
     }
-    let info = hf_model(&model).await.map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
-    let arch = info["config"]["architectures"][0].as_str().map(str::to_string);
+    let info = hf_model(&model)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    let arch = info["config"]["architectures"][0]
+        .as_str()
+        .map(str::to_string);
     let known = known_architectures(&state).await;
-    let siblings = arch.as_ref().and_then(|a| known.get(a)).cloned().unwrap_or_default();
+    let siblings = arch
+        .as_ref()
+        .and_then(|a| known.get(a))
+        .cloned()
+        .unwrap_or_default();
     let already = {
         let probe = state.clone();
         let m = model.clone();
         tokio::task::spawn_blocking(move || {
-            probe.tt_cli().and_then(|tt| tt.catalog(probe.device_mesh(), false).ok()).and_then(|c| c.find(&m).map(|x| x.name.clone()))
+            probe
+                .tt_cli()
+                .and_then(|tt| tt.catalog(probe.device_mesh(), false).ok())
+                .and_then(|c| c.find(&m).map(|x| x.name.clone()))
         })
         .await
         .ok()
@@ -340,7 +421,10 @@ pub(crate) async fn post_survey(State(state): State<AppState>, _auth: BearerAuth
     let params = info["safetensors"]["total"].as_f64().map(|p| p / 1e9);
     let package = crate::community::package_for(&model);
     let (recommend, why) = if let Some(name) = &already {
-        ("none", format!("{name} already runs on this box: download it in Models."))
+        (
+            "none",
+            format!("{name} already runs on this box: download it in Models."),
+        )
     } else if let Some(p) = &package {
         ("community", format!("Someone has already packaged it to run on Tenstorrent chips ({p}). Download it from the community catalog and start it: no bring-up needed."))
     } else if !siblings.is_empty() {
@@ -413,7 +497,8 @@ pub struct Approval {
 }
 
 static APPROVALS: Mutex<Vec<(String, Approval)>> = Mutex::new(Vec::new());
-static DECIDED: std::sync::LazyLock<tokio::sync::Notify> = std::sync::LazyLock::new(tokio::sync::Notify::new);
+static DECIDED: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
 /// Where unanswered approvals are kept, so an agent restart doesn't lose (and
 /// so deny) a question a run is waiting on. Set when the watcher starts.
 static APPROVALS_FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -423,8 +508,13 @@ static APPROVALS_FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new()
 fn approvals_changed() {
     DECIDED.notify_waiters();
     if let Some(path) = APPROVALS_FILE.get() {
-        let open: Vec<(String, Approval)> =
-            APPROVALS.lock().expect("approvals").iter().filter(|(_, a)| a.decision.is_none()).cloned().collect();
+        let open: Vec<(String, Approval)> = APPROVALS
+            .lock()
+            .expect("approvals")
+            .iter()
+            .filter(|(_, a)| a.decision.is_none())
+            .cloned()
+            .collect();
         let _ = std::fs::write(path, serde_json::to_vec(&open).unwrap_or_default());
     }
 }
@@ -435,8 +525,10 @@ fn restore_approvals(state: &AppState, live: &[String]) {
 }
 
 fn load_approvals(path: PathBuf, live: &[String]) {
-    let saved: Vec<(String, Approval)> =
-        std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let saved: Vec<(String, Approval)> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
     {
         let mut all = APPROVALS.lock().expect("approvals");
         for (run, a) in saved.into_iter().filter(|(run, _)| live.contains(run)) {
@@ -482,13 +574,25 @@ fn read_manifest(dir: &Path) -> HashMap<String, String> {
 /// folded into `stage_N_…` so a resumed stage reads like any other.
 fn parse_manifest(text: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
-    for (k, v) in text.lines().filter(|l| !l.starts_with("- ")).filter_map(|l| l.split_once('=')) {
+    for (k, v) in text
+        .lines()
+        .filter(|l| !l.starts_with("- "))
+        .filter_map(|l| l.split_once('='))
+    {
         out.insert(k.to_string(), v.to_string());
         let resumed = k.strip_prefix("stage_").and_then(|rest| {
             let (n, rest) = rest.split_once("_resume_")?;
             let (attempt, field) = rest.split_once('_')?;
-            (n.parse::<usize>().is_ok() && attempt.parse::<usize>().is_ok() && matches!(field, "terminal_status" | "check" | "started_at_utc"))
-                .then(|| (format!("stage_{n}_terminal_status"), format!("stage_{n}_check"), field))
+            (n.parse::<usize>().is_ok()
+                && attempt.parse::<usize>().is_ok()
+                && matches!(field, "terminal_status" | "check" | "started_at_utc"))
+            .then(|| {
+                (
+                    format!("stage_{n}_terminal_status"),
+                    format!("stage_{n}_check"),
+                    field,
+                )
+            })
         });
         match resumed {
             // Resumed: running again, so the old outcome and check no longer apply.
@@ -517,8 +621,16 @@ fn stage_logs(dir: &Path, name: &str) -> Vec<PathBuf> {
         .flatten()
         .filter_map(|e| {
             let f = e.file_name().to_string_lossy().to_string();
-            let ours = f == format!("{name}.jsonl") || (f.starts_with(&format!("{name}.")) && f.ends_with(".jsonl"));
-            ours.then(|| (e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), e.path()))
+            let ours = f == format!("{name}.jsonl")
+                || (f.starts_with(&format!("{name}.")) && f.ends_with(".jsonl"));
+            ours.then(|| {
+                (
+                    e.metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH),
+                    e.path(),
+                )
+            })
         })
         .collect();
     logs.sort();
@@ -528,7 +640,9 @@ fn stage_logs(dir: &Path, name: &str) -> Vec<PathBuf> {
 /// The last `bytes` of a file, whole lines only.
 fn tail_text(path: &Path, bytes: u64) -> String {
     use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else { return String::new() };
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let start = len.saturating_sub(bytes);
     let _ = f.seek(SeekFrom::Start(start));
@@ -536,7 +650,9 @@ fn tail_text(path: &Path, bytes: u64) -> String {
     let _ = f.read_to_end(&mut buf);
     let text = String::from_utf8_lossy(&buf).to_string();
     if start > 0 {
-        text.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap_or_default()
+        text.split_once('\n')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_default()
     } else {
         text
     }
@@ -558,12 +674,19 @@ pub fn events_from_log(text: &str, keep: usize) -> Vec<Value> {
     // Claude's tool calls by id, to attach their results when they arrive.
     let mut calls: HashMap<String, usize> = HashMap::new();
     for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if v["direction"] != "recv" {
             continue;
         }
         if v.get("claude").is_some() {
-            claude_events(&v["claude"], v["ts"].as_str().unwrap_or(""), &mut out, &mut calls);
+            claude_events(
+                &v["claude"],
+                v["ts"].as_str().unwrap_or(""),
+                &mut out,
+                &mut calls,
+            );
             continue;
         }
         let m = &v["message"];
@@ -628,8 +751,16 @@ fn clip_tail(s: &str, n: usize) -> String {
 fn ts_unix(ts: &str) -> Option<u64> {
     let (date, time) = ts.strip_suffix('Z')?.split_once('T')?;
     let num = |s: &str| s.parse::<i64>().ok();
-    let (y, m, d) = (num(date.get(0..4)?)?, num(date.get(4..6)?)?, num(date.get(6..8)?)?);
-    let (hh, mm, ss) = (num(time.get(0..2)?)?, num(time.get(2..4)?)?, num(time.get(4..6)?)?);
+    let (y, m, d) = (
+        num(date.get(0..4)?)?,
+        num(date.get(4..6)?)?,
+        num(date.get(6..8)?)?,
+    );
+    let (hh, mm, ss) = (
+        num(time.get(0..2)?)?,
+        num(time.get(2..4)?)?,
+        num(time.get(4..6)?)?,
+    );
     // Days from the civil date (Howard Hinnant's algorithm).
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
@@ -671,7 +802,10 @@ impl Usage {
             let id = c["message"]["id"].as_str().unwrap_or("").to_string();
             let u = &c["message"]["usage"];
             let n = |k: &str| u[k].as_u64().unwrap_or(0);
-            let now = (n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens"), n("output_tokens"));
+            let now = (
+                n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens"),
+                n("output_tokens"),
+            );
             if id == self.last_message {
                 self.tokens_in -= self.last_counted.0;
                 self.tokens_out -= self.last_counted.1;
@@ -688,12 +822,19 @@ impl Usage {
             let p = &m["params"];
             let total = &p["tokenUsage"]["total"];
             let thread = p["threadId"].as_str().unwrap_or("").to_string();
-            self.threads.insert(thread, (total["inputTokens"].as_u64().unwrap_or(0), total["outputTokens"].as_u64().unwrap_or(0)));
+            self.threads.insert(
+                thread,
+                (
+                    total["inputTokens"].as_u64().unwrap_or(0),
+                    total["outputTokens"].as_u64().unwrap_or(0),
+                ),
+            );
         }
     }
 }
 
-static USAGE: std::sync::LazyLock<Mutex<HashMap<PathBuf, Usage>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static USAGE: std::sync::LazyLock<Mutex<HashMap<PathBuf, Usage>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A stage's usage and timing across its logs, read incrementally.
 fn stage_usage(logs: &[PathBuf]) -> Option<Value> {
@@ -726,7 +867,10 @@ fn stage_usage(logs: &[PathBuf]) -> Option<Value> {
                 }
             }
         }
-        total.first = match (total.first, u.first) { (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b) };
+        total.first = match (total.first, u.first) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         total.last = total.last.max(u.last);
         total.tokens_in += u.tokens_in;
         total.tokens_out += u.tokens_out;
@@ -736,7 +880,10 @@ fn stage_usage(logs: &[PathBuf]) -> Option<Value> {
             *e = ((*e).0.max(*i), (*e).1.max(*o));
         }
     }
-    let (cin, cout) = total.threads.values().fold((0, 0), |(a, b), (i, o)| (a + i, b + o));
+    let (cin, cout) = total
+        .threads
+        .values()
+        .fold((0, 0), |(a, b), (i, o)| (a + i, b + o));
     Some(json!({
         "started_at": total.first, "last_at": total.last,
         "tokens_in": total.tokens_in + cin, "tokens_out": total.tokens_out + cout,
@@ -841,7 +988,10 @@ what was verified on hardware and what wasn't.\n",
 /// tt-model-manager's skills, where Codex and Claude look for skills.
 fn link_tt_model_skills() {
     let src = home().join("code/tt-model-manager");
-    for (from, to) in [(".codex/skills", ".codex/skills"), (".claude/skills", ".claude/skills")] {
+    for (from, to) in [
+        (".codex/skills", ".codex/skills"),
+        (".claude/skills", ".claude/skills"),
+    ] {
         for skill in ["tt-model-yaml", "tt-model-package-test"] {
             let (a, b) = (src.join(from).join(skill), home().join(to).join(skill));
             if a.is_dir() && !b.exists() {
@@ -856,9 +1006,19 @@ fn link_tt_model_skills() {
 fn package_result(run: &CodexRun) -> (Option<String>, Option<String>, Option<String>) {
     let text = std::fs::read_to_string(package_dir(run).join("out/PACKAGE.md")).ok();
     let field = |k: &str| {
-        text.as_deref().and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix(k).map(|v| v.trim().trim_matches('`').to_string())))
+        text.as_deref().and_then(|t| {
+            t.lines().find_map(|l| {
+                l.trim()
+                    .strip_prefix(k)
+                    .map(|v| v.trim().trim_matches('`').to_string())
+            })
+        })
     };
-    (field("repo_id:"), field("staged_dir:"), text.map(|t| clip(&t, 6000)))
+    (
+        field("repo_id:"),
+        field("staged_dir:"),
+        text.map(|t| clip(&t, 6000)),
+    )
 }
 
 const EXIT_MEANING: &[(i32, &str)] = &[
@@ -894,7 +1054,12 @@ fn ts_now() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}{m:02}{d:02}T{:02}{:02}{:02}Z", secs / 3600, secs % 3600 / 60, secs % 60)
+    format!(
+        "{y:04}{m:02}{d:02}T{:02}{:02}{:02}Z",
+        secs / 3600,
+        secs % 3600 / 60,
+        secs % 60
+    )
 }
 
 /// A run as the app shows it.
@@ -909,8 +1074,19 @@ pub fn describe(env: &CodexEnv, run: &CodexRun, live: bool) -> Value {
     }
     let mut current: Option<usize> = None;
     let logs_for = |i: usize| {
-        let name = format!("{:02}-{}", i + 1, prompts[i].file_stem().and_then(|s| s.to_str()).unwrap_or(""));
-        let dir = if i + 1 == PACKAGE_STAGE { package_dir(run) } else { run.log_dir.clone() };
+        let name = format!(
+            "{:02}-{}",
+            i + 1,
+            prompts[i]
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+        );
+        let dir = if i + 1 == PACKAGE_STAGE {
+            package_dir(run)
+        } else {
+            run.log_dir.clone()
+        };
         stage_logs(&dir, &name)
     };
     let stages: Vec<Value> = prompts
@@ -951,15 +1127,28 @@ pub fn describe(env: &CodexEnv, run: &CodexRun, live: bool) -> Value {
     let notes = read_notes(run);
     if let Some(i) = latest {
         // Notes for this stage, from as far back as the feed reaches.
-        let first = events.first().and_then(|e| e["at"].as_str()).and_then(ts_unix).unwrap_or(0);
-        for n in notes.iter().filter(|n| n["stage"].as_u64() == Some(i as u64 + 1) && n["at_unix"].as_u64().unwrap_or(0) >= first) {
+        let first = events
+            .first()
+            .and_then(|e| e["at"].as_str())
+            .and_then(ts_unix)
+            .unwrap_or(0);
+        for n in notes.iter().filter(|n| {
+            n["stage"].as_u64() == Some(i as u64 + 1) && n["at_unix"].as_u64().unwrap_or(0) >= first
+        }) {
             events.push(json!({ "at": n["at"], "kind": "you", "text": n["text"] }));
         }
         events.sort_by(|a, b| a["at"].as_str().cmp(&b["at"].as_str()));
     }
-    let usage_total = stages.iter().filter_map(|s| s["usage"].as_object()).fold((0u64, 0u64, 0f64), |(i, o, c), u| {
-        (i + u["tokens_in"].as_u64().unwrap_or(0), o + u["tokens_out"].as_u64().unwrap_or(0), c + u["cost_usd"].as_f64().unwrap_or(0.0))
-    });
+    let usage_total = stages.iter().filter_map(|s| s["usage"].as_object()).fold(
+        (0u64, 0u64, 0f64),
+        |(i, o, c), u| {
+            (
+                i + u["tokens_in"].as_u64().unwrap_or(0),
+                o + u["tokens_out"].as_u64().unwrap_or(0),
+                c + u["cost_usd"].as_f64().unwrap_or(0.0),
+            )
+        },
+    );
     let blocked = latest
         .filter(|_| !live)
         .and_then(|i| (stages[i]["goal"] == "blocked").then(|| json!({
@@ -974,7 +1163,10 @@ pub fn describe(env: &CodexEnv, run: &CodexRun, live: bool) -> Value {
         .filter(|(r, a)| r == &run.id && a.decision.is_none())
         .map(|(_, a)| a.clone())
         .collect();
-    let done = stages.iter().filter(|s| matches!(s["state"].as_str(), Some("done" | "advisory"))).count();
+    let done = stages
+        .iter()
+        .filter(|s| matches!(s["state"].as_str(), Some("done" | "advisory")))
+        .count();
     let chips_wait: Option<Value> = std::fs::read(run.log_dir.join("chips-wait.json"))
         .ok()
         .or_else(|| std::fs::read(package_dir(run).join("chips-wait.json")).ok())
@@ -997,11 +1189,18 @@ pub fn describe(env: &CodexEnv, run: &CodexRun, live: bool) -> Value {
         }
     };
     let thread = latest.and_then(|i| stages[i]["thread"].as_str().map(str::to_string));
-    let stage_done = |n: usize| manifest.get(&format!("stage_{n}_terminal_status")).map(String::as_str) == Some("complete");
+    let stage_done = |n: usize| {
+        manifest
+            .get(&format!("stage_{n}_terminal_status"))
+            .map(String::as_str)
+            == Some("complete")
+    };
     let (repo_id, staged_dir, package_report) = package_result(run);
     let packaged = stage_done(PACKAGE_STAGE) && repo_id.is_some();
     let publish_log = tail_text(&package_dir(run).join("publish.log"), 4000);
-    let publish_exit = std::fs::read_to_string(package_dir(run).join("publish.exit")).ok().map(|t| t.trim().to_string());
+    let publish_exit = std::fs::read_to_string(package_dir(run).join("publish.exit"))
+        .ok()
+        .map(|t| t.trim().to_string());
     let port_done = (1..=env.prompts().len()).filter(|n| stage_done(*n)).count();
     json!({
         "id": run.id, "engine": run.engine, "model": run.model, "model_dir": run.model_dir,
@@ -1057,7 +1256,10 @@ fn cli_command(env: &CodexEnv, run: &CodexRun) -> String {
 }
 
 fn live_ids(runs: &[CodexRun]) -> Vec<String> {
-    runs.iter().filter(|r| r.finished.is_none() && unit_active(&r.unit)).map(|r| r.id.clone()).collect()
+    runs.iter()
+        .filter(|r| r.finished.is_none() && unit_active(&r.unit))
+        .map(|r| r.id.clone())
+        .collect()
 }
 
 /// `GET /bringup/codex/runs` (authed): newest first.
@@ -1067,7 +1269,10 @@ pub(crate) async fn get_runs(State(state): State<AppState>, _auth: BearerAuth) -
         let env = CodexEnv::detect();
         let runs = load_runs(&probe);
         let live = live_ids(&runs);
-        runs.iter().rev().map(|r| describe(&env, r, live.contains(&r.id))).collect::<Vec<_>>()
+        runs.iter()
+            .rev()
+            .map(|r| describe(&env, r, live.contains(&r.id)))
+            .collect::<Vec<_>>()
     })
     .await
     .unwrap_or_default();
@@ -1075,13 +1280,24 @@ pub(crate) async fn get_runs(State(state): State<AppState>, _auth: BearerAuth) -
 }
 
 /// `GET /bringup/codex/runs/{id}` (authed).
-pub(crate) async fn get_run(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
+pub(crate) async fn get_run(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
     let probe = state.clone();
     tokio::task::spawn_blocking(move || {
         let env = CodexEnv::detect();
         let runs = load_runs(&probe);
-        let run = runs.iter().find(|r| r.id == id).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such run."))?;
-        Ok(Json(describe(&env, run, run.finished.is_none() && unit_active(&run.unit))))
+        let run = runs
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such run."))?;
+        Ok(Json(describe(
+            &env,
+            run,
+            run.finished.is_none() && unit_active(&run.unit),
+        )))
     })
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -1101,7 +1317,10 @@ pub struct StartBody {
 
 /// Free the chips for a run: refuse if something else holds them; stop the
 /// serving model only when asked. Returns the model to restore afterwards.
-async fn free_chips(state: &AppState, stop_serving: bool) -> Result<Option<String>, (StatusCode, Json<Value>)> {
+async fn free_chips(
+    state: &AppState,
+    stop_serving: bool,
+) -> Result<Option<String>, (StatusCode, Json<Value>)> {
     if let Some(why) = state.chips_holder() {
         return Err(err(StatusCode::CONFLICT, why));
     }
@@ -1121,10 +1340,12 @@ async fn free_chips(state: &AppState, stop_serving: bool) -> Result<Option<Strin
     }
     if serving {
         crate::coserve::leave_split(state).await;
-        state
-            .stop_serving()
-            .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't stop the model: {e:#}")))?;
+        state.stop_serving().await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("couldn't stop the model: {e:#}"),
+            )
+        })?;
         Ok(previous.map(|m| crate::notify::display_model(&m)))
     } else {
         Ok(None)
@@ -1138,22 +1359,38 @@ async fn free_chips(state: &AppState, stop_serving: bool) -> Result<Option<Strin
 /// state the next runtime can't always open), as Orchard's start does.
 async fn reset_chips(state: &AppState) -> Result<(), (StatusCode, Json<Value>)> {
     let st = state.clone();
-    tokio::task::spawn_blocking(move || st.run_power_command(crate::power::PowerAction::ResetChips, false))
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map(|_| ())
-        .map_err(|e| err(StatusCode::CONFLICT, format!("couldn't reset the chips: {e:#}")))
+    tokio::task::spawn_blocking(move || {
+        st.run_power_command(crate::power::PowerAction::ResetChips, false)
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map(|_| ())
+    .map_err(|e| {
+        err(
+            StatusCode::CONFLICT,
+            format!("couldn't reset the chips: {e:#}"),
+        )
+    })
 }
 
 /// Leases gozer shows that aren't TT Station's own serving: (holder, chips).
 fn foreign_holders() -> Vec<String> {
-    let out = Command::new("gozer").arg("status").stdin(Stdio::null()).output();
-    let text = out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    let out = Command::new("gozer")
+        .arg("status")
+        .stdin(Stdio::null())
+        .output();
+    let text = out
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
     let mut held: Vec<String> = text
         .lines()
         .filter_map(|l| {
             let rest = l.split_once("HELD")?.1;
-            let who = rest.split_whitespace().skip(1).collect::<Vec<_>>().join(" ");
+            let who = rest
+                .split_whitespace()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join(" ");
             (!who.is_empty() && !who.starts_with("tt-station:")).then_some(who)
         })
         .collect();
@@ -1167,9 +1404,19 @@ fn relaunch(state: &AppState, env: &CodexEnv, run: &CodexRun) -> Result<usize, S
     let manifest = read_manifest(&run.log_dir);
     let prompts = env.prompts();
     let n = (1..=prompts.len())
-        .find(|n| manifest.get(&format!("stage_{n}_terminal_status")).map(String::as_str) != Some("complete"))
+        .find(|n| {
+            manifest
+                .get(&format!("stage_{n}_terminal_status"))
+                .map(String::as_str)
+                != Some("complete")
+        })
         .ok_or("Every stage is already complete.")?;
-    let mut args: Vec<String> = vec!["--replace".into(), format!("HF_MODEL={}", run.model), "--replace".into(), format!("MODEL_DIR={}", run.model_dir)];
+    let mut args: Vec<String> = vec![
+        "--replace".into(),
+        format!("HF_MODEL={}", run.model),
+        "--replace".into(),
+        format!("MODEL_DIR={}", run.model_dir),
+    ];
     if manifest.contains_key(&format!("stage_{n}_thread_id")) {
         args.extend(["--resume-stage".into(), n.to_string()]);
         args.extend(prompts.iter().map(|p| p.display().to_string()));
@@ -1179,24 +1426,44 @@ fn relaunch(state: &AppState, env: &CodexEnv, run: &CodexRun) -> Result<usize, S
     }
     let _ = std::fs::remove_file(run.log_dir.join("chips-wait.json"));
     if run.log_dir.join("note.txt").is_file() {
-        args.extend(["--note-file".into(), run.log_dir.join("note.txt").display().to_string()]);
+        args.extend([
+            "--note-file".into(),
+            run.log_dir.join("note.txt").display().to_string(),
+        ]);
     }
     launch(state, env, run, &run.log_dir, &args)?;
     Ok(n)
 }
 
-fn launch(state: &AppState, env: &CodexEnv, run: &CodexRun, log_dir: &Path, stage_args: &[String]) -> Result<(), String> {
+fn launch(
+    state: &AppState,
+    env: &CodexEnv,
+    run: &CodexRun,
+    log_dir: &Path,
+    stage_args: &[String],
+) -> Result<(), String> {
     std::fs::create_dir_all(log_dir).map_err(|e| e.to_string())?;
     let dir = state.config_dir().join("bringup");
-    for (name, body) in [("codex_bringup.py", DRIVER), ("claude_bringup.py", CLAUDE_DRIVER), ("permission_mcp.py", PERMISSION_MCP), ("lease_run.py", LEASE_RUN)] {
+    for (name, body) in [
+        ("codex_bringup.py", DRIVER),
+        ("claude_bringup.py", CLAUDE_DRIVER),
+        ("permission_mcp.py", PERMISSION_MCP),
+        ("lease_run.py", LEASE_RUN),
+    ] {
         std::fs::write(dir.join(name), body).map_err(|e| e.to_string())?;
     }
     let home = home();
     let venv = env.repo.join("python_env");
     let node = home.join(".local/share/node/current/bin");
-    let path = std::env::join_paths(
-        [venv.join("bin"), home.join(".local/bin"), node, home.join(".tenstorrent-venv/bin"), PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
-    )
+    let path = std::env::join_paths([
+        venv.join("bin"),
+        home.join(".local/bin"),
+        node,
+        home.join(".tenstorrent-venv/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ])
     .map_err(|e| e.to_string())?;
     let q = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
     let python = q(&env.python.display().to_string());
@@ -1204,32 +1471,62 @@ fn launch(state: &AppState, env: &CodexEnv, run: &CodexRun, log_dir: &Path, stag
     let driver: Vec<String> = match run.engine.as_str() {
         "claude" => {
             let bin = claude_bin().ok_or("Claude Code isn't installed")?;
-            vec![python, q(&dir.join("claude_bringup.py").display().to_string()), "--policy".into(), q(&run.policy),
-                 "--claude-bin".into(), q(&bin), "--log-dir".into(), log_s]
+            vec![
+                python,
+                q(&dir.join("claude_bringup.py").display().to_string()),
+                "--policy".into(),
+                q(&run.policy),
+                "--claude-bin".into(),
+                q(&bin),
+                "--log-dir".into(),
+                log_s,
+            ]
         }
         _ => {
             let codex = env.codex.clone().ok_or("Codex isn't installed")?;
-            vec![python, q(&dir.join("codex_bringup.py").display().to_string()), "--policy".into(), q(&run.policy), "--".into(),
-                 "--codex-bin".into(), q(&codex), "--log-dir".into(), log_s]
+            vec![
+                python,
+                q(&dir.join("codex_bringup.py").display().to_string()),
+                "--policy".into(),
+                q(&run.policy),
+                "--".into(),
+                "--codex-bin".into(),
+                q(&codex),
+                "--log-dir".into(),
+                log_s,
+            ]
         }
     };
     // Waits for the chips if they're busy (gozer would just queue and quit).
     let mut inner = vec![
-        q(&env.python.display().to_string()), q(&dir.join("lease_run.py").display().to_string()),
+        q(&env.python.display().to_string()),
+        q(&dir.join("lease_run.py").display().to_string()),
         q(&log_dir.join("chips-wait.json").display().to_string()),
-        q(&format!("tt-station:{}-bringup:{}", run.engine, run.model)), q("model bring-up"), "--".into(),
+        q(&format!("tt-station:{}-bringup:{}", run.engine, run.model)),
+        q("model bring-up"),
+        "--".into(),
     ];
     inner.extend(driver);
     inner.extend(stage_args.iter().map(|a| q(a)));
     let exit_file = log_dir.join("exit");
     let _ = std::fs::remove_file(&exit_file);
-    let script = format!("{}; echo $? > {}", inner.join(" "), q(&exit_file.display().to_string()));
+    let script = format!(
+        "{}; echo $? > {}",
+        inner.join(" "),
+        q(&exit_file.display().to_string())
+    );
     let log = log_dir.join("runner.log");
     let out = Command::new("systemd-run")
         .args(["--user", "--collect", "--quiet"])
         .arg(format!("--unit={}", run.unit))
-        .arg(format!("--property=WorkingDirectory={}", env.repo.display()))
-        .arg(format!("--property=StandardOutput=append:{}", log.display()))
+        .arg(format!(
+            "--property=WorkingDirectory={}",
+            env.repo.display()
+        ))
+        .arg(format!(
+            "--property=StandardOutput=append:{}",
+            log.display()
+        ))
         .arg(format!("--property=StandardError=append:{}", log.display()))
         .arg(format!("--setenv=PATH={}", path.to_string_lossy()))
         .arg(format!("--setenv=HOME={}", home.display()))
@@ -1237,7 +1534,10 @@ fn launch(state: &AppState, env: &CodexEnv, run: &CodexRun, log_dir: &Path, stag
         .arg(format!("--setenv=TT_METAL_HOME={}", env.repo.display()))
         .arg(format!("--setenv=PYTHONPATH={}", env.repo.display()))
         .arg("--setenv=PYTHONUNBUFFERED=1")
-        .arg(format!("--setenv=TT_STATION_URL=http://127.0.0.1:{}", state.ctrl_port()))
+        .arg(format!(
+            "--setenv=TT_STATION_URL=http://127.0.0.1:{}",
+            state.ctrl_port()
+        ))
         .arg(format!("--setenv=TT_STATION_RUN={}", run.id))
         // The value from systemd-run's environment, not its command line.
         .arg("--setenv=TT_STATION_RUN_SECRET")
@@ -1247,7 +1547,10 @@ fn launch(state: &AppState, env: &CodexEnv, run: &CodexRun, log_dir: &Path, stag
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(format!("couldn't start the run: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "couldn't start the run: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     Ok(())
 }
@@ -1255,7 +1558,9 @@ fn launch(state: &AppState, env: &CodexEnv, run: &CodexRun, log_dir: &Path, stag
 /// Where stage 9 records how it served the port (TT Station asks the agent to
 /// write it): `{"command": [...], "env": {...}}`.
 fn serve_recipe_path(env: &CodexEnv, run: &CodexRun) -> PathBuf {
-    env.repo.join(&run.model_dir).join("doc/vllm_integration/serve.json")
+    env.repo
+        .join(&run.model_dir)
+        .join("doc/vllm_integration/serve.json")
 }
 
 /// The largest `max_model_len`-like number in the port's context contract.
@@ -1263,7 +1568,13 @@ fn contract_max_len(v: &Value) -> Option<u64> {
     match v {
         Value::Object(m) => m
             .iter()
-            .filter_map(|(k, v)| if k.contains("max_model_len") { v.as_u64() } else { contract_max_len(v) })
+            .filter_map(|(k, v)| {
+                if k.contains("max_model_len") {
+                    v.as_u64()
+                } else {
+                    contract_max_len(v)
+                }
+            })
             .max(),
         Value::Array(a) => a.iter().filter_map(contract_max_len).max(),
         _ => None,
@@ -1274,40 +1585,76 @@ fn contract_max_len(v: &Value) -> Option<u64> {
 /// native vLLM can serve it straight from tt-metal before it's packaged.
 async fn port_bundle(state: &AppState, env: &CodexEnv, run: &CodexRun) -> Result<PathBuf, String> {
     let code = env.repo.join(&run.model_dir).join("tt/generator_vllm.py");
-    let src = std::fs::read_to_string(&code).map_err(|_| format!("The port has no vLLM adapter yet ({}).", code.display()))?;
+    let src = std::fs::read_to_string(&code)
+        .map_err(|_| format!("The port has no vLLM adapter yet ({}).", code.display()))?;
     let class = src
         .lines()
-        .filter_map(|l| l.strip_prefix("class ").map(|r| r.split(|c: char| c == '(' || c == ':').next().unwrap_or("").trim().to_string()))
+        .filter_map(|l| {
+            l.strip_prefix("class ").map(|r| {
+                r.split(|c: char| c == '(' || c == ':')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            })
+        })
         .find(|c| c.ends_with("ForCausalLM") || c.ends_with("ForConditionalGeneration"))
         .ok_or("The port's vLLM adapter has no …ForCausalLM class.")?;
-    let module = format!("{}.tt.generator_vllm", run.model_dir.trim_end_matches('/').replace('/', "."));
+    let module = format!(
+        "{}.tt.generator_vllm",
+        run.model_dir.trim_end_matches('/').replace('/', ".")
+    );
     let info = hf_model(&run.model).await.unwrap_or(Value::Null);
-    let arch = info["config"]["architectures"][0].as_str().map(str::to_string).unwrap_or_else(|| class.trim_start_matches("TT").to_string());
-    let launch = match std::fs::read(serve_recipe_path(env, run)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+    let arch = info["config"]["architectures"][0]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| class.trim_start_matches("TT").to_string());
+    let launch = match std::fs::read(serve_recipe_path(env, run))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+    {
         Some(r) if r["command"].is_array() => json!({ "command": r["command"], "env": r["env"] }),
         _ => {
             // Not recorded (a run from before TT Station asked): the plugin's usual QB2 launch.
-            let contract = std::fs::read(env.repo.join(&run.model_dir).join("doc/context_contract.json"))
-                .ok()
-                .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+            let contract = std::fs::read(
+                env.repo
+                    .join(&run.model_dir)
+                    .join("doc/context_contract.json"),
+            )
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
             let mut command = vec![
-                "python".to_string(), "-m".into(), "vllm.entrypoints.openai.api_server".into(),
-                "--model".into(), run.model.clone(), "--block_size".into(), "64".into(), "--max_num_seqs".into(), "1".into(),
+                "python".to_string(),
+                "-m".into(),
+                "vllm.entrypoints.openai.api_server".into(),
+                "--model".into(),
+                run.model.clone(),
+                "--block_size".into(),
+                "64".into(),
+                "--max_num_seqs".into(),
+                "1".into(),
             ];
             if let Some(n) = contract.as_ref().and_then(contract_max_len) {
                 command.extend(["--max_model_len".into(), n.to_string()]);
             }
             command.extend([
-                "--host".into(), "127.0.0.1".into(), "--port".into(), "8000".into(),
-                "--served-model-name".into(), run.model.clone(), short(&run.model).to_string(),
-                "--additional-config".into(), r#"{"tt": {"sample_on_device_mode": "all", "fabric_config": "FABRIC_1D"}}"#.into(),
+                "--host".into(),
+                "127.0.0.1".into(),
+                "--port".into(),
+                "8000".into(),
+                "--served-model-name".into(),
+                run.model.clone(),
+                short(&run.model).to_string(),
+                "--additional-config".into(),
+                r#"{"tt": {"sample_on_device_mode": "all", "fabric_config": "FABRIC_1D"}}"#.into(),
             ]);
             json!({ "command": command, "env": {
                 "MESH_DEVICE": "P150x4", "ARCH_NAME": "blackhole", "HF_MODEL": run.model, "VLLM_RPC_TIMEOUT": "300000",
             } })
         }
     };
-    let dir = crate::native_vllm::station_bundles(state).join(run.model_dir.rsplit('/').next().unwrap_or(&run.id));
+    let dir = crate::native_vllm::station_bundles(state)
+        .join(run.model_dir.rsplit('/').next().unwrap_or(&run.id));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let meta = json!({
         "arch": arch,
@@ -1316,7 +1663,11 @@ async fn port_bundle(state: &AppState, env: &CodexEnv, run: &CodexRun) -> Result
         "description": format!("{} ported on this box by a TT Station bring-up (run {}); served from tt-metal ({}).", run.model, run.id, run.model_dir),
         "launch": { "blackhole": launch.clone(), "default": launch },
     });
-    std::fs::write(dir.join("vllm_metadata.json"), serde_json::to_vec_pretty(&meta).unwrap_or_default()).map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("vllm_metadata.json"),
+        serde_json::to_vec_pretty(&meta).unwrap_or_default(),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
@@ -1326,14 +1677,26 @@ fn package_dir(run: &CodexRun) -> PathBuf {
 }
 
 /// `POST /bringup/codex/runs` (authed): start a fast-models-fast run.
-pub(crate) async fn post_run(State(state): State<AppState>, _auth: BearerAuth, Json(body): Json<StartBody>) -> Reply<(StatusCode, Json<Value>)> {
+pub(crate) async fn post_run(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    Json(body): Json<StartBody>,
+) -> Reply<(StatusCode, Json<Value>)> {
     let model = body.model.trim().to_string();
     if !crate::orchard::valid_model(&model) {
-        return Err(err(StatusCode::BAD_REQUEST, "Use a Hugging Face id like org/model-name."));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Use a Hugging Face id like org/model-name.",
+        ));
     }
     let policy = match body.policy.as_deref().unwrap_or("smart") {
         p @ ("ask" | "smart" | "auto") => p.to_string(),
-        _ => return Err(err(StatusCode::BAD_REQUEST, "Policy is ask, smart or auto.")),
+        _ => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "Policy is ask, smart or auto.",
+            ))
+        }
     };
     if STARTING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return Err(err(StatusCode::CONFLICT, "A bring-up is already starting."));
@@ -1347,7 +1710,12 @@ pub(crate) async fn post_run(State(state): State<AppState>, _auth: BearerAuth, J
     let _release = Release;
     let engine = match body.engine.as_deref().unwrap_or("codex") {
         e @ ("codex" | "claude") => e.to_string(),
-        _ => return Err(err(StatusCode::BAD_REQUEST, "The engine is codex or claude.")),
+        _ => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "The engine is codex or claude.",
+            ))
+        }
     };
     let env = CodexEnv::detect();
     let (env2, which_engine) = (env.clone(), engine.clone());
@@ -1362,17 +1730,34 @@ pub(crate) async fn post_run(State(state): State<AppState>, _auth: BearerAuth, J
     .await
     .unwrap_or(false);
     if !ok {
-        return Err(err(StatusCode::PRECONDITION_FAILED, format!(
-            "{} isn't ready here: see its card in Bring-up for what's missing.",
-            if engine == "claude" { "Claude Code" } else { "Codex" }
-        )));
+        return Err(err(
+            StatusCode::PRECONDITION_FAILED,
+            format!(
+                "{} isn't ready here: see its card in Bring-up for what's missing.",
+                if engine == "claude" {
+                    "Claude Code"
+                } else {
+                    "Codex"
+                }
+            ),
+        ));
     }
     if state.orchard_busy() {
-        return Err(err(StatusCode::CONFLICT, "An Orchard bring-up is running. One bring-up at a time."));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "An Orchard bring-up is running. One bring-up at a time.",
+        ));
     }
     let probe = state.clone();
-    if !tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe))).await.unwrap_or_default().is_empty() {
-        return Err(err(StatusCode::CONFLICT, "A bring-up is already running. One at a time."));
+    if !tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe)))
+        .await
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "A bring-up is already running. One at a time.",
+        ));
     }
     let restore = free_chips(&state, body.stop_serving).await?;
     reset_chips(&state).await?;
@@ -1392,7 +1777,12 @@ pub(crate) async fn post_run(State(state): State<AppState>, _auth: BearerAuth, J
         exit: None,
         stopped: false,
     };
-    let mut args: Vec<String> = vec!["--replace".into(), format!("HF_MODEL={model}"), "--replace".into(), format!("MODEL_DIR={}", run.model_dir)];
+    let mut args: Vec<String> = vec![
+        "--replace".into(),
+        format!("HF_MODEL={model}"),
+        "--replace".into(),
+        format!("MODEL_DIR={}", run.model_dir),
+    ];
     args.extend(env.prompts().iter().map(|p| p.display().to_string()));
     let (st, r, e) = (state.clone(), run.clone(), env.clone());
     tokio::task::spawn_blocking(move || launch(&st, &e, &r, &r.log_dir.clone(), &args))
@@ -1429,7 +1819,12 @@ pub(crate) async fn post_action(
     match action.as_str() {
         "stop" => {
             let unit = runs[i].unit.clone();
-            let _ = tokio::task::spawn_blocking(move || Command::new("systemctl").args(["--user", "stop", &unit]).status()).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                Command::new("systemctl")
+                    .args(["--user", "stop", &unit])
+                    .status()
+            })
+            .await;
             runs[i].stopped = true;
             runs[i].finished = Some(unix_now());
             for (r, a) in APPROVALS.lock().expect("approvals").iter_mut() {
@@ -1444,15 +1839,30 @@ pub(crate) async fn post_action(
         }
         "resume" | "free-chips" | "tell" => {
             let env = CodexEnv::detect();
-            let stop_serving = body.as_ref().and_then(|b| b.0["stop_serving"].as_bool()).unwrap_or(false);
-            let note = body.as_ref().and_then(|b| b.0["text"].as_str()).map(str::trim).unwrap_or("").to_string();
+            let stop_serving = body
+                .as_ref()
+                .and_then(|b| b.0["stop_serving"].as_bool())
+                .unwrap_or(false);
+            let note = body
+                .as_ref()
+                .and_then(|b| b.0["text"].as_str())
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
             let _restarting = Restarting::new(&id);
             let probe = state.clone();
-            let live = tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe))).await.unwrap_or_default().contains(&id);
+            let live = tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe)))
+                .await
+                .unwrap_or_default()
+                .contains(&id);
             if action == "tell" && !live {
                 // A stopped run carries on once told: not while another one has the chips.
                 let probe = state.clone();
-                if !tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe))).await.unwrap_or_default().is_empty() {
+                if !tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe)))
+                    .await
+                    .unwrap_or_default()
+                    .is_empty()
+                {
                     return Err(err(StatusCode::CONFLICT, "Another bring-up is running. Answer this one when it ends, or stop it first."));
                 }
             }
@@ -1463,25 +1873,51 @@ pub(crate) async fn post_action(
                     return Err(err(StatusCode::BAD_REQUEST, "Say something to tell it."));
                 }
                 if note.chars().count() > 4000 {
-                    return Err(err(StatusCode::BAD_REQUEST, "That's too long (4,000 characters at most)."));
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "That's too long (4,000 characters at most).",
+                    ));
                 }
                 if package_dir(&runs[i]).join("prompts").is_dir() {
-                    return Err(err(StatusCode::CONFLICT, "Notes go to the bring-up stages; the finish line can't take one yet."));
+                    return Err(err(
+                        StatusCode::CONFLICT,
+                        "Notes go to the bring-up stages; the finish line can't take one yet.",
+                    ));
                 }
                 let manifest = read_manifest(&runs[i].log_dir);
-                let stage = (1..=env.prompts().len())
-                    .find(|n| manifest.get(&format!("stage_{n}_terminal_status")).map(String::as_str) != Some("complete"));
-                let entry = json!({ "at": ts_now(), "at_unix": unix_now(), "stage": stage, "text": note });
-                let dir = runs[i].log_dir.clone();
-                let written = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("note.txt"), &note)).and_then(|_| {
-                    use std::io::Write;
-                    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("notes.jsonl"))?;
-                    writeln!(f, "{entry}")
+                let stage = (1..=env.prompts().len()).find(|n| {
+                    manifest
+                        .get(&format!("stage_{n}_terminal_status"))
+                        .map(String::as_str)
+                        != Some("complete")
                 });
-                written.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't save the note: {e}")))?;
+                let entry =
+                    json!({ "at": ts_now(), "at_unix": unix_now(), "stage": stage, "text": note });
+                let dir = runs[i].log_dir.clone();
+                let written = std::fs::create_dir_all(&dir)
+                    .and_then(|_| std::fs::write(dir.join("note.txt"), &note))
+                    .and_then(|_| {
+                        use std::io::Write;
+                        let mut f = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(dir.join("notes.jsonl"))?;
+                        writeln!(f, "{entry}")
+                    });
+                written.map_err(|e| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("couldn't save the note: {e}"),
+                    )
+                })?;
                 if live {
                     let unit = runs[i].unit.clone();
-                    let _ = tokio::task::spawn_blocking(move || Command::new("systemctl").args(["--user", "stop", &unit]).status()).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        Command::new("systemctl")
+                            .args(["--user", "stop", &unit])
+                            .status()
+                    })
+                    .await;
                     for (r, a) in APPROVALS.lock().expect("approvals").iter_mut() {
                         if r == &id && a.decision.is_none() {
                             a.decision = Some("cancel".into());
@@ -1492,7 +1928,9 @@ pub(crate) async fn post_action(
                 }
             } else if action == "free-chips" {
                 // Someone else's lease: say who, rather than taking their chips.
-                let foreign = tokio::task::spawn_blocking(foreign_holders).await.unwrap_or_default();
+                let foreign = tokio::task::spawn_blocking(foreign_holders)
+                    .await
+                    .unwrap_or_default();
                 if !foreign.is_empty() {
                     return Err(err(StatusCode::CONFLICT, format!(
                         "The chips are leased to {} (not TT Station). Ask them to release the lease, or release it with gozer.",
@@ -1501,19 +1939,37 @@ pub(crate) async fn post_action(
                 }
                 // Pause the waiting run so the chips can be reset; it restarts below.
                 let unit = runs[i].unit.clone();
-                let _ = tokio::task::spawn_blocking(move || Command::new("systemctl").args(["--user", "stop", &unit]).status()).await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    Command::new("systemctl")
+                        .args(["--user", "stop", &unit])
+                        .status()
+                })
+                .await;
                 state.set_bringup_busy(false);
             } else {
                 let probe = state.clone();
-                if !tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe))).await.unwrap_or_default().is_empty() {
+                if !tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe)))
+                    .await
+                    .unwrap_or_default()
+                    .is_empty()
+                {
                     return Err(err(StatusCode::CONFLICT, "A bring-up is already running."));
                 }
             }
             let restore = free_chips(&state, stop_serving).await?;
             // Leases whose owner is gone (a crashed run) are cleared, then the chips reset.
-            let _ = tokio::task::spawn_blocking(|| Command::new("gozer").arg("reconcile").stdin(Stdio::null()).output()).await;
+            let _ = tokio::task::spawn_blocking(|| {
+                Command::new("gozer")
+                    .arg("reconcile")
+                    .stdin(Stdio::null())
+                    .output()
+            })
+            .await;
             if let Err(e) = reset_chips(&state).await {
-                eprintln!("tt-station-agentd: bring-up {id}: chip reset failed: {}", e.1 .0["error"]);
+                eprintln!(
+                    "tt-station-agentd: bring-up {id}: chip reset failed: {}",
+                    e.1 .0["error"]
+                );
                 return Err(e);
             }
             let run = &mut runs[i];
@@ -1536,27 +1992,43 @@ pub(crate) async fn post_action(
         "package" => {
             let env = CodexEnv::detect();
             let probe = state.clone();
-            if !tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe))).await.unwrap_or_default().is_empty() {
+            if !tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe)))
+                .await
+                .unwrap_or_default()
+                .is_empty()
+            {
                 return Err(err(StatusCode::CONFLICT, "A bring-up is already running."));
             }
             let run = runs[i].clone();
             let manifest = read_manifest(&run.log_dir);
             if manifest.get("stage_9_terminal_status").map(String::as_str) != Some("complete") {
-                return Err(err(StatusCode::CONFLICT, "Package it once the vLLM stage (9) has passed."));
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "Package it once the vLLM stage (9) has passed.",
+                ));
             }
-            let stop_serving = body.and_then(|b| b.0["stop_serving"].as_bool()).unwrap_or(false);
+            let stop_serving = body
+                .and_then(|b| b.0["stop_serving"].as_bool())
+                .unwrap_or(false);
             let restore = free_chips(&state, stop_serving).await?;
             reset_chips(&state).await?;
             let dir = package_dir(&run);
             let out = dir.join("out");
-            std::fs::create_dir_all(dir.join("prompts")).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            std::fs::create_dir_all(dir.join("prompts"))
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             let _ = std::fs::create_dir_all(&out);
             let prompt = dir.join(format!("prompts/{PACKAGE_STAGE}-package.txt"));
-            std::fs::write(&prompt, package_prompt(&env, &run, &out)).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            std::fs::write(&prompt, package_prompt(&env, &run, &out))
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             link_tt_model_skills();
             let args: Vec<String> = vec![
-                "--replace".into(), format!("HF_MODEL={}", run.model), "--replace".into(), format!("MODEL_DIR={}", run.model_dir),
-                "--start-index".into(), PACKAGE_STAGE.to_string(), prompt.display().to_string(),
+                "--replace".into(),
+                format!("HF_MODEL={}", run.model),
+                "--replace".into(),
+                format!("MODEL_DIR={}", run.model_dir),
+                "--start-index".into(),
+                PACKAGE_STAGE.to_string(),
+                prompt.display().to_string(),
             ];
             let (st, r, e, d) = (state.clone(), run.clone(), env.clone(), dir.clone());
             tokio::task::spawn_blocking(move || launch(&st, &e, &r, &d, &args))
@@ -1583,44 +2055,86 @@ pub(crate) async fn post_action(
             let run = runs[i].clone();
             let (repo_id, _, _) = package_result(&run);
             let Some(repo_id) = repo_id else {
-                return Err(err(StatusCode::CONFLICT, "Package it first: there's no package to serve yet."));
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "Package it first: there's no package to serve yet.",
+                ));
             };
             if let Some(holder) = state.chips_holder() {
                 return Err(err(StatusCode::CONFLICT, holder));
             }
-            let stop_serving = body.and_then(|b| b.0["stop_serving"].as_bool()).unwrap_or(false);
+            let stop_serving = body
+                .and_then(|b| b.0["stop_serving"].as_bool())
+                .unwrap_or(false);
             let life = state.lifecycle();
-            if !matches!(life.phase, Phase::Idle | Phase::Failed) || crate::coserve::is_split(&state) {
+            if !matches!(life.phase, Phase::Idle | Phase::Failed)
+                || crate::coserve::is_split(&state)
+            {
                 if !stop_serving {
-                    return Err((StatusCode::CONFLICT, Json(json!({ "error": "Serving it replaces what's serving now. Stop it first?", "needs_stop": true }))));
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(
+                            json!({ "error": "Serving it replaces what's serving now. Stop it first?", "needs_stop": true }),
+                        ),
+                    ));
                 }
                 crate::coserve::leave_split(&state).await;
-                state.stop_serving().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't stop the model: {e:#}")))?;
+                state.stop_serving().await.map_err(|e| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("couldn't stop the model: {e:#}"),
+                    )
+                })?;
             }
             let reset = state.clone();
-            tokio::task::spawn_blocking(move || reset.run_power_command(crate::power::PowerAction::ResetChips, false))
-                .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-                .map_err(|e| err(StatusCode::CONFLICT, format!("couldn't reset the chips: {e:#}")))?;
+            tokio::task::spawn_blocking(move || {
+                reset.run_power_command(crate::power::PowerAction::ResetChips, false)
+            })
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| {
+                err(
+                    StatusCode::CONFLICT,
+                    format!("couldn't reset the chips: {e:#}"),
+                )
+            })?;
             let log = package_dir(&run).join("serve.log");
-            let path = format!("{}:{}", home().join(".local/bin").display(), std::env::var("PATH").unwrap_or_default());
+            let path = format!(
+                "{}:{}",
+                home().join(".local/bin").display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
             let out = Command::new("systemd-run")
                 .args(["--user", "--collect", "--quiet"])
                 .arg(format!("--unit={}", crate::orchard::HARVEST_UNIT))
-                .arg(format!("--property=StandardOutput=append:{}", log.display()))
+                .arg(format!(
+                    "--property=StandardOutput=append:{}",
+                    log.display()
+                ))
                 .arg(format!("--property=StandardError=append:{}", log.display()))
                 .arg(format!("--setenv=PATH={path}"))
-                .args(["tt-model", "serve", &repo_id, "--local-only", "--port", &state.serving_port().to_string()])
+                .args([
+                    "tt-model",
+                    "serve",
+                    &repo_id,
+                    "--local-only",
+                    "--port",
+                    &state.serving_port().to_string(),
+                ])
                 .stdin(Stdio::null())
                 .output()
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             if !out.status.success() {
-                return Err(err(StatusCode::INTERNAL_SERVER_ERROR, String::from_utf8_lossy(&out.stderr).trim().to_string()));
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                ));
             }
             state.notifier().record(Draft {
                 kind: "bringup",
                 title: format!("Starting {}", short(&repo_id)),
-                body: "Serving your new package on the chips. Chat picks it up when it's ready.".into(),
+                body: "Serving your new package on the chips. Chat picks it up when it's ready."
+                    .into(),
             });
             Ok(Json(json!({ "serving": repo_id })))
         }
@@ -1628,33 +2142,65 @@ pub(crate) async fn post_action(
             // Serve the port with native vLLM, straight from tt-metal, before packaging.
             let env = CodexEnv::detect();
             let run = runs[i].clone();
-            if read_manifest(&run.log_dir).get("stage_9_terminal_status").map(String::as_str) != Some("complete") {
-                return Err(err(StatusCode::CONFLICT, "Try it once the vLLM stage (9) has passed."));
+            if read_manifest(&run.log_dir)
+                .get("stage_9_terminal_status")
+                .map(String::as_str)
+                != Some("complete")
+            {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "Try it once the vLLM stage (9) has passed.",
+                ));
             }
             let probe = state.clone();
-            if tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe))).await.unwrap_or_default().contains(&run.id) {
-                return Err(err(StatusCode::CONFLICT, "The bring-up is still using the chips. Try it when it pauses or ends."));
+            if tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe)))
+                .await
+                .unwrap_or_default()
+                .contains(&run.id)
+            {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "The bring-up is still using the chips. Try it when it pauses or ends.",
+                ));
             }
-            let stop_serving = body.and_then(|b| b.0["stop_serving"].as_bool()).unwrap_or(false);
-            let dir = port_bundle(&state, &env, &run).await.map_err(|e| err(StatusCode::CONFLICT, e))?;
+            let stop_serving = body
+                .and_then(|b| b.0["stop_serving"].as_bool())
+                .unwrap_or(false);
+            let dir = port_bundle(&state, &env, &run)
+                .await
+                .map_err(|e| err(StatusCode::CONFLICT, e))?;
             crate::native_vllm::serve_dir(&state, &dir, short(&run.model), stop_serving).await
         }
         "publish" | "list" => {
             let run = runs[i].clone();
             let (repo_id, staged, _) = package_result(&run);
             let (Some(repo_id), Some(staged)) = (repo_id, staged) else {
-                return Err(err(StatusCode::CONFLICT, "Package it first: there's nothing to publish yet."));
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "Package it first: there's nothing to publish yet.",
+                ));
             };
             let dir = package_dir(&run);
             let _ = std::fs::remove_file(dir.join("publish.exit"));
             // Push private first; listing in the public catalog is its own, explicit step.
             let cmd = if action == "publish" {
-                format!("tt-model push '{}' --repo '{}' --private", staged.replace('\'', ""), repo_id.replace('\'', ""))
+                format!(
+                    "tt-model push '{}' --repo '{}' --private",
+                    staged.replace('\'', ""),
+                    repo_id.replace('\'', "")
+                )
             } else {
                 format!("tt-model publish '{}'", repo_id.replace('\'', ""))
             };
-            let script = format!("{cmd} >> '{0}/publish.log' 2>&1; echo $? > '{0}/publish.exit'", dir.display());
-            let path = format!("{}:{}", home().join(".local/bin").display(), std::env::var("PATH").unwrap_or_default());
+            let script = format!(
+                "{cmd} >> '{0}/publish.log' 2>&1; echo $? > '{0}/publish.exit'",
+                dir.display()
+            );
+            let path = format!(
+                "{}:{}",
+                home().join(".local/bin").display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
             let out = Command::new("systemd-run")
                 .args(["--user", "--collect", "--quiet"])
                 .arg(format!("--unit=tt-bringup-publish-{}", run.id))
@@ -1664,11 +2210,17 @@ pub(crate) async fn post_action(
                 .output()
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             if !out.status.success() {
-                return Err(err(StatusCode::INTERNAL_SERVER_ERROR, String::from_utf8_lossy(&out.stderr).trim().to_string()));
+                return Err(err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                ));
             }
             Ok(Json(json!({ action: repo_id })))
         }
-        _ => Err(err(StatusCode::BAD_REQUEST, "Use stop, resume, package, serve, publish or list.")),
+        _ => Err(err(
+            StatusCode::BAD_REQUEST,
+            "Use stop, resume, package, serve, publish or list.",
+        )),
     }
 }
 
@@ -1677,23 +2229,52 @@ pub fn status_line(state: &AppState) -> (Value, String) {
     let env = CodexEnv::detect();
     let runs = load_runs(state);
     let live = live_ids(&runs);
-    let Some(run) = runs.iter().rev().find(|r| live.contains(&r.id)).or(runs.last()) else {
-        return (json!({ "runs": 0 }), "There's no bring-up yet. Start one in Bring-up, or ask me to open it.".into());
+    let Some(run) = runs
+        .iter()
+        .rev()
+        .find(|r| live.contains(&r.id))
+        .or(runs.last())
+    else {
+        return (
+            json!({ "runs": 0 }),
+            "There's no bring-up yet. Start one in Bring-up, or ask me to open it.".into(),
+        );
     };
     let d = describe(&env, run, live.contains(&run.id));
-    let who = if run.engine == "claude" { "Claude Code" } else { "Codex" };
+    let who = if run.engine == "claude" {
+        "Claude Code"
+    } else {
+        "Codex"
+    };
     let model = short(&run.model);
-    let stage = d["stages"].as_array().and_then(|s| s.iter().find(|x| x["n"] == d["current"])).and_then(|x| x["title"].as_str()).unwrap_or("");
+    let stage = d["stages"]
+        .as_array()
+        .and_then(|s| s.iter().find(|x| x["n"] == d["current"]))
+        .and_then(|x| x["title"].as_str())
+        .unwrap_or("");
     let line = match d["state"].as_str().unwrap_or("") {
         "waiting_for_you" => {
             let a = &d["approvals"][0];
             format!("{who} is waiting for you on {model}: it wants to run `{}` ({}). Say allow it or deny it.", a["command"].as_str().unwrap_or("something"), a["why"].as_str().unwrap_or(""))
         }
-        "waiting_for_chips" => format!("The {model} bring-up is waiting for the chips; {} has them.", d["chips_held_by"].as_str().unwrap_or("another job")),
-        "running" => format!("{who} is on stage {} of {} for {model}: {stage}. {} done so far.", d["current"], d["total"], d["done"]),
-        "finished" => format!("The {model} bring-up finished: every stage passed. Package it from Bring-up."),
+        "waiting_for_chips" => format!(
+            "The {model} bring-up is waiting for the chips; {} has them.",
+            d["chips_held_by"].as_str().unwrap_or("another job")
+        ),
+        "running" => format!(
+            "{who} is on stage {} of {} for {model}: {stage}. {} done so far.",
+            d["current"], d["total"], d["done"]
+        ),
+        "finished" => {
+            format!("The {model} bring-up finished: every stage passed. Package it from Bring-up.")
+        }
         "stopped" => format!("The {model} bring-up is stopped. Resume it from Bring-up."),
-        _ => format!("The {model} bring-up stopped on a problem: {}", d["exit_meaning"].as_str().unwrap_or("see Bring-up for why.")),
+        _ => format!(
+            "The {model} bring-up stopped on a problem: {}",
+            d["exit_meaning"]
+                .as_str()
+                .unwrap_or("see Bring-up for why.")
+        ),
     };
     (d, line)
 }
@@ -1718,19 +2299,33 @@ pub fn waiting_on() -> Option<String> {
 
 /// Is a bring-up waiting on a person?
 pub fn anything_waiting() -> bool {
-    APPROVALS.lock().expect("approvals").iter().any(|(_, a)| a.decision.is_none())
+    APPROVALS
+        .lock()
+        .expect("approvals")
+        .iter()
+        .any(|(_, a)| a.decision.is_none())
 }
 
 /// `DELETE /bringup/codex/runs/{id}` (authed): forget a run and its logs.
 /// The port's code in tt-metal (`models/autoports/…`) is left alone.
-pub(crate) async fn delete_run(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
+pub(crate) async fn delete_run(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
     let mut runs = load_runs(&state);
     let Some(i) = runs.iter().position(|r| r.id == id) else {
         return Err(err(StatusCode::NOT_FOUND, "No such run."));
     };
     let unit = runs[i].unit.clone();
-    if tokio::task::spawn_blocking(move || unit_active(&unit)).await.unwrap_or(false) {
-        return Err(err(StatusCode::CONFLICT, "Stop the run before deleting it."));
+    if tokio::task::spawn_blocking(move || unit_active(&unit))
+        .await
+        .unwrap_or(false)
+    {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Stop the run before deleting it.",
+        ));
     }
     let run = runs.remove(i);
     // Only ever inside TT Station's own bring-up folder.
@@ -1738,7 +2333,10 @@ pub(crate) async fn delete_run(State(state): State<AppState>, _auth: BearerAuth,
     if run.log_dir.starts_with(&root) && run.log_dir != root {
         let _ = std::fs::remove_dir_all(&run.log_dir);
     }
-    APPROVALS.lock().expect("approvals").retain(|(r, _)| r != &id);
+    APPROVALS
+        .lock()
+        .expect("approvals")
+        .retain(|(r, _)| r != &id);
     approvals_changed();
     save_runs(&state, &runs);
     Ok(Json(json!({ "deleted": id, "kept": run.model_dir })))
@@ -1747,18 +2345,35 @@ pub(crate) async fn delete_run(State(state): State<AppState>, _auth: BearerAuth,
 /// `POST /bringup/claude/login` (authed): open a terminal where the owner signs
 /// Claude Code in (`claude auth login`). TT Station never sees the credentials.
 pub(crate) async fn post_claude_login(_auth: BearerAuth) -> Reply {
-    let bin = claude_bin().ok_or_else(|| err(StatusCode::NOT_FOUND, "Claude Code isn't installed."))?;
+    let bin =
+        claude_bin().ok_or_else(|| err(StatusCode::NOT_FOUND, "Claude Code isn't installed."))?;
     if !crate::desktop::has_session() {
-        return Err(err(StatusCode::CONFLICT, "Sign in at the box: run `claude auth login` in a terminal there."));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "Sign in at the box: run `claude auth login` in a terminal there.",
+        ));
     }
-    let script = format!("'{bin}' auth login; echo; read -p 'Signed in? Press Enter to close this window. ' _");
+    let script = format!(
+        "'{bin}' auth login; echo; read -p 'Signed in? Press Enter to close this window. ' _"
+    );
     Command::new("gnome-terminal")
-        .args(["--title=Sign in to Claude Code", "--", "bash", "-lc", &script])
+        .args([
+            "--title=Sign in to Claude Code",
+            "--",
+            "bash",
+            "-lc",
+            &script,
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't open a terminal: {e}")))?;
+        .map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("couldn't open a terminal: {e}"),
+            )
+        })?;
     Ok(Json(json!({ "opened": true })))
 }
 
@@ -1766,8 +2381,15 @@ pub(crate) async fn post_claude_login(_auth: BearerAuth) -> Reply {
 // Approvals
 // ---------------------------------------------------------------------
 
-fn driver_auth(state: &AppState, id: &str, headers: &HeaderMap) -> Result<CodexRun, (StatusCode, Json<Value>)> {
-    let secret = headers.get("x-run-secret").and_then(|v| v.to_str().ok()).unwrap_or("");
+fn driver_auth(
+    state: &AppState,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<CodexRun, (StatusCode, Json<Value>)> {
+    let secret = headers
+        .get("x-run-secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     load_runs(state)
         .into_iter()
         .find(|r| r.id == id && !secret.is_empty() && r.secret == secret)
@@ -1794,12 +2416,31 @@ pub(crate) async fn post_approval(
         created: unix_now(),
         decision: None,
     };
-    APPROVALS.lock().expect("approvals").push((id.clone(), approval.clone()));
+    APPROVALS
+        .lock()
+        .expect("approvals")
+        .push((id.clone(), approval.clone()));
     approvals_changed();
     state.notifier().record(Draft {
         kind: "bringup",
-        title: format!("{} needs you: {}", if run.engine == "claude" { "Claude" } else { "Codex" }, short(&run.model)),
-        body: format!("It wants to {}: {}", if approval.kind == "command" { "run a command that ".to_string() + &approval.why } else { approval.why.clone() }, approval.command.clone().unwrap_or_default()),
+        title: format!(
+            "{} needs you: {}",
+            if run.engine == "claude" {
+                "Claude"
+            } else {
+                "Codex"
+            },
+            short(&run.model)
+        ),
+        body: format!(
+            "It wants to {}: {}",
+            if approval.kind == "command" {
+                "run a command that ".to_string() + &approval.why
+            } else {
+                approval.why.clone()
+            },
+            approval.command.clone().unwrap_or_default()
+        ),
     });
     Ok(Json(json!({ "id": approval.id })))
 }
@@ -1848,11 +2489,19 @@ pub(crate) async fn post_decide(
 ) -> Reply {
     let decision = match body.decision.as_str() {
         d @ ("accept" | "acceptForSession" | "decline") => d.to_string(),
-        _ => return Err(err(StatusCode::BAD_REQUEST, "Decide accept, acceptForSession or decline.")),
+        _ => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "Decide accept, acceptForSession or decline.",
+            ))
+        }
     };
     let mut all = APPROVALS.lock().expect("approvals");
     let Some((_, a)) = all.iter_mut().find(|(r, a)| r == &id && a.id == aid) else {
-        return Err(err(StatusCode::NOT_FOUND, "That request is gone (the run stopped?)."));
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "That request is gone (the run stopped?).",
+        ));
     };
     a.decision = Some(decision.clone());
     let what = format!("{id}: {}", a.command.as_deref().unwrap_or(&a.why));
@@ -1871,7 +2520,10 @@ pub(crate) async fn post_decide(
 pub async fn watch_forever(state: AppState) {
     let mut seen: HashMap<String, String> = HashMap::new();
     let probe = state.clone();
-    let _ = tokio::task::spawn_blocking(move || restore_approvals(&probe, &live_ids(&load_runs(&probe)))).await;
+    let _ = tokio::task::spawn_blocking(move || {
+        restore_approvals(&probe, &live_ids(&load_runs(&probe)))
+    })
+    .await;
     loop {
         let probe = state.clone();
         let (live, mut runs) = tokio::task::spawn_blocking(move || {
@@ -1893,7 +2545,11 @@ pub async fn watch_forever(state: AppState) {
             let mut done: Vec<(usize, String)> = manifest
                 .iter()
                 .filter_map(|(k, v)| {
-                    let n = k.strip_prefix("stage_")?.strip_suffix("_terminal_status")?.parse().ok()?;
+                    let n = k
+                        .strip_prefix("stage_")?
+                        .strip_suffix("_terminal_status")?
+                        .parse()
+                        .ok()?;
                     Some((n, v.clone()))
                 })
                 .collect();
@@ -1905,19 +2561,44 @@ pub async fn watch_forever(state: AppState) {
                     let title = if *n == PACKAGE_STAGE {
                         "Package".to_string()
                     } else {
-                        env.prompts().get(n - 1).map(|p| stage_title(p)).unwrap_or_else(|| format!("Stage {n}"))
+                        env.prompts()
+                            .get(n - 1)
+                            .map(|p| stage_title(p))
+                            .unwrap_or_else(|| format!("Stage {n}"))
                     };
                     state.notifier().record(Draft {
                         kind: "bringup",
-                        title: format!("{}: {title} {}", short(&run.model), if status == "complete" { "done" } else { status.as_str() }),
-                        body: format!("{} bring-up, stage {n} of {}.", if run.engine == "claude" { "Claude" } else { "Codex" }, env.prompts().len()),
+                        title: format!(
+                            "{}: {title} {}",
+                            short(&run.model),
+                            if status == "complete" {
+                                "done"
+                            } else {
+                                status.as_str()
+                            }
+                        ),
+                        body: format!(
+                            "{} bring-up, stage {n} of {}.",
+                            if run.engine == "claude" {
+                                "Claude"
+                            } else {
+                                "Codex"
+                            },
+                            env.prompts().len()
+                        ),
                     });
                 }
             }
             seen.insert(run.id.clone(), key);
             if !live.contains(&run.id) && !restarting.contains(&run.id) {
-                let exit_file = if packaging { pkg.join("exit") } else { run.log_dir.join("exit") };
-                let exit = std::fs::read_to_string(exit_file).ok().and_then(|t| t.trim().parse().ok());
+                let exit_file = if packaging {
+                    pkg.join("exit")
+                } else {
+                    run.log_dir.join("exit")
+                };
+                let exit = std::fs::read_to_string(exit_file)
+                    .ok()
+                    .and_then(|t| t.trim().parse().ok());
                 // Not live and no exit file yet: the unit may just be starting.
                 if exit.is_none() && unix_now().saturating_sub(run.started) < 60 {
                     continue;
@@ -1926,23 +2607,52 @@ pub async fn watch_forever(state: AppState) {
                 run.finished = Some(unix_now());
                 changed = true;
                 // Blocked on something only a person can decide: say what, and that it needs an answer.
-                let blocked = done
-                    .last()
-                    .filter(|(_, status)| status == "blocked")
-                    .map(|(n, _)| manifest.get(&format!("stage_{n}_blocked_reason")).cloned().unwrap_or_default());
-                let agent = if run.engine == "claude" { "Claude" } else { "Codex" };
+                let blocked =
+                    done.last()
+                        .filter(|(_, status)| status == "blocked")
+                        .map(|(n, _)| {
+                            manifest
+                                .get(&format!("stage_{n}_blocked_reason"))
+                                .cloned()
+                                .unwrap_or_default()
+                        });
+                let agent = if run.engine == "claude" {
+                    "Claude"
+                } else {
+                    "Codex"
+                };
                 state.notifier().record(match blocked {
                     Some(why) => Draft {
                         kind: "bringup",
                         title: format!("{}: {agent} needs an answer", short(&run.model)),
-                        body: if why.is_empty() { "A stage is blocked. Answer it in Bring-up and it carries on.".into() } else { format!("{why} Answer it in Bring-up and it carries on.") },
+                        body: if why.is_empty() {
+                            "A stage is blocked. Answer it in Bring-up and it carries on.".into()
+                        } else {
+                            format!("{why} Answer it in Bring-up and it carries on.")
+                        },
                     },
                     None => Draft {
                         kind: "bringup",
-                        title: format!("{}: {} {}", short(&run.model), if packaging { "packaging" } else { "bring-up" }, if exit == Some(0) { "finished" } else { "stopped" }),
+                        title: format!(
+                            "{}: {} {}",
+                            short(&run.model),
+                            if packaging { "packaging" } else { "bring-up" },
+                            if exit == Some(0) {
+                                "finished"
+                            } else {
+                                "stopped"
+                            }
+                        ),
                         body: exit
-                            .and_then(|e| EXIT_MEANING.iter().find(|(c, _)| *c == e).map(|(_, m)| m.to_string()))
-                            .unwrap_or_else(|| "It stopped before finishing. Resume it from Bring-up.".into()),
+                            .and_then(|e| {
+                                EXIT_MEANING
+                                    .iter()
+                                    .find(|(c, _)| *c == e)
+                                    .map(|(_, m)| m.to_string())
+                            })
+                            .unwrap_or_else(|| {
+                                "It stopped before finishing. Resume it from Bring-up.".into()
+                            }),
                     },
                 });
                 restore = run.restore.take();
@@ -1966,8 +2676,14 @@ mod tests {
 
     #[test]
     fn names() {
-        assert_eq!(model_dir("Qwen/Qwen3.6-27B"), "models/autoports/qwen_qwen3_6_27b");
-        assert_eq!(stage_title(Path::new("01-functional-decoder.txt")), "Functional decoder");
+        assert_eq!(
+            model_dir("Qwen/Qwen3.6-27B"),
+            "models/autoports/qwen_qwen3_6_27b"
+        );
+        assert_eq!(
+            stage_title(Path::new("01-functional-decoder.txt")),
+            "Functional decoder"
+        );
         assert_eq!(stage_title(Path::new("09-vllm.txt")), "vLLM");
         assert_eq!(stage_title(Path::new("11-tti-release.txt")), "TTI release");
     }
@@ -1996,15 +2712,31 @@ mod tests {
     fn unanswered_approvals_survive_a_restart() {
         let path = std::env::temp_dir().join(format!("tt-approvals-{}.json", std::process::id()));
         let ask = |id: &str, decision: Option<&str>| Approval {
-            id: id.into(), kind: "command".into(), why: "uses sudo".into(), command: Some("sudo x".into()), cwd: None,
-            reason: None, grant_root: None, created: 1, decision: decision.map(str::to_string),
+            id: id.into(),
+            kind: "command".into(),
+            why: "uses sudo".into(),
+            command: Some("sudo x".into()),
+            cwd: None,
+            reason: None,
+            grant_root: None,
+            created: 1,
+            decision: decision.map(str::to_string),
         };
         load_approvals(path.clone(), &[]); // sets the file
-        APPROVALS.lock().unwrap().extend([("run1".to_string(), ask("a", None)), ("run1".to_string(), ask("b", Some("accept"))), ("gone".to_string(), ask("c", None))]);
+        APPROVALS.lock().unwrap().extend([
+            ("run1".to_string(), ask("a", None)),
+            ("run1".to_string(), ask("b", Some("accept"))),
+            ("gone".to_string(), ask("c", None)),
+        ]);
         approvals_changed();
         APPROVALS.lock().unwrap().clear(); // the agent restarts
         load_approvals(path.clone(), &["run1".to_string()]);
-        let back: Vec<String> = APPROVALS.lock().unwrap().iter().map(|(_, a)| a.id.clone()).collect();
+        let back: Vec<String> = APPROVALS
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, a)| a.id.clone())
+            .collect();
         assert_eq!(back, ["a"]); // unanswered, and its run still going
         let _ = std::fs::remove_file(path);
     }
@@ -2013,7 +2745,9 @@ mod tests {
     fn resumed_stages_read_like_any_other() {
         let base = "stage_1_thread_id=t\nstage_1_terminal_status=blocked\n";
         // Resumed and running again: no longer blocked.
-        let running = parse_manifest(&format!("{base}stage_1_resume_1_started_at_utc=x\nstage_1_resume_1_thread_id=t\n"));
+        let running = parse_manifest(&format!(
+            "{base}stage_1_resume_1_started_at_utc=x\nstage_1_resume_1_thread_id=t\n"
+        ));
         assert_eq!(running["stage_1_terminal_status"], "");
         // Resumed and done, with its check.
         let done = parse_manifest(&format!(
@@ -2087,7 +2821,14 @@ for c in ["pytest models/x -k y", "rm -rf build", "rm -f /tmp/x.log", "python3 -
 print("ok")
 "#;
         let out = std::process::Command::new("python3")
-            .args(["-I", "-c", &format!("import sys; sys.path.insert(0, {:?}); exec(sys.stdin.read())", t.path().display().to_string())])
+            .args([
+                "-I",
+                "-c",
+                &format!(
+                    "import sys; sys.path.insert(0, {:?}); exec(sys.stdin.read())",
+                    t.path().display().to_string()
+                ),
+            ])
             .env("TT_STATION_REPO", &repo)
             .env("TT_STATION_POLICY", "smart")
             .stdin(std::process::Stdio::piped())
@@ -2100,7 +2841,12 @@ print("ok")
                 c.wait_with_output()
             })
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok", "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "ok",
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]
@@ -2124,15 +2870,26 @@ print("ok")
             json!({"ts":"20261008T150100Z","direction":"recv","claude":{"type":"result","total_cost_usd":0.4}}),
             json!({"ts":"20261008T150200Z","direction":"recv","message":{"method":"thread/tokenUsage/updated","params":{"threadId":"t","tokenUsage":{"total":{"inputTokens":1000,"outputTokens":50}}}}}),
         ];
-        std::fs::write(&log, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        std::fs::write(
+            &log,
+            lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
+        )
+        .unwrap();
         let u = stage_usage(&[log.clone()]).unwrap();
         assert_eq!(u["tokens_in"], 1100);
         assert_eq!(u["tokens_out"], 55);
         assert_eq!(u["cost_usd"], 0.4);
-        assert_eq!(u["last_at"].as_u64().unwrap() - u["started_at"].as_u64().unwrap(), 120);
+        assert_eq!(
+            u["last_at"].as_u64().unwrap() - u["started_at"].as_u64().unwrap(),
+            120
+        );
         // Read again after it grows: only the new lines count.
         let more = json!({"ts":"20261008T150300Z","direction":"recv","claude":{"type":"assistant","message":{"id":"m2","usage":usage,"content":[]}}});
-        std::fs::write(&log, format!("{}{more}\n", std::fs::read_to_string(&log).unwrap())).unwrap();
+        std::fs::write(
+            &log,
+            format!("{}{more}\n", std::fs::read_to_string(&log).unwrap()),
+        )
+        .unwrap();
         assert_eq!(stage_usage(&[log]).unwrap()["tokens_in"], 1200);
         let _ = std::fs::remove_dir_all(dir);
     }

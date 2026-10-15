@@ -261,7 +261,10 @@ async fn choices_are_the_models_that_fit_half_the_box() {
     let v = h.get("/coserve").await;
     assert_eq!(v["available"], true, "{v}");
     assert_eq!(v["split"], false);
-    assert_eq!(v["layout"], json!({ "chat": "0,1", "image": "2,3", "second": "2,3" }));
+    assert_eq!(
+        v["layout"],
+        json!({ "chat": "0,1", "image": "2,3", "second": "2,3" })
+    );
     let names = |k: &str| -> Vec<(String, bool)> {
         v["choices"][k]
             .as_array()

@@ -40,12 +40,16 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) 
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/root"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/root"))
 }
 
 /// tt-metal's checkout: where the model code lives and whose Python env serves.
 pub fn tt_metal() -> PathBuf {
-    std::env::var_os("TT_METAL_HOME").map(PathBuf::from).unwrap_or_else(|| home().join("tt-metal"))
+    std::env::var_os("TT_METAL_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join("tt-metal"))
 }
 
 fn python() -> PathBuf {
@@ -58,7 +62,9 @@ pub fn station_bundles(state: &AppState) -> PathBuf {
 }
 
 fn tt_kernel_bundles() -> PathBuf {
-    std::env::var_os("TT_KERNEL_BUNDLES_DIR").map(PathBuf::from).unwrap_or_else(|| home().join(".cache/tt-kernel/bundles"))
+    std::env::var_os("TT_KERNEL_BUNDLES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".cache/tt-kernel/bundles"))
 }
 
 fn tt_kernel_repo() -> PathBuf {
@@ -80,7 +86,9 @@ fn stack_ready() -> (bool, bool) {
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output();
-    let text = out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    let text = out
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
     let mut it = text.split_whitespace().map(|w| w == "True");
     let v = (it.next().unwrap_or(false), it.next().unwrap_or(false));
     *STACK.lock().expect("vllm cache") = Some((Instant::now(), v));
@@ -93,13 +101,20 @@ fn forget_stack() {
 }
 
 fn unit_active(unit: &str) -> bool {
-    Command::new("systemctl").args(["--user", "is-active", "--quiet", unit]).status().map(|s| s.success()).unwrap_or(false)
+    Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", unit])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// The launch for this box (Blackhole), else the bundle's default.
 fn launch(meta: &Value) -> Option<&Value> {
     let l = &meta["launch"];
-    ["blackhole", "blackhole-4card", "p300x2", "default"].iter().map(|k| &l[*k]).find(|v| v["command"].is_array())
+    ["blackhole", "blackhole-4card", "p300x2", "default"]
+        .iter()
+        .map(|k| &l[*k])
+        .find(|v| v["command"].is_array())
 }
 
 /// Where a `module.path:Class` main class's code is, if it's on this box: in
@@ -115,27 +130,47 @@ fn code_present(bundle: &Path, main_class: &str) -> bool {
 /// `model.safetensors.index.json` lists, complete (not mid-download).
 /// (have, need) counts the shards; need is 0 when there's no index to go by.
 pub(crate) fn weights_complete(repo: &str) -> (bool, usize, usize) {
-    let hub = std::env::var_os("HF_HOME").map(|h| PathBuf::from(h).join("hub")).unwrap_or_else(|| home().join(".cache/huggingface/hub"));
-    let snaps = hub.join(format!("models--{}", repo.replace('/', "--"))).join("snapshots");
+    let hub = std::env::var_os("HF_HOME")
+        .map(|h| PathBuf::from(h).join("hub"))
+        .unwrap_or_else(|| home().join(".cache/huggingface/hub"));
+    let snaps = hub
+        .join(format!("models--{}", repo.replace('/', "--")))
+        .join("snapshots");
     let mut best = (false, 0, 0);
     for snap in std::fs::read_dir(snaps).into_iter().flatten().flatten() {
         let dir = snap.path();
-        let index: Option<serde_json::Value> = std::fs::read(dir.join("model.safetensors.index.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        let index: Option<serde_json::Value> =
+            std::fs::read(dir.join("model.safetensors.index.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok());
         let need: std::collections::BTreeSet<String> = index
             .as_ref()
             .and_then(|i| i["weight_map"].as_object())
-            .map(|m| m.values().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|m| {
+                m.values()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         if need.is_empty() {
             // A single-file model: its safetensors, resolved (a link to a finished file).
-            let one = std::fs::read_dir(&dir).into_iter().flatten().flatten()
-                .any(|f| f.file_name().to_string_lossy().ends_with(".safetensors") && std::fs::metadata(f.path()).is_ok());
+            let one = std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|f| {
+                    f.file_name().to_string_lossy().ends_with(".safetensors")
+                        && std::fs::metadata(f.path()).is_ok()
+                });
             if one {
                 return (true, 1, 1);
             }
             continue;
         }
-        let have = need.iter().filter(|f| std::fs::metadata(dir.join(f)).is_ok_and(|m| m.len() > 0)).count();
+        let have = need
+            .iter()
+            .filter(|f| std::fs::metadata(dir.join(f)).is_ok_and(|m| m.len() > 0))
+            .count();
         if have > best.1 || best.2 == 0 {
             best = (have == need.len(), have, need.len());
         }
@@ -147,11 +182,23 @@ pub(crate) fn weights_complete(repo: &str) -> (bool, usize, usize) {
 }
 
 pub(crate) fn weights_present(repo: &str) -> bool {
-    let hub = std::env::var_os("HF_HOME").map(|h| PathBuf::from(h).join("hub")).unwrap_or_else(|| home().join(".cache/huggingface/hub"));
-    let snaps = hub.join(format!("models--{}", repo.replace('/', "--"))).join("snapshots");
-    std::fs::read_dir(snaps).into_iter().flatten().flatten().any(|s| {
-        std::fs::read_dir(s.path()).into_iter().flatten().flatten().any(|f| f.file_name().to_string_lossy().ends_with(".safetensors"))
-    })
+    let hub = std::env::var_os("HF_HOME")
+        .map(|h| PathBuf::from(h).join("hub"))
+        .unwrap_or_else(|| home().join(".cache/huggingface/hub"));
+    let snaps = hub
+        .join(format!("models--{}", repo.replace('/', "--")))
+        .join("snapshots");
+    std::fs::read_dir(snaps)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|s| {
+            std::fs::read_dir(s.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|f| f.file_name().to_string_lossy().ends_with(".safetensors"))
+        })
 }
 
 /// Model code a bundle's own Python imports from tt-metal's autoports
@@ -164,9 +211,15 @@ fn missing_autoports(dir: &Path) -> Vec<String> {
         }
         let text = std::fs::read_to_string(e.path()).unwrap_or_default();
         for (i, _) in text.match_indices("models.autoports.") {
-            let name: String = text[i + "models.autoports.".len()..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            let name: String = text[i + "models.autoports.".len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
             let module = format!("models.autoports.{name}");
-            if !name.is_empty() && !tt_metal().join("models/autoports").join(&name).is_dir() && !missing.contains(&module) {
+            if !name.is_empty()
+                && !tt_metal().join("models/autoports").join(&name).is_dir()
+                && !missing.contains(&module)
+            {
                 missing.push(module);
             }
         }
@@ -177,28 +230,42 @@ fn missing_autoports(dir: &Path) -> Vec<String> {
 /// Where a bundle's README says its code lives: the `branch` it names, if any.
 fn code_branch(dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(dir.join("README.md")).ok()?;
-    text.lines().find(|l| l.contains("branch") || l.contains("not upstream")).and_then(|l| {
-        let mut parts = l.split('`').skip(1).step_by(2);
-        parts.find(|p| p.contains('/') && !p.contains(' ') && !p.contains('.'))
-    }).map(str::to_string)
+    text.lines()
+        .find(|l| l.contains("branch") || l.contains("not upstream"))
+        .and_then(|l| {
+            let mut parts = l.split('`').skip(1).step_by(2);
+            parts.find(|p| p.contains('/') && !p.contains(' ') && !p.contains('.'))
+        })
+        .map(str::to_string)
         .or_else(|| {
             // The branch can sit on the line before "not upstream".
             let lines: Vec<&str> = text.lines().collect();
-            lines.windows(2).find(|w| w[1].contains("not upstream") || w[1].contains("branch")).and_then(|w| {
-                w.iter().flat_map(|l| l.split('`').skip(1).step_by(2)).find(|p| p.contains('/') && !p.contains(' ') && !p.contains('.')).map(str::to_string)
-            })
+            lines
+                .windows(2)
+                .find(|w| w[1].contains("not upstream") || w[1].contains("branch"))
+                .and_then(|w| {
+                    w.iter()
+                        .flat_map(|l| l.split('`').skip(1).step_by(2))
+                        .find(|p| p.contains('/') && !p.contains(' ') && !p.contains('.'))
+                        .map(str::to_string)
+                })
         })
 }
 
 /// One bundle as the app shows it.
 fn describe_bundle(dir: &Path, id: String, source: &str) -> Option<Value> {
-    let meta: Value = serde_json::from_slice(&std::fs::read(dir.join("vllm_metadata.json")).ok()?).ok()?;
+    let meta: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("vllm_metadata.json")).ok()?).ok()?;
     let main_class = meta["main_class"].as_str().unwrap_or("");
     let weights = meta["hf_weights"].as_str().map(str::to_string);
     let l = launch(&meta);
     let served = l
         .and_then(|l| l["command"].as_array())
-        .and_then(|c| c.iter().position(|a| a == "--model").and_then(|i| c.get(i + 1)))
+        .and_then(|c| {
+            c.iter()
+                .position(|a| a == "--model")
+                .and_then(|i| c.get(i + 1))
+        })
         .and_then(Value::as_str)
         .map(str::to_string);
     let missing = missing_autoports(dir);
@@ -243,7 +310,10 @@ pub fn bundles(state: &AppState) -> Vec<Value> {
             }
         }
     }
-    for (base, source) in [(tt_kernel_bundles(), "tt-kernel"), (station_bundles(state), "bring-up")] {
+    for (base, source) in [
+        (tt_kernel_bundles(), "tt-kernel"),
+        (station_bundles(state), "bring-up"),
+    ] {
         for e in std::fs::read_dir(&base).into_iter().flatten().flatten() {
             let dir = e.path();
             if dir.is_dir() && !listed.contains(&dir) {
@@ -258,7 +328,10 @@ pub fn bundles(state: &AppState) -> Vec<Value> {
 fn tail(path: &Path, n: usize) -> Vec<String> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    lines[lines.len().saturating_sub(n)..].iter().map(|l| l.to_string()).collect()
+    lines[lines.len().saturating_sub(n)..]
+        .iter()
+        .map(|l| l.to_string())
+        .collect()
 }
 
 /// `GET /vllm/native`: is the stack ready, is it being set up, what can it serve.
@@ -301,17 +374,24 @@ pub(crate) async fn get_native(State(state): State<AppState>, _auth: BearerAuth)
 /// that environment's packages, so not while a bring-up or Orchard uses it).
 pub(crate) async fn post_setup(State(state): State<AppState>, _auth: BearerAuth) -> Reply {
     if state.bringup_busy() || state.orchard_busy() {
-        return Err(err(StatusCode::CONFLICT, "A bring-up is running. This setup can happen once it ends."));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "A bring-up is running. This setup can happen once it ends.",
+        ));
     }
     let script = tt_kernel_repo().join("scripts/install.sh");
     if !script.is_file() {
-        return Err(err(StatusCode::CONFLICT, format!("tt-kernel's installer isn't here ({}).", script.display())));
+        return Err(err(
+            StatusCode::CONFLICT,
+            format!("tt-kernel's installer isn't here ({}).", script.display()),
+        ));
     }
     if unit_active(SETUP_UNIT) {
         return Ok(Json(json!({ "setting_up": true })));
     }
     let dir = state.config_dir().join("vllm-native");
-    std::fs::create_dir_all(&dir).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let log = dir.join("setup.log");
     let exit = dir.join("setup.exit");
     let _ = std::fs::remove_file(&exit);
@@ -319,13 +399,23 @@ pub(crate) async fn post_setup(State(state): State<AppState>, _auth: BearerAuth)
     let q = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
     let cmd = format!(
         "bash {} --venv {} --vllm-dir {}; echo $? > {}",
-        q(&script), q(&tt_metal().join("python_env")), q(&home().join("dispatch/vllm")), q(&exit)
+        q(&script),
+        q(&tt_metal().join("python_env")),
+        q(&home().join("dispatch/vllm")),
+        q(&exit)
     );
-    let path = format!("{}:{}", home().join(".local/bin").display(), std::env::var("PATH").unwrap_or_default());
+    let path = format!(
+        "{}:{}",
+        home().join(".local/bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let out = Command::new("systemd-run")
         .args(["--user", "--collect", "--quiet"])
         .arg(format!("--unit={SETUP_UNIT}"))
-        .arg(format!("--property=StandardOutput=append:{}", log.display()))
+        .arg(format!(
+            "--property=StandardOutput=append:{}",
+            log.display()
+        ))
         .arg(format!("--property=StandardError=append:{}", log.display()))
         .arg(format!("--setenv=PATH={path}"))
         .arg(format!("--setenv=TT_METAL_HOME={}", tt_metal().display()))
@@ -334,7 +424,10 @@ pub(crate) async fn post_setup(State(state): State<AppState>, _auth: BearerAuth)
         .output()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !out.status.success() {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, String::from_utf8_lossy(&out.stderr).trim().to_string()));
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
     }
     forget_stack();
     Ok(Json(json!({ "setting_up": true })))
@@ -347,8 +440,15 @@ static NATIVE_SERVING: Mutex<Option<(String, String)>> = Mutex::new(None);
 /// serving port, everything else as the bundle says.
 pub fn serve_argv(meta: &Value, port: u16) -> Option<(Vec<String>, Vec<(String, String)>)> {
     let l = launch(meta)?;
-    let mut argv: Vec<String> = l["command"].as_array()?.iter().filter_map(|a| a.as_str().map(str::to_string)).collect();
-    if argv.first().is_some_and(|a| a == "python" || a == "python3") {
+    let mut argv: Vec<String> = l["command"]
+        .as_array()?
+        .iter()
+        .filter_map(|a| a.as_str().map(str::to_string))
+        .collect();
+    if argv
+        .first()
+        .is_some_and(|a| a == "python" || a == "python3")
+    {
         argv[0] = python().display().to_string();
     }
     match argv.iter().position(|a| a == "--port") {
@@ -357,13 +457,29 @@ pub fn serve_argv(meta: &Value, port: u16) -> Option<(Vec<String>, Vec<(String, 
     }
     // Cached prompt tokens in each reply's usage (see `community::extra_vllm_args`;
     // the tt-metal vLLM this runs, merged from upstream 0.17, has the flag).
-    let vllm = argv.iter().any(|a| a == "vllm.entrypoints.openai.api_server") || argv.windows(2).any(|w| w[0].ends_with("vllm") && w[1] == "serve");
+    let vllm = argv
+        .iter()
+        .any(|a| a == "vllm.entrypoints.openai.api_server")
+        || argv
+            .windows(2)
+            .any(|w| w[0].ends_with("vllm") && w[1] == "serve");
     if vllm && !argv.iter().any(|a| a == "--enable-prompt-tokens-details") {
         argv.push("--enable-prompt-tokens-details".into());
     }
     let env = l["env"]
         .as_object()
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect())
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| v.to_string()),
+                    )
+                })
+                .collect()
+        })
         .unwrap_or_default();
     Some((argv, env))
 }
@@ -377,26 +493,43 @@ pub struct ServeBody {
 }
 
 /// `POST /vllm/native/serve`: serve a bundle on the chips with native vLLM.
-pub(crate) async fn post_serve(State(state): State<AppState>, _auth: BearerAuth, Json(body): Json<ServeBody>) -> Reply {
+pub(crate) async fn post_serve(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    Json(body): Json<ServeBody>,
+) -> Reply {
     let dir = PathBuf::from(&body.dir);
     // Only bundles the box lists, not any folder a caller names.
     let known = {
         let st = state.clone();
-        tokio::task::spawn_blocking(move || bundles(&st)).await.unwrap_or_default()
+        tokio::task::spawn_blocking(move || bundles(&st))
+            .await
+            .unwrap_or_default()
     };
-    let Some(bundle) = known.into_iter().find(|b| b["dir"].as_str() == Some(body.dir.as_str())) else {
+    let Some(bundle) = known
+        .into_iter()
+        .find(|b| b["dir"].as_str() == Some(body.dir.as_str()))
+    else {
         return Err(err(StatusCode::NOT_FOUND, "No such bundle on this box."));
     };
     if let Some(why) = bundle["why_not"].as_str() {
         return Err(err(StatusCode::CONFLICT, why.to_string()));
     }
-    serve_dir(&state, &dir, bundle["id"].as_str().unwrap_or("the model"), body.stop_serving).await
+    serve_dir(
+        &state,
+        &dir,
+        bundle["id"].as_str().unwrap_or("the model"),
+        body.stop_serving,
+    )
+    .await
 }
 
 /// Serve the bundle in `dir` (its id shown as `label`): free and reset the
 /// chips, start vLLM as the serving unit, adopt it once it answers.
 pub async fn serve_dir(state: &AppState, dir: &Path, label: &str, stop_serving: bool) -> Reply {
-    let (vllm, plugin) = tokio::task::spawn_blocking(stack_ready).await.unwrap_or((false, false));
+    let (vllm, plugin) = tokio::task::spawn_blocking(stack_ready)
+        .await
+        .unwrap_or((false, false));
     if !(vllm && plugin) {
         return Err(err(
             StatusCode::CONFLICT,
@@ -406,9 +539,19 @@ pub async fn serve_dir(state: &AppState, dir: &Path, label: &str, stop_serving: 
     let meta: Value = std::fs::read(dir.join("vllm_metadata.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
-        .ok_or_else(|| err(StatusCode::CONFLICT, "The bundle has no readable vllm_metadata.json."))?;
+        .ok_or_else(|| {
+            err(
+                StatusCode::CONFLICT,
+                "The bundle has no readable vllm_metadata.json.",
+            )
+        })?;
     let port = state.serving_port();
-    let (argv, launch_env) = serve_argv(&meta, port).ok_or_else(|| err(StatusCode::CONFLICT, "The bundle has no launch command for this box."))?;
+    let (argv, launch_env) = serve_argv(&meta, port).ok_or_else(|| {
+        err(
+            StatusCode::CONFLICT,
+            "The bundle has no launch command for this box.",
+        )
+    })?;
     if let Some(holder) = state.chips_holder() {
         return Err(err(StatusCode::CONFLICT, holder));
     }
@@ -417,35 +560,60 @@ pub async fn serve_dir(state: &AppState, dir: &Path, label: &str, stop_serving: 
         if !stop_serving {
             return Err((
                 StatusCode::CONFLICT,
-                Json(json!({ "error": "Serving it replaces what's serving now. Stop it first?", "needs_stop": true })),
+                Json(
+                    json!({ "error": "Serving it replaces what's serving now. Stop it first?", "needs_stop": true }),
+                ),
             ));
         }
         crate::coserve::leave_split(state).await;
-        state.stop_serving().await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't stop the model: {e:#}")))?;
+        state.stop_serving().await.map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("couldn't stop the model: {e:#}"),
+            )
+        })?;
     }
     let reset = state.clone();
-    tokio::task::spawn_blocking(move || reset.run_power_command(crate::power::PowerAction::ResetChips, false))
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| err(StatusCode::CONFLICT, format!("couldn't reset the chips: {e:#}")))?;
+    tokio::task::spawn_blocking(move || {
+        reset.run_power_command(crate::power::PowerAction::ResetChips, false)
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| {
+        err(
+            StatusCode::CONFLICT,
+            format!("couldn't reset the chips: {e:#}"),
+        )
+    })?;
 
     let logs = state.config_dir().join("vllm-native");
     let _ = std::fs::create_dir_all(&logs);
     let log = logs.join("serve.log");
     let repo = tt_metal();
     let venv = repo.join("python_env");
-    let path = format!("{}:{}:{}", venv.join("bin").display(), home().join(".local/bin").display(), std::env::var("PATH").unwrap_or_default());
+    let path = format!(
+        "{}:{}:{}",
+        venv.join("bin").display(),
+        home().join(".local/bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let mut cmd = Command::new("systemd-run");
     cmd.args(["--user", "--collect", "--quiet"])
         .arg(format!("--unit={}", crate::orchard::HARVEST_UNIT))
         .arg(format!("--property=WorkingDirectory={}", repo.display()))
-        .arg(format!("--property=StandardOutput=append:{}", log.display()))
+        .arg(format!(
+            "--property=StandardOutput=append:{}",
+            log.display()
+        ))
         .arg(format!("--property=StandardError=append:{}", log.display()))
         .arg(format!("--setenv=PATH={path}"))
         .arg(format!("--setenv=VIRTUAL_ENV={}", venv.display()))
         .arg(format!("--setenv=TT_METAL_HOME={}", repo.display()))
         .arg(format!("--setenv=PYTHONPATH={}", repo.display()))
-        .arg(format!("--setenv=EXTRA_MODELS_DIR={}", dir.parent().unwrap_or(dir).display()))
+        .arg(format!(
+            "--setenv=EXTRA_MODELS_DIR={}",
+            dir.parent().unwrap_or(dir).display()
+        ))
         .arg("--setenv=VLLM_USE_V1=1")
         .arg("--setenv=PYTHONUNBUFFERED=1");
     if let Some(token) = crate::bringup::hf_token() {
@@ -455,14 +623,26 @@ pub async fn serve_dir(state: &AppState, dir: &Path, label: &str, stop_serving: 
     for (k, v) in &launch_env {
         cmd.arg(format!("--setenv={k}={v}"));
     }
-    let out = cmd.args(&argv).stdin(Stdio::null()).output().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let out = cmd
+        .args(&argv)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !out.status.success() {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't start it: {}", String::from_utf8_lossy(&out.stderr).trim())));
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "couldn't start it: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
     }
     let model = meta["hf_weights"].as_str().unwrap_or(label).to_string();
     *NATIVE_SERVING.lock().expect("native") = Some((label.to_string(), model.clone()));
     crate::orchard::adopt_when_serving(state, port, model);
-    Ok(Json(json!({ "serving": label, "log": log.display().to_string() })))
+    Ok(Json(
+        json!({ "serving": label, "log": log.display().to_string() }),
+    ))
 }
 
 #[cfg(test)]
@@ -478,14 +658,30 @@ mod tests {
         }});
         let (argv, env) = serve_argv(&meta, 8123).unwrap();
         assert!(argv[0].ends_with("python_env/bin/python"));
-        assert_eq!(&argv[argv.len() - 3..], ["--port", "8123", "--enable-prompt-tokens-details"]);
+        assert_eq!(
+            &argv[argv.len() - 3..],
+            ["--port", "8123", "--enable-prompt-tokens-details"]
+        );
         assert!(argv.contains(&"g/m".to_string()));
         assert_eq!(env, vec![("MESH_DEVICE".to_string(), "P150x4".to_string())]);
         // No --port in the bundle: added.
         let bare = json!({"launch": {"default": {"command": ["python", "-m", "y"]}}});
-        assert_eq!(&serve_argv(&bare, 9).unwrap().0[3..], ["--port", "9"], "not vLLM: no vLLM flags");
+        assert_eq!(
+            &serve_argv(&bare, 9).unwrap().0[3..],
+            ["--port", "9"],
+            "not vLLM: no vLLM flags"
+        );
         let serve = json!({"launch": {"default": {"command": ["vllm", "serve", "g/m", "--enable-prompt-tokens-details"]}}});
-        assert_eq!(serve_argv(&serve, 9).unwrap().0.iter().filter(|a| *a == "--enable-prompt-tokens-details").count(), 1, "not twice");
+        assert_eq!(
+            serve_argv(&serve, 9)
+                .unwrap()
+                .0
+                .iter()
+                .filter(|a| *a == "--enable-prompt-tokens-details")
+                .count(),
+            1,
+            "not twice"
+        );
         assert!(serve_argv(&json!({}), 9).is_none());
     }
 }

@@ -43,7 +43,10 @@ fn stored_digests(path: &std::path::Path, raw_tokens: &[&str]) -> Vec<String> {
     let contents = std::fs::read_to_string(path)
         .unwrap_or_else(|err| panic!("token store file {path:?} not written: {err}"));
     for t in raw_tokens {
-        assert!(!contents.contains(t), "the raw token {t:?} was written to disk");
+        assert!(
+            !contents.contains(t),
+            "the raw token {t:?} was written to disk"
+        );
     }
     let file: serde_json::Value =
         serde_json::from_str(&contents).expect("token store file was not valid JSON");
@@ -52,7 +55,12 @@ fn stored_digests(path: &std::path::Path, raw_tokens: &[&str]) -> Vec<String> {
         .as_array()
         .expect("sessions missing")
         .iter()
-        .map(|s| s["token_sha256"].as_str().expect("token_sha256 missing").to_string())
+        .map(|s| {
+            s["token_sha256"]
+                .as_str()
+                .expect("token_sha256 missing")
+                .to_string()
+        })
         .collect()
 }
 
@@ -200,7 +208,10 @@ async fn a_token_written_to_the_store_is_accepted_by_a_freshly_constructed_state
 
     // And the file was converted: the token's digest, not the token.
     let digests = stored_digests(&path, &[known_token]);
-    assert_eq!(digests, [tt_station_agentd::sessions::token_digest(known_token)]);
+    assert_eq!(
+        digests,
+        [tt_station_agentd::sessions::token_digest(known_token)]
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -241,7 +252,12 @@ async fn a_corrupt_token_store_file_starts_empty_instead_of_panicking() {
         .unwrap()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(&format!("{name}.corrupt-")))
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&format!("{name}.corrupt-"))
+        })
         .collect();
     assert_eq!(aside.len(), 1, "{aside:?}");
     assert_eq!(std::fs::read(&aside[0]).unwrap(), b"this is not json {{{");

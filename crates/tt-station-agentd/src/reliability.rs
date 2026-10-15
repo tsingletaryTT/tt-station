@@ -83,7 +83,14 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { lengths: LENGTHS.to_vec(), histories: 4, tasks: 5, concurrency: 4, seed: 1, retries: 2 }
+        Options {
+            lengths: LENGTHS.to_vec(),
+            histories: 4,
+            tasks: 5,
+            concurrency: 4,
+            seed: 1,
+            retries: 2,
+        }
     }
 }
 
@@ -234,16 +241,28 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
     }
     v.sort_by(f64::total_cmp);
     let m = v.len() / 2;
-    Some(if v.len().is_multiple_of(2) { (v[m - 1] + v[m]) / 2.0 } else { v[m] })
+    Some(if v.len().is_multiple_of(2) {
+        (v[m - 1] + v[m]) / 2.0
+    } else {
+        v[m]
+    })
 }
 
 pub fn summarize(target: u64, trials: &[Trial]) -> Row {
     let of = |o: Outcome| trials.iter().filter(|t| t.outcome == o).count();
-    let graded: Vec<&Trial> = trials.iter().filter(|t| t.outcome != Outcome::Error).collect();
+    let graded: Vec<&Trial> = trials
+        .iter()
+        .filter(|t| t.outcome != Outcome::Error)
+        .collect();
     let n = graded.len();
     let valid = of(Outcome::Valid);
     let (ci_low, ci_high) = wilson(valid, n);
-    let within = |k: usize| graded.iter().filter(|t| t.valid_after.is_some_and(|a| a <= k)).count();
+    let within = |k: usize| {
+        graded
+            .iter()
+            .filter(|t| t.valid_after.is_some_and(|a| a <= k))
+            .count()
+    };
     let within_1_retry = within(1);
     let (recovered_ci_low, recovered_ci_high) = wilson(within_1_retry, n);
     let mut tokens: Vec<u64> = trials.iter().filter_map(|t| t.prompt_tokens).collect();
@@ -278,8 +297,15 @@ pub fn summarize(target: u64, trials: &[Trial]) -> Row {
         within_1_retry,
         within_2_retries: within(2),
         still_failing: graded.iter().filter(|t| t.valid_after.is_none()).count(),
-        ended_without_call: graded.iter().filter(|t| t.valid_after.is_none() && t.failed_as.as_deref() == Some("no call")).count(),
-        recovered_rate: if n == 0 { 0.0 } else { within_1_retry as f64 / n as f64 },
+        ended_without_call: graded
+            .iter()
+            .filter(|t| t.valid_after.is_none() && t.failed_as.as_deref() == Some("no call"))
+            .count(),
+        recovered_rate: if n == 0 {
+            0.0
+        } else {
+            within_1_retry as f64 / n as f64
+        },
         recovered_ci_low,
         recovered_ci_high,
     }
@@ -288,7 +314,10 @@ pub fn summarize(target: u64, trials: &[Trial]) -> Row {
 fn largest_holding(rows: &[Row], rate: fn(&Row) -> f64) -> Option<u64> {
     let mut rows: Vec<&Row> = rows.iter().collect();
     rows.sort_by_key(|r| r.target);
-    rows.iter().take_while(|r| r.trials >= MIN_TRIALS && rate(r) >= THRESHOLD).last().map(|r| r.target)
+    rows.iter()
+        .take_while(|r| r.trials >= MIN_TRIALS && rate(r) >= THRESHOLD)
+        .last()
+        .map(|r| r.target)
 }
 
 /// See [`RULE`]. `None` when even the smallest size falls short.
@@ -332,14 +361,41 @@ impl Rng {
 }
 
 fn hash(s: &str) -> u64 {
-    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 // ---------------------------------------------------------------- a made-up project
 
-const NOUNS: &[&str] = &["ledger", "batch", "token", "segment", "record", "cursor", "lease", "window", "shard", "frame", "bucket", "entry", "snapshot", "route", "budget", "queue", "span", "chunk", "schema", "manifest", "policy", "session", "metric", "index"];
-const VERBS: &[&str] = &["load", "parse", "flush", "merge", "resolve", "compact", "encode", "decode", "validate", "apply", "collect", "refresh", "split", "drain", "render", "schedule", "retry", "prune", "rebuild", "lookup"];
-const FIELDS: &[&str] = &["capacity", "offset", "limit", "entries", "deadline", "retries", "version", "pending", "weights", "checksum", "cursor", "labels", "owner", "budget", "interval", "generation"];
+const NOUNS: &[&str] = &[
+    "ledger", "batch", "token", "segment", "record", "cursor", "lease", "window", "shard", "frame",
+    "bucket", "entry", "snapshot", "route", "budget", "queue", "span", "chunk", "schema",
+    "manifest", "policy", "session", "metric", "index",
+];
+const VERBS: &[&str] = &[
+    "load", "parse", "flush", "merge", "resolve", "compact", "encode", "decode", "validate",
+    "apply", "collect", "refresh", "split", "drain", "render", "schedule", "retry", "prune",
+    "rebuild", "lookup",
+];
+const FIELDS: &[&str] = &[
+    "capacity",
+    "offset",
+    "limit",
+    "entries",
+    "deadline",
+    "retries",
+    "version",
+    "pending",
+    "weights",
+    "checksum",
+    "cursor",
+    "labels",
+    "owner",
+    "budget",
+    "interval",
+    "generation",
+];
 const DOCS: &[&str] = &[
     "Returns early when there is nothing to do.",
     "Keeps the order of the input.",
@@ -372,7 +428,14 @@ struct Project {
 }
 
 fn camel(s: &str) -> String {
-    s.split('_').map(|w| { let mut c = w.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }).collect()
+    s.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 fn ident(r: &mut Rng) -> String {
@@ -380,7 +443,12 @@ fn ident(r: &mut Rng) -> String {
 }
 
 fn rust_file(r: &mut Rng, module: &str, others: &[&str]) -> (Vec<String>, Vec<(String, usize)>) {
-    let mut l = vec![format!("//! The {module} stage: {}", r.pick(DOCS).to_lowercase()), String::new(), "use std::collections::HashMap;".into(), "use std::time::Duration;".into()];
+    let mut l = vec![
+        format!("//! The {module} stage: {}", r.pick(DOCS).to_lowercase()),
+        String::new(),
+        "use std::collections::HashMap;".into(),
+        "use std::time::Duration;".into(),
+    ];
     for o in others.iter().take(r.range(1, 3)) {
         l.push(format!("use crate::{o}::{};", camel(o)));
     }
@@ -389,9 +457,27 @@ fn rust_file(r: &mut Rng, module: &str, others: &[&str]) -> (Vec<String>, Vec<(S
     for _ in 0..r.range(1, 3) {
         let ty = camel(&format!("{}_{}", module, r.pick(NOUNS)));
         let fields: Vec<&str> = (0..r.range(3, 6)).map(|_| *r.pick(FIELDS)).collect();
-        l.extend([String::new(), format!("/// {}", r.pick(DOCS)), "#[derive(Debug, Clone, Default)]".into(), format!("pub struct {ty} {{")]);
+        l.extend([
+            String::new(),
+            format!("/// {}", r.pick(DOCS)),
+            "#[derive(Debug, Clone, Default)]".into(),
+            format!("pub struct {ty} {{"),
+        ]);
         for f in &fields {
-            l.push(format!("    pub {f}: {},", r.pick(&["u32", "u64", "usize", "String", "bool", "Vec<u8>", "Option<String>", "Duration", "HashMap<String, u64>"])));
+            l.push(format!(
+                "    pub {f}: {},",
+                r.pick(&[
+                    "u32",
+                    "u64",
+                    "usize",
+                    "String",
+                    "bool",
+                    "Vec<u8>",
+                    "Option<String>",
+                    "Duration",
+                    "HashMap<String, u64>"
+                ])
+            ));
         }
         l.extend(["}".into(), String::new(), format!("impl {ty} {{")]);
         for k in 0..r.range(3, 7) {
@@ -402,7 +488,9 @@ fn rust_file(r: &mut Rng, module: &str, others: &[&str]) -> (Vec<String>, Vec<(S
             }
             l.push(format!("    /// {}", r.pick(DOCS)));
             fns.push((name.clone(), l.len() + 1));
-            l.push(format!("    pub fn {name}(&mut self, {a}: &str, limit: usize) -> Result<usize, Error> {{"));
+            l.push(format!(
+                "    pub fn {name}(&mut self, {a}: &str, limit: usize) -> Result<usize, Error> {{"
+            ));
             for _ in 0..r.range(3, 12) {
                 let n = r.range(2, 4096);
                 match r.below(9) {
@@ -421,16 +509,41 @@ fn rust_file(r: &mut Rng, module: &str, others: &[&str]) -> (Vec<String>, Vec<(S
         }
         l.push("}".into());
     }
-    l.extend([String::new(), "#[cfg(test)]".into(), "mod tests {".into(), "    use super::*;".into()]);
+    l.extend([
+        String::new(),
+        "#[cfg(test)]".into(),
+        "mod tests {".into(),
+        "    use super::*;".into(),
+    ]);
     for (name, _) in fns.clone().iter().take(r.range(2, 5)) {
-        l.extend([String::new(), "    #[test]".into(), format!("    fn {name}_handles_empty_input() {{"), "        let mut s = Default::default();".into(), format!("        assert_eq!(s.{name}(\"\", {}).unwrap(), 0);", r.range(1, 64)), "    }".into()]);
+        l.extend([
+            String::new(),
+            "    #[test]".into(),
+            format!("    fn {name}_handles_empty_input() {{"),
+            "        let mut s = Default::default();".into(),
+            format!(
+                "        assert_eq!(s.{name}(\"\", {}).unwrap(), 0);",
+                r.range(1, 64)
+            ),
+            "    }".into(),
+        ]);
     }
     l.push("}".into());
     (l, fns)
 }
 
 fn python_file(r: &mut Rng, module: &str, others: &[&str]) -> (Vec<String>, Vec<(String, usize)>) {
-    let mut l = vec![format!("\"\"\"The {module} stage: {}\"\"\"", r.pick(DOCS).to_lowercase()), String::new(), "from __future__ import annotations".into(), String::new(), "import logging".into(), "from dataclasses import dataclass, field".into()];
+    let mut l = vec![
+        format!(
+            "\"\"\"The {module} stage: {}\"\"\"",
+            r.pick(DOCS).to_lowercase()
+        ),
+        String::new(),
+        "from __future__ import annotations".into(),
+        String::new(),
+        "import logging".into(),
+        "from dataclasses import dataclass, field".into(),
+    ];
     for o in others.iter().take(r.range(1, 3)) {
         l.push(format!("from .{o} import {}", camel(o)));
     }
@@ -439,24 +552,62 @@ fn python_file(r: &mut Rng, module: &str, others: &[&str]) -> (Vec<String>, Vec<
     for _ in 0..r.range(1, 3) {
         let ty = camel(&format!("{}_{}", module, r.pick(NOUNS)));
         let fields: Vec<&str> = (0..r.range(3, 6)).map(|_| *r.pick(FIELDS)).collect();
-        l.extend([String::new(), String::new(), "@dataclass".into(), format!("class {ty}:"), format!("    \"\"\"{}\"\"\"", r.pick(DOCS)), String::new()]);
+        l.extend([
+            String::new(),
+            String::new(),
+            "@dataclass".into(),
+            format!("class {ty}:"),
+            format!("    \"\"\"{}\"\"\"", r.pick(DOCS)),
+            String::new(),
+        ]);
         for f in &fields {
-            l.push(format!("    {f}: {} = {}", r.pick(&["int", "str", "list[str]", "dict[str, int]", "float", "bool"]), r.pick(&["0", "\"\"", "field(default_factory=list)", "field(default_factory=dict)", "0.0", "False"])));
+            l.push(format!(
+                "    {f}: {} = {}",
+                r.pick(&["int", "str", "list[str]", "dict[str, int]", "float", "bool"]),
+                r.pick(&[
+                    "0",
+                    "\"\"",
+                    "field(default_factory=list)",
+                    "field(default_factory=dict)",
+                    "0.0",
+                    "False"
+                ])
+            ));
         }
         for _ in 0..r.range(3, 7) {
             let name = ident(r);
             let (a, f, g) = (*r.pick(NOUNS), *r.pick(&fields), *r.pick(&fields));
             l.push(String::new());
             fns.push((name.clone(), l.len() + 1));
-            l.extend([format!("    def {name}(self, {a}: str, limit: int = {}) -> int:", r.range(8, 512)), format!("        \"\"\"{}\"\"\"", r.pick(DOCS))]);
+            l.extend([
+                format!(
+                    "    def {name}(self, {a}: str, limit: int = {}) -> int:",
+                    r.range(8, 512)
+                ),
+                format!("        \"\"\"{}\"\"\"", r.pick(DOCS)),
+            ]);
             for _ in 0..r.range(3, 12) {
                 let n = r.range(2, 4096);
                 match r.below(8) {
-                    0 => l.extend([format!("        if len(self.{f}) > limit:"), format!("            raise ValueError(f\"{name}: over {{limit}}\")")]),
-                    1 => l.extend([format!("        for i, ch in enumerate({a}[:limit]):"), "            if ch == \"\\n\":".into(), format!("                log.debug(\"{name}: line at %d\", i)")]),
-                    2 => l.push(format!("        parts = [p for p in {a}.split(\",\") if p]")),
+                    0 => l.extend([
+                        format!("        if len(self.{f}) > limit:"),
+                        format!("            raise ValueError(f\"{name}: over {{limit}}\")"),
+                    ]),
+                    1 => l.extend([
+                        format!("        for i, ch in enumerate({a}[:limit]):"),
+                        "            if ch == \"\\n\":".into(),
+                        format!("                log.debug(\"{name}: line at %d\", i)"),
+                    ]),
+                    2 => l.push(format!(
+                        "        parts = [p for p in {a}.split(\",\") if p]"
+                    )),
                     3 => l.push(format!("        log.info(\"{name} %s %s\", {a}, self.{g})")),
-                    4 => l.extend(["        try:".into(), format!("            value = int({a})"), "        except ValueError:".into(), format!("            return {n}")]),
+                    4 => l.extend([
+                        "        try:".into(),
+                        format!("            value = int({a})"),
+                        "        except ValueError:".into(),
+                        format!("            return {n}"),
+                    ]),
                     5 => l.push(format!("        # {}", r.pick(DOCS))),
                     6 => l.push(format!("        self.{f} = type(self.{f})()")),
                     _ => l.push(format!("        deadline = {n} / 1000")),
@@ -469,7 +620,10 @@ fn python_file(r: &mut Rng, module: &str, others: &[&str]) -> (Vec<String>, Vec<
 }
 
 fn ts_file(r: &mut Rng, module: &str, others: &[&str]) -> (Vec<String>, Vec<(String, usize)>) {
-    let mut l = vec![format!("// The {module} stage: {}", r.pick(DOCS).to_lowercase()), String::new()];
+    let mut l = vec![
+        format!("// The {module} stage: {}", r.pick(DOCS).to_lowercase()),
+        String::new(),
+    ];
     for o in others.iter().take(r.range(1, 3)) {
         l.push(format!("import {{ {} }} from \"./{o}\";", camel(o)));
     }
@@ -477,9 +631,23 @@ fn ts_file(r: &mut Rng, module: &str, others: &[&str]) -> (Vec<String>, Vec<(Str
     for _ in 0..r.range(1, 3) {
         let ty = camel(&format!("{}_{}", module, r.pick(NOUNS)));
         let fields: Vec<&str> = (0..r.range(3, 6)).map(|_| *r.pick(FIELDS)).collect();
-        l.extend([String::new(), format!("/** {} */", r.pick(DOCS)), format!("export interface {ty} {{")]);
+        l.extend([
+            String::new(),
+            format!("/** {} */", r.pick(DOCS)),
+            format!("export interface {ty} {{"),
+        ]);
         for f in &fields {
-            l.push(format!("  {f}: {};", r.pick(&["number", "string", "boolean", "string[]", "Record<string, number>", "Date | null"])));
+            l.push(format!(
+                "  {f}: {};",
+                r.pick(&[
+                    "number",
+                    "string",
+                    "boolean",
+                    "string[]",
+                    "Record<string, number>",
+                    "Date | null"
+                ])
+            ));
         }
         l.push("}".into());
         for _ in 0..r.range(3, 7) {
@@ -491,14 +659,25 @@ fn ts_file(r: &mut Rng, module: &str, others: &[&str]) -> (Vec<String>, Vec<(Str
             let (a, f) = (*r.pick(NOUNS), *r.pick(&fields));
             l.extend([String::new(), format!("/** {} */", r.pick(DOCS))]);
             fns.push((name.clone(), l.len() + 1));
-            l.push(format!("export function {name}(state: {ty}, {a}: string, limit = {}): number {{", r.range(8, 512)));
+            l.push(format!(
+                "export function {name}(state: {ty}, {a}: string, limit = {}): number {{",
+                r.range(8, 512)
+            ));
             for _ in 0..r.range(3, 12) {
                 let n = r.range(2, 4096);
                 match r.below(7) {
-                    0 => l.extend([format!("  if (Object.keys(state.{f} ?? {{}}).length > limit) {{"), format!("    throw new Error(`{name}: over ${{limit}}`);"), "  }".into()]),
+                    0 => l.extend([
+                        format!("  if (Object.keys(state.{f} ?? {{}}).length > limit) {{"),
+                        format!("    throw new Error(`{name}: over ${{limit}}`);"),
+                        "  }".into(),
+                    ]),
                     1 => l.push(format!("  const parts = {a}.split(\",\").filter(Boolean);")),
                     2 => l.push(format!("  console.debug(\"{name}\", {a}, state.{f});")),
-                    3 => l.extend([format!("  for (const [i, ch] of [...{a}].entries()) {{"), "    if (i > limit || ch === \"\\n\") break;".into(), "  }".into()]),
+                    3 => l.extend([
+                        format!("  for (const [i, ch] of [...{a}].entries()) {{"),
+                        "    if (i > limit || ch === \"\\n\") break;".into(),
+                        "  }".into(),
+                    ]),
                     4 => l.push(format!("  // {}", r.pick(DOCS))),
                     5 => l.push(format!("  const deadline = Date.now() + {n};")),
                     _ => l.push(format!("  const n = Number.parseInt({a}, 10) || {n};")),
@@ -510,8 +689,29 @@ fn ts_file(r: &mut Rng, module: &str, others: &[&str]) -> (Vec<String>, Vec<(Str
     (l, fns)
 }
 
-const MODULES: &[&str] = &["parser", "config", "storage", "scheduler", "http", "cache", "metrics", "retry", "auth", "queue", "index", "codec", "planner", "gateway", "journal", "sync", "limits", "export"];
-const PROJECTS: &[&str] = &["ledgerd", "tidepool", "quarry", "fernlog", "packrat", "lanternd"];
+const MODULES: &[&str] = &[
+    "parser",
+    "config",
+    "storage",
+    "scheduler",
+    "http",
+    "cache",
+    "metrics",
+    "retry",
+    "auth",
+    "queue",
+    "index",
+    "codec",
+    "planner",
+    "gateway",
+    "journal",
+    "sync",
+    "limits",
+    "export",
+];
+const PROJECTS: &[&str] = &[
+    "ledgerd", "tidepool", "quarry", "fernlog", "packrat", "lanternd",
+];
 
 fn project(seed: u64) -> Project {
     let mut r = Rng::new(seed);
@@ -528,11 +728,23 @@ fn project(seed: u64) -> Project {
         .iter()
         .enumerate()
         .map(|(i, m)| {
-            let others: Vec<&str> = mods.iter().filter(|o| *o != m).skip(i % 3).copied().collect();
+            let others: Vec<&str> = mods
+                .iter()
+                .filter(|o| *o != m)
+                .skip(i % 3)
+                .copied()
+                .collect();
             let mut fr = Rng::new(seed ^ hash(m));
             let (dir, ext) = match lang {
                 Lang::Rust => ("src", "rs"),
-                Lang::Python => (if i % 4 == 3 { "src/{name}/io" } else { "src/{name}" }, "py"),
+                Lang::Python => (
+                    if i % 4 == 3 {
+                        "src/{name}/io"
+                    } else {
+                        "src/{name}"
+                    },
+                    "py",
+                ),
                 Lang::Ts => (if i % 4 == 3 { "src/lib" } else { "src" }, "ts"),
             };
             let (lines, fns) = match lang {
@@ -540,7 +752,11 @@ fn project(seed: u64) -> Project {
                 Lang::Python => python_file(&mut fr, m, &others),
                 Lang::Ts => ts_file(&mut fr, m, &others),
             };
-            File { path: format!("{}/{m}.{ext}", dir.replace("{name}", &name)), lines, fns }
+            File {
+                path: format!("{}/{m}.{ext}", dir.replace("{name}", &name)),
+                lines,
+                fns,
+            }
         })
         .collect();
     Project { lang, name, files }
@@ -566,72 +782,195 @@ impl Project {
 // ---------------------------------------------------------------- what the tools answer
 
 fn numbered(f: &File, offset: usize, limit: usize) -> String {
-    f.lines.iter().enumerate().skip(offset.saturating_sub(1)).take(limit).map(|(i, l)| format!("{:>6}\t{l}", i + 1)).collect::<Vec<_>>().join("\n")
+    f.lines
+        .iter()
+        .enumerate()
+        .skip(offset.saturating_sub(1))
+        .take(limit)
+        .map(|(i, l)| format!("{:>6}\t{l}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn test_run(p: &Project, r: &mut Rng, fail: bool) -> String {
-    let tests: Vec<(String, String)> = p.files.iter().flat_map(|f| f.fns.iter().map(move |(n, _)| (f.path.clone(), n.clone()))).collect();
+    let tests: Vec<(String, String)> = p
+        .files
+        .iter()
+        .flat_map(|f| f.fns.iter().map(move |(n, _)| (f.path.clone(), n.clone())))
+        .collect();
     let n = tests.len().min(r.range(12, 60));
     let start = r.below(tests.len().saturating_sub(n).max(1));
     let picked = &tests[start..start + n];
     let failed = if fail { Some(r.below(n)) } else { None };
-    let module = |path: &str| path.rsplit('/').next().unwrap_or(path).split('.').next().unwrap_or("").to_string();
+    let module = |path: &str| {
+        path.rsplit('/')
+            .next()
+            .unwrap_or(path)
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .to_string()
+    };
     match p.lang {
         Lang::Rust => {
-            let mut o = vec![format!("   Compiling {} v0.{}.{} (/work)", p.name, r.range(1, 9), r.range(0, 20)), format!("    Finished `test` profile [unoptimized + debuginfo] target(s) in {}.{:02}s", r.range(1, 40), r.below(100)), format!("     Running unittests src/lib.rs (target/debug/deps/{}-{:016x})", p.name, r.next()), String::new(), format!("running {n} tests")];
+            let mut o = vec![
+                format!(
+                    "   Compiling {} v0.{}.{} (/work)",
+                    p.name,
+                    r.range(1, 9),
+                    r.range(0, 20)
+                ),
+                format!(
+                    "    Finished `test` profile [unoptimized + debuginfo] target(s) in {}.{:02}s",
+                    r.range(1, 40),
+                    r.below(100)
+                ),
+                format!(
+                    "     Running unittests src/lib.rs (target/debug/deps/{}-{:016x})",
+                    p.name,
+                    r.next()
+                ),
+                String::new(),
+                format!("running {n} tests"),
+            ];
             for (i, (path, t)) in picked.iter().enumerate() {
-                o.push(format!("test {}::tests::{t}_handles_empty_input ... {}", module(path), if failed == Some(i) { "FAILED" } else { "ok" }));
+                o.push(format!(
+                    "test {}::tests::{t}_handles_empty_input ... {}",
+                    module(path),
+                    if failed == Some(i) { "FAILED" } else { "ok" }
+                ));
             }
             if let Some(i) = failed {
                 let (path, t) = &picked[i];
-                o.extend([String::new(), "failures:".into(), String::new(), format!("---- {}::tests::{t}_handles_empty_input stdout ----", module(path)), format!("thread '{}::tests::{t}_handles_empty_input' panicked at {path}:{}:{}:", module(path), r.range(20, 400), r.range(5, 40)), "assertion `left == right` failed".into(), format!("  left: {}", r.range(1, 99)), " right: 0".into(), "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace".into()]);
+                o.extend([
+                    String::new(),
+                    "failures:".into(),
+                    String::new(),
+                    format!(
+                        "---- {}::tests::{t}_handles_empty_input stdout ----",
+                        module(path)
+                    ),
+                    format!(
+                        "thread '{}::tests::{t}_handles_empty_input' panicked at {path}:{}:{}:",
+                        module(path),
+                        r.range(20, 400),
+                        r.range(5, 40)
+                    ),
+                    "assertion `left == right` failed".into(),
+                    format!("  left: {}", r.range(1, 99)),
+                    " right: 0".into(),
+                    "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
+                        .into(),
+                ]);
             }
             o.extend([String::new(), format!("test result: {}. {} passed; {} failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.{:02}s", if fail { "FAILED" } else { "ok" }, n - fail as usize, fail as usize, r.below(100))]);
             o.join("\n")
         }
         Lang::Python => {
-            let dots: String = (0..n).map(|i| if failed == Some(i) { 'F' } else { '.' }).collect();
-            let mut o = vec![format!("{dots}{:>w$}[100%]", "", w = 72usize.saturating_sub(n).max(1))];
+            let dots: String = (0..n)
+                .map(|i| if failed == Some(i) { 'F' } else { '.' })
+                .collect();
+            let mut o = vec![format!(
+                "{dots}{:>w$}[100%]",
+                "",
+                w = 72usize.saturating_sub(n).max(1)
+            )];
             if let Some(i) = failed {
                 let (path, t) = &picked[i];
                 o.extend(["=================================== FAILURES ===================================".into(), format!("_____________________________ test_{t}_empty _____________________________"), String::new(), format!("    def test_{t}_empty():"), format!(">       assert {}().{t}(\"\") == 0", camel(&module(path))), format!("E       AssertionError: assert {} == 0", r.range(1, 99)), String::new(), format!("tests/test_{}.py:{}: AssertionError", module(path), r.range(5, 200)), "=========================== short test summary info ============================".into(), format!("FAILED tests/test_{}.py::test_{t}_empty - AssertionError", module(path))]);
             }
-            o.push(format!("{} passed{} in {}.{:02}s", n - fail as usize, if fail { ", 1 failed" } else { "" }, r.range(0, 9), r.below(100)));
+            o.push(format!(
+                "{} passed{} in {}.{:02}s",
+                n - fail as usize,
+                if fail { ", 1 failed" } else { "" },
+                r.range(0, 9),
+                r.below(100)
+            ));
             o.join("\n")
         }
         Lang::Ts => {
-            let mut o = vec![String::new(), format!("> {}@0.{}.0 test", p.name, r.range(1, 9)), "> vitest run".into(), String::new(), format!(" RUN  v2.1.{} /work", r.range(1, 9)), String::new()];
+            let mut o = vec![
+                String::new(),
+                format!("> {}@0.{}.0 test", p.name, r.range(1, 9)),
+                "> vitest run".into(),
+                String::new(),
+                format!(" RUN  v2.1.{} /work", r.range(1, 9)),
+                String::new(),
+            ];
             for f in p.files.iter().take(r.range(4, 10)) {
-                o.push(format!(" ✓ {} ({} tests) {}ms", f.path.replace(".ts", ".test.ts"), f.fns.len(), r.range(2, 90)));
+                o.push(format!(
+                    " ✓ {} ({} tests) {}ms",
+                    f.path.replace(".ts", ".test.ts"),
+                    f.fns.len(),
+                    r.range(2, 90)
+                ));
             }
             if let Some(i) = failed {
                 let (path, t) = &picked[i];
-                o.extend([format!(" ❯ {} (1 failed)", path.replace(".ts", ".test.ts")), format!("   × {t} handles empty input"), format!("     → expected {} to be +0", r.range(1, 99))]);
+                o.extend([
+                    format!(" ❯ {} (1 failed)", path.replace(".ts", ".test.ts")),
+                    format!("   × {t} handles empty input"),
+                    format!("     → expected {} to be +0", r.range(1, 99)),
+                ]);
             }
-            o.extend([String::new(), format!(" Test Files  {} passed", r.range(4, 12)), format!("      Tests  {} passed{}", n, if fail { " | 1 failed" } else { "" }), format!("   Duration  {}.{:02}s", r.range(0, 9), r.below(100))]);
+            o.extend([
+                String::new(),
+                format!(" Test Files  {} passed", r.range(4, 12)),
+                format!(
+                    "      Tests  {} passed{}",
+                    n,
+                    if fail { " | 1 failed" } else { "" }
+                ),
+                format!("   Duration  {}.{:02}s", r.range(0, 9), r.below(100)),
+            ]);
             o.join("\n")
         }
     }
 }
 
 fn git_status(p: &Project, r: &mut Rng) -> String {
-    let mut o = vec!["On branch fix/".to_string() + &ident(r).replace('_', "-"), "Changes not staged for commit:".into(), "  (use \"git add <file>...\" to update what will be committed)".into(), "  (use \"git restore <file>...\" to discard changes in working directory)".into()];
+    let mut o = vec![
+        "On branch fix/".to_string() + &ident(r).replace('_', "-"),
+        "Changes not staged for commit:".into(),
+        "  (use \"git add <file>...\" to update what will be committed)".into(),
+        "  (use \"git restore <file>...\" to discard changes in working directory)".into(),
+    ];
     for _ in 0..r.range(1, 4) {
         o.push(format!("\tmodified:   {}", r.pick(&p.files).path));
     }
-    o.extend([String::new(), "no changes added to commit (use \"git add\" and/or \"git commit -a\")".into()]);
+    o.extend([
+        String::new(),
+        "no changes added to commit (use \"git add\" and/or \"git commit -a\")".into(),
+    ]);
     o.join("\n")
 }
 
 fn git_diff(p: &Project, r: &mut Rng) -> String {
     let f = r.pick(&p.files);
     let at = r.range(1, f.lines.len().saturating_sub(12).max(1));
-    let mut o = vec![format!("diff --git a/{0} b/{0}", f.path), format!("index {:07x}..{:07x} 100644", r.next() & 0xFFFFFFF, r.next() & 0xFFFFFFF), format!("--- a/{}", f.path), format!("+++ b/{}", f.path), format!("@@ -{at},10 +{at},11 @@")];
+    let mut o = vec![
+        format!("diff --git a/{0} b/{0}", f.path),
+        format!(
+            "index {:07x}..{:07x} 100644",
+            r.next() & 0xFFFFFFF,
+            r.next() & 0xFFFFFFF
+        ),
+        format!("--- a/{}", f.path),
+        format!("+++ b/{}", f.path),
+        format!("@@ -{at},10 +{at},11 @@"),
+    ];
     for (k, l) in f.lines.iter().skip(at - 1).take(10).enumerate() {
         if k == 5 {
             o.push(format!("-{l}"));
             o.push(format!("+{}", l.replace("limit", "limit.max(1)")));
-            o.push(format!("+{}", if p.lang == Lang::Python { "        # guard against a zero limit" } else { "        // guard against a zero limit" }));
+            o.push(format!(
+                "+{}",
+                if p.lang == Lang::Python {
+                    "        # guard against a zero limit"
+                } else {
+                    "        // guard against a zero limit"
+                }
+            ));
         } else {
             o.push(format!(" {l}"));
         }
@@ -640,8 +979,23 @@ fn git_diff(p: &Project, r: &mut Rng) -> String {
 }
 
 fn grep_hits(p: &Project, needle: &str) -> String {
-    let hits: Vec<String> = p.files.iter().flat_map(|f| f.lines.iter().enumerate().filter(|(_, l)| l.contains(needle)).map(move |(i, l)| format!("{}:{}:{}", f.path, i + 1, l.trim()))).take(40).collect();
-    if hits.is_empty() { "No matches found".into() } else { hits.join("\n") }
+    let hits: Vec<String> = p
+        .files
+        .iter()
+        .flat_map(|f| {
+            f.lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.contains(needle))
+                .map(move |(i, l)| format!("{}:{}:{}", f.path, i + 1, l.trim()))
+        })
+        .take(40)
+        .collect();
+    if hits.is_empty() {
+        "No matches found".into()
+    } else {
+        hits.join("\n")
+    }
 }
 
 // ---------------------------------------------------------------- the session
@@ -748,10 +1102,20 @@ pub fn tools() -> Value {
 
 /// What's wrong with `args` for the tool called `name` in `tools`, if anything.
 pub fn check_call(tools: &Value, name: &str, args: &Value) -> Result<(), String> {
-    let tool = tools.as_array().into_iter().flatten().find(|t| t["name"] == name).ok_or_else(|| format!("no tool {name}"))?;
+    let tool = tools
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|t| t["name"] == name)
+        .ok_or_else(|| format!("no tool {name}"))?;
     let s = &tool["input_schema"];
     let obj = args.as_object().ok_or("arguments aren't a JSON object")?;
-    for r in s["required"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+    for r in s["required"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
         if !obj.contains_key(r) {
             return Err(format!("missing {r}"));
         }
@@ -773,11 +1137,17 @@ pub fn check_call(tools: &Value, name: &str, args: &Value) -> Result<(), String>
             _ => true,
         };
         if !fits {
-            return Err(format!("{k} should be a {}, got {v}", p["type"].as_str().unwrap_or("?")));
+            return Err(format!(
+                "{k} should be a {}, got {v}",
+                p["type"].as_str().unwrap_or("?")
+            ));
         }
         if let Some(allowed) = p["enum"].as_array() {
             if !allowed.contains(v) {
-                return Err(format!("{k} = {v} isn't one of {}", Value::Array(allowed.clone())));
+                return Err(format!(
+                    "{k} = {v} isn't one of {}",
+                    Value::Array(allowed.clone())
+                ));
             }
         }
     }
@@ -786,39 +1156,122 @@ pub fn check_call(tools: &Value, name: &str, args: &Value) -> Result<(), String>
 
 fn tool_id(r: &mut Rng) -> String {
     const B62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    "toolu_01".to_string() + &(0..22).map(|_| B62[r.below(62)] as char).collect::<String>()
+    "toolu_01".to_string()
+        + &(0..22)
+            .map(|_| B62[r.below(62)] as char)
+            .collect::<String>()
 }
 
 /// One step of the session: what the assistant said and called, and what came back.
 fn step(p: &Project, r: &mut Rng, out: &mut Vec<Value>) {
     let f = r.pick(&p.files);
-    let fun = f.fns.first().map(|x| x.0.clone()).unwrap_or_else(|| ident(r));
-    let (fun, fun_line) = f.fns.get(r.below(f.fns.len().max(1))).cloned().unwrap_or((fun, 1));
+    let fun = f
+        .fns
+        .first()
+        .map(|x| x.0.clone())
+        .unwrap_or_else(|| ident(r));
+    let (fun, fun_line) = f
+        .fns
+        .get(r.below(f.fns.len().max(1)))
+        .cloned()
+        .unwrap_or((fun, 1));
     let roll = r.below(100);
     let (text, name, input, result) = if roll < 34 {
         // Read: a whole small file, or a window of a big one.
-        let (offset, limit) = if f.lines.len() <= 250 || r.chance(0.3) { (None, None) } else { let o = fun_line.saturating_sub(r.range(5, 30)).max(1); (Some(o), Some(r.range(60, 220))) };
+        let (offset, limit) = if f.lines.len() <= 250 || r.chance(0.3) {
+            (None, None)
+        } else {
+            let o = fun_line.saturating_sub(r.range(5, 30)).max(1);
+            (Some(o), Some(r.range(60, 220)))
+        };
         let mut input = json!({ "file_path": format!("/work/{}", f.path) });
         if let (Some(o), Some(l)) = (offset, limit) {
             input["offset"] = json!(o);
             input["limit"] = json!(l);
         }
-        let text = r.pick(&["Let me look at `{p}`.", "I'll read `{f}` in `{p}`.", "Let me check how `{f}` handles an empty input.", "Reading the rest of `{p}`.", ""]).replace("{p}", &f.path).replace("{f}", &fun);
-        (text, "Read", input, numbered(f, offset.unwrap_or(1), limit.unwrap_or(2000)))
+        let text = r
+            .pick(&[
+                "Let me look at `{p}`.",
+                "I'll read `{f}` in `{p}`.",
+                "Let me check how `{f}` handles an empty input.",
+                "Reading the rest of `{p}`.",
+                "",
+            ])
+            .replace("{p}", &f.path)
+            .replace("{f}", &fun);
+        (
+            text,
+            "Read",
+            input,
+            numbered(f, offset.unwrap_or(1), limit.unwrap_or(2000)),
+        )
     } else if roll < 72 {
         let (cmd, desc, res) = match r.below(8) {
             0..=2 => {
                 let fail = r.chance(0.35);
-                (p.test_cmd().to_string(), "Run the test suite", test_run(p, r, fail))
+                (
+                    p.test_cmd().to_string(),
+                    "Run the test suite",
+                    test_run(p, r, fail),
+                )
             }
-            3 => ("git status".into(), "Show working tree status", git_status(p, r)),
-            4 => (format!("git diff {}", f.path), "Show the change so far", git_diff(p, r)),
-            5 => (format!("wc -l src/*.{}", p.ext()), "Count lines per source file", p.files.iter().map(|x| format!("{:>6} {}", x.lines.len(), x.path)).collect::<Vec<_>>().join("\n")),
-            6 => (format!("rg -n \"{fun}\" src"), "Find uses of the function", grep_hits(p, &fun)),
-            _ => ("ls -la src".into(), "List source files", p.files.iter().map(|x| format!("-rw-r--r-- 1 dev dev {:>6} Oct 14 {:02}:{:02} {}", x.lines.iter().map(|l| l.len() + 1).sum::<usize>(), r.range(8, 19), r.below(60), x.path.rsplit('/').next().unwrap_or(""))).collect::<Vec<_>>().join("\n")),
+            3 => (
+                "git status".into(),
+                "Show working tree status",
+                git_status(p, r),
+            ),
+            4 => (
+                format!("git diff {}", f.path),
+                "Show the change so far",
+                git_diff(p, r),
+            ),
+            5 => (
+                format!("wc -l src/*.{}", p.ext()),
+                "Count lines per source file",
+                p.files
+                    .iter()
+                    .map(|x| format!("{:>6} {}", x.lines.len(), x.path))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            6 => (
+                format!("rg -n \"{fun}\" src"),
+                "Find uses of the function",
+                grep_hits(p, &fun),
+            ),
+            _ => (
+                "ls -la src".into(),
+                "List source files",
+                p.files
+                    .iter()
+                    .map(|x| {
+                        format!(
+                            "-rw-r--r-- 1 dev dev {:>6} Oct 14 {:02}:{:02} {}",
+                            x.lines.iter().map(|l| l.len() + 1).sum::<usize>(),
+                            r.range(8, 19),
+                            r.below(60),
+                            x.path.rsplit('/').next().unwrap_or("")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
         };
-        let text = r.pick(&["Now let me run the tests.", "Let me see where things stand.", "Checking the change.", "", "Let me verify that with a quick command."]).to_string();
-        (text, "Bash", json!({ "command": cmd, "description": desc }), res)
+        let text = r
+            .pick(&[
+                "Now let me run the tests.",
+                "Let me see where things stand.",
+                "Checking the change.",
+                "",
+                "Let me verify that with a quick command.",
+            ])
+            .to_string();
+        (
+            text,
+            "Bash",
+            json!({ "command": cmd, "description": desc }),
+            res,
+        )
     } else if roll < 86 {
         let at = fun_line.clamp(1, f.lines.len());
         let old = f.lines[at.saturating_sub(1)..(at + 2).min(f.lines.len())].join("\n");
@@ -828,18 +1281,45 @@ fn step(p: &Project, r: &mut Rng, out: &mut Vec<Value>) {
         (text, "Edit", json!({ "file_path": format!("/work/{}", f.path), "old_string": old, "new_string": new, "replace_all": false }), format!("The file /work/{} has been updated. Here's the result of running `cat -n` on a snippet of the edited file:\n{snippet}", f.path))
     } else if roll < 95 {
         let text = format!("Let me find where `{fun}` is used.");
-        let mode = if r.chance(0.5) { "content" } else { "files_with_matches" };
-        let res = if mode == "content" { grep_hits(p, &fun) } else { p.files.iter().filter(|x| x.lines.iter().any(|l| l.contains(&fun))).map(|x| x.path.clone()).collect::<Vec<_>>().join("\n") };
+        let mode = if r.chance(0.5) {
+            "content"
+        } else {
+            "files_with_matches"
+        };
+        let res = if mode == "content" {
+            grep_hits(p, &fun)
+        } else {
+            p.files
+                .iter()
+                .filter(|x| x.lines.iter().any(|l| l.contains(&fun)))
+                .map(|x| x.path.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         let mut input = json!({ "pattern": fun, "path": "src", "output_mode": mode });
         if mode == "content" {
             input["-n"] = json!(true);
         }
         (text, "Grep", input, res)
     } else if roll < 98 {
-        (String::new(), "Glob", json!({ "pattern": format!("src/**/*.{}", p.ext()) }), p.files.iter().map(|x| format!("/work/{}", x.path)).collect::<Vec<_>>().join("\n"))
+        (
+            String::new(),
+            "Glob",
+            json!({ "pattern": format!("src/**/*.{}", p.ext()) }),
+            p.files
+                .iter()
+                .map(|x| format!("/work/{}", x.path))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
     } else {
         let path = format!("notes/{}.md", r.pick(NOUNS));
-        ("Writing down what I found so far.".into(), "Write", json!({ "file_path": format!("/work/{path}"), "content": format!("# Notes\n\n- `{fun}` in {} needs a non-zero limit.\n- Tests: `{}`.\n", f.path, p.test_cmd()) }), format!("File created successfully at: /work/{path}"))
+        (
+            "Writing down what I found so far.".into(),
+            "Write",
+            json!({ "file_path": format!("/work/{path}"), "content": format!("# Notes\n\n- `{fun}` in {} needs a non-zero limit.\n- Tests: `{}`.\n", f.path, p.test_cmd()) }),
+            format!("File created successfully at: /work/{path}"),
+        )
     };
     let id = tool_id(r);
     let mut content = Vec::new();
@@ -898,18 +1378,120 @@ fn some_file<'a>(p: &'a Project, r: &mut Rng) -> &'a File {
 }
 
 pub const TASKS: &[Task] = &[
-    Task { key: "read_function", expect: &["Read", "Grep"], text: |p, r| { let f = some_file(p, r); format!("Show me the `{}` function in {}.", f.fns.first().map_or("main", |x| x.0.as_str()), f.path) } },
-    Task { key: "read_range", expect: &["Read"], text: |p, r| { let f = some_file(p, r); let a = r.range(10, f.lines.len().max(20)); format!("Read {} from line {a} to line {}.", f.path, a + r.range(20, 60)) } },
-    Task { key: "run_tests", expect: &["Bash"], text: |p, _| format!("Run the whole test suite again ({}) and tell me what fails.", p.test_cmd()) },
-    Task { key: "find_definition", expect: &["Grep", "Bash"], text: |p, r| { let f = some_file(p, r); format!("Where is `{}` defined? Search the whole repo.", f.fns.last().map_or("main", |x| x.0.as_str())) } },
-    Task { key: "list_files", expect: &["Glob", "Bash"], text: |p, _| format!("List every .{} file in the project.", p.ext()) },
-    Task { key: "git_status", expect: &["Bash"], text: |_, _| "Check git status and show me what's changed so far.".into() },
-    Task { key: "write_file", expect: &["Write"], text: |p, r| { let f = some_file(p, r); let m = f.path.rsplit('/').next().unwrap_or("").split('.').next().unwrap_or(""); format!("Create docs/{m}.md with a short paragraph describing what the {m} module of {} does.", p.name) } },
-    Task { key: "rename", expect: &["Edit", "Read", "Grep"], text: |p, r| { let f = some_file(p, r); let n = f.fns.first().map_or("main", |x| x.0.as_str()); format!("In {}, rename the function `{n}` to `{n}_checked` (only its definition for now).", f.path) } },
-    Task { key: "count_lines", expect: &["Bash"], text: |p, r| format!("How many lines is {}? Use wc.", some_file(p, r).path) },
-    Task { key: "find_todos", expect: &["Grep", "Bash"], text: |_, _| "Find every TODO or FIXME comment under src/.".into() },
-    Task { key: "read_head", expect: &["Read"], text: |p, r| format!("Open {} and show me just its first 40 lines.", some_file(p, r).path) },
-    Task { key: "search_limit", expect: &["Grep", "Bash"], text: |p, r| format!("Search {} for every place that compares against `limit`.", some_file(p, r).path) },
+    Task {
+        key: "read_function",
+        expect: &["Read", "Grep"],
+        text: |p, r| {
+            let f = some_file(p, r);
+            format!(
+                "Show me the `{}` function in {}.",
+                f.fns.first().map_or("main", |x| x.0.as_str()),
+                f.path
+            )
+        },
+    },
+    Task {
+        key: "read_range",
+        expect: &["Read"],
+        text: |p, r| {
+            let f = some_file(p, r);
+            let a = r.range(10, f.lines.len().max(20));
+            format!(
+                "Read {} from line {a} to line {}.",
+                f.path,
+                a + r.range(20, 60)
+            )
+        },
+    },
+    Task {
+        key: "run_tests",
+        expect: &["Bash"],
+        text: |p, _| {
+            format!(
+                "Run the whole test suite again ({}) and tell me what fails.",
+                p.test_cmd()
+            )
+        },
+    },
+    Task {
+        key: "find_definition",
+        expect: &["Grep", "Bash"],
+        text: |p, r| {
+            let f = some_file(p, r);
+            format!(
+                "Where is `{}` defined? Search the whole repo.",
+                f.fns.last().map_or("main", |x| x.0.as_str())
+            )
+        },
+    },
+    Task {
+        key: "list_files",
+        expect: &["Glob", "Bash"],
+        text: |p, _| format!("List every .{} file in the project.", p.ext()),
+    },
+    Task {
+        key: "git_status",
+        expect: &["Bash"],
+        text: |_, _| "Check git status and show me what's changed so far.".into(),
+    },
+    Task {
+        key: "write_file",
+        expect: &["Write"],
+        text: |p, r| {
+            let f = some_file(p, r);
+            let m = f
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .split('.')
+                .next()
+                .unwrap_or("");
+            format!("Create docs/{m}.md with a short paragraph describing what the {m} module of {} does.", p.name)
+        },
+    },
+    Task {
+        key: "rename",
+        expect: &["Edit", "Read", "Grep"],
+        text: |p, r| {
+            let f = some_file(p, r);
+            let n = f.fns.first().map_or("main", |x| x.0.as_str());
+            format!(
+                "In {}, rename the function `{n}` to `{n}_checked` (only its definition for now).",
+                f.path
+            )
+        },
+    },
+    Task {
+        key: "count_lines",
+        expect: &["Bash"],
+        text: |p, r| format!("How many lines is {}? Use wc.", some_file(p, r).path),
+    },
+    Task {
+        key: "find_todos",
+        expect: &["Grep", "Bash"],
+        text: |_, _| "Find every TODO or FIXME comment under src/.".into(),
+    },
+    Task {
+        key: "read_head",
+        expect: &["Read"],
+        text: |p, r| {
+            format!(
+                "Open {} and show me just its first 40 lines.",
+                some_file(p, r).path
+            )
+        },
+    },
+    Task {
+        key: "search_limit",
+        expect: &["Grep", "Bash"],
+        text: |p, r| {
+            format!(
+                "Search {} for every place that compares against `limit`.",
+                some_file(p, r).path
+            )
+        },
+    },
 ];
 
 // ---------------------------------------------------------------- talking to the server
@@ -938,7 +1520,17 @@ impl Server {
         if let Some(o) = req.as_object_mut() {
             o.remove("stream_options");
         }
-        let v: Value = self.http.post(self.chat_url()).json(&req).timeout(Duration::from_secs(900)).send().await.ok()?.json().await.ok()?;
+        let v: Value = self
+            .http
+            .post(self.chat_url())
+            .json(&req)
+            .timeout(Duration::from_secs(900))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
         v["usage"]["prompt_tokens"].as_u64()
     }
 }
@@ -978,11 +1570,23 @@ struct Reply {
 
 async fn send(server: &Server, body: &Value) -> Result<Reply, String> {
     let started = Instant::now();
-    let r = server.http.post(server.chat_url()).json(body).send().await.map_err(|e| format!("couldn't reach the model: {e}"))?;
+    let r = server
+        .http
+        .post(server.chat_url())
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach the model: {e}"))?;
     if !r.status().is_success() {
         let status = r.status();
         let v: Value = r.json().await.unwrap_or(Value::Null);
-        return Err(format!("{status}: {}", v["error"]["message"].as_str().or(v["message"].as_str()).unwrap_or("")));
+        return Err(format!(
+            "{status}: {}",
+            v["error"]["message"]
+                .as_str()
+                .or(v["message"].as_str())
+                .unwrap_or("")
+        ));
     }
     let mut reply = Reply::default();
     let mut bytes = r.bytes_stream();
@@ -994,20 +1598,32 @@ async fn send(server: &Server, body: &Value) -> Result<Reply, String> {
         while let Some(end) = buf.iter().position(|b| *b == b'\n') {
             let raw: Vec<u8> = buf.drain(..=end).collect();
             let line = String::from_utf8_lossy(&raw);
-            let Some(data) = line.trim().strip_prefix("data:").map(str::trim) else { continue };
+            let Some(data) = line.trim().strip_prefix("data:").map(str::trim) else {
+                continue;
+            };
             if data == "[DONE]" {
                 done = true;
                 break 'read;
             }
-            let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+            let Ok(v) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
             reply.chunks.push(v.clone());
             if let Some(u) = v["usage"].as_object() {
-                reply.prompt_tokens = u.get("prompt_tokens").and_then(Value::as_u64).or(reply.prompt_tokens);
-                reply.completion_tokens = u.get("completion_tokens").and_then(Value::as_u64).or(reply.completion_tokens);
+                reply.prompt_tokens = u
+                    .get("prompt_tokens")
+                    .and_then(Value::as_u64)
+                    .or(reply.prompt_tokens);
+                reply.completion_tokens = u
+                    .get("completion_tokens")
+                    .and_then(Value::as_u64)
+                    .or(reply.completion_tokens);
             }
             let c = &v["choices"][0];
             let d = &c["delta"];
-            let any = ["content", "reasoning_content", "reasoning", "tool_calls"].iter().any(|k| !d[*k].is_null());
+            let any = ["content", "reasoning_content", "reasoning", "tool_calls"]
+                .iter()
+                .any(|k| !d[*k].is_null());
             if any && reply.ttft.is_none() {
                 reply.ttft = Some(started.elapsed().as_secs_f64());
             }
@@ -1015,7 +1631,10 @@ async fn send(server: &Server, body: &Value) -> Result<Reply, String> {
                 reply.content.push_str(t);
             }
             for tc in d["tool_calls"].as_array().into_iter().flatten() {
-                let i = tc["index"].as_u64().unwrap_or(reply.calls.len().saturating_sub(1) as u64) as usize;
+                let i = tc["index"]
+                    .as_u64()
+                    .unwrap_or(reply.calls.len().saturating_sub(1) as u64)
+                    as usize;
                 while reply.calls.len() <= i {
                     reply.calls.push(Default::default());
                 }
@@ -1039,38 +1658,93 @@ async fn send(server: &Server, body: &Value) -> Result<Reply, String> {
 
 fn clip(s: &str, n: usize) -> String {
     let s = s.replace('\n', " ");
-    if s.chars().count() > n { format!("{}…", s.chars().take(n).collect::<String>()) } else { s }
+    if s.chars().count() > n {
+        format!("{}…", s.chars().take(n).collect::<String>())
+    } else {
+        s
+    }
 }
 
 /// (outcome, salvaged, on task, the calls, what happened)
-pub fn grade(tools: &Value, content: &str, calls: &[(String, String)], expect: &[&str]) -> (Outcome, bool, bool, Vec<String>, String) {
-    let shown: Vec<String> = calls.iter().map(|(n, a)| clip(&format!("{n}({a})"), 200)).collect();
+pub fn grade(
+    tools: &Value,
+    content: &str,
+    calls: &[(String, String)],
+    expect: &[&str],
+) -> (Outcome, bool, bool, Vec<String>, String) {
+    let shown: Vec<String> = calls
+        .iter()
+        .map(|(n, a)| clip(&format!("{n}({a})"), 200))
+        .collect();
     if calls.is_empty() {
         let text = crate::assistant::strip_think(content);
         if let Some(at) = crate::anthropic::leak_start(&text) {
             let salvage = crate::anthropic::leaked_call(&text[at..]);
-            let salvaged = salvage.as_ref().is_some_and(|(n, a)| check_call(tools, n, a).is_ok());
-            let on_task = salvaged && salvage.as_ref().is_some_and(|(n, _)| expect.contains(&n.as_str()));
-            return (Outcome::Leaked, salvaged, on_task, shown, clip(&text[at..], 200));
+            let salvaged = salvage
+                .as_ref()
+                .is_some_and(|(n, a)| check_call(tools, n, a).is_ok());
+            let on_task = salvaged
+                && salvage
+                    .as_ref()
+                    .is_some_and(|(n, _)| expect.contains(&n.as_str()));
+            return (
+                Outcome::Leaked,
+                salvaged,
+                on_task,
+                shown,
+                clip(&text[at..], 200),
+            );
         }
         return (Outcome::NoCall, false, false, shown, clip(&text, 200));
     }
-    let names_ok = |n: &str| tools.as_array().into_iter().flatten().any(|t| t["name"] == n);
+    let names_ok = |n: &str| {
+        tools
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|t| t["name"] == n)
+    };
     if let Some((n, _)) = calls.iter().find(|(n, _)| !names_ok(n)) {
-        return (Outcome::Invented, false, false, shown, format!("called {n}, which wasn't offered"));
+        return (
+            Outcome::Invented,
+            false,
+            false,
+            shown,
+            format!("called {n}, which wasn't offered"),
+        );
     }
     for (n, a) in calls {
         let parsed: Value = match serde_json::from_str(a.trim()) {
             Ok(v) => v,
             Err(_) if a.trim().is_empty() => json!({}),
-            Err(e) => return (Outcome::InvalidArgs, false, false, shown, format!("{n}: arguments aren't JSON ({e})")),
+            Err(e) => {
+                return (
+                    Outcome::InvalidArgs,
+                    false,
+                    false,
+                    shown,
+                    format!("{n}: arguments aren't JSON ({e})"),
+                )
+            }
         };
         if let Err(why) = check_call(tools, n, &parsed) {
-            return (Outcome::InvalidArgs, false, false, shown, format!("{n}: {why}"));
+            return (
+                Outcome::InvalidArgs,
+                false,
+                false,
+                shown,
+                format!("{n}: {why}"),
+            );
         }
     }
     let on_task = calls.iter().any(|(n, _)| expect.contains(&n.as_str()));
-    (Outcome::Valid, false, on_task, shown.clone(), shown.join(", "))
+    (
+        Outcome::Valid,
+        false,
+        on_task,
+        shown.clone(),
+        shown.join(", "),
+    )
 }
 
 // ---------------------------------------------------------------- what Claude Code gets, and does with it
@@ -1081,7 +1755,8 @@ pub fn grade(tools: &Value, content: &str, calls: &[(String, String)], expect: &
 /// tool_use blocks. The check is the translator's, uncounted: the eval's calls
 /// stay out of the box's tool-call health.
 pub fn translate(tools: &Value, model: &str, chunks: &[Value]) -> Vec<Value> {
-    let mut s = crate::anthropic::Stream::with_thinking("quietbox", false).checking(crate::anthropic::ToolCheck::uncounted(tools, model));
+    let mut s = crate::anthropic::Stream::with_thinking("quietbox", false)
+        .checking(crate::anthropic::ToolCheck::uncounted(tools, model));
     let mut events: Vec<String> = chunks.iter().flat_map(|c| s.chunk(c)).collect();
     events.extend(s.finish());
     assemble(&events)
@@ -1092,7 +1767,13 @@ fn assemble(events: &[String]) -> Vec<Value> {
     let mut blocks: Vec<Value> = Vec::new();
     let mut inputs: Vec<String> = Vec::new();
     for e in events {
-        let Some(v) = e.lines().find_map(|l| l.strip_prefix("data: ")).and_then(|d| serde_json::from_str::<Value>(d).ok()) else { continue };
+        let Some(v) = e
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .and_then(|d| serde_json::from_str::<Value>(d).ok())
+        else {
+            continue;
+        };
         let i = v["index"].as_u64().unwrap_or(0) as usize;
         match v["type"].as_str() {
             Some("content_block_start") => {
@@ -1106,16 +1787,26 @@ fn assemble(events: &[String]) -> Vec<Value> {
                 let d = &v["delta"];
                 match d["type"].as_str() {
                     Some("text_delta") => {
-                        let t = format!("{}{}", blocks[i]["text"].as_str().unwrap_or(""), d["text"].as_str().unwrap_or(""));
+                        let t = format!(
+                            "{}{}",
+                            blocks[i]["text"].as_str().unwrap_or(""),
+                            d["text"].as_str().unwrap_or("")
+                        );
                         blocks[i]["text"] = json!(t);
                     }
-                    Some("input_json_delta") => inputs[i].push_str(d["partial_json"].as_str().unwrap_or("")),
+                    Some("input_json_delta") => {
+                        inputs[i].push_str(d["partial_json"].as_str().unwrap_or(""))
+                    }
                     _ => {}
                 }
             }
             Some("content_block_stop") if i < blocks.len() && blocks[i]["type"] == "tool_use" => {
                 // As a client takes a call's input: the JSON it was sent, `{}` for none.
-                blocks[i]["input"] = if inputs[i].trim().is_empty() { json!({}) } else { serde_json::from_str(&inputs[i]).unwrap_or(Value::Null) };
+                blocks[i]["input"] = if inputs[i].trim().is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str(&inputs[i]).unwrap_or(Value::Null)
+                };
             }
             _ => {}
         }
@@ -1142,15 +1833,28 @@ fn json_type(v: &Value) -> &'static str {
 /// wrong-type and enum wording wasn't seen there and follows its formatter's
 /// pattern.
 pub fn tool_use_error(tools: &Value, name: &str, input: &Value) -> Option<String> {
-    let Some(tool) = tools.as_array().into_iter().flatten().find(|t| t["name"] == name) else {
-        return Some(format!("<tool_use_error>Error: No such tool available: {name}</tool_use_error>"));
+    let Some(tool) = tools
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|t| t["name"] == name)
+    else {
+        return Some(format!(
+            "<tool_use_error>Error: No such tool available: {name}</tool_use_error>"
+        ));
     };
     let why = check_call(tools, name, input).err()?;
     let s = &tool["input_schema"];
     let empty = serde_json::Map::new();
     let obj = input.as_object().unwrap_or(&empty);
     let mut issues = Vec::new();
-    for r in s["required"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|r| !obj.contains_key(*r)) {
+    for r in s["required"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|r| !obj.contains_key(*r))
+    {
         issues.push(format!("The required parameter `{r}` is missing"));
     }
     let mut unexpected = Vec::new();
@@ -1166,9 +1870,19 @@ pub fn tool_use_error(tools: &Value, name: &str, input: &Value) -> Option<String
             _ => true,
         };
         if !fits {
-            issues.push(format!("The parameter `{k}` type is expected as `{want}` but provided as `{}`", json_type(v)));
+            issues.push(format!(
+                "The parameter `{k}` type is expected as `{want}` but provided as `{}`",
+                json_type(v)
+            ));
         } else if let Some(allowed) = p["enum"].as_array().filter(|a| !a.contains(v)) {
-            issues.push(format!("The parameter `{k}` must be one of {}", allowed.iter().map(Value::to_string).collect::<Vec<_>>().join(", ")));
+            issues.push(format!(
+                "The parameter `{k}` must be one of {}",
+                allowed
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
     }
     issues.extend(unexpected);
@@ -1194,7 +1908,10 @@ fn judge(tools: &Value, content: &[Value]) -> Result<(), Option<Vec<Value>>> {
     if uses.is_empty() {
         return Err(None);
     }
-    let errors: Vec<Option<String>> = uses.iter().map(|b| tool_use_error(tools, b["name"].as_str().unwrap_or(""), &b["input"])).collect();
+    let errors: Vec<Option<String>> = uses
+        .iter()
+        .map(|b| tool_use_error(tools, b["name"].as_str().unwrap_or(""), &b["input"]))
+        .collect();
     if errors.iter().all(Option::is_none) {
         return Ok(());
     }
@@ -1210,11 +1927,27 @@ fn judge(tools: &Value, content: &[Value]) -> Result<(), Option<Vec<Value>>> {
 }
 
 fn shown_calls(content: &[Value]) -> Vec<String> {
-    content.iter().filter(|b| b["type"] == "tool_use").map(|b| clip(&format!("{}({})", b["name"].as_str().unwrap_or(""), b["input"]), 200)).collect()
+    content
+        .iter()
+        .filter(|b| b["type"] == "tool_use")
+        .map(|b| {
+            clip(
+                &format!("{}({})", b["name"].as_str().unwrap_or(""), b["input"]),
+                200,
+            )
+        })
+        .collect()
 }
 
 fn reply_text(content: &[Value]) -> String {
-    clip(&content.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join(" "), 200)
+    clip(
+        &content
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        200,
+    )
 }
 
 /// How a trial recovered.
@@ -1228,10 +1961,22 @@ struct Recovery {
 /// The rest of the turn as Claude Code would have it: the first reply through
 /// the translator and, while a call is still invalid, its errors sent back and
 /// the model asked again, up to `retries` times. `messages` ends with the task.
-async fn recover(server: &Server, tools: &Value, system: &str, mut messages: Vec<Value>, first: &Reply, retries: usize) -> Recovery {
+async fn recover(
+    server: &Server,
+    tools: &Value,
+    system: &str,
+    mut messages: Vec<Value>,
+    first: &Reply,
+    retries: usize,
+) -> Recovery {
     let mut content = translate(tools, &server.model, &first.chunks);
     let mut log = Vec::new();
-    let done = |valid_after, failed_as: Option<&str>, log| Recovery { repaired: valid_after == Some(0), valid_after, failed_as: failed_as.map(str::to_string), retries: log };
+    let done = |valid_after, failed_as: Option<&str>, log| Recovery {
+        repaired: valid_after == Some(0),
+        valid_after,
+        failed_as: failed_as.map(str::to_string),
+        retries: log,
+    };
     for k in 0..=retries {
         let results = match judge(tools, &content) {
             Ok(()) => return done(Some(k), None, log),
@@ -1241,7 +1986,10 @@ async fn recover(server: &Server, tools: &Value, system: &str, mut messages: Vec
         if k == retries {
             break;
         }
-        let sent = results.iter().map(|r| r["content"].as_str().unwrap_or("").to_string()).collect();
+        let sent = results
+            .iter()
+            .map(|r| r["content"].as_str().unwrap_or("").to_string())
+            .collect();
         messages.push(json!({ "role": "assistant", "content": content }));
         messages.push(json!({ "role": "user", "content": results }));
         let (_, body) = request(server, system, &messages);
@@ -1250,10 +1998,22 @@ async fn recover(server: &Server, tools: &Value, system: &str, mut messages: Vec
             Ok(reply) => {
                 content = translate(tools, &server.model, &reply.chunks);
                 let valid = judge(tools, &content).is_ok();
-                log.push(Retry { sent, calls: shown_calls(&content), valid, detail: reply_text(&content), seconds: t.elapsed().as_secs_f64() });
+                log.push(Retry {
+                    sent,
+                    calls: shown_calls(&content),
+                    valid,
+                    detail: reply_text(&content),
+                    seconds: t.elapsed().as_secs_f64(),
+                });
             }
             Err(e) => {
-                log.push(Retry { sent, calls: vec![], valid: false, detail: e.clone(), seconds: t.elapsed().as_secs_f64() });
+                log.push(Retry {
+                    sent,
+                    calls: vec![],
+                    valid: false,
+                    detail: e.clone(),
+                    seconds: t.elapsed().as_secs_f64(),
+                });
                 return done(None, Some("request failed"), log);
             }
         }
@@ -1270,7 +2030,13 @@ struct Session {
     prefill_s: Option<f64>,
 }
 
-async fn session(server: &Server, seed: u64, target: u64, tasks: usize, ratio: &std::sync::Mutex<f64>) -> Session {
+async fn session(
+    server: &Server,
+    seed: u64,
+    target: u64,
+    tasks: usize,
+    ratio: &std::sync::Mutex<f64>,
+) -> Session {
     let p = project(seed);
     let system = system_prompt(&p);
     let mut r = Rng::new(seed.wrapping_mul(31).wrapping_add(target));
@@ -1279,7 +2045,12 @@ async fn session(server: &Server, seed: u64, target: u64, tasks: usize, ratio: &
         let j = r.below(i + 1);
         order.swap(i, j);
     }
-    let tasks: Vec<(&Task, String)> = order.iter().cycle().take(tasks).map(|&i| (&TASKS[i], (TASKS[i].text)(&p, &mut r))).collect();
+    let tasks: Vec<(&Task, String)> = order
+        .iter()
+        .cycle()
+        .take(tasks)
+        .map(|&i| (&TASKS[i], (TASKS[i].text)(&p, &mut r)))
+        .collect();
     // Grow the session until the prompt (with the longest last turn) is about the target.
     let longest = tasks.iter().map(|(_, t)| t.len()).max().unwrap_or(0);
     let mut chars = (target as f64 * *ratio.lock().expect("ratio")) as usize;
@@ -1305,30 +2076,54 @@ async fn session(server: &Server, seed: u64, target: u64, tasks: usize, ratio: &
             break;
         }
         // The fixed part (system prompt, tools) doesn't scale: correct by the difference.
-        chars = (chars as i64 + ((target as i64 - n as i64) as f64 * size) as i64).max(1000) as usize;
+        chars =
+            (chars as i64 + ((target as i64 - n as i64) as f64 * size) as i64).max(1000) as usize;
     }
-    Session { system, messages, tasks, prefill_s }
+    Session {
+        system,
+        messages,
+        tasks,
+        prefill_s,
+    }
 }
 
 /// Runs the trials for every size in `opts` that fits the model's context.
 /// `progress` hears each size as it starts; `stop` is asked between requests.
-pub async fn run(server: &Server, opts: &Options, progress: &(dyn Fn(String) + Sync), stop: &(dyn Fn() -> bool + Sync)) -> Result<(Report, Vec<Trial>), String> {
+pub async fn run(
+    server: &Server,
+    opts: &Options,
+    progress: &(dyn Fn(String) + Sync),
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Result<(Report, Vec<Trial>), String> {
     let tools = tools();
     let ratio = std::sync::Mutex::new(3.6_f64);
     let mut trials = Vec::new();
     let mut rows = Vec::new();
     // Room for the reply: a size that leaves under 4K tokens for it isn't a session Code would have.
-    let lengths: Vec<u64> = opts.lengths.iter().copied().filter(|l| server.context.is_none_or(|c| l + 4096 <= c)).collect();
+    let lengths: Vec<u64> = opts
+        .lengths
+        .iter()
+        .copied()
+        .filter(|l| server.context.is_none_or(|c| l + 4096 <= c))
+        .collect();
     for (li, &target) in lengths.iter().enumerate() {
         if stop() {
             return Err("Stopped.".into());
         }
-        progress(format!("{}K-token sessions ({} of {})", target / 1024, li + 1, lengths.len()));
+        progress(format!(
+            "{}K-token sessions ({} of {})",
+            target / 1024,
+            li + 1,
+            lengths.len()
+        ));
         let here: Vec<Vec<Trial>> = futures_util::stream::iter(0..opts.histories)
             .map(|h| {
                 let (tools, ratio) = (&tools, &ratio);
                 async move {
-                    let seed = opts.seed.wrapping_mul(1_000_003).wrapping_add(h as u64 * 7919 + target);
+                    let seed = opts
+                        .seed
+                        .wrapping_mul(1_000_003)
+                        .wrapping_add(h as u64 * 7919 + target);
                     let s = session(server, seed, target, opts.tasks, ratio).await;
                     let mut out = Vec::new();
                     // One at a time within a session, each finding it in the server's prefix cache.
@@ -1343,13 +2138,58 @@ pub async fn run(server: &Server, opts: &Options, progress: &(dyn Fn(String) + S
                         let trial = match send(server, &body).await {
                             Ok(reply) => {
                                 let seconds = t.elapsed().as_secs_f64();
-                                let (outcome, salvaged, on_task, calls, detail) = grade(tools, &reply.content, &reply.calls, task.expect);
-                                let r = recover(server, tools, &s.system, messages, &reply, opts.retries).await;
-                                Trial { target, history: h, task: task.key.into(), prompt_tokens: reply.prompt_tokens, completion_tokens: reply.completion_tokens, outcome, prefill_s: s.prefill_s, salvaged, on_task, calls, detail, finish_reason: reply.finish, seconds, ttft_s: reply.ttft,
-                                    repaired: r.repaired, valid_after: r.valid_after, failed_as: r.failed_as, retries: r.retries }
+                                let (outcome, salvaged, on_task, calls, detail) =
+                                    grade(tools, &reply.content, &reply.calls, task.expect);
+                                let r = recover(
+                                    server,
+                                    tools,
+                                    &s.system,
+                                    messages,
+                                    &reply,
+                                    opts.retries,
+                                )
+                                .await;
+                                Trial {
+                                    target,
+                                    history: h,
+                                    task: task.key.into(),
+                                    prompt_tokens: reply.prompt_tokens,
+                                    completion_tokens: reply.completion_tokens,
+                                    outcome,
+                                    prefill_s: s.prefill_s,
+                                    salvaged,
+                                    on_task,
+                                    calls,
+                                    detail,
+                                    finish_reason: reply.finish,
+                                    seconds,
+                                    ttft_s: reply.ttft,
+                                    repaired: r.repaired,
+                                    valid_after: r.valid_after,
+                                    failed_as: r.failed_as,
+                                    retries: r.retries,
+                                }
                             }
-                            Err(e) => Trial { target, history: h, task: task.key.into(), prompt_tokens: None, completion_tokens: None, outcome: Outcome::Error, prefill_s: s.prefill_s, salvaged: false, on_task: false, calls: vec![], detail: e, finish_reason: None, seconds: t.elapsed().as_secs_f64(), ttft_s: None,
-                                repaired: false, valid_after: None, failed_as: None, retries: vec![] },
+                            Err(e) => Trial {
+                                target,
+                                history: h,
+                                task: task.key.into(),
+                                prompt_tokens: None,
+                                completion_tokens: None,
+                                outcome: Outcome::Error,
+                                prefill_s: s.prefill_s,
+                                salvaged: false,
+                                on_task: false,
+                                calls: vec![],
+                                detail: e,
+                                finish_reason: None,
+                                seconds: t.elapsed().as_secs_f64(),
+                                ttft_s: None,
+                                repaired: false,
+                                valid_after: None,
+                                failed_as: None,
+                                retries: vec![],
+                            },
                         };
                         out.push(trial);
                     }
@@ -1370,21 +2210,52 @@ pub async fn run(server: &Server, opts: &Options, progress: &(dyn Fn(String) + S
     let recommended_window = recommend_window(&rows);
     let raw_window = recommend_window_raw(&rows);
     Ok((
-        Report { model: server.model.clone(), context: server.context, histories: opts.histories, tasks: opts.tasks, seed: opts.seed, rows, recommended_window, rule: RULE.into(), retries: opts.retries, raw_window, raw_rule: RAW_RULE.into() },
+        Report {
+            model: server.model.clone(),
+            context: server.context,
+            histories: opts.histories,
+            tasks: opts.tasks,
+            seed: opts.seed,
+            rows,
+            recommended_window,
+            rule: RULE.into(),
+            retries: opts.retries,
+            raw_window,
+            raw_rule: RAW_RULE.into(),
+        },
         trials,
     ))
 }
 
 /// The results as a Markdown table.
 pub fn table(report: &Report) -> String {
-    let pct = |k: usize, n: usize| if n == 0 { "–".to_string() } else { format!("{:.0}%", 100.0 * k as f64 / n as f64) };
+    let pct = |k: usize, n: usize| {
+        if n == 0 {
+            "–".to_string()
+        } else {
+            format!("{:.0}%", 100.0 * k as f64 / n as f64)
+        }
+    };
     let secs = |s: Option<f64>| s.map_or("–".into(), |s| format!("{s:.1} s"));
     let mut out = String::from("| Target | Prompt tokens (median) | Trials | Valid | 95% CI | Leaked as text | Invented tool | Invalid args | No call | Salvageable leaks | Errors | Median latency (cached prefix) | Median prefill (cold) |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for r in &report.rows {
         out.push_str(&format!(
             "| {}K | {} | {} | {} | {:.0}–{:.0}% | {} | {} | {} | {} | {}/{} | {} | {} | {} |\n",
-            r.target / 1024, r.prompt_tokens.map_or("–".into(), |t| t.to_string()), r.trials, pct(r.valid, r.trials), 100.0 * r.ci_low, 100.0 * r.ci_high,
-            pct(r.leaked, r.trials), pct(r.invented, r.trials), pct(r.invalid_args, r.trials), pct(r.no_call, r.trials), r.salvaged, r.leaked, r.errors, secs(r.median_s), secs(r.median_prefill_s),
+            r.target / 1024,
+            r.prompt_tokens.map_or("–".into(), |t| t.to_string()),
+            r.trials,
+            pct(r.valid, r.trials),
+            100.0 * r.ci_low,
+            100.0 * r.ci_high,
+            pct(r.leaked, r.trials),
+            pct(r.invented, r.trials),
+            pct(r.invalid_args, r.trials),
+            pct(r.no_call, r.trials),
+            r.salvaged,
+            r.leaked,
+            r.errors,
+            secs(r.median_s),
+            secs(r.median_prefill_s),
         ));
     }
     out
@@ -1393,13 +2264,27 @@ pub fn table(report: &Report) -> String {
 /// Recovery, as a Markdown table: valid calls as returned, after the
 /// translator, and within one and two retries.
 pub fn recovery_table(report: &Report) -> String {
-    let pct = |k: usize, n: usize| if n == 0 { "–".to_string() } else { format!("{:.0}% ({k}/{n})", 100.0 * k as f64 / n as f64) };
+    let pct = |k: usize, n: usize| {
+        if n == 0 {
+            "–".to_string()
+        } else {
+            format!("{:.0}% ({k}/{n})", 100.0 * k as f64 / n as f64)
+        }
+    };
     let mut out = String::from("| Target | Trials | First reply valid (raw) | After translator repair | Within 1 retry | 95% CI (1 retry) | Within 2 retries | Still failing | of which: no call |\n|---|---|---|---|---|---|---|---|---|\n");
     for r in &report.rows {
         out.push_str(&format!(
             "| {}K | {} | {} | {} | {} | {:.0}–{:.0}% | {} | {} | {} |\n",
-            r.target / 1024, r.trials, pct(r.valid, r.trials), pct(r.repaired, r.trials), pct(r.within_1_retry, r.trials), 100.0 * r.recovered_ci_low, 100.0 * r.recovered_ci_high,
-            pct(r.within_2_retries, r.trials), pct(r.still_failing, r.trials), r.ended_without_call,
+            r.target / 1024,
+            r.trials,
+            pct(r.valid, r.trials),
+            pct(r.repaired, r.trials),
+            pct(r.within_1_retry, r.trials),
+            100.0 * r.recovered_ci_low,
+            100.0 * r.recovered_ci_high,
+            pct(r.within_2_retries, r.trials),
+            pct(r.still_failing, r.trials),
+            r.ended_without_call,
         ));
     }
     out
@@ -1413,47 +2298,184 @@ mod tests {
     fn grades_each_kind_of_reply() {
         let t = tools();
         let call = |n: &str, a: &str| vec![(n.to_string(), a.to_string())];
-        assert_eq!(grade(&t, "", &call("Read", r#"{"file_path":"/work/src/a.rs","offset":10,"limit":40}"#), &["Read"]).0, Outcome::Valid);
-        assert!(grade(&t, "", &call("Bash", r#"{"command":"cargo test"}"#), &["Bash"]).2, "on task");
+        assert_eq!(
+            grade(
+                &t,
+                "",
+                &call(
+                    "Read",
+                    r#"{"file_path":"/work/src/a.rs","offset":10,"limit":40}"#
+                ),
+                &["Read"]
+            )
+            .0,
+            Outcome::Valid
+        );
+        assert!(
+            grade(
+                &t,
+                "",
+                &call("Bash", r#"{"command":"cargo test"}"#),
+                &["Bash"]
+            )
+            .2,
+            "on task"
+        );
         let leaked = "Let me look.\n\nassistantcommentary to=functions.Read json{\"file_path\":\"/work/src/a.rs\",\"offset\":1,\"limit\":20}";
         let (o, salvaged, ..) = grade(&t, leaked, &[], &["Read"]);
         assert_eq!((o, salvaged), (Outcome::Leaked, true));
-        let (o, salvaged, ..) = grade(&t, "assistantcommentary to=functions.Read json{\"file_path\":\"a\",\"line_start\":1}", &[], &["Read"]);
-        assert_eq!((o, salvaged), (Outcome::Leaked, false), "leaked with an invented parameter can't be salvaged as valid");
-        assert_eq!(grade(&t, "", &call("Search", r#"{"query":"x"}"#), &[]).0, Outcome::Invented);
-        assert_eq!(grade(&t, "", &call("Read<|channel|>commentary", r#"{"file_path":"a"}"#), &[]).0, Outcome::Invented);
-        assert_eq!(grade(&t, "", &call("Read", r#"{"file_path":"a","line_start":1,"line_end":9}"#), &[]).0, Outcome::InvalidArgs);
-        assert_eq!(grade(&t, "", &call("Read", r#"{"file_path":"a","offset":"10"}"#), &[]).0, Outcome::InvalidArgs);
-        assert_eq!(grade(&t, "", &call("Edit", r#"{"file_path":"a","new_string":"b"}"#), &[]).0, Outcome::InvalidArgs);
-        assert_eq!(grade(&t, "", &call("Grep", r#"{"pattern":"x","output_mode":"lines"}"#), &[]).0, Outcome::InvalidArgs);
-        assert_eq!(grade(&t, "", &call("Bash", "{\"command\": \"ls"), &[]).0, Outcome::InvalidArgs);
-        assert_eq!(grade(&t, "Sure, here's what I'd do.", &[], &["Bash"]).0, Outcome::NoCall);
+        let (o, salvaged, ..) = grade(
+            &t,
+            "assistantcommentary to=functions.Read json{\"file_path\":\"a\",\"line_start\":1}",
+            &[],
+            &["Read"],
+        );
+        assert_eq!(
+            (o, salvaged),
+            (Outcome::Leaked, false),
+            "leaked with an invented parameter can't be salvaged as valid"
+        );
+        assert_eq!(
+            grade(&t, "", &call("Search", r#"{"query":"x"}"#), &[]).0,
+            Outcome::Invented
+        );
+        assert_eq!(
+            grade(
+                &t,
+                "",
+                &call("Read<|channel|>commentary", r#"{"file_path":"a"}"#),
+                &[]
+            )
+            .0,
+            Outcome::Invented
+        );
+        assert_eq!(
+            grade(
+                &t,
+                "",
+                &call("Read", r#"{"file_path":"a","line_start":1,"line_end":9}"#),
+                &[]
+            )
+            .0,
+            Outcome::InvalidArgs
+        );
+        assert_eq!(
+            grade(
+                &t,
+                "",
+                &call("Read", r#"{"file_path":"a","offset":"10"}"#),
+                &[]
+            )
+            .0,
+            Outcome::InvalidArgs
+        );
+        assert_eq!(
+            grade(
+                &t,
+                "",
+                &call("Edit", r#"{"file_path":"a","new_string":"b"}"#),
+                &[]
+            )
+            .0,
+            Outcome::InvalidArgs
+        );
+        assert_eq!(
+            grade(
+                &t,
+                "",
+                &call("Grep", r#"{"pattern":"x","output_mode":"lines"}"#),
+                &[]
+            )
+            .0,
+            Outcome::InvalidArgs
+        );
+        assert_eq!(
+            grade(&t, "", &call("Bash", "{\"command\": \"ls"), &[]).0,
+            Outcome::InvalidArgs
+        );
+        assert_eq!(
+            grade(&t, "Sure, here's what I'd do.", &[], &["Bash"]).0,
+            Outcome::NoCall
+        );
         // Two calls: valid only if both are.
-        let two = vec![("Read".to_string(), r#"{"file_path":"a"}"#.to_string()), ("Bash".to_string(), "{}".to_string())];
+        let two = vec![
+            ("Read".to_string(), r#"{"file_path":"a"}"#.to_string()),
+            ("Bash".to_string(), "{}".to_string()),
+        ];
         assert_eq!(grade(&t, "", &two, &[]).0, Outcome::InvalidArgs);
     }
 
     #[test]
     fn recommends_the_largest_size_that_holds_up_from_the_bottom() {
-        let row = |target, valid, trials| Row { target, within_1_retry: valid, trials, recovered_rate: valid as f64 / trials as f64, ..Default::default() };
-        assert_eq!(recommend_window(&[row(8192, 20, 20), row(16384, 20, 20), row(32768, 19, 20), row(65536, 18, 20), row(98304, 20, 20)]), Some(32768), "a later lucky size doesn't count past a failing one");
+        let row = |target, valid, trials| Row {
+            target,
+            within_1_retry: valid,
+            trials,
+            recovered_rate: valid as f64 / trials as f64,
+            ..Default::default()
+        };
+        assert_eq!(
+            recommend_window(&[
+                row(8192, 20, 20),
+                row(16384, 20, 20),
+                row(32768, 19, 20),
+                row(65536, 18, 20),
+                row(98304, 20, 20)
+            ]),
+            Some(32768),
+            "a later lucky size doesn't count past a failing one"
+        );
         assert_eq!(recommend_window(&[row(8192, 18, 20)]), None);
-        assert_eq!(recommend_window(&[row(8192, 10, 10)]), None, "too few trials");
-        assert_eq!(recommend_window(&[row(65536, 40, 40), row(8192, 40, 40)]), Some(65536), "order doesn't matter");
+        assert_eq!(
+            recommend_window(&[row(8192, 10, 10)]),
+            None,
+            "too few trials"
+        );
+        assert_eq!(
+            recommend_window(&[row(65536, 40, 40), row(8192, 40, 40)]),
+            Some(65536),
+            "order doesn't matter"
+        );
     }
 
     #[test]
     fn the_raw_and_recovered_windows_are_judged_apart() {
         // First replies at 86%, all but one fine within a retry.
-        let row = |target| Row { target, trials: 50, valid: 43, valid_rate: 0.86, within_1_retry: 49, recovered_rate: 0.98, ..Default::default() };
+        let row = |target| Row {
+            target,
+            trials: 50,
+            valid: 43,
+            valid_rate: 0.86,
+            within_1_retry: 49,
+            recovered_rate: 0.98,
+            ..Default::default()
+        };
         let rows = [row(8192), row(16384)];
         assert_eq!(recommend_window(&rows), Some(16384));
         assert_eq!(recommend_window_raw(&rows), None);
     }
 
     fn trial(outcome: Outcome, valid_after: Option<usize>, failed_as: Option<&str>) -> Trial {
-        Trial { target: 8192, history: 0, task: "t".into(), prompt_tokens: Some(8000), completion_tokens: None, outcome, prefill_s: None, salvaged: false, on_task: false, calls: vec![], detail: String::new(),
-            finish_reason: None, seconds: 1.0, ttft_s: None, repaired: valid_after == Some(0), valid_after, failed_as: failed_as.map(str::to_string), retries: vec![] }
+        Trial {
+            target: 8192,
+            history: 0,
+            task: "t".into(),
+            prompt_tokens: Some(8000),
+            completion_tokens: None,
+            outcome,
+            prefill_s: None,
+            salvaged: false,
+            on_task: false,
+            calls: vec![],
+            detail: String::new(),
+            finish_reason: None,
+            seconds: 1.0,
+            ttft_s: None,
+            repaired: valid_after == Some(0),
+            valid_after,
+            failed_as: failed_as.map(str::to_string),
+            retries: vec![],
+        }
     }
 
     #[test]
@@ -1468,14 +2490,28 @@ mod tests {
             trial(Outcome::Error, None, None),
         ];
         let r = summarize(8192, &t);
-        assert_eq!((r.trials, r.valid, r.repaired, r.within_1_retry, r.within_2_retries, r.still_failing, r.ended_without_call), (6, 1, 2, 3, 4, 2, 1));
+        assert_eq!(
+            (
+                r.trials,
+                r.valid,
+                r.repaired,
+                r.within_1_retry,
+                r.within_2_retries,
+                r.still_failing,
+                r.ended_without_call
+            ),
+            (6, 1, 2, 3, 4, 2, 1)
+        );
         assert!((r.recovered_rate - 0.5).abs() < 1e-9);
     }
 
     #[test]
     fn errors_are_worded_as_claude_code_words_them() {
         let t = tools();
-        assert_eq!(tool_use_error(&t, "Read", &json!({ "file_path": "a", "offset": 1 })), None);
+        assert_eq!(
+            tool_use_error(&t, "Read", &json!({ "file_path": "a", "offset": 1 })),
+            None
+        );
         assert_eq!(tool_use_error(&t, "Read<|channel|>commentary", &json!({ "file_path": "a" })).unwrap(), "<tool_use_error>Error: No such tool available: Read<|channel|>commentary</tool_use_error>");
         assert_eq!(tool_use_error(&t, "Edit", &json!({ "file_path": "a", "new_string": "b" })).unwrap(), "<tool_use_error>InputValidationError: Edit failed due to the following issue:\nThe required parameter `old_string` is missing</tool_use_error>");
         assert_eq!(
@@ -1487,17 +2523,40 @@ mod tests {
             tool_use_error(&t, "Bash", &json!({ "_unparsed_arguments": "{\"command\": \"ls" })).unwrap(),
             "<tool_use_error>InputValidationError: Bash failed due to the following issues:\nThe required parameter `command` is missing\nAn unexpected parameter `_unparsed_arguments` was provided</tool_use_error>"
         );
-        assert!(tool_use_error(&t, "Read", &json!({ "file_path": "a", "offset": "ten" })).unwrap().contains("The parameter `offset` type is expected as `number` but provided as `string`"));
-        assert!(tool_use_error(&t, "Grep", &json!({ "pattern": "x", "output_mode": "lines" })).unwrap().contains("`output_mode` must be one of"));
+        assert!(
+            tool_use_error(&t, "Read", &json!({ "file_path": "a", "offset": "ten" }))
+                .unwrap()
+                .contains(
+                    "The parameter `offset` type is expected as `number` but provided as `string`"
+                )
+        );
+        assert!(tool_use_error(
+            &t,
+            "Grep",
+            &json!({ "pattern": "x", "output_mode": "lines" })
+        )
+        .unwrap()
+        .contains("`output_mode` must be one of"));
         // An error exactly when the grader calls it invalid.
-        for (n, a) in [("Read", json!({})), ("Glob", json!({ "pattern": "*", "depth": 2 })), ("Bash", json!({ "command": "ls", "timeout": 5 })), ("Write", json!(null))] {
-            assert_eq!(tool_use_error(&t, n, &a).is_some(), check_call(&t, n, &a).is_err(), "{n} {a}");
+        for (n, a) in [
+            ("Read", json!({})),
+            ("Glob", json!({ "pattern": "*", "depth": 2 })),
+            ("Bash", json!({ "command": "ls", "timeout": 5 })),
+            ("Write", json!(null)),
+        ] {
+            assert_eq!(
+                tool_use_error(&t, n, &a).is_some(),
+                check_call(&t, n, &a).is_err(),
+                "{n} {a}"
+            );
         }
     }
 
     /// A streamed reply, as vLLM sends it: text, then calls, then the finish.
     fn chunks(text: &str, calls: &[(&str, &str)]) -> Vec<Value> {
-        let mut out = vec![json!({ "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "" } }] })];
+        let mut out = vec![
+            json!({ "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "" } }] }),
+        ];
         if !text.is_empty() {
             out.push(json!({ "choices": [{ "index": 0, "delta": { "content": text } }] }));
         }
@@ -1515,30 +2574,76 @@ mod tests {
         let model = "eval-test/translate";
         let one = |text: &str, calls: &[(&str, &str)]| translate(&t, model, &chunks(text, calls));
         // Harmony residue on the name, a number written as a string: mended.
-        let c = one("", &[("Read<|channel|>commentary", r#"{"file_path":"/work/a.rs","offset":"10","limit":40}"#)]);
+        let c = one(
+            "",
+            &[(
+                "Read<|channel|>commentary",
+                r#"{"file_path":"/work/a.rs","offset":"10","limit":40}"#,
+            )],
+        );
         assert_eq!(c.len(), 1);
-        assert_eq!((c[0]["type"].as_str(), c[0]["name"].as_str(), &c[0]["input"]["offset"]), (Some("tool_use"), Some("Read"), &json!(10)));
+        assert_eq!(
+            (
+                c[0]["type"].as_str(),
+                c[0]["name"].as_str(),
+                &c[0]["input"]["offset"]
+            ),
+            (Some("tool_use"), Some("Read"), &json!(10))
+        );
         assert_eq!(judge(&t, &c), Ok(()));
         // A call leaked into the text: salvaged into a call, the text before it kept.
         let c = one("Let me look.\n\nassistantcommentary to=functions.Read json{\"file_path\":\"/work/a.rs\"}", &[]);
-        assert_eq!(c.iter().map(|b| b["type"].as_str().unwrap()).collect::<Vec<_>>(), ["text", "tool_use"]);
+        assert_eq!(
+            c.iter()
+                .map(|b| b["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["text", "tool_use"]
+        );
         assert_eq!(c[0]["text"].as_str().map(str::trim), Some("Let me look."));
         assert_eq!(judge(&t, &c), Ok(()));
         // An invented parameter: left alone, so Claude Code's error goes back.
-        let c = one("", &[("Read", r#"{"file_path":"a","line_start":1,"line_end":9}"#)]);
-        let Err(Some(results)) = judge(&t, &c) else { panic!("should be sent back") };
-        assert_eq!((results.len(), &results[0]["is_error"], &results[0]["tool_use_id"]), (1, &json!(true), &json!("call_0")));
-        assert!(results[0]["content"].as_str().unwrap().contains("unexpected parameter `line_end`"));
+        let c = one(
+            "",
+            &[("Read", r#"{"file_path":"a","line_start":1,"line_end":9}"#)],
+        );
+        let Err(Some(results)) = judge(&t, &c) else {
+            panic!("should be sent back")
+        };
+        assert_eq!(
+            (
+                results.len(),
+                &results[0]["is_error"],
+                &results[0]["tool_use_id"]
+            ),
+            (1, &json!(true), &json!("call_0"))
+        );
+        assert!(results[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("unexpected parameter `line_end`"));
         // Text alone ends the turn: nothing to retry.
         assert_eq!(judge(&t, &one("All done.", &[])), Err(None));
         // Two calls, one fine: it runs, the other gets its error.
-        let c = one("", &[("Bash", r#"{"command":"ls"}"#), ("Search", r#"{"query":"x"}"#)]);
-        let Err(Some(results)) = judge(&t, &c) else { panic!("should be sent back") };
+        let c = one(
+            "",
+            &[
+                ("Bash", r#"{"command":"ls"}"#),
+                ("Search", r#"{"query":"x"}"#),
+            ],
+        );
+        let Err(Some(results)) = judge(&t, &c) else {
+            panic!("should be sent back")
+        };
         assert_eq!(results[0]["content"], STAND_IN);
         assert!(results[0].get("is_error").is_none());
-        assert_eq!(results[1]["content"], "<tool_use_error>Error: No such tool available: Search</tool_use_error>");
+        assert_eq!(
+            results[1]["content"],
+            "<tool_use_error>Error: No such tool available: Search</tool_use_error>"
+        );
         // None of it counts as a client's call.
-        assert!(crate::anthropic::tool_call_health().iter().all(|h| h["model"] != model));
+        assert!(crate::anthropic::tool_call_health()
+            .iter()
+            .all(|h| h["model"] != model));
     }
 
     #[test]
@@ -1562,7 +2667,12 @@ mod tests {
             // Every call it made in the past was a valid one, and has its result.
             let t = tools();
             for (i, m) in a.iter().enumerate() {
-                for b in m["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "tool_use") {
+                for b in m["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|b| b["type"] == "tool_use")
+                {
                     check_call(&t, b["name"].as_str().unwrap(), &b["input"]).unwrap();
                     assert_eq!(a[i + 1]["content"][0]["tool_use_id"], b["id"]);
                 }
@@ -1573,7 +2683,12 @@ mod tests {
 
     #[test]
     fn asks_the_way_the_translator_does() {
-        let server = Server { http: reqwest::Client::new(), base_url: "http://localhost:8003/v1".into(), model: "openai/gpt-oss-20b".into(), context: Some(131_072) };
+        let server = Server {
+            http: reqwest::Client::new(),
+            base_url: "http://localhost:8003/v1".into(),
+            model: "openai/gpt-oss-20b".into(),
+            context: Some(131_072),
+        };
         let p = project(5);
         let mut m = history(&p, 5, 20_000);
         m.push(json!({ "role": "user", "content": "Run the tests." }));
@@ -1582,10 +2697,17 @@ mod tests {
         assert_eq!(body["stream"], true);
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
-        assert!(body.get("temperature").is_none(), "Claude Code sends none: the server's own sampling");
+        assert!(
+            body.get("temperature").is_none(),
+            "Claude Code sends none: the server's own sampling"
+        );
         assert_eq!(body["tools"].as_array().unwrap().len(), 6);
         assert_eq!(body["messages"][0]["role"], "system");
-        assert!(body["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool"));
+        assert!(body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["role"] == "tool"));
         assert_eq!(body["max_tokens"], 16_384);
     }
 }

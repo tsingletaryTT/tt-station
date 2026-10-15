@@ -643,7 +643,9 @@ pub async fn gather(state: &AppState) -> Facts {
     .await;
     let (docker_ok, stray_containers, hugepages_1g, disk_free_gb, boot, headless) =
         blocking.unwrap_or((false, vec![], None, None, false, false));
-    let (network, iommu_translated, driver_hangs) = tokio::task::spawn_blocking(system_facts).await.unwrap_or((None, None, 0));
+    let (network, iommu_translated, driver_hangs) = tokio::task::spawn_blocking(system_facts)
+        .await
+        .unwrap_or((None, None, 0));
 
     Facts {
         expected_chips,
@@ -673,16 +675,33 @@ pub async fn gather(state: &AppState) -> Facts {
 fn system_facts() -> (Option<(String, bool, Option<String>)>, Option<bool>, u32) {
     use std::process::{Command, Stdio};
     let run = |cmd: &str, args: &[&str]| {
-        Command::new(cmd).args(args).stdin(Stdio::null()).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+        Command::new(cmd)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
     };
     let route = run("ip", &["route", "get", "1.1.1.1"]);
-    let dev = route.split_whitespace().skip_while(|w| *w != "dev").nth(1).map(str::to_string);
+    let dev = route
+        .split_whitespace()
+        .skip_while(|w| *w != "dev")
+        .nth(1)
+        .map(str::to_string);
     let network = dev.map(|dev| {
         let wifi = Path::new(&format!("/sys/class/net/{dev}/wireless")).exists();
-        let unplugged = std::fs::read_dir("/sys/class/net").into_iter().flatten().flatten()
+        let unplugged = std::fs::read_dir("/sys/class/net")
+            .into_iter()
+            .flatten()
+            .flatten()
             .map(|e| e.file_name().to_string_lossy().to_string())
             .filter(|n| n.starts_with("en") || n.starts_with("eth"))
-            .find(|n| std::fs::read_to_string(format!("/sys/class/net/{n}/carrier")).map(|c| c.trim() == "0").unwrap_or(true));
+            .find(|n| {
+                std::fs::read_to_string(format!("/sys/class/net/{n}/carrier"))
+                    .map(|c| c.trim() == "0")
+                    .unwrap_or(true)
+            });
         (dev, wifi, unplugged)
     });
     let kernel = run("journalctl", &["-k", "-b", "--no-pager", "-q"]);
@@ -701,7 +720,11 @@ fn system_facts() -> (Option<(String, bool, Option<String>)>, Option<bool>, u32)
     let mut stuck: std::collections::HashSet<String> = Default::default();
     let lines: Vec<&str> = kernel.lines().collect();
     for (i, l) in lines.iter().enumerate() {
-        if let Some(rest) = l.split("INFO: task ").nth(1).filter(|_| l.contains("blocked for more than")) {
+        if let Some(rest) = l
+            .split("INFO: task ")
+            .nth(1)
+            .filter(|_| l.contains("blocked for more than"))
+        {
             let window = lines[i..lines.len().min(i + 40)].join("\n");
             if window.contains("[tenstorrent]") {
                 stuck.insert(rest.split_whitespace().next().unwrap_or("").to_string());
@@ -1032,14 +1055,28 @@ mod tests {
             ..Default::default()
         };
         let c = checks(&f);
-        let get = |id: &str| c.iter().find(|x| x.id == id).unwrap_or_else(|| panic!("no {id} check"));
+        let get = |id: &str| {
+            c.iter()
+                .find(|x| x.id == id)
+                .unwrap_or_else(|| panic!("no {id} check"))
+        };
         assert!(get("network").detail.contains("enp10s0"));
         assert_eq!(get("iommu").status, Status::Info);
-        assert!(get("iommu").command.as_deref().unwrap_or("").contains("iommu=pt"));
+        assert!(get("iommu")
+            .command
+            .as_deref()
+            .unwrap_or("")
+            .contains("iommu=pt"));
         assert_eq!(get("driver_hang").status, Status::Warn);
         assert!(get("stuck_start").detail.contains("15 minutes"));
-        let wired = Facts { network: Some(("enp10s0".into(), false, None)), ..Default::default() };
-        assert!(checks(&wired).iter().all(|x| x.id != "network"), "nothing to say about a wired box");
+        let wired = Facts {
+            network: Some(("enp10s0".into(), false, None)),
+            ..Default::default()
+        };
+        assert!(
+            checks(&wired).iter().all(|x| x.id != "network"),
+            "nothing to say about a wired box"
+        );
     }
 
     fn healthy() -> Facts {

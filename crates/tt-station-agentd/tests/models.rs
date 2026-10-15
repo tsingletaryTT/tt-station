@@ -42,15 +42,26 @@ async fn models_returns_catalog_from_runpy_backend_to_the_box_itself() {
     let addr = listener.local_addr().expect("failed to read local addr");
 
     tokio::spawn(async move {
-        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let other_addr = other.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(other, network).await.unwrap();
     });
-    let unpaired = reqwest::get(format!("http://{other_addr}/models")).await.unwrap();
-    assert_eq!(unpaired.status(), reqwest::StatusCode::UNAUTHORIZED, "the network needs pairing");
+    let unpaired = reqwest::get(format!("http://{other_addr}/models"))
+        .await
+        .unwrap();
+    assert_eq!(
+        unpaired.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "the network needs pairing"
+    );
 
     let resp = reqwest::get(format!("http://{addr}/models"))
         .await
@@ -83,15 +94,26 @@ async fn models_returns_empty_catalog_for_backend_without_override() {
     let addr = listener.local_addr().expect("failed to read local addr");
 
     tokio::spawn(async move {
-        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let other_addr = other.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(other, network).await.unwrap();
     });
-    let unpaired = reqwest::get(format!("http://{other_addr}/models")).await.unwrap();
-    assert_eq!(unpaired.status(), reqwest::StatusCode::UNAUTHORIZED, "the network needs pairing");
+    let unpaired = reqwest::get(format!("http://{other_addr}/models"))
+        .await
+        .unwrap();
+    assert_eq!(
+        unpaired.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "the network needs pairing"
+    );
 
     let resp = reqwest::get(format!("http://{addr}/models"))
         .await

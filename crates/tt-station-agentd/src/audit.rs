@@ -55,7 +55,10 @@ pub struct Actor {
 impl Actor {
     /// The box's own user, from a program on the box.
     pub fn the_box() -> Self {
-        Actor { device_id: None, device_name: "This box".to_string() }
+        Actor {
+            device_id: None,
+            device_name: "This box".to_string(),
+        }
     }
 }
 
@@ -86,19 +89,27 @@ pub struct AuditLog {
 
 impl std::fmt::Debug for AuditLog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuditLog").field("path", &self.path).finish_non_exhaustive()
+        f.debug_struct("AuditLog")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
     }
 }
 
 impl AuditLog {
     /// Kept in memory only (tests, or no config directory).
     pub fn in_memory() -> Self {
-        AuditLog { path: None, memory: Mutex::new(Vec::new()) }
+        AuditLog {
+            path: None,
+            memory: Mutex::new(Vec::new()),
+        }
     }
 
     /// Appended to `path` (created 0600 on the first entry).
     pub fn open(path: impl Into<PathBuf>) -> Self {
-        AuditLog { path: Some(path.into()), memory: Mutex::new(Vec::new()) }
+        AuditLog {
+            path: Some(path.into()),
+            memory: Mutex::new(Vec::new()),
+        }
     }
 
     /// Add `entry`. A failed write is logged, never returned: the action it
@@ -113,7 +124,10 @@ impl AuditLog {
             return;
         };
         if let Err(e) = append_line(path, &entry, MAX_BYTES) {
-            eprintln!("tt-station-agentd: couldn't write the activity log at {}: {e}", path.display());
+            eprintln!(
+                "tt-station-agentd: couldn't write the activity log at {}: {e}",
+                path.display()
+            );
         }
     }
 
@@ -189,21 +203,37 @@ fn append_line(path: &Path, entry: &Entry, max: u64) -> std::io::Result<()> {
             }
         }
     }
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
     file.write_all(line.as_bytes())?;
     Ok(())
 }
 
 /// Record an action by whoever made the current request (see [`ACTOR`]).
 pub fn record(state: &crate::routes::AppState, action: &str, target: &str, result: &str) {
-    let actor = ACTOR.try_with(Clone::clone).unwrap_or_else(|_| Actor::the_box());
+    let actor = ACTOR
+        .try_with(Clone::clone)
+        .unwrap_or_else(|_| Actor::the_box());
     record_as(state, &actor, action, target, result);
 }
 
 /// Record an action by `actor` (when it isn't the request's caller, as in
 /// pairing, where the actor is the device that just paired).
-pub fn record_as(state: &crate::routes::AppState, actor: &Actor, action: &str, target: &str, result: &str) {
-    let target: String = target.chars().filter(|c| !c.is_control()).take(MAX_TARGET).collect();
+pub fn record_as(
+    state: &crate::routes::AppState,
+    actor: &Actor,
+    action: &str,
+    target: &str,
+    result: &str,
+) {
+    let target: String = target
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_TARGET)
+        .collect();
     state.audit().append(Entry {
         ts: crate::sessions::unix_now(),
         device_id: actor.device_id.clone(),
@@ -261,7 +291,10 @@ mod tests {
             log.append(entry(n));
         }
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 5);
         let (page, more) = log.page(0, 2);
         assert_eq!(page.iter().map(|e| e.ts).collect::<Vec<_>>(), vec![4, 3]);
@@ -288,7 +321,10 @@ mod tests {
         let log = AuditLog::open(&path);
         let (page, _) = log.page(0, 100);
         // The newest 10 survive, newest first, across the files in order.
-        assert_eq!(page.iter().map(|e| e.ts).collect::<Vec<_>>(), (20..30).rev().collect::<Vec<_>>());
+        assert_eq!(
+            page.iter().map(|e| e.ts).collect::<Vec<_>>(),
+            (20..30).rev().collect::<Vec<_>>()
+        );
     }
 
     #[test]

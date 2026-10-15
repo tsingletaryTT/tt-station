@@ -228,8 +228,18 @@ pub(crate) async fn post_cli_update(
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let dry_run = body.is_some_and(|b| b.dry_run);
     let tt = tt(&state)?;
-    if !dry_run && !matches!(state.lifecycle().phase, crate::routes::Phase::Idle | crate::routes::Phase::Serving | crate::routes::Phase::Failed) {
-        return Err(err(StatusCode::CONFLICT, "A model is starting or stopping, and that uses tt. Update once it's done."));
+    if !dry_run
+        && !matches!(
+            state.lifecycle().phase,
+            crate::routes::Phase::Idle
+                | crate::routes::Phase::Serving
+                | crate::routes::Phase::Failed
+        )
+    {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "A model is starting or stopping, and that uses tt. Update once it's done.",
+        ));
     }
     if !dry_run {
         crate::audit::record(&state, "update_tt_cli", "", "started");
@@ -453,10 +463,17 @@ pub(crate) async fn stop_client(
 mod tests {
     #[test]
     fn reads_pips_dry_run() {
-        let out = "Requirement already satisfied: idna\nWould install tenstorrent-1.1.0 tomlkit-0.14.0\n";
-        assert_eq!(super::would_install(out), ["tenstorrent-1.1.0", "tomlkit-0.14.0"]);
+        let out =
+            "Requirement already satisfied: idna\nWould install tenstorrent-1.1.0 tomlkit-0.14.0\n";
+        assert_eq!(
+            super::would_install(out),
+            ["tenstorrent-1.1.0", "tomlkit-0.14.0"]
+        );
         assert_eq!(super::pip_name("tenstorrent-1.1.0"), "tenstorrent");
-        assert_eq!(super::pip_name("opentelemetry-sdk-1.2.3"), "opentelemetry-sdk");
+        assert_eq!(
+            super::pip_name("opentelemetry-sdk-1.2.3"),
+            "opentelemetry-sdk"
+        );
         assert!(super::would_install("Requirement already satisfied: x").is_empty());
     }
 

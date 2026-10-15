@@ -305,7 +305,11 @@ impl Jobs {
     }
 
     fn save(&self, job: &Job) {
-        crate::fsio::save_json(&self.job_dir(&job.id).join("job.json"), job, crate::fsio::PRIVATE);
+        crate::fsio::save_json(
+            &self.job_dir(&job.id).join("job.json"),
+            job,
+            crate::fsio::PRIVATE,
+        );
     }
 
     pub fn update(&self, id: &str, change: impl FnOnce(&mut Job)) -> Option<Job> {
@@ -775,7 +779,11 @@ async fn transcribe(state: &AppState, jobs: &Jobs, job: Job, base: &str) {
     let text_copy = text.clone();
     let _ = tokio::task::spawn_blocking(move || {
         use crate::fsio::{write_atomic, PRIVATE};
-        let _ = write_atomic(&folder.join("transcript.txt"), text_copy.as_bytes(), PRIVATE);
+        let _ = write_atomic(
+            &folder.join("transcript.txt"),
+            text_copy.as_bytes(),
+            PRIVATE,
+        );
         let _ = write_atomic(&folder.join("transcript.srt"), srt.as_bytes(), PRIVATE);
         let _ = write_atomic(&folder.join("transcript.json"), &transcript_json, PRIVATE);
     })

@@ -32,8 +32,15 @@ pub fn argv(program: &str, args: &[&str], scoped: bool) -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
     if scoped {
         v.extend(
-            ["systemd-run", "--user", "--scope", "--collect", "--quiet", "--"]
-                .map(String::from),
+            [
+                "systemd-run",
+                "--user",
+                "--scope",
+                "--collect",
+                "--quiet",
+                "--",
+            ]
+            .map(String::from),
         );
     }
     v.push(program.to_string());
@@ -75,11 +82,21 @@ mod tests {
         assert_eq!(
             argv("gtk-launch", &["google-chrome", "https://x"], true),
             [
-                "systemd-run", "--user", "--scope", "--collect", "--quiet", "--",
-                "gtk-launch", "google-chrome", "https://x"
+                "systemd-run",
+                "--user",
+                "--scope",
+                "--collect",
+                "--quiet",
+                "--",
+                "gtk-launch",
+                "google-chrome",
+                "https://x"
             ]
         );
-        assert_eq!(argv("xdg-open", &["https://x"], false), ["xdg-open", "https://x"]);
+        assert_eq!(
+            argv("xdg-open", &["https://x"], false),
+            ["xdg-open", "https://x"]
+        );
     }
 
     #[cfg(target_os = "linux")]

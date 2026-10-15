@@ -776,7 +776,9 @@ impl AppState {
     pub fn managing_units(mut self) -> Self {
         match Arc::get_mut(&mut self.inner) {
             Some(inner) => inner.manages_units = true,
-            None => eprintln!("tt-station-agentd: managing_units called on a shared AppState; ignored"),
+            None => {
+                eprintln!("tt-station-agentd: managing_units called on a shared AppState; ignored")
+            }
         }
         self
     }
@@ -911,20 +913,29 @@ impl AppState {
     }
 
     pub fn bringup_busy(&self) -> bool {
-        self.inner.bringup_busy.load(std::sync::atomic::Ordering::SeqCst)
+        self.inner
+            .bringup_busy
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn set_bringup_busy(&self, busy: bool) {
-        self.inner.bringup_busy.store(busy, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .bringup_busy
+            .store(busy, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn chips_resetting(&self) -> bool {
-        self.inner.chips_resetting.load(std::sync::atomic::Ordering::SeqCst) > 0
+        self.inner
+            .chips_resetting
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
     }
 
     /// Pause chip readings until the guard drops (a reset is under way).
     pub fn pause_readings(&self) -> ReadingsPause {
-        self.inner.chips_resetting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .chips_resetting
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         ReadingsPause(Arc::clone(&self.inner.chips_resetting))
     }
 
@@ -1267,7 +1278,9 @@ impl AppState {
             Ok(json) => json,
             // A model start resets and opens the chips; a reading that fails
             // meanwhile is that, not a broken tt-smi.
-            Err(e) if matches!(self.lifecycle().phase, Phase::Starting) || self.chips_resetting() => {
+            Err(e)
+                if matches!(self.lifecycle().phase, Phase::Starting) || self.chips_resetting() =>
+            {
                 eprintln!("tt-station-agentd: tt-smi -s during a model start: {e:#}");
                 anyhow::bail!("A model is starting on the chips; readings come back in a minute.");
             }
@@ -1830,7 +1843,11 @@ impl AppState {
     /// bearer-guarded too.
     /// The newest pending action proposed within `within`, for "yes, do it".
     pub(crate) fn latest_pending_action(&self, within: std::time::Duration) -> Option<String> {
-        let pending = self.inner.pending_actions.lock().expect("pending_actions mutex poisoned");
+        let pending = self
+            .inner
+            .pending_actions
+            .lock()
+            .expect("pending_actions mutex poisoned");
         pending
             .iter()
             .filter(|(_, a)| a.created.elapsed() < within.min(crate::assistant::PENDING_TTL))
@@ -1945,7 +1962,12 @@ impl AppState {
             // container): the port answering with a model is enough.
             let answering = alive || {
                 let url = format!("http://127.0.0.1:{}/v1/models", self.serving_port());
-                match reqwest::Client::new().get(url).timeout(std::time::Duration::from_secs(3)).send().await {
+                match reqwest::Client::new()
+                    .get(url)
+                    .timeout(std::time::Duration::from_secs(3))
+                    .send()
+                    .await
+                {
                     Ok(r) if r.status().is_success() => r
                         .json::<serde_json::Value>()
                         .await
@@ -1986,7 +2008,15 @@ impl AppState {
     /// new key, so nothing cached before it is reused after.
     pub(crate) fn serve_key(&self) -> String {
         let l = self.lifecycle();
-        format!("{:?}|{:?}|{}|{:?}|{:?}|{}", self.status(), l.phase, l.since, l.model, l.served_id, l.adopted)
+        format!(
+            "{:?}|{:?}|{}|{:?}|{:?}|{}",
+            self.status(),
+            l.phase,
+            l.since,
+            l.model,
+            l.served_id,
+            l.adopted
+        )
     }
 
     /// Snapshot the currently-serving `Endpoint`, or `None` if idle.
@@ -2074,7 +2104,10 @@ impl AppState {
     /// Resolves once `token` stops being good -- its device was removed or
     /// the box was reset -- so a long-lived WebSocket can close itself rather
     /// than outlive the pairing that opened it.
-    pub(crate) fn signed_out(&self, token: String) -> impl std::future::Future<Output = ()> + Send + 'static {
+    pub(crate) fn signed_out(
+        &self,
+        token: String,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
         let sessions = self.sessions();
         let mut changes = sessions.revocations();
         async move {
@@ -2092,7 +2125,10 @@ impl AppState {
 
     /// [`Self::signed_out`] for a caller known by its device id (`None`, the
     /// box itself, is never signed out).
-    pub(crate) fn device_signed_out(&self, id: Option<String>) -> impl std::future::Future<Output = ()> + Send + 'static {
+    pub(crate) fn device_signed_out(
+        &self,
+        id: Option<String>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
         let sessions = self.sessions();
         let mut changes = sessions.revocations();
         async move {
@@ -2130,7 +2166,9 @@ impl AppState {
     pub(crate) fn pair_init_allowed(&self, peer: Option<std::net::IpAddr>, now: u64) -> bool {
         let mut recent = self.inner.pair_inits.lock().expect("pair inits");
         recent.retain(|(t, _)| now.saturating_sub(*t) < 60);
-        if recent.len() >= PAIR_INITS_PER_MINUTE || recent.iter().filter(|(_, p)| *p == peer).count() >= PAIR_INITS_PER_ADDRESS {
+        if recent.len() >= PAIR_INITS_PER_MINUTE
+            || recent.iter().filter(|(_, p)| *p == peer).count() >= PAIR_INITS_PER_ADDRESS
+        {
             return false;
         }
         recent.push((now, peer));
@@ -2255,7 +2293,10 @@ impl AppState {
             .pending_pairs
             .lock()
             .expect("pending_pairs mutex poisoned")
-            .insert(pair_id.to_string(), (code.to_string(), already_expired, 0, false));
+            .insert(
+                pair_id.to_string(),
+                (code.to_string(), already_expired, 0, false),
+            );
     }
 }
 
@@ -2431,7 +2472,8 @@ async fn pair_init(
 ) -> Result<Json<PairInitResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Anyone on the network can ask, and each ask notifies the owner: a few a
     // minute from any one address, and a ceiling for all of them together.
-    let peer = peer.map(|axum::extract::Extension(axum::extract::ConnectInfo(a))| a.ip().to_canonical());
+    let peer =
+        peer.map(|axum::extract::Extension(axum::extract::ConnectInfo(a))| a.ip().to_canonical());
     if !state.pair_init_allowed(peer, unix_now()) {
         return Err(tt_error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -2443,14 +2485,21 @@ async fn pair_init(
     // `{"device": "Jane's MacBook"}`: who's asking, for the person reading the code.
     let device: String = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
-        .and_then(|v| v["device"].as_str().map(|d| d.chars().filter(|c| !c.is_control()).take(60).collect()))
+        .and_then(|v| {
+            v["device"]
+                .as_str()
+                .map(|d| d.chars().filter(|c| !c.is_control()).take(60).collect())
+        })
         .unwrap_or_else(|| "a device".to_string());
 
     // The box has no screen of its own: the code goes where its owner reads
     // things -- the desktop app and the phone (as an event). Never the
     // journal, which anyone who can read the box's logs could use.
     println!("tt-station-agentd: pairing requested by {device}");
-    let fp = state.tls().map(|t| t.sha256.chars().take(8).collect::<String>()).unwrap_or_default();
+    let fp = state
+        .tls()
+        .map(|t| t.sha256.chars().take(8).collect::<String>())
+        .unwrap_or_default();
     state.notifier().emit(crate::notify::Draft {
         kind: "pairing",
         title: format!("Pairing code for {device}: {} {}", &code[..3.min(code.len())], &code[3.min(code.len())..]),
@@ -2548,10 +2597,26 @@ async fn pair_complete(
     };
 
     let token = pairing::issue_token();
-    let name = req.name.as_deref().filter(|n| !n.trim().is_empty()).or(req.label.as_deref());
-    let session = state.inner.sessions.pair(&token, name, req.platform.as_deref(), owner);
-    let actor = crate::audit::Actor { device_id: Some(session.id.clone()), device_name: session.name.clone() };
-    crate::audit::record_as(&state, &actor, "pair", if session.owner { "owner" } else { "member" }, "ok");
+    let name = req
+        .name
+        .as_deref()
+        .filter(|n| !n.trim().is_empty())
+        .or(req.label.as_deref());
+    let session = state
+        .inner
+        .sessions
+        .pair(&token, name, req.platform.as_deref(), owner);
+    let actor = crate::audit::Actor {
+        device_id: Some(session.id.clone()),
+        device_name: session.name.clone(),
+    };
+    crate::audit::record_as(
+        &state,
+        &actor,
+        "pair",
+        if session.owner { "owner" } else { "member" },
+        "ok",
+    );
     let what = match &session.platform {
         Some(p) => format!("{} ({p})", session.name),
         None => session.name.clone(),
@@ -2595,7 +2660,9 @@ impl axum::response::IntoResponse for AuthRejection {
     fn into_response(self) -> Response {
         let mut res = (
             StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse { error: self.0.message() }),
+            Json(ErrorResponse {
+                error: self.0.message(),
+            }),
         )
             .into_response();
         res.headers_mut().insert(
@@ -2627,7 +2694,10 @@ pub(crate) struct BearerAuth;
 impl FromRequestParts<AppState> for BearerAuth {
     type Rejection = AuthRejection;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AuthRejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, AuthRejection> {
         authenticate_parts(parts, state).map(|_| BearerAuth)
     }
 }
@@ -2639,7 +2709,10 @@ pub(crate) struct ThisDevice(pub String);
 impl FromRequestParts<AppState> for ThisDevice {
     type Rejection = AuthRejection;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AuthRejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, AuthRejection> {
         authenticate_parts(parts, state).map(ThisDevice)
     }
 }
@@ -2668,7 +2741,10 @@ impl DeviceView {
         DeviceView {
             this_device: s.id == me,
             expires: s.expires(),
-            person: state.people().person_of_digest(&s.token_sha256).map(|p| p.id),
+            person: state
+                .people()
+                .person_of_digest(&s.token_sha256)
+                .map(|p| p.id),
             owner: s.owner,
             id: s.id,
             name: s.name,
@@ -2714,11 +2790,23 @@ async fn post_device_owner(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<OwnerChange>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let s = state.sessions().set_owner(&id, req.owner).map_err(|e| tt_error(StatusCode::CONFLICT, &e))?;
-    crate::audit::record(&state, if req.owner { "promote" } else { "demote" }, &format!("{} ({})", s.name, s.id), "ok");
+    let s = state
+        .sessions()
+        .set_owner(&id, req.owner)
+        .map_err(|e| tt_error(StatusCode::CONFLICT, &e))?;
+    crate::audit::record(
+        &state,
+        if req.owner { "promote" } else { "demote" },
+        &format!("{} ({})", s.name, s.id),
+        "ok",
+    );
     state.notifier().record(crate::notify::Draft {
         kind: "devices",
-        title: format!("{} is {} of this box now", s.name, if s.owner { "an owner" } else { "a member" }),
+        title: format!(
+            "{} is {} of this box now",
+            s.name,
+            if s.owner { "an owner" } else { "a member" }
+        ),
         body: if s.owner {
             "It can manage devices, keys, power and updates.".to_string()
         } else {
@@ -2743,14 +2831,29 @@ async fn put_device_person(
     Json(req): Json<PersonChange>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let Some(s) = state.sessions().get(&id) else {
-        return Err(tt_error(StatusCode::NOT_FOUND, "No such device. It may have been removed."));
+        return Err(tt_error(
+            StatusCode::NOT_FOUND,
+            "No such device. It may have been removed.",
+        ));
     };
     state
         .people()
         .assign_digest(&s.token_sha256, req.person.as_deref())
         .map_err(|e| tt_error(StatusCode::BAD_REQUEST, &e))?;
-    crate::audit::record(&state, "device_person", &format!("{} ({}) → {}", s.name, s.id, req.person.as_deref().unwrap_or("no one")), "ok");
-    Ok(Json(serde_json::json!({ "id": s.id, "person": req.person })))
+    crate::audit::record(
+        &state,
+        "device_person",
+        &format!(
+            "{} ({}) → {}",
+            s.name,
+            s.id,
+            req.person.as_deref().unwrap_or("no one")
+        ),
+        "ok",
+    );
+    Ok(Json(
+        serde_json::json!({ "id": s.id, "person": req.person }),
+    ))
 }
 
 /// `DELETE /devices/{id}` (bearer-guarded): sign one device out. Its token
@@ -2768,11 +2871,19 @@ async fn delete_device(
         return Err(tt_error(StatusCode::FORBIDDEN, OWNER_ONLY));
     }
     let Some(removed) = state.sessions().revoke(&id) else {
-        return Err(tt_error(StatusCode::NOT_FOUND, "No such device. It may have been removed already."));
+        return Err(tt_error(
+            StatusCode::NOT_FOUND,
+            "No such device. It may have been removed already.",
+        ));
     };
     state.people().forget_phone(&removed.token_sha256);
     let this_device = removed.id == me;
-    crate::audit::record(&state, "revoke", &format!("{} ({})", removed.name, removed.id), "ok");
+    crate::audit::record(
+        &state,
+        "revoke",
+        &format!("{} ({})", removed.name, removed.id),
+        "ok",
+    );
     state.notifier().record(crate::notify::Draft {
         kind: "devices",
         title: if this_device {
@@ -2782,7 +2893,9 @@ async fn delete_device(
         },
         body: "It can no longer use this box until it pairs again.".to_string(),
     });
-    Ok(Json(serde_json::json!({ "removed": removed.id, "this_device": this_device })))
+    Ok(Json(
+        serde_json::json!({ "removed": removed.id, "this_device": this_device }),
+    ))
 }
 
 /// How the box closes a WebSocket whose device was signed out: 1008
@@ -2826,11 +2939,16 @@ pub(crate) struct LocalOrPaired;
 impl FromRequestParts<AppState> for LocalOrPaired {
     type Rejection = AuthRejection;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AuthRejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, AuthRejection> {
         if parts.extensions.get::<LocalCaller>().is_some() {
             return Ok(LocalOrPaired);
         }
-        BearerAuth::from_request_parts(parts, state).await.map(|_| LocalOrPaired)
+        BearerAuth::from_request_parts(parts, state)
+            .await
+            .map(|_| LocalOrPaired)
     }
 }
 
@@ -2860,7 +2978,10 @@ impl Caller {
 
     pub fn actor(&self) -> crate::audit::Actor {
         match &self.device {
-            Some(d) => crate::audit::Actor { device_id: Some(d.id.clone()), device_name: d.name.clone() },
+            Some(d) => crate::audit::Actor {
+                device_id: Some(d.id.clone()),
+                device_name: d.name.clone(),
+            },
             None => crate::audit::Actor::the_box(),
         }
     }
@@ -2876,10 +2997,18 @@ pub(crate) fn resolve_caller(
     state: &AppState,
 ) -> Result<Caller, crate::sessions::AuthFailure> {
     let token = ws_token(headers);
-    let device = token.as_deref().and_then(|t| state.sessions().session_for(t));
+    let device = token
+        .as_deref()
+        .and_then(|t| state.sessions().session_for(t));
     if device.is_none() && !local {
-        let known = token.as_deref().is_some_and(|t| state.sessions().id_for(t).is_some());
-        return Err(if known { crate::sessions::AuthFailure::Expired } else { crate::sessions::AuthFailure::Unknown });
+        let known = token
+            .as_deref()
+            .is_some_and(|t| state.sessions().id_for(t).is_some());
+        return Err(if known {
+            crate::sessions::AuthFailure::Expired
+        } else {
+            crate::sessions::AuthFailure::Unknown
+        });
     }
     Ok(Caller { local, device })
 }
@@ -2890,9 +3019,14 @@ pub(crate) struct CallerAuth(pub Caller);
 impl FromRequestParts<AppState> for CallerAuth {
     type Rejection = AuthRejection;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AuthRejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, AuthRejection> {
         let local = parts.extensions.get::<LocalCaller>().is_some();
-        resolve_caller(&parts.headers, local, state).map(CallerAuth).map_err(AuthRejection)
+        resolve_caller(&parts.headers, local, state)
+            .map(CallerAuth)
+            .map_err(AuthRejection)
     }
 }
 
@@ -2907,7 +3041,9 @@ impl FromRequestParts<AppState> for OwnerAuth {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Response> {
         use axum::response::IntoResponse;
-        let CallerAuth(caller) = CallerAuth::from_request_parts(parts, state).await.map_err(IntoResponse::into_response)?;
+        let CallerAuth(caller) = CallerAuth::from_request_parts(parts, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
         if caller.owner() {
             return Ok(OwnerAuth);
         }
@@ -2958,8 +3094,14 @@ pub const HANDLER_AUTHED_ROUTES: &[&str] = &[
 
 /// Whether `method route` is on [`PUBLIC_ROUTES`].
 pub fn is_public_route(method: &axum::http::Method, route: &str) -> bool {
-    let m = if method == axum::http::Method::HEAD { "GET" } else { method.as_str() };
-    PUBLIC_ROUTES.iter().any(|(pm, pr)| *pm == m && *pr == route)
+    let m = if method == axum::http::Method::HEAD {
+        "GET"
+    } else {
+        method.as_str()
+    };
+    PUBLIC_ROUTES
+        .iter()
+        .any(|(pm, pr)| *pm == m && *pr == route)
 }
 
 /// Default-deny: every route needs a paired device or the box itself unless
@@ -2980,11 +3122,15 @@ async fn require_auth(
         .unwrap_or_default();
     let local = req.extensions().get::<LocalCaller>().is_some();
     let caller = resolve_caller(req.headers(), local, &state);
-    let open = is_public_route(req.method(), &route) || HANDLER_AUTHED_ROUTES.contains(&route.as_str());
+    let open =
+        is_public_route(req.method(), &route) || HANDLER_AUTHED_ROUTES.contains(&route.as_str());
     match caller {
         Ok(c) => crate::audit::ACTOR.scope(c.actor(), next.run(req)).await,
         Err(_) if open => {
-            let anyone = crate::audit::Actor { device_id: None, device_name: "Not paired".to_string() };
+            let anyone = crate::audit::Actor {
+                device_id: None,
+                device_name: "Not paired".to_string(),
+            };
             crate::audit::ACTOR.scope(anyone, next.run(req)).await
         }
         Err(failure) => AuthRejection(failure).into_response(),
@@ -3048,9 +3194,10 @@ fn backend_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
 /// no duration, since gozer exposes none. Used by the three routes that can
 /// contend; every other route keeps `backend_error`.
 fn contention_aware_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
-    if err.chain().any(|cause| {
-        cause.is::<crate::gozer::Contention>() || cause.is::<StartInFlight>()
-    }) {
+    if err
+        .chain()
+        .any(|cause| cause.is::<crate::gozer::Contention>() || cause.is::<StartInFlight>())
+    {
         return (
             StatusCode::CONFLICT,
             Json(ErrorResponse {
@@ -3091,8 +3238,15 @@ async fn run_model(
     }
     // A contended box answers 409 (naming the board and the holder), not
     // 500 -- see `contention_aware_error`.
-    let started = state.start_serving_claimed(&req.model, req.force, prev).await;
-    crate::audit::record(&state, "model_start", &req.model, if started.is_ok() { "ok" } else { "failed" });
+    let started = state
+        .start_serving_claimed(&req.model, req.force, prev)
+        .await;
+    crate::audit::record(
+        &state,
+        "model_start",
+        &req.model,
+        if started.is_ok() { "ok" } else { "failed" },
+    );
     let endpoint = started.map_err(contention_aware_error)?;
 
     Ok(Json(RunResponse { endpoint }))
@@ -3110,7 +3264,12 @@ async fn stop_model(
     _auth: BearerAuth,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let stopped = state.stop_serving().await;
-    crate::audit::record(&state, "model_stop", "", if stopped.is_ok() { "ok" } else { "failed" });
+    crate::audit::record(
+        &state,
+        "model_stop",
+        "",
+        if stopped.is_ok() { "ok" } else { "failed" },
+    );
     stopped.map_err(backend_error)?;
     Ok(Json(serde_json::json!({})))
 }
@@ -3291,7 +3450,12 @@ async fn power(
     let ran = tokio::task::spawn_blocking(move || s.run_power_command(action, force))
         .await
         .map_err(|join_err| backend_error(anyhow::anyhow!("power task panicked: {join_err}")))?;
-    crate::audit::record(&state, "power", &req.action, if ran.is_ok() { "ok" } else { "failed" });
+    crate::audit::record(
+        &state,
+        "power",
+        &req.action,
+        if ran.is_ok() { "ok" } else { "failed" },
+    );
     ran.map_err(|e| {
             // A permission failure (no polkit rule) is the operator's to fix --
             // distinguish it from a generic 500 with a pointer to the doc.
@@ -3397,7 +3561,11 @@ async fn telemetry_ws(
         .map(|q| q.split('&').any(|kv| kv == "view=lite"))
         .unwrap_or(false);
     let Some(slot) = TelemetrySlot::take() else {
-        return tt_error(StatusCode::TOO_MANY_REQUESTS, "Too many live telemetry views are open on this box. Close one and try again.").into_response();
+        return tt_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many live telemetry views are open on this box. Close one and try again.",
+        )
+        .into_response();
     };
     let owner = caller.owner();
     let signed_out = state.device_signed_out(caller.device_id());
@@ -3422,7 +3590,9 @@ impl TelemetrySlot {
     fn take() -> Option<Self> {
         use std::sync::atomic::Ordering::SeqCst;
         TELEMETRY_SOCKETS
-            .fetch_update(SeqCst, SeqCst, |n| (n < MAX_TELEMETRY_SOCKETS).then_some(n + 1))
+            .fetch_update(SeqCst, SeqCst, |n| {
+                (n < MAX_TELEMETRY_SOCKETS).then_some(n + 1)
+            })
             .ok()
             .map(|_| TelemetrySlot)
     }
@@ -3811,7 +3981,8 @@ async fn logs_ws(
     let (source_str, tail) = parse_logs_query(query.as_deref());
     // Removing the device (or resetting the box) closes the stream.
     let signed_out = state.device_signed_out(caller.device_id());
-    ws.protocols([WS_PROTOCOL]).on_upgrade(move |socket| logs_stream(socket, state, source_str, tail, signed_out))
+    ws.protocols([WS_PROTOCOL])
+        .on_upgrade(move |socket| logs_stream(socket, state, source_str, tail, signed_out))
 }
 
 /// Follow-interval for the log tail poll. Short enough to feel live, long
@@ -4062,39 +4233,62 @@ fn qr_svg(text: &str) -> Option<String> {
 /// box -- the account, port, addresses, whether the SSH server is listening,
 /// the keys TT Station has added, and the standard `~/.ssh/config` block that
 /// SSH apps import (Termius imports `~/.ssh` on the desktop).
-async fn ssh_info(axum::extract::State(state): axum::extract::State<AppState>, _auth: BearerAuth) -> Json<serde_json::Value> {
+async fn ssh_info(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Json<serde_json::Value> {
     let user = state.ssh_user().to_string();
     let name = state.name().to_string();
     let path = state.ssh_path().to_path_buf();
     let (lan, listening, keys) = tokio::task::spawn_blocking(move || {
-        let listening = std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], 22)), std::time::Duration::from_millis(500)).is_ok();
+        let listening = std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], 22)),
+            std::time::Duration::from_millis(500),
+        )
+        .is_ok();
         // Keys TT Station added carry a `ttstation:<label>` marker.
         let keys: Vec<serde_json::Value> = std::fs::read_to_string(&path)
             .unwrap_or_default()
             .lines()
             .filter_map(|l| {
-                let raw = l.split_whitespace().find_map(|w| w.strip_prefix("ttstation:"))?;
+                let raw = l
+                    .split_whitespace()
+                    .find_map(|w| w.strip_prefix("ttstation:"))?;
                 let mut label = raw;
                 // Phones label their keys `ttstation:<device>:<date>`: show the device.
                 while let Some(rest) = label.strip_prefix("ttstation:") {
                     label = rest;
                 }
                 let (label, added) = match label.rsplit_once(':') {
-                    Some((name, date)) if date.len() == 10 && date.chars().filter(|c| *c == '-').count() == 2 => (name, Some(date)),
+                    Some((name, date))
+                        if date.len() == 10 && date.chars().filter(|c| *c == '-').count() == 2 =>
+                    {
+                        (name, Some(date))
+                    }
                     _ => (label, None),
                 };
-                let kind = l.split_whitespace().next().unwrap_or("").trim_start_matches("ssh-");
+                let kind = l
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_start_matches("ssh-");
                 // `raw` is the stored label, what `DELETE /ssh/authorize` takes.
-                Some(serde_json::json!({ "label": label, "type": kind, "added": added, "raw": raw }))
+                Some(
+                    serde_json::json!({ "label": label, "type": kind, "added": added, "raw": raw }),
+                )
             })
             .collect();
         (crate::pairqr::lan_ipv4(), listening, keys)
     })
     .await
     .unwrap_or((None, false, Vec::new()));
-    let mut hosts = vec![serde_json::json!({ "label": "On your network, by name", "host": format!("{name}.local") })];
+    let mut hosts = vec![
+        serde_json::json!({ "label": "On your network, by name", "host": format!("{name}.local") }),
+    ];
     if let Some(ip) = lan {
-        hosts.push(serde_json::json!({ "label": "On your network, by address", "host": ip.to_string() }));
+        hosts.push(
+            serde_json::json!({ "label": "On your network, by address", "host": ip.to_string() }),
+        );
     }
     let primary = format!("{name}.local");
     let link = format!("ssh://{user}@{primary}:22");
@@ -4299,7 +4493,16 @@ async fn assistant_confirm(
     let approve = req.approve;
     let done = crate::assistant::confirm(&state, req).await;
     let what = tool.unwrap_or_else(|| "unknown action".to_string());
-    crate::audit::record(&state, "assistant_approval", &what, match (&done, approve) { (Err(_), _) => "failed", (Ok(_), true) => "approved", (Ok(_), false) => "declined" });
+    crate::audit::record(
+        &state,
+        "assistant_approval",
+        &what,
+        match (&done, approve) {
+            (Err(_), _) => "failed",
+            (Ok(_), true) => "approved",
+            (Ok(_), false) => "declined",
+        },
+    );
     done.map(Json).map_err(assistant_error)
 }
 
@@ -4318,7 +4521,12 @@ pub fn local_peer(ip: std::net::IpAddr) -> bool {
     }
     match ip {
         std::net::IpAddr::V4(v4) => v4.is_loopback(),
-        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| local_peer(std::net::IpAddr::V4(v4))),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| local_peer(std::net::IpAddr::V4(v4)))
+        }
     }
 }
 
@@ -4329,13 +4537,16 @@ pub fn local_peer(ip: std::net::IpAddr) -> bool {
 pub fn container_peer(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => v4.octets()[0] == 172 && (16..32).contains(&v4.octets()[1]),
-        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some_and(|v4| container_peer(std::net::IpAddr::V4(v4))),
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .is_some_and(|v4| container_peer(std::net::IpAddr::V4(v4))),
     }
 }
 
 /// This box's own addresses (refreshed every minute: DHCP can change them).
 fn own_addresses() -> Vec<std::net::IpAddr> {
-    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<std::net::IpAddr>)>> = std::sync::Mutex::new(None);
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<std::net::IpAddr>)>> =
+        std::sync::Mutex::new(None);
     let mut c = CACHE.lock().expect("own addresses");
     if let Some((at, ips)) = c.as_ref() {
         if at.elapsed() < std::time::Duration::from_secs(60) {
@@ -4344,7 +4555,12 @@ fn own_addresses() -> Vec<std::net::IpAddr> {
     }
     let out = std::process::Command::new("hostname").arg("-I").output();
     let ips: Vec<std::net::IpAddr> = out
-        .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().filter_map(|w| w.parse().ok()).collect())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .filter_map(|w| w.parse().ok())
+                .collect()
+        })
         .unwrap_or_default();
     *c = Some((std::time::Instant::now(), ips.clone()));
     ips
@@ -4367,12 +4583,16 @@ async fn only_local(
     // Trusted as the box itself only when the program on the other end runs
     // as the agent's own account (`crate::localpeer`): not another user on
     // the box, not root, not a container on the host network.
-    let me = local_peer(peer.ip()) && tokio::task::spawn_blocking(move || crate::localpeer::peer_is_me(peer)).await.unwrap_or(false);
+    let me = local_peer(peer.ip())
+        && tokio::task::spawn_blocking(move || crate::localpeer::peer_is_me(peer))
+            .await
+            .unwrap_or(false);
     if me {
         req.extensions_mut().insert(LocalCaller);
         return next.run(req).await;
     }
-    if (container_peer(peer.ip()) || local_peer(peer.ip())) && req.uri().path().starts_with("/v1/") {
+    if (container_peer(peer.ip()) || local_peer(peer.ip())) && req.uri().path().starts_with("/v1/")
+    {
         return next.run(req).await;
     }
     if local_peer(peer.ip()) {
@@ -4411,11 +4631,17 @@ pub fn local_http_app(state: AppState) -> Router {
     let local_only = Router::new()
         .route("/pair/qr", post(pair_qr))
         .route("/security", get(get_security).post(post_security))
-        .route_layer(axum::middleware::from_fn_with_state(state.clone(), require_auth))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ))
         .with_state(state.clone());
     app(state.clone())
         .merge(local_only)
-        .layer(axum::middleware::from_fn_with_state(state.clone(), only_local))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            only_local,
+        ))
         .layer(axum::middleware::from_fn_with_state(state, known_host))
 }
 
@@ -4429,7 +4655,10 @@ async fn known_host(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let host = req.headers().get(axum::http::header::HOST).and_then(|h| h.to_str().ok());
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok());
     match host {
         Some(h) if !host_is_the_box(h, state.name()) => (
             StatusCode::MISDIRECTED_REQUEST,
@@ -4446,14 +4675,22 @@ pub fn host_is_the_box(host: &str, name: &str) -> bool {
     // Drop the port: "[::1]:8765" -> "::1", "box.local:8765" -> "box.local".
     let h = match host.strip_prefix('[') {
         Some(rest) => rest.split(']').next().unwrap_or(""),
-        None => host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h),
+        None => host
+            .rsplit_once(':')
+            .filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit()))
+            .map_or(host, |(h, _)| h),
     };
     let h = h.trim_end_matches('.').to_ascii_lowercase();
     if let Ok(ip) = h.parse::<std::net::IpAddr>() {
-        return ip.is_loopback() || own_addresses().contains(&ip) || ip.to_canonical().is_loopback();
+        return ip.is_loopback()
+            || own_addresses().contains(&ip)
+            || ip.to_canonical().is_loopback();
     }
     let me = name.to_ascii_lowercase();
-    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_ascii_lowercase();
+    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
     h == "localhost"
         || h.ends_with(".localhost")
         || h == "host.docker.internal"
@@ -4471,10 +4708,16 @@ async fn pair_qr(
     caller: Option<axum::extract::Extension<LocalCaller>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     if caller.is_none() {
-        return Err(tt_error(StatusCode::FORBIDDEN, "Pair a phone from TT Station on the box itself."));
+        return Err(tt_error(
+            StatusCode::FORBIDDEN,
+            "Pair a phone from TT Station on the box itself.",
+        ));
     }
     let Some(tls) = state.tls() else {
-        return Err(tt_error(StatusCode::CONFLICT, "HTTPS isn't running on this box, so a phone can't connect securely."));
+        return Err(tt_error(
+            StatusCode::CONFLICT,
+            "HTTPS isn't running on this box, so a phone can't connect securely.",
+        ));
     };
     let (port, sha) = (tls.port, tls.sha256.as_str());
     let pair_id = pairing::issue_pair_id();
@@ -4497,7 +4740,11 @@ async fn pair_qr(
         tls_port: Some(port as u16),
         cert_sha256: Some(sha.to_string()),
     };
-    let url = format!("{}&ssh={}", link.url(), crate::pairqr::encode_component(state.ssh_user()));
+    let url = format!(
+        "{}&ssh={}",
+        link.url(),
+        crate::pairqr::encode_component(state.ssh_user())
+    );
     Ok(Json(serde_json::json!({
         "link": url,
         "qr_svg": qr_svg(&url),
@@ -4509,7 +4756,9 @@ async fn pair_qr(
 }
 
 /// `GET /security` (the box itself): how the box is reachable.
-async fn get_security(axum::extract::State(state): axum::extract::State<AppState>) -> Json<serde_json::Value> {
+async fn get_security(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "lan_http": lan_http_allowed(&state),
         "https_port": state.ctrl_port() + 1,
@@ -4531,12 +4780,30 @@ async fn post_security(
     Json(body): Json<SecurityBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     if caller.is_none() {
-        return Err(tt_error(StatusCode::FORBIDDEN, "Change this from TT Station on the box itself."));
+        return Err(tt_error(
+            StatusCode::FORBIDDEN,
+            "Change this from TT Station on the box itself.",
+        ));
     }
     let flag = state.config_dir().join("allow-lan-http");
-    let done = if body.lan_http { std::fs::write(&flag, "") } else { std::fs::remove_file(&flag).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) };
+    let done = if body.lan_http {
+        std::fs::write(&flag, "")
+    } else {
+        std::fs::remove_file(&flag).or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+    };
     done.map_err(|e| tt_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    crate::audit::record(&state, "security", &format!("lan_http={}", body.lan_http), "ok");
+    crate::audit::record(
+        &state,
+        "security",
+        &format!("lan_http={}", body.lan_http),
+        "ok",
+    );
     Ok(Json(serde_json::json!({ "lan_http": body.lan_http })))
 }
 
@@ -4559,7 +4826,10 @@ pub fn app(state: AppState) -> Router {
         .route("/devices", get(get_devices))
         .route("/devices/{id}", axum::routing::delete(delete_device))
         .route("/devices/{id}/owner", post(post_device_owner))
-        .route("/devices/{id}/person", axum::routing::put(put_device_person))
+        .route(
+            "/devices/{id}/person",
+            axum::routing::put(put_device_person),
+        )
         .route("/audit", get(crate::audit::get_audit))
         .route("/power", post(power))
         .route("/endpoint", get(get_endpoint))
@@ -4569,7 +4839,10 @@ pub fn app(state: AppState) -> Router {
         .route("/discover", get(crate::discover::get_discover))
         .route("/assistant", post(assistant_chat))
         .route("/assistant/confirm", post(assistant_confirm))
-        .route("/assistant/client-result", post(crate::assistant::post_client_result))
+        .route(
+            "/assistant/client-result",
+            post(crate::assistant::post_client_result),
+        )
         .route("/assistant/stream", post(assistant_stream))
         .route("/tt/models", get(tt_models))
         .route("/tt/pulls", get(tt_pulls))
@@ -4606,7 +4879,10 @@ pub fn app(state: AppState) -> Router {
         .route("/apps", get(crate::apps::get_apps))
         .route("/apps/{id}/start", post(crate::apps::post_start))
         .route("/apps/{id}/stop", post(crate::apps::post_stop))
-        .route("/apps/{id}/network", axum::routing::put(crate::apps::put_network))
+        .route(
+            "/apps/{id}/network",
+            axum::routing::put(crate::apps::put_network),
+        )
         .route("/apps/{id}", axum::routing::delete(crate::apps::delete_app))
         .route("/energy", get(get_energy))
         .route("/record", get(crate::recorder::get_record))
@@ -4614,12 +4890,21 @@ pub fn app(state: AppState) -> Router {
         .route("/bringup/engines", get(crate::bringup::get_engines))
         .route("/community", get(crate::community::get_community))
         .route("/community/catalog", get(crate::community::get_catalog))
-        .route("/community/info/{ns}/{name}", get(crate::community::get_info))
+        .route(
+            "/community/info/{ns}/{name}",
+            get(crate::community::get_info),
+        )
         .route("/community/pull", post(crate::community::post_pull))
         .route("/community/pull/pause", post(crate::community::post_pause))
-        .route("/community/pull/cancel", post(crate::community::post_cancel))
+        .route(
+            "/community/pull/cancel",
+            post(crate::community::post_cancel),
+        )
         .route("/community/serve", post(crate::community::post_serve))
-        .route("/community/{ns}/{name}", axum::routing::delete(crate::community::delete_package))
+        .route(
+            "/community/{ns}/{name}",
+            axum::routing::delete(crate::community::delete_package),
+        )
         .route("/hermes", get(crate::hermes::get_hermes))
         .route("/hermes/install", post(crate::hermes::post_install))
         .route("/hermes/open", post(crate::hermes::post_open))
@@ -4628,7 +4913,10 @@ pub fn app(state: AppState) -> Router {
         .route("/vllm/native/setup", post(crate::native_vllm::post_setup))
         .route("/vllm/native/serve", post(crate::native_vllm::post_serve))
         .route("/bringup/survey", post(crate::bringup::post_survey))
-        .route("/bringup/claude/login", post(crate::bringup::post_claude_login))
+        .route(
+            "/bringup/claude/login",
+            post(crate::bringup::post_claude_login),
+        )
         .route(
             "/bringup/codex/runs",
             get(crate::bringup::get_runs).post(crate::bringup::post_run),
@@ -4637,7 +4925,10 @@ pub fn app(state: AppState) -> Router {
             "/bringup/codex/runs/{id}",
             get(crate::bringup::get_run).delete(crate::bringup::delete_run),
         )
-        .route("/bringup/codex/runs/{id}/approvals", post(crate::bringup::post_approval))
+        .route(
+            "/bringup/codex/runs/{id}/approvals",
+            post(crate::bringup::post_approval),
+        )
         .route(
             "/bringup/codex/runs/{id}/approvals/{aid}/wait",
             post(crate::bringup::post_wait),
@@ -4646,7 +4937,10 @@ pub fn app(state: AppState) -> Router {
             "/bringup/codex/runs/{id}/approvals/{aid}",
             post(crate::bringup::post_decide),
         )
-        .route("/bringup/codex/runs/{id}/{action}", post(crate::bringup::post_action))
+        .route(
+            "/bringup/codex/runs/{id}/{action}",
+            post(crate::bringup::post_action),
+        )
         .route("/toplike", get(crate::toplike_term::get_toplike))
         .route("/toplike/term", get(crate::toplike_term::term_ws))
         .route("/coding/term", get(crate::coding::term_ws))
@@ -4710,7 +5004,10 @@ pub fn app(state: AppState) -> Router {
             post(crate::orchard::post_serve),
         )
         .route("/orchard/packaging", post(crate::orchard::post_packaging))
-        .route("/orchard/lab", get(crate::orchard_lab::get_lab).put(crate::orchard_lab::put_lab))
+        .route(
+            "/orchard/lab",
+            get(crate::orchard_lab::get_lab).put(crate::orchard_lab::put_lab),
+        )
         .route("/orchard/lab/check", post(crate::orchard_lab::post_check))
         .route("/orchard/lab/setup", post(crate::orchard_lab::post_setup))
         .route(
@@ -4722,59 +5019,147 @@ pub fn app(state: AppState) -> Router {
             get(crate::orchard::get_report),
         )
         .route("/orchard/runs/{name}/story", get(crate::orchard::get_story))
-        .route("/favorites", get(crate::favorites::get_favorites).put(crate::favorites::put_favorite))
-        .route("/research", get(crate::research::get_research).post(crate::research::post_research))
-        .route("/research/{id}", get(crate::research::get_job).delete(crate::research::delete_job))
+        .route(
+            "/favorites",
+            get(crate::favorites::get_favorites).put(crate::favorites::put_favorite),
+        )
+        .route(
+            "/research",
+            get(crate::research::get_research).post(crate::research::post_research),
+        )
+        .route(
+            "/research/{id}",
+            get(crate::research::get_job).delete(crate::research::delete_job),
+        )
         .route("/research/{id}/stop", post(crate::research::post_stop))
         .route("/research/{id}/rename", post(crate::research::post_rename))
-        .route("/research/{id}/explain", post(crate::research::post_explain))
+        .route(
+            "/research/{id}/explain",
+            post(crate::research::post_explain),
+        )
         .route("/skills", get(crate::skills::get_skills))
-        .route("/embeddings", get(crate::embeddings::get_embeddings).put(crate::embeddings::put_embeddings))
+        .route(
+            "/embeddings",
+            get(crate::embeddings::get_embeddings).put(crate::embeddings::put_embeddings),
+        )
         .route("/code", get(crate::workspace::get_code))
         .route("/code/setup", post(crate::workspace::post_setup))
         .route("/code/sessions", post(crate::workspace::post_session))
-        .route("/code/sessions/{id}", get(crate::workspace::get_session).delete(crate::workspace::delete_session))
-        .route("/code/sessions/{id}/message", post(crate::workspace::post_message))
-        .route("/code/sessions/{id}/approve", post(crate::workspace::post_approve))
-        .route("/code/sessions/{id}/interrupt", post(crate::workspace::post_interrupt))
-        .route("/code/sessions/{id}/stop", post(crate::workspace::post_stop))
-        .route("/code/sessions/{id}/changes", get(crate::workspace::get_changes))
-        .route("/code/sessions/{id}/commit", post(crate::workspace::post_commit))
-        .route("/code/sessions/{id}/discard", post(crate::workspace::post_discard))
-        .route("/code/sessions/{id}/forget", post(crate::workspace::post_forget))
-        .route("/code/sessions/{id}/settings", post(crate::workspace::post_settings))
-        .route("/code/sessions/{id}/rename", post(crate::workspace::post_rename))
-        .route("/code/sessions/{id}/speed", get(crate::codespeed::get_speed))
+        .route(
+            "/code/sessions/{id}",
+            get(crate::workspace::get_session).delete(crate::workspace::delete_session),
+        )
+        .route(
+            "/code/sessions/{id}/message",
+            post(crate::workspace::post_message),
+        )
+        .route(
+            "/code/sessions/{id}/approve",
+            post(crate::workspace::post_approve),
+        )
+        .route(
+            "/code/sessions/{id}/interrupt",
+            post(crate::workspace::post_interrupt),
+        )
+        .route(
+            "/code/sessions/{id}/stop",
+            post(crate::workspace::post_stop),
+        )
+        .route(
+            "/code/sessions/{id}/changes",
+            get(crate::workspace::get_changes),
+        )
+        .route(
+            "/code/sessions/{id}/commit",
+            post(crate::workspace::post_commit),
+        )
+        .route(
+            "/code/sessions/{id}/discard",
+            post(crate::workspace::post_discard),
+        )
+        .route(
+            "/code/sessions/{id}/forget",
+            post(crate::workspace::post_forget),
+        )
+        .route(
+            "/code/sessions/{id}/settings",
+            post(crate::workspace::post_settings),
+        )
+        .route(
+            "/code/sessions/{id}/rename",
+            post(crate::workspace::post_rename),
+        )
+        .route(
+            "/code/sessions/{id}/speed",
+            get(crate::codespeed::get_speed),
+        )
         .route("/code/models", get(crate::codespeed::get_models))
         .route("/coding", get(crate::coding::get_coding))
         .route("/coding/sessions", post(crate::coding::post_session))
-        .route("/coding/sessions/{id}", axum::routing::delete(crate::coding::delete_session))
+        .route(
+            "/coding/sessions/{id}",
+            axum::routing::delete(crate::coding::delete_session),
+        )
         .route("/coding/sessions/{id}/stop", post(crate::coding::post_stop))
-        .route("/coding/sessions/{id}/changes", get(crate::coding::get_changes))
-        .route("/coding/folders", get(crate::coding::get_folders).post(crate::coding::post_folder))
+        .route(
+            "/coding/sessions/{id}/changes",
+            get(crate::coding::get_changes),
+        )
+        .route(
+            "/coding/folders",
+            get(crate::coding::get_folders).post(crate::coding::post_folder),
+        )
         .route("/skills/{id}/hermes", post(crate::skills::post_hermes))
-        .route("/idle", get(crate::idle::get_idle).put(crate::idle::put_idle))
+        .route(
+            "/idle",
+            get(crate::idle::get_idle).put(crate::idle::put_idle),
+        )
         .route("/idle/wake", post(crate::idle::post_wake))
         .route("/updates", get(crate::updates::get_updates))
         .route("/updates/install", post(crate::updates::post_install))
         .route("/updates/undo", post(crate::updates::post_undo))
         .route("/approvals", get(crate::approvals::get_approvals))
         .route("/approvals/answer", post(crate::approvals::post_answer))
-        .route("/evals", get(crate::evals::get_evals).post(crate::evals::post_eval))
+        .route(
+            "/evals",
+            get(crate::evals::get_evals).post(crate::evals::post_eval),
+        )
         .route("/evals/stop", post(crate::evals::post_stop))
-        .route("/evals/{id}", get(crate::evals::get_eval).delete(crate::evals::delete_eval))
+        .route(
+            "/evals/{id}",
+            get(crate::evals::get_eval).delete(crate::evals::delete_eval),
+        )
         .route("/library", get(crate::library::get_library))
         .route("/library/sources", post(crate::library::post_source))
-        .route("/library/sources/{id}", axum::routing::delete(crate::library::delete_source))
-        .route("/library/sources/{id}/reindex", post(crate::library::post_reindex))
+        .route(
+            "/library/sources/{id}",
+            axum::routing::delete(crate::library::delete_source),
+        )
+        .route(
+            "/library/sources/{id}/reindex",
+            post(crate::library::post_reindex),
+        )
         .route("/library/search", post(crate::library::post_search))
-        .route("/routines", get(crate::routines::get_routines).post(crate::routines::post_routine))
-        .route("/routines/{id}", axum::routing::put(crate::routines::put_routine).delete(crate::routines::delete_routine))
+        .route(
+            "/routines",
+            get(crate::routines::get_routines).post(crate::routines::post_routine),
+        )
+        .route(
+            "/routines/{id}",
+            axum::routing::put(crate::routines::put_routine)
+                .delete(crate::routines::delete_routine),
+        )
         .route("/routines/{id}/run", post(crate::routines::post_run))
         .route("/routines/{id}/runs", get(crate::routines::get_runs))
         .route("/routines/runs/{run}", get(crate::routines::get_run))
-        .route("/routines/runs/{run}/approve", post(crate::routines::post_approve))
-        .route("/routines/runs/{run}/stop", post(crate::routines::post_stop))
+        .route(
+            "/routines/runs/{run}/approve",
+            post(crate::routines::post_approve),
+        )
+        .route(
+            "/routines/runs/{run}/stop",
+            post(crate::routines::post_stop),
+        )
         .route("/lab", get(crate::lab::get_lab))
         .route("/lab/prepare", post(crate::lab::post_prepare))
         .route("/lab/run", post(crate::lab::post_run))
@@ -4811,7 +5196,10 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/embeddings", post(crate::gateway::v1_embeddings))
         .route("/v1/rerank", post(crate::gateway::v1_rerank))
         .route("/v1/messages", post(crate::anthropic::v1_messages))
-        .route("/v1/messages/count_tokens", post(crate::anthropic::count_tokens))
+        .route(
+            "/v1/messages/count_tokens",
+            post(crate::anthropic::count_tokens),
+        )
         .route("/v1/images/generations", post(crate::gateway::v1_images))
         .route(
             "/coserve",
@@ -4834,7 +5222,10 @@ pub fn app(state: AppState) -> Router {
         .route("/generate/video/{id}/download", get(download_video))
         .route("/generate/video/{id}/cancel", post(cancel_video))
         // Default-deny (see `require_auth`): last, so it covers every route above.
-        .route_layer(axum::middleware::from_fn_with_state(state.clone(), require_auth))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_auth,
+        ))
         .with_state(state)
 }
 
@@ -5061,7 +5452,12 @@ async fn post_serve(
     Json(req): Json<RunRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
     let begun = begin_serve(&state, &req.model, req.force).await;
-    crate::audit::record(&state, "model_switch", &req.model, if begun.is_ok() { "starting" } else { "failed" });
+    crate::audit::record(
+        &state,
+        "model_switch",
+        &req.model,
+        if begun.is_ok() { "starting" } else { "failed" },
+    );
     begun?;
     Ok((
         StatusCode::ACCEPTED,
@@ -6032,7 +6428,10 @@ mod logs_query_tests {
 
 #[cfg(test)]
 mod local_http_tests {
-    use super::{container_peer, host_is_the_box, local_peer, AppState, PAIR_INITS_PER_ADDRESS, PAIR_INITS_PER_MINUTE};
+    use super::{
+        container_peer, host_is_the_box, local_peer, AppState, PAIR_INITS_PER_ADDRESS,
+        PAIR_INITS_PER_MINUTE,
+    };
 
     #[test]
     fn plain_http_is_for_the_box_and_its_containers_get_only_v1() {
@@ -6050,29 +6449,60 @@ mod local_http_tests {
 
     #[test]
     fn the_plain_http_api_answers_only_to_the_boxs_own_names() {
-        for h in ["127.0.0.1:8765", "localhost:8765", "localhost", "[::1]:8765", "app.localhost:8765", "host.docker.internal:8765", "qb2-lab.local:8765", "QB2-LAB:8765", "127.0.0.1"] {
+        for h in [
+            "127.0.0.1:8765",
+            "localhost:8765",
+            "localhost",
+            "[::1]:8765",
+            "app.localhost:8765",
+            "host.docker.internal:8765",
+            "qb2-lab.local:8765",
+            "QB2-LAB:8765",
+            "127.0.0.1",
+        ] {
             assert!(host_is_the_box(h, "qb2-lab"), "{h}");
         }
-        for h in ["evil.example:8765", "evil.example", "127.0.0.1.evil.example:8765", "qb2-lab.local.evil.example", "localhost.evil.example:8765", "8.8.8.8:8765", "[2606:4700::1111]:80"] {
+        for h in [
+            "evil.example:8765",
+            "evil.example",
+            "127.0.0.1.evil.example:8765",
+            "qb2-lab.local.evil.example",
+            "localhost.evil.example:8765",
+            "8.8.8.8:8765",
+            "[2606:4700::1111]:80",
+        ] {
             assert!(!host_is_the_box(h, "qb2-lab"), "{h}");
         }
     }
 
     #[test]
     fn pairing_asks_are_limited_per_address_with_a_ceiling() {
-        let state = AppState::new("t".to_string(), "1xBH".to_string(), std::sync::Arc::new(crate::serving::dstack::DstackBackend));
+        let state = AppState::new(
+            "t".to_string(),
+            "1xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        );
         let ip = |n: u8| Some(std::net::IpAddr::from([192, 168, 1, n]));
         for _ in 0..PAIR_INITS_PER_ADDRESS {
             assert!(state.pair_init_allowed(ip(9), 1000));
         }
-        assert!(!state.pair_init_allowed(ip(9), 1000), "one address hammering is stopped");
-        assert!(state.pair_init_allowed(ip(2), 1000), "and doesn't lock out the owner's phone");
+        assert!(
+            !state.pair_init_allowed(ip(9), 1000),
+            "one address hammering is stopped"
+        );
+        assert!(
+            state.pair_init_allowed(ip(2), 1000),
+            "and doesn't lock out the owner's phone"
+        );
         // Many addresses together hit the ceiling.
         let mut n = 10;
         while state.pair_init_allowed(ip(n), 1000) {
             n += 1;
         }
-        assert_eq!(state.inner.pair_inits.lock().unwrap().len(), PAIR_INITS_PER_MINUTE);
+        assert_eq!(
+            state.inner.pair_inits.lock().unwrap().len(),
+            PAIR_INITS_PER_MINUTE
+        );
         // A minute later, everyone may ask again.
         assert!(state.pair_init_allowed(ip(9), 1061));
     }
@@ -6102,7 +6532,10 @@ mod signed_out_tests {
 
         state.sessions().revoke(&other.id);
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!watch.is_finished(), "another device's removal closed this socket");
+        assert!(
+            !watch.is_finished(),
+            "another device's removal closed this socket"
+        );
 
         state.sessions().revoke(&mine.id);
         tokio::time::timeout(Duration::from_secs(2), watch)
@@ -6113,7 +6546,9 @@ mod signed_out_tests {
 
     #[test]
     fn telemetry_sockets_are_capped_and_given_back() {
-        let slots: Vec<TelemetrySlot> = std::iter::from_fn(TelemetrySlot::take).take(MAX_TELEMETRY_SOCKETS + 5).collect();
+        let slots: Vec<TelemetrySlot> = std::iter::from_fn(TelemetrySlot::take)
+            .take(MAX_TELEMETRY_SOCKETS + 5)
+            .collect();
         assert_eq!(slots.len(), MAX_TELEMETRY_SOCKETS);
         assert!(TelemetrySlot::take().is_none());
         drop(slots);
@@ -6129,7 +6564,10 @@ mod signed_out_tests {
         let watch = tokio::spawn(state.device_signed_out(Some(mine.id.clone())));
         let the_box = tokio::spawn(state.device_signed_out(None));
         state.sessions().revoke(&mine.id);
-        tokio::time::timeout(Duration::from_secs(2), watch).await.expect("still open after removal").unwrap();
+        tokio::time::timeout(Duration::from_secs(2), watch)
+            .await
+            .expect("still open after removal")
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!the_box.is_finished());
         the_box.abort();
@@ -6141,6 +6579,9 @@ mod signed_out_tests {
         state.sessions().pair("mine", None, None, false);
         let watch = tokio::spawn(state.signed_out("mine".to_string()));
         state.clear_tokens();
-        tokio::time::timeout(Duration::from_secs(2), watch).await.expect("still open after a reset").unwrap();
+        tokio::time::timeout(Duration::from_secs(2), watch)
+            .await
+            .expect("still open after a reset")
+            .unwrap();
     }
 }

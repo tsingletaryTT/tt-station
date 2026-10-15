@@ -604,8 +604,23 @@ fn record_utterance(patience: Duration, ptt: bool) -> Result<Vec<i16>, String> {
     use std::io::Read;
     use std::sync::atomic::Ordering;
     let mut child = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-f", "pulse", "-i", "default",
-               "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1"])
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-f",
+            "pulse",
+            "-i",
+            "default",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "s16le",
+            "pipe:1",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -628,13 +643,22 @@ fn record_utterance(patience: Duration, ptt: bool) -> Result<Vec<i16>, String> {
         if out.read_exact(&mut frame).is_err() {
             break Err("the microphone stopped".to_string());
         }
-        let samples: Vec<i16> = frame.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
-        let rms = (samples.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / samples.len() as f64).sqrt() / 32768.0;
+        let samples: Vec<i16> = frame
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let rms = (samples.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / samples.len() as f64)
+            .sqrt()
+            / 32768.0;
         let db = 20.0 * (rms + 1e-6).log10();
         HEAR_LEVEL.store((db as f32).to_bits(), Ordering::Relaxed);
         let loud = db > (floor + 14.0).max(-48.0);
         if !speaking {
-            floor = if db < floor { floor * 0.7 + db * 0.3 } else { floor * 0.98 + db * 0.02 };
+            floor = if db < floor {
+                floor * 0.7 + db * 0.3
+            } else {
+                floor * 0.98 + db * 0.02
+            };
             pre.extend(&samples);
             while pre.len() > 16000 * 4 / 10 {
                 pre.pop_front(); // keep 400 ms before speech starts
@@ -692,7 +716,10 @@ pub struct HearBody {
 
 /// `POST /voice/hear` (authed): listen through the box's microphone until
 /// someone has said something and stopped; `{text}` ("" if nobody spoke).
-pub(crate) async fn post_hear(_auth: BearerAuth, body: Option<Json<HearBody>>) -> Reply<Json<Value>> {
+pub(crate) async fn post_hear(
+    _auth: BearerAuth,
+    body: Option<Json<HearBody>>,
+) -> Reply<Json<Value>> {
     use std::sync::atomic::Ordering;
     if HEARING.swap(true, Ordering::SeqCst) {
         return Err(err(StatusCode::CONFLICT, "Already listening."));
@@ -716,18 +743,37 @@ pub(crate) async fn post_hear(_auth: BearerAuth, body: Option<Json<HearBody>>) -
         .file_name("speech.wav")
         .mime_str("audio/wav")
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let form = reqwest::multipart::Form::new().part("file", part).text("model", LISTEN_MODEL);
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("model", LISTEN_MODEL);
     let res = client(Duration::from_secs(60))
         .post(format!("{}/v1/audio/transcriptions", base(&LISTEN)))
         .multipart(form)
         .send()
         .await
-        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "Speech recognition isn't running."))?;
+        .map_err(|_| {
+            err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Speech recognition isn't running.",
+            )
+        })?;
     let v: Value = res.json().await.unwrap_or_default();
     let text = v["text"].as_str().unwrap_or("").trim().to_string();
     // Whisper's usual inventions on near-silence.
-    let junk = ["you", "you.", "thank you.", "thank you", "thanks for watching!", "bye.", "."];
-    let text = if junk.contains(&text.to_lowercase().as_str()) { String::new() } else { text };
+    let junk = [
+        "you",
+        "you.",
+        "thank you.",
+        "thank you",
+        "thanks for watching!",
+        "bye.",
+        ".",
+    ];
+    let text = if junk.contains(&text.to_lowercase().as_str()) {
+        String::new()
+    } else {
+        text
+    };
     Ok(Json(json!({ "text": text })))
 }
 
@@ -787,7 +833,10 @@ pub(crate) async fn post_say(
         .send()
         .await
         .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "The box's voice isn't running."))?;
-    let audio = res.bytes().await.map_err(|e| err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let audio = res
+        .bytes()
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, e.to_string()))?;
     // A private, unguessable file (not `/tmp/tt-say-<pid>.wav`, which anyone
     // on the box could create first, or swap for a symlink).
     let path = tokio::task::spawn_blocking(move || -> std::io::Result<std::path::PathBuf> {

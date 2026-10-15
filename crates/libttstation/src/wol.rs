@@ -32,7 +32,10 @@ mod tests {
     #[test]
     fn parse_mac_accepts_colon_and_dash() {
         assert_eq!(parse_mac("01:02:03:04:05:06"), Some([1, 2, 3, 4, 5, 6]));
-        assert_eq!(parse_mac("aa-bb-cc-dd-ee-ff"), Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
+        assert_eq!(
+            parse_mac("aa-bb-cc-dd-ee-ff"),
+            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+        );
         assert_eq!(parse_mac("nope"), None);
     }
     #[test]

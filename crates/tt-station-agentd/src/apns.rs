@@ -160,7 +160,12 @@ impl Apns {
 
     /// Send one alert (`payload`, from `crate::notify::push_payload`) to one
     /// device token.
-    pub async fn send(&self, device_token: &str, sandbox: bool, payload: &serde_json::Value) -> Delivery {
+    pub async fn send(
+        &self,
+        device_token: &str,
+        sandbox: bool,
+        payload: &serde_json::Value,
+    ) -> Delivery {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())

@@ -169,7 +169,9 @@ pub struct Sessions {
 
 impl std::fmt::Debug for Sessions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Sessions").field("path", &self.path).finish_non_exhaustive()
+        f.debug_struct("Sessions")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
     }
 }
 
@@ -279,7 +281,8 @@ fn desktop_token_digest(store: &Path) -> Option<String> {
 /// owner, every other device a member (see the module docs).
 fn assign_first_roles(sessions: &mut [Session], desktop: Option<&str>) {
     for s in sessions.iter_mut() {
-        s.owner = desktop.is_some_and(|d| constant_time_eq(d.as_bytes(), s.token_sha256.as_bytes()));
+        s.owner =
+            desktop.is_some_and(|d| constant_time_eq(d.as_bytes(), s.token_sha256.as_bytes()));
     }
 }
 
@@ -289,11 +292,18 @@ impl Sessions {
     }
 
     fn with_roles(path: Option<PathBuf>, sessions: Vec<Session>, owner_claimed: bool) -> Self {
-        let on_disk = sessions.iter().map(|s| (s.id.clone(), s.last_used)).collect();
+        let on_disk = sessions
+            .iter()
+            .map(|s| (s.id.clone(), s.last_used))
+            .collect();
         let owner_claimed = owner_claimed || sessions.iter().any(|s| s.owner);
         Sessions {
             path,
-            table: Mutex::new(Table { sessions, owner_claimed, on_disk }),
+            table: Mutex::new(Table {
+                sessions,
+                owner_claimed,
+                on_disk,
+            }),
             write_lock: Mutex::new(()),
             revocations: tokio::sync::watch::Sender::new(0),
         }
@@ -318,14 +328,20 @@ impl Sessions {
         match read_store(&path) {
             Loaded::Missing | Loaded::Unreadable => Self::with(Some(path), Vec::new()),
             Loaded::Current(sessions, owner_claimed) => {
-                let live: Vec<Session> = sessions.into_iter().filter(|s| !s.expired_at(now)).collect();
+                let live: Vec<Session> = sessions
+                    .into_iter()
+                    .filter(|s| !s.expired_at(now))
+                    .collect();
                 Self::with_roles(Some(path), live, owner_claimed)
             }
             Loaded::Unroled(sessions) => {
                 // A box that was paired before has had its first owner, whoever
                 // it was: the next pairing from the network is a member.
                 let claimed = !sessions.is_empty();
-                let mut live: Vec<Session> = sessions.into_iter().filter(|s| !s.expired_at(now)).collect();
+                let mut live: Vec<Session> = sessions
+                    .into_iter()
+                    .filter(|s| !s.expired_at(now))
+                    .collect();
                 assign_first_roles(&mut live, desktop_token_digest(&path).as_deref());
                 let owners = live.iter().filter(|s| s.owner).count();
                 let upgraded = Self::with_roles(Some(path.clone()), live, claimed);
@@ -382,7 +398,11 @@ impl Sessions {
     }
 
     pub fn len(&self) -> usize {
-        self.table.lock().expect("sessions mutex poisoned").sessions.len()
+        self.table
+            .lock()
+            .expect("sessions mutex poisoned")
+            .sessions
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -396,7 +416,8 @@ impl Sessions {
         let mut found = None;
         // No early exit: every stored digest is compared.
         for (i, s) in table.sessions.iter().enumerate() {
-            if constant_time_eq(presented.as_bytes(), s.token_sha256.as_bytes()) && found.is_none() {
+            if constant_time_eq(presented.as_bytes(), s.token_sha256.as_bytes()) && found.is_none()
+            {
                 found = Some(i);
             }
         }
@@ -422,7 +443,10 @@ impl Sessions {
             let id = session.id.clone();
             let last_used = session.last_used;
             let written = table.on_disk.get(&id).copied().unwrap_or(0);
-            (id, last_used.saturating_sub(written) >= TOUCH_WRITE_INTERVAL_S)
+            (
+                id,
+                last_used.saturating_sub(written) >= TOUCH_WRITE_INTERVAL_S,
+            )
         };
         if flush {
             self.persist("record when a device was last used");
@@ -460,17 +484,36 @@ impl Sessions {
     /// Record a new pairing for `token` and persist it. It's an owner when
     /// `owner` is asked for (paired with the local secret) or when it's the
     /// first device the box ever paired; a member otherwise.
-    pub fn pair(&self, token: &str, name: Option<&str>, platform: Option<&str>, owner: bool) -> Session {
+    pub fn pair(
+        &self,
+        token: &str,
+        name: Option<&str>,
+        platform: Option<&str>,
+        owner: bool,
+    ) -> Session {
         self.pair_as(token, name, platform, owner, unix_now())
     }
 
     /// [`Self::pair`] with no owner asked for (tests).
     #[cfg(test)]
-    pub(crate) fn pair_at(&self, token: &str, name: Option<&str>, platform: Option<&str>, now: u64) -> Session {
+    pub(crate) fn pair_at(
+        &self,
+        token: &str,
+        name: Option<&str>,
+        platform: Option<&str>,
+        now: u64,
+    ) -> Session {
         self.pair_as(token, name, platform, false, now)
     }
 
-    pub(crate) fn pair_as(&self, token: &str, name: Option<&str>, platform: Option<&str>, owner: bool, now: u64) -> Session {
+    pub(crate) fn pair_as(
+        &self,
+        token: &str,
+        name: Option<&str>,
+        platform: Option<&str>,
+        owner: bool,
+        now: u64,
+    ) -> Session {
         let session = {
             let mut table = self.table.lock().expect("sessions mutex poisoned");
             let session = Session {
@@ -496,14 +539,20 @@ impl Sessions {
         let now = unix_now();
         let changed = {
             let mut table = self.table.lock().expect("sessions mutex poisoned");
-            let owners = table.sessions.iter().filter(|s| s.owner && !s.expired_at(now)).count();
+            let owners = table
+                .sessions
+                .iter()
+                .filter(|s| s.owner && !s.expired_at(now))
+                .count();
             let s = table
                 .sessions
                 .iter_mut()
                 .find(|s| s.id == id && !s.expired_at(now))
                 .ok_or_else(|| "No such device. It may have been removed.".to_string())?;
             if s.owner && !owner && owners <= 1 {
-                return Err("This is the box's only owner. Make another device an owner first.".to_string());
+                return Err(
+                    "This is the box's only owner. Make another device an owner first.".to_string(),
+                );
             }
             s.owner = owner;
             let s = s.clone();
@@ -517,7 +566,11 @@ impl Sessions {
     /// Add a session as-is (tests: one with a chosen `last_used`).
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn insert_for_test(&self, session: Session) {
-        self.table.lock().expect("sessions mutex poisoned").sessions.push(session);
+        self.table
+            .lock()
+            .expect("sessions mutex poisoned")
+            .sessions
+            .push(session);
     }
 
     /// Every live session, most recently used first.
@@ -535,7 +588,11 @@ impl Sessions {
             .filter(|s| !s.expired_at(now))
             .cloned()
             .collect();
-        out.sort_by(|a, b| b.last_used.cmp(&a.last_used).then_with(|| a.name.cmp(&b.name)));
+        out.sort_by(|a, b| {
+            b.last_used
+                .cmp(&a.last_used)
+                .then_with(|| a.name.cmp(&b.name))
+        });
         out
     }
 
@@ -566,7 +623,10 @@ impl Sessions {
         };
         self.revocations.send_modify(|n| *n += 1);
         if let Some(path) = &self.path {
-            let _guard = self.write_lock.lock().expect("token-store write lock poisoned");
+            let _guard = self
+                .write_lock
+                .lock()
+                .expect("token-store write lock poisoned");
             match std::fs::remove_file(path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -605,7 +665,10 @@ impl Sessions {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        let _guard = self.write_lock.lock().expect("token-store write lock poisoned");
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("token-store write lock poisoned");
         let (snapshot, owner_claimed) = {
             let table = self.table.lock().expect("sessions mutex poisoned");
             (table.sessions.clone(), table.owner_claimed)
@@ -659,10 +722,17 @@ fn write_tmp_and_rename(tmp: &Path, path: &Path, contents: &str) -> anyhow::Resu
     #[cfg(unix)]
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(tmp)?
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(tmp)?
     };
     #[cfg(not(unix))]
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(tmp)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
     drop(file);
@@ -698,7 +768,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         // And a fresh load from the file accepts the token.
         let reloaded = Sessions::open_at(path, T0 + 1);
@@ -716,7 +789,10 @@ mod tests {
     fn unknown_tokens_are_refused() {
         let sessions = Sessions::in_memory();
         sessions.pair_at("right", None, None, T0);
-        assert_eq!(sessions.authenticate_at("wrong", T0), Err(AuthFailure::Unknown));
+        assert_eq!(
+            sessions.authenticate_at("wrong", T0),
+            Err(AuthFailure::Unknown)
+        );
     }
 
     #[test]
@@ -724,10 +800,16 @@ mod tests {
         let sessions = Sessions::in_memory();
         sessions.pair_at("tok", None, None, T0);
         let limit = IDLE_EXPIRY.as_secs();
-        assert!(sessions.authenticate_at("tok", T0 + limit).is_ok(), "still good on the last second");
+        assert!(
+            sessions.authenticate_at("tok", T0 + limit).is_ok(),
+            "still good on the last second"
+        );
         let sessions = Sessions::in_memory();
         sessions.pair_at("tok", None, None, T0);
-        assert_eq!(sessions.authenticate_at("tok", T0 + limit + 1), Err(AuthFailure::Expired));
+        assert_eq!(
+            sessions.authenticate_at("tok", T0 + limit + 1),
+            Err(AuthFailure::Expired)
+        );
         assert!(AuthFailure::Expired.message().contains("90 days"));
     }
 
@@ -738,11 +820,20 @@ mod tests {
         // Used every 60 days: never more than 90 idle, so it keeps working
         // well past 90 days from pairing.
         for k in 1..=4 {
-            assert!(sessions.authenticate_at("tok", T0 + k * 60 * DAY).is_ok(), "use {k}");
+            assert!(
+                sessions.authenticate_at("tok", T0 + k * 60 * DAY).is_ok(),
+                "use {k}"
+            );
         }
         let last = T0 + 4 * 60 * DAY;
-        assert_eq!(sessions.list_at(last)[0].expires(), last + IDLE_EXPIRY.as_secs());
-        assert_eq!(sessions.authenticate_at("tok", last + 91 * DAY), Err(AuthFailure::Expired));
+        assert_eq!(
+            sessions.list_at(last)[0].expires(),
+            last + IDLE_EXPIRY.as_secs()
+        );
+        assert_eq!(
+            sessions.authenticate_at("tok", last + 91 * DAY),
+            Err(AuthFailure::Expired)
+        );
     }
 
     #[test]
@@ -756,8 +847,14 @@ mod tests {
         };
         sessions.authenticate_at("tok", T0 + 60).unwrap();
         assert_eq!(on_disk(&path), T0, "a use a minute later isn't written");
-        sessions.authenticate_at("tok", T0 + TOUCH_WRITE_INTERVAL_S).unwrap();
-        assert_eq!(on_disk(&path), T0 + TOUCH_WRITE_INTERVAL_S, "an hour later it is");
+        sessions
+            .authenticate_at("tok", T0 + TOUCH_WRITE_INTERVAL_S)
+            .unwrap();
+        assert_eq!(
+            on_disk(&path),
+            T0 + TOUCH_WRITE_INTERVAL_S,
+            "an hour later it is"
+        );
     }
 
     #[test]
@@ -767,13 +864,20 @@ mod tests {
         let a = sessions.pair_at("a", Some("A"), None, T0);
         let b = sessions.pair_at("b", Some("B"), None, T0);
         let changes = sessions.revocations();
-        assert_eq!(sessions.revoke(&a.id).map(|s| s.name), Some("A".to_string()));
+        assert_eq!(
+            sessions.revoke(&a.id).map(|s| s.name),
+            Some("A".to_string())
+        );
         assert!(changes.has_changed().unwrap(), "open sockets hear about it");
         assert_eq!(sessions.authenticate_at("a", T0), Err(AuthFailure::Unknown));
         assert_eq!(sessions.authenticate_at("b", T0), Ok(b.id.clone()));
         assert!(sessions.revoke(&a.id).is_none(), "already gone");
         let reloaded = Sessions::open_at(path, T0);
-        assert_eq!(reloaded.authenticate_at("a", T0), Err(AuthFailure::Unknown), "gone after a restart too");
+        assert_eq!(
+            reloaded.authenticate_at("a", T0),
+            Err(AuthFailure::Unknown),
+            "gone after a restart too"
+        );
         assert_eq!(reloaded.list_at(T0).len(), 1);
     }
 
@@ -798,7 +902,9 @@ mod tests {
         assert!(sessions.authenticate_at("old-token-2", T0).is_ok());
         let list = sessions.list_at(T0);
         assert_eq!(list.len(), 2, "duplicates collapse");
-        assert!(list.iter().all(|s| s.name == MIGRATED_NAME && s.created.is_none() && s.platform.is_none()));
+        assert!(list
+            .iter()
+            .all(|s| s.name == MIGRATED_NAME && s.created.is_none() && s.platform.is_none()));
 
         // The file is now the new format, with no raw token left in it.
         let on_disk = std::fs::read_to_string(&path).unwrap();
@@ -808,7 +914,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         assert!(!path.with_extension("tmp").exists());
 
@@ -829,9 +938,15 @@ mod tests {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         // Running as root ignores directory modes; nothing to check then.
         if std::fs::read_to_string(&path).unwrap() == r#"["old-token"]"# {
-            assert!(sessions.authenticate_at("old-token", T0).is_ok(), "still works this run");
+            assert!(
+                sessions.authenticate_at("old-token", T0).is_ok(),
+                "still works this run"
+            );
             let next = Sessions::open_at(path, T0);
-            assert!(next.authenticate_at("old-token", T0).is_ok(), "and is converted next start");
+            assert!(
+                next.authenticate_at("old-token", T0).is_ok(),
+                "and is converted next start"
+            );
         }
     }
 
@@ -841,7 +956,10 @@ mod tests {
         let sessions = Sessions::open_at(path.clone(), T0);
         assert!(sessions.pair_at("a", None, None, T0).owner, "first ever");
         assert!(!sessions.pair_at("b", None, None, T0).owner);
-        assert!(sessions.pair_as("c", None, None, true, T0).owner, "paired with the local secret");
+        assert!(
+            sessions.pair_as("c", None, None, true, T0).owner,
+            "paired with the local secret"
+        );
         // Removing every owner doesn't hand the role to the next pairing...
         for s in sessions.list_at(T0).into_iter().filter(|s| s.owner) {
             sessions.revoke(&s.id);
@@ -871,8 +989,21 @@ mod tests {
     /// the clear beside it.
     fn unroled_store(desktop_token: Option<&str>) -> (tempfile::TempDir, PathBuf) {
         let (dir, path) = temp_store();
-        let s = |id: &str, tok: &str| format!(r#"{{"id":"{id}","token_sha256":"{}","name":"{id}","created":{T0},"last_used":{T0}}}"#, token_digest(tok));
-        std::fs::write(&path, format!(r#"{{"version":2,"sessions":[{},{}]}}"#, s("desktop", "desk-tok"), s("phone", "phone-tok"))).unwrap();
+        let s = |id: &str, tok: &str| {
+            format!(
+                r#"{{"id":"{id}","token_sha256":"{}","name":"{id}","created":{T0},"last_used":{T0}}}"#,
+                token_digest(tok)
+            )
+        };
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"version":2,"sessions":[{},{}]}}"#,
+                s("desktop", "desk-tok"),
+                s("phone", "phone-tok")
+            ),
+        )
+        .unwrap();
         if let Some(t) = desktop_token {
             std::fs::write(path.with_file_name("desktop-token"), t).unwrap();
         }
@@ -883,17 +1014,32 @@ mod tests {
     fn stores_from_before_roles_make_the_box_desktop_the_owner() {
         let (_dir, path) = unroled_store(Some("desk-tok\n"));
         let sessions = Sessions::open_at(path.clone(), T0);
-        let by = |id: &str| sessions.list_at(T0).into_iter().find(|s| s.id == id).unwrap();
+        let by = |id: &str| {
+            sessions
+                .list_at(T0)
+                .into_iter()
+                .find(|s| s.id == id)
+                .unwrap()
+        };
         assert!(by("desktop").owner);
-        assert!(!by("phone").owner, "other devices are members until promoted");
-        assert!(!sessions.pair_at("new", None, None, T0).owner, "the box was paired before: no free owner");
+        assert!(
+            !by("phone").owner,
+            "other devices are members until promoted"
+        );
+        assert!(
+            !sessions.pair_at("new", None, None, T0).owner,
+            "the box was paired before: no free owner"
+        );
         // Written back with roles, and the desktop's token itself isn't copied in.
         let on_disk = std::fs::read_to_string(&path).unwrap();
         assert!(!on_disk.contains("desk-tok"));
         let file: StoreFile = serde_json::from_str(&on_disk).unwrap();
         assert_eq!(file.version, STORE_VERSION);
         assert!(file.owner_claimed);
-        assert!(Sessions::open_at(path, T0).list_at(T0).iter().any(|s| s.id == "desktop" && s.owner));
+        assert!(Sessions::open_at(path, T0)
+            .list_at(T0)
+            .iter()
+            .any(|s| s.id == "desktop" && s.owner));
     }
 
     #[test]
@@ -904,7 +1050,10 @@ mod tests {
         assert!(sessions.list_at(T0).iter().all(|s| !s.owner));
         assert!(sessions.pair_as("desk-2", None, None, true, T0).owner);
         let (_dir, path) = unroled_store(None);
-        assert!(Sessions::open_at(path, T0).list_at(T0).iter().all(|s| !s.owner));
+        assert!(Sessions::open_at(path, T0)
+            .list_at(T0)
+            .iter()
+            .all(|s| !s.owner));
     }
 
     #[test]
@@ -914,7 +1063,10 @@ mod tests {
         std::fs::write(path.with_file_name("desktop-token"), "desk-tok").unwrap();
         let sessions = Sessions::open_at(path, T0);
         let desk = sessions.authenticate_at("desk-tok", T0).unwrap();
-        assert!(sessions.list_at(T0).iter().all(|s| s.owner == (s.id == desk)));
+        assert!(sessions
+            .list_at(T0)
+            .iter()
+            .all(|s| s.owner == (s.id == desk)));
     }
 
     #[test]
@@ -952,7 +1104,10 @@ mod tests {
         let s = sessions.pair_at("u", None, None, 1_760_486_400);
         assert_eq!(s.name, "Device paired 2025-10-15");
         let long = "x".repeat(500);
-        assert_eq!(sessions.pair_at("v", Some(&long), None, T0).name.len(), MAX_NAME);
+        assert_eq!(
+            sessions.pair_at("v", Some(&long), None, T0).name.len(),
+            MAX_NAME
+        );
     }
 
     #[test]

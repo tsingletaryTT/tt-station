@@ -210,9 +210,18 @@ fn pick(prefs: &[&str], available: &[(String, bool)]) -> Option<(String, bool)> 
 
 /// The owner's preferred model when this box can run it (downloaded or not),
 /// else the best of the mode's own list.
-fn choose(mine: Option<&str>, prefs: &[&str], available: &[(String, bool)]) -> Option<(String, bool)> {
-    mine.and_then(|m| available.iter().find(|(n, _)| n.eq_ignore_ascii_case(m)).cloned())
-        .or_else(|| pick(prefs, available))
+fn choose(
+    mine: Option<&str>,
+    prefs: &[&str],
+    available: &[(String, bool)],
+) -> Option<(String, bool)> {
+    mine.and_then(|m| {
+        available
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(m))
+            .cloned()
+    })
+    .or_else(|| pick(prefs, available))
 }
 
 /// The modes this box offers right now (blocking: reads the tt catalog).
@@ -253,7 +262,10 @@ pub fn modes_blocking(state: &AppState) -> Vec<Mode> {
                     }
                     let image = choose(mine.image.as_deref(), image, &half)?;
                     let note = crate::coserve::half_box_note(&image.0);
-                    (vec![choose(mine.chat.as_deref(), chat, &half)?, image], note)
+                    (
+                        vec![choose(mine.chat.as_deref(), chat, &half)?, image],
+                        note,
+                    )
                 }
             };
             let models: Vec<String> = picked.iter().map(|(n, _)| n.clone()).collect();
@@ -345,7 +357,16 @@ pub(crate) async fn post_mode(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<ErrorResponse>)> {
     let started = start(&state, &id).await;
-    crate::audit::record(&state, "mode_switch", &id, match &started { Ok(true) => "starting", Ok(false) => "already_active", Err(_) => "failed" });
+    crate::audit::record(
+        &state,
+        "mode_switch",
+        &id,
+        match &started {
+            Ok(true) => "starting",
+            Ok(false) => "already_active",
+            Err(_) => "failed",
+        },
+    );
     match started {
         Ok(true) => Ok((
             StatusCode::ACCEPTED,

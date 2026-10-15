@@ -355,7 +355,11 @@ impl Notifier {
     }
 
     /// [`Self::emit`], with what a client needs to act on it.
-    pub fn emit_with(self: &std::sync::Arc<Self>, draft: Draft, data: Option<serde_json::Value>) -> Event {
+    pub fn emit_with(
+        self: &std::sync::Arc<Self>,
+        draft: Draft,
+        data: Option<serde_json::Value>,
+    ) -> Event {
         let event = self.record_with(draft, data);
         let me = std::sync::Arc::clone(self);
         let pushed = event.clone();
@@ -492,7 +496,11 @@ impl Notifier {
 /// authenticated connection and shows the real text; these words are what
 /// shows when it can't (the phone is away from the box, say).
 pub fn push_alert(event: &Event) -> (&'static str, &'static str) {
-    if event.data.as_ref().is_some_and(|d| d.get("approval").is_some()) {
+    if event
+        .data
+        .as_ref()
+        .is_some_and(|d| d.get("approval").is_some())
+    {
         let who = match event.kind.as_str() {
             "coding" => "Code needs your OK",
             "routine" => "A routine needs your OK",
@@ -502,9 +510,15 @@ pub fn push_alert(event: &Event) -> (&'static str, &'static str) {
         return (who, "Open TT Station to see what it's asking.");
     }
     match event.kind.as_str() {
-        "pairing" => ("A computer is asking to pair", "Open TT Station to see the code. If you didn't start pairing, ignore this."),
+        "pairing" => (
+            "A computer is asking to pair",
+            "Open TT Station to see the code. If you didn't start pairing, ignore this.",
+        ),
         "research" => ("Your research has news", "Open TT Station to read it."),
-        "job_done" => ("A meeting transcript is ready", "Open TT Station to read it."),
+        "job_done" => (
+            "A meeting transcript is ready",
+            "Open TT Station to read it.",
+        ),
         "coding" => ("A coding session finished", "Open TT Station to review it."),
         "routine" => ("A routine has news", "Open TT Station to see how it went."),
         "bringup" => ("A model bring-up has news", "Open TT Station to see it."),
@@ -514,13 +528,25 @@ pub fn push_alert(event: &Event) -> (&'static str, &'static str) {
         "model" => ("A model needs a look", "Open TT Station for details."),
         "download_done" => ("A download finished", "Ready to start in TT Station."),
         "download_failed" => ("A download failed", "Open TT Station for details."),
-        "chips_hot" => ("The chips are running hot", "Check the box's airflow; it will slow down to protect itself."),
+        "chips_hot" => (
+            "The chips are running hot",
+            "Check the box's airflow; it will slow down to protect itself.",
+        ),
         "box_online" => ("Your box is online", "TT Station can reach it."),
         "power" => ("Your box's power changed", "Open TT Station for details."),
-        "devices" => ("The devices that can use your box changed", "Check them in TT Station: Settings, Devices."),
+        "devices" => (
+            "The devices that can use your box changed",
+            "Check them in TT Station: Settings, Devices.",
+        ),
         "schedule" => ("A schedule ran", "Open TT Station for details."),
-        "doctor" => ("A box check found something", "Open TT Station for details."),
-        "test" => ("Notifications are working", "You'll hear when downloads finish and models are ready."),
+        "doctor" => (
+            "A box check found something",
+            "Open TT Station for details.",
+        ),
+        "test" => (
+            "Notifications are working",
+            "You'll hear when downloads finish and models are ready.",
+        ),
         _ => ("TT Station", "Open TT Station for details."),
     }
 }
@@ -531,7 +557,10 @@ pub fn push_alert(event: &Event) -> (&'static str, &'static str) {
 /// the words with the event's own, fetched from the box.
 pub fn push_payload(event: &Event, box_name: &str) -> Value {
     let (title, body) = push_alert(event);
-    let approval = event.data.as_ref().is_some_and(|d| d.get("approval").is_some());
+    let approval = event
+        .data
+        .as_ref()
+        .is_some_and(|d| d.get("approval").is_some());
     let urgent = approval || event.kind.contains("failed") || event.kind == "chips_hot";
     json!({
         "aps": {
@@ -819,12 +848,35 @@ mod tests {
     fn a_push_carries_no_content_only_the_event_id() {
         let secret = "Q3 layoffs plan for Dana";
         let kinds = [
-            "research", "job_done", "coding", "routine", "bringup", "orchard", "orchard_done", "model_ready", "model_failed",
-            "model", "download_done", "download_failed", "chips_hot", "box_online", "power", "devices", "pairing", "schedule",
-            "doctor", "test", "something_new",
+            "research",
+            "job_done",
+            "coding",
+            "routine",
+            "bringup",
+            "orchard",
+            "orchard_done",
+            "model_ready",
+            "model_failed",
+            "model",
+            "download_done",
+            "download_failed",
+            "chips_hot",
+            "box_online",
+            "power",
+            "devices",
+            "pairing",
+            "schedule",
+            "doctor",
+            "test",
+            "something_new",
         ];
         for (i, kind) in kinds.iter().enumerate() {
-            for data in [None, Some(json!({ "approval": { "id": "ap-1", "kind": "command", "summary": secret, "can_always": true } }))] {
+            for data in [
+                None,
+                Some(
+                    json!({ "approval": { "id": "ap-1", "kind": "command", "summary": secret, "can_always": true } }),
+                ),
+            ] {
                 let event = Event {
                     seq: 1_000 + i as u64,
                     at: 1,
@@ -835,23 +887,49 @@ mod tests {
                 };
                 let p = push_payload(&event, "qb2-lab");
                 let text = p.to_string();
-                assert!(!text.contains("Dana") && !text.contains("rm -rf") && !text.contains("123 456") && !text.contains("ap-1"), "{kind}: {text}");
+                assert!(
+                    !text.contains("Dana")
+                        && !text.contains("rm -rf")
+                        && !text.contains("123 456")
+                        && !text.contains("ap-1"),
+                    "{kind}: {text}"
+                );
                 assert_eq!(p["event"], event.seq, "{kind}");
                 assert_eq!(p["aps"]["mutable-content"], 1, "{kind}");
                 assert_eq!(p["aps"]["alert"]["subtitle"], "qb2-lab");
                 let mut keys: Vec<&String> = p.as_object().unwrap().keys().collect();
                 keys.sort();
                 assert_eq!(keys, ["aps", "event"], "{kind}");
-                assert!(p["aps"].get("category").is_none(), "the extension sets the approval buttons once it has the approval");
+                assert!(
+                    p["aps"].get("category").is_none(),
+                    "the extension sets the approval buttons once it has the approval"
+                );
                 assert!(!p["aps"]["alert"]["title"].as_str().unwrap().is_empty());
             }
         }
-        let ask = Event { seq: 7, at: 1, kind: "coding".into(), title: String::new(), body: String::new(), data: Some(json!({ "approval": {} })) };
+        let ask = Event {
+            seq: 7,
+            at: 1,
+            kind: "coding".into(),
+            title: String::new(),
+            body: String::new(),
+            data: Some(json!({ "approval": {} })),
+        };
         assert_eq!(push_alert(&ask).0, "Code needs your OK");
-        assert_eq!(push_payload(&ask, "")["aps"]["interruption-level"], "time-sensitive");
-        let done = Event { kind: "job_done".into(), data: None, ..ask.clone() };
+        assert_eq!(
+            push_payload(&ask, "")["aps"]["interruption-level"],
+            "time-sensitive"
+        );
+        let done = Event {
+            kind: "job_done".into(),
+            data: None,
+            ..ask.clone()
+        };
         assert_eq!(push_alert(&done).0, "A meeting transcript is ready");
-        assert_eq!(push_payload(&done, "")["aps"]["interruption-level"], "active");
+        assert_eq!(
+            push_payload(&done, "")["aps"]["interruption-level"],
+            "active"
+        );
     }
 
     #[test]

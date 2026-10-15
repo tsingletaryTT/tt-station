@@ -68,7 +68,19 @@ pub(crate) fn command(dir: &Path) -> Command {
     for p in PINNED {
         c.arg("-c").arg(p);
     }
-    for v in ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_EXTERNAL_DIFF", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS"] {
+    for v in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_ASKPASS",
+    ] {
         c.env_remove(v);
     }
     c.env("GIT_CONFIG_NOSYSTEM", "1")
@@ -82,11 +94,19 @@ pub(crate) fn command(dir: &Path) -> Command {
 }
 
 fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let o = command(dir).args(args).output().map_err(|e| e.to_string())?;
+    let o = command(dir)
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
     if o.status.success() {
         Ok(String::from_utf8_lossy(&o.stdout).to_string())
     } else {
-        Err(String::from_utf8_lossy(&o.stderr).trim().lines().last().unwrap_or("git failed").to_string())
+        Err(String::from_utf8_lossy(&o.stderr)
+            .trim()
+            .lines()
+            .last()
+            .unwrap_or("git failed")
+            .to_string())
     }
 }
 
@@ -98,11 +118,21 @@ fn canon(p: &Path) -> PathBuf {
 pub(crate) fn refuse(dir: &Path, reach: &Reach) -> Option<String> {
     let folder = canon(&reach.folder);
     let ro: Vec<PathBuf> = reach.read_only.iter().map(|p| canon(p)).collect();
-    let Ok(out) = run(dir, &["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", "--show-toplevel"]) else {
+    let Ok(out) = run(
+        dir,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+            "--git-common-dir",
+            "--show-toplevel",
+        ],
+    ) else {
         return Some("not a git repository".into());
     };
     let mut lines = out.lines().map(|l| canon(Path::new(l)));
-    let (Some(git_dir), Some(common), Some(top)) = (lines.next(), lines.next(), lines.next()) else {
+    let (Some(git_dir), Some(common), Some(top)) = (lines.next(), lines.next(), lines.next())
+    else {
         return Some("not a git repository".into());
     };
     // `core.worktree` (or a `.git` file) pointing git at some other folder.
@@ -158,9 +188,13 @@ pub(crate) fn git(dir: &Path, reach: Option<&Reach>, args: &[&str]) -> Result<St
 /// `git status --porcelain` lines in the folder (empty when it isn't a repository,
 /// or is one git mustn't run in).
 pub(crate) fn changed_files(dir: &Path, reach: Option<&Reach>) -> Vec<String> {
-    git(dir, reach, &["status", "--porcelain", "--ignore-submodules=all"])
-        .map(|o| o.lines().map(str::to_string).collect())
-        .unwrap_or_default()
+    git(
+        dir,
+        reach,
+        &["status", "--porcelain", "--ignore-submodules=all"],
+    )
+    .map(|o| o.lines().map(str::to_string).collect())
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -169,7 +203,14 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn sh(dir: &Path, cmd: &str) {
-        let ok = Command::new("sh").arg("-c").arg(cmd).current_dir(dir).env("GIT_CONFIG_NOSYSTEM", "1").status().unwrap().success();
+        let ok = Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap()
+            .success();
         assert!(ok, "{cmd}");
     }
 
@@ -190,11 +231,22 @@ mod tests {
         if diff_drivers {
             sh(&repo, &format!("git config diff.evil.textconv '{s}' && git config diff.evil.command '{s}' && echo '* diff=evil' > app/.gitattributes"));
         }
-        for hook in ["pre-commit", "commit-msg", "post-commit", "prepare-commit-msg", "post-checkout", "post-index-change", "reference-transaction", "pre-auto-gc"] {
+        for hook in [
+            "pre-commit",
+            "commit-msg",
+            "post-commit",
+            "prepare-commit-msg",
+            "post-checkout",
+            "post-index-change",
+            "reference-transaction",
+            "pre-auto-gc",
+        ] {
             for d in [app.join("hooks"), repo.join(".git/hooks")] {
                 std::fs::create_dir_all(&d).unwrap();
-                std::fs::write(d.join(hook), format!("#!/bin/sh\ntouch {m}/hook-{hook}\n")).unwrap();
-                std::fs::set_permissions(d.join(hook), std::fs::Permissions::from_mode(0o755)).unwrap();
+                std::fs::write(d.join(hook), format!("#!/bin/sh\ntouch {m}/hook-{hook}\n"))
+                    .unwrap();
+                std::fs::set_permissions(d.join(hook), std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
             }
         }
         if filter {
@@ -205,7 +257,11 @@ mod tests {
     }
 
     fn marks(dir: &Path) -> Vec<String> {
-        std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect()
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect()
     }
 
     /// Everything the Changes view and its buttons run.
@@ -217,10 +273,29 @@ mod tests {
         assert!(git(dir, r, &diff).unwrap().contains("+two"));
         git(dir, r, &["log", "--oneline", "-8"]).unwrap();
         git(dir, r, &["add", "-A", "--", "."]).unwrap();
-        git(dir, r, &["-c", "user.name=TT Station", "-c", "user.email=tt-station@localhost", "commit", "-q", "-m", "x"]).unwrap();
+        git(
+            dir,
+            r,
+            &[
+                "-c",
+                "user.name=TT Station",
+                "-c",
+                "user.email=tt-station@localhost",
+                "commit",
+                "-q",
+                "-m",
+                "x",
+            ],
+        )
+        .unwrap();
         std::fs::write(dir.join("a.txt"), "three\n").unwrap();
         git(dir, r, &["checkout", "--", "."]).unwrap();
-        git(dir, r, &["ls-files", "--others", "--exclude-standard", "--", "."]).unwrap();
+        git(
+            dir,
+            r,
+            &["ls-files", "--others", "--exclude-standard", "--", "."],
+        )
+        .unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "two\n");
         std::fs::write(dir.join("a.txt"), "two\nmore\n").unwrap();
         std::fs::write(dir.join("a.txt"), "two\n").unwrap();
@@ -236,7 +311,10 @@ mod tests {
         // The project is a folder inside the repository: its git directory is
         // out of the sandbox's reach, so even the diff drivers are allowed --
         // and still never run.
-        let reach = Reach { folder: app.clone(), read_only: vec![] };
+        let reach = Reach {
+            folder: app.clone(),
+            read_only: vec![],
+        };
         assert!(refuse(&app, &reach).is_none(), "{:?}", refuse(&app, &reach));
         look_commit_discard(&app, Some(&reach));
         // An unsandboxed session (or Agents) gets the same pinned settings.
@@ -258,8 +336,15 @@ mod tests {
         let mk = t.path().join("marks");
         std::fs::create_dir_all(&mk).unwrap();
         let repo = rigged(t.path(), &mk, false, false);
-        let reach = Reach { folder: repo.clone(), read_only: vec![repo.join(".git")] };
-        assert!(refuse(&repo, &reach).is_none(), "{:?}", refuse(&repo, &reach));
+        let reach = Reach {
+            folder: repo.clone(),
+            read_only: vec![repo.join(".git")],
+        };
+        assert!(
+            refuse(&repo, &reach).is_none(),
+            "{:?}",
+            refuse(&repo, &reach)
+        );
         look_commit_discard(&repo.join("app"), Some(&reach));
         assert!(marks(&mk).is_empty(), "ran: {:?}", marks(&mk));
     }
@@ -270,7 +355,10 @@ mod tests {
         let mk = t.path().join("marks");
         std::fs::create_dir_all(&mk).unwrap();
         let repo = rigged(t.path(), &mk, false, true);
-        let reach = Reach { folder: repo.clone(), read_only: vec![repo.join(".git")] };
+        let reach = Reach {
+            folder: repo.clone(),
+            read_only: vec![repo.join(".git")],
+        };
         assert!(refuse(&repo, &reach).unwrap().contains("filter.evil"));
         assert!(changed_files(&repo, Some(&reach)).is_empty());
         assert!(git(&repo, Some(&reach), &["add", "-A"]).is_err());
@@ -284,11 +372,19 @@ mod tests {
         std::fs::create_dir_all(&mk).unwrap();
         // A plain folder in which the model ran `git init` and rigged it.
         let repo = rigged(t.path(), &mk, false, false);
-        let reach = Reach { folder: repo.clone(), read_only: vec![] };
-        assert!(refuse(&repo, &reach).unwrap().contains("sandbox can change"));
+        let reach = Reach {
+            folder: repo.clone(),
+            read_only: vec![],
+        };
+        assert!(refuse(&repo, &reach)
+            .unwrap()
+            .contains("sandbox can change"));
         assert!(changed_files(&repo, Some(&reach)).is_empty());
         // ...or one inside a folder of projects.
-        let reach = Reach { folder: t.path().to_path_buf(), read_only: vec![] };
+        let reach = Reach {
+            folder: t.path().to_path_buf(),
+            read_only: vec![],
+        };
         assert!(refuse(&repo.join("app"), &reach).is_some());
         assert!(marks(&mk).is_empty(), "ran: {:?}", marks(&mk));
     }
@@ -298,18 +394,42 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let repo = t.path().join("p");
         std::fs::create_dir_all(&repo).unwrap();
-        sh(&repo, &format!("git init -q && git config core.worktree {}", t.path().join("elsewhere").display()));
+        sh(
+            &repo,
+            &format!(
+                "git init -q && git config core.worktree {}",
+                t.path().join("elsewhere").display()
+            ),
+        );
         std::fs::create_dir_all(t.path().join("elsewhere")).unwrap();
-        let reach = Reach { folder: repo.clone(), read_only: vec![repo.join(".git")] };
+        let reach = Reach {
+            folder: repo.clone(),
+            read_only: vec![repo.join(".git")],
+        };
         assert!(refuse(&repo, &reach).is_some());
     }
 
     #[test]
     fn keys_that_run_something() {
-        for k in ["filter.lfs.clean", "filter.x.process", "diff.x.textconv", "diff.x.command", "merge.x.driver", "include.path", "includeif.gitdir:/x.path"] {
+        for k in [
+            "filter.lfs.clean",
+            "filter.x.process",
+            "diff.x.textconv",
+            "diff.x.command",
+            "merge.x.driver",
+            "include.path",
+            "includeif.gitdir:/x.path",
+        ] {
             assert!(runs_something(k), "{k}");
         }
-        for k in ["core.bare", "remote.origin.url", "filter.x.required", "diff.x.binary", "core.hookspath", "user.name"] {
+        for k in [
+            "core.bare",
+            "remote.origin.url",
+            "filter.x.required",
+            "diff.x.binary",
+            "core.hookspath",
+            "user.name",
+        ] {
             assert!(!runs_something(k), "{k}");
         }
     }

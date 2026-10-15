@@ -44,7 +44,10 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) 
 }
 
 fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------- jobs on disk
@@ -166,7 +169,10 @@ fn event(state: &AppState, id: &str, kind: &str, text: impl Into<String>) {
 
 fn events(state: &AppState, id: &str, last: usize) -> Vec<Value> {
     let text = std::fs::read_to_string(dir(state, id).join("events.jsonl")).unwrap_or_default();
-    let all: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let all: Vec<Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
     all[all.len().saturating_sub(last)..].to_vec()
 }
 
@@ -189,13 +195,25 @@ pub async fn check(state: &AppState) -> Value {
     let serving = matches!(life.phase, Phase::Serving) && state.endpoint().is_some();
     let (model, context) = if serving {
         let url = format!("http://127.0.0.1:{}/v1/models", state.serving_port());
-        let v: Option<Value> = match reqwest::Client::new().get(url).timeout(Duration::from_secs(5)).send().await {
+        let v: Option<Value> = match reqwest::Client::new()
+            .get(url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+        {
             Ok(r) => r.json().await.ok(),
             Err(_) => None,
         };
-        let first = v.as_ref().map(|v| v["data"][0].clone()).unwrap_or(Value::Null);
+        let first = v
+            .as_ref()
+            .map(|v| v["data"][0].clone())
+            .unwrap_or(Value::Null);
         (
-            first["id"].as_str().map(str::to_string).or(life.served_id.clone()).or(state.endpoint().map(|e| e.model)),
+            first["id"]
+                .as_str()
+                .map(str::to_string)
+                .or(life.served_id.clone())
+                .or(state.endpoint().map(|e| e.model)),
             first["max_model_len"].as_u64(),
         )
     } else {
@@ -217,7 +235,10 @@ pub async fn check(state: &AppState) -> Value {
 }
 
 fn short(model: &Option<String>) -> String {
-    model.as_deref().map(|m| m.rsplit('/').next().unwrap_or(m).to_string()).unwrap_or_else(|| "The model".into())
+    model
+        .as_deref()
+        .map(|m| m.rsplit('/').next().unwrap_or(m).to_string())
+        .unwrap_or_else(|| "The model".into())
 }
 
 const SEARXNG: &str = "http://127.0.0.1:3024";
@@ -225,12 +246,20 @@ const SEARXNG: &str = "http://127.0.0.1:3024";
 /// SearXNG answering on the box; started first if it's installed but stopped.
 async fn searxng_up() -> bool {
     let probe = || async {
-        reqwest::Client::new().get(format!("{SEARXNG}/config")).timeout(Duration::from_secs(3)).send().await.is_ok_and(|r| r.status().is_success())
+        reqwest::Client::new()
+            .get(format!("{SEARXNG}/config"))
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
     };
     if probe().await {
         return true;
     }
-    if !tokio::task::spawn_blocking(|| crate::apps::ensure_running("searxng")).await.unwrap_or(false) {
+    if !tokio::task::spawn_blocking(|| crate::apps::ensure_running("searxng"))
+        .await
+        .unwrap_or(false)
+    {
         return false;
     }
     for _ in 0..10 {
@@ -262,7 +291,12 @@ async fn search(query: &str, n: usize) -> (Vec<Hit>, &'static str) {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|x| Some(Hit { url: x["url"].as_str()?.to_string(), title: x["title"].as_str().unwrap_or("").to_string() }))
+                .filter_map(|x| {
+                    Some(Hit {
+                        url: x["url"].as_str()?.to_string(),
+                        title: x["title"].as_str().unwrap_or("").to_string(),
+                    })
+                })
                 .take(n)
                 .collect();
             if !hits.is_empty() {
@@ -271,7 +305,15 @@ async fn search(query: &str, n: usize) -> (Vec<Hit>, &'static str) {
         }
     }
     let hits = crate::web::search(query, n).await.unwrap_or_default();
-    (hits.into_iter().map(|h| Hit { url: h.url, title: h.title }).collect(), "web")
+    (
+        hits.into_iter()
+            .map(|h| Hit {
+                url: h.url,
+                title: h.title,
+            })
+            .collect(),
+        "web",
+    )
 }
 
 // ---------------------------------------------------------------- the model
@@ -286,7 +328,11 @@ impl Llm {
     fn new(state: &AppState) -> Result<Self, String> {
         let ep = state.endpoint().ok_or("nothing is serving")?;
         Ok(Llm {
-            http: reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(900)).build().map_err(|e| e.to_string())?,
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(900))
+                .build()
+                .map_err(|e| e.to_string())?,
             url: crate::assistant::chat_completions_url(&ep.base_url),
             model: ep.model,
         })
@@ -300,19 +346,41 @@ impl Llm {
             "max_tokens": max_tokens,
             "chat_template_kwargs": { "enable_thinking": false },
         });
-        let r = self.http.post(&self.url).json(&body).send().await.map_err(|e| format!("couldn't reach the model: {e}"))?;
+        let r = self
+            .http
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("couldn't reach the model: {e}"))?;
         let status = r.status();
-        let v: Value = r.json().await.map_err(|e| format!("the model's answer wasn't readable: {e}"))?;
+        let v: Value = r
+            .json()
+            .await
+            .map_err(|e| format!("the model's answer wasn't readable: {e}"))?;
         if !status.is_success() {
-            return Err(format!("the model answered {status}: {}", v["error"]["message"].as_str().or(v["message"].as_str()).unwrap_or("")));
+            return Err(format!(
+                "the model answered {status}: {}",
+                v["error"]["message"]
+                    .as_str()
+                    .or(v["message"].as_str())
+                    .unwrap_or("")
+            ));
         }
-        Ok(crate::assistant::strip_think(v["choices"][0]["message"]["content"].as_str().unwrap_or("")))
+        Ok(crate::assistant::strip_think(
+            v["choices"][0]["message"]["content"].as_str().unwrap_or(""),
+        ))
     }
 
     /// Ask for JSON; the first `{...}` in the answer.
     async fn ask_json(&self, system: &str, user: &str, max_tokens: u32) -> Result<Value, String> {
         let text = self.ask(system, user, max_tokens).await?;
-        first_json(&text).ok_or_else(|| format!("the model didn't answer in the expected form: {}", text.chars().take(120).collect::<String>()))
+        first_json(&text).ok_or_else(|| {
+            format!(
+                "the model didn't answer in the expected form: {}",
+                text.chars().take(120).collect::<String>()
+            )
+        })
     }
 }
 
@@ -320,18 +388,28 @@ impl Llm {
 pub fn first_json(text: &str) -> Option<Value> {
     let start = text.find('{')?;
     let end = text.rfind('}')?;
-    (end > start).then(|| serde_json::from_str(&text[start..=end]).ok()).flatten()
+    (end > start)
+        .then(|| serde_json::from_str(&text[start..=end]).ok())
+        .flatten()
 }
 
 fn strings(v: &Value, key: &str, max: usize) -> Vec<String> {
-    v[key].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty()).take(max).collect()
+    v[key]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .take(max)
+        .collect()
 }
 
 // ---------------------------------------------------------------- the run
 
 static STOPS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 /// One job on the model at a time.
-static RUNNER: LazyLock<Arc<tokio::sync::Mutex<()>>> = LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
+static RUNNER: LazyLock<Arc<tokio::sync::Mutex<()>>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
 
 fn stopped(id: &str) -> bool {
     STOPS.lock().expect("research").contains(id)
@@ -346,7 +424,9 @@ fn set_step(state: &AppState, job: &mut Job, step: &str) {
 fn spawn(state: AppState, id: String) {
     tokio::spawn(async move {
         let _turn = RUNNER.clone().lock_owned().await;
-        let Some(mut job) = load_job(&state, &id) else { return };
+        let Some(mut job) = load_job(&state, &id) else {
+            return;
+        };
         if job.state != "queued" && job.state != "running" {
             return;
         }
@@ -370,7 +450,10 @@ fn spawn(state: AppState, id: String) {
                 state.notifier().emit(crate::notify::Draft {
                     kind: "research",
                     title: format!("Report ready: {}", clip(&job.question, 60)),
-                    body: job.summary.clone().unwrap_or_else(|| "Your research report is ready in TT Station.".into()),
+                    body: job
+                        .summary
+                        .clone()
+                        .unwrap_or_else(|| "Your research report is ready in TT Station.".into()),
                 });
             }
             Err(e) if stopped(&id) => {
@@ -397,7 +480,10 @@ fn spawn(state: AppState, id: String) {
 
 /// A Library file as a source: its passages that match the question and the
 /// search that found it (a long PDF's first pages may not be the part that matters).
-async fn library_text(state: &AppState, src: &Source) -> Result<(String, Option<String>, String), String> {
+async fn library_text(
+    state: &AppState,
+    src: &Source,
+) -> Result<(String, Option<String>, String), String> {
     let name = src.title.clone().unwrap_or_default();
     let hits = crate::library::search(state, &src.query, 8, Some(&name)).await;
     let mut hits: Vec<_> = hits.into_iter().filter(|h| h.document == name).collect();
@@ -405,12 +491,24 @@ async fn library_text(state: &AppState, src: &Source) -> Result<(String, Option<
         return Err("That file is no longer in the Library.".into());
     }
     hits.sort_by_key(|h| h.passage);
-    let text: String = hits.iter().map(|h| h.text.as_str()).collect::<Vec<_>>().join("\n\n[…]\n\n");
-    Ok((src.url.clone(), Some(name), text.chars().take(16_000).collect()))
+    let text: String = hits
+        .iter()
+        .map(|h| h.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n[…]\n\n");
+    Ok((
+        src.url.clone(),
+        Some(name),
+        text.chars().take(16_000).collect(),
+    ))
 }
 
 fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n).collect::<String>().trim_end()) }
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(n).collect::<String>().trim_end())
+    }
 }
 
 const SYSTEM: &str = "You are the research engine on a private AI box. You are careful and factual. You only use what the sources say, and you say when sources disagree or are missing.";
@@ -421,10 +519,25 @@ async fn run(state: &AppState, job: &mut Job) -> Result<(), String> {
     let llm = Llm::new(state)?;
     job.model = Some(llm.model.clone());
     let (n_sub, per_search, rounds, max_pages) = job.depth.shape();
-    let check_stop = || if stopped(&id) { Err("stopped".to_string()) } else { Ok(()) };
+    let check_stop = || {
+        if stopped(&id) {
+            Err("stopped".to_string())
+        } else {
+            Ok(())
+        }
+    };
 
     // What a follow-up already knows.
-    let prior: Vec<Source> = job.parent.as_deref().map(|p| sources(state, p).into_iter().filter(|s| s.relevant).collect()).unwrap_or_default();
+    let prior: Vec<Source> = job
+        .parent
+        .as_deref()
+        .map(|p| {
+            sources(state, p)
+                .into_iter()
+                .filter(|s| s.relevant)
+                .collect()
+        })
+        .unwrap_or_default();
     let prior_text = notes_text(&prior, 6000);
 
     // 1. Plan.
@@ -477,39 +590,91 @@ async fn run(state: &AppState, job: &mut Job) -> Result<(), String> {
             }
         }
         check_stop()?;
-        set_step(state, job, if round == 0 { "Searching" } else { "Searching again" });
-        let mut seen: HashSet<String> = all.iter().map(|s| s.url.clone()).chain(prior.iter().map(|s| s.url.clone())).collect();
+        set_step(
+            state,
+            job,
+            if round == 0 {
+                "Searching"
+            } else {
+                "Searching again"
+            },
+        );
+        let mut seen: HashSet<String> = all
+            .iter()
+            .map(|s| s.url.clone())
+            .chain(prior.iter().map(|s| s.url.clone()))
+            .collect();
         for q in &queries {
             check_stop()?;
             let (hits, via) = search(q, per_search).await;
             job.search = Some(via.to_string());
-            event(state, &id, "search", format!("Searched \"{q}\": {} results", hits.len()));
+            event(
+                state,
+                &id,
+                "search",
+                format!("Searched \"{q}\": {} results", hits.len()),
+            );
             for h in hits {
                 if all.len() >= max_pages || !seen.insert(h.url.clone()) {
                     continue;
                 }
-                all.push(Source { n: all.len() + 1, url: h.url, title: Some(h.title).filter(|t| !t.is_empty()), query: q.clone(), status: "pending".into(), ..Default::default() });
+                all.push(Source {
+                    n: all.len() + 1,
+                    url: h.url,
+                    title: Some(h.title).filter(|t| !t.is_empty()),
+                    query: q.clone(),
+                    status: "pending".into(),
+                    ..Default::default()
+                });
             }
             // The person's own files (the Library) too: a couple of the best per search.
             let mut mine = 0;
             for h in crate::library::search(state, q, 6, None).await {
-                let url = match &h.path { Some(p) => format!("file://{p}"), None => format!("doc:{}", h.document) };
-                if mine >= 2 || h.score < 0.5 || all.len() >= max_pages + 4 || !seen.insert(url.clone()) {
+                let url = match &h.path {
+                    Some(p) => format!("file://{p}"),
+                    None => format!("doc:{}", h.document),
+                };
+                if mine >= 2
+                    || h.score < 0.5
+                    || all.len() >= max_pages + 4
+                    || !seen.insert(url.clone())
+                {
                     continue;
                 }
                 mine += 1;
-                event(state, &id, "search", format!("Your Library: {}", h.document));
-                all.push(Source { n: all.len() + 1, url, title: Some(h.document), query: q.clone(), status: "pending".into(), ..Default::default() });
+                event(
+                    state,
+                    &id,
+                    "search",
+                    format!("Your Library: {}", h.document),
+                );
+                all.push(Source {
+                    n: all.len() + 1,
+                    url,
+                    title: Some(h.document),
+                    query: q.clone(),
+                    status: "pending".into(),
+                    ..Default::default()
+                });
             }
         }
         write_json(&folder.join("sources.json"), &all);
         check_stop()?;
 
         // Read and note every pending page, several at once (the box reads fast).
-        let pending: Vec<usize> = all.iter().enumerate().filter(|(_, s)| s.status == "pending").map(|(i, _)| i).collect();
+        let pending: Vec<usize> = all
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.status == "pending")
+            .map(|(i, _)| i)
+            .collect();
         set_step(state, job, &format!("Reading {} pages", pending.len()));
         let shared = Arc::new(Mutex::new(std::mem::take(&mut all)));
-        let llm = Arc::new(Llm { http: llm.http.clone(), url: llm.url.clone(), model: llm.model.clone() });
+        let llm = Arc::new(Llm {
+            http: llm.http.clone(),
+            url: llm.url.clone(),
+            model: llm.model.clone(),
+        });
         let question = job.question.clone();
         stream::iter(pending)
             .for_each_concurrent(8, |i| {
@@ -578,11 +743,21 @@ async fn run(state: &AppState, job: &mut Job) -> Result<(), String> {
         s.n = i + 1;
     }
     if cited.is_empty() {
-        return Err("none of the pages it read had anything on the question. Try asking it differently.".into());
+        return Err(
+            "none of the pages it read had anything on the question. Try asking it differently."
+                .into(),
+        );
     }
     set_step(state, job, "Writing the report");
-    event(state, &id, "write", format!("Writing the report from {} sources…", cited.len()));
-    let title = read_json::<Value>(&plan_path).and_then(|p| p["title"].as_str().map(str::to_string)).unwrap_or_else(|| job.question.clone());
+    event(
+        state,
+        &id,
+        "write",
+        format!("Writing the report from {} sources…", cited.len()),
+    );
+    let title = read_json::<Value>(&plan_path)
+        .and_then(|p| p["title"].as_str().map(str::to_string))
+        .unwrap_or_else(|| job.question.clone());
     let budget = 40_000;
     let ask = format!(
         "Question: {q}\n\nNumbered sources and what each says:\n{notes}\n\nWrite a research report in Markdown:\n- Start with \"# {title}\".\n- Then \"## Summary\": 3-5 sentences that answer the question directly.\n- Then sections with \"##\" headings covering the findings. Use a table when comparing several things.\n- Then \"## Where sources disagree or are missing\".\n- Sources marked THE PERSON'S OWN FILE are the asker's own documents (their policy, notes, contract...): say \"your ...\" and put what they say first, ahead of general web sources.\n- Cite every claim with its source number in brackets, like [3] or [2][5]. Only cite the numbers above. Don't invent facts or sources.\n- Don't add a sources list; it is added after.",
@@ -593,11 +768,23 @@ async fn run(state: &AppState, job: &mut Job) -> Result<(), String> {
     report = clean_citations(&report, cited.len());
     let mut list = String::from("\n\n## Sources\n\n");
     for s in &cited {
-        list.push_str(&format!("{}. [{}]({})\n", s.n, s.title.clone().unwrap_or_else(|| s.url.clone()).replace(['[', ']'], ""), s.url));
+        list.push_str(&format!(
+            "{}. [{}]({})\n",
+            s.n,
+            s.title
+                .clone()
+                .unwrap_or_else(|| s.url.clone())
+                .replace(['[', ']'], ""),
+            s.url
+        ));
     }
     report.push_str(&list);
-    crate::fsio::write_atomic(&folder.join("report.md"), report.as_bytes(), crate::fsio::PRIVATE)
-        .map_err(|e| e.to_string())?;
+    crate::fsio::write_atomic(
+        &folder.join("report.md"),
+        report.as_bytes(),
+        crate::fsio::PRIVATE,
+    )
+    .map_err(|e| e.to_string())?;
     write_json(&folder.join("cited.json"), &cited);
     job.summary = summary_of(&report);
     save_job(state, job);
@@ -608,8 +795,16 @@ async fn run(state: &AppState, job: &mut Job) -> Result<(), String> {
 fn notes_text(sources: &[Source], max_chars: usize) -> String {
     let mut out = String::new();
     for s in sources.iter().filter(|s| s.relevant) {
-        let whose = if s.url.starts_with("file://") || s.url.starts_with("doc:") { "THE PERSON'S OWN FILE" } else { s.url.as_str() };
-        let mut block = format!("[{}] {} ({whose})\n", s.n, s.title.clone().unwrap_or_default());
+        let whose = if s.url.starts_with("file://") || s.url.starts_with("doc:") {
+            "THE PERSON'S OWN FILE"
+        } else {
+            s.url.as_str()
+        };
+        let mut block = format!(
+            "[{}] {} ({whose})\n",
+            s.n,
+            s.title.clone().unwrap_or_default()
+        );
         for n in &s.notes {
             if let Some(c) = n["claim"].as_str() {
                 block.push_str(&format!("  - {c}\n"));
@@ -625,10 +820,15 @@ fn notes_text(sources: &[Source], max_chars: usize) -> String {
 
 /// Drop citations to source numbers that don't exist (`[0]`, `[99]`).
 pub fn clean_citations(text: &str, count: usize) -> String {
-    static CITE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\[(\d{1,3})\]").expect("valid regex"));
+    static CITE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\[(\d{1,3})\]").expect("valid regex"));
     CITE.replace_all(text, |c: &regex::Captures| {
         let n: usize = c[1].parse().unwrap_or(0);
-        if (1..=count).contains(&n) { c[0].to_string() } else { String::new() }
+        if (1..=count).contains(&n) {
+            c[0].to_string()
+        } else {
+            String::new()
+        }
     })
     .to_string()
 }
@@ -638,7 +838,8 @@ fn summary_of(report: &str) -> Option<String> {
     let after = report.split("## Summary").nth(1)?;
     let para = after.trim_start().split("\n\n").next()?.trim();
     let first = para.split_inclusive(". ").next().unwrap_or(para);
-    static CITE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\s*\[\d{1,3}\]").expect("valid regex"));
+    static CITE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\s*\[\d{1,3}\]").expect("valid regex"));
     Some(clip(CITE.replace_all(first, "").trim(), 200))
 }
 
@@ -657,7 +858,9 @@ pub struct StartBody {
 pub(crate) async fn get_research(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
     let c = check(&state).await;
     let st = state.clone();
-    let jobs = tokio::task::spawn_blocking(move || all_jobs(&st)).await.unwrap_or_default();
+    let jobs = tokio::task::spawn_blocking(move || all_jobs(&st))
+        .await
+        .unwrap_or_default();
     Json(json!({ "jobs": jobs, "check": c }))
 }
 
@@ -668,19 +871,32 @@ pub async fn start(state: &AppState, body: StartBody) -> Result<Job, (StatusCode
         return Err(err(StatusCode::BAD_REQUEST, "Ask a full question."));
     }
     if question.len() > 2000 {
-        return Err(err(StatusCode::BAD_REQUEST, "That question is too long; keep it under 2,000 characters."));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "That question is too long; keep it under 2,000 characters.",
+        ));
     }
     if let Some(p) = &body.parent {
         if !valid_id(p) || load_job(state, p).is_none() {
-            return Err(err(StatusCode::NOT_FOUND, "The report to follow up on isn't there."));
+            return Err(err(
+                StatusCode::NOT_FOUND,
+                "The report to follow up on isn't there.",
+            ));
         }
     }
     let c = check(state).await;
     if c["ok"] != true {
-        return Err(err(StatusCode::CONFLICT, c["why"].as_str().unwrap_or("The box isn't ready for research.").to_string()));
+        return Err(err(
+            StatusCode::CONFLICT,
+            c["why"]
+                .as_str()
+                .unwrap_or("The box isn't ready for research.")
+                .to_string(),
+        ));
     }
     let id = format!("{}-{}", now(), &crate::pairing::issue_pair_id()[..6]);
-    crate::fsio::ensure_private_dir(&dir(state, &id)).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::fsio::ensure_private_dir(&dir(state, &id))
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let job = Job {
         id: id.clone(),
         question,
@@ -698,19 +914,40 @@ pub async fn start(state: &AppState, body: StartBody) -> Result<Job, (StatusCode
         round: 0,
     };
     save_job(state, &job);
-    event(state, &id, "info", format!("Researching on {} with {} search.", short(&job.model), if c["search"] == "searxng" { "private (SearXNG)" } else { "web" }));
+    event(
+        state,
+        &id,
+        "info",
+        format!(
+            "Researching on {} with {} search.",
+            short(&job.model),
+            if c["search"] == "searxng" {
+                "private (SearXNG)"
+            } else {
+                "web"
+            }
+        ),
+    );
     spawn(state.clone(), id);
     Ok(job)
 }
 
 /// `POST /research`.
-pub(crate) async fn post_research(State(state): State<AppState>, _auth: BearerAuth, Json(body): Json<StartBody>) -> Reply {
+pub(crate) async fn post_research(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    Json(body): Json<StartBody>,
+) -> Reply {
     let job = start(&state, body).await?;
     Ok(Json(json!({ "job": job })))
 }
 
 /// `GET /research/{id}`.
-pub(crate) async fn get_job(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
+pub(crate) async fn get_job(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
     if !valid_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "No such report."));
     }
@@ -734,8 +971,14 @@ pub(crate) async fn get_job(State(state): State<AppState>, _auth: BearerAuth, Ur
 }
 
 /// `POST /research/{id}/stop`.
-pub(crate) async fn post_stop(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
-    let mut job = load_job(&state, &id).filter(|_| valid_id(&id)).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
+pub(crate) async fn post_stop(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
+    let mut job = load_job(&state, &id)
+        .filter(|_| valid_id(&id))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
     if job.state == "queued" {
         job.state = "stopped".into();
         job.step = "Stopped".into();
@@ -746,12 +989,19 @@ pub(crate) async fn post_stop(State(state): State<AppState>, _auth: BearerAuth, 
 }
 
 /// `DELETE /research/{id}`.
-pub(crate) async fn delete_job(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
-    let job = load_job(&state, &id).filter(|_| valid_id(&id)).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
+pub(crate) async fn delete_job(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
+    let job = load_job(&state, &id)
+        .filter(|_| valid_id(&id))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
     if job.state == "running" || job.state == "queued" {
         return Err(err(StatusCode::CONFLICT, "Stop it first."));
     }
-    std::fs::remove_dir_all(dir(&state, &id)).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    std::fs::remove_dir_all(dir(&state, &id))
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "deleted": true })))
 }
 
@@ -761,7 +1011,12 @@ pub struct Rename {
 }
 
 /// `POST /research/{id}/rename`: give the report a name of your own.
-pub(crate) async fn post_rename(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>, Json(b): Json<Rename>) -> Reply {
+pub(crate) async fn post_rename(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+    Json(b): Json<Rename>,
+) -> Reply {
     if !valid_id(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such report."));
     }
@@ -770,9 +1025,13 @@ pub(crate) async fn post_rename(State(state): State<AppState>, _auth: BearerAuth
         return Err(err(StatusCode::BAD_REQUEST, "Give it a name."));
     }
     if title.len() > 120 {
-        return Err(err(StatusCode::BAD_REQUEST, "Keep the name under 120 characters."));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Keep the name under 120 characters.",
+        ));
     }
-    let mut job = load_job(&state, &id).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
+    let mut job =
+        load_job(&state, &id).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
     job.title = Some(title.clone());
     save_job(&state, &job);
     Ok(Json(json!({ "job": job })))
@@ -788,7 +1047,8 @@ const NEARBY_CHARS: usize = 6000;
 /// How much of the cited sources' notes it sees.
 const NOTES_CHARS: usize = 2500;
 /// Explanations written at once, across everyone; the rest wait a moment, then are told the box is busy.
-static EXPLAINING: LazyLock<Arc<tokio::sync::Semaphore>> = LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+static EXPLAINING: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -814,22 +1074,49 @@ fn checked(b: ExplainBody) -> Result<Checked, (StatusCode, Json<Value>)> {
     // Selections out of a rendered page come with stray line breaks and spaces.
     let selection = b.selection.split_whitespace().collect::<Vec<_>>().join(" ");
     if selection.chars().count() < 2 {
-        return Err(err(StatusCode::BAD_REQUEST, "Select some of the report first."));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Select some of the report first.",
+        ));
     }
     if selection.chars().count() > MAX_SELECTION {
         return Err(err(StatusCode::BAD_REQUEST, "That's a lot of the report at once. Select a paragraph or two (under 4,000 characters)."));
     }
-    let question = b.question.map(|q| q.trim().to_string()).filter(|q| !q.is_empty());
+    let question = b
+        .question
+        .map(|q| q.trim().to_string())
+        .filter(|q| !q.is_empty());
     match (b.mode, &question) {
-        (ExplainMode::Ask, None) => return Err(err(StatusCode::BAD_REQUEST, "Ask a question about the passage.")),
-        (_, Some(q)) if q.chars().count() > MAX_QUESTION => return Err(err(StatusCode::BAD_REQUEST, "Keep the question under 500 characters.")),
+        (ExplainMode::Ask, None) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "Ask a question about the passage.",
+            ))
+        }
+        (_, Some(q)) if q.chars().count() > MAX_QUESTION => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "Keep the question under 500 characters.",
+            ))
+        }
         _ => {}
     }
-    Ok((selection, b.mode, if b.mode == ExplainMode::Ask { question } else { None }))
+    Ok((
+        selection,
+        b.mode,
+        if b.mode == ExplainMode::Ask {
+            question
+        } else {
+            None
+        },
+    ))
 }
 
 fn words(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
 /// The part of the report around `selection`: the block (paragraph, list, table)
@@ -838,13 +1125,25 @@ fn words(text: &str) -> Vec<String> {
 /// won't match the Markdown exactly; matching on words gets past `**`, `|` and links.
 pub fn nearby(report: &str, selection: &str, budget: usize) -> String {
     let body = report.split("\n## Sources").next().unwrap_or(report);
-    let blocks: Vec<&str> = body.split("\n\n").map(str::trim).filter(|b| !b.is_empty()).collect();
+    let blocks: Vec<&str> = body
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .collect();
     if blocks.is_empty() {
         return String::new();
     }
     let want: HashSet<String> = words(selection).into_iter().collect();
-    let score = |b: &str| words(b).into_iter().collect::<HashSet<_>>().intersection(&want).count();
-    let best = (0..blocks.len()).max_by_key(|&i| (score(blocks[i]), std::cmp::Reverse(i))).unwrap_or(0);
+    let score = |b: &str| {
+        words(b)
+            .into_iter()
+            .collect::<HashSet<_>>()
+            .intersection(&want)
+            .count()
+    };
+    let best = (0..blocks.len())
+        .max_by_key(|&i| (score(blocks[i]), std::cmp::Reverse(i)))
+        .unwrap_or(0);
     let (mut lo, mut hi) = (best, best + 1);
     let mut size = blocks[best].len();
     loop {
@@ -865,12 +1164,17 @@ pub fn nearby(report: &str, selection: &str, budget: usize) -> String {
     }
     let text = blocks[lo..hi].join("\n\n");
     // One huge block (a long table): its start is better than nothing.
-    if text.len() > budget { clip(&text, budget) } else { text }
+    if text.len() > budget {
+        clip(&text, budget)
+    } else {
+        text
+    }
 }
 
 /// The source numbers cited in `text`, in order, once each.
 fn cited_numbers(text: &str) -> Vec<usize> {
-    static CITE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\[(\d{1,3})\]").expect("valid regex"));
+    static CITE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\[(\d{1,3})\]").expect("valid regex"));
     let mut seen = Vec::new();
     for c in CITE.captures_iter(text) {
         if let Ok(n) = c[1].parse::<usize>() {
@@ -884,7 +1188,9 @@ fn cited_numbers(text: &str) -> Vec<usize> {
 
 /// Report text in the prompt is fenced in tags; text from a web page can't close the fence early.
 fn fenced(text: &str) -> String {
-    static TAG: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?i)</?\s*(report|passage|notes|question)\s*>").expect("valid regex"));
+    static TAG: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(?i)</?\s*(report|passage|notes|question)\s*>").expect("valid regex")
+    });
     TAG.replace_all(text, "").to_string()
 }
 
@@ -897,7 +1203,14 @@ Put the report's source numbers like [3] after the claims they support, as the r
 
 /// The model's instructions and the request, from the report's title, the passage,
 /// the report around it, and what the sources it cites said.
-pub fn explain_prompt(title: &str, nearby: &str, notes: &str, selection: &str, mode: ExplainMode, question: Option<&str>) -> (String, String) {
+pub fn explain_prompt(
+    title: &str,
+    nearby: &str,
+    notes: &str,
+    selection: &str,
+    mode: ExplainMode,
+    question: Option<&str>,
+) -> (String, String) {
     let task = match mode {
         ExplainMode::Explain => "Explain the passage: what it means, and how it fits with the rest of the report around it. Start with the point, not with \"The passage\"; don't just repeat it, and don't add reasons it doesn't give. Cite source numbers like [12] from the report after each claim. At most 100 words.".to_string(),
         ExplainMode::Simpler => "Say the passage again in plain, everyday words for someone new to the subject. Keep its facts, numbers and source numbers; drop jargon or explain it in a few words. No longer than the passage, and at most 120 words.".to_string(),
@@ -906,7 +1219,14 @@ pub fn explain_prompt(title: &str, nearby: &str, notes: &str, selection: &str, m
             fenced(question.unwrap_or_default())
         ),
     };
-    let notes = if notes.is_empty() { String::new() } else { format!("What the sources the passage cites said:\n<notes>\n{}\n</notes>\n\n", fenced(notes)) };
+    let notes = if notes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "What the sources the passage cites said:\n<notes>\n{}\n</notes>\n\n",
+            fenced(notes)
+        )
+    };
     let user = format!(
         "Report title: {title}\n\nThe report around the passage:\n<report>\n{nearby}\n</report>\n\n{notes}The passage the person selected:\n<passage>\n{selection}\n</passage>\n\n{task}",
         title = fenced(title),
@@ -919,15 +1239,23 @@ pub fn explain_prompt(title: &str, nearby: &str, notes: &str, selection: &str, m
 /// The notes of the cited sources numbered in `text`, within about `max_chars`.
 fn cited_notes(cited: &[Source], text: &str, max_chars: usize) -> String {
     let numbers = cited_numbers(text);
-    let picked: Vec<Source> = numbers.iter().filter_map(|n| cited.iter().find(|s| s.n == *n).cloned()).collect();
+    let picked: Vec<Source> = numbers
+        .iter()
+        .filter_map(|n| cited.iter().find(|s| s.n == *n).cloned())
+        .collect();
     notes_text(&picked, max_chars)
 }
 
 /// The finished answer: citations only to sources that exist, and no made-up
 /// labels in their place (`[table]`, `[report]`, seen from gpt-oss-20b).
 fn clean_answer(text: &str, count: usize) -> String {
-    static LABEL: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?i)\s*\[(table|report|passage|notes?|sources?)\]").expect("valid regex"));
-    clean_citations(&LABEL.replace_all(text, ""), count).trim().to_string()
+    static LABEL: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(?i)\s*\[(table|report|passage|notes?|sources?)\]")
+            .expect("valid regex")
+    });
+    clean_citations(&LABEL.replace_all(text, ""), count)
+        .trim()
+        .to_string()
 }
 
 /// One `data:` line of an OpenAI-style stream: (reasoning, answer text), either may be empty.
@@ -938,8 +1266,14 @@ fn stream_delta(line: &str) -> Option<(String, String)> {
     }
     let v: Value = serde_json::from_str(payload).ok()?;
     let delta = v.pointer("/choices/0/delta")?;
-    let reasoning = ["reasoning_content", "reasoning"].iter().filter_map(|k| delta[*k].as_str()).collect::<String>();
-    Some((reasoning, delta["content"].as_str().unwrap_or("").to_string()))
+    let reasoning = ["reasoning_content", "reasoning"]
+        .iter()
+        .filter_map(|k| delta[*k].as_str())
+        .collect::<String>();
+    Some((
+        reasoning,
+        delta["content"].as_str().unwrap_or("").to_string(),
+    ))
 }
 
 /// What the explain stream sends, one `data:` line each.
@@ -948,10 +1282,17 @@ fn stream_delta(line: &str) -> Option<(String, String)> {
 enum ExplainEvent {
     /// The model is thinking before it writes (some models think first, which takes a while).
     Thinking,
-    Delta { text: String },
+    Delta {
+        text: String,
+    },
     /// The whole answer, cleaned; replaces what was streamed.
-    Done { answer: String, model: String },
-    Error { error: String },
+    Done {
+        answer: String,
+        model: String,
+    },
+    Error {
+        error: String,
+    },
 }
 
 /// `POST /research/{id}/explain` (authed): `{selection, mode: explain|simpler|ask, question?}`.
@@ -965,7 +1306,12 @@ pub(crate) async fn post_explain(
     who: crate::people::Who,
     UrlPath(id): UrlPath<String>,
     Json(body): Json<ExplainBody>,
-) -> Result<axum::response::sse::Sse<impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>, (StatusCode, Json<Value>)> {
+) -> Result<
+    axum::response::sse::Sse<
+        impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    (StatusCode, Json<Value>),
+> {
     if !valid_id(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such report."));
     }
@@ -981,10 +1327,14 @@ pub(crate) async fn post_explain(
 
     // A chat model has to be serving (the way Tori checks: a media server would answer 404).
     let _ = state.reconciled_status().await;
-    let not_serving = || err(StatusCode::CONFLICT, "Explaining runs on the model the box serves, and nothing is serving. Start a chat model (Qwen3-32B is a good choice) and try again.");
+    let not_serving = || {
+        err(StatusCode::CONFLICT, "Explaining runs on the model the box serves, and nothing is serving. Start a chat model (Qwen3-32B is a good choice) and try again.")
+    };
     let ep = state.endpoint().ok_or_else(not_serving)?;
     let probe = state.clone();
-    let kind = tokio::task::spawn_blocking(move || probe.served_kind_blocking()).await.unwrap_or("chat");
+    let kind = tokio::task::spawn_blocking(move || probe.served_kind_blocking())
+        .await
+        .unwrap_or("chat");
     if kind != "chat" && kind != "other" {
         return Err(err(StatusCode::CONFLICT, format!("The box is serving {} ({kind}), and explaining needs a chat model. Start one like Qwen3-32B.", short(&Some(ep.model.clone())))));
     }
@@ -992,13 +1342,32 @@ pub(crate) async fn post_explain(
         .await
         .ok()
         .and_then(Result::ok)
-        .ok_or_else(|| err(StatusCode::TOO_MANY_REQUESTS, "The box is busy explaining other passages. Try again in a moment."))?;
+        .ok_or_else(|| {
+            err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "The box is busy explaining other passages. Try again in a moment.",
+            )
+        })?;
 
     let cited: Vec<Source> = read_json(&folder.join("cited.json")).unwrap_or_default();
-    let title = job.title.clone().or_else(|| read_json::<Value>(&folder.join("plan.json")).and_then(|p| p["title"].as_str().map(str::to_string))).unwrap_or_else(|| job.question.clone());
+    let title = job
+        .title
+        .clone()
+        .or_else(|| {
+            read_json::<Value>(&folder.join("plan.json"))
+                .and_then(|p| p["title"].as_str().map(str::to_string))
+        })
+        .unwrap_or_else(|| job.question.clone());
     let around = nearby(&report, &selection, NEARBY_CHARS);
     let notes = cited_notes(&cited, &format!("{selection}\n{around}"), NOTES_CHARS);
-    let (system, user) = explain_prompt(&title, &around, &notes, &selection, mode, question.as_deref());
+    let (system, user) = explain_prompt(
+        &title,
+        &around,
+        &notes,
+        &selection,
+        mode,
+        question.as_deref(),
+    );
     let body = json!({
         "model": ep.model,
         "messages": [{ "role": "system", "content": system }, { "role": "user", "content": user }],
@@ -1016,8 +1385,18 @@ pub(crate) async fn post_explain(
     tokio::spawn(async move {
         let _permit = permit;
         let fail = |e: String| ExplainEvent::Error { error: e };
-        let http = reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).timeout(crate::assistant::STREAM_TIMEOUT).build();
-        let send = async { http.map_err(|e| e.to_string())?.post(&url).json(&body).send().await.map_err(|e| format!("Couldn't reach the model: {e}")) };
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(crate::assistant::STREAM_TIMEOUT)
+            .build();
+        let send = async {
+            http.map_err(|e| e.to_string())?
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Couldn't reach the model: {e}"))
+        };
         let mut resp = tokio::select! {
             _ = tx.closed() => return,
             r = send => match r {
@@ -1028,7 +1407,10 @@ pub(crate) async fn post_explain(
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            let _ = tx.send(fail(format!("The model answered {status}: {}", clip(&text, 200))));
+            let _ = tx.send(fail(format!(
+                "The model answered {status}: {}",
+                clip(&text, 200)
+            )));
             return;
         }
         let mut filter = crate::assistant::ThinkFilter::default();
@@ -1036,7 +1418,9 @@ pub(crate) async fn post_explain(
         let mut buf: Vec<u8> = Vec::new();
         let mut thinking = false;
         let mut handle = |line: &str, answer: &mut String| -> bool {
-            let Some((reasoning, text)) = stream_delta(line) else { return true };
+            let Some((reasoning, text)) = stream_delta(line) else {
+                return true;
+            };
             let mut out = Vec::new();
             if !reasoning.is_empty() && !thinking && answer.is_empty() {
                 thinking = true;
@@ -1089,14 +1473,21 @@ pub(crate) async fn post_explain(
         }
         let answer = clean_answer(&answer, count);
         let _ = tx.send(if answer.is_empty() {
-            fail("The model didn't write an answer. Try again, or select a different passage.".into())
+            fail(
+                "The model didn't write an answer. Try again, or select a different passage."
+                    .into(),
+            )
         } else {
             ExplainEvent::Done { answer, model }
         });
     });
     let events = stream::unfold(rx, |mut rx| async move {
         let e = rx.recv().await?;
-        Some((Ok(axum::response::sse::Event::default().data(serde_json::to_string(&e).unwrap_or_default())), rx))
+        Some((
+            Ok(axum::response::sse::Event::default()
+                .data(serde_json::to_string(&e).unwrap_or_default())),
+            rx,
+        ))
     });
     let events = futures_util::StreamExt::take_until(events, Box::pin(signed_out));
     Ok(axum::response::sse::Sse::new(events).keep_alive(axum::response::sse::KeepAlive::default()))
@@ -1104,7 +1495,11 @@ pub(crate) async fn post_explain(
 
 /// At startup: carry on with jobs the agent stopped in the middle of.
 pub fn resume(state: &AppState) {
-    for job in all_jobs(state).into_iter().rev().filter(|j| j.state == "running" || j.state == "queued") {
+    for job in all_jobs(state)
+        .into_iter()
+        .rev()
+        .filter(|j| j.state == "running" || j.state == "queued")
+    {
         event(state, &job.id, "info", "Picking up where it left off.");
         let mut j = job.clone();
         j.state = "queued".into();
@@ -1126,31 +1521,72 @@ mod tests {
 
     #[test]
     fn drops_citations_to_missing_sources() {
-        assert_eq!(clean_citations("A [1] B [7] C [2][3]", 3), "A [1] B  C [2][3]");
+        assert_eq!(
+            clean_citations("A [1] B [7] C [2][3]", 3),
+            "A [1] B  C [2][3]"
+        );
     }
 
     fn body(selection: &str, mode: ExplainMode, question: Option<&str>) -> ExplainBody {
-        ExplainBody { selection: selection.into(), mode, question: question.map(str::to_string) }
+        ExplainBody {
+            selection: selection.into(),
+            mode,
+            question: question.map(str::to_string),
+        }
     }
 
     #[test]
     fn explain_checks_the_selection_and_question() {
-        let (sel, mode, q) = checked(body("  Foxes\n hunt   in snow [1]. ", ExplainMode::Explain, Some("ignored"))).unwrap();
-        assert_eq!((sel.as_str(), mode, q), ("Foxes hunt in snow [1].", ExplainMode::Explain, None));
+        let (sel, mode, q) = checked(body(
+            "  Foxes\n hunt   in snow [1]. ",
+            ExplainMode::Explain,
+            Some("ignored"),
+        ))
+        .unwrap();
+        assert_eq!(
+            (sel.as_str(), mode, q),
+            ("Foxes hunt in snow [1].", ExplainMode::Explain, None)
+        );
         assert!(checked(body(" \n ", ExplainMode::Explain, None)).is_err());
-        assert!(checked(body(&"a".repeat(MAX_SELECTION + 1), ExplainMode::Simpler, None)).is_err());
-        assert!(checked(body(&"a \n ".repeat(MAX_SELECTION / 2), ExplainMode::Simpler, None)).is_ok(), "whitespace collapses before the cap");
+        assert!(checked(body(
+            &"a".repeat(MAX_SELECTION + 1),
+            ExplainMode::Simpler,
+            None
+        ))
+        .is_err());
+        assert!(
+            checked(body(
+                &"a \n ".repeat(MAX_SELECTION / 2),
+                ExplainMode::Simpler,
+                None
+            ))
+            .is_ok(),
+            "whitespace collapses before the cap"
+        );
         assert!(checked(body("Foxes hunt", ExplainMode::Ask, None)).is_err());
         assert!(checked(body("Foxes hunt", ExplainMode::Ask, Some("   "))).is_err());
-        assert!(checked(body("Foxes hunt", ExplainMode::Ask, Some(&"why ".repeat(200)))).is_err());
+        assert!(checked(body(
+            "Foxes hunt",
+            ExplainMode::Ask,
+            Some(&"why ".repeat(200))
+        ))
+        .is_err());
         let (_, _, q) = checked(body("Foxes hunt", ExplainMode::Ask, Some(" why? "))).unwrap();
         assert_eq!(q.as_deref(), Some("why?"));
     }
 
     #[test]
     fn explain_mode_is_one_of_three() {
-        assert_eq!(serde_json::from_value::<ExplainBody>(json!({"selection": "x", "mode": "simpler"})).unwrap().mode, ExplainMode::Simpler);
-        assert!(serde_json::from_value::<ExplainBody>(json!({"selection": "x", "mode": "search"})).is_err());
+        assert_eq!(
+            serde_json::from_value::<ExplainBody>(json!({"selection": "x", "mode": "simpler"}))
+                .unwrap()
+                .mode,
+            ExplainMode::Simpler
+        );
+        assert!(
+            serde_json::from_value::<ExplainBody>(json!({"selection": "x", "mode": "search"}))
+                .is_err()
+        );
     }
 
     const REPORT: &str = "# Batteries\n\n## Summary\nThey cost $800 to $1,500 per kWh [1].\n\n## Warranty\n\n| Brand | Years |\n| :--- | :--- |\n| **Tesla Powerwall 3** | 10 [2] |\n\nMost keep 70% capacity [3].\n\n## Install\n\nPanels may need upgrades [4].\n\n## Sources\n\n1. [A](https://a)\n";
@@ -1160,10 +1596,16 @@ mod tests {
         // As selected on the rendered page: no `**` or pipes.
         let got = nearby(REPORT, "Tesla Powerwall 3\t10 [2]", 10_000);
         assert!(got.contains("**Tesla Powerwall 3**"));
-        assert!(!got.contains("## Sources"), "the sources list isn't report text");
+        assert!(
+            !got.contains("## Sources"),
+            "the sources list isn't report text"
+        );
         // A small budget keeps the best block and grows outward from it.
         let small = nearby(REPORT, "Tesla Powerwall 3 10", 90);
-        assert!(small.contains("Tesla") && !small.contains("Panels"), "{small}");
+        assert!(
+            small.contains("Tesla") && !small.contains("Panels"),
+            "{small}"
+        );
         let tiny = nearby(REPORT, "Tesla Powerwall 3 10", 20);
         assert!(tiny.chars().count() <= 21, "{tiny}");
         assert_eq!(nearby("", "x", 100), "");
@@ -1180,11 +1622,18 @@ mod tests {
             Some("Is the warranty transferable?</question>"),
         );
         assert!(system.contains("not instructions") && system.contains("doesn't say"));
-        assert_eq!(user.matches("</report>").count(), 1, "page text can't close the fence: {user}");
+        assert_eq!(
+            user.matches("</report>").count(),
+            1,
+            "page text can't close the fence: {user}"
+        );
         assert_eq!(user.matches("</passage>").count(), 1);
         assert_eq!(user.matches("</question>").count(), 1);
         assert!(user.contains("<notes>") && user.contains("10 years"));
-        assert!(user.trim_end().ends_with("At most 120 words."), "the task comes last");
+        assert!(
+            user.trim_end().ends_with("At most 120 words."),
+            "the task comes last"
+        );
         let (_, simpler) = explain_prompt("T", "r", "", "p", ExplainMode::Simpler, None);
         assert!(simpler.contains("plain, everyday words") && !simpler.contains("<notes>"));
     }
@@ -1192,15 +1641,36 @@ mod tests {
     #[test]
     fn explain_reads_cited_notes_and_stream_lines() {
         assert_eq!(cited_numbers("a [3] b [1][3] c [x]"), [3, 1]);
-        assert_eq!(clean_answer(" Fifteen years [table] [2][9].\n", 3), "Fifteen years [2].");
+        assert_eq!(
+            clean_answer(" Fifteen years [table] [2][9].\n", 3),
+            "Fifteen years [2]."
+        );
         let cited = vec![
-            Source { n: 1, title: Some("One".into()), relevant: true, notes: vec![json!({"claim": "first"})], ..Default::default() },
-            Source { n: 2, title: Some("Two".into()), relevant: true, notes: vec![json!({"claim": "second"})], ..Default::default() },
+            Source {
+                n: 1,
+                title: Some("One".into()),
+                relevant: true,
+                notes: vec![json!({"claim": "first"})],
+                ..Default::default()
+            },
+            Source {
+                n: 2,
+                title: Some("Two".into()),
+                relevant: true,
+                notes: vec![json!({"claim": "second"})],
+                ..Default::default()
+            },
         ];
         let notes = cited_notes(&cited, "only [2]", 1000);
         assert!(notes.contains("second") && !notes.contains("first"));
-        assert_eq!(stream_delta(r#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#), Some((String::new(), "Hi".into())));
-        assert_eq!(stream_delta(r#"data: {"choices":[{"delta":{"reasoning_content":"hm"}}]}"#), Some(("hm".into(), String::new())));
+        assert_eq!(
+            stream_delta(r#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#),
+            Some((String::new(), "Hi".into()))
+        );
+        assert_eq!(
+            stream_delta(r#"data: {"choices":[{"delta":{"reasoning_content":"hm"}}]}"#),
+            Some(("hm".into(), String::new()))
+        );
         assert_eq!(stream_delta("data: [DONE]"), None);
         assert_eq!(stream_delta(": keep-alive"), None);
     }

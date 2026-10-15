@@ -264,7 +264,10 @@ fn line_matches(line: &str, which: &Revoke) -> bool {
     match which {
         Revoke::Blob(blob) => {
             key_blob(line) == Some(blob.as_str())
-                && line.split_whitespace().last().is_some_and(|t| t.starts_with("ttstation:"))
+                && line
+                    .split_whitespace()
+                    .last()
+                    .is_some_and(|t| t.starts_with("ttstation:"))
         }
         Revoke::Label(label) => {
             let marker = format!("ttstation:{label}");
@@ -440,10 +443,17 @@ mod tests {
     fn revoke_by_blob_leaves_keys_tt_station_did_not_add() {
         let p = tmp("revoke-blob");
         // The same key, added by hand and by TT Station.
-        fs::write(&p, "ssh-ed25519 AAAASAME jane@mac\nssh-ed25519 AAAASAME jane@mac ttstation:phone\n").unwrap();
+        fs::write(
+            &p,
+            "ssh-ed25519 AAAASAME jane@mac\nssh-ed25519 AAAASAME jane@mac ttstation:phone\n",
+        )
+        .unwrap();
         revoke(&p, &Revoke::Blob("AAAASAME".into())).unwrap();
         let body = fs::read_to_string(&p).unwrap();
-        assert_eq!(body, "ssh-ed25519 AAAASAME jane@mac\n", "only the ttstation: line goes");
+        assert_eq!(
+            body, "ssh-ed25519 AAAASAME jane@mac\n",
+            "only the ttstation: line goes"
+        );
     }
 
     // --- Security-review fixes (commit b009fe5 findings) -----------------

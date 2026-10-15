@@ -57,7 +57,10 @@ pub const MAX_WINDOW: u64 = 131_072;
 /// launch paths (Code in `workspace.rs`, coding sessions here) and Code's speed
 /// panel (`codespeed.rs`) use this, so what the panel shows is what was launched.
 pub fn code_window(state: &AppState, context: Option<u64>) -> (u64, u64) {
-    window_for(context, crate::evals::compact_window(state, state.endpoint().map(|e| e.model).as_deref()))
+    window_for(
+        context,
+        crate::evals::compact_window(state, state.endpoint().map(|e| e.model).as_deref()),
+    )
 }
 
 /// [`code_window`]'s arithmetic: the served context capped at [`MAX_WINDOW`], and
@@ -74,7 +77,12 @@ pub fn window_for(context: Option<u64>, compact: u64) -> (u64, u64) {
 ///
 /// `context` is the served model's; `web` offers the web tools (not from a
 /// sandbox, which has no internet).
-pub(crate) fn claude_tuning(state: &AppState, context: Option<u64>, folder: &Path, web: bool) -> (Vec<String>, Vec<(String, String)>) {
+pub(crate) fn claude_tuning(
+    state: &AppState,
+    context: Option<u64>,
+    folder: &Path,
+    web: bool,
+) -> (Vec<String>, Vec<(String, String)>) {
     let (window, compact_at) = code_window(state, context);
     // Its answers fit in what's left of the context: Claude Code asks for large
     // output budgets by default, and prompt plus budget past the context is refused.
@@ -115,7 +123,10 @@ pub(crate) fn claude_tuning(state: &AppState, context: Option<u64>, folder: &Pat
         ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".into()),
         ("DISABLE_AUTOUPDATER", "1".into()),
     ];
-    (args, env.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    (
+        args,
+        env.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+    )
 }
 
 type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -127,11 +138,16 @@ fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) 
 }
 
 fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 fn root(state: &AppState) -> PathBuf {
@@ -156,7 +172,10 @@ const AGENTS: &[Agent] = &[
 ];
 
 fn find_bin(a: &Agent) -> Option<PathBuf> {
-    a.bins.iter().map(|b| PathBuf::from(b.replacen('~', &home().display().to_string(), 1))).find(|p| p.is_file())
+    a.bins
+        .iter()
+        .map(|b| PathBuf::from(b.replacen('~', &home().display().to_string(), 1)))
+        .find(|p| p.is_file())
 }
 
 /// The one app key coding sessions use (made once, kept 0600).
@@ -177,7 +196,13 @@ pub(crate) fn key(state: &AppState) -> Result<String, String> {
 }
 
 /// The command and environment that start `agent` on the box's model.
-fn launch(state: &AppState, agent: &Agent, bin: &Path, task: Option<&str>, folder: &Path) -> Result<(Vec<String>, Vec<(String, String)>), String> {
+fn launch(
+    state: &AppState,
+    agent: &Agent,
+    bin: &Path,
+    task: Option<&str>,
+    folder: &Path,
+) -> Result<(Vec<String>, Vec<(String, String)>), String> {
     let base = format!("http://127.0.0.1:{}", state.ctrl_port());
     let k = key(state)?;
     let b = bin.display().to_string();
@@ -188,7 +213,10 @@ fn launch(state: &AppState, agent: &Agent, bin: &Path, task: Option<&str>, folde
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             // Onboarding done, and the folder trusted: picking it in TT Station is that choice.
             let cfg = dir.join(".claude.json");
-            let mut c: Value = std::fs::read(&cfg).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| json!({}));
+            let mut c: Value = std::fs::read(&cfg)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_else(|| json!({}));
             c["hasCompletedOnboarding"] = json!(true);
             if c["theme"].is_null() {
                 c["theme"] = json!("dark");
@@ -203,7 +231,11 @@ fn launch(state: &AppState, agent: &Agent, bin: &Path, task: Option<&str>, folde
             c["projects"][&f]["hasTrustDialogAccepted"] = json!(true);
             let _ = std::fs::write(&cfg, serde_json::to_vec_pretty(&c).unwrap_or_default());
             // Its context window: the served model's own (it can't know "quietbox").
-            let context = FIT.lock().expect("fit").as_ref().and_then(|(_, _, v)| v["context"].as_u64());
+            let context = FIT
+                .lock()
+                .expect("fit")
+                .as_ref()
+                .and_then(|(_, _, v)| v["context"].as_u64());
             let (args, mut env) = claude_tuning(state, context, folder, true);
             let mut cmd = vec![b];
             cmd.extend(args);
@@ -219,7 +251,10 @@ fn launch(state: &AppState, agent: &Agent, bin: &Path, task: Option<&str>, folde
         }
         "opencode" => {
             let cfg = root(state).join("opencode.json");
-            let model = state.endpoint().map(|e| e.model).unwrap_or_else(|| "quietbox".into());
+            let model = state
+                .endpoint()
+                .map(|e| e.model)
+                .unwrap_or_else(|| "quietbox".into());
             let config = json!({
                 "$schema": "https://opencode.ai/config.json",
                 "model": "quietbox/quietbox",
@@ -229,12 +264,26 @@ fn launch(state: &AppState, agent: &Agent, bin: &Path, task: Option<&str>, folde
                     "models": { "quietbox": { "name": format!("QuietBox ({})", model.rsplit('/').next().unwrap_or(&model)), "limit": { "context": 131072, "output": 16384 } } }
                 } }
             });
-            std::fs::write(&cfg, serde_json::to_vec_pretty(&config).unwrap_or_default()).map_err(|e| e.to_string())?;
-            (vec![b], vec![("OPENCODE_CONFIG".into(), cfg.display().to_string())])
+            std::fs::write(&cfg, serde_json::to_vec_pretty(&config).unwrap_or_default())
+                .map_err(|e| e.to_string())?;
+            (
+                vec![b],
+                vec![("OPENCODE_CONFIG".into(), cfg.display().to_string())],
+            )
         }
         "aider" => (
-            vec![b, "--from".into(), "aider-chat".into(), "aider".into(), "--model".into(), "openai/quietbox".into(),
-                 "--openai-api-base".into(), format!("{base}/v1"), "--no-show-model-warnings".into(), "--no-check-update".into()],
+            vec![
+                b,
+                "--from".into(),
+                "aider-chat".into(),
+                "aider".into(),
+                "--model".into(),
+                "openai/quietbox".into(),
+                "--openai-api-base".into(),
+                format!("{base}/v1"),
+                "--no-show-model-warnings".into(),
+                "--no-check-update".into(),
+            ],
             vec![("OPENAI_API_KEY".into(), k)],
         ),
         _ => (vec![b, "-l".into()], vec![]),
@@ -270,15 +319,23 @@ fn sock(state: &AppState, id: &str) -> PathBuf {
 }
 
 fn load(state: &AppState, id: &str) -> Option<Session> {
-    std::fs::read(sessions_dir(state).join(id).join("session.json")).ok().and_then(|b| serde_json::from_slice(&b).ok())
+    std::fs::read(sessions_dir(state).join(id).join("session.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
 }
 
 fn save(state: &AppState, s: &Session) {
-    let _ = std::fs::write(sessions_dir(state).join(&s.id).join("session.json"), serde_json::to_vec_pretty(s).unwrap_or_default());
+    let _ = std::fs::write(
+        sessions_dir(state).join(&s.id).join("session.json"),
+        serde_json::to_vec_pretty(s).unwrap_or_default(),
+    );
 }
 
 fn unit_active(id: &str) -> bool {
-    Command::new("systemctl").args(["--user", "is-active", "--quiet", &unit(id)]).status().is_ok_and(|s| s.success())
+    Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", &unit(id)])
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 fn valid_id(id: &str) -> bool {
@@ -289,7 +346,9 @@ fn valid_id(id: &str) -> bool {
 fn refresh(state: &AppState, mut s: Session) -> Session {
     if s.ended.is_none() && !unit_active(&s.id) {
         s.ended = Some(now());
-        s.exit = std::fs::read_to_string(sessions_dir(state).join(&s.id).join("term.log.exit")).ok().and_then(|t| t.trim().parse().ok());
+        s.exit = std::fs::read_to_string(sessions_dir(state).join(&s.id).join("term.log.exit"))
+            .ok()
+            .and_then(|t| t.trim().parse().ok());
         save(state, &s);
     }
     s
@@ -313,7 +372,10 @@ pub(crate) fn changed_files(folder: &str) -> Vec<String> {
 }
 
 fn describe(s: &Session) -> Value {
-    let name = AGENTS.iter().find(|a| a.id == s.agent).map_or(s.agent.as_str(), |a| a.name);
+    let name = AGENTS
+        .iter()
+        .find(|a| a.id == s.agent)
+        .map_or(s.agent.as_str(), |a| a.name);
     json!({
         "id": s.id, "agent": s.agent, "agent_name": name, "folder": s.folder, "task": s.task,
         "created": s.created, "ended": s.ended, "exit": s.exit, "live": s.ended.is_none(),
@@ -327,7 +389,11 @@ static FIT: LazyLock<Mutex<Option<(String, Instant, Value)>>> = LazyLock::new(||
 
 /// The served model's context, from the last check of it (no new request).
 pub(crate) fn known_context(model: &str) -> Option<u64> {
-    FIT.lock().expect("fit").as_ref().filter(|(m, _, _)| m == model).and_then(|(_, _, v)| v["context"].as_u64())
+    FIT.lock()
+        .expect("fit")
+        .as_ref()
+        .filter(|(m, _, _)| m == model)
+        .and_then(|(_, _, v)| v["context"].as_u64())
 }
 
 /// Does the served model make clean tool calls, and how much does it remember?
@@ -342,8 +408,17 @@ pub(crate) async fn check(state: &AppState) -> Value {
         }
     }
     let models_url = format!("http://127.0.0.1:{}/v1/models", state.serving_port());
-    let context = match crate::localhttp::local().get(models_url).timeout(Duration::from_secs(5)).send().await {
-        Ok(r) => r.json::<Value>().await.ok().and_then(|v| v["data"][0]["max_model_len"].as_u64()),
+    let context = match crate::localhttp::local()
+        .get(models_url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) => r
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v["data"][0]["max_model_len"].as_u64()),
         Err(_) => None,
     };
     let body = json!({
@@ -353,14 +428,25 @@ pub(crate) async fn check(state: &AppState) -> Value {
         "tool_choice": "auto",
     });
     let started = Instant::now();
-    let r = crate::localhttp::local().post(crate::assistant::chat_completions_url(&ep.base_url)).json(&body).timeout(Duration::from_secs(120)).send().await;
+    let r = crate::localhttp::local()
+        .post(crate::assistant::chat_completions_url(&ep.base_url))
+        .json(&body)
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await;
     let secs = started.elapsed().as_secs_f32();
     let reply: Option<Value> = match r {
         Ok(r) => r.json().await.ok(),
         Err(_) => None,
     };
-    let call = reply.as_ref().map(|v| v["choices"][0]["message"]["tool_calls"][0].clone()).unwrap_or(Value::Null);
-    let args_ok = call["function"]["arguments"].as_str().and_then(|a| serde_json::from_str::<Value>(a).ok()).is_some_and(|a| a["path"].as_str().is_some_and(|p| p.contains("main.rs")));
+    let call = reply
+        .as_ref()
+        .map(|v| v["choices"][0]["message"]["tool_calls"][0].clone())
+        .unwrap_or(Value::Null);
+    let args_ok = call["function"]["arguments"]
+        .as_str()
+        .and_then(|a| serde_json::from_str::<Value>(a).ok())
+        .is_some_and(|a| a["path"].as_str().is_some_and(|p| p.contains("main.rs")));
     let tools_ok = call["function"]["name"] == "read_file" && args_ok;
     let short = ep.model.rsplit('/').next().unwrap_or(&ep.model).to_string();
     let (ok, level, why) = match (reply.is_some(), tools_ok, context) {
@@ -394,7 +480,9 @@ pub(crate) async fn get_coding(State(state): State<AppState>, _auth: BearerAuth)
     })
     .await
     .unwrap_or_default();
-    Json(json!({ "agents": agents, "sessions": sessions, "recent": recent, "check": c, "home": home() }))
+    Json(
+        json!({ "agents": agents, "sessions": sessions, "recent": recent, "check": c, "home": home() }),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -414,8 +502,13 @@ pub(crate) fn allowed_folder(folder: &str) -> Result<PathBuf, String> {
     }
     // Not a hidden folder (~/.ssh, ~/.config holding keys and TT Station's own
     // state): an agent, sandboxed or not, gets the whole folder.
-    if p.strip_prefix(&h).is_ok_and(|r| r.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.'))) {
-        return Err("That's a hidden folder (it may hold keys or settings). Pick a project folder.".into());
+    if p.strip_prefix(&h).is_ok_and(|r| {
+        r.components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    }) {
+        return Err(
+            "That's a hidden folder (it may hold keys or settings). Pick a project folder.".into(),
+        );
     }
     // A colon or comma would break the folder's mount into the sandbox.
     if p.to_string_lossy().contains([':', ',', '\n']) {
@@ -438,9 +531,21 @@ pub(crate) fn cut(s: &mut String, max: usize) -> bool {
 }
 
 /// `POST /coding/sessions`.
-pub(crate) async fn post_session(State(state): State<AppState>, _auth: BearerAuth, Json(body): Json<StartBody>) -> Reply {
-    let agent = AGENTS.iter().find(|a| a.id == body.agent).ok_or_else(|| err(StatusCode::BAD_REQUEST, "Pick one of the listed agents."))?;
-    let bin = find_bin(agent).ok_or_else(|| err(StatusCode::CONFLICT, format!("{} isn't installed on the box.", agent.name)))?;
+pub(crate) async fn post_session(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    Json(body): Json<StartBody>,
+) -> Reply {
+    let agent = AGENTS
+        .iter()
+        .find(|a| a.id == body.agent)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "Pick one of the listed agents."))?;
+    let bin = find_bin(agent).ok_or_else(|| {
+        err(
+            StatusCode::CONFLICT,
+            format!("{} isn't installed on the box.", agent.name),
+        )
+    })?;
     // A plain shell may start in the home folder itself (it runs as the user
     // anyway); the agents get a project folder.
     let home_dir = std::fs::canonicalize(home()).unwrap_or_else(|_| home());
@@ -449,7 +554,10 @@ pub(crate) async fn post_session(State(state): State<AppState>, _auth: BearerAut
         _ => allowed_folder(&body.folder).map_err(|e| err(StatusCode::BAD_REQUEST, e))?,
     };
     if agent.id != "shell" && state.endpoint().is_none() {
-        return Err(err(StatusCode::CONFLICT, "No model is serving. Start one in Models first."));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "No model is serving. Start one in Models first.",
+        ));
     }
     let task = body.task.map(|t| t.chars().take(4000).collect::<String>());
     let st = state.clone();
@@ -459,26 +567,57 @@ pub(crate) async fn post_session(State(state): State<AppState>, _auth: BearerAut
         let (cmd, env) = launch(&st, agent, &bin, task.as_deref(), &folder)?;
         let dir = sessions_dir(&st).join(&sid);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let session = Session { id: sid.clone(), agent: agent.id.into(), folder: folder.display().to_string(), task: task.clone(), created: now(), ended: None, exit: None };
+        let session = Session {
+            id: sid.clone(),
+            agent: agent.id.into(),
+            folder: folder.display().to_string(),
+            task: task.clone(),
+            created: now(),
+            ended: None,
+            exit: None,
+        };
         save(&st, &session);
-        let path = format!("{}:{}:{}", home().join(".local/bin").display(), home().join(".opencode/bin").display(), std::env::var("PATH").unwrap_or_default());
+        let path = format!(
+            "{}:{}:{}",
+            home().join(".local/bin").display(),
+            home().join(".opencode/bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         let mut run = Command::new("systemd-run");
-        run.args(["--user", "--collect", "--quiet", &format!("--unit={}", unit(&sid)), &format!("--working-directory={}", folder.display())])
-            .arg(format!("--setenv=PATH={path}"))
-            .arg(format!("--setenv=HOME={}", home().display()));
+        run.args([
+            "--user",
+            "--collect",
+            "--quiet",
+            &format!("--unit={}", unit(&sid)),
+            &format!("--working-directory={}", folder.display()),
+        ])
+        .arg(format!("--setenv=PATH={path}"))
+        .arg(format!("--setenv=HOME={}", home().display()));
         // Names only: systemd-run takes each value from its own environment,
         // so the key never shows in a process list.
         for (k, v) in &env {
             run.arg(format!("--setenv={k}")).env(k, v);
         }
         let out = run
-            .args(["python3", "-c", HOST, &sock(&st, &sid).display().to_string(), &dir.join("term.log").display().to_string(), "120", "36", "--"])
+            .args([
+                "python3",
+                "-c",
+                HOST,
+                &sock(&st, &sid).display().to_string(),
+                &dir.join("term.log").display().to_string(),
+                "120",
+                "36",
+                "--",
+            ])
             .args(&cmd)
             .stdin(Stdio::null())
             .output()
             .map_err(|e| e.to_string())?;
         if !out.status.success() {
-            return Err(format!("couldn't start it: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            return Err(format!(
+                "couldn't start it: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
         }
         Ok(session)
     })
@@ -489,16 +628,26 @@ pub(crate) async fn post_session(State(state): State<AppState>, _auth: BearerAut
 }
 
 /// `POST /coding/sessions/{id}/stop`.
-pub(crate) async fn post_stop(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
+pub(crate) async fn post_stop(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
     if !valid_id(&id) || load(&state, &id).is_none() {
         return Err(err(StatusCode::NOT_FOUND, "No such session."));
     }
-    let _ = Command::new("systemctl").args(["--user", "stop", &unit(&id)]).status();
+    let _ = Command::new("systemctl")
+        .args(["--user", "stop", &unit(&id)])
+        .status();
     Ok(Json(json!({ "stopped": true })))
 }
 
 /// `DELETE /coding/sessions/{id}`: forget an ended session (its folder and files stay).
-pub(crate) async fn delete_session(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
+pub(crate) async fn delete_session(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
     if !valid_id(&id) || load(&state, &id).is_none() {
         return Err(err(StatusCode::NOT_FOUND, "No such session."));
     }
@@ -510,19 +659,40 @@ pub(crate) async fn delete_session(State(state): State<AppState>, _auth: BearerA
 }
 
 /// `GET /coding/sessions/{id}/changes`: what the agent changed (git status and diff).
-pub(crate) async fn get_changes(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
-    let s = load(&state, &id).filter(|_| valid_id(&id)).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
+pub(crate) async fn get_changes(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
+    let s = load(&state, &id)
+        .filter(|_| valid_id(&id))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
     let v = tokio::task::spawn_blocking(move || {
-        let git = |args: &[&str]| crate::safegit::command(Path::new(&s.folder)).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+        let git = |args: &[&str]| {
+            crate::safegit::command(Path::new(&s.folder))
+                .args(args)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        };
         let is_repo = git(&["rev-parse", "--is-inside-work-tree"]).is_some();
-        let mut diff = git(&["diff", "--no-ext-diff", "--no-textconv", "HEAD"]).or_else(|| git(&["diff", "--no-ext-diff", "--no-textconv"])).unwrap_or_default();
+        let mut diff = git(&["diff", "--no-ext-diff", "--no-textconv", "HEAD"])
+            .or_else(|| git(&["diff", "--no-ext-diff", "--no-textconv"]))
+            .unwrap_or_default();
         // New files git doesn't track yet, shown whole.
-        for f in changed_files(&s.folder).iter().filter(|l| l.starts_with("??")).take(20) {
+        for f in changed_files(&s.folder)
+            .iter()
+            .filter(|l| l.starts_with("??"))
+            .take(20)
+        {
             let name = f[3..].trim();
             let p = Path::new(&s.folder).join(name);
             if let Ok(text) = std::fs::read_to_string(&p) {
                 if text.len() < 40_000 {
-                    diff.push_str(&format!("\ndiff --git a/{name} b/{name}\nnew file\n--- /dev/null\n+++ b/{name}\n"));
+                    diff.push_str(&format!(
+                        "\ndiff --git a/{name} b/{name}\nnew file\n--- /dev/null\n+++ b/{name}\n"
+                    ));
                     for l in text.lines() {
                         diff.push_str(&format!("+{l}\n"));
                     }
@@ -550,9 +720,13 @@ pub struct FolderQuery {
 pub(crate) async fn get_folders(_auth: BearerAuth, Query(q): Query<FolderQuery>) -> Reply {
     let h = home();
     let path = q.path.map(PathBuf::from).unwrap_or_else(|| h.clone());
-    let p = std::fs::canonicalize(&path).map_err(|_| err(StatusCode::NOT_FOUND, "That folder doesn't exist."))?;
+    let p = std::fs::canonicalize(&path)
+        .map_err(|_| err(StatusCode::NOT_FOUND, "That folder doesn't exist."))?;
     if !p.starts_with(std::fs::canonicalize(&h).unwrap_or(h.clone())) {
-        return Err(err(StatusCode::BAD_REQUEST, "Only folders in your home folder."));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Only folders in your home folder.",
+        ));
     }
     let mut dirs: Vec<Value> = std::fs::read_dir(&p)
         .into_iter()
@@ -561,8 +735,16 @@ pub(crate) async fn get_folders(_auth: BearerAuth, Query(q): Query<FolderQuery>)
         .filter(|e| e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.'))
         .map(|e| json!({ "name": e.file_name().to_string_lossy(), "path": e.path().display().to_string(), "git": e.path().join(".git").exists() }))
         .collect();
-    dirs.sort_by(|a, b| a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase()));
-    Ok(Json(json!({ "path": p.display().to_string(), "parent": p.parent().filter(|_| p != std::fs::canonicalize(home()).unwrap_or_default()).map(|x| x.display().to_string()), "git": p.join(".git").exists(), "folders": dirs })))
+    dirs.sort_by(|a, b| {
+        a["name"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
+    });
+    Ok(Json(
+        json!({ "path": p.display().to_string(), "parent": p.parent().filter(|_| p != std::fs::canonicalize(home()).unwrap_or_default()).map(|x| x.display().to_string()), "git": p.join(".git").exists(), "folders": dirs }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -574,19 +756,36 @@ pub struct NewFolder {
 /// `POST /coding/folders`: a new project folder, as a git repository.
 pub(crate) async fn post_folder(_auth: BearerAuth, Json(b): Json<NewFolder>) -> Reply {
     let name = b.name.trim();
-    if name.is_empty() || name.len() > 80 || name.starts_with('.') || !name.chars().all(|c| c.is_ascii_alphanumeric() || "-_ .".contains(c)) {
-        return Err(err(StatusCode::BAD_REQUEST, "Use letters, numbers, spaces, - and _ in the name."));
+    if name.is_empty()
+        || name.len() > 80
+        || name.starts_with('.')
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_ .".contains(c))
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "Use letters, numbers, spaces, - and _ in the name.",
+        ));
     }
-    let parent = std::fs::canonicalize(&b.parent).map_err(|_| err(StatusCode::NOT_FOUND, "That folder doesn't exist."))?;
+    let parent = std::fs::canonicalize(&b.parent)
+        .map_err(|_| err(StatusCode::NOT_FOUND, "That folder doesn't exist."))?;
     if !parent.starts_with(std::fs::canonicalize(home()).unwrap_or_else(|_| home())) {
         return Err(err(StatusCode::BAD_REQUEST, "Only in your home folder."));
     }
     let p = parent.join(name);
     if p.exists() {
-        return Err(err(StatusCode::CONFLICT, "A folder with that name is already there."));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "A folder with that name is already there.",
+        ));
     }
-    std::fs::create_dir_all(&p).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let _ = Command::new("git").args(["init", "-q"]).current_dir(&p).status();
+    std::fs::create_dir_all(&p)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let _ = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&p)
+        .status();
     Ok(Json(json!({ "path": p.display().to_string() })))
 }
 
@@ -600,7 +799,12 @@ pub struct TermQuery {
 }
 
 /// `GET /coding/term` (WebSocket): a session's terminal.
-pub(crate) async fn term_ws(ws: WebSocketUpgrade, State(state): State<AppState>, headers: axum::http::HeaderMap, Query(q): Query<TermQuery>) -> Response {
+pub(crate) async fn term_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<TermQuery>,
+) -> Response {
     // The token in a header, not the URL (crate::routes::ws_token).
     let Some(token) = crate::routes::ws_token(&headers).filter(|t| state.is_valid_token(t)) else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -612,16 +816,32 @@ pub(crate) async fn term_ws(ws: WebSocketUpgrade, State(state): State<AppState>,
         return (StatusCode::NOT_FOUND, "no such session").into_response();
     }
     let path = sock(&state, &q.session);
-    let (cols, rows) = (q.cols.unwrap_or(120).clamp(40, 400), q.rows.unwrap_or(36).clamp(10, 200));
+    let (cols, rows) = (
+        q.cols.unwrap_or(120).clamp(40, 400),
+        q.rows.unwrap_or(36).clamp(10, 200),
+    );
     ws.on_upgrade(move |socket| bridge(socket, path, cols, rows, signed_out))
 }
 
-async fn bridge(mut socket: WebSocket, path: PathBuf, cols: u16, rows: u16, signed_out: impl std::future::Future<Output = ()>) {
+async fn bridge(
+    mut socket: WebSocket,
+    path: PathBuf,
+    cols: u16,
+    rows: u16,
+    signed_out: impl std::future::Future<Output = ()>,
+) {
     tokio::pin!(signed_out);
     let conn = match tokio::net::UnixStream::connect(&path).await {
         Ok(c) => c,
         Err(_) => {
-            let _ = socket.send(Message::Binary("\r\n\x1b[2m[this session has ended]\x1b[0m\r\n".as_bytes().to_vec().into())).await;
+            let _ = socket
+                .send(Message::Binary(
+                    "\r\n\x1b[2m[this session has ended]\x1b[0m\r\n"
+                        .as_bytes()
+                        .to_vec()
+                        .into(),
+                ))
+                .await;
             return;
         }
     };
@@ -661,18 +881,33 @@ pub async fn watch_forever(state: AppState) {
     let mut first = true;
     loop {
         let st = state.clone();
-        let sessions = tokio::task::spawn_blocking(move || all(&st)).await.unwrap_or_default();
+        let sessions = tokio::task::spawn_blocking(move || all(&st))
+            .await
+            .unwrap_or_default();
         for s in &sessions {
             if s.ended.is_none() {
                 live.insert(s.id.clone());
             } else if live.remove(&s.id) && !first {
-                let name = AGENTS.iter().find(|a| a.id == s.agent).map_or("The agent", |a| a.name);
-                let folder = Path::new(&s.folder).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                let name = AGENTS
+                    .iter()
+                    .find(|a| a.id == s.agent)
+                    .map_or("The agent", |a| a.name);
+                let folder = Path::new(&s.folder)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 let n = changed_files(&s.folder).len();
                 state.notifier().emit(crate::notify::Draft {
                     kind: "coding",
                     title: format!("{name} finished in {folder}"),
-                    body: if n > 0 { format!("{n} changed file{} to review in TT Station → Code.", if n == 1 { "" } else { "s" }) } else { "No changed files.".into() },
+                    body: if n > 0 {
+                        format!(
+                            "{n} changed file{} to review in TT Station → Code.",
+                            if n == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        "No changed files.".into()
+                    },
                 });
             }
         }
@@ -687,10 +922,19 @@ mod tests {
 
     #[test]
     fn the_window_is_the_served_context_capped_and_compaction_fits_in_it() {
-        assert_eq!(window_for(Some(131_072), COMPACT_WINDOW), (131_072, COMPACT_WINDOW));
-        assert_eq!(window_for(Some(262_144), COMPACT_WINDOW), (MAX_WINDOW, COMPACT_WINDOW));
+        assert_eq!(
+            window_for(Some(131_072), COMPACT_WINDOW),
+            (131_072, COMPACT_WINDOW)
+        );
+        assert_eq!(
+            window_for(Some(262_144), COMPACT_WINDOW),
+            (MAX_WINDOW, COMPACT_WINDOW)
+        );
         assert_eq!(window_for(Some(32_768), COMPACT_WINDOW), (32_768, 32_768));
-        assert_eq!(window_for(None, COMPACT_WINDOW), (MAX_WINDOW, COMPACT_WINDOW));
+        assert_eq!(
+            window_for(None, COMPACT_WINDOW),
+            (MAX_WINDOW, COMPACT_WINDOW)
+        );
         // A measured compaction point is used as is.
         assert_eq!(window_for(Some(131_072), 98_304), (131_072, 98_304));
     }
@@ -699,14 +943,25 @@ mod tests {
     fn every_claude_launch_is_tuned_for_the_prefix_cache_and_a_small_window() {
         let dir = std::env::temp_dir().join(format!("tt-claude-tuning-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let state = AppState::new("t".into(), "1xBH".into(), std::sync::Arc::new(crate::serving::dstack::DstackBackend)).with_config_dir(dir.clone());
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_config_dir(dir.clone());
         let (args, env) = claude_tuning(&state, Some(262_144), &dir, false);
         assert_eq!(args, ["--tools=Bash,Read,Edit,Write"]);
         let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
         // The window and compaction point are the ones the speed panel reports.
         let (window, compact_at) = code_window(&state, Some(262_144));
-        assert_eq!(get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some(window.to_string().as_str()));
-        assert_eq!(get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), Some(compact_at.to_string().as_str()));
+        assert_eq!(
+            get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+            Some(window.to_string().as_str())
+        );
+        assert_eq!(
+            get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+            Some(compact_at.to_string().as_str())
+        );
         assert_eq!(get("CLAUDE_CODE_ATTRIBUTION_HEADER"), Some("0"));
         assert_eq!(get("CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS"), Some("8000"));
         assert_eq!(get("BASH_MAX_OUTPUT_LENGTH"), Some("15000"));

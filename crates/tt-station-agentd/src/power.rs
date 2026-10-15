@@ -284,8 +284,15 @@ mod tests {
         // user manager (where the agent runs), for the six logind actions.
         assert!(!POLKIT_RULE.contains("isInGroup(\"sudo\")"));
         assert!(POLKIT_RULE.contains("subject.isInGroup(\"tt-station-power\")"));
-        assert!(POLKIT_RULE.contains(r#"/^user[@-][0-9]+\.service$/.test(subject.system_unit || "")"#));
-        assert_eq!(POLKIT_RULE.matches("action.id == \"org.freedesktop.login1.").count(), 6);
+        assert!(
+            POLKIT_RULE.contains(r#"/^user[@-][0-9]+\.service$/.test(subject.system_unit || "")"#)
+        );
+        assert_eq!(
+            POLKIT_RULE
+                .matches("action.id == \"org.freedesktop.login1.")
+                .count(),
+            6
+        );
         assert_eq!(POLKIT_RULE.matches("polkit.Result.YES").count(), 1);
     }
 

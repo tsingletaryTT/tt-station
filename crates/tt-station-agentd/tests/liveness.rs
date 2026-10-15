@@ -112,7 +112,10 @@ async fn a_hung_model_turns_degraded_and_recovers_when_it_answers() {
     let health = &s["model_health"];
     assert_eq!(health["state"], "degraded", "{s}");
     assert!(
-        health["reason"].as_str().unwrap().contains("no answer within"),
+        health["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no answer within"),
         "{health}"
     );
     assert_eq!(health["restart"], "/doctor/fix/restart_model");

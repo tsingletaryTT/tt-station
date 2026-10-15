@@ -36,7 +36,9 @@ pub struct Recent<T> {
 
 impl<T: Clone> Recent<T> {
     pub const fn new() -> Self {
-        Self { slot: Mutex::new(None) }
+        Self {
+            slot: Mutex::new(None),
+        }
     }
 
     /// The value stored under `key` if it is younger than [`DISCOVERY_TTL`].
@@ -47,7 +49,8 @@ impl<T: Clone> Recent<T> {
     }
 
     pub fn put(&self, key: &str, value: T) {
-        *self.slot.lock().expect("discovery cache") = Some((Instant::now(), key.to_string(), value));
+        *self.slot.lock().expect("discovery cache") =
+            Some((Instant::now(), key.to_string(), value));
     }
 }
 
@@ -453,12 +456,22 @@ mod tests {
         let status = ServingStatus::Serving("m".into());
         let a = discover_serving_cached(&runner, "test-reuse|serving", "h", 8003, &status);
         let b = discover_serving_cached(&runner, "test-reuse|serving", "h", 8003, &status);
-        assert_eq!((a.len(), a, probes()), (1, b, 1), "the second look reuses the first");
+        assert_eq!(
+            (a.len(), a, probes()),
+            (1, b, 1),
+            "the second look reuses the first"
+        );
         // The agent started or stopped something: look again.
         discover_serving_cached(&runner, "test-reuse|stopping", "h", 8003, &status);
         assert_eq!(probes(), 2);
         // A different status for the same key is a different question too.
-        discover_serving_cached(&runner, "test-reuse|stopping", "h", 8003, &ServingStatus::Idle);
+        discover_serving_cached(
+            &runner,
+            "test-reuse|stopping",
+            "h",
+            8003,
+            &ServingStatus::Idle,
+        );
         assert_eq!(probes(), 3);
     }
 

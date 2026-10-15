@@ -141,12 +141,22 @@ mod tests {
     /// same-origin API and WebSockets).
     #[test]
     fn the_app_runs_only_its_own_script() {
-        let dir = |d: &str| CSP.split(';').map(str::trim).find(|x| x.starts_with(&format!("{d} "))).unwrap_or_else(|| panic!("{d}")).to_string();
+        let dir = |d: &str| {
+            CSP.split(';')
+                .map(str::trim)
+                .find(|x| x.starts_with(&format!("{d} ")))
+                .unwrap_or_else(|| panic!("{d}"))
+                .to_string()
+        };
         assert_eq!(dir("script-src"), "script-src 'self'");
         assert_eq!(dir("connect-src"), "connect-src 'self'");
         assert_eq!(dir("object-src"), "object-src 'none'");
         assert_eq!(dir("frame-ancestors"), "frame-ancestors 'none'");
-        assert!(dir("img-src").contains("blob:") && dir("img-src").contains("data:") && !dir("img-src").contains("https:"));
+        assert!(
+            dir("img-src").contains("blob:")
+                && dir("img-src").contains("data:")
+                && !dir("img-src").contains("https:")
+        );
         assert!(!CSP.contains("unsafe-eval") && !CSP.contains('*'));
     }
 }

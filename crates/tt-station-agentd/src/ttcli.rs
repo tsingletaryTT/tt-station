@@ -461,7 +461,9 @@ impl TtCli {
     /// The Python that runs `tt` (the `python3` beside its script), when `tt` is a
     /// virtualenv's script: the one `pip install --upgrade tenstorrent` must use.
     pub fn venv_python(&self) -> Option<PathBuf> {
-        let py = std::path::Path::new(self.argv.first()?).parent()?.join("python3");
+        let py = std::path::Path::new(self.argv.first()?)
+            .parent()?
+            .join("python3");
         py.is_file().then_some(py)
     }
 
@@ -756,10 +758,17 @@ impl TtCli {
             if let Some(repo) = &job.hf_repo {
                 job.bytes_on_disk = dir_size(&hf_repo_dir(&self.hf_cache, repo));
                 if job.state == PullState::Running {
-                    let hub = hf_repo_dir(&self.hf_cache, repo).parent().map(Path::to_path_buf).unwrap_or_default();
+                    let hub = hf_repo_dir(&self.hf_cache, repo)
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_default();
                     let done = crate::download::repo_on_disk(&hub, repo);
                     job.bytes_on_disk = done;
-                    job.progress = Some(crate::download::progress(&format!("tt:{}", job.model), done, crate::download::repo_total(repo)));
+                    job.progress = Some(crate::download::progress(
+                        &format!("tt:{}", job.model),
+                        done,
+                        crate::download::repo_total(repo),
+                    ));
                 }
             }
         }
@@ -835,7 +844,11 @@ pub fn dir_size(dir: &Path) -> u64 {
             Ok(t) if t.is_file() => e.metadata().map(|m| m.blocks() * 512).unwrap_or(0),
             // A finished blob kept in a shared store (`hub/blobs/..`) and linked from the repo's own `blobs/`.
             Ok(t) if t.is_symlink() && dir.file_name().is_some_and(|n| n == "blobs") => {
-                std::fs::metadata(e.path()).ok().filter(|m| m.is_file()).map(|m| m.blocks() * 512).unwrap_or(0)
+                std::fs::metadata(e.path())
+                    .ok()
+                    .filter(|m| m.is_file())
+                    .map(|m| m.blocks() * 512)
+                    .unwrap_or(0)
             }
             _ => 0,
         })
@@ -1167,8 +1180,11 @@ mod tests {
             ),
         )
         .unwrap();
-        let tt = TtCli::new(vec!["sh".into(), script.display().to_string()], dir.join("hf"))
-            .with_log_dir(dir.join("logs"));
+        let tt = TtCli::new(
+            vec!["sh".into(), script.display().to_string()],
+            dir.join("hf"),
+        )
+        .with_log_dir(dir.join("logs"));
         let runs = || std::fs::read(&counter).map(|v| v.len()).unwrap_or(0);
         for _ in 0..5 {
             tt.catalog(Some("p300x2"), false).unwrap();

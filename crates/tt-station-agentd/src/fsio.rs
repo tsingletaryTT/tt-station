@@ -188,7 +188,10 @@ pub fn private_temp_file(prefix: &str, suffix: &str) -> io::Result<(File, PathBu
             Err(e) => return Err(e),
         }
     }
-    Err(io::Error::new(io::ErrorKind::AlreadyExists, "no free temp file name"))
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free temp file name",
+    ))
 }
 
 #[cfg(test)]

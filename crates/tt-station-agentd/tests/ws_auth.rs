@@ -23,7 +23,14 @@ async fn harness() -> (String, String) {
     });
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
-    let init: Value = client.post(format!("{base}/pair/init")).send().await.unwrap().json().await.unwrap();
+    let init: Value = client
+        .post(format!("{base}/pair/init"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let pair_id = init["pair_id"].as_str().unwrap().to_string();
     let code = state.last_code(&pair_id).unwrap();
     let done: Value = client
@@ -35,7 +42,10 @@ async fn harness() -> (String, String) {
         .json()
         .await
         .unwrap();
-    (format!("ws://{addr}"), done["token"].as_str().unwrap().to_string())
+    (
+        format!("ws://{addr}"),
+        done["token"].as_str().unwrap().to_string(),
+    )
 }
 
 /// The HTTP status the upgrade was refused with.
@@ -61,16 +71,51 @@ async fn a_terminal_websocket_takes_its_token_from_a_header_not_the_url() {
     // In the URL: not accepted any more.
     assert_eq!(status(format!("{term}&token={token}"), None).await, 401);
     assert_eq!(status(term.clone(), None).await, 401);
-    assert_eq!(status(term.clone(), Some(("sec-websocket-protocol", "tt-station, tt-token.wrong".into()))).await, 401);
+    assert_eq!(
+        status(
+            term.clone(),
+            Some((
+                "sec-websocket-protocol",
+                "tt-station, tt-token.wrong".into()
+            ))
+        )
+        .await,
+        401
+    );
     // In a header, it gets past auth (to "no such session").
-    assert_eq!(status(term.clone(), Some(("authorization", format!("Bearer {token}")))).await, 404);
-    assert_eq!(status(term, Some(("sec-websocket-protocol", format!("tt-station, tt-token.{token}")))).await, 404);
+    assert_eq!(
+        status(
+            term.clone(),
+            Some(("authorization", format!("Bearer {token}")))
+        )
+        .await,
+        404
+    );
+    assert_eq!(
+        status(
+            term,
+            Some((
+                "sec-websocket-protocol",
+                format!("tt-station, tt-token.{token}")
+            ))
+        )
+        .await,
+        404
+    );
     // Same for tt-toplike's view, which opens -- the handshake answering with
     // the `tt-station` subprotocol a browser insists on.
     let top = format!("{ws}/toplike/term?mode=starfield");
     assert_eq!(status(format!("{top}&token={token}"), None).await, 401);
     let mut req = top.into_client_request().unwrap();
-    req.headers_mut().insert("sec-websocket-protocol", format!("tt-station, tt-token.{token}").parse().unwrap());
-    let (_, resp) = tokio_tungstenite::connect_async(req).await.expect("upgraded");
-    assert_eq!(resp.headers().get("sec-websocket-protocol").unwrap(), "tt-station");
+    req.headers_mut().insert(
+        "sec-websocket-protocol",
+        format!("tt-station, tt-token.{token}").parse().unwrap(),
+    );
+    let (_, resp) = tokio_tungstenite::connect_async(req)
+        .await
+        .expect("upgraded");
+    assert_eq!(
+        resp.headers().get("sec-websocket-protocol").unwrap(),
+        "tt-station"
+    );
 }

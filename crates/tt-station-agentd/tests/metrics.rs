@@ -63,7 +63,12 @@ async fn serve_with_history() -> String {
     // The box's own plain HTTP (a program on the box, as this account):
     // dashboards read it there without pairing.
     tokio::spawn(async move {
-        axum::serve(listener, local_http_app(state).into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap()
+        axum::serve(
+            listener,
+            local_http_app(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap()
     });
     base
 }

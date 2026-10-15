@@ -1182,14 +1182,26 @@ pub struct RunOptions {
 
 impl RunOptions {
     fn from_request(refuse: bool, base: Option<&str>) -> Result<Self, (StatusCode, Json<Value>)> {
-        let base = base.map(str::trim).filter(|b| !b.is_empty()).map(str::to_string);
+        let base = base
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(str::to_string);
         if let Some(b) = &base {
-            let ok = b.len() <= 160 && b.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:".contains(c)) && !b.starts_with('-');
+            let ok = b.len() <= 160
+                && b.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./:".contains(c))
+                && !b.starts_with('-');
             if !ok {
-                return Err(err(StatusCode::BAD_REQUEST, "That isn't a model or bundle name."));
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "That isn't a model or bundle name.",
+                ));
             }
         }
-        Ok(Self { refuse_credentials: refuse, base })
+        Ok(Self {
+            refuse_credentials: refuse,
+            base,
+        })
     }
 }
 
@@ -1370,16 +1382,38 @@ pub(crate) async fn delete_run(
         let dir = run_dir(&o2, &n)?;
         let status = o2.status_blocking(&dir);
         let units = o2.active_units();
-        let live = o2.launch_for(&n).is_some_and(|l| Orchard::launch_active(&l, &units))
-            || status.as_ref().and_then(|s| s["supervisor"]["alive"].as_bool()) == Some(true);
+        let live = o2
+            .launch_for(&n)
+            .is_some_and(|l| Orchard::launch_active(&l, &units))
+            || status
+                .as_ref()
+                .and_then(|s| s["supervisor"]["alive"].as_bool())
+                == Some(true);
         if live {
-            return Err(err(StatusCode::CONFLICT, "Stop the run before deleting it."));
+            return Err(err(
+                StatusCode::CONFLICT,
+                "Stop the run before deleting it.",
+            ));
         }
-        let root = o2.runs_root().ok_or_else(|| err(StatusCode::PRECONDITION_FAILED, "tt-orchard has no runs folder."))?;
+        let root = o2.runs_root().ok_or_else(|| {
+            err(
+                StatusCode::PRECONDITION_FAILED,
+                "tt-orchard has no runs folder.",
+            )
+        })?;
         if dir.starts_with(&root) && dir != root && dir.is_dir() {
-            std::fs::remove_dir_all(&dir).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("couldn't remove it: {e}")))?;
+            std::fs::remove_dir_all(&dir).map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("couldn't remove it: {e}"),
+                )
+            })?;
         }
-        let launches: Vec<Launch> = o2.launches().into_iter().filter(|l| l.run_name != n).collect();
+        let launches: Vec<Launch> = o2
+            .launches()
+            .into_iter()
+            .filter(|l| l.run_name != n)
+            .collect();
         o2.save_launches(&launches);
         Ok((StatusCode::OK, Json(json!({ "deleted": n }))))
     })
@@ -1409,9 +1443,14 @@ pub(crate) async fn get_run(
         o2.attach_progress(&mut run);
         let console = tail(&o2.log_path(&n), 60);
         // Where each hardware test ran (this box or the lab) and the configs not run.
-        run["hardware"] = crate::orchard_progress::hardware(&crate::orchard_progress::read_ledger(&dir.join("ledger.jsonl")));
+        run["hardware"] = crate::orchard_progress::hardware(&crate::orchard_progress::read_ledger(
+            &dir.join("ledger.jsonl"),
+        ));
         // tt-orchard says `refused: ...` when it won't start (a lab that changed, packaging with a lab, ...).
-        run["refused"] = json!(console.iter().rev().find_map(|l| l.trim().strip_prefix("refused:").map(|r| r.trim().to_string())));
+        run["refused"] = json!(console.iter().rev().find_map(|l| l
+            .trim()
+            .strip_prefix("refused:")
+            .map(|r| r.trim().to_string())));
         let servable = harvest_dir(&dir).is_some();
         let reports: Vec<&str> = REPORTS
             .iter()
@@ -1445,7 +1484,8 @@ pub(crate) async fn get_story(
         if !dir.join("ledger.jsonl").is_file() {
             return Ok(json!({ "facts": null, "narration": [], "agent": [] }));
         }
-        o.bridge(&["story", &dir.display().to_string()]).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))
+        o.bridge(&["story", &dir.display().to_string()])
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))
     })
     .await??;
     if let Some(e) = v["error"].as_str() {
@@ -1605,7 +1645,8 @@ pub(crate) async fn post_control(
                 .and_then(|s| s["model"].as_str().map(str::to_string))
                 .or(launch.map(|l| l.model))
                 .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such run."))?;
-            let opts = RunOptions::from_request(req.refuse_credentials_visible, req.base.as_deref())?;
+            let opts =
+                RunOptions::from_request(req.refuse_credentials_visible, req.base.as_deref())?;
             return start(&state, o, model, req.stop_serving, opts).await;
         }
         _ => {

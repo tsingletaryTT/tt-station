@@ -17,18 +17,48 @@ use crate::desktop::{self, DesktopApp};
 
 /// What Tori can do instantly, for "what can you do?" (and the docs).
 pub const CAPABILITIES: &[(&str, &str)] = &[
-    ("Open apps and sites", "“open Claude and VS Code”, “open YouTube”, “go to github.com”"),
+    (
+        "Open apps and sites",
+        "“open Claude and VS Code”, “open YouTube”, “go to github.com”",
+    ),
     ("Open folders", "“open my Downloads”, “open Documents”"),
-    ("Run models", "“start Qwen3-32B”, “stop the model”, “reset the chips”"),
-    ("Switch what the box does", "“switch to images”, “video mode”, “chat and images”, “transcribe mode”"),
-    ("Make pictures", "“make an image of a fox in the snow”, “draw a teal robot”"),
+    (
+        "Run models",
+        "“start Qwen3-32B”, “stop the model”, “reset the chips”",
+    ),
+    (
+        "Switch what the box does",
+        "“switch to images”, “video mode”, “chat and images”, “transcribe mode”",
+    ),
+    (
+        "Make pictures",
+        "“make an image of a fox in the snow”, “draw a teal robot”",
+    ),
     ("Record meetings", "“record this meeting”, “stop recording”"),
-    ("Check the box", "“what's the box doing?”, “how hot are the chips?”"),
-    ("Open TT Station", "“open Studio”, “open Models”, “open Bring-up”, “open hardware”"),
-    ("Sound and music", "“volume to 30”, “louder”, “mute”, “pause”, “next song”"),
-    ("The screen", "“lock the screen”, “dark mode”, “do not disturb”"),
-    ("Bring-up", "“how's the bring-up going?”, “allow it” / “deny it” when it's waiting on you"),
-    ("Confirm", "“yes” / “no” when I ask before changing the model"),
+    (
+        "Check the box",
+        "“what's the box doing?”, “how hot are the chips?”",
+    ),
+    (
+        "Open TT Station",
+        "“open Studio”, “open Models”, “open Bring-up”, “open hardware”",
+    ),
+    (
+        "Sound and music",
+        "“volume to 30”, “louder”, “mute”, “pause”, “next song”",
+    ),
+    (
+        "The screen",
+        "“lock the screen”, “dark mode”, “do not disturb”",
+    ),
+    (
+        "Bring-up",
+        "“how's the bring-up going?”, “allow it” / “deny it” when it's waiting on you",
+    ),
+    (
+        "Confirm",
+        "“yes” / “no” when I ask before changing the model",
+    ),
 ];
 
 /// One thing to do, as the matching assistant tool call.
@@ -115,28 +145,72 @@ const SITES: &[(&str, &str)] = &[
 
 /// Words that make "start X" about a model rather than an app.
 const MODEL_WORDS: &[&str] = &[
-    "qwen", "llama", "gemma", "mistral", "mixtral", "deepseek", "whisper", "flux", "wan", "mochi", "falcon",
-    "phi", "gpt-oss", "gpt oss", "stable diffusion", "sdxl", "sd3", "qwq", "coder", "speecht5", "model",
+    "qwen",
+    "llama",
+    "gemma",
+    "mistral",
+    "mixtral",
+    "deepseek",
+    "whisper",
+    "flux",
+    "wan",
+    "mochi",
+    "falcon",
+    "phi",
+    "gpt-oss",
+    "gpt oss",
+    "stable diffusion",
+    "sdxl",
+    "sd3",
+    "qwq",
+    "coder",
+    "speecht5",
+    "model",
 ];
 
 fn model_like(s: &str) -> bool {
-    MODEL_WORDS.iter().any(|w| s.contains(w)) || (s.chars().any(|c| c.is_ascii_digit()) && s.contains('b'))
+    MODEL_WORDS.iter().any(|w| s.contains(w))
+        || (s.chars().any(|c| c.is_ascii_digit()) && s.contains('b'))
 }
 
 /// TT Station's pages, by what people call them.
 const PAGES: &[(&str, &str)] = &[
-    ("tt station", "home"), ("tt-station", "home"), ("station", "home"),
-    ("chat", "chat"), ("studio", "studio"), ("transcripts", "transcribe"), ("transcribe", "transcribe"),
-    ("models", "models"), ("model list", "models"), ("bring-up", "bringup"), ("bring up", "bringup"),
-    ("bringup", "bringup"), ("orchard", "bringup"), ("hardware", "hardware"), ("chips", "hardware"),
-    ("telemetry", "hardware"), ("connect", "connect"), ("tt station settings", "settings"),
+    ("tt station", "home"),
+    ("tt-station", "home"),
+    ("station", "home"),
+    ("chat", "chat"),
+    ("studio", "studio"),
+    ("transcripts", "transcribe"),
+    ("transcribe", "transcribe"),
+    ("models", "models"),
+    ("model list", "models"),
+    ("bring-up", "bringup"),
+    ("bring up", "bringup"),
+    ("bringup", "bringup"),
+    ("orchard", "bringup"),
+    ("hardware", "hardware"),
+    ("chips", "hardware"),
+    ("telemetry", "hardware"),
+    ("connect", "connect"),
+    ("tt station settings", "settings"),
 ];
 
 const MODES: &[(&str, &str)] = &[
-    ("chat and images", "chat_images"), ("chat and image", "chat_images"), ("chat and pictures", "chat_images"),
-    ("chat + images", "chat_images"), ("images", "images"), ("image", "images"), ("pictures", "images"),
-    ("picture", "images"), ("video", "video"), ("videos", "video"), ("transcription", "transcribe"),
-    ("transcribe", "transcribe"), ("transcribing", "transcribe"), ("speech", "transcribe"), ("chat", "chat"),
+    ("chat and images", "chat_images"),
+    ("chat and image", "chat_images"),
+    ("chat and pictures", "chat_images"),
+    ("chat + images", "chat_images"),
+    ("images", "images"),
+    ("image", "images"),
+    ("pictures", "images"),
+    ("picture", "images"),
+    ("video", "video"),
+    ("videos", "video"),
+    ("transcription", "transcribe"),
+    ("transcribe", "transcribe"),
+    ("transcribing", "transcribe"),
+    ("speech", "transcribe"),
+    ("chat", "chat"),
 ];
 
 static SWITCH: LazyLock<Regex> = LazyLock::new(|| {
@@ -152,8 +226,14 @@ static RUN: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 fn page(item: &str) -> Option<&'static str> {
-    let item = item.trim_end_matches(" page").trim_end_matches(" tab").trim();
-    PAGES.iter().find(|(name, _)| *name == item).map(|(_, p)| *p)
+    let item = item
+        .trim_end_matches(" page")
+        .trim_end_matches(" tab")
+        .trim();
+    PAGES
+        .iter()
+        .find(|(name, _)| *name == item)
+        .map(|(_, p)| *p)
 }
 
 /// Box things: models, modes, pictures, recording, status, help, yes/no.
@@ -161,46 +241,100 @@ fn box_command(s: &str, apps: &[DesktopApp]) -> Option<Vec<Step>> {
     use serde_json::json;
     let one = |step| Some(vec![step]);
     match s {
-        "yes" | "yeah" | "yep" | "yes please" | "do it" | "go ahead" | "confirm" | "sure" | "ok" | "okay"
-        | "sounds good" | "go for it" => return one(Step::Confirm(true)),
-        "no" | "nope" | "cancel" | "never mind" | "nevermind" | "don't" | "no thanks" | "stop that" => {
-            return one(Step::Confirm(false))
-        }
-        "what can you do" | "help" | "what do you do" | "what can i ask you" | "what can i say" | "commands"
+        "yes" | "yeah" | "yep" | "yes please" | "do it" | "go ahead" | "confirm" | "sure"
+        | "ok" | "okay" | "sounds good" | "go for it" => return one(Step::Confirm(true)),
+        "no" | "nope" | "cancel" | "never mind" | "nevermind" | "don't" | "no thanks"
+        | "stop that" => return one(Step::Confirm(false)),
+        "what can you do"
+        | "help"
+        | "what do you do"
+        | "what can i ask you"
+        | "what can i say"
+        | "commands"
         | "what are your commands" => return one(Step::Help),
-        "stop the model" | "stop serving" | "unload the model" | "shut down the model" | "stop the chips"
-        | "turn off the model" | "free the chips" | "stop everything" => {
-            return one(Step::Tool("stop_model", json!({})))
+        "stop the model"
+        | "stop serving"
+        | "unload the model"
+        | "shut down the model"
+        | "stop the chips"
+        | "turn off the model"
+        | "free the chips"
+        | "stop everything" => return one(Step::Tool("stop_model", json!({}))),
+        "reset the chips" | "reset chips" | "reset the board" | "reset the boards"
+        | "reset the cards" | "reset the hardware" => {
+            return one(Step::Tool("reset_chips", json!({})))
         }
-        "reset the chips" | "reset chips" | "reset the board" | "reset the boards" | "reset the cards"
-        | "reset the hardware" => return one(Step::Tool("reset_chips", json!({}))),
-        "record" | "record this" | "record this meeting" | "record the meeting" | "record a meeting"
-        | "start recording" | "record this call" | "record the call" | "start a recording" => {
-            return one(Step::Tool("start_recording", json!({})))
-        }
-        "stop recording" | "stop the recording" | "end the recording" | "finish recording"
-        | "stop recording and transcribe" | "transcribe the meeting" => {
-            return one(Step::Tool("stop_recording", json!({})))
-        }
-        "how's the bring-up going" | "how is the bring-up going" | "how's the bring-up" | "bring-up status" | "bringup status"
-        | "how's the bringup going" | "how's the port going" | "what's the bring-up doing" | "where's the bring-up"
+        "record"
+        | "record this"
+        | "record this meeting"
+        | "record the meeting"
+        | "record a meeting"
+        | "start recording"
+        | "record this call"
+        | "record the call"
+        | "start a recording" => return one(Step::Tool("start_recording", json!({}))),
+        "stop recording"
+        | "stop the recording"
+        | "end the recording"
+        | "finish recording"
+        | "stop recording and transcribe"
+        | "transcribe the meeting" => return one(Step::Tool("stop_recording", json!({}))),
+        "how's the bring-up going"
+        | "how is the bring-up going"
+        | "how's the bring-up"
+        | "bring-up status"
+        | "bringup status"
+        | "how's the bringup going"
+        | "how's the port going"
+        | "what's the bring-up doing"
+        | "where's the bring-up"
         | "is the bring-up done" => return one(Step::Tool("bringup_status", json!({}))),
-        "allow it" | "approve it" | "allow that" | "approve that" | "let it" | "let it run" | "go ahead and allow it" => {
-            return one(Step::Tool("bringup_decide", json!({ "decision": "accept" })))
+        "allow it"
+        | "approve it"
+        | "allow that"
+        | "approve that"
+        | "let it"
+        | "let it run"
+        | "go ahead and allow it" => {
+            return one(Step::Tool(
+                "bringup_decide",
+                json!({ "decision": "accept" }),
+            ))
         }
         "deny it" | "deny that" | "don't allow it" | "don't let it" | "block it" | "reject it" => {
-            return one(Step::Tool("bringup_decide", json!({ "decision": "decline" })))
+            return one(Step::Tool(
+                "bringup_decide",
+                json!({ "decision": "decline" }),
+            ))
         }
-        "status" | "box status" | "what's the box doing" | "what is the box doing" | "how's the box"
-        | "how is the box" | "how's my box" | "what's running" | "what is running" | "what model is running"
-        | "what's serving" | "what is serving" | "how hot are the chips" | "how hot is the box" | "temperature"
-        | "temperatures" | "chip temperatures" | "how are the chips" | "how much power" | "power" => {
-            return one(Step::Tool("box_status", json!({})))
-        }
+        "status"
+        | "box status"
+        | "what's the box doing"
+        | "what is the box doing"
+        | "how's the box"
+        | "how is the box"
+        | "how's my box"
+        | "what's running"
+        | "what is running"
+        | "what model is running"
+        | "what's serving"
+        | "what is serving"
+        | "how hot are the chips"
+        | "how hot is the box"
+        | "temperature"
+        | "temperatures"
+        | "chip temperatures"
+        | "how are the chips"
+        | "how much power"
+        | "power" => return one(Step::Tool("box_status", json!({}))),
         _ => {}
     }
     if let Some(m) = SWITCH.captures(s) {
-        let what = m.get(1).or(m.get(2)).map(|x| x.as_str().trim()).unwrap_or("");
+        let what = m
+            .get(1)
+            .or(m.get(2))
+            .map(|x| x.as_str().trim())
+            .unwrap_or("");
         let what = what.trim_start_matches("the ").trim_end_matches(" mode");
         if let Some((_, mode)) = MODES.iter().find(|(name, _)| *name == what) {
             return one(Step::Tool("switch_mode", json!({ "mode": mode })));
@@ -208,20 +342,33 @@ fn box_command(s: &str, apps: &[DesktopApp]) -> Option<Vec<Step>> {
     }
     if let Some(m) = IMAGE.captures(s) {
         let prompt = m[1].trim();
-        let pictured = ["image", "picture", "photo", "drawing", "painting", "illustration", "wallpaper"]
-            .iter()
-            .any(|w| s.contains(w))
+        let pictured = [
+            "image",
+            "picture",
+            "photo",
+            "drawing",
+            "painting",
+            "illustration",
+            "wallpaper",
+        ]
+        .iter()
+        .any(|w| s.contains(w))
             || s.starts_with("draw")
             || s.starts_with("paint")
             || s.starts_with("sketch");
         if pictured && prompt.split_whitespace().count() >= 2 {
-            return Some(vec![Step::Tool("create_image", json!({ "prompt": prompt })), Step::Station("studio")]);
+            return Some(vec![
+                Step::Tool("create_image", json!({ "prompt": prompt })),
+                Step::Station("studio"),
+            ]);
         }
     }
     if let Some(m) = RUN.captures(s) {
         let name = m[1].trim();
         // An installed app with that name wins ("start Steam").
-        let app = desktop::find(apps, name).0.filter(|a| desktop::score(a, name) >= 60);
+        let app = desktop::find(apps, name)
+            .0
+            .filter(|a| desktop::score(a, name) >= 60);
         if app.is_none() && model_like(name) && !name.contains(" and ") {
             return one(Step::Tool("run_model", json!({ "model": name })));
         }
@@ -375,14 +522,21 @@ fn list(names: &[String]) -> String {
 /// What Tori says about a box step (None: nothing special to say).
 fn box_reply(tool: &str, r: &serde_json::Value) -> Option<String> {
     if r["status"] == "needs_confirmation" {
-        return Some(format!("{} Say yes, or tap Do it.", r["summary"].as_str().unwrap_or("Shall I?")));
+        return Some(format!(
+            "{} Say yes, or tap Do it.",
+            r["summary"].as_str().unwrap_or("Shall I?")
+        ));
     }
     Some(match tool {
         "box_status" => status_line(r),
         "bringup_status" => r["status"].as_str().unwrap_or("").to_string(),
         "bringup_decide" => {
             let what = r["what"].as_str().unwrap_or("it");
-            if r["decided"] == "accept" { format!("Allowed. It's running `{what}` now.") } else { format!("Denied `{what}`.") }
+            if r["decided"] == "accept" {
+                format!("Allowed. It's running `{what}` now.")
+            } else {
+                format!("Denied `{what}`.")
+            }
         }
         "create_image" => "Here it is. It's in Studio too.".into(),
         "start_recording" => "Recording. Let everyone know.".into(),
@@ -391,31 +545,48 @@ fn box_reply(tool: &str, r: &serde_json::Value) -> Option<String> {
         "home" => "Opening TT Station.".into(),
         "bringup" => "Opening Bring-up.".into(),
         "transcribe" => "Opening your transcripts.".into(),
-        "chat" | "models" | "hardware" | "connect" | "settings" => format!("Opening {}.", capitalize(tool)),
+        "chat" | "models" | "hardware" | "connect" | "settings" => {
+            format!("Opening {}.", capitalize(tool))
+        }
         _ => return None,
     })
 }
 
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
-    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+    c.next()
+        .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+        .unwrap_or_default()
 }
 
 /// "Serving Qwen3-32B. The 4 chips are at 49–55 °C, drawing 214 W."
 pub fn status_line(r: &serde_json::Value) -> String {
-    let serving = r["serving"]["model"].as_str().map(|m| m.rsplit('/').next().unwrap_or(m).to_string());
+    let serving = r["serving"]["model"]
+        .as_str()
+        .map(|m| m.rsplit('/').next().unwrap_or(m).to_string());
     let mut line = match serving {
         Some(m) => format!("Serving {m}."),
         None => "Nothing is serving right now.".to_string(),
     };
     if let Some(devices) = r["devices"].as_array() {
-        let temps: Vec<f64> = devices.iter().filter_map(|d| d["temp_c"].as_f64()).collect();
+        let temps: Vec<f64> = devices
+            .iter()
+            .filter_map(|d| d["temp_c"].as_f64())
+            .collect();
         let watts: f64 = devices.iter().filter_map(|d| d["power_w"].as_f64()).sum();
         if !temps.is_empty() {
             let lo = temps.iter().cloned().fold(f64::MAX, f64::min).round();
             let hi = temps.iter().cloned().fold(f64::MIN, f64::max).round();
-            let range = if lo == hi { format!("{lo} °C") } else { format!("{lo}–{hi} °C") };
-            line.push_str(&format!(" The {} chips are at {range}, drawing {} W.", temps.len(), watts.round()));
+            let range = if lo == hi {
+                format!("{lo} °C")
+            } else {
+                format!("{lo}–{hi} °C")
+            };
+            line.push_str(&format!(
+                " The {} chips are at {range}, drawing {} W.",
+                temps.len(),
+                watts.round()
+            ));
         }
     }
     line
@@ -427,8 +598,14 @@ pub fn reply(done: &[(Step, Result<serde_json::Value, String>)]) -> String {
     let mut said = Vec::new();
     for (step, outcome) in done {
         if let Step::Help = step {
-            let lines: Vec<String> = CAPABILITIES.iter().map(|(what, eg)| format!("• {what}: {eg}")).collect();
-            said.push(format!("Here's what I can do right away:\n{}\nAnything else, just ask.", lines.join("\n")));
+            let lines: Vec<String> = CAPABILITIES
+                .iter()
+                .map(|(what, eg)| format!("• {what}: {eg}"))
+                .collect();
+            said.push(format!(
+                "Here's what I can do right away:\n{}\nAnything else, just ask.",
+                lines.join("\n")
+            ));
             continue;
         }
         if let (Step::Tool(tool, _) | Step::Station(tool), Ok(r)) = (step, outcome) {
@@ -603,29 +780,86 @@ mod tests {
     fn box_commands() {
         use serde_json::json;
         let t = |s: &str| parse(s, &apps());
-        assert_eq!(t("start Qwen3-32B"), Some(vec![Step::Tool("run_model", json!({ "model": "qwen3-32b" }))]));
-        assert_eq!(t("bring up llama 3.1 8b please"), Some(vec![Step::Tool("run_model", json!({ "model": "llama 3.1 8b" }))]));
-        assert_eq!(t("switch to images"), Some(vec![Step::Tool("switch_mode", json!({ "mode": "images" }))]));
-        assert_eq!(t("video mode"), Some(vec![Step::Tool("switch_mode", json!({ "mode": "video" }))]));
-        assert_eq!(t("set the box up for chat and images"), Some(vec![Step::Tool("switch_mode", json!({ "mode": "chat_images" }))]));
+        assert_eq!(
+            t("start Qwen3-32B"),
+            Some(vec![Step::Tool(
+                "run_model",
+                json!({ "model": "qwen3-32b" })
+            )])
+        );
+        assert_eq!(
+            t("bring up llama 3.1 8b please"),
+            Some(vec![Step::Tool(
+                "run_model",
+                json!({ "model": "llama 3.1 8b" })
+            )])
+        );
+        assert_eq!(
+            t("switch to images"),
+            Some(vec![Step::Tool("switch_mode", json!({ "mode": "images" }))])
+        );
+        assert_eq!(
+            t("video mode"),
+            Some(vec![Step::Tool("switch_mode", json!({ "mode": "video" }))])
+        );
+        assert_eq!(
+            t("set the box up for chat and images"),
+            Some(vec![Step::Tool(
+                "switch_mode",
+                json!({ "mode": "chat_images" })
+            )])
+        );
         assert_eq!(
             t("make an image of a fox in the snow"),
-            Some(vec![Step::Tool("create_image", json!({ "prompt": "a fox in the snow" })), Step::Station("studio")])
+            Some(vec![
+                Step::Tool("create_image", json!({ "prompt": "a fox in the snow" })),
+                Step::Station("studio")
+            ])
         );
         assert_eq!(
             t("draw me a teal robot reading a book"),
-            Some(vec![Step::Tool("create_image", json!({ "prompt": "teal robot reading a book" })), Step::Station("studio")])
+            Some(vec![
+                Step::Tool(
+                    "create_image",
+                    json!({ "prompt": "teal robot reading a book" })
+                ),
+                Step::Station("studio")
+            ])
         );
-        assert_eq!(t("what's the box doing?"), Some(vec![Step::Tool("box_status", json!({}))]));
-        assert_eq!(t("How hot are the chips?"), Some(vec![Step::Tool("box_status", json!({}))]));
-        assert_eq!(t("record this meeting"), Some(vec![Step::Tool("start_recording", json!({}))]));
-        assert_eq!(t("stop recording"), Some(vec![Step::Tool("stop_recording", json!({}))]));
-        assert_eq!(t("stop the model"), Some(vec![Step::Tool("stop_model", json!({}))]));
+        assert_eq!(
+            t("what's the box doing?"),
+            Some(vec![Step::Tool("box_status", json!({}))])
+        );
+        assert_eq!(
+            t("How hot are the chips?"),
+            Some(vec![Step::Tool("box_status", json!({}))])
+        );
+        assert_eq!(
+            t("record this meeting"),
+            Some(vec![Step::Tool("start_recording", json!({}))])
+        );
+        assert_eq!(
+            t("stop recording"),
+            Some(vec![Step::Tool("stop_recording", json!({}))])
+        );
+        assert_eq!(
+            t("stop the model"),
+            Some(vec![Step::Tool("stop_model", json!({}))])
+        );
         assert_eq!(t("yes"), Some(vec![Step::Confirm(true)]));
         assert_eq!(t("never mind"), Some(vec![Step::Confirm(false)]));
         assert_eq!(t("what can you do?"), Some(vec![Step::Help]));
-        assert_eq!(t("how's the bring-up going?"), Some(vec![Step::Tool("bringup_status", json!({}))]));
-        assert_eq!(t("allow it"), Some(vec![Step::Tool("bringup_decide", json!({ "decision": "accept" }))]));
+        assert_eq!(
+            t("how's the bring-up going?"),
+            Some(vec![Step::Tool("bringup_status", json!({}))])
+        );
+        assert_eq!(
+            t("allow it"),
+            Some(vec![Step::Tool(
+                "bringup_decide",
+                json!({ "decision": "accept" })
+            )])
+        );
         assert_eq!(t("open models"), Some(vec![Step::Station("models")]));
         assert_eq!(t("open bring-up"), Some(vec![Step::Station("bringup")]));
         assert_eq!(t("start steam"), Some(vec![Step::OpenApp("Steam".into())]));
@@ -635,7 +869,10 @@ mod tests {
     fn status_reads_well() {
         let r = serde_json::json!({ "serving": { "model": "Qwen/Qwen3-32B" }, "devices": [
             { "temp_c": 49.6, "power_w": 51.0 }, { "temp_c": 54.6, "power_w": 57.0 } ] });
-        assert_eq!(status_line(&r), "Serving Qwen3-32B. The 2 chips are at 50–55 °C, drawing 108 W.");
+        assert_eq!(
+            status_line(&r),
+            "Serving Qwen3-32B. The 2 chips are at 50–55 °C, drawing 108 W."
+        );
     }
 
     #[test]

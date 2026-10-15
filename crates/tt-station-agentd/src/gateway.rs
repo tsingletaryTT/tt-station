@@ -144,7 +144,12 @@ fn day_of(unix: u64) -> String {
     let t = unix as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::localtime_r(&t, &mut tm) };
-    format!("{:04}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+    format!(
+        "{:04}-{:02}-{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday
+    )
 }
 
 /// A key as listed (never the secret).
@@ -230,11 +235,14 @@ impl AppKeys {
 
     fn summary(k: &AppKey) -> KeySummary {
         let now = unix_now();
-        let days: Vec<(String, Usage)> = (0..14u64).rev().map(|d| {
-            let day = day_of(now.saturating_sub(d * 86_400));
-            let u = k.usage.get(&day).copied().unwrap_or_default();
-            (day, u)
-        }).collect();
+        let days: Vec<(String, Usage)> = (0..14u64)
+            .rev()
+            .map(|d| {
+                let day = day_of(now.saturating_sub(d * 86_400));
+                let u = k.usage.get(&day).copied().unwrap_or_default();
+                (day, u)
+            })
+            .collect();
         KeySummary {
             id: k.id.clone(),
             name: k.name.clone(),
@@ -266,7 +274,12 @@ impl AppKeys {
     }
 
     /// [`Self::create`], stopping working at `expires` (unix seconds) if given.
-    pub fn create_expiring(&self, name: &str, now: u64, expires: Option<u64>) -> Result<(KeySummary, String), String> {
+    pub fn create_expiring(
+        &self,
+        name: &str,
+        now: u64,
+        expires: Option<u64>,
+    ) -> Result<(KeySummary, String), String> {
         let name = name.trim();
         if name.is_empty() || name.len() > 60 {
             return Err("Give the key a short name, like the app it's for.".to_string());
@@ -336,7 +349,13 @@ impl AppKeys {
             return Err(Denied::Paused);
         }
         if !key.scopes.is_empty() && !key.scopes.iter().any(|s| s == scope) {
-            return Err(Denied::Scope(SCOPES.iter().find(|s| **s == scope).copied().unwrap_or("chat")));
+            return Err(Denied::Scope(
+                SCOPES
+                    .iter()
+                    .find(|s| **s == scope)
+                    .copied()
+                    .unwrap_or("chat"),
+            ));
         }
         let today = day_of(now);
         if let Some(budget) = key.limits.tokens_per_day {
@@ -394,7 +413,9 @@ impl AppKeys {
     pub fn change(&self, id: &str, c: KeyChange) -> Result<KeySummary, String> {
         if let Some(scopes) = &c.scopes {
             if let Some(bad) = scopes.iter().find(|s| !SCOPES.contains(&s.as_str())) {
-                return Err(format!("Unknown permission \"{bad}\" (chat, images or embeddings)."));
+                return Err(format!(
+                    "Unknown permission \"{bad}\" (chat, images or embeddings)."
+                ));
             }
         }
         let mut keys = self.keys.lock().expect("keys mutex poisoned");
@@ -403,11 +424,18 @@ impl AppKeys {
             k.name = n.chars().take(60).collect();
         }
         if let Some(l) = c.limits {
-            k.limits = Limits { requests_per_minute: l.requests_per_minute.filter(|r| *r > 0), tokens_per_day: l.tokens_per_day.filter(|t| *t > 0) };
+            k.limits = Limits {
+                requests_per_minute: l.requests_per_minute.filter(|r| *r > 0),
+                tokens_per_day: l.tokens_per_day.filter(|t| *t > 0),
+            };
             self.recent.lock().expect("keys mutex poisoned").remove(id);
         }
         if let Some(sc) = c.scopes {
-            k.scopes = if SCOPES.iter().all(|s| sc.iter().any(|x| x == s)) { Vec::new() } else { sc };
+            k.scopes = if SCOPES.iter().all(|s| sc.iter().any(|x| x == s)) {
+                Vec::new()
+            } else {
+                sc
+            };
         }
         if let Some(p) = c.paused {
             k.paused = p;
@@ -458,7 +486,9 @@ impl GatewayAuth {
     /// Counts a finished request's tokens against the app key that made it.
     pub fn record(&self, state: &AppState, input: u64, output: u64) {
         if let Some(id) = &self.key {
-            state.app_keys().record_tokens(id, input, output, unix_now());
+            state
+                .app_keys()
+                .record_tokens(id, input, output, unix_now());
         }
     }
 }
@@ -479,7 +509,10 @@ impl FromRequestParts<AppState> for GatewayAuth {
             .to_string();
         let presented = presented.as_str();
         if presented.is_empty() {
-            return Err(openai_error(StatusCode::UNAUTHORIZED, "Missing API key. Create one in TT Station (Connect → App keys)."));
+            return Err(openai_error(
+                StatusCode::UNAUTHORIZED,
+                "Missing API key. Create one in TT Station (Connect → App keys).",
+            ));
         }
         let scope = scope_of(parts.uri.path());
         match state.app_keys().admit(presented, unix_now(), scope) {
@@ -493,15 +526,33 @@ impl FromRequestParts<AppState> for GatewayAuth {
                 if BearerAuth::from_request_parts(parts, state).await.is_ok() {
                     Ok(GatewayAuth { key: None })
                 } else {
-                    Err(openai_error(StatusCode::UNAUTHORIZED, "Unknown API key. Create one in TT Station (Connect → App keys)."))
+                    Err(openai_error(
+                        StatusCode::UNAUTHORIZED,
+                        "Unknown API key. Create one in TT Station (Connect → App keys).",
+                    ))
                 }
             }
-            Err(Denied::Expired) => Err(openai_error(StatusCode::UNAUTHORIZED, "This key has expired. Create a new one in TT Station (Connect → App keys).")),
-            Err(Denied::Paused) => Err(openai_error(StatusCode::FORBIDDEN, "This key is paused. The box's owner can turn it back on in TT Station.")),
-            Err(Denied::Scope(what)) => Err(openai_error(StatusCode::FORBIDDEN, format!("This key isn't allowed to use {what} on this box."))),
-            Err(Denied::Budget) => Err(openai_error(StatusCode::TOO_MANY_REQUESTS, "This key has used its tokens for today. It resets at midnight on the box.")),
+            Err(Denied::Expired) => Err(openai_error(
+                StatusCode::UNAUTHORIZED,
+                "This key has expired. Create a new one in TT Station (Connect → App keys).",
+            )),
+            Err(Denied::Paused) => Err(openai_error(
+                StatusCode::FORBIDDEN,
+                "This key is paused. The box's owner can turn it back on in TT Station.",
+            )),
+            Err(Denied::Scope(what)) => Err(openai_error(
+                StatusCode::FORBIDDEN,
+                format!("This key isn't allowed to use {what} on this box."),
+            )),
+            Err(Denied::Budget) => Err(openai_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "This key has used its tokens for today. It resets at midnight on the box.",
+            )),
             Err(Denied::Rate(wait)) => {
-                let mut r = openai_error(StatusCode::TOO_MANY_REQUESTS, format!("Too many requests for this key: try again in {wait} s."));
+                let mut r = openai_error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!("Too many requests for this key: try again in {wait} s."),
+                );
                 if let Ok(v) = header::HeaderValue::from_str(&wait.to_string()) {
                     r.headers_mut().insert(header::RETRY_AFTER, v);
                 }
@@ -536,12 +587,20 @@ pub(crate) async fn create_key(
     Json(req): Json<CreateKey>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<ErrorResponse>)> {
     let now = unix_now();
-    let expires = req.expires_in_days.filter(|d| *d > 0).map(|d| now + u64::from(d) * 86_400);
+    let expires = req
+        .expires_in_days
+        .filter(|d| *d > 0)
+        .map(|d| now + u64::from(d) * 86_400);
     let (summary, key) = state
         .app_keys()
         .create_expiring(&req.name, now, expires)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
-    crate::audit::record(&state, "app_key_create", &format!("{} ({})", summary.name, summary.id), "ok");
+    crate::audit::record(
+        &state,
+        "app_key_create",
+        &format!("{} ({})", summary.name, summary.id),
+        "ok",
+    );
     Ok((
         StatusCode::CREATED,
         Json(json!({ "key": key, "info": summary })),
@@ -556,7 +615,12 @@ pub(crate) async fn change_key(
     Json(change): Json<KeyChange>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let changed = state.app_keys().change(&id, change);
-    crate::audit::record(&state, "app_key_change", &id, if changed.is_ok() { "ok" } else { "failed" });
+    crate::audit::record(
+        &state,
+        "app_key_change",
+        &id,
+        if changed.is_ok() { "ok" } else { "failed" },
+    );
     changed
         .map(|k| Json(json!({ "info": k })))
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
@@ -582,7 +646,9 @@ pub(crate) async fn connect_info(
     _auth: BearerAuth,
 ) -> Json<Value> {
     let port = state.ctrl_port();
-    let lan = tokio::task::spawn_blocking(crate::pairqr::lan_ipv4).await.unwrap_or(None);
+    let lan = tokio::task::spawn_blocking(crate::pairqr::lan_ipv4)
+        .await
+        .unwrap_or(None);
     let name = state.name().to_string();
     // From other computers the API is encrypted (HTTPS with the box's own
     // certificate); on the box itself plain HTTP still works.
@@ -626,10 +692,14 @@ async fn served_models(state: &AppState) -> Vec<Value> {
     }
     // The CPU services beside the chips (`crate::embeddings`).
     if let Some(id) = crate::embeddings::ready(state, &crate::embeddings::EMBED).await {
-        models.push(json!({ "id": id, "object": "model", "owned_by": state.name(), "kind": "embedding" }));
+        models.push(
+            json!({ "id": id, "object": "model", "owned_by": state.name(), "kind": "embedding" }),
+        );
     }
     if let Some(id) = crate::embeddings::ready(state, &crate::embeddings::RERANK).await {
-        models.push(json!({ "id": id, "object": "model", "owned_by": state.name(), "kind": "rerank" }));
+        models.push(
+            json!({ "id": id, "object": "model", "owned_by": state.name(), "kind": "rerank" }),
+        );
     }
     models
 }
@@ -670,7 +740,11 @@ pub(crate) async fn chat_endpoint(state: &AppState) -> Option<libttstation::mode
 /// Which chat model a request goes to, when two are serving (`crate::coserve`):
 /// the one it names; for Code (`for_code`), the second unless it names the
 /// first; otherwise the first.
-pub(crate) async fn llm_endpoint(state: &AppState, asked: Option<&str>, for_code: bool) -> Option<libttstation::model::Endpoint> {
+pub(crate) async fn llm_endpoint(
+    state: &AppState,
+    asked: Option<&str>,
+    for_code: bool,
+) -> Option<libttstation::model::Endpoint> {
     let main = chat_endpoint(state).await;
     let second = state.companion().and_then(|c| c.chat());
     pick_llm(main, second, asked, for_code)
@@ -746,11 +820,15 @@ pub(crate) async fn v1_text(
     uri: axum::http::Uri,
     Json(mut body): Json<Value>,
 ) -> Response {
-    let asked = body.get("model").and_then(Value::as_str).map(str::to_string);
+    let asked = body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let Some(endpoint) = llm_endpoint(&state, asked.as_deref(), false).await else {
         if let Some(waking) = crate::idle::wake_for_request(&state).await {
             let mut r = openai_error(StatusCode::SERVICE_UNAVAILABLE, waking);
-            r.headers_mut().insert(header::RETRY_AFTER, header::HeaderValue::from_static("60"));
+            r.headers_mut()
+                .insert(header::RETRY_AFTER, header::HeaderValue::from_static("60"));
             return r;
         }
         return openai_error(
@@ -763,10 +841,15 @@ pub(crate) async fn v1_text(
     }
     let path = uri.path().trim_start_matches("/v1");
     let url = format!("{}{path}", endpoint.base_url.trim_end_matches('/'));
-    let prompt_chars = body.get("messages").or(body.get("prompt")).or(body.get("input")).map_or(0, |v| v.to_string().len()) as u64;
+    let prompt_chars = body
+        .get("messages")
+        .or(body.get("prompt"))
+        .or(body.get("input"))
+        .map_or(0, |v| v.to_string().len()) as u64;
     // A stream's token counts come in a last chunk the client didn't ask for:
     // ask for it, count it, and leave it out of what the client gets.
-    let strip = auth.key.is_some() && body["stream"] == true && body.get("stream_options").is_none();
+    let strip =
+        auth.key.is_some() && body["stream"] == true && body.get("stream_options").is_none();
     if strip {
         body["stream_options"] = json!({ "include_usage": true });
     }
@@ -801,7 +884,11 @@ impl<F: FnOnce(u64, u64)> Tally<F> {
         }
         self.pending.extend_from_slice(chunk);
         let Some(last) = self.pending.iter().rposition(|b| *b == b'\n') else {
-            return if self.strip { axum::body::Bytes::new() } else { axum::body::Bytes::copy_from_slice(chunk) };
+            return if self.strip {
+                axum::body::Bytes::new()
+            } else {
+                axum::body::Bytes::copy_from_slice(chunk)
+            };
         };
         let lines: Vec<u8> = self.pending.drain(..=last).collect();
         let mut out = Vec::with_capacity(lines.len());
@@ -811,10 +898,16 @@ impl<F: FnOnce(u64, u64)> Tally<F> {
                 if let Ok(v) = serde_json::from_slice::<Value>(data.trim_ascii()) {
                     self.usage(&v);
                     let choice = &v["choices"][0];
-                    if choice["delta"]["content"].as_str().is_some_and(|c| !c.is_empty()) || choice["text"].as_str().is_some_and(|c| !c.is_empty()) {
+                    if choice["delta"]["content"]
+                        .as_str()
+                        .is_some_and(|c| !c.is_empty())
+                        || choice["text"].as_str().is_some_and(|c| !c.is_empty())
+                    {
                         self.pieces += 1;
                     }
-                    keep = !(self.strip && v["choices"].as_array().is_some_and(Vec::is_empty) && v.get("usage").is_some());
+                    keep = !(self.strip
+                        && v["choices"].as_array().is_some_and(Vec::is_empty)
+                        && v.get("usage").is_some());
                 }
             }
             if keep {
@@ -831,7 +924,11 @@ impl<F: FnOnce(u64, u64)> Tally<F> {
     /// Whatever's left at the end (a last line with no newline).
     fn flush(&mut self) -> axum::body::Bytes {
         let rest = std::mem::take(&mut self.pending);
-        if self.strip { axum::body::Bytes::from(rest) } else { axum::body::Bytes::new() }
+        if self.strip {
+            axum::body::Bytes::from(rest)
+        } else {
+            axum::body::Bytes::new()
+        }
     }
 
     fn usage(&mut self, v: &Value) {
@@ -851,7 +948,14 @@ impl<F: FnOnce(u64, u64)> Drop for Tally<F> {
             }
         }
         if let Some(done) = self.done.take() {
-            done(self.input, if self.output > 0 { self.output } else { self.pieces });
+            done(
+                self.input,
+                if self.output > 0 {
+                    self.output
+                } else {
+                    self.pieces
+                },
+            );
         }
     }
 }
@@ -859,13 +963,29 @@ impl<F: FnOnce(u64, u64)> Drop for Tally<F> {
 /// Passes a response through (less the usage chunk when `strip`), and once
 /// it's over -- or the client leaves -- calls `done` with its token counts:
 /// the model server's own, or else output counted from the streamed pieces.
-fn count_tokens(resp: Response, strip: bool, done: impl FnOnce(u64, u64) + Send + 'static) -> Response {
+fn count_tokens(
+    resp: Response,
+    strip: bool,
+    done: impl FnOnce(u64, u64) + Send + 'static,
+) -> Response {
     use futures_util::StreamExt;
-    let tally = std::sync::Arc::new(Mutex::new(Tally { strip, pending: Vec::new(), whole: Vec::new(), input: 0, output: 0, pieces: 0, done: Some(done) }));
+    let tally = std::sync::Arc::new(Mutex::new(Tally {
+        strip,
+        pending: Vec::new(),
+        whole: Vec::new(),
+        input: 0,
+        output: 0,
+        pieces: 0,
+        done: Some(done),
+    }));
     let (parts, body) = resp.into_parts();
     let feeding = tally.clone();
-    let body = body.into_data_stream().map(move |chunk| chunk.map(|c| feeding.lock().expect("tally").feed(&c)));
-    let tail = futures_util::stream::once(async move { Ok::<_, axum::Error>(tally.lock().expect("tally").flush()) });
+    let body = body
+        .into_data_stream()
+        .map(move |chunk| chunk.map(|c| feeding.lock().expect("tally").feed(&c)));
+    let tail = futures_util::stream::once(async move {
+        Ok::<_, axum::Error>(tally.lock().expect("tally").flush())
+    });
     Response::from_parts(parts, Body::from_stream(body.chain(tail)))
 }
 
@@ -1004,18 +1124,55 @@ mod tests {
         assert_eq!(scope_of("/v1/messages"), "chat");
 
         // Two a minute: the third waits.
-        keys.change(&info.id, KeyChange { limits: Some(Limits { requests_per_minute: Some(2), tokens_per_day: None }), ..Default::default() }).unwrap();
+        keys.change(
+            &info.id,
+            KeyChange {
+                limits: Some(Limits {
+                    requests_per_minute: Some(2),
+                    tokens_per_day: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(keys.admit(&secret, now, "chat").is_ok());
         assert!(keys.admit(&secret, now + 1, "chat").is_ok());
-        assert!(matches!(keys.admit(&secret, now + 2, "chat"), Err(Denied::Rate(58))));
-        assert!(keys.admit(&secret, now + 61, "chat").is_ok(), "a minute later it's through");
+        assert!(matches!(
+            keys.admit(&secret, now + 2, "chat"),
+            Err(Denied::Rate(58))
+        ));
+        assert!(
+            keys.admit(&secret, now + 61, "chat").is_ok(),
+            "a minute later it's through"
+        );
 
         // Chat only.
-        keys.change(&info.id, KeyChange { scopes: Some(vec!["chat".into()]), limits: Some(Limits::default()), ..Default::default() }).unwrap();
-        assert_eq!(keys.admit(&secret, now + 70, "images"), Err(Denied::Scope("images")));
+        keys.change(
+            &info.id,
+            KeyChange {
+                scopes: Some(vec!["chat".into()]),
+                limits: Some(Limits::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            keys.admit(&secret, now + 70, "images"),
+            Err(Denied::Scope("images"))
+        );
 
         // A day's tokens, then no more.
-        keys.change(&info.id, KeyChange { limits: Some(Limits { requests_per_minute: None, tokens_per_day: Some(1000) }), ..Default::default() }).unwrap();
+        keys.change(
+            &info.id,
+            KeyChange {
+                limits: Some(Limits {
+                    requests_per_minute: None,
+                    tokens_per_day: Some(1000),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         keys.record_tokens(&info.id, 700, 400, now + 80);
         assert_eq!(keys.admit(&secret, now + 90, "chat"), Err(Denied::Budget));
         let listed = &keys.list()[0];
@@ -1023,41 +1180,100 @@ mod tests {
         assert!(listed.days.iter().any(|(_, u)| u.tokens() == 1100));
 
         // Paused, and every permission is the same as none.
-        keys.change(&info.id, KeyChange { paused: Some(true), scopes: Some(SCOPES.iter().map(|s| s.to_string()).collect()), ..Default::default() }).unwrap();
+        keys.change(
+            &info.id,
+            KeyChange {
+                paused: Some(true),
+                scopes: Some(SCOPES.iter().map(|s| s.to_string()).collect()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(keys.admit(&secret, now + 100, "chat"), Err(Denied::Paused));
         assert!(keys.list()[0].scopes.is_empty());
         assert_eq!(keys.admit("ttq-nope", now, "chat"), Err(Denied::Unknown));
-        assert!(keys.change(&info.id, KeyChange { scopes: Some(vec!["video".into()]), ..Default::default() }).is_err());
+        assert!(keys
+            .change(
+                &info.id,
+                KeyChange {
+                    scopes: Some(vec!["video".into()]),
+                    ..Default::default()
+                }
+            )
+            .is_err());
     }
 
     #[test]
     fn two_chat_models_go_by_name_and_code_gets_the_second() {
-        let ep = |m: &str| libttstation::model::Endpoint { base_url: format!("http://x/{m}"), model: m.to_string(), requires_key: false };
+        let ep = |m: &str| libttstation::model::Endpoint {
+            base_url: format!("http://x/{m}"),
+            model: m.to_string(),
+            requires_key: false,
+        };
         let (main, coder) = (ep("Qwen/Qwen3-8B"), ep("Qwen/Qwen3-Coder-30B-A3B-Instruct"));
-        let pick = |asked: Option<&str>, code: bool| pick_llm(Some(main.clone()), Some(coder.clone()), asked, code).map(|e| e.model);
-        assert_eq!(pick(Some("gpt-4o"), false).as_deref(), Some("Qwen/Qwen3-8B"), "an unknown name gets the first");
-        assert_eq!(pick(Some("Qwen3-Coder-30B-A3B-Instruct"), false).as_deref(), Some("Qwen/Qwen3-Coder-30B-A3B-Instruct"));
-        assert_eq!(pick(Some("claude-sonnet"), true).as_deref(), Some("Qwen/Qwen3-Coder-30B-A3B-Instruct"), "Code gets the second");
-        assert_eq!(pick(Some("qwen/qwen3-8b"), true).as_deref(), Some("Qwen/Qwen3-8B"), "unless it names the first");
-        assert_eq!(pick_llm(Some(main.clone()), None, Some("x"), true).map(|e| e.model).as_deref(), Some("Qwen/Qwen3-8B"));
-        assert_eq!(pick_llm(None, Some(coder.clone()), None, false).map(|e| e.model).as_deref(), Some("Qwen/Qwen3-Coder-30B-A3B-Instruct"));
+        let pick = |asked: Option<&str>, code: bool| {
+            pick_llm(Some(main.clone()), Some(coder.clone()), asked, code).map(|e| e.model)
+        };
+        assert_eq!(
+            pick(Some("gpt-4o"), false).as_deref(),
+            Some("Qwen/Qwen3-8B"),
+            "an unknown name gets the first"
+        );
+        assert_eq!(
+            pick(Some("Qwen3-Coder-30B-A3B-Instruct"), false).as_deref(),
+            Some("Qwen/Qwen3-Coder-30B-A3B-Instruct")
+        );
+        assert_eq!(
+            pick(Some("claude-sonnet"), true).as_deref(),
+            Some("Qwen/Qwen3-Coder-30B-A3B-Instruct"),
+            "Code gets the second"
+        );
+        assert_eq!(
+            pick(Some("qwen/qwen3-8b"), true).as_deref(),
+            Some("Qwen/Qwen3-8B"),
+            "unless it names the first"
+        );
+        assert_eq!(
+            pick_llm(Some(main.clone()), None, Some("x"), true)
+                .map(|e| e.model)
+                .as_deref(),
+            Some("Qwen/Qwen3-8B")
+        );
+        assert_eq!(
+            pick_llm(None, Some(coder.clone()), None, false)
+                .map(|e| e.model)
+                .as_deref(),
+            Some("Qwen/Qwen3-Coder-30B-A3B-Instruct")
+        );
     }
 
     #[test]
     fn counts_a_streams_tokens_without_showing_the_usage_chunk() {
         let got = std::sync::Arc::new(Mutex::new(None));
         let g = got.clone();
-        let mut t = Tally { strip: true, pending: Vec::new(), whole: Vec::new(), input: 0, output: 0, pieces: 0,
-            done: Some(move |i, o| *g.lock().unwrap() = Some((i, o))) };
+        let mut t = Tally {
+            strip: true,
+            pending: Vec::new(),
+            whole: Vec::new(),
+            input: 0,
+            output: 0,
+            pieces: 0,
+            done: Some(move |i, o| *g.lock().unwrap() = Some((i, o))),
+        };
         let mut out = Vec::new();
         // Split mid-line, as the network does.
-        out.extend_from_slice(&t.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: {\"choi"));
+        out.extend_from_slice(
+            &t.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: {\"choi"),
+        );
         out.extend_from_slice(&t.feed(b"ces\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":7}}\n\ndata: [DONE]\n\n"));
         out.extend_from_slice(&t.flush());
         drop(t);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("\"Hi\"") && text.contains("[DONE]"));
-        assert!(!text.contains("usage"), "the client didn't ask for usage: {text}");
+        assert!(
+            !text.contains("usage"),
+            "the client didn't ask for usage: {text}"
+        );
         assert_eq!(*got.lock().unwrap(), Some((12, 7)));
     }
 
@@ -1079,7 +1295,10 @@ mod tests {
         assert!(keys.create("  ", 1).is_err());
 
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert!(!on_disk.contains(&secret), "the key itself never reaches the disk");
+        assert!(
+            !on_disk.contains(&secret),
+            "the key itself never reaches the disk"
+        );
         assert!(on_disk.contains(&key_digest(&secret)));
         assert_eq!(secret.len(), 4 + 64, "256 bits");
         let reopened = AppKeys::open(&path);
@@ -1104,10 +1323,19 @@ mod tests {
         assert_eq!(keys.list()[0].hint, "ttq-0123…");
         assert_eq!(keys.list()[0].requests, 4);
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert!(!on_disk.contains("0123456789abcdef0123456789abcdef"), "converted in place: {on_disk}");
+        assert!(
+            !on_disk.contains("0123456789abcdef0123456789abcdef"),
+            "converted in place: {on_disk}"
+        );
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        assert!(AppKeys::open(&path).check("ttq-0123456789abcdef0123456789abcdef", 20), "and after a restart");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            AppKeys::open(&path).check("ttq-0123456789abcdef0123456789abcdef", 20),
+            "and after a restart"
+        );
     }
 
     #[test]
@@ -1115,7 +1343,10 @@ mod tests {
         let keys = AppKeys::in_memory();
         let (info, secret) = keys.create_expiring("Demo", 100, Some(200)).unwrap();
         assert_eq!(info.expires, Some(200));
-        assert!(keys.admit(&secret, 200, "chat").is_ok(), "good through its last second");
+        assert!(
+            keys.admit(&secret, 200, "chat").is_ok(),
+            "good through its last second"
+        );
         assert_eq!(keys.admit(&secret, 201, "chat"), Err(Denied::Expired));
     }
 

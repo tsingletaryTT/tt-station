@@ -51,8 +51,16 @@ pub const EMBED: Service = Service {
     container: "tt-embeddings",
     port: 3040,
     models: &[
-        ("BAAI/bge-m3", "Multilingual, best quality: 1024-number vectors, documents up to 8K tokens", 1024),
-        ("BAAI/bge-small-en-v1.5", "English only, fastest and smallest: 384-number vectors", 384),
+        (
+            "BAAI/bge-m3",
+            "Multilingual, best quality: 1024-number vectors, documents up to 8K tokens",
+            1024,
+        ),
+        (
+            "BAAI/bge-small-en-v1.5",
+            "English only, fastest and smallest: 384-number vectors",
+            384,
+        ),
     ],
 };
 
@@ -77,15 +85,22 @@ fn settings_path(state: &AppState) -> std::path::PathBuf {
 
 /// The model each service is set to serve (absent: off).
 fn settings(state: &AppState) -> HashMap<String, String> {
-    std::fs::read(settings_path(state)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    std::fs::read(settings_path(state))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
 }
 
 fn save(state: &AppState, s: &HashMap<String, String>) {
-    let _ = std::fs::write(settings_path(state), serde_json::to_vec_pretty(s).unwrap_or_default());
+    let _ = std::fs::write(
+        settings_path(state),
+        serde_json::to_vec_pretty(s).unwrap_or_default(),
+    );
 }
 
 /// Setting a service up: its step, or why it failed.
-static STEPS: LazyLock<Mutex<HashMap<&'static str, (String, Option<String>)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static STEPS: LazyLock<Mutex<HashMap<&'static str, (String, Option<String>)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn docker_state(container: &str) -> String {
     Command::new("docker")
@@ -102,7 +117,8 @@ fn docker_state(container: &str) -> String {
 /// its page is open, and turning a service on or off drops it at once.
 const STATE_TTL: Duration = Duration::from_secs(5);
 
-static STATES: LazyLock<Mutex<HashMap<&'static str, (Instant, String)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static STATES: LazyLock<Mutex<HashMap<&'static str, (Instant, String)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// [`docker_state`] for the routes: off the async runtime, and reused for [`STATE_TTL`].
 async fn docker_state_recent(container: &'static str) -> String {
@@ -120,7 +136,10 @@ async fn docker_state_recent(container: &'static str) -> String {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "missing".into());
-    STATES.lock().expect("embeddings").insert(container, (Instant::now(), state.clone()));
+    STATES
+        .lock()
+        .expect("embeddings")
+        .insert(container, (Instant::now(), state.clone()));
     state
 }
 
@@ -141,8 +160,15 @@ pub async fn ready(state: &AppState, svc: &Service) -> Option<String> {
 
 /// The vector size of the embedding model in use (for apps that must be told it).
 pub fn embed_dims(state: &AppState) -> u32 {
-    let model = settings(state).get(EMBED.id).cloned().unwrap_or_else(|| EMBED.models[0].0.to_string());
-    EMBED.models.iter().find(|(m, _, _)| *m == model).map_or(1024, |(_, _, d)| *d)
+    let model = settings(state)
+        .get(EMBED.id)
+        .cloned()
+        .unwrap_or_else(|| EMBED.models[0].0.to_string());
+    EMBED
+        .models
+        .iter()
+        .find(|(m, _, _)| *m == model)
+        .map_or(1024, |(_, _, d)| *d)
 }
 
 async fn describe(state: &AppState, svc: &Service) -> Value {
@@ -177,29 +203,72 @@ pub fn set(state: &AppState, svc: &'static Service, model: Option<String>) {
     save(state, &s);
     STEPS.lock().expect("embeddings").remove(svc.id);
     STATES.lock().expect("embeddings").remove(svc.container);
-    let _ = Command::new("docker").args(["rm", "-f", svc.container]).stdin(Stdio::null()).output();
+    let _ = Command::new("docker")
+        .args(["rm", "-f", svc.container])
+        .stdin(Stdio::null())
+        .output();
     let Some(model) = model else { return };
-    STEPS.lock().expect("embeddings").insert(svc.id, ("Downloading the server".into(), None));
+    STEPS
+        .lock()
+        .expect("embeddings")
+        .insert(svc.id, ("Downloading the server".into(), None));
     std::thread::spawn(move || {
         let step = |s: &str| {
-            STEPS.lock().expect("embeddings").insert(svc.id, (s.to_string(), None));
+            STEPS
+                .lock()
+                .expect("embeddings")
+                .insert(svc.id, (s.to_string(), None));
         };
         let fail = |e: String| {
-            STEPS.lock().expect("embeddings").insert(svc.id, ("Failed".into(), Some(e)));
+            STEPS
+                .lock()
+                .expect("embeddings")
+                .insert(svc.id, ("Failed".into(), Some(e)));
         };
-        let pulled = Command::new("docker").args(["pull", IMAGE]).stdin(Stdio::null()).output();
+        let pulled = Command::new("docker")
+            .args(["pull", IMAGE])
+            .stdin(Stdio::null())
+            .output();
         if !pulled.as_ref().is_ok_and(|o| o.status.success()) {
-            return fail(pulled.map(|o| String::from_utf8_lossy(&o.stderr).trim().lines().last().unwrap_or("docker pull failed").to_string()).unwrap_or_else(|e| e.to_string()));
+            return fail(
+                pulled
+                    .map(|o| {
+                        String::from_utf8_lossy(&o.stderr)
+                            .trim()
+                            .lines()
+                            .last()
+                            .unwrap_or("docker pull failed")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|e| e.to_string()),
+            );
         }
         step("Downloading the model and starting");
-        let _ = Command::new("docker").args(["network", "create", "tt-apps"]).stdin(Stdio::null()).output();
+        let _ = Command::new("docker")
+            .args(["network", "create", "tt-apps"])
+            .stdin(Stdio::null())
+            .output();
         let out = Command::new("docker")
             .args([
-                "run", "-d", "--name", svc.container, "--restart", "unless-stopped", "--network", "tt-apps",
-                "--label", "tt-station.service=embeddings", "--cpus", CPUS,
-                "-p", &format!("127.0.0.1:{}:80", svc.port),
-                "-v", &format!("{VOLUME}:/data"),
-                IMAGE, "--model-id", &model,
+                "run",
+                "-d",
+                "--name",
+                svc.container,
+                "--restart",
+                "unless-stopped",
+                "--network",
+                "tt-apps",
+                "--label",
+                "tt-station.service=embeddings",
+                "--cpus",
+                CPUS,
+                "-p",
+                &format!("127.0.0.1:{}:80", svc.port),
+                "-v",
+                &format!("{VOLUME}:/data"),
+                IMAGE,
+                "--model-id",
+                &model,
             ])
             .stdin(Stdio::null())
             .output();
@@ -208,7 +277,14 @@ pub fn set(state: &AppState, svc: &'static Service, model: Option<String>) {
                 // It answers once the model is downloaded and loaded; describe() sees that.
                 STEPS.lock().expect("embeddings").remove(svc.id);
             }
-            Ok(o) => fail(String::from_utf8_lossy(&o.stderr).trim().lines().last().unwrap_or("docker run failed").to_string()),
+            Ok(o) => fail(
+                String::from_utf8_lossy(&o.stderr)
+                    .trim()
+                    .lines()
+                    .last()
+                    .unwrap_or("docker run failed")
+                    .to_string(),
+            ),
             Err(e) => fail(e.to_string()),
         }
     });
@@ -219,14 +295,20 @@ pub fn ensure_embed(state: &AppState) {
     if settings(state).get(EMBED.id).is_none() {
         set(state, &EMBED, Some(EMBED.models[0].0.to_string()));
     } else if docker_state(EMBED.container) != "running" {
-        let _ = Command::new("docker").args(["start", EMBED.container]).stdin(Stdio::null()).output();
+        let _ = Command::new("docker")
+            .args(["start", EMBED.container])
+            .stdin(Stdio::null())
+            .output();
     }
 }
 
 // ---------------------------------------------------------------- routes
 
 /// `GET /embeddings`.
-pub(crate) async fn get_embeddings(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
+pub(crate) async fn get_embeddings(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+) -> Json<Value> {
     let (embed, rerank) = tokio::join!(describe(&state, &EMBED), describe(&state, &RERANK));
     Json(json!({ "services": [embed, rerank] }))
 }
@@ -244,20 +326,34 @@ pub(crate) async fn put_embeddings(
     _auth: BearerAuth,
     Json(body): Json<SetBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let svc = service(&body.service).ok_or_else(|| (StatusCode::BAD_REQUEST, Json(json!({ "error": "No such service." }))))?;
+    let svc = service(&body.service).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "No such service." })),
+        )
+    })?;
     if let Some(m) = &body.model {
         if !svc.models.iter().any(|(id, _, _)| id == m) {
-            return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "Pick one of the listed models." }))));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Pick one of the listed models." })),
+            ));
         }
     }
     let st = state.clone();
     let model = body.model.clone();
-    tokio::task::spawn_blocking(move || set(&st, svc, model)).await.ok();
+    tokio::task::spawn_blocking(move || set(&st, svc, model))
+        .await
+        .ok();
     Ok(Json(describe(&state, svc).await))
 }
 
 fn openai_error(status: StatusCode, msg: &str) -> Response {
-    (status, Json(json!({ "error": { "message": msg, "type": "invalid_request_error" } }))).into_response()
+    (
+        status,
+        Json(json!({ "error": { "message": msg, "type": "invalid_request_error" } })),
+    )
+        .into_response()
 }
 
 /// `POST /v1/embeddings` for the gateway: the embeddings service, in OpenAI's format.
@@ -276,11 +372,15 @@ pub async fn v1_embeddings(state: &AppState, mut body: Value) -> Option<Response
         .await;
     Some(match r {
         Ok(r) => {
-            let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let v: Value = r.json().await.unwrap_or(Value::Null);
             (status, Json(v)).into_response()
         }
-        Err(e) => openai_error(StatusCode::BAD_GATEWAY, &format!("The embeddings service didn't answer: {e}")),
+        Err(e) => openai_error(
+            StatusCode::BAD_GATEWAY,
+            &format!("The embeddings service didn't answer: {e}"),
+        ),
     })
 }
 
@@ -290,13 +390,27 @@ pub fn tei_rerank_request(body: &Value) -> Option<(Value, Vec<String>)> {
     let docs: Vec<String> = body["documents"]
         .as_array()?
         .iter()
-        .map(|d| d.as_str().map(str::to_string).or_else(|| d["text"].as_str().map(str::to_string)).unwrap_or_default())
+        .map(|d| {
+            d.as_str()
+                .map(str::to_string)
+                .or_else(|| d["text"].as_str().map(str::to_string))
+                .unwrap_or_default()
+        })
         .collect();
-    Some((json!({ "query": query, "texts": docs, "truncate": true }), docs))
+    Some((
+        json!({ "query": query, "texts": docs, "truncate": true }),
+        docs,
+    ))
 }
 
 /// TEI's `[{index, score}]` as Cohere/Jina's `{results: [{index, relevance_score, document}]}`, best first.
-pub fn rerank_response(tei: &Value, docs: &[String], top_n: Option<usize>, model: &str, with_docs: bool) -> Value {
+pub fn rerank_response(
+    tei: &Value,
+    docs: &[String],
+    top_n: Option<usize>,
+    model: &str,
+    with_docs: bool,
+) -> Value {
     let mut results: Vec<Value> = tei
         .as_array()
         .into_iter()
@@ -310,7 +424,12 @@ pub fn rerank_response(tei: &Value, docs: &[String], top_n: Option<usize>, model
             Some(out)
         })
         .collect();
-    results.sort_by(|a, b| b["relevance_score"].as_f64().partial_cmp(&a["relevance_score"].as_f64()).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b["relevance_score"]
+            .as_f64()
+            .partial_cmp(&a["relevance_score"].as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     if let Some(n) = top_n {
         results.truncate(n);
     }
@@ -320,10 +439,16 @@ pub fn rerank_response(tei: &Value, docs: &[String], top_n: Option<usize>, model
 /// `POST /v1/rerank` for the gateway.
 pub async fn v1_rerank(state: &AppState, body: Value) -> Response {
     let Some(model) = ready(state, &RERANK).await else {
-        return openai_error(StatusCode::SERVICE_UNAVAILABLE, "Reranking isn't on. Turn it on in TT Station → Models → Embeddings and reranking.");
+        return openai_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Reranking isn't on. Turn it on in TT Station → Models → Embeddings and reranking.",
+        );
     };
     let Some((request, docs)) = tei_rerank_request(&body) else {
-        return openai_error(StatusCode::BAD_REQUEST, "Send a query and a list of documents.");
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "Send a query and a list of documents.",
+        );
     };
     if docs.is_empty() {
         return Json(json!({ "model": model, "results": [] })).into_response();
@@ -342,11 +467,18 @@ pub async fn v1_rerank(state: &AppState, body: Value) -> Response {
             Json(rerank_response(&tei, &docs, top_n, &model, with_docs)).into_response()
         }
         Ok(r) => {
-            let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let v: Value = r.json().await.unwrap_or(Value::Null);
-            openai_error(status, v["error"].as_str().unwrap_or("The reranker refused it."))
+            openai_error(
+                status,
+                v["error"].as_str().unwrap_or("The reranker refused it."),
+            )
         }
-        Err(e) => openai_error(StatusCode::BAD_GATEWAY, &format!("The reranker didn't answer: {e}")),
+        Err(e) => openai_error(
+            StatusCode::BAD_GATEWAY,
+            &format!("The reranker didn't answer: {e}"),
+        ),
     }
 }
 

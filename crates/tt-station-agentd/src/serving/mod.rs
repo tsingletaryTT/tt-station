@@ -269,7 +269,10 @@ pub(crate) fn poll_until_healthy(
 /// through the gateway, which checks keys. A host configured as a network
 /// address keeps the network publish that address needs.
 pub fn loopback_only(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Construct a `ServingBackend` for the given `--backend` CLI choice.

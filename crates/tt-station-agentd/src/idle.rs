@@ -29,7 +29,10 @@ use serde_json::{json, Value};
 use crate::routes::{AppState, BearerAuth, Phase};
 
 fn now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -41,7 +44,11 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { enabled: false, after_minutes: 60, wake_on_request: true }
+        Settings {
+            enabled: false,
+            after_minutes: 60,
+            wake_on_request: true,
+        }
     }
 }
 
@@ -65,7 +72,12 @@ struct Watch {
     waking: bool,
 }
 
-static WATCH: LazyLock<Mutex<Watch>> = LazyLock::new(|| Mutex::new(Watch { last_active: now(), ..Default::default() }));
+static WATCH: LazyLock<Mutex<Watch>> = LazyLock::new(|| {
+    Mutex::new(Watch {
+        last_active: now(),
+        ..Default::default()
+    })
+});
 
 fn settings_file(state: &AppState) -> std::path::PathBuf {
     state.config_dir().join("idle.json")
@@ -76,17 +88,25 @@ fn asleep_file(state: &AppState) -> std::path::PathBuf {
 }
 
 pub fn settings(state: &AppState) -> Settings {
-    std::fs::read(settings_file(state)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    std::fs::read(settings_file(state))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
 }
 
 pub fn asleep(state: &AppState) -> Option<Asleep> {
-    std::fs::read(asleep_file(state)).ok().and_then(|b| serde_json::from_slice(&b).ok())
+    std::fs::read(asleep_file(state))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
 }
 
 fn set_asleep(state: &AppState, a: Option<&Asleep>) {
     match a {
         Some(a) => {
-            let _ = std::fs::write(asleep_file(state), serde_json::to_vec_pretty(a).unwrap_or_default());
+            let _ = std::fs::write(
+                asleep_file(state),
+                serde_json::to_vec_pretty(a).unwrap_or_default(),
+            );
         }
         None => {
             let _ = std::fs::remove_file(asleep_file(state));
@@ -99,7 +119,9 @@ pub fn parse_metrics(text: &str) -> (f64, f64) {
     let mut busy = 0.0;
     let mut tokens = 0.0;
     for line in text.lines().filter(|l| !l.starts_with('#')) {
-        let Some((name, value)) = line.rsplit_once(' ') else { continue };
+        let Some((name, value)) = line.rsplit_once(' ') else {
+            continue;
+        };
         let v: f64 = value.trim().parse().unwrap_or(0.0);
         let metric = name.split('{').next().unwrap_or("");
         match metric {
@@ -116,7 +138,15 @@ pub fn parse_metrics(text: &str) -> (f64, f64) {
 async fn active(state: &AppState) -> Option<bool> {
     let ep = state.endpoint()?;
     let base = ep.base_url.trim_end_matches('/').trim_end_matches("/v1");
-    let text = crate::localhttp::local().get(format!("{base}/metrics")).timeout(Duration::from_secs(5)).send().await.ok()?.text().await.ok()?;
+    let text = crate::localhttp::local()
+        .get(format!("{base}/metrics"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
     if !text.contains("vllm:") {
         return None;
     }
@@ -139,10 +169,20 @@ fn working(state: &AppState) -> bool {
 async fn current_target(state: &AppState) -> Option<Asleep> {
     let life = state.lifecycle();
     if let Some(id) = crate::community::serving_package(state, &life) {
-        return Some(Asleep { label: id.rsplit('/').next().unwrap_or(&id).to_string(), target: id, community: true, at: now() });
+        return Some(Asleep {
+            label: id.rsplit('/').next().unwrap_or(&id).to_string(),
+            target: id,
+            community: true,
+            at: now(),
+        });
     }
     let model = life.model.clone().or(life.served_id.clone())?;
-    Some(Asleep { label: model.rsplit('/').next().unwrap_or(&model).to_string(), target: model, community: false, at: now() })
+    Some(Asleep {
+        label: model.rsplit('/').next().unwrap_or(&model).to_string(),
+        target: model,
+        community: false,
+        at: now(),
+    })
 }
 
 /// Watches forever; started once, at agent start.
@@ -169,8 +209,14 @@ pub async fn watch_forever(state: AppState) {
         if idle_for < s.after_minutes.max(5) as u64 * 60 {
             continue;
         }
-        let Some(target) = current_target(&state).await else { continue };
-        eprintln!("tt-station-agentd: idle for {} min: stopping {}", idle_for / 60, target.target);
+        let Some(target) = current_target(&state).await else {
+            continue;
+        };
+        eprintln!(
+            "tt-station-agentd: idle for {} min: stopping {}",
+            idle_for / 60,
+            target.target
+        );
         set_asleep(&state, Some(&target));
         if let Err(e) = state.stop_serving().await {
             eprintln!("tt-station-agentd: idle stop failed: {e:#}");
@@ -183,7 +229,11 @@ pub async fn watch_forever(state: AppState) {
             body: format!(
                 "Nobody used it for {} minutes.{}",
                 idle_for / 60,
-                if s.wake_on_request { " It starts again when something asks for it." } else { "" }
+                if s.wake_on_request {
+                    " It starts again when something asks for it."
+                } else {
+                    ""
+                }
             ),
         });
     }
@@ -200,29 +250,50 @@ pub async fn wake_for_request(state: &AppState) -> Option<String> {
     let life = state.lifecycle();
     let eta = |state: &AppState| {
         let life = state.lifecycle();
-        let total = life.model.as_deref().or(Some(a.target.as_str())).and_then(|m| state.load_times().estimate(m));
+        let total = life
+            .model
+            .as_deref()
+            .or(Some(a.target.as_str()))
+            .and_then(|m| state.load_times().estimate(m));
         total
             .map(|t| t.saturating_sub(now().saturating_sub(life.since)))
             .map(|left| format!(" in about {} min", (left / 60).max(1)))
             .unwrap_or_else(|| " in a few minutes".into())
     };
     match life.phase {
-        Phase::Starting => return Some(format!("{} is waking up; it'll be ready{}.", a.label, eta(state))),
+        Phase::Starting => {
+            return Some(format!(
+                "{} is waking up; it'll be ready{}.",
+                a.label,
+                eta(state)
+            ))
+        }
         Phase::Serving => return None,
         _ => {}
     }
     {
         let mut w = WATCH.lock().expect("idle");
         if w.waking {
-            return Some(format!("{} is waking up; it'll be ready{}.", a.label, eta(state)));
+            return Some(format!(
+                "{} is waking up; it'll be ready{}.",
+                a.label,
+                eta(state)
+            ));
         }
         w.waking = true;
     }
     let started = wake(state, &a).await;
     WATCH.lock().expect("idle").waking = false;
     match started {
-        Ok(()) => Some(format!("{} was asleep to save power. It's waking up now and will be ready{}.", a.label, eta(state))),
-        Err(e) => Some(format!("{} was asleep to save power, and it couldn't be started again: {e}", a.label)),
+        Ok(()) => Some(format!(
+            "{} was asleep to save power. It's waking up now and will be ready{}.",
+            a.label,
+            eta(state)
+        )),
+        Err(e) => Some(format!(
+            "{} was asleep to save power, and it couldn't be started again: {e}",
+            a.label
+        )),
     }
 }
 
@@ -253,10 +324,22 @@ pub(crate) async fn get_idle(State(state): State<AppState>, _auth: BearerAuth) -
 }
 
 /// `PUT /idle {enabled, after_minutes, wake_on_request}`
-pub(crate) async fn put_idle(State(state): State<AppState>, _auth: BearerAuth, Json(mut s): Json<Settings>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+pub(crate) async fn put_idle(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    Json(mut s): Json<Settings>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     s.after_minutes = s.after_minutes.clamp(5, 24 * 60);
-    std::fs::write(settings_file(&state), serde_json::to_vec_pretty(&s).unwrap_or_default())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))))?;
+    std::fs::write(
+        settings_file(&state),
+        serde_json::to_vec_pretty(&s).unwrap_or_default(),
+    )
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
     if !s.enabled {
         // Turning it off forgets nothing: a model put to sleep can still be woken by hand.
         WATCH.lock().expect("idle").last_active = now();
@@ -265,9 +348,19 @@ pub(crate) async fn put_idle(State(state): State<AppState>, _auth: BearerAuth, J
 }
 
 /// `POST /idle/wake`: start the model put to sleep, now.
-pub(crate) async fn post_wake(State(state): State<AppState>, _auth: BearerAuth) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let a = asleep(&state).ok_or_else(|| (StatusCode::CONFLICT, Json(json!({ "error": "Nothing is asleep." }))))?;
-    wake(&state, &a).await.map_err(|e| (StatusCode::CONFLICT, Json(json!({ "error": e }))))?;
+pub(crate) async fn post_wake(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let a = asleep(&state).ok_or_else(|| {
+        (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "Nothing is asleep." })),
+        )
+    })?;
+    wake(&state, &a)
+        .await
+        .map_err(|e| (StatusCode::CONFLICT, Json(json!({ "error": e }))))?;
     Ok(Json(json!({ "waking": a.label })))
 }
 
@@ -281,7 +374,10 @@ mod tests {
                     vllm:num_requests_waiting_by_reason{reason=\"capacity\"} 5.0\nvllm:prompt_tokens_total{engine=\"0\"} 8.865026e+06\n\
                     vllm:generation_tokens_total{engine=\"0\"} 54311.0\n";
         let (busy, tokens) = parse_metrics(text);
-        assert_eq!(busy, 3.0, "waiting_by_reason is a breakdown, not more requests");
+        assert_eq!(
+            busy, 3.0,
+            "waiting_by_reason is a breakdown, not more requests"
+        );
         assert_eq!(tokens, 8_865_026.0 + 54_311.0);
     }
 }

@@ -51,7 +51,9 @@ async fn get_config_returns_summary_without_secrets() {
     tokio::spawn(async move {
         axum::serve(net_listener, net).await.unwrap();
     });
-    let resp = reqwest::get(format!("http://{net_addr}/config")).await.unwrap();
+    let resp = reqwest::get(format!("http://{net_addr}/config"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
 
     // On the box itself (plain HTTP from loopback): no pairing needed.
@@ -63,11 +65,21 @@ async fn get_config_returns_summary_without_secrets() {
     let addr = listener.local_addr().expect("failed to read local addr");
 
     tokio::spawn(async move {
-        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     // A page in a browser on the box, reaching it through a name of its own (DNS rebinding).
-    let rebound = reqwest::Client::new().get(format!("http://{addr}/config")).header("host", "evil.example:8765").send().await.unwrap();
+    let rebound = reqwest::Client::new()
+        .get(format!("http://{addr}/config"))
+        .header("host", "evil.example:8765")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(rebound.status(), reqwest::StatusCode::MISDIRECTED_REQUEST);
 
     let url = format!("http://{addr}/config");
