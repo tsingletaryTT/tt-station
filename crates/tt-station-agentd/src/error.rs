@@ -1,7 +1,11 @@
 //! The `{ "error": "<message>" }` body the agent's routes answer with when
 //! a request fails, and the helpers that build it.
 
-use axum::{http::StatusCode, Json};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::Serialize;
 
 use crate::state::StartInFlight;
@@ -14,6 +18,36 @@ use crate::state::StartInFlight;
 #[derive(Serialize)]
 pub(crate) struct ErrorResponse {
     pub(crate) error: String,
+}
+
+/// A request that failed: its status, and the message the
+/// `{ "error": "<message>" }` body carries. Routes return it as their `Err`;
+/// the body is the same bytes as an [`ErrorResponse`] or a
+/// `json!({ "error": .. })`, which the modules used to build by hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiError {
+    pub status: StatusCode,
+    pub error: String,
+}
+
+impl ApiError {
+    pub fn new(status: StatusCode, error: impl Into<String>) -> Self {
+        ApiError {
+            status,
+            error: error.into(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(ErrorResponse { error: self.error })).into_response()
+    }
+}
+
+/// [`ApiError::new`], by the name the route modules' own helpers had.
+pub(crate) fn err(status: StatusCode, error: impl Into<String>) -> ApiError {
+    ApiError::new(status, error)
 }
 
 pub(crate) fn backend_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
@@ -79,4 +113,51 @@ pub(crate) fn tt_error(
             error: error.into(),
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    async fn bytes(response: Response) -> (StatusCode, String, Vec<u8>) {
+        let status = response.status();
+        let content_type = response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        (status, content_type, body)
+    }
+
+    /// The same status, content type and body bytes as both shapes it replaces.
+    #[tokio::test]
+    async fn an_api_error_is_the_body_the_modules_built_by_hand() {
+        for message in [
+            "No such run.",
+            "",
+            "quotes \" and \\ backslashes",
+            "lines\nand\ttabs",
+            "unicode — “curly” 😀",
+        ] {
+            let status = StatusCode::CONFLICT;
+            let ours = bytes(err(status, message).into_response()).await;
+            let value = bytes((status, Json(json!({ "error": message }))).into_response()).await;
+            let strukt = bytes(
+                (
+                    status,
+                    Json(ErrorResponse {
+                        error: message.to_string(),
+                    }),
+                )
+                    .into_response(),
+            )
+            .await;
+            assert_eq!(ours, value, "{message:?}");
+            assert_eq!(ours, strukt, "{message:?}");
+        }
+    }
 }

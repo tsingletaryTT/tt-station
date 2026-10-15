@@ -18,6 +18,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::error::{err, ApiError};
 use crate::notify::Draft;
 use crate::routes::{AppState, BearerAuth};
 
@@ -293,11 +294,7 @@ pub async fn run_forever(state: AppState) {
 // Routes
 // ---------------------------------------------------------------------
 
-type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
-
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({ "error": msg.into() })))
-}
+type Reply = Result<Json<Value>, ApiError>;
 
 pub(crate) async fn get_schedules(
     axum::extract::State(state): axum::extract::State<AppState>,
