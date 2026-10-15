@@ -262,6 +262,16 @@ pub(crate) fn poll_until_healthy(
     false
 }
 
+/// Whether the serving `host` (what an `Endpoint`'s `base_url` names) is this
+/// box only. Then the model's port is published on loopback alone: it takes
+/// no key (`--no-auth`), and everything that uses it -- the gateway, Chat,
+/// Code's gate, the apps (via the gateway) -- reaches it as 127.0.0.1 or
+/// through the gateway, which checks keys. A host configured as a network
+/// address keeps the network publish that address needs.
+pub fn loopback_only(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
 /// Construct a `ServingBackend` for the given `--backend` CLI choice.
 ///
 /// `"runpy"`, `"docker"`, and `"dstack"` are the only recognized kinds;

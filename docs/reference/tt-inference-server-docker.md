@@ -103,6 +103,15 @@ Source of truth: `vllm-tt-metal/README.md` "Minimal Example" in the repo, corrob
 ## Decisions taken for the PoC DockerBackend
 
 - **`--no-auth`** by default (no JWT-minting dependency in Rust). `Endpoint.requires_key = !no_auth`.
+- **The keyless model port is published on loopback only** (2026-10): with the default
+  serving host (`127.0.0.1`), the Docker backend publishes `127.0.0.1:<port>:8000` and the
+  run.py backend passes `--bind-host 127.0.0.1` (run.py has had it since 2026-03; an older
+  checkout without it keeps publishing on every interface). Nothing needs the port from the
+  network: the gateway, Chat, Code's gate and the agent's own probes use `127.0.0.1`, and
+  containers (apps, the Code sandbox) and other computers go through the gateway
+  (`:8765`/`:8766` `/v1`), which checks app keys. A `--serving-host` set to a network address
+  keeps the network publish that address needs. `--serve-with tt` launches are built by the
+  `tt` CLI and bind however it does.
 - **QB2 = 2× p300 = 4 Blackhole chips.** The exact `--tt-device` string for QB2 is not 100% pinned in sources (`p150x4` / `p300x2` seen for Blackhole) — expose it as a **configurable flag**, don't hardcode. Operator confirms on hardware.
 - **No `latest`** — image tag is a required-to-set flag; default points at the ghcr release repo with an example tag that MUST be reviewed per release.
 - Health poll hits **`/health`** (not `/v1/models`).

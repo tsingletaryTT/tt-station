@@ -1162,7 +1162,9 @@ impl ServingBackend for DockerBackend {
 
         // The container's serving port is fixed at `CONTAINER_PORT`; only
         // the host side of the `--publish` mapping is configurable.
-        let publish_mapping = format!("{}:{}", self.config.host_port, CONTAINER_PORT);
+        // On loopback unless the endpoint is advertised at a network address (see `loopback_only`).
+        let bind = if super::loopback_only(&self.config.host) { "127.0.0.1:" } else { "" };
+        let publish_mapping = format!("{bind}{}:{}", self.config.host_port, CONTAINER_PORT);
         // `--mount type=bind,src=X,dst=X`: the hugepages path is bind-mounted
         // onto the SAME path inside the container, since that's the path
         // tt-metal's DMA code expects to find inside the container too.

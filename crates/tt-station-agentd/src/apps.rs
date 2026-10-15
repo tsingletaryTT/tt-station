@@ -209,7 +209,10 @@ pub const APPS: &[AppDef] = &[
             ("LDR_SEARCH_PRIVATE_ENGINE_URL_ALLOWLIST", "{app:searxng}"),
         ],
         command: None,
-        local_only: false,
+        // It holds a key to the box's model and spends it for whoever reaches
+        // it: this computer only (another computer's TT Station opens it
+        // through its SSH tunnel).
+        local_only: true,
         url_suffix: "",
         homepage: "https://github.com/LearningCircuit/local-deep-research",
         needs: &["searxng"],
@@ -833,6 +836,10 @@ mod tests {
         assert!(
             app("jupyter").unwrap().local_only,
             "Jupyter runs code: never on the network"
+        );
+        assert!(
+            app("localdeepresearch").unwrap().local_only,
+            "it spends the box's model key for whoever reaches it: never on the network"
         );
     }
 }

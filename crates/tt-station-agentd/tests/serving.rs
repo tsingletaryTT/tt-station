@@ -97,7 +97,7 @@ fn docker_start_issues_run_command_and_returns_endpoint() {
         "docker run args should carry --publish: {run_cmd:?}"
     );
     assert!(
-        run_cmd.iter().any(|a| a == "8080:8000"),
+        run_cmd.iter().any(|a| a == "127.0.0.1:8080:8000"),
         "docker run args should map the host port onto the container's fixed port 8000: {run_cmd:?}"
     );
     assert!(
@@ -505,7 +505,7 @@ fn unleased_docker_run_argv(image: &str, host_port: u16, model: &str) -> Vec<Str
         "--volume",
         "tt-station-cache:/home/container_app_user/cache_root",
         "--publish",
-        &format!("{host_port}:8000"),
+        &format!("127.0.0.1:{host_port}:8000"),
         image,
         "--model",
         model,
@@ -1496,4 +1496,17 @@ fn docker_swap_never_releases_a_lease_recorded_by_a_concurrent_serve() {
         "the concurrent serve's lease must still be held afterwards: {:?}",
         gozer.held_lease_ids()
     );
+}
+
+/// The Docker backend publishes the keyless model port on loopback unless
+/// the endpoint is advertised at a network address.
+#[test]
+fn docker_publishes_on_loopback_unless_advertised_on_the_network() {
+    use tt_station_agentd::serving::loopback_only;
+    for h in ["127.0.0.1", "localhost", "::1", "127.0.0.2"] {
+        assert!(loopback_only(h), "{h}");
+    }
+    for h in ["192.168.1.20", "quietbox.local", "0.0.0.0", "::"] {
+        assert!(!loopback_only(h), "{h}");
+    }
 }
