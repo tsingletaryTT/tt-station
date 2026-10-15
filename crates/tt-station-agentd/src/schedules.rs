@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! Scheduled modes: the box switches itself at set times -- images during
-//! the day, chat in the evening, transcription overnight. A schedule never
-//! interrupts a Lab run, an Orchard bring-up or a transcription job: it
-//! skips that day and says so.
+//! Scheduled modes, now routines: switching the box's mode at set times is a
+//! routine with a `mode` (`crate::routines`), and Routines is the one place
+//! for it. What's left here is the old store, kept only so schedules still
+//! arrive -- from `schedules.json` on a box that had them, an export, or an
+//! older phone app -- and are turned into routines straight away
+//! ([`crate::routines::absorb_schedules`]). The routes below keep answering in
+//! the shape they always did, from those routines.
 //!
 //! - `GET /schedules`, `POST /schedules {mode, time: "HH:MM", days: [0..6]}` (0 is Sunday),
 //!   `PATCH /schedules/{id} {enabled?, mode?, time?, days?}`, `DELETE /schedules/{id}`.
@@ -18,7 +21,6 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::notify::Draft;
 use crate::routes::{AppState, BearerAuth};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -128,7 +130,7 @@ impl Schedules {
         }
     }
 
-    fn check(mode: &str, time: &str, days: &[u8]) -> Result<(), String> {
+    pub(crate) fn check(mode: &str, time: &str, days: &[u8]) -> Result<(), String> {
         if crate::modes::mode_title(mode).is_none() {
             return Err(format!("No mode called {mode}."));
         }
@@ -228,6 +230,23 @@ impl Schedules {
         removed
     }
 
+    /// Everything here, leaving the store empty (for `crate::routines`). The
+    /// file they came from is kept beside it as `schedules.json.migrated`.
+    pub fn take_all(&self) -> Vec<Schedule> {
+        let mut items = self.items.lock().expect("schedules mutex");
+        if items.is_empty() {
+            return vec![];
+        }
+        let taken = std::mem::take(&mut *items);
+        if let Some(path) = &self.path {
+            let kept = path.with_extension("json.migrated");
+            crate::fsio::save_json(&kept, &taken, crate::fsio::PRIVATE);
+        }
+        self.save(&items);
+        taken
+    }
+
+    #[cfg(test)]
     fn mark_run(&self, id: &str, today: &str) {
         let mut items = self.items.lock().expect("schedules mutex");
         if let Some(s) = items.iter_mut().find(|s| s.id == id) {
@@ -253,39 +272,12 @@ pub fn blocker(state: &AppState) -> Option<String> {
     busy_job.then(|| "A transcription job is running.".to_string())
 }
 
-/// Check every 30 s; switch modes as schedules come due.
+/// Turns schedules into routines as they arrive (at start, and every 30 s
+/// after, for an import or an older phone app). Routines run them.
 pub async fn run_forever(state: AppState) {
     loop {
+        crate::routines::absorb_schedules(&state);
         tokio::time::sleep(Duration::from_secs(30)).await;
-        let (weekday, hour, minute, today) = local_now();
-        let schedules = state.schedules();
-        for s in due(&schedules.list(), weekday, hour, minute, &today) {
-            schedules.mark_run(&s.id, &today);
-            let title = crate::modes::mode_title(&s.mode).unwrap_or("the scheduled mode");
-            if let Some(why) = blocker(&state) {
-                state.notifier().emit(Draft {
-                    kind: "schedule",
-                    title: format!("Skipped switching to {title}"),
-                    body: format!("{why} The schedule tries again next time."),
-                });
-                continue;
-            }
-            match crate::modes::start(&state, &s.mode).await {
-                Ok(_) => state.notifier().record(Draft {
-                    kind: "schedule",
-                    title: format!("Switching to {title}"),
-                    body: format!(
-                        "On schedule ({}). You'll get a notification when it's ready.",
-                        s.time
-                    ),
-                }),
-                Err(e) => state.notifier().emit(Draft {
-                    kind: "schedule",
-                    title: format!("Couldn't switch to {title}"),
-                    body: e,
-                }),
-            };
-        }
     }
 }
 
@@ -303,7 +295,7 @@ pub(crate) async fn get_schedules(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
 ) -> Json<Value> {
-    Json(json!({ "schedules": state.schedules().list() }))
+    Json(json!({ "schedules": crate::routines::as_schedules(&state) }))
 }
 
 #[derive(Deserialize)]
@@ -322,7 +314,9 @@ pub(crate) async fn post_schedule(
         .schedules()
         .add(&req.mode, &req.time, req.days)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(json!({ "schedules": state.schedules().list() })))
+    Ok(Json(
+        json!({ "schedules": crate::routines::as_schedules(&state) }),
+    ))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -339,11 +333,11 @@ pub(crate) async fn patch_schedule(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(patch): Json<Patch>,
 ) -> Reply {
-    state
-        .schedules()
-        .update(&id, &patch)
+    crate::routines::patch_from_schedule(&state, &id, &patch)
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(json!({ "schedules": state.schedules().list() })))
+    Ok(Json(
+        json!({ "schedules": crate::routines::as_schedules(&state) }),
+    ))
 }
 
 pub(crate) async fn delete_schedule(
@@ -351,10 +345,12 @@ pub(crate) async fn delete_schedule(
     _auth: BearerAuth,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Reply {
-    if !state.schedules().remove(&id) {
+    if !crate::routines::remove_mode_routine(&state, &id) {
         return Err(err(StatusCode::NOT_FOUND, "No such schedule."));
     }
-    Ok(Json(json!({ "schedules": state.schedules().list() })))
+    Ok(Json(
+        json!({ "schedules": crate::routines::as_schedules(&state) }),
+    ))
 }
 
 #[cfg(test)]
