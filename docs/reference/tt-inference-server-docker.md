@@ -145,7 +145,7 @@ venv, including as uid 1000 inside a release image with the file mounted read-on
 | Launch path | Now |
 |---|---|
 | Docker backend | `--volume <file>:/run/secrets/hf_token:ro --env HF_TOKEN_PATH=/run/secrets/hf_token` |
-| Community `tt-model pull` / `tt-model serve` | `--setenv=HF_TOKEN_PATH=<file>`. tt-model forwards only `HF_TOKEN` into a container, so its containers get no token in their environment; a `--local-only` serve downloads nothing, and a container that needs it still finds `$HF_HOME/token` in the cache tt-model mounts at `/hf`. |
+| Community `tt-model pull` / `tt-model serve` | `--setenv=HF_TOKEN_PATH=<file>`. tt-model forwards only `HF_TOKEN` into a container, so its containers get no token in their environment; a `--local-only` serve downloads nothing, and a container that needs it still finds `$HF_HOME/token` in the cache tt-model mounts into the container (as /hf). |
 | Native vLLM | `--setenv=HF_TOKEN_PATH=<file>` |
 | run.py backend and `tt serve` | **Gap, not fixed here.** run.py requires `HF_TOKEN` in its environment for `--docker-server`, writes it to its checkout's `.env`, and starts the container with `--env-file .env`, so the token shows in `docker inspect`. Needs an upstream run.py change (mount the token file, set `HF_TOKEN_PATH`). |
 
