@@ -327,25 +327,40 @@ pub fn below_floor(running: &str, candidate: &str) -> bool {
     older(candidate, &floor.join("."))
 }
 
-/// `a < b` for dotted versions (`0.9.0 < 0.11.0`).
+/// `a < b` for dotted versions (`0.9.0 < 0.11.0`). As in semver, a
+/// pre-release is older than its release (`1.0.0-rc.2 < 1.0.0`), and build
+/// metadata (`+…`) doesn't count.
 pub fn older(a: &str, b: &str) -> bool {
     let parts = |v: &str| {
-        v.trim_start_matches('v')
-            .split(['.', '-', '+'])
-            .map(|p| p.parse::<u64>().unwrap_or(0))
-            .collect::<Vec<_>>()
+        let v = v.trim_start_matches('v');
+        let v = v.split('+').next().unwrap_or(v);
+        let (core, pre) = v.split_once('-').map_or((v, None), |(c, p)| (c, Some(p)));
+        let nums = |s: &str| {
+            s.split(['.', '-'])
+                .map(|p| p.parse::<u64>().unwrap_or(0))
+                .collect::<Vec<_>>()
+        };
+        (nums(core), pre.map(nums))
     };
-    let (a, b) = (parts(a), parts(b));
-    for i in 0..a.len().max(b.len()) {
-        let (x, y) = (
-            a.get(i).copied().unwrap_or(0),
-            b.get(i).copied().unwrap_or(0),
-        );
-        if x != y {
-            return x < y;
+    let lt = |a: &[u64], b: &[u64]| {
+        for i in 0..a.len().max(b.len()) {
+            let (x, y) = (
+                a.get(i).copied().unwrap_or(0),
+                b.get(i).copied().unwrap_or(0),
+            );
+            if x != y {
+                return Some(x < y);
+            }
         }
+        None
+    };
+    let ((a, a_pre), (b, b_pre)) = (parts(a), parts(b));
+    match (lt(&a, &b), a_pre, b_pre) {
+        (Some(less), _, _) => less,
+        (None, Some(_), None) => true,
+        (None, Some(x), Some(y)) => lt(&x, &y).unwrap_or(false),
+        (None, None, _) => false,
     }
-    false
 }
 
 // ---------------------------------------------------------------- releases
