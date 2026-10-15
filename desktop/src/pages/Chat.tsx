@@ -15,7 +15,7 @@ import { Icon } from "@tenstorrent/vesper/icons";
 import { Switch } from "@tenstorrent/vesper/switch";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { Admonition } from "@tenstorrent/vesper/admonition";
-import { type ActionReport, ApiError, clientKind, fetchBlob, get, type Mode, post, runOnClient, type Serve, short, streamChat, upsertAction } from "../api";
+import { type ActionReport, ApiError, clientKind, fetchBlob, get, type Mode, post, runConfirmed, runOnClient, type Serve, short, streamChat, upsertAction } from "../api";
 import { toastError, toastOk, usePoll, useToriShortcut } from "../ui";
 import { type AskHooks, VoiceMode } from "../VoiceMode";
 import { ask, askText } from "../dialog";
@@ -133,8 +133,8 @@ export function Chat() {
 
   const confirm = async (action: ActionReport, approve: boolean) => {
     try {
-      const r = await post<{ message?: string; status?: string }>("/assistant/confirm", { action_id: action.id, approve });
-      const note = (r as { summary?: string })?.summary ?? r?.message ?? (approve ? "Done." : "Cancelled.");
+      const r = await post<{ message?: string; status?: string; run?: { tool: string; args?: Record<string, unknown> } }>("/assistant/confirm", { action_id: action.id, approve });
+      const note = (await runConfirmed(r)) ?? (r as { summary?: string })?.summary ?? r?.message ?? (approve ? "Done." : "Cancelled.");
       if (!conv) return;
       update(conv.id, (c) => ({
         ...c,

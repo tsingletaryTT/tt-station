@@ -1709,6 +1709,13 @@ pub fn decide_waiting(decision: &str) -> Option<(String, String)> {
     Some((decision.to_string(), what))
 }
 
+/// What [`decide_waiting`] would answer right now (the command, or the kind of request).
+pub fn waiting_on() -> Option<String> {
+    let all = APPROVALS.lock().expect("approvals");
+    let (_, a) = all.iter().find(|(_, a)| a.decision.is_none())?;
+    Some(a.command.clone().unwrap_or_else(|| a.kind.clone()))
+}
+
 /// Is a bring-up waiting on a person?
 pub fn anything_waiting() -> bool {
     APPROVALS.lock().expect("approvals").iter().any(|(_, a)| a.decision.is_none())

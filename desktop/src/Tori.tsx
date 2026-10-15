@@ -13,7 +13,7 @@ import remarkGfm from "remark-gfm";
 import { Button } from "@tenstorrent/vesper/button";
 import { IconButton } from "@tenstorrent/vesper/icon-button";
 import { Icon } from "@tenstorrent/vesper/icons";
-import { type ActionReport, clientKind, get, post, runOnClient, short, streamChat, upsertAction } from "./api";
+import { type ActionReport, clientKind, get, post, runConfirmed, runOnClient, short, streamChat, upsertAction } from "./api";
 import { toastError } from "./ui";
 import { Orb, type Phase } from "./VoiceMode";
 import { Listener, Speaker, type VoiceStatus } from "./voice";
@@ -238,8 +238,8 @@ export function ToriWindow() {
 
   const confirm = async (a: ActionReport, approve: boolean) => {
     try {
-      const r = await post<{ summary?: string; message?: string }>("/assistant/confirm", { action_id: a.id, approve });
-      const note = r?.summary ?? r?.message ?? (approve ? "Done." : "Cancelled.");
+      const r = await post<{ summary?: string; message?: string; status?: string; run?: { tool: string; args?: Record<string, unknown> } }>("/assistant/confirm", { action_id: a.id, approve });
+      const note = (await runConfirmed(r)) ?? r?.summary ?? r?.message ?? (approve ? "Done." : "Cancelled.");
       setTurns((all) => all.map((t) => ({ ...t, actions: t.actions?.map((x) => (x.id === a.id ? { ...x, status: "done" as const, summary: note } : x)) })));
     } catch (e) { toastError(e); }
   };

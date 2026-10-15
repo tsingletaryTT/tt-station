@@ -601,6 +601,16 @@ export async function runOnClient(a: ActionReport): Promise<void> {
   await post("/assistant/client-result", { id: a.id, ...r }).catch(() => {});
 }
 
+/** A confirmed step for this computer: once the person approves a step that
+ *  acts here (`status: "on_client"`), the device hands it back to run. Returns
+ *  what happened, or null when the step ran on the device. */
+export async function runConfirmed(r: { status?: string; run?: { tool: string; args?: Record<string, unknown> } } | undefined): Promise<string | null> {
+  if (r?.status !== "on_client" || !r.run) return null;
+  const out: { ok: boolean; summary?: string; error?: string } = (await window.ttDesktop?.computer?.(r.run.tool, r.run.args ?? {}).catch((e: Error) => ({ ok: false, error: e.message })))
+    ?? { ok: false, error: "This app can't do that on this computer." };
+  return out.ok ? out.summary ?? "Done." : out.error ?? "It didn't work.";
+}
+
 /** A list of actions with this report added, or replacing the one with its id. */
 export function upsertAction(list: ActionReport[] | undefined, a: ActionReport): ActionReport[] {
   const all = list ?? [];

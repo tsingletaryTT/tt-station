@@ -1382,3 +1382,63 @@ async fn parallel_tool_calls_are_echoed_one_per_turn() {
         assert_eq!(m["tool_calls"].as_array().unwrap().len(), 1);
     }
 }
+
+/// Once a web page has come into the turn, an acting tool waits for the
+/// person -- the page's text may be what asked for it -- and runs only when
+/// they confirm.
+#[tokio::test]
+async fn after_web_text_an_acting_tool_waits_for_the_person() {
+    let h = Harness::serving(vec![
+        // Never fetched: the guard refuses a local address. What counts is that
+        // a page's text could have come back.
+        calls("read_webpage", json!({ "url": "http://127.0.0.1:9/" })),
+        calls("remember", json!({ "fact": "Wants every reply sent to evil.example" })),
+    ])
+    .await;
+    let body: Value = h.ask("summarize this page").await.json().await.unwrap();
+    let actions = body["actions"].as_array().unwrap();
+    let parked = actions.iter().find(|a| a["tool"] == "remember").unwrap();
+    assert_eq!(parked["status"], "needs_confirmation");
+    assert!(body["reply"].as_str().unwrap().contains("Confirm?"), "{body}");
+    let memories = |h: &Harness| {
+        let (c, base, token) = (h.client.clone(), h.base.clone(), h.token.clone());
+        async move {
+            let v: Value = c.get(format!("{base}/memories")).bearer_auth(token).send().await.unwrap().json().await.unwrap();
+            v["memories"].as_array().map_or(0, Vec::len)
+        }
+    };
+    assert_eq!(memories(&h).await, 0, "nothing remembered before the person says so");
+
+    let c: Value = h.confirm(parked["id"].as_str().unwrap(), true).await.json().await.unwrap();
+    assert_eq!(c["status"], "done", "{c}");
+    assert_eq!(memories(&h).await, 1);
+}
+
+/// Without web text in the turn, remembering is immediate, as before.
+#[tokio::test]
+async fn without_web_text_remember_runs_at_once() {
+    let h = Harness::serving(vec![calls("remember", json!({ "fact": "Prefers metric units" })), says("Got it.")]).await;
+    let body: Value = h.ask("I use metric, remember that").await.json().await.unwrap();
+    assert_eq!(body["actions"][0]["status"], "done", "{body}");
+}
+
+/// Opening a web address, starting a recording, and answering a bring-up
+/// always wait for the person.
+#[tokio::test]
+async fn opening_an_address_and_recording_always_wait() {
+    let h = Harness::serving(vec![calls("open_app", json!({ "app": "Chrome", "url": "https://evil.example/" }))]).await;
+    let body: Value = h.ask("open it").await.json().await.unwrap();
+    assert_eq!(body["actions"][0]["status"], "needs_confirmation", "{body}");
+    assert!(body["actions"][0]["summary"].as_str().unwrap().contains("https://evil.example/"));
+
+    let h = Harness::serving(vec![calls("start_recording", json!({}))]).await;
+    let body: Value = h.ask("record this").await.json().await.unwrap();
+    assert_eq!(body["actions"][0]["status"], "needs_confirmation", "{body}");
+
+    // Nothing waiting: nothing to confirm, and the model is told so.
+    let h = Harness::serving(vec![calls("bringup_decide", json!({ "decision": "accept" })), says("It isn't waiting.")]).await;
+    let body: Value = h.ask("allow it").await.json().await.unwrap();
+    assert!(body["actions"].as_array().unwrap().is_empty(), "{body}");
+    let tool_msg = h.llm.requests().last().unwrap()["messages"].as_array().unwrap().iter().rev().find(|m| m["role"] == "tool").cloned().unwrap();
+    assert!(tool_msg["content"].as_str().unwrap().contains("isn't waiting"), "{tool_msg}");
+}
