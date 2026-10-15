@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Check that every agent endpoint named in docs/reference/*.md exists in the router.
 
-The route table is parsed out of crates/tt-station-agentd/src/routes.rs (every
+The route table is parsed out of crates/tt-station-agentd/src/router.rs (every
 `.route("<path>", <method>(...)...)` call, multi-line ones included). Docs are
 scanned for inline code spans that look like endpoints:
 
@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ROUTES_RS = ROOT / "crates/tt-station-agentd/src/routes.rs"
+ROUTER_RS = ROOT / "crates/tt-station-agentd/src/router.rs"
 DOCS = sorted((ROOT / "docs/reference").glob("*.md"))
 
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
@@ -111,7 +111,11 @@ def doc_endpoints(text: str):
 
 
 def main() -> int:
-    routes = parse_routes(ROUTES_RS.read_text())
+    routes = parse_routes(ROUTER_RS.read_text())
+    if "/status" not in routes:
+        # The router moved or changed shape: say so rather than pass on an empty table.
+        print(f"{ROUTER_RS.relative_to(ROOT)}: no route table found (no `.route(\"/status\", ...)`)")
+        return 1
     if "--list-routes" in sys.argv:
         for p in sorted(routes):
             print(f"{','.join(sorted(routes[p])):<20} {p}")

@@ -67,6 +67,7 @@ pub mod recorder;
 pub mod release_keys;
 pub mod reliability;
 pub mod research;
+pub mod router;
 pub mod routes;
 pub mod routines;
 pub mod safegit;

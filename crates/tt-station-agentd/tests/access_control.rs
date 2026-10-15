@@ -5,7 +5,7 @@
 //!
 //! - default-deny: every route the router serves answers `401` without
 //!   credentials unless it's on the public allowlist (walked from the route
-//!   table in `src/routes.rs`, so a route added later is covered too);
+//!   table in `src/router.rs`, so a route added later is covered too);
 //! - owners and members: the first device paired is an owner, later ones are
 //!   members until promoted, what members are refused, and the last owner
 //!   staying one;
@@ -57,9 +57,9 @@ async fn spawn_local(state: AppState) -> String {
 }
 
 /// `(method, route)` for every `.route(..)` in the body of `fn_header` in
-/// `src/routes.rs`, up to the auth layer that closes it.
+/// `src/router.rs`, up to the auth layer that closes it.
 fn routes_in(fn_header: &str) -> Vec<(String, String)> {
-    let src = include_str!("../src/routes.rs");
+    let src = include_str!("../src/router.rs");
     let start = src
         .find(fn_header)
         .unwrap_or_else(|| panic!("{fn_header} not found"));
