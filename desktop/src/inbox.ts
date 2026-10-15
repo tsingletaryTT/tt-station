@@ -17,7 +17,7 @@
 //   owners). Nothing to allow: the person reads the code out, or ignores it.
 //
 // The pure part (gathering, ordering, answering) lives here, tested; the
-// page and the sidebar count share one poll of each source (`useInbox`).
+// page and the bell at the top right share one poll of each source (`useInbox`).
 
 import { get, post } from "./api";
 
@@ -151,6 +151,21 @@ export function gather({ approvals, bringup, events, owner, now, ignored = [], s
   return out
     .filter((i) => !ignored.includes(i.key))
     .sort((a, b) => (a.kind === "pairing" ? 0 : 1) - (b.kind === "pairing" ? 0 : 1) || a.since - b.since);
+}
+
+/** The notifications dropdown's order: newest first. */
+export function newestFirst(items: InboxItem[]): InboxItem[] {
+  return [...items].sort((a, b) => b.since - a.since);
+}
+
+/** The bell's count: nothing at zero, and "9+" past nine. */
+export function badgeText(n: number): string | null {
+  return n <= 0 ? null : n > 9 ? "9+" : String(n);
+}
+
+/** The bell's accessible name. */
+export function bellLabel(n: number): string {
+  return n > 0 ? `Notifications, ${n} waiting` : "Notifications, nothing waiting";
 }
 
 export type Decision = "allow" | "always" | "deny";

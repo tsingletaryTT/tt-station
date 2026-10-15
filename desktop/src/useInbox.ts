@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-// The "Needs you" list, live: one shared poll of each source for the sidebar's
-// count and the page, quick while the window is shown and resting while it's
+// The "Needs you" list, live: one shared poll of each source for the bell's
+// count and dropdown and the page, quick while the window is shown and resting while it's
 // hidden (`poll.ts`). See `inbox.ts` for what's gathered.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
