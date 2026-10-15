@@ -22,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use axum::extract::{Path as UrlPath, State};
@@ -92,16 +92,25 @@ pub struct Source {
     pub error: Option<String>,
 }
 
-static SOURCES: LazyLock<Mutex<Option<Vec<Source>>>> = LazyLock::new(|| Mutex::new(None));
-/// Folders being indexed right now.
-static BUSY: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+/// What `crate::library` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// The sources, loaded from disk on first use.
+    sources: Mutex<Option<Vec<Source>>>,
+    /// Folders being indexed right now.
+    busy: Mutex<HashSet<String>>,
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().library
+}
 
 fn file(state: &AppState) -> PathBuf {
     state.config_dir().join("library.json")
 }
 
 fn with_sources<T>(state: &AppState, f: impl FnOnce(&mut Vec<Source>) -> T) -> T {
-    let mut held = SOURCES.lock().expect("library");
+    let mut held = mine(state).sources.lock().expect("library");
     let list = held.get_or_insert_with(|| {
         std::fs::read(file(state))
             .ok()
@@ -344,11 +353,16 @@ pub async fn search(
 }
 
 async fn index(state: &AppState, id: &str) {
-    if !BUSY.lock().expect("library").insert(id.to_string()) {
+    if !mine(state)
+        .busy
+        .lock()
+        .expect("library")
+        .insert(id.to_string())
+    {
         return;
     }
     let Some(src) = with_sources(state, |l| l.iter().find(|s| s.id == id).cloned()) else {
-        BUSY.lock().expect("library").remove(id);
+        mine(state).busy.lock().expect("library").remove(id);
         return;
     };
     set(state, id, |s| {
@@ -378,7 +392,7 @@ async fn index(state: &AppState, id: &str) {
             s.error = Some(e);
         }),
     }
-    BUSY.lock().expect("library").remove(id);
+    mine(state).busy.lock().expect("library").remove(id);
 }
 
 /// Keeps every folder current. Started once, at agent start.

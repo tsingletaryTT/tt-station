@@ -113,6 +113,7 @@ pub struct AppState {
 /// (each test's, too) has its own.
 #[derive(Default)]
 pub(crate) struct PerAgent {
+    pub(crate) library: crate::library::PerAgent,
     pub(crate) routines: crate::routines::PerAgent,
 }
 
