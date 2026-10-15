@@ -15,7 +15,9 @@
 //!
 //! Any paired device may answer these: Code sessions and routines are the
 //! household's, and members use both. Bring-up's approvals -- commands on
-//! the box itself, with root when asked for -- are owners' (`crate::bringup`).
+//! the box itself, with root when asked for -- are owners' (`crate::bringup`),
+//! and so are the questions of a Code session outside the sandbox: a member
+//! neither sees nor answers those (`crate::workspace`).
 
 use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
@@ -23,13 +25,17 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::routes::{AppState, BearerAuth};
+use crate::routes::{AppState, BearerAuth, CallerAuth};
 
 type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 /// `GET /approvals`
-pub(crate) async fn get_approvals(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
-    let mut all = crate::workspace::pending_approvals(&state);
+pub(crate) async fn get_approvals(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
+) -> Json<Value> {
+    let mut all = crate::workspace::pending_approvals(&state, caller.owner());
     all.extend(crate::routines::pending_approvals(&state));
     Json(json!({ "approvals": all }))
 }
@@ -46,6 +52,7 @@ pub struct Answer {
 pub(crate) async fn post_answer(
     State(state): State<AppState>,
     auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     Json(a): Json<Answer>,
 ) -> Reply {
     crate::audit::record(
@@ -65,6 +72,7 @@ pub(crate) async fn post_answer(
             crate::workspace::post_approve(
                 State(state),
                 auth,
+                CallerAuth(caller),
                 UrlPath(session.to_string()),
                 Json(body),
             )

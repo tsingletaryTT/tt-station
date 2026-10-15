@@ -21,6 +21,10 @@
 //!   `POST /bringup/codex/runs/{id}/{stop|resume}`.
 //! - `POST /bringup/codex/runs/{id}/approvals/{aid} {decision}`: answer one.
 //! - Driver-only (`X-Run-Secret`): `POST …/approvals`, `POST …/approvals/{aid}/wait`.
+//!
+//! Starting, stopping, resuming and deleting runs, and signing Claude Code in,
+//! are an owner's (`routes::OwnerAuth`): the engines run commands on the box as
+//! its own account, outside any sandbox.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1671,10 +1675,11 @@ fn package_dir(run: &CodexRun) -> PathBuf {
     run.log_dir.join("package")
 }
 
-/// `POST /bringup/codex/runs` (authed): start a fast-models-fast run.
+/// `POST /bringup/codex/runs` (owners): start a fast-models-fast run. Its agent
+/// runs commands on the box as its user, so only an owner may start one.
 pub(crate) async fn post_run(
     State(state): State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     Json(body): Json<StartBody>,
 ) -> Reply<(StatusCode, Json<Value>)> {
     let model = body.model.trim().to_string();
@@ -1788,6 +1793,12 @@ pub(crate) async fn post_run(
     runs.push(run.clone());
     save_runs(&state, &runs);
     state.set_bringup_busy(true);
+    crate::audit::record(
+        &state,
+        "host_run",
+        &format!("bring-up of {model} with {engine}"),
+        "ok",
+    );
     state.notifier().record(Draft {
         kind: "bringup",
         title: format!("Bringing up {} with {}", short(&model), if engine == "claude" { "Claude Code" } else { "Codex" }),
@@ -1800,10 +1811,10 @@ fn short(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model)
 }
 
-/// `POST /bringup/codex/runs/{id}/{action}` (authed): `stop` or `resume`.
+/// `POST /bringup/codex/runs/{id}/{action}` (owners): `stop` or `resume`.
 pub(crate) async fn post_action(
     State(state): State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     UrlPath((id, action)): UrlPath<(String, String)>,
     body: Option<Json<Value>>,
 ) -> Reply {
@@ -2301,11 +2312,11 @@ pub fn anything_waiting() -> bool {
         .any(|(_, a)| a.decision.is_none())
 }
 
-/// `DELETE /bringup/codex/runs/{id}` (authed): forget a run and its logs.
+/// `DELETE /bringup/codex/runs/{id}` (owners): forget a run and its logs.
 /// The port's code in tt-metal (`models/autoports/…`) is left alone.
 pub(crate) async fn delete_run(
     State(state): State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
     let mut runs = load_runs(&state);
@@ -2337,9 +2348,9 @@ pub(crate) async fn delete_run(
     Ok(Json(json!({ "deleted": id, "kept": run.model_dir })))
 }
 
-/// `POST /bringup/claude/login` (authed): open a terminal where the owner signs
+/// `POST /bringup/claude/login` (owners): open a terminal where the owner signs
 /// Claude Code in (`claude auth login`). TT Station never sees the credentials.
-pub(crate) async fn post_claude_login(_auth: BearerAuth) -> Reply {
+pub(crate) async fn post_claude_login(_owner: crate::routes::OwnerAuth) -> Reply {
     let bin =
         claude_bin().ok_or_else(|| err(StatusCode::NOT_FOUND, "Claude Code isn't installed."))?;
     if !crate::desktop::has_session() {

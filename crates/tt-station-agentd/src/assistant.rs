@@ -173,6 +173,30 @@ pub const ACTING_TOOLS: [&str; 10] = [
 /// Tools whose results carry text from the web.
 pub const WEB_TOOLS: [&str; 2] = ["web_search", "read_webpage"];
 
+/// Tools that act on the box's own computer, as its account: open apps, files
+/// and pages on its screen, work its controls, list its files, and answer a
+/// bring-up (which runs a command on the box). An owner's, like the routes
+/// that do the same (`POST /desktop/open`, bring-up approvals): for anyone
+/// else they're refused when they run ([`run_read_only`]). Tori on the
+/// person's own computer (`ChatOptions::client`) runs hers there instead.
+pub const HOST_TOOLS: [&str; 6] = [
+    "open_app",
+    "control_computer",
+    "open_folder",
+    "find_files",
+    "open_station",
+    "bringup_decide",
+];
+
+tokio::task_local! {
+    /// Whether the request being answered may use [`HOST_TOOLS`]: an owner's
+    /// (set by the routes, `routes::assistant_*`). Unset, nobody may.
+    pub static HOST_OK: bool;
+}
+
+/// What the model hears when a member's turn calls one of [`HOST_TOOLS`].
+const HOST_REFUSED: &str = "Only an owner of this box can do that on the box itself. Tell the person so; an owner can make their device one in Settings.";
+
 /// Whether a model's call of `name` would fetch or open a web address the turn
 /// didn't already know, after web text came in (see `crate::urltrust`): it
 /// waits for the person too.
@@ -2563,6 +2587,9 @@ fn new_action_id() -> String {
 pub(crate) async fn run_read_only(state: &AppState, call: &ToolCall) -> (Value, ActionReport) {
     let args = call.args.clone().unwrap_or_else(|_| json!({}));
     let outcome: Result<(Value, String), String> = match call.name.as_str() {
+        name if HOST_TOOLS.contains(&name) && !HOST_OK.try_with(|ok| *ok).unwrap_or(false) => {
+            Err(HOST_REFUSED.to_string())
+        }
         "box_status" => Ok(box_status(state).await),
         "list_models" => list_models(state).await,
         "recent_logs" => recent_logs(state, &args).await,
@@ -3402,6 +3429,31 @@ pub(crate) async fn confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_box_own_computer_is_only_for_owners() {
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        );
+        for name in HOST_TOOLS {
+            let call = ToolCall {
+                id: "a".into(),
+                name: name.into(),
+                args: Ok(json!({ "decision": "accept", "app": "Terminal" })),
+            };
+            // Not an owner's turn (or nobody's): refused before anything runs.
+            for scoped in [None, Some(false)] {
+                let (result, report) = match scoped {
+                    None => run_read_only(&state, &call).await,
+                    Some(ok) => HOST_OK.scope(ok, run_read_only(&state, &call)).await,
+                };
+                assert_eq!(result["error"], HOST_REFUSED, "{name}");
+                assert_eq!(report.status, ActionStatus::Error);
+            }
+        }
+    }
 
     #[test]
     fn what_waits_for_the_person() {

@@ -62,8 +62,8 @@ pub(crate) async fn get_skills(State(_state): State<AppState>, _auth: BearerAuth
 
 /// `POST /skills/{id}/hermes`.
 pub(crate) async fn post_hermes(
-    State(_state): State<AppState>,
-    _auth: BearerAuth,
+    State(state): State<AppState>,
+    _owner: crate::routes::OwnerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let err = |s: StatusCode, m: String| (s, Json(json!({ "error": m })));
@@ -83,6 +83,7 @@ pub(crate) async fn post_hermes(
         )
     })?;
     let repo = repo.to_string();
+    crate::audit::record(&state, "host_run", &format!("Hermes plugin {repo}"), "ok");
     let out = tokio::time::timeout(
         Duration::from_secs(300),
         tokio::task::spawn_blocking(move || {

@@ -372,7 +372,10 @@ pub(crate) async fn get_native(State(state): State<AppState>, _auth: BearerAuth)
 /// `POST /vllm/native/setup`: install the vLLM fork and the TT plugin into
 /// tt-metal's environment with tt-kernel's own installer (minutes; it changes
 /// that environment's packages, so not while a bring-up or Orchard uses it).
-pub(crate) async fn post_setup(State(state): State<AppState>, _auth: BearerAuth) -> Reply {
+pub(crate) async fn post_setup(
+    State(state): State<AppState>,
+    _owner: crate::routes::OwnerAuth,
+) -> Reply {
     if state.bringup_busy() || state.orchard_busy() {
         return Err(err(
             StatusCode::CONFLICT,
@@ -429,6 +432,7 @@ pub(crate) async fn post_setup(State(state): State<AppState>, _auth: BearerAuth)
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
+    crate::audit::record(&state, "host_run", "native vLLM setup", "ok");
     forget_stack();
     Ok(Json(json!({ "setting_up": true })))
 }

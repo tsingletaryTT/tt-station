@@ -24,11 +24,12 @@ import { ago, del, get, post, wsProtocols } from "../api";
 import { Card, Eyebrow, Page, toastError, toastOk, usePoll } from "../ui";
 import { ask } from "../dialog";
 import { navigate } from "../App";
+import { OWNER_ONLY_HOST } from "../role";
 
 interface Agent { id: string; name: string; blurb: string; available: boolean }
 interface Session { id: string; agent: string; agent_name: string; folder: string; task: string | null; created: number; ended: number | null; exit: number | null; live: boolean; changes: number }
 interface Check { ok: boolean; level: "ok" | "warn" | "block"; why: string; model?: string; context?: number | null }
-interface Coding { agents: Agent[]; sessions: Session[]; recent: string[]; check: Check; home: string }
+interface Coding { agents: Agent[]; sessions: Session[]; recent: string[]; check: Check; home: string; owner?: boolean }
 
 const base = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
 /** Connect's tiles open this page with their agent picked. */
@@ -48,6 +49,12 @@ export function Terminals() {
   return (
     <Page title="Terminal sessions" subtitle="Coding agents' own terminal apps, working in your projects on the box with the box's model. They run as you (not in the sandbox the Code page uses) and keep going when you close this window."
       actions={<Button variant="tertiary" onClick={() => navigate("connect")}>Back to Connect</Button>}>
+      {d?.owner === false && (
+        <Admonition variant="info" subtle size="sm">
+          <div className="row-between wrap" style={{ gap: 8 }}><span>{OWNER_ONLY_HOST}</span>
+            <Button size="xs" variant="subtle" onClick={() => navigate("code")}>Open Code</Button></div>
+        </Admonition>
+      )}
       {d?.check && d.check.level !== "ok" && (
         <Admonition variant={d.check.level === "block" ? "warning" : "info"} subtle size="sm">
           <div className="row-between wrap" style={{ gap: 8 }}><span>{d.check.why}</span>
@@ -71,7 +78,7 @@ export function Terminals() {
         </div>
       )}
 
-      {showNew && d && <NewSession d={d} onClose={sel ? () => setStarting(false) : undefined}
+      {showNew && d && d.owner !== false && <NewSession d={d} onClose={sel ? () => setStarting(false) : undefined}
         onStarted={(s) => { setPicked(s.id); setStarting(false); c.refresh(); }} />}
       {!showNew && sel && <SessionView key={sel.id} s={sel} onChanged={c.refresh} onDeleted={() => { setPicked(null); c.refresh(); }} />}
     </Page>

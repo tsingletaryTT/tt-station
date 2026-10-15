@@ -699,9 +699,10 @@ pub struct OpenBody {
     pub url: Option<String>,
 }
 
-/// `POST /desktop/open` (authed) `{app?, url?}`.
+/// `POST /desktop/open` (owners) `{app?, url?}`: whatever it opens runs as the
+/// box's own account, on its screen.
 pub(crate) async fn post_open(
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     Json(body): Json<OpenBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     tokio::task::spawn_blocking(move || open(body.app.as_deref(), body.url.as_deref()))

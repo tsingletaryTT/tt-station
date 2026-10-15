@@ -826,6 +826,7 @@ const ACTIONS: Record<string, string> = {
   update_undo: "Undid an update", update_tt_cli: "Updated tt", approval: "Answered an approval", bringup_approval: "Answered a bring-up approval",
   assistant_approval: "Answered Tori", model_start: "Started a model", model_stop: "Stopped the model", model_switch: "Switched models",
   mode_switch: "Switched mode", device_person: "Set whose a device is", person_remove: "Removed a person", denied: "Refused (owners only)",
+  host_run: "Ran something on the box itself",
 };
 
 /** The box's activity log (owners): who did what, newest first, kept on the box. */

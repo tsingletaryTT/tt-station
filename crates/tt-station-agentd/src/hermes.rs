@@ -451,7 +451,10 @@ fn desktop_running() -> bool {
 
 /// `POST /hermes/open`: open Hermes Desktop on the box's screen. Its own
 /// first-run setup takes it from there (TT Station's guide shows what to enter).
-pub(crate) async fn post_open(State(state): State<AppState>, _auth: BearerAuth) -> Reply {
+pub(crate) async fn post_open(
+    State(state): State<AppState>,
+    _owner: crate::routes::OwnerAuth,
+) -> Reply {
     let bin = hermes_bin()
         .ok_or_else(|| err(StatusCode::CONFLICT, "Hermes Agent isn't installed yet."))?;
     if !crate::desktop::has_session() {
@@ -476,6 +479,7 @@ pub(crate) async fn post_open(State(state): State<AppState>, _auth: BearerAuth) 
             json!({ "opened": true, "already_open": true, "raised": raised }),
         ));
     }
+    crate::audit::record(&state, "host_run", "Hermes Agent's desktop app", "ok");
     let log = work_dir(&state).join("desktop.log");
     let _ = std::fs::create_dir_all(work_dir(&state));
     let path = format!(

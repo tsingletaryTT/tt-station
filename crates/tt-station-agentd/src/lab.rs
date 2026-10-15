@@ -18,6 +18,9 @@
 //!   confirmed stopping it (`stop_serving: true`). While a run holds the chips,
 //!   the agent's tt-smi telemetry pauses, and model starts and chip resets are
 //!   refused -- tt-lab owns the devices exclusively.
+//!
+//! Preparing and running are an owner's (`routes::OwnerAuth`): tt-lab runs as
+//! the box's own account, with the chips opened directly.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -443,7 +446,7 @@ pub(crate) async fn get_lab(
 /// `POST /lab/prepare` (authed).
 pub(crate) async fn post_prepare(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     Json(req): Json<PrepareRequest>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<ErrorResponse>)> {
     let lab = lab(&state)?;
@@ -473,7 +476,7 @@ impl Drop for Busy {
 /// ok, exit_code, seconds, stats, previous}`.
 pub(crate) async fn post_run(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     Json(req): Json<RunRequest>,
 ) -> Result<
     Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>,
@@ -522,6 +525,7 @@ pub(crate) async fn post_run(
         .tokens
         .unwrap_or(if req.check { 4 } else { 128 })
         .clamp(1, 2048);
+    crate::audit::record(&state, "host_run", &format!("Lab run of {}", m.title), "ok");
 
     if let Some(holder) = state.chips_holder() {
         return Err(err(StatusCode::CONFLICT, holder));

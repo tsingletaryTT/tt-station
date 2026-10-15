@@ -19,6 +19,7 @@ import { Card, Eyebrow, Page, Spark, tempTone, tempWord, toastError, usePoll, us
 import { useDevTools } from "../devtools";
 import { TopTerm } from "../TopTerm";
 import { askToStop } from "../dialog";
+import { OWNER_ONLY_HOST, useOwner } from "../role";
 
 interface HistoryPoint { t: number; chips: { temp_c: number | null; power_w: number | null }[]; gen_tps: number | null }
 interface Lease { chip: number; board: string; state: string; who: string | null; reason: string | null }
@@ -128,6 +129,7 @@ function ChipPanel({ chip: c, live, temps, power, times }: { chip: Chip; live: b
 interface LabStatus { installed: boolean; serving: string | null; running: unknown; models: { id: string; title: string; ready: boolean; tiles: number[] }[] }
 
 function Lab() {
+  const owner = useOwner();
   const lab = usePoll(() => get<LabStatus>("/lab"), 20000);
   const [model, setModel] = useState("gpt-oss-20b");
   const [prompt, setPrompt] = useState("Explain what a Tensix core is in two sentences.");
@@ -191,7 +193,7 @@ function Lab() {
           options={(lab.data?.models ?? []).map((m) => ({ label: `${m.title}${m.ready ? "" : " (not prepared)"}`, value: m.id }))} />
         <Switch size="sm" label="Bit-exact check" checked={check} onChange={(e) => setCheck(e.target.checked)} />
         <div className="grow" />
-        <Button size="sm" disabled={running || !lab.data?.models.find((m) => m.id === model)?.ready} onClick={() => run()}>{running ? "Checking…" : "Run the check"}</Button>
+        <Button size="sm" disabled={running || !owner || !lab.data?.models.find((m) => m.id === model)?.ready} title={owner ? undefined : OWNER_ONLY_HOST} onClick={() => run()}>{running ? "Checking…" : "Run the check"}</Button>
       </div>
       <TextArea value={prompt} onChange={(e) => setPrompt(e.target.value)} height={64} />
       {(output || running) && <div className="console">{output || "Resetting the chips and loading the firmware…"}</div>}
