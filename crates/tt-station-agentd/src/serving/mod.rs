@@ -14,6 +14,7 @@ pub mod discovery;
 pub mod docker;
 pub mod dstack;
 pub mod runpy;
+pub mod secrets;
 
 use std::time::Duration;
 

@@ -174,33 +174,59 @@ fn docker_start_keeps_raw_model_in_argv_but_sanitizes_container_name() {
     );
 }
 
-/// A configured HF token should show up as `--env HF_TOKEN` -- by name only,
-/// the value going through docker's own environment so it never shows in a
-/// process list -- and only when set (see the sibling test below).
+/// A configured HF token reaches the container as a read-only file named by
+/// `HF_TOKEN_PATH` -- never as `HF_TOKEN` in its environment (which `docker
+/// inspect` shows), and never as a value in the command line or the child
+/// process's environment.
 #[test]
-fn docker_start_includes_hf_token_env_when_configured() {
+fn docker_start_mounts_hf_token_file_when_configured() {
+    use std::os::unix::fs::PermissionsExt;
+
     let runner = FakeRunner::new(0);
+    let secrets = tempfile::tempdir().unwrap();
     let mut cfg = config("some/image:tag", "127.0.0.1", 8080);
     cfg.hf_token = Some("secret-token".to_string());
-    let backend = DockerBackend::new(cfg, Box::new(runner.clone()));
+    let backend =
+        DockerBackend::new(cfg, Box::new(runner.clone())).with_secrets_dir(secrets.path());
 
     backend.start("llama3").expect("start should succeed");
 
     let commands = runner.commands();
     let run_cmd = &commands[0];
+    let file = secrets.path().join("hf_token");
     assert!(
-        run_cmd.iter().any(|a| a == "--env"),
-        "docker run args should carry --env when a token is configured: {run_cmd:?}"
+        run_cmd.windows(2).any(|w| w[0] == "--volume"
+            && w[1] == format!("{}:/run/secrets/hf_token:ro", file.display())),
+        "the token file should be mounted read-only: {run_cmd:?}"
     );
     assert!(
         run_cmd
             .windows(2)
-            .any(|w| w[0] == "--env" && w[1] == "HF_TOKEN"),
-        "docker run args should name HF_TOKEN: {run_cmd:?}"
+            .any(|w| w[0] == "--env" && w[1] == "HF_TOKEN_PATH=/run/secrets/hf_token"),
+        "the container should be pointed at the file: {run_cmd:?}"
+    );
+    assert!(
+        !run_cmd
+            .iter()
+            .any(|a| a == "HF_TOKEN" || a.starts_with("HF_TOKEN=")),
+        "HF_TOKEN itself must not be passed: {run_cmd:?}"
     );
     assert!(
         !run_cmd.iter().any(|a| a.contains("secret-token")),
         "the token's value must not be in the command line: {run_cmd:?}"
+    );
+    assert!(
+        runner
+            .child_envs()
+            .iter()
+            .flatten()
+            .all(|(k, v)| k != "HF_TOKEN" && !v.contains("secret-token")),
+        "the token must not be in docker's own environment either"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "secret-token");
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o400
     );
 }
 
@@ -219,7 +245,7 @@ fn docker_start_omits_hf_token_env_when_not_configured() {
     let commands = runner.commands();
     let run_cmd = &commands[0];
     assert!(
-        !run_cmd.iter().any(|a| a.starts_with("HF_TOKEN=")),
+        !run_cmd.iter().any(|a| a.starts_with("HF_TOKEN")),
         "docker run args should not carry HF_TOKEN when no token is configured: {run_cmd:?}"
     );
     assert!(

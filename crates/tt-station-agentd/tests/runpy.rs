@@ -507,10 +507,46 @@ fn runpy_start_omits_tool_calling_when_disabled() {
 
     let commands = runner.commands();
     let cmd = find_runpy_cmd(&commands);
-    assert!(
-        !cmd.iter().any(|a| a == "--vllm-override-args"),
-        "enable_tool_calling=false must suppress the override args: {cmd:?}"
+    let val = cmd
+        .windows(2)
+        .find(|w| w[0] == "--vllm-override-args")
+        .map(|w| w[1].clone())
+        .expect("a chat model still gets cached-token reporting");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&val).unwrap(),
+        serde_json::json!({ "enable_prompt_tokens_details": true }),
+        "enable_tool_calling=false must suppress the tool-calling keys: {val}"
     );
+}
+
+/// A chat model's run.py launch asks vLLM for cached-token counts in each
+/// reply's usage, alongside tool calling, in the one `--vllm-override-args`.
+#[test]
+fn runpy_start_enables_prompt_tokens_details_for_chat_model() {
+    let runner = FakeRunner::new(0);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()));
+
+    backend
+        .start("Qwen/Qwen3-32B")
+        .expect("start should succeed");
+
+    let commands = runner.commands();
+    let cmd = find_runpy_cmd(&commands);
+    let overrides: Vec<&String> = cmd
+        .windows(2)
+        .filter(|w| w[0] == "--vllm-override-args")
+        .map(|w| &w[1])
+        .collect();
+    assert_eq!(overrides.len(), 1, "exactly one override payload: {cmd:?}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(overrides[0]).unwrap(),
+        serde_json::json!({
+            "enable_prompt_tokens_details": true,
+            "enable_auto_tool_choice": true,
+            "tool_call_parser": "hermes",
+        })
+    );
+    assert!(!cmd.iter().any(|a| a.contains("disable-log-stats")));
 }
 
 // ---------------------------------------------------------------------

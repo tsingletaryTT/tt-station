@@ -469,6 +469,13 @@ pub fn serve_argv(meta: &Value, port: u16) -> Option<Launch> {
     if vllm && !argv.iter().any(|a| a == "--enable-prompt-tokens-details") {
         argv.push("--enable-prompt-tokens-details".into());
     }
+    // Stats on, so `/metrics` exports the prefix-cache counters (queries and
+    // hits) Code's speed view reads. vLLM's default; a bundle that turns them
+    // off saves only per-step bookkeeping on the API process (vLLM's own
+    // serving benchmarks run with stats on).
+    if vllm {
+        argv.retain(|a| a != "--disable-log-stats");
+    }
     let env = l["env"]
         .as_object()
         .map(|m| {
@@ -619,10 +626,9 @@ pub async fn serve_dir(state: &AppState, dir: &Path, label: &str, stop_serving: 
         ))
         .arg("--setenv=VLLM_USE_V1=1")
         .arg("--setenv=PYTHONUNBUFFERED=1");
-    if let Some(token) = crate::bringup::hf_token() {
-        // The value from systemd-run's environment, not its command line.
-        cmd.arg("--setenv=HF_TOKEN").env("HF_TOKEN", token);
-    }
+    // The Hugging Face token as a private file (`HF_TOKEN_PATH`), never the
+    // value in the unit's environment, where `systemctl --user show` prints it.
+    cmd.args(crate::serving::secrets::launch_hf_token_args());
     for (k, v) in &launch_env {
         cmd.arg(format!("--setenv={k}={v}"));
     }
@@ -686,5 +692,16 @@ mod tests {
             "not twice"
         );
         assert!(serve_argv(&json!({}), 9).is_none());
+        // Stats back on for vLLM, so /metrics has the prefix-cache counters.
+        let quiet = json!({"launch": {"default": {"command": ["vllm", "serve", "g/m", "--disable-log-stats"]}}});
+        assert!(!serve_argv(&quiet, 9)
+            .unwrap()
+            .0
+            .contains(&"--disable-log-stats".to_string()));
+        let other = json!({"launch": {"default": {"command": ["python", "-m", "y", "--disable-log-stats"]}}});
+        assert!(serve_argv(&other, 9)
+            .unwrap()
+            .0
+            .contains(&"--disable-log-stats".to_string()));
     }
 }
