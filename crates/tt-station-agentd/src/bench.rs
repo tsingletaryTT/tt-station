@@ -18,8 +18,16 @@ use serde_json::{json, Value};
 
 use crate::routes::{AppState, BearerAuth, ErrorResponse};
 
-/// One benchmark at a time per box.
-static RUNNING: AtomicBool = AtomicBool::new(false);
+/// What `crate::bench` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// One benchmark at a time per box.
+    running: AtomicBool,
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().bench
+}
 
 const PROMPT: &str = "Explain how a transformer neural network turns a prompt into an answer, \
                       step by step, for a curious engineer.";
@@ -240,7 +248,7 @@ pub(crate) async fn post_bench(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
 ) -> Result<Json<BenchResult>, (StatusCode, Json<ErrorResponse>)> {
-    if RUNNING.swap(true, Ordering::SeqCst) {
+    if mine(&state).running.swap(true, Ordering::SeqCst) {
         return Err((
             StatusCode::CONFLICT,
             Json(ErrorResponse {
@@ -249,7 +257,7 @@ pub(crate) async fn post_bench(
         ));
     }
     let outcome = run(&state).await;
-    RUNNING.store(false, Ordering::SeqCst);
+    mine(&state).running.store(false, Ordering::SeqCst);
     outcome
         .map(Json)
         .map_err(|e| (StatusCode::CONFLICT, Json(ErrorResponse { error: e })))

@@ -114,6 +114,7 @@ pub struct AppState {
 #[derive(Default)]
 pub(crate) struct PerAgent {
     pub(crate) apps: crate::apps::PerAgent,
+    pub(crate) bench: crate::bench::PerAgent,
     pub(crate) idle: crate::idle::PerAgent,
     pub(crate) library: crate::library::PerAgent,
     pub(crate) routines: crate::routines::PerAgent,
