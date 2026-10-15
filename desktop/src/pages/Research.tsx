@@ -7,7 +7,7 @@
 // notification says when one is ready, and a follow-up builds on what the
 // last one read. Tori starts them too ("research …").
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@tenstorrent/vesper/button";
 import { Icon } from "@tenstorrent/vesper/icons";
 import { TextArea } from "@tenstorrent/vesper/text-area";
@@ -18,7 +18,7 @@ import { ProgressBar } from "@tenstorrent/vesper/progress-bar";
 import { StatusIndicator } from "@tenstorrent/vesper/status-indicator";
 import { addToast } from "@tenstorrent/vesper/toast";
 import { Typography } from "@tenstorrent/vesper/typography";
-import Markdown from "react-markdown";
+import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ago, del, duration, get, post } from "../api";
 import { Card, copyText, Eyebrow, MoreMenu, Page, toastError, toastOk, usePoll } from "../ui";
@@ -26,6 +26,8 @@ import { askText } from "../dialog";
 import { fileName, reportFiles, zipFiles, type ReportText } from "../reports";
 import { deleteWithUndo, UNDO_MS } from "../undo";
 import { navigate } from "../App";
+import { ExplainPanel, SelectionMenu, useReportSelection, type ExplainRequest, type Picked } from "./ResearchExplain";
+import { linkCitations, type ExplainMode } from "./explainHelpers";
 
 type Depth = "quick" | "standard" | "deep";
 interface Job {
@@ -59,6 +61,15 @@ const save = (blob: Blob, name: string) => {
   a.download = name;
   a.click();
   URL.revokeObjectURL(a.href);
+};
+/** What the page offers to start when nothing is serving. */
+const startQwen = async () => { try { await post("/serve", { model: "Qwen3-32B", force: true }); toastOk("Starting Qwen3-32B. It takes a few minutes."); } catch (e) { toastError(e); } };
+const openLink = (href: string) => window.ttDesktop ? window.ttDesktop.openExternal(href) : window.open(href, "_blank", "noopener");
+/** The report's links: citations scroll to their source, other links open outside the app. Made once, so polling doesn't remount them (and drop a selection). */
+const REPORT_COMPONENTS: Components = {
+  a: ({ href, children }) => href?.startsWith("#src-")
+    ? <a href={href} className="cite" onClick={(e) => { e.preventDefault(); document.getElementById(href.slice(1))?.scrollIntoView({ behavior: "smooth", block: "center" }); }}>{children}</a>
+    : <a href={href} onClick={(e) => { e.preventDefault(); if (href) void openLink(href); }}>{children}</a>,
 };
 const domain = (u: string) => { if (mine(u)) return "Your Library"; try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return u; } };
 
@@ -129,7 +140,8 @@ export function Research() {
               ))}
             </div>
           </div>
-          {sel && <JobView key={sel.id} id={sel.id} onChanged={list.refresh} onStarted={started} onDelete={() => remove(sel)} />}
+          {sel && <JobView key={sel.id} id={sel.id} onChanged={list.refresh} onStarted={started} onDelete={() => remove(sel)}
+            canStartModel={!!check && !check.model && check.level === "block"} />}
         </div>
       )}
     </Page>
@@ -162,7 +174,7 @@ function ReadyBanner({ check }: { check: Check | null }) {
         <Admonition variant="warning" subtle size="sm">
           <div className="row-between wrap" style={{ gap: 8 }}>
             <span>{check.why}</span>
-            {!check.model && check.level === "block" && <Button size="xs" onClick={async () => { try { await post("/serve", { model: "Qwen3-32B", force: true }); toastOk("Starting Qwen3-32B. It takes a few minutes."); } catch (e) { toastError(e); } }}>Start Qwen3-32B</Button>}
+            {!check.model && check.level === "block" && <Button size="xs" onClick={startQwen}>Start Qwen3-32B</Button>}
           </div>
         </Admonition>
       )}
@@ -229,7 +241,9 @@ export function NewResearch({ check, onStarted, onClose, compact }: { check: Che
   );
 }
 
-function JobView({ id, onChanged, onStarted, onDelete }: { id: string; onChanged: () => void; onStarted: (j: Job) => void; onDelete: () => void }) {
+function JobView({ id, onChanged, onStarted, onDelete, canStartModel }: {
+  id: string; onChanged: () => void; onStarted: (j: Job) => void; onDelete: () => void; canStartModel: boolean;
+}) {
   const d = usePoll(() => get<Detail>(`/research/${id}`), 3000, [id]);
   const det = d.data;
   const [follow, setFollow] = useState("");
@@ -238,7 +252,35 @@ function JobView({ id, onChanged, onStarted, onDelete }: { id: string; onChanged
   const running = !!j && live(j.state);
 
   // Citations [3] become links to the source below.
-  const report = useMemo(() => det?.report?.replace(/\[(\d{1,3})\](?!\()/g, (_, n) => `[[${n}]](#src-${n})`) ?? null, [det?.report]);
+  const report = useMemo(() => (det?.report ? linkCitations(det.report) : null), [det?.report]);
+
+  // Select part of the finished report to explain it, simplify it, or ask about it.
+  const reportBox = useRef<HTMLDivElement>(null);
+  const reportText = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const { picked, pointer, reread } = useReportSelection(reportText);
+  const [menu, setMenu] = useState<{ picked: Picked; keyboard: boolean } | null>(null);
+  const [asked, setAsked] = useState<ExplainRequest | null>(null);
+  const done = j?.state === "done";
+  useEffect(() => { if (pointer && done) { const p = reread(); if (p) setMenu({ picked: p, keyboard: false }); } }, [pointer]); // eslint-disable-line react-hooks/exhaustive-deps
+  const openedByKeyboard = useRef(false);
+  openedByKeyboard.current = !!menu?.keyboard;
+  const closeMenu = useCallback((restoreFocus: boolean) => {
+    if (restoreFocus && openedByKeyboard.current) trigger.current?.focus();
+    setMenu(null);
+  }, []);
+  const explain = (mode: ExplainMode, question?: string) => {
+    if (!menu) return;
+    setAsked((a) => ({ key: (a?.key ?? 0) + 1, selection: menu.picked.text, mode, question }));
+    setMenu(null);
+  };
+  const closePanel = () => { setAsked(null); reportText.current?.focus({ preventScroll: true }); };
+  const researchFurther = (q: string) => {
+    setFollow(q);
+    setAsked(null);
+    requestAnimationFrame(() => { const el = document.getElementById("research-follow-up") as HTMLInputElement | null; el?.scrollIntoView({ behavior: "smooth", block: "center" }); el?.focus({ preventScroll: true }); });
+  };
+
   if (!det || !j) return <Card><span className="muted">Loading…</span></Card>;
 
   const stop = async () => { try { await post(`/research/${id}/stop`); d.refresh(); onChanged(); } catch (e) { toastError(e); } };
@@ -306,16 +348,28 @@ function JobView({ id, onChanged, onStarted, onDelete }: { id: string; onChanged
         <Card>
           <div className="row-between" style={{ alignItems: "center" }}>
             <Eyebrow>The report</Eyebrow>
-            <Button size="xs" variant="ghost" onClick={() => void copyText(det.report ?? "", "Report copied as Markdown.")}>Copy</Button>
+            <span className="row" style={{ gap: 6 }}>
+              {done && (picked || menu) && (
+                <Button ref={trigger} size="xs" variant="subtle" aria-haspopup="true" aria-expanded={!!menu}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => { const p = reread() ?? menu?.picked; if (p) setMenu({ picked: p, keyboard: true }); }}>Ask about the selection</Button>
+              )}
+              <Button size="xs" variant="ghost" onClick={() => void copyText(det.report ?? "", "Report copied as Markdown.")}>Copy</Button>
+            </span>
           </div>
-          <div className="markdown selectable research-report">
-            <Markdown remarkPlugins={[remarkGfm]} components={{
-              a: ({ href, children }) => href?.startsWith("#src-")
-                ? <a href={href} className="cite" onClick={(e) => { e.preventDefault(); document.getElementById(href.slice(1))?.scrollIntoView({ behavior: "smooth", block: "center" }); }}>{children}</a>
-                : <a href={href} onClick={(e) => { e.preventDefault(); if (href) window.ttDesktop ? window.ttDesktop.openExternal(href) : window.open(href, "_blank", "noopener"); }}>{children}</a>,
-            }}>{report.split("\n## Sources")[0]}</Markdown>
+          {done && !asked && <span className="muted" style={{ fontSize: 12 }}>Select any part of the report to have it explained, said more simply, or to ask about it.</span>}
+          <div ref={reportBox} className="research-report-box">
+            <div ref={reportText} tabIndex={-1} className="markdown selectable research-report">
+              <Markdown remarkPlugins={[remarkGfm]} components={REPORT_COMPONENTS}>{report.split("\n## Sources")[0]}</Markdown>
+            </div>
+            {menu && <SelectionMenu key={menu.picked.text} picked={menu.picked} box={reportBox} focusFirst={menu.keyboard} onPick={explain} onClose={closeMenu} />}
           </div>
         </Card>
+      )}
+
+      {asked && done && (
+        <ExplainPanel key={asked.key} reportId={id} req={asked} onClose={closePanel} onFollowUp={researchFurther}
+          onRetry={() => setAsked((a) => (a ? { ...a, key: a.key + 1 } : a))} startModel={canStartModel ? () => void startQwen() : undefined} />
       )}
 
       {det.sources.length > 0 && j.state === "done" && (
@@ -340,7 +394,7 @@ function JobView({ id, onChanged, onStarted, onDelete }: { id: string; onChanged
                     ))}
                     {mine(s.url)
                       ? <span className="muted mono" style={{ fontSize: 12, overflowWrap: "anywhere" }}>{s.url.startsWith("file://") ? `On the box: ${s.url.slice(7)}` : "Saved on the box"}</span>
-                      : <a className="source-open" href={s.url} onClick={(e) => { e.preventDefault(); window.ttDesktop ? window.ttDesktop.openExternal(s.url) : window.open(s.url, "_blank", "noopener"); }}>Open the page ↗</a>}
+                      : <a className="source-open" href={s.url} onClick={(e) => { e.preventDefault(); void openLink(s.url); }}>Open the page ↗</a>}
                   </div>
                 </details>
               </li>
@@ -353,7 +407,7 @@ function JobView({ id, onChanged, onStarted, onDelete }: { id: string; onChanged
         <Card>
           <Eyebrow>Follow up</Eyebrow>
           <div className="row">
-            <div className="grow"><TextInput value={follow} onChange={(e) => setFollow(e.target.value)} placeholder="Go deeper on one part, e.g. licensing for the top three"
+            <div className="grow"><TextInput id="research-follow-up" aria-label="Follow-up question" value={follow} onChange={(e) => setFollow(e.target.value)} placeholder="Go deeper on one part, e.g. licensing for the top three"
               onKeyDown={(e) => { if (e.key === "Enter" && follow.trim().length >= 8) void followUp(); }} /></div>
             <Button variant="subtle" disabled={follow.trim().length < 8} onClick={followUp}>Follow up</Button>
           </div>

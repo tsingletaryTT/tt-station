@@ -324,10 +324,31 @@ export async function* streamChat(
   opts: { think: boolean; detailed: boolean; persona?: "tori"; client?: string },
   signal: AbortSignal,
 ): AsyncGenerator<StreamEvent> {
-  const res = await fetch("/assistant/stream", {
+  yield* streamPost<StreamEvent>("/assistant/stream",
+    { messages, think: opts.think, style: opts.detailed ? "detailed" : "concise", persona: opts.persona, client: opts.client }, signal);
+}
+
+export type ExplainEvent =
+  | { type: "thinking" }
+  | { type: "delta"; text: string }
+  | { type: "done"; answer: string; model: string }
+  | { type: "error"; error: string };
+
+/** Explain, simplify or ask about part of a finished research report (`/research/{id}/explain`, streamed). */
+export function streamExplain(
+  id: string,
+  body: { selection: string; mode: "explain" | "simpler" | "ask"; question?: string },
+  signal: AbortSignal,
+): AsyncGenerator<ExplainEvent> {
+  return streamPost<ExplainEvent>(`/research/${encodeURIComponent(id)}/explain`, body, signal);
+}
+
+/** POST, then read the server-sent events back, one parsed `data:` line each. */
+async function* streamPost<T>(path: string, body: unknown, signal: AbortSignal): AsyncGenerator<T> {
+  const res = await fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ messages, think: opts.think, style: opts.detailed ? "detailed" : "concise", persona: opts.persona, client: opts.client }),
+    body: JSON.stringify(body),
     signal,
   });
   if (!res.ok || !res.body) {
@@ -347,7 +368,7 @@ export async function* streamChat(
       const line = buffer.slice(0, cut).trim();
       buffer = buffer.slice(cut + 1);
       if (line.startsWith("data:")) {
-        try { yield JSON.parse(line.slice(5).trim()) as StreamEvent; } catch { /* keep-alive */ }
+        try { yield JSON.parse(line.slice(5).trim()) as T; } catch { /* keep-alive */ }
       }
     }
   }

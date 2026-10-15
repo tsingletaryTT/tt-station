@@ -11,7 +11,7 @@ export default defineConfig({
   plugins: [react()],
   build: { outDir: "dist", chunkSizeWarningLimit: 1500 },
   // `npm test`: unit tests next to the code, in a browser-like DOM.
-  test: { environment: "jsdom", include: ["src/**/*.test.{ts,tsx}"] },
+  test: { environment: "jsdom", include: ["src/**/*.test.{ts,tsx}", "test/**/*.test.ts"] },
   server: {
     port: 5173,
     proxy: Object.fromEntries(
