@@ -55,7 +55,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -1861,18 +1861,28 @@ pub const CLIENT_TOOLS: &[&str] = &[
     "stop_recording",
 ];
 
-static CLIENT_WAITS: LazyLock<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Value>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// What `crate::assistant` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// Steps out on the person's computer, and where to send what it did.
+    client_waits: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Value>>>,
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().assistant
+}
 
 /// Has the person's computer run `call` and waits for what happened (30 s at most).
 async fn run_on_client(
+    state: &AppState,
     call: &ToolCall,
     on_action: &mut (dyn FnMut(&ActionReport) + Send),
 ) -> (Value, ActionReport) {
     let args = call.args.clone().unwrap_or_else(|_| json!({}));
     let id = new_action_id();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    CLIENT_WAITS
+    mine(state)
+        .client_waits
         .lock()
         .expect("client waits")
         .insert(id.clone(), tx);
@@ -1886,7 +1896,11 @@ async fn run_on_client(
     };
     on_action(&report);
     let answer = tokio::time::timeout(Duration::from_secs(30), rx).await;
-    CLIENT_WAITS.lock().expect("client waits").remove(&id);
+    mine(state)
+        .client_waits
+        .lock()
+        .expect("client waits")
+        .remove(&id);
     match answer {
         Ok(Ok(v)) if v["ok"] == true => {
             report.status = ActionStatus::Done;
@@ -1927,10 +1941,16 @@ pub struct ClientResult {
 /// `POST /assistant/client-result {id, ok, result?, summary?, error?}`: what a
 /// computer tool did on the person's computer.
 pub(crate) async fn post_client_result(
+    axum::extract::State(state): axum::extract::State<AppState>,
     _auth: crate::routes::BearerAuth,
     axum::Json(r): axum::Json<ClientResult>,
 ) -> axum::http::StatusCode {
-    match CLIENT_WAITS.lock().expect("client waits").remove(&r.id) {
+    match mine(&state)
+        .client_waits
+        .lock()
+        .expect("client waits")
+        .remove(&r.id)
+    {
         Some(tx) => {
             let _ = tx.send(r.outcome);
             axum::http::StatusCode::NO_CONTENT
@@ -2308,7 +2328,7 @@ async fn run_tool_calls(
             },
             Some(ToolKind::ReadOnly) => {
                 let (result, report) = if client && CLIENT_TOOLS.contains(&call.name.as_str()) {
-                    run_on_client(call, on_action).await
+                    run_on_client(state, call, on_action).await
                 } else {
                     run_read_only(state, call).await
                 };
@@ -3543,19 +3563,25 @@ mod tests {
             name: "find_files".into(),
             args: Ok(json!({ "name": "resume" })),
         };
+        let state = AppState::new(
+            "t".to_string(),
+            "1xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        );
         let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<ActionReport>();
+        let st = state.clone();
         let task = tokio::spawn(async move {
             let mut on_action = move |r: &ActionReport| {
                 let _ = seen_tx.send(r.clone());
             };
-            run_on_client(&call, &mut on_action).await
+            run_on_client(&st, &call, &mut on_action).await
         });
         // The step goes out to the person's computer…
         let out = seen_rx.recv().await.unwrap();
         assert_eq!(out.status, ActionStatus::OnClient);
         assert_eq!(out.args["name"], "resume");
         // …which posts what it found.
-        let status = post_client_result(crate::routes::BearerAuth, axum::Json(ClientResult {
+        let status = post_client_result(axum::extract::State(state.clone()), crate::routes::BearerAuth, axum::Json(ClientResult {
             id: out.id.clone(),
             outcome: json!({ "ok": true, "summary": "Found 1 matching file(s)", "result": { "matches": ["/Users/j/resume.pdf"] } }),
         })).await;
@@ -3569,6 +3595,7 @@ mod tests {
         );
         // An answer for a step nobody's waiting on goes nowhere.
         let late = post_client_result(
+            axum::extract::State(state),
             crate::routes::BearerAuth,
             axum::Json(ClientResult {
                 id: out.id,
