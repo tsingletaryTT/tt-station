@@ -371,10 +371,18 @@ async fn generation_and_serve_need_a_paired_client() {
             .unwrap();
         assert_eq!(r.status().as_u16(), 401, "{path}");
     }
-    // Reading the lifecycle is open, like `/status`.
+    // Reading the lifecycle takes pairing too (only `/status` is open).
     let r = h
         .client
         .get(format!("{}/serve", h.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    let r = h
+        .client
+        .get(format!("{}/serve", h.base))
+        .bearer_auth(&h.token)
         .send()
         .await
         .unwrap();

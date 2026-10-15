@@ -223,6 +223,7 @@ impl Harness {
     async fn get(&self, path: &str) -> Value {
         self.client
             .get(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
             .send()
             .await
             .unwrap()

@@ -713,3 +713,24 @@ impl CommandRunner for FakeRunner {
             .unwrap_or_else(|| DEFAULT_HTTP_GET_BODY.to_string()))
     }
 }
+
+/// Pair a device with the agent at `base` (`/pair/init` + `/pair/complete`,
+/// reading the code through the `test-hooks` seam) and return its token. The
+/// first device a fresh box pairs is its owner; later ones are members.
+#[allow(dead_code)]
+pub async fn pair(base: &str, state: &tt_station_agentd::routes::AppState) -> String {
+    let client = reqwest::Client::new();
+    let init: serde_json::Value = client.post(format!("{base}/pair/init")).send().await.unwrap().json().await.unwrap();
+    let pair_id = init["pair_id"].as_str().unwrap().to_string();
+    let code = state.last_code(&pair_id).unwrap();
+    let done: serde_json::Value = client
+        .post(format!("{base}/pair/complete"))
+        .json(&serde_json::json!({ "pair_id": pair_id, "code": code }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    done["token"].as_str().unwrap().to_string()
+}

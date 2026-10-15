@@ -143,6 +143,15 @@ impl Memories {
         self.save();
     }
 
+    /// Forget one person's own memories, leaving the household's shared ones.
+    pub fn clear_own(&self, person: &str) {
+        self.items
+            .lock()
+            .expect("memories mutex poisoned")
+            .retain(|m| m.person.as_deref() != Some(person));
+        self.save();
+    }
+
     /// The system-prompt section, or empty when there's nothing remembered.
     pub fn prompt_note(&self, person: Option<&crate::people::Person>) -> String {
         let items = self.list_for(person.map(|p| p.id.as_str()));
@@ -217,6 +226,17 @@ mod tests {
         reopened.clear(None);
         assert_eq!(reopened.prompt_note(None), "");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clearing_your_own_leaves_the_households_and_others() {
+        let m = Memories::in_memory();
+        m.add("The wifi is called Orchard", 1, None).unwrap();
+        m.add("Ana is vegetarian", 2, Some("ana")).unwrap();
+        m.add("Ben runs on Sundays", 3, Some("ben")).unwrap();
+        m.clear_own("ana");
+        let left: Vec<String> = m.list().into_iter().map(|x| x.text).collect();
+        assert_eq!(left, ["The wifi is called Orchard", "Ben runs on Sundays"]);
     }
 
     #[test]

@@ -1,12 +1,14 @@
 //! Integration test for `GET /models` on the agentd HTTP skeleton.
 //!
 //! Like `tests/status.rs`, starts the real axum `Router` on an ephemeral
-//! port with no mDNS side effects, and -- since `/models` is UNAUTHED, same
-//! as `/status` -- calls it with a plain `reqwest::get`, no bearer token.
+//! port with no mDNS side effects. `/models` takes a paired device or the
+//! box itself: these call the box's own plain-HTTP server (as the `tt-station`
+//! CLI on the box does) with a plain `reqwest::get`, no bearer token; from
+//! the network the same request needs pairing.
 
 use std::sync::Arc;
 
-use tt_station_agentd::routes::{app, AppState};
+use tt_station_agentd::routes::{app, local_http_app, AppState};
 use tt_station_agentd::serving::dstack::DstackBackend;
 use tt_station_agentd::serving::runpy::{RunPyBackend, RunPyConfig};
 use tt_station_agentd::serving::ServingBackend;
@@ -18,7 +20,7 @@ use support::TempModelSpec;
 /// (unauthed, like `/status`) and return the `RunPyBackend`'s
 /// `model_spec.json`-derived catalog.
 #[tokio::test]
-async fn models_returns_catalog_from_runpy_backend_with_no_auth() {
+async fn models_returns_catalog_from_runpy_backend_to_the_box_itself() {
     let fixture = TempModelSpec::write(
         r#"{ "release_version": "0.12.0",
              "model_specs": { "Qwen/Qwen3-32B": { "P300X2": {"vLLM": {}}, "T3K": {"vLLM": {}} } } }"#,
@@ -31,7 +33,8 @@ async fn models_returns_catalog_from_runpy_backend_with_no_auth() {
         Arc::new(RunPyBackend::new(config, Box::new(RealCommandRunnerStub)));
 
     let state = AppState::new("qb2-lab".to_string(), "4xBH".to_string(), backend);
-    let router = app(state);
+    let network = app(state.clone());
+    let router = local_http_app(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -39,8 +42,15 @@ async fn models_returns_catalog_from_runpy_backend_with_no_auth() {
     let addr = listener.local_addr().expect("failed to read local addr");
 
     tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
+        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
     });
+    let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let other_addr = other.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(other, network).await.unwrap();
+    });
+    let unpaired = reqwest::get(format!("http://{other_addr}/models")).await.unwrap();
+    assert_eq!(unpaired.status(), reqwest::StatusCode::UNAUTHORIZED, "the network needs pairing");
 
     let resp = reqwest::get(format!("http://{addr}/models"))
         .await
@@ -64,7 +74,8 @@ async fn models_returns_empty_catalog_for_backend_without_override() {
         "4xBH".to_string(),
         Arc::new(DstackBackend),
     );
-    let router = app(state);
+    let network = app(state.clone());
+    let router = local_http_app(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -72,8 +83,15 @@ async fn models_returns_empty_catalog_for_backend_without_override() {
     let addr = listener.local_addr().expect("failed to read local addr");
 
     tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
+        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
     });
+    let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let other_addr = other.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(other, network).await.unwrap();
+    });
+    let unpaired = reqwest::get(format!("http://{other_addr}/models")).await.unwrap();
+    assert_eq!(unpaired.status(), reqwest::StatusCode::UNAUTHORIZED, "the network needs pairing");
 
     let resp = reqwest::get(format!("http://{addr}/models"))
         .await

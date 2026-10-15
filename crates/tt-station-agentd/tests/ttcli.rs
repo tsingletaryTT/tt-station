@@ -185,6 +185,7 @@ impl Harness {
         let r = self
             .client
             .get(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
             .send()
             .await
             .unwrap();

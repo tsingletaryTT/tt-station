@@ -37,7 +37,7 @@ fn fresh_token_store_path() -> std::path::PathBuf {
     ))
 }
 
-/// The token digests in a store file (the `{"version": 2, "sessions": [..]}`
+/// The token digests in a store file (the `{"version": 3, "sessions": [..]}`
 /// format), asserting on the way that no raw token is in it.
 fn stored_digests(path: &std::path::Path, raw_tokens: &[&str]) -> Vec<String> {
     let contents = std::fs::read_to_string(path)
@@ -47,7 +47,7 @@ fn stored_digests(path: &std::path::Path, raw_tokens: &[&str]) -> Vec<String> {
     }
     let file: serde_json::Value =
         serde_json::from_str(&contents).expect("token store file was not valid JSON");
-    assert_eq!(file["version"], 2);
+    assert_eq!(file["version"], 3);
     file["sessions"]
         .as_array()
         .expect("sessions missing")

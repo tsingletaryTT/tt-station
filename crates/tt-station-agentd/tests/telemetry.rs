@@ -12,13 +12,20 @@
 //!
 //! Bounded by design: a short interval, read exactly one frame, then drop the
 //! connection so the server-side loop exits on the client disconnect.
+//!
+//! `/telemetry` takes the box itself (its own plain HTTP, as this account) or
+//! a paired device; anyone else is refused, and a member sees each process's
+//! command cut to its executable's name.
 
 use std::sync::Arc;
 
 use futures_util::StreamExt;
 use tokio_tungstenite::connect_async;
-use tt_station_agentd::routes::{app, AppState};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tt_station_agentd::routes::{app, local_http_app, AppState};
 use tt_station_agentd::serving::dstack::DstackBackend;
+
+mod support;
 
 /// Canned `tt-smi -s` snapshot the stub script emits. The shape is
 /// representative (a `tt-smi`-like object), but the test only cares that the
@@ -77,7 +84,8 @@ async fn telemetry_stream_pushes_verbatim_tt_smi_snapshot() {
         Arc::new(DstackBackend),
     )
     .with_telemetry_config(stub.path(), 50);
-    let router = app(state);
+    // The box's own plain HTTP: tt-toplike and the panel read it there.
+    let router = local_http_app(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -85,7 +93,7 @@ async fn telemetry_stream_pushes_verbatim_tt_smi_snapshot() {
     let addr = listener.local_addr().expect("failed to read local addr");
 
     tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
+        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
     });
 
     // Connect a real WebSocket client and read exactly one frame.
@@ -118,4 +126,51 @@ async fn telemetry_stream_pushes_verbatim_tt_smi_snapshot() {
 
     // Dropping `ws` closes the connection, so the server loop exits.
     drop(ws);
+}
+
+/// One full telemetry frame for `token` (or none) from the network router.
+async fn frame(addr: std::net::SocketAddr, token: Option<&str>) -> Result<serde_json::Value, u16> {
+    let mut req = format!("ws://{addr}/telemetry").into_client_request().unwrap();
+    if let Some(t) = token {
+        req.headers_mut().insert("authorization", format!("Bearer {t}").parse().unwrap());
+    }
+    let (mut ws, _) = match connect_async(req).await {
+        Ok(ok) => ok,
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => return Err(resp.status().as_u16()),
+        Err(e) => panic!("{e}"),
+    };
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("timed out waiting for a telemetry frame")
+        .expect("stream closed before any frame")
+        .expect("frame was an error");
+    Ok(serde_json::from_str(&msg.into_text().unwrap()).unwrap())
+}
+
+#[tokio::test]
+async fn telemetry_needs_pairing_and_hides_command_lines_from_members() {
+    let stub = StubTtSmi::new();
+    let state = AppState::new("qb2-lab".to_string(), "4xBH".to_string(), Arc::new(DstackBackend))
+        .with_telemetry_config(stub.path(), 50);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = app(state.clone());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let base = format!("http://{addr}");
+
+    // Not paired: no stream at all.
+    assert_eq!(frame(addr, None).await.unwrap_err(), 401);
+
+    let owner = support::pair(&base, &state).await;
+    let member = support::pair(&base, &state).await;
+
+    // A member's process list names executables only: no arguments, no paths.
+    let got = frame(addr, Some(&member)).await.unwrap();
+    for p in got["tt_toplike"]["processes"].as_array().unwrap() {
+        let cmd = p["cmd"].as_str().unwrap();
+        assert!(!cmd.contains(' ') && !cmd.contains('/'), "a member saw a command line: {cmd}");
+    }
+    // An owner still gets the frame (with whole command lines).
+    let got = frame(addr, Some(&owner)).await.unwrap();
+    assert!(got["tt_toplike"]["processes"].is_array());
 }

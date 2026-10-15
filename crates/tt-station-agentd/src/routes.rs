@@ -150,11 +150,12 @@ struct Inner {
     /// and must never run directly on the async runtime -- see `serving/mod.rs`).
     backend: Arc<dyn ServingBackend>,
     /// Pairing attempts started by `/pair/init` but not yet completed:
-    /// `pair_id -> (code, expiry, wrong_attempts)`. An entry is removed the
+    /// `pair_id -> (code, expiry, wrong_attempts, owner)`, `owner` when it was
+    /// offered with the box user's local secret. An entry is removed the
     /// moment it's consumed -- successfully, because it expired, or because
     /// `wrong_attempts` hit `MAX_PAIR_ATTEMPTS` -- by `complete_pair`, so
     /// this map only ever holds pairing attempts that are still "live".
-    pending_pairs: Mutex<HashMap<String, (String, Instant, u32)>>,
+    pending_pairs: Mutex<HashMap<String, (String, Instant, u32, bool)>>,
     /// Recent `/pair/init` asks: when, and from which address (`None` when
     /// the server doesn't know its peers). See `pair_init_allowed`.
     pair_inits: Mutex<Vec<(u64, Option<std::net::IpAddr>)>>,
@@ -346,6 +347,8 @@ struct Inner {
     cpu_brain: bool,
     /// Who's who on this box (`crate::people`).
     people: Arc<crate::people::People>,
+    /// The activity log (`crate::audit`).
+    audit: Arc<crate::audit::AuditLog>,
     /// Scheduled modes (`crate::schedules`).
     schedules: Arc<crate::schedules::Schedules>,
     /// Model bring-ups with tt-orchard (`crate::orchard`), when it's checked out.
@@ -558,6 +561,7 @@ impl AppState {
                 cpu_brain: false,
                 orchard: None,
                 people: Arc::new(crate::people::People::in_memory()),
+                audit: Arc::new(crate::audit::AuditLog::in_memory()),
                 schedules: Arc::new(crate::schedules::Schedules::in_memory()),
                 orchard_busy: std::sync::atomic::AtomicBool::new(false),
                 orchard_chips: std::sync::atomic::AtomicBool::new(false),
@@ -872,6 +876,19 @@ impl AppState {
 
     pub fn people(&self) -> Arc<crate::people::People> {
         Arc::clone(&self.inner.people)
+    }
+
+    /// Keep the activity log at `audit` (`crate::audit`) rather than in memory.
+    pub fn with_audit(mut self, audit: crate::audit::AuditLog) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.audit = Arc::new(audit),
+            None => eprintln!("tt-station-agentd: with_audit called on a shared AppState; ignored"),
+        }
+        self
+    }
+
+    pub fn audit(&self) -> Arc<crate::audit::AuditLog> {
+        Arc::clone(&self.inner.audit)
     }
 
     pub fn orchard(&self) -> Option<Arc<crate::orchard::Orchard>> {
@@ -1760,6 +1777,16 @@ impl AppState {
         id
     }
 
+    /// Which tool a pending assistant action would run, without taking it.
+    pub(crate) fn pending_action_tool(&self, id: &str) -> Option<String> {
+        self.inner
+            .pending_actions
+            .lock()
+            .expect("pending_actions mutex poisoned")
+            .get(id)
+            .map(|a| a.tool.clone())
+    }
+
     /// Remove and return the pending action `id`, or `None` if it's unknown
     /// or has outlived `assistant::PENDING_TTL`. Always a REMOVE, never a
     /// peek: whatever the caller decides (approve or deny), the action is
@@ -1963,6 +1990,26 @@ impl AppState {
         }
     }
 
+    /// [`Self::signed_out`] for a caller known by its device id (`None`, the
+    /// box itself, is never signed out).
+    pub(crate) fn device_signed_out(&self, id: Option<String>) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let sessions = self.sessions();
+        let mut changes = sessions.revocations();
+        async move {
+            let Some(id) = id else {
+                return std::future::pending::<()>().await;
+            };
+            loop {
+                if sessions.get(&id).is_none() {
+                    return;
+                }
+                if changes.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    }
+
     /// Record a freshly-issued pairing attempt: `pair_id` will be accepted
     /// by `complete_pair` if presented with the matching `code` before
     /// `PAIR_TTL` elapses.
@@ -1991,6 +2038,12 @@ impl AppState {
     }
 
     fn insert_pending_pair(&self, pair_id: String, code: String) {
+        self.insert_pending_pair_as(pair_id, code, false);
+    }
+
+    /// [`Self::insert_pending_pair`]; `owner` makes the device that completes
+    /// it an owner (`/pair/offer`, which takes the local secret).
+    fn insert_pending_pair_as(&self, pair_id: String, code: String, owner: bool) {
         let now = Instant::now();
         let expiry = now + PAIR_TTL;
         let mut pending = self
@@ -1998,15 +2051,15 @@ impl AppState {
             .pending_pairs
             .lock()
             .expect("pending_pairs mutex poisoned");
-        pending.retain(|_, (_, exp, _)| *exp > now);
-        pending.insert(pair_id, (code, expiry, 0));
+        pending.retain(|_, (_, exp, _, _)| *exp > now);
+        pending.insert(pair_id, (code, expiry, 0, owner));
     }
 
     /// Check `code` against the pending pairing attempt for `pair_id`.
     ///
-    /// Returns `true` only when `pair_id` is known, unexpired, and `code`
+    /// Succeeds (`Some`) only when `pair_id` is known, unexpired, and `code`
     /// matches -- in which case the pending entry is consumed (removed) so
-    /// the same code can't be replayed. Returns `false` for an unknown
+    /// the same code can't be replayed. It is `None` for an unknown
     /// pair_id or an expired one (also removed, since it can never succeed
     /// again).
     ///
@@ -2017,7 +2070,9 @@ impl AppState {
     /// entry is left in place (with the bumped counter) so a human who
     /// mistyped the code still gets a few more real chances before the TTL
     /// runs out.
-    fn complete_pair(&self, pair_id: &str, code: &str) -> bool {
+    ///
+    /// `Some(owner)` on success: whether it was offered with the local secret.
+    fn complete_pair_as(&self, pair_id: &str, code: &str) -> Option<bool> {
         let mut pending = self
             .inner
             .pending_pairs
@@ -2028,27 +2083,25 @@ impl AppState {
         // `pending`) so the branches below are free to call
         // `pending.insert`/`pending.remove` without fighting the borrow
         // checker over a mutex we're already holding.
-        let Some((stored_code, expiry, attempts)) = pending.get(pair_id).cloned() else {
-            return false;
-        };
+        let (stored_code, expiry, attempts, owner) = pending.get(pair_id).cloned()?;
 
         if Instant::now() >= expiry {
             pending.remove(pair_id);
-            return false;
+            return None;
         }
 
         if stored_code == code {
             pending.remove(pair_id);
-            return true;
+            return Some(owner);
         }
 
         let attempts = attempts + 1;
         if attempts >= MAX_PAIR_ATTEMPTS {
             pending.remove(pair_id);
         } else {
-            pending.insert(pair_id.to_string(), (stored_code, expiry, attempts));
+            pending.insert(pair_id.to_string(), (stored_code, expiry, attempts, owner));
         }
-        false
+        None
     }
 
     /// Sign every paired device out (`POST /reset`): their tokens stop
@@ -2085,7 +2138,7 @@ impl AppState {
             .lock()
             .expect("pending_pairs mutex poisoned")
             .get(pair_id)
-            .map(|(code, _, _)| code.clone())
+            .map(|(code, _, _, _)| code.clone())
     }
 
     /// Test-only seam: insert a pending pair whose expiry is already in the
@@ -2102,7 +2155,7 @@ impl AppState {
             .pending_pairs
             .lock()
             .expect("pending_pairs mutex poisoned")
-            .insert(pair_id.to_string(), (code.to_string(), already_expired, 0));
+            .insert(pair_id.to_string(), (code.to_string(), already_expired, 0, false));
     }
 }
 
@@ -2207,11 +2260,11 @@ async fn get_leases(
     Json(LeaseList { available, leases })
 }
 
-/// `GET /config` (UNAUTHED, like `GET /status`): the agent's redacted
+/// `GET /config` (the box itself or a paired device): the agent's redacted
 /// serving-config summary -- active/available profiles plus the resolved
 /// backend/serving-host/port/image/repo/device -- so the GTK panel, the `tt-station
 /// config` CLI, and the Mac app can render "what am I actually about to
-/// serve with" without pairing first. `ConfigSummary` carries no secrets by
+/// serve with" (on the box, without pairing). `ConfigSummary` carries no secrets by
 /// construction (no `hf_token` field exists on it), so there's nothing for
 /// this handler to redact -- it just serves the stored summary verbatim.
 async fn get_config(
@@ -2221,12 +2274,11 @@ async fn get_config(
     Json(state.config_summary())
 }
 
-/// `GET /models` (UNAUTHED, like `GET /status`): enumerate the models this
-/// box's backend can serve (see `ServingBackend::list_models`), so a client
-/// never has to guess or hardcode a model id before calling `/run`.
-/// Unauthed for the same reason `/status` is -- it's read-only discovery
-/// info, not a control action, and a client needs it to even know what to
-/// pass to the (bearer-gated) `/run`.
+/// `GET /models` (the box itself or a paired device): enumerate the models
+/// this box's backend can serve (see `ServingBackend::list_models`), so a
+/// client never has to guess or hardcode a model id before calling `/run`.
+/// It was unauthed once, like `/status`; every route but the few in
+/// `PUBLIC_ROUTES` now takes pairing (`require_auth`).
 ///
 /// `ServingBackend::list_models` is sync (like `start`/`stop`), so it's run
 /// via `spawn_blocking` rather than called directly from this async
@@ -2281,8 +2333,9 @@ async fn pair_init(
         .unwrap_or_else(|| "a device".to_string());
 
     // The box has no screen of its own: the code goes where its owner reads
-    // things -- the desktop app and the phone (as an event) -- and the journal.
-    println!("tt-station-agentd: pairing code: {code}");
+    // things -- the desktop app and the phone (as an event). Never the
+    // journal, which anyone who can read the box's logs could use.
+    println!("tt-station-agentd: pairing requested by {device}");
     let fp = state.tls().map(|t| t.sha256.chars().take(8).collect::<String>()).unwrap_or_default();
     state.notifier().emit(crate::notify::Draft {
         kind: "pairing",
@@ -2323,7 +2376,8 @@ async fn pair_offer(
     }
     let pair_id = pairing::issue_pair_id();
     let code = pairing::issue_code();
-    state.insert_pending_pair(pair_id.clone(), code.clone());
+    // Only the box's own user holds the secret: what pairs with it is an owner.
+    state.insert_pending_pair_as(pair_id.clone(), code.clone(), true);
     Ok(Json(serde_json::json!({
         "pair_id": pair_id,
         "code": code,
@@ -2375,13 +2429,15 @@ async fn pair_complete(
     axum::extract::State(state): axum::extract::State<AppState>,
     Json(req): Json<PairCompleteRequest>,
 ) -> Result<Json<PairCompleteResponse>, StatusCode> {
-    if !state.complete_pair(&req.pair_id, &req.code) {
+    let Some(owner) = state.complete_pair_as(&req.pair_id, &req.code) else {
         return Err(StatusCode::UNAUTHORIZED);
-    }
+    };
 
     let token = pairing::issue_token();
     let name = req.name.as_deref().filter(|n| !n.trim().is_empty()).or(req.label.as_deref());
-    let session = state.inner.sessions.pair(&token, name, req.platform.as_deref());
+    let session = state.inner.sessions.pair(&token, name, req.platform.as_deref(), owner);
+    let actor = crate::audit::Actor { device_id: Some(session.id.clone()), device_name: session.name.clone() };
+    crate::audit::record_as(&state, &actor, "pair", if session.owner { "owner" } else { "member" }, "ok");
     let what = match &session.platform {
         Some(p) => format!("{} ({p})", session.name),
         None => session.name.clone(),
@@ -2389,7 +2445,11 @@ async fn pair_complete(
     state.notifier().emit(crate::notify::Draft {
         kind: "devices",
         title: format!("New device paired: {what}"),
-        body: "It can now use and control this box. If you don't recognize it, remove it in Settings → Pairing and security → Devices.".to_string(),
+        body: if session.owner {
+            "It's an owner: it can use this box and manage it. If you don't recognize it, remove it in Settings → Pairing and security → Devices.".to_string()
+        } else {
+            "It's a member: it can use this box, but not manage it. If you don't recognize it, remove it in Settings → Pairing and security → Devices.".to_string()
+        },
     });
 
     Ok(Json(PairCompleteResponse {
@@ -2483,32 +2543,100 @@ struct DeviceView {
     expires: u64,
     /// The device making this request.
     this_device: bool,
+    /// Manages the box; `false` is a member (`crate::sessions`).
+    owner: bool,
+    /// Who the device belongs to (`crate::people`), if anyone in particular.
+    person: Option<String>,
 }
 
-/// `GET /devices` (bearer-guarded): every paired device, most recently used
-/// first, marking the caller's own.
-async fn get_devices(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    ThisDevice(me): ThisDevice,
-) -> Json<serde_json::Value> {
-    let devices: Vec<DeviceView> = state
-        .sessions()
-        .list()
-        .into_iter()
-        .map(|s| DeviceView {
+impl DeviceView {
+    fn of(state: &AppState, s: crate::sessions::Session, me: &str) -> Self {
+        DeviceView {
             this_device: s.id == me,
             expires: s.expires(),
+            person: state.people().person_of_digest(&s.token_sha256).map(|p| p.id),
+            owner: s.owner,
             id: s.id,
             name: s.name,
             platform: s.platform,
             paired: s.created,
             last_used: s.last_used,
-        })
+        }
+    }
+}
+
+/// `GET /devices` (bearer-guarded): every paired device, most recently used
+/// first, marking the caller's own, for an owner; just its own device for a
+/// member. `owner` says which the caller is.
+async fn get_devices(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    ThisDevice(me): ThisDevice,
+) -> Json<serde_json::Value> {
+    let owner = state.sessions().get(&me).is_some_and(|s| s.owner);
+    let devices: Vec<DeviceView> = state
+        .sessions()
+        .list()
+        .into_iter()
+        .filter(|s| owner || s.id == me)
+        .map(|s| DeviceView::of(&state, s, &me))
         .collect();
     Json(serde_json::json!({
         "devices": devices,
+        "owner": owner,
         "idle_expiry_days": crate::sessions::IDLE_EXPIRY.as_secs() / 86_400,
     }))
+}
+
+#[derive(Deserialize)]
+struct OwnerChange {
+    owner: bool,
+}
+
+/// `POST /devices/{id}/owner {"owner": bool}` (owners): make a device an
+/// owner, or a member again. The last owner stays one.
+async fn post_device_owner(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _owner: OwnerAuth,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<OwnerChange>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let s = state.sessions().set_owner(&id, req.owner).map_err(|e| tt_error(StatusCode::CONFLICT, &e))?;
+    crate::audit::record(&state, if req.owner { "promote" } else { "demote" }, &format!("{} ({})", s.name, s.id), "ok");
+    state.notifier().record(crate::notify::Draft {
+        kind: "devices",
+        title: format!("{} is {} of this box now", s.name, if s.owner { "an owner" } else { "a member" }),
+        body: if s.owner {
+            "It can manage devices, keys, power and updates.".to_string()
+        } else {
+            "It can use the box, but not manage devices, keys, power or updates.".to_string()
+        },
+    });
+    Ok(Json(serde_json::json!({ "id": s.id, "owner": s.owner })))
+}
+
+#[derive(Deserialize)]
+struct PersonChange {
+    person: Option<String>,
+}
+
+/// `PUT /devices/{id}/person {"person": id | null}` (owners): whose device
+/// it is (`crate::people`). A member can only claim a person nobody's
+/// device has yet; an owner settles everything else here.
+async fn put_device_person(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _owner: OwnerAuth,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<PersonChange>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let Some(s) = state.sessions().get(&id) else {
+        return Err(tt_error(StatusCode::NOT_FOUND, "No such device. It may have been removed."));
+    };
+    state
+        .people()
+        .assign_digest(&s.token_sha256, req.person.as_deref())
+        .map_err(|e| tt_error(StatusCode::BAD_REQUEST, &e))?;
+    crate::audit::record(&state, "device_person", &format!("{} ({}) → {}", s.name, s.id, req.person.as_deref().unwrap_or("no one")), "ok");
+    Ok(Json(serde_json::json!({ "id": s.id, "person": req.person })))
 }
 
 /// `DELETE /devices/{id}` (bearer-guarded): sign one device out. Its token
@@ -2520,11 +2648,17 @@ async fn delete_device(
     ThisDevice(me): ThisDevice,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    // Signing yourself out is anyone's; removing another device is an owner's.
+    if id != me && !state.sessions().get(&me).is_some_and(|s| s.owner) {
+        crate::audit::record(&state, "denied", &format!("DELETE /devices/{id}"), "denied");
+        return Err(tt_error(StatusCode::FORBIDDEN, OWNER_ONLY));
+    }
     let Some(removed) = state.sessions().revoke(&id) else {
         return Err(tt_error(StatusCode::NOT_FOUND, "No such device. It may have been removed already."));
     };
     state.people().forget_phone(&removed.token_sha256);
     let this_device = removed.id == me;
+    crate::audit::record(&state, "revoke", &format!("{} ({})", removed.name, removed.id), "ok");
     state.notifier().record(crate::notify::Draft {
         kind: "devices",
         title: if this_device {
@@ -2583,6 +2717,161 @@ impl FromRequestParts<AppState> for LocalOrPaired {
             return Ok(LocalOrPaired);
         }
         BearerAuth::from_request_parts(parts, state).await.map(|_| LocalOrPaired)
+    }
+}
+
+/// What a member hears when it asks for something only an owner may do.
+pub(crate) const OWNER_ONLY: &str =
+    "Only an owner of this box can do that. An owner can make this device one in Settings → Pairing and security → Devices.";
+
+/// Who is making a request: the box's own user (plain HTTP from its own
+/// account, see `only_local`), a paired device, or both (the desktop app on
+/// the box, which also sends its token).
+#[derive(Debug, Clone)]
+pub(crate) struct Caller {
+    pub local: bool,
+    pub device: Option<crate::sessions::Session>,
+}
+
+impl Caller {
+    /// Owners manage the box. The box's own user is one: it can read the
+    /// local secret that pairs as an owner anyway.
+    pub fn owner(&self) -> bool {
+        self.local || self.device.as_ref().is_some_and(|d| d.owner)
+    }
+
+    pub fn device_id(&self) -> Option<String> {
+        self.device.as_ref().map(|d| d.id.clone())
+    }
+
+    pub fn actor(&self) -> crate::audit::Actor {
+        match &self.device {
+            Some(d) => crate::audit::Actor { device_id: Some(d.id.clone()), device_name: d.name.clone() },
+            None => crate::audit::Actor::the_box(),
+        }
+    }
+}
+
+/// The caller of a request with these headers, without counting a use: a
+/// live device token (header or WebSocket subprotocol, [`ws_token`]) and/or
+/// the box itself. When it's neither, the error says why the token (if any)
+/// was turned away.
+pub(crate) fn resolve_caller(
+    headers: &axum::http::HeaderMap,
+    local: bool,
+    state: &AppState,
+) -> Result<Caller, crate::sessions::AuthFailure> {
+    let token = ws_token(headers);
+    let device = token.as_deref().and_then(|t| state.sessions().session_for(t));
+    if device.is_none() && !local {
+        let known = token.as_deref().is_some_and(|t| state.sessions().id_for(t).is_some());
+        return Err(if known { crate::sessions::AuthFailure::Expired } else { crate::sessions::AuthFailure::Unknown });
+    }
+    Ok(Caller { local, device })
+}
+
+/// [`LocalOrPaired`], keeping who the caller is.
+pub(crate) struct CallerAuth(pub Caller);
+
+impl FromRequestParts<AppState> for CallerAuth {
+    type Rejection = AuthRejection;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AuthRejection> {
+        let local = parts.extensions.get::<LocalCaller>().is_some();
+        resolve_caller(&parts.headers, local, state).map(CallerAuth).map_err(AuthRejection)
+    }
+}
+
+/// Extractor for what only an owner may do (`crate::sessions`): manage other
+/// devices, SSH and app keys, power, updates, reset and security settings.
+/// A member gets `403` with [`OWNER_ONLY`], and the refusal is logged
+/// (`crate::audit`); no credentials at all is the usual `401`.
+pub(crate) struct OwnerAuth;
+
+impl FromRequestParts<AppState> for OwnerAuth {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Response> {
+        use axum::response::IntoResponse;
+        let CallerAuth(caller) = CallerAuth::from_request_parts(parts, state).await.map_err(IntoResponse::into_response)?;
+        if caller.owner() {
+            return Ok(OwnerAuth);
+        }
+        let what = format!("{} {}", parts.method, parts.uri.path());
+        crate::audit::record_as(state, &caller.actor(), "denied", &what, "denied");
+        Err(tt_error(StatusCode::FORBIDDEN, OWNER_ONLY).into_response())
+    }
+}
+
+/// Requests served over plain HTTP (`local_http_app`) carry this; HTTPS ones
+/// don't. The model API only takes app keys there (`crate::gateway`).
+#[derive(Clone, Copy, Debug)]
+pub struct PlainHttp;
+
+/// Routes anyone may call without pairing: what a device needs to find the
+/// box and pair with it, and the app's own pages (no data in them).
+/// `(method, route)`; a GET route answers HEAD too.
+pub const PUBLIC_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/status"),
+    ("GET", "/tls"),
+    ("POST", "/pair/init"),
+    ("POST", "/pair/complete"),
+    // Checks the local secret itself.
+    ("POST", "/pair/offer"),
+    ("GET", "/app"),
+    ("GET", "/app/"),
+    ("GET", "/app/{*rel}"),
+];
+
+/// Routes whose handler checks a credential of its own that isn't a device
+/// token: app keys on the model API (`crate::gateway::GatewayAuth`) and a
+/// bring-up run's secret for its driver (`crate::bringup`). The auth layer
+/// lets them through to that check; without it they still answer `401`.
+pub const HANDLER_AUTHED_ROUTES: &[&str] = &[
+    "/v1/models",
+    "/v1/chat/completions",
+    "/v1/completions",
+    "/v1/embeddings",
+    "/v1/rerank",
+    "/v1/messages",
+    "/v1/messages/count_tokens",
+    "/v1/images/generations",
+    "/bringup/codex/runs/{id}/approvals",
+    "/bringup/codex/runs/{id}/approvals/{aid}/wait",
+];
+
+/// Whether `method route` is on [`PUBLIC_ROUTES`].
+pub fn is_public_route(method: &axum::http::Method, route: &str) -> bool {
+    let m = if method == axum::http::Method::HEAD { "GET" } else { method.as_str() };
+    PUBLIC_ROUTES.iter().any(|(pm, pr)| *pm == m && *pr == route)
+}
+
+/// Default-deny: every route needs a paired device or the box itself unless
+/// it's on [`PUBLIC_ROUTES`] or [`HANDLER_AUTHED_ROUTES`]. Each handler's own
+/// extractor still applies on top (a route that wants a device token still
+/// refuses the box's own user without one). Runs the handler with its caller
+/// in [`crate::audit::ACTOR`], for the activity log.
+async fn require_auth(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    use axum::response::IntoResponse;
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default();
+    let local = req.extensions().get::<LocalCaller>().is_some();
+    let caller = resolve_caller(req.headers(), local, &state);
+    let open = is_public_route(req.method(), &route) || HANDLER_AUTHED_ROUTES.contains(&route.as_str());
+    match caller {
+        Ok(c) => crate::audit::ACTOR.scope(c.actor(), next.run(req)).await,
+        Err(_) if open => {
+            let anyone = crate::audit::Actor { device_id: None, device_name: "Not paired".to_string() };
+            crate::audit::ACTOR.scope(anyone, next.run(req)).await
+        }
+        Err(failure) => AuthRejection(failure).into_response(),
     }
 }
 
@@ -2679,10 +2968,9 @@ async fn run_model(
     check_servable(&state, &req.model).await?;
     // A contended box answers 409 (naming the board and the holder), not
     // 500 -- see `contention_aware_error`.
-    let endpoint = state
-        .start_serving(&req.model, req.force)
-        .await
-        .map_err(contention_aware_error)?;
+    let started = state.start_serving(&req.model, req.force).await;
+    crate::audit::record(&state, "model_start", &req.model, if started.is_ok() { "ok" } else { "failed" });
+    let endpoint = started.map_err(contention_aware_error)?;
 
     Ok(Json(RunResponse { endpoint }))
 }
@@ -2698,7 +2986,9 @@ async fn stop_model(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    state.stop_serving().await.map_err(backend_error)?;
+    let stopped = state.stop_serving().await;
+    crate::audit::record(&state, "model_stop", "", if stopped.is_ok() { "ok" } else { "failed" });
+    stopped.map_err(backend_error)?;
     Ok(Json(serde_json::json!({})))
 }
 
@@ -2734,7 +3024,7 @@ async fn stop_model(
 /// failing there resets nothing.)
 async fn reset(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: OwnerAuth,
     body: Option<Json<ResetRequest>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let backend = state.backend();
@@ -2759,6 +3049,7 @@ async fn reset(
     .map_err(contention_aware_error)?;
 
     // Sign out every paired device (the caller's own too -- expected).
+    crate::audit::record(&state, "reset", if force { "forced" } else { "" }, "ok");
     state.clear_tokens();
 
     // Best-effort: also revoke every keyless-SSH key the pair flow ever
@@ -2832,7 +3123,7 @@ struct ResetRequest {
 ///     missing) -- `backend_error`, same as every other route's fallback.
 async fn power(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: OwnerAuth,
     Json(req): Json<PowerRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
     let action = crate::power::PowerAction::parse(&req.action).ok_or_else(|| {
@@ -2874,10 +3165,11 @@ async fn power(
     }
     let s = state.clone();
     let force = req.force;
-    tokio::task::spawn_blocking(move || s.run_power_command(action, force))
+    let ran = tokio::task::spawn_blocking(move || s.run_power_command(action, force))
         .await
-        .map_err(|join_err| backend_error(anyhow::anyhow!("power task panicked: {join_err}")))?
-        .map_err(|e| {
+        .map_err(|join_err| backend_error(anyhow::anyhow!("power task panicked: {join_err}")))?;
+    crate::audit::record(&state, "power", &req.action, if ran.is_ok() { "ok" } else { "failed" });
+    ran.map_err(|e| {
             // A permission failure (no polkit rule) is the operator's to fix --
             // distinguish it from a generic 500 with a pointer to the doc.
             let msg = e.to_string();
@@ -2940,16 +3232,15 @@ async fn get_endpoint(
     state.endpoint().map(Json).ok_or(StatusCode::CONFLICT)
 }
 
-/// `GET /telemetry` (UNAUTHED, like `GET /status` and `GET /models`):
+/// `GET /telemetry` (the box itself or a paired device, like `/logs`):
 /// upgrade to a WebSocket and stream `tt-smi -s` telemetry snapshots.
 ///
-/// Unauthed for the same reason `/status`/`/models` are -- a telemetry stream
-/// is exactly as read-only as they are (it mutates no box state), and the
-/// remote-QuietBox design deliberately decided telemetry is unauthed (see
-/// `REMOTE_QUIETBOX_DESIGN.md` §1: "the WebSocket upgrade should be unauthed
-/// for v1, consistent with `/status`/`/models`"). Anyone on the LAN who can
-/// reach the control port can already read `/status`; this extends that same
-/// exposure rather than creating a new class of it.
+/// It was unauthed once, like `/status`; but the full frame lists the box's
+/// processes, and a process's command line can carry paths, prompts and
+/// secrets passed as arguments. So: paired callers only, at most
+/// [`MAX_TELEMETRY_SOCKETS`] at a time, and for anyone but an owner each
+/// process's `cmd` is cut to its executable's name
+/// (`crate::procscan::redact_cmd`). Removing the device closes the stream.
 ///
 /// The handshake itself does no I/O -- it just hands the upgraded socket to
 /// [`telemetry_stream`], which owns the collect-and-push loop.
@@ -2965,8 +3256,10 @@ async fn get_energy(
 async fn telemetry_ws(
     ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<AppState>,
+    CallerAuth(caller): CallerAuth,
     RawQuery(query): RawQuery,
 ) -> Response {
+    use axum::response::IntoResponse;
     // `?view=lite` opts a client into the trimmed dashboard-only frame -- no
     // process scan, no vLLM scrape (see `telemetry::lite_frame`). The macOS
     // app's device strip / temp chip request this. tt-toplike does the
@@ -2980,7 +3273,42 @@ async fn telemetry_ws(
         .as_deref()
         .map(|q| q.split('&').any(|kv| kv == "view=lite"))
         .unwrap_or(false);
-    ws.on_upgrade(move |socket| telemetry_stream(socket, state, lite))
+    let Some(slot) = TelemetrySlot::take() else {
+        return tt_error(StatusCode::TOO_MANY_REQUESTS, "Too many live telemetry views are open on this box. Close one and try again.").into_response();
+    };
+    let owner = caller.owner();
+    let signed_out = state.device_signed_out(caller.device_id());
+    // The desktop app's token rides as a subprotocol: answer with ours.
+    let ws = ws.protocols([WS_PROTOCOL]);
+    ws.on_upgrade(move |socket| async move {
+        telemetry_stream(socket, state, lite, owner, signed_out).await;
+        drop(slot);
+    })
+}
+
+/// Live `/telemetry` sockets, and how many may be open at once: each one runs
+/// its own process scan every interval.
+static TELEMETRY_SOCKETS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub const MAX_TELEMETRY_SOCKETS: usize = 16;
+
+/// One of the [`MAX_TELEMETRY_SOCKETS`], held for a socket's life (and
+/// given back however it ends, a failed upgrade included).
+struct TelemetrySlot;
+
+impl TelemetrySlot {
+    fn take() -> Option<Self> {
+        use std::sync::atomic::Ordering::SeqCst;
+        TELEMETRY_SOCKETS
+            .fetch_update(SeqCst, SeqCst, |n| (n < MAX_TELEMETRY_SOCKETS).then_some(n + 1))
+            .ok()
+            .map(|_| TelemetrySlot)
+    }
+}
+
+impl Drop for TelemetrySlot {
+    fn drop(&mut self) {
+        TELEMETRY_SOCKETS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// The per-connection telemetry loop behind `GET /telemetry`.
@@ -2996,7 +3324,14 @@ async fn telemetry_ws(
 /// [`collect_snapshot`]) rather than directly on the async runtime -- the same
 /// off-the-runtime discipline every `ServingBackend` call in this crate
 /// follows.
-async fn telemetry_stream(mut socket: WebSocket, state: AppState, lite: bool) {
+async fn telemetry_stream(
+    mut socket: WebSocket,
+    state: AppState,
+    lite: bool,
+    owner: bool,
+    signed_out: impl std::future::Future<Output = ()>,
+) {
+    tokio::pin!(signed_out);
     // Clamp to >=1ms: `tokio::time::interval` panics on a zero duration, and this
     // runs in a per-connection task, so `--telemetry-interval-ms 0` would panic
     // every telemetry client (the CLI also rejects 0; this is belt-and-suspenders).
@@ -3072,6 +3407,11 @@ async fn telemetry_stream(mut socket: WebSocket, state: AppState, lite: bool) {
                                 .tick(&status, scrape_body.as_deref())
                                 .map(|entry| vec![entry]);
 
+                            if !owner {
+                                for p in &mut toplike.processes {
+                                    p.cmd = crate::procscan::redact_cmd(&p.cmd);
+                                }
+                            }
                             crate::telemetry::enrich_frame(&json, Some(&toplike))
                         }
                     }
@@ -3091,6 +3431,11 @@ async fn telemetry_stream(mut socket: WebSocket, state: AppState, lite: bool) {
                     // Client hung up between ticks -- nothing left to send to.
                     break;
                 }
+            }
+            // Its device was removed (or the box reset): close.
+            () = &mut signed_out => {
+                let _ = socket.send(Message::Close(Some(signed_out_frame()))).await;
+                break;
             }
             // Watch the inbound half so a client disconnect (or a Close frame,
             // or a socket error) ends the loop promptly instead of only being
@@ -3192,11 +3537,11 @@ fn telemetry_error_frame(err: &anyhow::Error) -> String {
     serde_json::json!({ "error": err.to_string() }).to_string()
 }
 
-/// `GET /serving` (UNAUTHED, like `GET /status` and `GET /models`): list
+/// `GET /serving` (the box itself or a paired device, like `GET /models`): list
 /// EVERY live `tt-inference-server` `/v1` endpoint on the box, whoever
 /// launched it (the agent's own `/run`, tt-studio's FastAPI, or a manual
-/// `run.py`). Read-only discovery, so unauthed for the same reason
-/// `/status`/`/models` are.
+/// `run.py`). Read-only discovery, behind the same default-deny layer as
+/// `/models` (`require_auth`).
 ///
 /// Additive to (not a replacement for) `/status`: `/status` still reports the
 /// agent's own last serving intent, while `/serving` reflects docker reality.
@@ -3325,7 +3670,7 @@ pub(crate) fn read_log_tail(
     }
 }
 
-/// `GET /logs/stream` (UNAUTHED, like `GET /logs`/`GET /telemetry`): upgrade
+/// `GET /logs/stream` (the box itself or a paired device, like `GET /logs`): upgrade
 /// to a WebSocket and follow the same source `GET /logs` tails, pushing new
 /// lines as they're written instead of returning a single snapshot.
 ///
@@ -3336,11 +3681,13 @@ pub(crate) fn read_log_tail(
 async fn logs_ws(
     ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<AppState>,
-    _caller: LocalOrPaired,
+    CallerAuth(caller): CallerAuth,
     RawQuery(query): RawQuery,
 ) -> Response {
     let (source_str, tail) = parse_logs_query(query.as_deref());
-    ws.on_upgrade(move |socket| logs_stream(socket, state, source_str, tail))
+    // Removing the device (or resetting the box) closes the stream.
+    let signed_out = state.device_signed_out(caller.device_id());
+    ws.protocols([WS_PROTOCOL]).on_upgrade(move |socket| logs_stream(socket, state, source_str, tail, signed_out))
 }
 
 /// Follow-interval for the log tail poll. Short enough to feel live, long
@@ -3366,7 +3713,14 @@ const LOG_FOLLOW_INTERVAL: Duration = Duration::from_millis(500);
 /// same error shapes `GET /logs` uses, just delivered over the socket instead
 /// of as an HTTP status since a WebSocket upgrade has already committed to
 /// `101 Switching Protocols`.
-async fn logs_stream(mut socket: WebSocket, state: AppState, source_str: String, tail: usize) {
+async fn logs_stream(
+    mut socket: WebSocket,
+    state: AppState,
+    source_str: String,
+    tail: usize,
+    signed_out: impl std::future::Future<Output = ()>,
+) {
+    tokio::pin!(signed_out);
     let source = match crate::logs::LogSource::parse(&source_str) {
         Some(s) => s,
         None => {
@@ -3446,6 +3800,10 @@ async fn logs_stream(mut socket: WebSocket, state: AppState, source_str: String,
                         Err(_) => { /* file vanished mid-follow; re-resolve next tick */ cur_path = None; }
                     }
                 }
+            }
+            () = &mut signed_out => {
+                let _ = socket.send(Message::Close(Some(signed_out_frame()))).await;
+                break;
             }
             msg = socket.recv() => {
                 match msg {
@@ -3542,13 +3900,14 @@ struct SshAuthorizeResponse {
 /// having a problem, so neither should read as a `500`.
 async fn ssh_authorize(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: OwnerAuth,
     Json(req): Json<SshAuthorizeRequest>,
 ) -> Result<Json<SshAuthorizeResponse>, (StatusCode, Json<ErrorResponse>)> {
     authkeys::validate_public_key(&req.public_key).map_err(|err| bad_request(err.to_string()))?;
 
     let outcome = authkeys::authorize(state.ssh_path(), &req.public_key, &req.label)
         .map_err(|err| bad_request(err.to_string()))?;
+    crate::audit::record(&state, "ssh_key_add", &req.label, "ok");
 
     Ok(Json(SshAuthorizeResponse {
         authorized: true,
@@ -3653,7 +4012,7 @@ struct SshRevokeResponse {
 /// documents for its own no-match case.
 async fn ssh_revoke(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: OwnerAuth,
     Json(req): Json<SshRevokeRequest>,
 ) -> Result<Json<SshRevokeResponse>, (StatusCode, Json<ErrorResponse>)> {
     let which = if let Some(label) = req.label {
@@ -3670,6 +4029,11 @@ async fn ssh_revoke(
     };
 
     authkeys::revoke(state.ssh_path(), &which).map_err(backend_error)?;
+    let what = match &which {
+        authkeys::Revoke::Label(l) => l.clone(),
+        authkeys::Revoke::Blob(_) => "a key, by its key material".to_string(),
+    };
+    crate::audit::record(&state, "ssh_key_remove", &what, "ok");
 
     Ok(Json(SshRevokeResponse { revoked: true }))
 }
@@ -3753,6 +4117,7 @@ async fn assistant_stream(
 > {
     let opts = req.options(true);
     let person = who.person;
+    let signed_out = state.signed_out(who.token);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     if let Some(done) = crate::assistant::quick(&state, &req.messages, opts).await {
         // An instant command: already done; tell it like a stream.
@@ -3783,6 +4148,8 @@ async fn assistant_stream(
         let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
         Some((Ok(axum::response::sse::Event::default().data(data)), rx))
     });
+    // Removing the device ends the stream.
+    let events = futures_util::StreamExt::take_until(events, Box::pin(signed_out));
     Ok(axum::response::sse::Sse::new(events).keep_alive(axum::response::sse::KeepAlive::default()))
 }
 
@@ -3796,12 +4163,20 @@ async fn assistant_stream(
 async fn assistant_confirm(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     Json(req): Json<crate::assistant::ConfirmRequest>,
 ) -> Result<Json<crate::assistant::ConfirmResponse>, (StatusCode, Json<ErrorResponse>)> {
-    crate::assistant::confirm(&state, req)
-        .await
-        .map(Json)
-        .map_err(assistant_error)
+    // Resetting the chips is a power action: an owner's, here as on `/power`.
+    let tool = state.pending_action_tool(&req.action_id);
+    if req.approve && tool.as_deref() == Some("reset_chips") && !caller.owner() {
+        crate::audit::record(&state, "denied", "assistant reset_chips", "denied");
+        return Err(tt_error(StatusCode::FORBIDDEN, OWNER_ONLY));
+    }
+    let approve = req.approve;
+    let done = crate::assistant::confirm(&state, req).await;
+    let what = tool.unwrap_or_else(|| "unknown action".to_string());
+    crate::audit::record(&state, "assistant_approval", &what, match (&done, approve) { (Err(_), _) => "failed", (Ok(_), true) => "approved", (Ok(_), false) => "declined" });
+    done.map(Json).map_err(assistant_error)
 }
 
 /// Build the router for a given `AppState`. Side-effect-free: no sockets,
@@ -3864,12 +4239,30 @@ async fn only_local(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    if local_peer(peer.ip()) {
+    req.extensions_mut().insert(PlainHttp);
+    // Trusted as the box itself only when the program on the other end runs
+    // as the agent's own account (`crate::localpeer`): not another user on
+    // the box, not root, not a container on the host network.
+    let me = local_peer(peer.ip()) && tokio::task::spawn_blocking(move || crate::localpeer::peer_is_me(peer)).await.unwrap_or(false);
+    if me {
         req.extensions_mut().insert(LocalCaller);
         return next.run(req).await;
     }
-    if container_peer(peer.ip()) && req.uri().path().starts_with("/v1/") {
+    if (container_peer(peer.ip()) || local_peer(peer.ip())) && req.uri().path().starts_with("/v1/") {
         return next.run(req).await;
+    }
+    if local_peer(peer.ip()) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": format!(
+                    "Only TT Station's own account on this box can use this connection. Other programs use the model API (/v1) with an app key, or pair over https on port {}.",
+                    state.ctrl_port() + 1
+                ),
+                "https_port": state.ctrl_port() + 1,
+            })),
+        )
+            .into_response();
     }
     // Phones never get plain HTTP; other computers only if the owner allowed it.
     if lan_http_allowed(&state) && req.uri().path().starts_with("/v1/") {
@@ -3894,6 +4287,7 @@ pub fn local_http_app(state: AppState) -> Router {
     let local_only = Router::new()
         .route("/pair/qr", post(pair_qr))
         .route("/security", get(get_security).post(post_security))
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
     app(state.clone())
         .merge(local_only)
@@ -4009,6 +4403,7 @@ struct SecurityBody {
 async fn post_security(
     axum::extract::State(state): axum::extract::State<AppState>,
     caller: Option<axum::extract::Extension<LocalCaller>>,
+    _owner: OwnerAuth,
     Json(body): Json<SecurityBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     if caller.is_none() {
@@ -4017,6 +4412,7 @@ async fn post_security(
     let flag = state.config_dir().join("allow-lan-http");
     let done = if body.lan_http { std::fs::write(&flag, "") } else { std::fs::remove_file(&flag).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) };
     done.map_err(|e| tt_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    crate::audit::record(&state, "security", &format!("lan_http={}", body.lan_http), "ok");
     Ok(Json(serde_json::json!({ "lan_http": body.lan_http })))
 }
 
@@ -4037,6 +4433,9 @@ pub fn app(state: AppState) -> Router {
         .route("/reset", post(reset))
         .route("/devices", get(get_devices))
         .route("/devices/{id}", axum::routing::delete(delete_device))
+        .route("/devices/{id}/owner", post(post_device_owner))
+        .route("/devices/{id}/person", axum::routing::put(put_device_person))
+        .route("/audit", get(crate::audit::get_audit))
         .route("/power", post(power))
         .route("/endpoint", get(get_endpoint))
         .route("/leases", get(get_leases))
@@ -4308,6 +4707,8 @@ pub fn app(state: AppState) -> Router {
         .route("/generate/video/{id}", get(get_video))
         .route("/generate/video/{id}/download", get(download_video))
         .route("/generate/video/{id}/cancel", post(cancel_video))
+        // Default-deny (see `require_auth`): last, so it covers every route above.
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state)
 }
 
@@ -4368,7 +4769,7 @@ struct HistoryQuery {
     range: Option<String>,
 }
 
-/// `GET /metrics/history?range=5m|1h|24h` (unauthed, like `/telemetry`):
+/// `GET /metrics/history?range=5m|1h|24h` (paired, like `/telemetry`):
 /// `{range, step_s, points: [{t, chips: [{temp_c, power_w, aiclk_mhz}], gen_tps,
 /// prompt_tps, running, waiting, kv_cache, ttft_s, tpot_s}], totals}`.
 async fn metrics_history(
@@ -4388,7 +4789,7 @@ async fn metrics_history(
     })))
 }
 
-/// `GET /metrics/now` (unauthed): the latest sample, the live inference view
+/// `GET /metrics/now` (paired): the latest sample, the live inference view
 /// (phase, throughput, latency, media counters), the energy/token totals, and
 /// how well each model's tool calls fit their schemas (`/v1/messages`).
 async fn metrics_now(
@@ -4454,7 +4855,7 @@ async fn check_servable(
     }
 }
 
-/// `GET /serve` (unauthed, like `/status`): the [`Lifecycle`] plus the kind of
+/// `GET /serve` (paired): the [`Lifecycle`] plus the kind of
 /// experience the served model is (`chat`, `image`, `video`, `speech`, `tts`).
 async fn get_serve(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -4510,7 +4911,9 @@ async fn post_serve(
     _auth: BearerAuth,
     Json(req): Json<RunRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
-    begin_serve(&state, &req.model, req.force).await?;
+    let begun = begin_serve(&state, &req.model, req.force).await;
+    crate::audit::record(&state, "model_switch", &req.model, if begun.is_ok() { "starting" } else { "failed" });
+    begun?;
     Ok((
         StatusCode::ACCEPTED,
         Json(serde_json::json!({ "status": "starting", "model": req.model })),
@@ -4844,7 +5247,7 @@ fn tt_error(status: StatusCode, error: impl Into<String>) -> (StatusCode, Json<E
     )
 }
 
-/// `GET /tt/models` (unauthed, like `/models`): this mesh's catalog from
+/// `GET /tt/models` (paired, like `/models`): this mesh's catalog from
 /// `tt model list` -- support status, tool-call parser, whether the weights are
 /// downloaded and their size -- plus this agent's pulls and the free disk where
 /// weights land.
@@ -4876,7 +5279,7 @@ async fn tt_models(
     })))
 }
 
-/// `GET /tt/pulls` (unauthed): just the pulls and free disk -- cheap enough to
+/// `GET /tt/pulls` (paired): just the pulls and free disk -- cheap enough to
 /// poll every couple of seconds while a download runs.
 async fn tt_pulls(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -5029,13 +5432,25 @@ async fn list_memories(
     Json(serde_json::json!({ "memories": state.memories().list_for(person.as_deref()) }))
 }
 
-/// `DELETE /memories` (authed): forget everything.
+/// `DELETE /memories` (authed): a member forgets its person's own memories;
+/// an owner forgets everything it sees, the household's shared ones too.
 async fn clear_memories(
     axum::extract::State(state): axum::extract::State<AppState>,
     who: crate::people::Who,
-) -> StatusCode {
-    state.memories().clear(who.person.map(|p| p.id).as_deref());
-    StatusCode::NO_CONTENT
+    CallerAuth(caller): CallerAuth,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let person = who.person.map(|p| p.id);
+    if caller.device.as_ref().is_some_and(|d| d.owner) {
+        state.memories().clear(person.as_deref());
+    } else if let Some(person) = person {
+        state.memories().clear_own(&person);
+    } else {
+        return Err(tt_error(
+            StatusCode::FORBIDDEN,
+            "This device isn't anyone's, so its memories are the household's: only an owner can clear those. Pick who you are in Settings → People first.",
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `DELETE /memories/{id}` (authed).
@@ -5462,7 +5877,7 @@ mod local_http_tests {
 
 #[cfg(test)]
 mod signed_out_tests {
-    use super::AppState;
+    use super::{AppState, TelemetrySlot, MAX_TELEMETRY_SOCKETS};
     use std::time::Duration;
 
     fn state() -> AppState {
@@ -5478,8 +5893,8 @@ mod signed_out_tests {
     #[tokio::test]
     async fn open_sockets_close_when_their_device_is_removed() {
         let state = state();
-        let mine = state.sessions().pair("mine", Some("Mine"), None);
-        let other = state.sessions().pair("other", Some("Other"), None);
+        let mine = state.sessions().pair("mine", Some("Mine"), None, false);
+        let other = state.sessions().pair("other", Some("Other"), None, false);
         let watch = tokio::spawn(state.signed_out("mine".to_string()));
 
         state.sessions().revoke(&other.id);
@@ -5493,10 +5908,34 @@ mod signed_out_tests {
             .unwrap();
     }
 
+    #[test]
+    fn telemetry_sockets_are_capped_and_given_back() {
+        let slots: Vec<TelemetrySlot> = std::iter::from_fn(TelemetrySlot::take).take(MAX_TELEMETRY_SOCKETS + 5).collect();
+        assert_eq!(slots.len(), MAX_TELEMETRY_SOCKETS);
+        assert!(TelemetrySlot::take().is_none());
+        drop(slots);
+        assert!(TelemetrySlot::take().is_some());
+    }
+
+    /// The same, for a stream that knows its caller by device id (logs,
+    /// telemetry); the box's own user is never signed out.
+    #[tokio::test]
+    async fn streams_known_by_device_close_when_it_is_removed() {
+        let state = state();
+        let mine = state.sessions().pair("mine", None, None, false);
+        let watch = tokio::spawn(state.device_signed_out(Some(mine.id.clone())));
+        let the_box = tokio::spawn(state.device_signed_out(None));
+        state.sessions().revoke(&mine.id);
+        tokio::time::timeout(Duration::from_secs(2), watch).await.expect("still open after removal").unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!the_box.is_finished());
+        the_box.abort();
+    }
+
     #[tokio::test]
     async fn open_sockets_close_on_reset() {
         let state = state();
-        state.sessions().pair("mine", None, None);
+        state.sessions().pair("mine", None, None, false);
         let watch = tokio::spawn(state.signed_out("mine".to_string()));
         state.clear_tokens();
         tokio::time::timeout(Duration::from_secs(2), watch).await.expect("still open after a reset").unwrap();

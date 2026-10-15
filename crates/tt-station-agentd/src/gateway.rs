@@ -11,9 +11,18 @@
 //! model ids. The `model` a client sends is rewritten to the one actually
 //! serving, so tools that insist on a model name just work.
 //!
-//! Access needs an *app key* (`ttq-...`), minted and revoked from a paired
-//! phone or the desktop app (`/keys`), or a paired device's own token. Keys
-//! live in `app-keys.json` (mode 0600) in the agent's config directory.
+//! Access needs an *app key* (`ttq-...`), minted and revoked by an owner from
+//! a paired phone or the desktop app (`/keys`), or -- over HTTPS only -- a
+//! paired device's own token. Plain HTTP (the box itself, its containers, and
+//! other computers when the owner allows it) takes app keys only: a device
+//! token there could be read off the wire, and it opens the whole box, not
+//! just the model API.
+//!
+//! Keys live in `app-keys.json` (mode 0600) in the agent's config directory,
+//! as SHA-256 digests: a key is shown once, when it's made, and the file
+//! alone can't be used to call the box. (Files from before kept the keys
+//! themselves; they're converted on load.) A key is 256 random bits, and can
+//! be made to expire.
 //!
 //! For a team sharing one box, each key can have limits -- requests a minute,
 //! tokens a day -- and a list of what it may use (chat, images, embeddings),
@@ -43,8 +52,20 @@ const MAX_KEYS: usize = 32;
 struct AppKey {
     id: String,
     name: String,
-    key: String,
+    /// The key itself, in files from before keys were hashed: read once, to
+    /// convert, and never written.
+    #[serde(default, skip_serializing)]
+    key: Option<String>,
+    /// Lower-case hex SHA-256 of the key.
+    #[serde(default)]
+    key_sha256: String,
+    /// The key's first characters (`ttq-1a2b`), so a person can tell keys apart.
+    #[serde(default)]
+    hint: String,
     created: u64,
+    /// Unix seconds after which the key stops working; `None` never.
+    #[serde(default)]
+    expires: Option<u64>,
     #[serde(default)]
     last_used: Option<u64>,
     #[serde(default)]
@@ -107,6 +128,15 @@ pub enum Denied {
     /// Seconds until a request would be let through.
     Rate(u64),
     Budget,
+    /// Past its expiry.
+    Expired,
+}
+
+/// The characters of a key shown in lists.
+const HINT_LEN: usize = 8;
+
+fn key_digest(key: &str) -> String {
+    crate::sessions::token_digest(key)
 }
 
 /// Today in local time, `YYYY-MM-DD`.
@@ -125,6 +155,7 @@ pub struct KeySummary {
     /// The first characters, so a person can tell keys apart.
     pub hint: String,
     pub created: u64,
+    pub expires: Option<u64>,
     pub last_used: Option<u64>,
     pub requests: u64,
     pub limits: Limits,
@@ -168,19 +199,33 @@ impl AppKeys {
         }
     }
 
-    /// Loaded from (and saved to) `path`; a missing file is no keys.
+    /// Loaded from (and saved to) `path`; a missing file is no keys. Keys
+    /// kept in the clear by older versions are hashed and the file rewritten.
     pub fn open(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let keys = std::fs::read(&path)
+        let mut keys: Vec<AppKey> = std::fs::read(&path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
-        AppKeys {
+        let mut converted = 0;
+        for k in &mut keys {
+            if let Some(raw) = k.key.take() {
+                k.key_sha256 = key_digest(&raw);
+                k.hint = raw.chars().take(HINT_LEN).collect();
+                converted += 1;
+            }
+        }
+        let opened = AppKeys {
             path: Some(path),
             keys: Mutex::new(keys),
             last_saved: Mutex::new(0),
             recent: Mutex::new(Default::default()),
+        };
+        if converted > 0 {
+            opened.save();
+            eprintln!("tt-station-agentd: app keys are now stored hashed ({converted} converted)");
         }
+        opened
     }
 
     fn summary(k: &AppKey) -> KeySummary {
@@ -193,8 +238,9 @@ impl AppKeys {
         KeySummary {
             id: k.id.clone(),
             name: k.name.clone(),
-            hint: format!("{}…", &k.key[..k.key.len().min(8)]),
+            hint: format!("{}…", k.hint),
             created: k.created,
+            expires: k.expires,
             last_used: k.last_used,
             requests: k.requests,
             limits: k.limits.clone(),
@@ -216,6 +262,11 @@ impl AppKeys {
 
     /// Mint a key for `name`; the secret is returned only here.
     pub fn create(&self, name: &str, now: u64) -> Result<(KeySummary, String), String> {
+        self.create_expiring(name, now, None)
+    }
+
+    /// [`Self::create`], stopping working at `expires` (unix seconds) if given.
+    pub fn create_expiring(&self, name: &str, now: u64, expires: Option<u64>) -> Result<(KeySummary, String), String> {
         let name = name.trim();
         if name.is_empty() || name.len() > 60 {
             return Err("Give the key a short name, like the app it's for.".to_string());
@@ -226,11 +277,16 @@ impl AppKeys {
                 "This box already has {MAX_KEYS} app keys; revoke one first."
             ));
         }
+        // 256 random bits, like a device token.
+        let secret = format!("ttq-{}", crate::pairing::issue_token());
         let key = AppKey {
             id: crate::pairing::issue_pair_id()[..12].to_string(),
             name: name.to_string(),
-            key: format!("ttq-{}", crate::pairing::issue_pair_id()),
+            key: None,
+            key_sha256: key_digest(&secret),
+            hint: secret.chars().take(HINT_LEN).collect(),
             created: now,
+            expires,
             last_used: None,
             requests: 0,
             limits: Limits::default(),
@@ -238,7 +294,6 @@ impl AppKeys {
             paused: false,
             usage: Default::default(),
         };
-        let secret = key.key.clone();
         keys.push(key);
         let summary = Self::summary(keys.last().expect("just pushed"));
         drop(keys);
@@ -266,13 +321,17 @@ impl AppKeys {
     /// Lets a request with `presented` through for `scope`, or says why not;
     /// counts the request. The key's id when it's let through.
     pub fn admit(&self, presented: &str, now: u64, scope: &str) -> Result<String, Denied> {
+        let presented = key_digest(presented);
         let mut keys = self.keys.lock().expect("keys mutex poisoned");
         let Some(key) = keys
             .iter_mut()
-            .find(|k| crate::pairqr::secrets_match(&k.key, presented))
+            .find(|k| crate::pairqr::secrets_match(&k.key_sha256, &presented))
         else {
             return Err(Denied::Unknown);
         };
+        if key.expires.is_some_and(|e| now > e) {
+            return Err(Denied::Expired);
+        }
         if key.paused {
             return Err(Denied::Paused);
         }
@@ -362,21 +421,10 @@ impl AppKeys {
     fn save(&self) {
         let Some(path) = &self.path else { return };
         let keys = self.keys.lock().expect("keys mutex poisoned").clone();
-        let write = || -> std::io::Result<()> {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            let tmp = path.with_extension("tmp");
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)?;
-            file.write_all(&serde_json::to_vec_pretty(&keys).map_err(std::io::Error::other)?)?;
-            std::fs::rename(&tmp, path)
+        // A fresh 0600 temp file (never one left over, which could keep a
+        // looser mode), then a rename: `sessions::write_private`.
+        let write = || -> anyhow::Result<()> {
+            crate::sessions::write_private(path, &serde_json::to_string_pretty(&keys)?)
         };
         if let Err(e) = write() {
             eprintln!("tt-station-agentd: couldn't save app keys: {e}");
@@ -437,12 +485,18 @@ impl FromRequestParts<AppState> for GatewayAuth {
         match state.app_keys().admit(presented, unix_now(), scope) {
             Ok(id) => Ok(GatewayAuth { key: Some(id) }),
             Err(Denied::Unknown) => {
+                // A device's own token only over HTTPS: on plain HTTP it could
+                // be read off the wire, and it opens far more than `/v1`.
+                if parts.extensions.get::<crate::routes::PlainHttp>().is_some() {
+                    return Err(openai_error(StatusCode::UNAUTHORIZED, "This connection takes app keys only (ttq-…). Create one in TT Station (Connect → App keys)."));
+                }
                 if BearerAuth::from_request_parts(parts, state).await.is_ok() {
                     Ok(GatewayAuth { key: None })
                 } else {
                     Err(openai_error(StatusCode::UNAUTHORIZED, "Unknown API key. Create one in TT Station (Connect → App keys)."))
                 }
             }
+            Err(Denied::Expired) => Err(openai_error(StatusCode::UNAUTHORIZED, "This key has expired. Create a new one in TT Station (Connect → App keys).")),
             Err(Denied::Paused) => Err(openai_error(StatusCode::FORBIDDEN, "This key is paused. The box's owner can turn it back on in TT Station.")),
             Err(Denied::Scope(what)) => Err(openai_error(StatusCode::FORBIDDEN, format!("This key isn't allowed to use {what} on this box."))),
             Err(Denied::Budget) => Err(openai_error(StatusCode::TOO_MANY_REQUESTS, "This key has used its tokens for today. It resets at midnight on the box.")),
@@ -464,6 +518,9 @@ impl FromRequestParts<AppState> for GatewayAuth {
 #[derive(Debug, Deserialize)]
 pub struct CreateKey {
     pub name: String,
+    /// Stop working after this many days; absent or 0, never.
+    #[serde(default)]
+    pub expires_in_days: Option<u32>,
 }
 
 pub(crate) async fn list_keys(
@@ -475,13 +532,16 @@ pub(crate) async fn list_keys(
 
 pub(crate) async fn create_key(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     Json(req): Json<CreateKey>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<ErrorResponse>)> {
+    let now = unix_now();
+    let expires = req.expires_in_days.filter(|d| *d > 0).map(|d| now + u64::from(d) * 86_400);
     let (summary, key) = state
         .app_keys()
-        .create(&req.name, unix_now())
+        .create_expiring(&req.name, now, expires)
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
+    crate::audit::record(&state, "app_key_create", &format!("{} ({})", summary.name, summary.id), "ok");
     Ok((
         StatusCode::CREATED,
         Json(json!({ "key": key, "info": summary })),
@@ -491,23 +551,24 @@ pub(crate) async fn create_key(
 /// `PATCH /keys/{id}` `{name?, limits?, scopes?, paused?}`
 pub(crate) async fn change_key(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(change): Json<KeyChange>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
-    state
-        .app_keys()
-        .change(&id, change)
+    let changed = state.app_keys().change(&id, change);
+    crate::audit::record(&state, "app_key_change", &id, if changed.is_ok() { "ok" } else { "failed" });
+    changed
         .map(|k| Json(json!({ "info": k })))
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))
 }
 
 pub(crate) async fn revoke_key(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> StatusCode {
     if state.app_keys().revoke(&id) {
+        crate::audit::record(&state, "app_key_revoke", &id, "ok");
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND
@@ -1017,6 +1078,10 @@ mod tests {
         assert_eq!(keys.list()[0].requests, 1);
         assert!(keys.create("  ", 1).is_err());
 
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains(&secret), "the key itself never reaches the disk");
+        assert!(on_disk.contains(&key_digest(&secret)));
+        assert_eq!(secret.len(), 4 + 64, "256 bits");
         let reopened = AppKeys::open(&path);
         assert!(reopened.check(&secret, 300), "persisted");
         use std::os::unix::fs::PermissionsExt;
@@ -1027,6 +1092,31 @@ mod tests {
         assert!(reopened.revoke(&info.id));
         assert!(!reopened.check(&secret, 400));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keys_from_before_hashing_are_converted_and_keep_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app-keys.json");
+        std::fs::write(&path, r#"[{"id":"k1","name":"Open WebUI","key":"ttq-0123456789abcdef0123456789abcdef","created":5,"requests":3}]"#).unwrap();
+        let keys = AppKeys::open(&path);
+        assert!(keys.check("ttq-0123456789abcdef0123456789abcdef", 10));
+        assert_eq!(keys.list()[0].hint, "ttq-0123…");
+        assert_eq!(keys.list()[0].requests, 4);
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains("0123456789abcdef0123456789abcdef"), "converted in place: {on_disk}");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(AppKeys::open(&path).check("ttq-0123456789abcdef0123456789abcdef", 20), "and after a restart");
+    }
+
+    #[test]
+    fn keys_can_expire() {
+        let keys = AppKeys::in_memory();
+        let (info, secret) = keys.create_expiring("Demo", 100, Some(200)).unwrap();
+        assert_eq!(info.expires, Some(200));
+        assert!(keys.admit(&secret, 200, "chat").is_ok(), "good through its last second");
+        assert_eq!(keys.admit(&secret, 201, "chat"), Err(Denied::Expired));
     }
 
     #[test]

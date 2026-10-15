@@ -11,6 +11,10 @@
 //!
 //! Ids: `code:<session>:<request>` and `routine:<run>`. The same objects ride
 //! along on the box's events (`data.approval`), so a notification can answer.
+//!
+//! Any paired device may answer these: Code sessions and routines are the
+//! household's, and members use both. Bring-up's approvals -- commands on
+//! the box itself, with root when asked for -- are owners' (`crate::bringup`).
 
 use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
@@ -39,6 +43,7 @@ pub struct Answer {
 
 /// `POST /approvals/answer {id, allow, always?}`
 pub(crate) async fn post_answer(State(state): State<AppState>, auth: BearerAuth, Json(a): Json<Answer>) -> Reply {
+    crate::audit::record(&state, "approval", &a.id, if a.allow { "allowed" } else { "declined" });
     let mut parts = a.id.splitn(3, ':');
     match (parts.next(), parts.next(), parts.next()) {
         (Some("code"), Some(session), Some(request_id)) => {

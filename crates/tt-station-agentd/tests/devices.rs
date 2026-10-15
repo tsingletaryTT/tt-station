@@ -93,8 +93,9 @@ async fn removing_a_device_signs_out_only_that_device() {
     let state = new_state();
     let base = spawn_with(state.clone()).await;
     let client = reqwest::Client::new();
-    let phone = pair_with(&client, &state, &base, json!({ "name": "Jane's iPhone", "platform": "iOS" })).await;
+    // The laptop pairs first, so it's the owner; removing another device is an owner's.
     let laptop = pair_with(&client, &state, &base, json!({ "name": "Work laptop", "platform": "Linux" })).await;
+    let phone = pair_with(&client, &state, &base, json!({ "name": "Jane's iPhone", "platform": "iOS" })).await;
 
     let id = phone["device_id"].as_str().unwrap();
     let resp = client.delete(format!("{base}/devices/{id}")).bearer_auth(token(&laptop)).send().await.unwrap();
@@ -186,6 +187,7 @@ async fn an_expired_device_is_told_so_and_asked_to_pair_again() {
         platform: None,
         created: Some(now - 200 * 86_400),
         last_used,
+        owner: true,
     };
 
     // An agent that stayed up while a device went 91 days unused.
