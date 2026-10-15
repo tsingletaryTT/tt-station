@@ -147,22 +147,27 @@ fn mask_prefixed(s: &str, prefix: &str, min_len: usize) -> String {
     result
 }
 
+/// Every token after `marker` on the line, not just the first.
 fn mask_after(s: &str, marker: &str) -> String {
-    match s.find(marker) {
-        Some(pos) => {
-            let after = &s[pos + marker.len()..];
-            let tok_len = after
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
-                .count();
-            if tok_len >= 8 {
-                format!("{}{}***{}", &s[..pos], marker, &after[tok_len..])
-            } else {
-                s.to_string()
-            }
-        }
-        None => s.to_string(),
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find(marker) {
+        let after = &rest[pos + marker.len()..];
+        // ASCII only, so the count is also the byte length.
+        let tok_len = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+            .count();
+        out.push_str(&rest[..pos + marker.len()]);
+        out.push_str(if tok_len >= 8 {
+            "***"
+        } else {
+            &after[..tok_len]
+        });
+        rest = &after[tok_len..];
     }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
