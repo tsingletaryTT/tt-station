@@ -133,20 +133,15 @@ fn save(state: &AppState, e: &Eval) {
 
 /// Writes an evaluation where [`all`] finds it (`evals/<id>.json`).
 pub fn save_in(d: &std::path::Path, e: &Eval) {
-    let _ = std::fs::create_dir_all(d);
-    let _ = std::fs::write(
-        d.join(format!("{}.json", e.id)),
-        serde_json::to_vec_pretty(e).unwrap_or_default(),
-    );
+    crate::fsio::save_json(&d.join(format!("{}.json", e.id)), e, crate::fsio::PRIVATE);
 }
 
 /// Every graded request of an agent reliability run, next to it (`evals/raw/<id>.json`).
 pub fn save_trials(d: &std::path::Path, id: &str, trials: &[crate::reliability::Trial]) {
-    let raw = d.join("raw");
-    let _ = std::fs::create_dir_all(&raw);
-    let _ = std::fs::write(
-        raw.join(format!("{id}.json")),
-        serde_json::to_vec_pretty(trials).unwrap_or_default(),
+    crate::fsio::save_json(
+        &d.join("raw").join(format!("{id}.json")),
+        trials,
+        crate::fsio::PRIVATE,
     );
 }
 
@@ -159,12 +154,19 @@ fn valid_id(id: &str) -> bool {
 }
 
 pub fn all(state: &AppState) -> Vec<Eval> {
-    let mut out: Vec<Eval> = std::fs::read_dir(dir(state))
+    all_in(&dir(state))
+}
+
+/// Every evaluation saved in `d` (one `<id>.json` each), newest first. A file
+/// that won't parse is moved aside rather than dropped (`crate::fsio`).
+pub fn all_in(d: &std::path::Path) -> Vec<Eval> {
+    let mut out: Vec<Eval> = std::fs::read_dir(d)
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|e| std::fs::read(e.path()).ok())
-        .filter_map(|b| serde_json::from_slice(&b).ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
+        .filter_map(|p| crate::fsio::read_json_or_backup(&p))
         .collect();
     out.sort_by_key(|e: &Eval| std::cmp::Reverse(e.started));
     out
@@ -1292,10 +1294,8 @@ pub(crate) async fn get_eval(
     if !valid_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "Bad id."));
     }
-    let b = std::fs::read(dir(&state).join(format!("{id}.json")))
-        .map_err(|_| err(StatusCode::NOT_FOUND, "No such evaluation."))?;
-    let e: Eval = serde_json::from_slice(&b)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let e: Eval = crate::fsio::read_json_or_backup(&dir(&state).join(format!("{id}.json")))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such evaluation."))?;
     Ok(Json(json!({ "eval": e })))
 }
 
@@ -1445,6 +1445,31 @@ mod tests {
             measured_window(&evals, "Qwen/Qwen3-32B").unwrap_or(DEFAULT_COMPACT_WINDOW),
             65_536,
             "the fallback is 64K"
+        );
+    }
+
+    #[test]
+    fn evaluations_are_saved_whole_and_temp_or_broken_files_are_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path().join("evals");
+        let e = Eval {
+            id: "1-abc".into(),
+            model: "m".into(),
+            started: 5,
+            status: "done".into(),
+            ..Default::default()
+        };
+        save_in(&d, &e);
+        save_trials(&d, "1-abc", &[]);
+        std::fs::write(d.join(".2-x.json.tmp-00ff"), b"{").unwrap();
+        std::fs::write(d.join("3-bad.json"), b"{\"id\":").unwrap();
+        let all = all_in(&d);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "1-abc");
+        assert!(d.join("raw/1-abc.json").is_file());
+        assert!(
+            !d.join("3-bad.json").exists(),
+            "moved aside, not left to be overwritten"
         );
     }
 }
