@@ -1,4 +1,4 @@
-# People, schedules and energy (reference)
+# People, mode switches on a timetable, and energy (reference)
 
 Box features that need no account anywhere, plus serving an Orchard result. (Remote access
 over WireGuard was documented here but never implemented; see below.)
@@ -21,18 +21,39 @@ household's (`person: null`); a phone that is no one in particular sees only the
 it's talking with through a task-local (`people::CALLER`, set by `/assistant` and
 `/assistant/stream` from the `Who` extractor), and its prompt says "You are talking with Ana."
 
-## Schedules (`/schedules`, `src/schedules.rs`)
+## Switching modes on a timetable (routines with a `mode`; `/schedules` for older apps)
 
-`{id, mode, time: "HH:MM", days: [0..6], enabled, last_run}` in `schedules.json` (0 is Sunday; mode
-ids from `modes.rs`). Checked every 30 s; due from its minute until 10 minutes after, once a day.
-It skips (and notifies) while a Lab run, an Orchard bring-up or a transcription holds the box.
-`GET`, `POST {mode, time, days}`, `PATCH /schedules/{id} {enabled?, mode?, time?, days?}`, `DELETE`.
+Switching the box's mode at set times used to be Settings → Schedules; it is now a routine
+(`routines.rs`), so Routines is the one place for jobs the box does on its own. A routine with
+`mode: "<id>"` (ids from `modes.rs`) needs no goal or model: when it runs, the runner switches
+the box to that mode. Its schedule is any routine schedule, plus `{kind: "days", time: "HH:MM",
+days: [0..6]}` (0 is Sunday) for chosen days. What schedules did, it keeps doing:
+
+- It never interrupts a Lab run, an Orchard bring-up or a transcription: the run is
+  `skipped`, with a notification ("Skipped switching to Images …"), and it tries next time.
+- It runs from its minute until ten minutes after; later than that (the box was off), it
+  waits for its next time instead of switching late.
+- A switch that started records "Switching to …"; the model's own "ready" notification follows.
+
+**Migration.** `schedules.json` (an existing box's, an import's, or one an older phone app
+just posted) is turned into routines whenever routines load, and every 30 s: each schedule
+becomes a routine with the same id, mode, days, time and on/off, named "Switch to <Mode>",
+with its next run worked out from now (so one that already ran today doesn't run again). The
+original file is kept beside it as `schedules.json.migrated` and `schedules.json` is left
+empty.
+
+**`/schedules` still answers** in its old shape, from those routines, for phone apps that ask
+for it: `GET` lists mode routines as `{id, mode, time, days, enabled}`; `POST {mode, time,
+days}` adds one (as a routine); `PATCH /schedules/{id} {enabled?, mode?, time?, days?}` and
+`DELETE` change or remove the routine.
 
 ## Energy (`GET /energy`, `history.rs`)
 
 The history now keeps per-day totals (energy from the chips' power readings, tokens, requests;
 about two years). `/energy` returns `{months: [{month, energy_kwh, tokens, requests, days}],
-days: [last 31]}`. The phone prices it at its own $/kWh setting.
+days: [last 31]}`. The phone prices it at its own $/kWh setting. On the desktop, energy has one
+home, Hardware → Energy (today, this month and each day, priced at a $/kWh you set there);
+Home's "Today" shows today's kWh and links to it.
 
 ## Remote access: not implemented
 
