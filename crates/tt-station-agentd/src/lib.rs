@@ -67,6 +67,7 @@ pub mod tori;
 pub mod ttcli;
 pub mod tttools;
 pub mod updates;
+pub mod urltrust;
 pub mod voice;
 pub mod web;
 pub mod workspace;

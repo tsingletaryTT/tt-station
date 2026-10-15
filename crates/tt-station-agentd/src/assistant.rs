@@ -167,6 +167,16 @@ pub const ACTING_TOOLS: [&str; 10] = [
 /// Tools whose results carry text from the web.
 pub const WEB_TOOLS: [&str; 2] = ["web_search", "read_webpage"];
 
+/// Whether a model's call of `name` would fetch or open a web address the turn
+/// didn't already know, after web text came in (see `crate::urltrust`): it
+/// waits for the person too.
+pub fn fetches_unknown_address(name: &str, args: &Value, turn: &crate::urltrust::Turn) -> bool {
+    match name {
+        "read_webpage" | "open_app" => args["url"].as_str().is_some_and(|u| !u.trim().is_empty() && !turn.may_fetch(u)),
+        _ => false,
+    }
+}
+
 /// Whether a model's call of a read-only tool must wait for the person.
 /// Always: answering a bring-up (it runs a command on the box), starting a
 /// recording, opening a web address. Once web text is in the turn (`tainted`):
@@ -1177,6 +1187,10 @@ pub fn pending_summary(tool: &str, args: &Value, current_model: &str) -> String 
         ),
         "start_recording" => "Start recording (the microphone, until you stop it).".to_string(),
         "remember" => format!("Remember: {}", args["fact"].as_str().unwrap_or("something")),
+        "read_webpage" => format!(
+            "Read {} (an address that came from neither you nor this turn's searches, after reading the web).",
+            args["url"].as_str().unwrap_or("a web page")
+        ),
         "research" => format!("Research: {}", args["question"].as_str().unwrap_or("that")),
         other => format!("Run {other} with {args}."),
     }
@@ -1209,7 +1223,7 @@ pub fn pending_reply(proposed: &[(String, Value)]) -> String {
                 "I can set up {} on the box; it downloads the first time.",
                 args.get("name").and_then(Value::as_str).unwrap_or("that app")
             ),
-            "open_app" | "bringup_decide" | "start_recording" | "remember" | "research" => {
+            "open_app" | "bringup_decide" | "start_recording" | "remember" | "research" | "read_webpage" => {
                 format!("I'd like to: {}", pending_summary(tool, args, ""))
             }
             other => format!("I can run {other}."),
@@ -2065,8 +2079,9 @@ async fn converse_rounds(
 ) -> Result<String, AssistantError> {
     // Rounds 0..MAX_TOOL_ROUNDS offer tools; the last round doesn't, which
     // forces a plain-text answer out of a model stuck calling tools.
-    // Web text has come into this turn (see `needs_confirmation`).
-    let mut tainted = false;
+    // Whether web text has come into this turn, and the addresses it knows
+    // (see `needs_confirmation`, `fetches_unknown_address`).
+    let mut turn = crate::urltrust::Turn::from_messages(messages);
     for round in 0..=MAX_TOOL_ROUNDS {
         let offer_tools = round < MAX_TOOL_ROUNDS;
         let read = |message: &Value| {
@@ -2109,7 +2124,7 @@ async fn converse_rounds(
             actions,
             // Not streamed: nothing reaches the person's computer, so the box's own tools.
             false,
-            &mut tainted,
+            &mut turn,
             &mut |_| {},
         )
         .await;
@@ -2142,7 +2157,7 @@ async fn run_tool_calls(
     served_model: &str,
     actions: &mut Vec<ActionReport>,
     client: bool,
-    tainted: &mut bool,
+    turn: &mut crate::urltrust::Turn,
     on_action: &mut (dyn FnMut(&ActionReport) + Send),
 ) -> Vec<(String, Value)> {
     // Echo the assistant turn (with its tool calls) back so the next round's
@@ -2171,7 +2186,8 @@ async fn run_tool_calls(
             }));
         }
         let args = call.args.as_ref().unwrap_or(&Value::Null);
-        let gated = tool_kind(&call.name) == Some(ToolKind::ReadOnly) && needs_confirmation(&call.name, args, *tainted);
+        let gated = tool_kind(&call.name) == Some(ToolKind::ReadOnly)
+            && (needs_confirmation(&call.name, args, turn.tainted()) || fetches_unknown_address(&call.name, args, turn));
         let result = match tool_kind(&call.name) {
             Some(ToolKind::ReadOnly) if gated => match park(state, call, client && CLIENT_TOOLS.contains(&call.name.as_str())) {
                 Ok((pending, report)) => {
@@ -2214,8 +2230,8 @@ async fn run_tool_calls(
                 )
             }),
         };
-        if WEB_TOOLS.contains(&call.name.as_str()) {
-            *tainted = true;
+        if WEB_TOOLS.contains(&call.name.as_str()) && !gated {
+            turn.web_result(&result.to_string());
         }
         messages.push(json!({
             "role": "tool",
@@ -2295,8 +2311,9 @@ pub(crate) async fn converse_stream(
     };
     let mut actions: Vec<ActionReport> = Vec::new();
     let mut streamed_any = false;
-    // Web text has come into this turn (see `needs_confirmation`).
-    let mut tainted = false;
+    // Whether web text has come into this turn, and the addresses it knows
+    // (see `needs_confirmation`, `fetches_unknown_address`).
+    let mut turn = crate::urltrust::Turn::from_messages(&messages);
     for round in 0..=MAX_TOOL_ROUNDS {
         let offer_tools = round < MAX_TOOL_ROUNDS;
         if streamed_any {
@@ -2396,7 +2413,7 @@ pub(crate) async fn converse_stream(
             &model,
             &mut actions,
             opts.client,
-            &mut tainted,
+            &mut turn,
             &mut |report| {
                 let _ = tx.send(StreamEvent::Action {
                     action: report.clone(),
@@ -3222,6 +3239,21 @@ mod tests {
         for t in ["box_status", "web_search", "read_webpage", "search_documents", "find_files", "bringup_status", "research_check"] {
             assert!(!needs_confirmation(t, &none, true), "{t}");
         }
+    }
+
+    #[test]
+    fn after_web_text_only_known_addresses_are_fetched_unasked() {
+        let mut turn = crate::urltrust::Turn::from_messages(&[json!({ "role": "user", "content": "read https://news.example/a" })]);
+        let read = |u: &str| json!({ "url": u });
+        // Before any web text, nothing about an address waits.
+        assert!(!fetches_unknown_address("read_webpage", &read("https://other.example/?q=x"), &turn));
+        turn.web_result(&json!({ "results": [{ "url": "https://found.example/page" }] }).to_string());
+        assert!(!fetches_unknown_address("read_webpage", &read("https://news.example/a"), &turn));
+        assert!(!fetches_unknown_address("read_webpage", &read("https://found.example/page"), &turn));
+        assert!(fetches_unknown_address("read_webpage", &read("https://found.example/page?leak=hello"), &turn));
+        assert!(fetches_unknown_address("open_app", &read("https://other.example/"), &turn));
+        assert!(!fetches_unknown_address("box_status", &json!({}), &turn));
+        assert!(pending_summary("read_webpage", &read("https://x.example/?q=1"), "").contains("https://x.example/?q=1"));
     }
 
     #[tokio::test]
