@@ -3,4 +3,5 @@
 
 pub mod devices;
 pub mod pairing;
+pub mod serving;
 pub mod status;
