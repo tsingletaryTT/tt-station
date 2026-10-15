@@ -802,10 +802,9 @@ pub(crate) async fn post_pull(
         ))
         .arg(format!("--property=StandardError=append:{}", log.display()))
         .arg(format!("--setenv=PATH={path}"));
-    if let Some(t) = crate::bringup::hf_token() {
-        // The value from systemd-run's environment, not its command line.
-        cmd.arg("--setenv=HF_TOKEN").env("HF_TOKEN", t);
-    }
+    // The Hugging Face token as a private file (`HF_TOKEN_PATH`), never the
+    // value in the unit's environment, where `systemctl --user show` prints it.
+    cmd.args(crate::serving::secrets::launch_hf_token_args());
     let out = cmd
         .args(["sh", "-c", &script])
         .stdin(Stdio::null())
@@ -1358,10 +1357,13 @@ async fn launch(
         ))
         .arg(format!("--property=StandardError=append:{}", log.display()))
         .arg(format!("--setenv=PATH={path}"));
-    if let Some(t) = crate::bringup::hf_token() {
-        // The value from systemd-run's environment, not its command line.
-        cmd.arg("--setenv=HF_TOKEN").env("HF_TOKEN", t);
-    }
+    // No HF_TOKEN: tt-model forwards it into the container's environment
+    // (`--env HF_TOKEN`), where `docker inspect` shows it for as long as the
+    // model runs, and a `--local-only` serve downloads nothing. The host-side
+    // tt-model gets the token as a private file (`HF_TOKEN_PATH`), which it
+    // doesn't forward; a container that does want it still finds
+    // `$HF_HOME/token` in the Hugging Face cache tt-model mounts.
+    cmd.args(crate::serving::secrets::launch_hf_token_args());
     cmd.arg(bin).args([
         "serve",
         id,

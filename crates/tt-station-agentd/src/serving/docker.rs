@@ -367,10 +367,11 @@ pub struct DockerConfig {
     /// physical box and isn't 100% confirmed for QuietBox 2 -- see the doc's
     /// "Uncertainties" section.
     pub tt_device: String,
-    /// Hugging Face access token for gated repos (e.g. Llama). Passed
-    /// through as `--env HF_TOKEN=...` only when `Some` and non-empty --
-    /// most local/open models need no token at all, so the argv shouldn't
-    /// carry an empty or placeholder one.
+    /// Hugging Face access token for gated repos (e.g. Llama). Only when
+    /// `Some` and non-empty, it is written to a private file (see
+    /// `serving::secrets`) mounted read-only into the container, which finds
+    /// it through `HF_TOKEN_PATH` -- never as `HF_TOKEN` in the container's
+    /// environment, where `docker inspect` would show it.
     pub hf_token: Option<String>,
     /// Name of the Docker volume mounted at
     /// `/home/container_app_user/cache_root` to persist downloaded
@@ -455,6 +456,9 @@ pub struct DockerBackend {
     /// `gozer` process ever spawned. Set via `with_gozer`, which
     /// `serving::make_backend` calls on the production path.
     gozer: Option<crate::gozer::Capability>,
+    /// Where the Hugging Face token file is written before a `docker run`
+    /// (`serving::secrets::default_dir` unless `with_secrets_dir` says).
+    secrets_dir: std::path::PathBuf,
     /// The lease this backend currently holds on behalf of a RUNNING serve,
     /// and the container that lease was taken for -- or `None` when nothing
     /// is leased.
@@ -519,8 +523,16 @@ impl DockerBackend {
             // `with_gozer` behaves exactly as it did before this integration
             // existed. See the `gozer` field's doc comment.
             gozer: None,
+            secrets_dir: super::secrets::default_dir(),
             lease: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Keep launch secrets (the Hugging Face token file) in `dir` instead of
+    /// `serving::secrets::default_dir`.
+    pub fn with_secrets_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.secrets_dir = dir.into();
+        self
     }
 
     /// Attach the `gozer` capability this agent probed for at startup (see
@@ -1176,17 +1188,31 @@ impl ServingBackend for DockerBackend {
             "{}:/home/container_app_user/cache_root",
             self.config.cache_volume
         );
-        // Only pass `--env HF_TOKEN=...` when a real, non-empty token is
-        // configured -- most local/open models need no token, and shipping
-        // an empty one would be actively misleading in a `docker inspect`.
-        // By name only: docker takes the value from its own environment
-        // (`run_in_dir_with_env` below), so the token never shows in a
-        // process list.
-        let hf_token = self
+        // The Hugging Face token, only when a real, non-empty one is
+        // configured (most open models need none): written to a private file
+        // and mounted read-only, the container's huggingface_hub reading it
+        // through `HF_TOKEN_PATH`. Never `--env HF_TOKEN` -- a container's
+        // environment is on show to anyone who can `docker inspect` it, for
+        // as long as it runs. Written per start, so a changed token takes
+        // effect at the next one.
+        let hf_token_mount = match self
             .config
             .hf_token
             .as_deref()
-            .filter(|token| !token.is_empty());
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            Some(token) => {
+                let file = super::secrets::write_hf_token(&self.secrets_dir, token)
+                    .context("couldn't hand the Hugging Face token to the container")?;
+                Some(format!(
+                    "{}:{}:ro",
+                    file.display(),
+                    super::secrets::CONTAINER_HF_TOKEN_PATH
+                ))
+            }
+            None => None,
+        };
 
         // Built as owned `String`s (several pieces are computed at runtime,
         // e.g. `publish_mapping`) then borrowed as `&str` for
@@ -1216,9 +1242,13 @@ impl ServingBackend for DockerBackend {
             "--volume".to_string(),
             volume_spec,
         ]);
-        if hf_token.is_some() {
-            args.push("--env".to_string());
-            args.push("HF_TOKEN".to_string());
+        if let Some(mount) = hf_token_mount {
+            args.extend([
+                "--volume".to_string(),
+                mount,
+                "--env".to_string(),
+                format!("HF_TOKEN_PATH={}", super::secrets::CONTAINER_HF_TOKEN_PATH),
+            ]);
         }
         args.push("--publish".to_string());
         args.push(publish_mapping);
@@ -1235,9 +1265,8 @@ impl ServingBackend for DockerBackend {
         }
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let env: Vec<(&str, &str)> = hf_token.map(|t| ("HF_TOKEN", t)).into_iter().collect();
         self.runner
-            .run_in_dir_with_env(".", &arg_refs, &env)
+            .run_in_dir_with_env(".", &arg_refs, &[])
             .inspect_err(|_| {
                 // `docker run -d` can create a container and still exit non-zero
                 // (it started and immediately died, or the daemon failed part

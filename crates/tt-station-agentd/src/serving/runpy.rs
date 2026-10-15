@@ -266,17 +266,28 @@ pub fn tool_call_parser_for(model: &str) -> Option<&'static str> {
     None
 }
 
-/// Build the `--vllm-override-args` JSON payload that enables tool calling
-/// with `parser`. Emitted with underscore keys (`enable_auto_tool_choice` /
-/// `tool_call_parser`) -- the exact form verified on this box's
+/// Build the `--vllm-override-args` JSON payload for a chat model:
+///
+/// - `enable_prompt_tokens_details`, always, so each reply's usage carries
+///   `prompt_tokens_details.cached_tokens` (prompt tokens served from the
+///   prefix cache), which Code's speed record reads. vLLM has had the flag
+///   since 0.6.4; every tt-inference-server release image on the box
+///   (0.10.0 through 0.19.0, and the 0.20.0 studio image) has it in its
+///   vLLM's `cli_args.py` -- checked 2026-10-15. run.py renders `true` as
+///   the bare flag.
+/// - tool calling with `parser` (`enable_auto_tool_choice` /
+///   `tool_call_parser`), when `parser` is `Some`.
+///
+/// Underscore keys -- the exact form verified on this box's
 /// tt-inference-server; run.py normalizes `-`/`_` either way. serde_json
 /// guarantees correct quoting/escaping of the value.
-fn tool_calling_override_args(parser: &str) -> String {
-    serde_json::json!({
-        "enable_auto_tool_choice": true,
-        "tool_call_parser": parser,
-    })
-    .to_string()
+pub fn vllm_override_args(parser: Option<&str>) -> String {
+    let mut args = serde_json::json!({ "enable_prompt_tokens_details": true });
+    if let Some(parser) = parser {
+        args["enable_auto_tool_choice"] = true.into();
+        args["tool_call_parser"] = parser.into();
+    }
+    args.to_string()
 }
 
 /// Everything `RunPyBackend` needs to build the real `run.py` invocation
@@ -1504,15 +1515,21 @@ impl ServingBackend for RunPyBackend {
             args.push(ids.clone());
         }
 
-        // Enable OpenAI-style tool calling for families we know the vLLM
-        // parser for (see `enable_tool_calling` / `tool_call_parser_for`).
-        // `run_model` is the org-stripped short name the parser heuristic
-        // expects. Unknown families add nothing -- no guessed parser.
-        if self.config.enable_tool_calling {
-            if let Some(parser) = tool_call_parser_for(run_model) {
-                args.push("--vllm-override-args".to_string());
-                args.push(tool_calling_override_args(parser));
-            }
+        // For the chat families we know the vLLM parser for (see
+        // `enable_tool_calling` / `tool_call_parser_for`): cached-token
+        // reporting, and OpenAI-style tool calling unless it's turned off --
+        // see `vllm_override_args`. `run_model` is the org-stripped short
+        // name the parser heuristic expects. Unknown families (and media
+        // models, which aren't vLLM) add nothing -- no guessed flags.
+        //
+        // Nothing to undo for `/metrics`: neither run.py nor the images'
+        // `run_vllm_api_server.py` pass `--disable-log-stats`, so vLLM's
+        // prefix-cache counters are already exported on this path.
+        if let Some(parser) = tool_call_parser_for(run_model) {
+            args.push("--vllm-override-args".to_string());
+            args.push(vllm_override_args(
+                self.config.enable_tool_calling.then_some(parser),
+            ));
         }
 
         // `--serve-with tt`: hand the launch to the official Tenstorrent CLI
