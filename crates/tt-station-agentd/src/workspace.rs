@@ -2662,7 +2662,7 @@ pub(crate) async fn post_rename(
     if title.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "Give it a name."));
     }
-    if title.len() > 120 {
+    if title.chars().count() > 120 {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "Keep the name under 120 characters.",
