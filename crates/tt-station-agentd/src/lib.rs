@@ -12,6 +12,7 @@ pub mod authkeys;
 pub mod bench;
 pub mod bringup;
 pub mod coding;
+pub mod codespeed;
 pub mod community;
 pub mod routines;
 pub mod download;

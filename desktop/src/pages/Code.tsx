@@ -29,6 +29,7 @@ import { Eyebrow, MoreMenu, toastError, toastOk, usePoll, writeClipboard } from 
 import { ask, askText } from "../dialog";
 import { navigate } from "../App";
 import { FolderBrowser } from "./Terminals";
+import { CodeModelButton, SpeedStrip } from "./CodeSpeed";
 
 interface Sess { id: string; folder: string; title: string; created: number; last: number; sandbox: boolean; policy: string; running: boolean; busy: boolean; waiting: number; changes: number; always: string[]; think: boolean }
 interface Activity { seconds: number; phase: string; tool: string | null; tokens: number; tokens_per_s: number; context_tokens: number; session?: string | null }
@@ -136,6 +137,7 @@ function NewSession({ d, onCreated, onCancel }: { d: Overview; onCreated: (s: Se
       </div>
       {!d.claude && <Admonition variant="warning" subtle size="sm">Code's agent engine isn't installed on the box. Install it with <code>npm i -g @anthropic-ai/claude-code</code>.</Admonition>}
       {d.check.level !== "ok" && <Admonition variant={d.check.level === "block" ? "warning" : "info"} subtle size="sm">{d.check.why}</Admonition>}
+      <div className="code-new-model muted">Runs on <CodeModelButton model={d.check.model} />, the model the box is serving.</div>
 
       <div className="code-step">
         <span className="code-step-num">1</span>
@@ -508,7 +510,7 @@ function SessionPane({ s, check, onChanged, onForgotten }: { s: Sess; check: Ove
           <button className="code-head-title" onClick={() => void rename()} title="Rename this session">{live.title}</button>
           <div className="code-head-meta">
             <span className="mono" title={live.folder}>{live.folder.replace(/^\/home\/[^/]+/, "~")}</span>
-            <span>{check.model?.split("/").pop() ?? "the box's model"}</span>
+            <span><CodeModelButton model={check.model} /></span>
             {live.sandbox ? <span title="It sees only this folder, with no internet">🔒 Sandbox</span>
               : <span className="warn" title="It runs on the box as you, like a terminal">Runs as you</span>}
             <span title={policy?.label}>{policy?.short}</span>
@@ -526,6 +528,7 @@ function SessionPane({ s, check, onChanged, onForgotten }: { s: Sess; check: Ove
           ]} />
         </div>
       </div>
+      <SpeedStrip session={s.id} working={working} />
       {trouble && <div className="code-trouble" role="status">Can't reach the box right now ({trouble}). Retrying…</div>}
       <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
         <div className="chat-thread code-thread">

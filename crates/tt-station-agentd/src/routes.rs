@@ -4223,6 +4223,8 @@ pub fn app(state: AppState) -> Router {
         .route("/code/sessions/{id}/forget", post(crate::workspace::post_forget))
         .route("/code/sessions/{id}/settings", post(crate::workspace::post_settings))
         .route("/code/sessions/{id}/rename", post(crate::workspace::post_rename))
+        .route("/code/sessions/{id}/speed", get(crate::codespeed::get_speed))
+        .route("/code/models", get(crate::codespeed::get_models))
         .route("/coding", get(crate::coding::get_coding))
         .route("/coding/sessions", post(crate::coding::post_session))
         .route("/coding/sessions/{id}", axum::routing::delete(crate::coding::delete_session))
