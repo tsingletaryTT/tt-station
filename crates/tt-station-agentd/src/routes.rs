@@ -1562,7 +1562,7 @@ impl AppState {
                 // a failure worth showing.
                 let stopping = self.lifecycle().phase == Phase::Stopping;
                 if !stopping {
-                    eprintln!("tt-station-agentd: start of {model} failed: {e:#}");
+                    crate::log!(error, "start of {model} failed: {e:#}");
                     self.set_lifecycle(
                         Phase::Failed,
                         Some(model.to_string()),
@@ -2220,6 +2220,11 @@ struct StatusResponse {
     /// `reason` and the `restart` action (`POST /doctor/fix/restart_model`).
     /// `status` stays `serving:<id>` either way -- older clients parse it.
     model_health: crate::liveness::Health,
+    /// This build, the API generation it speaks, and the oldest client API
+    /// generation it still serves (see `crate::health`).
+    agent_version: &'static str,
+    api_version: u32,
+    min_client: u32,
 }
 
 async fn get_status(
@@ -2238,6 +2243,9 @@ async fn get_status(
         mac: state.mac().map(str::to_string),
         leasing,
         model_health: state.liveness().health(),
+        agent_version: crate::health::AGENT_VERSION,
+        api_version: crate::health::API_VERSION,
+        min_client: crate::health::MIN_CLIENT,
     })
 }
 
@@ -4119,6 +4127,7 @@ async fn post_security(
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/status", get(get_status))
+        .route("/healthz", get(crate::health::healthz))
         .route("/config", get(get_config))
         .route("/models", get(get_models))
         .route("/serving", get(get_serving))

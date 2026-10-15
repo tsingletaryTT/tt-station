@@ -30,6 +30,7 @@ pub mod doctor;
 pub mod fsio;
 pub mod gateway;
 pub mod gozer;
+pub mod health;
 pub mod hermes;
 pub mod idle;
 pub mod history;
