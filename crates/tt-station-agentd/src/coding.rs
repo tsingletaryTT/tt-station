@@ -243,14 +243,7 @@ fn all(state: &AppState) -> Vec<Session> {
 
 /// `git status --porcelain` lines in the folder (empty when it isn't a repository).
 pub(crate) fn changed_files(folder: &str) -> Vec<String> {
-    Command::new("git")
-        .args(["-C", folder, "status", "--porcelain"])
-        .stdin(Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect())
-        .unwrap_or_default()
+    crate::safegit::changed_files(Path::new(folder), None)
 }
 
 fn describe(s: &Session) -> Value {
@@ -452,9 +445,9 @@ pub(crate) async fn delete_session(State(state): State<AppState>, _auth: BearerA
 pub(crate) async fn get_changes(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
     let s = load(&state, &id).filter(|_| valid_id(&id)).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
     let v = tokio::task::spawn_blocking(move || {
-        let git = |args: &[&str]| Command::new("git").arg("-C").arg(&s.folder).args(args).stdin(Stdio::null()).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+        let git = |args: &[&str]| crate::safegit::command(Path::new(&s.folder)).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string());
         let is_repo = git(&["rev-parse", "--is-inside-work-tree"]).is_some();
-        let mut diff = git(&["diff", "HEAD"]).or_else(|| git(&["diff"])).unwrap_or_default();
+        let mut diff = git(&["diff", "--no-ext-diff", "--no-textconv", "HEAD"]).or_else(|| git(&["diff", "--no-ext-diff", "--no-textconv"])).unwrap_or_default();
         // New files git doesn't track yet, shown whole.
         for f in changed_files(&s.folder).iter().filter(|l| l.starts_with("??")).take(20) {
             let name = f[3..].trim();

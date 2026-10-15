@@ -54,6 +54,7 @@ pub mod recorder;
 pub mod research;
 pub mod skills;
 pub mod routes;
+pub mod safegit;
 pub mod schedules;
 pub mod serving;
 pub mod telemetry;
