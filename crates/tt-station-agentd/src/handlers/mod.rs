@@ -13,4 +13,5 @@ pub mod security;
 pub mod serving;
 pub mod ssh;
 pub mod status;
+pub mod telemetry;
 pub mod ttcli;
