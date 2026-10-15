@@ -10,6 +10,7 @@
     "dev": "vite",
     "build": "tsc --noEmit -p . && vite build",
     "typecheck": "tsc --noEmit -p .",
+    "test": "node --test --experimental-strip-types test/*.test.ts",
     "start": "electron . --ozone-platform-hint=auto"
   },
   "dependencies": {
