@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::authkeys;
 use crate::pairing;
-use crate::serving::discovery::discover_serving;
+use crate::serving::discovery::discover_serving_cached;
 use crate::serving::docker::{CommandRunner, RealCommandRunner};
 use crate::serving::ServingBackend;
 use crate::telemetry;
@@ -1806,7 +1806,14 @@ impl AppState {
         if !matches!(stored, ServingStatus::Serving(_)) {
             return stored;
         }
-        let reconciled = if self.lifecycle().adopted {
+        // Reused for a moment while the serve state is unchanged: every open
+        // app polls this (see `discovery::DISCOVERY_TTL`).
+        static RECONCILED: crate::serving::discovery::Recent<ServingStatus> =
+            crate::serving::discovery::Recent::new();
+        let key = self.serve_key();
+        let reconciled = if let Some(r) = RECONCILED.get(&key) {
+            r
+        } else if self.lifecycle().adopted {
             // An adopted serve was never started by the backend, so the
             // backend's own record says idle; believe the serving port instead.
             let (host, port, probe) = (
@@ -1814,9 +1821,10 @@ impl AppState {
                 self.serving_port(),
                 stored.clone(),
             );
+            let k = key.clone();
             let alive = tokio::task::spawn_blocking(move || {
                 let runner = RealCommandRunner;
-                discover_serving(&runner, &host, port, &probe)
+                discover_serving_cached(&runner, &k, &host, port, &probe)
                     .iter()
                     .any(|e| e.host_port == port)
             })
@@ -1851,6 +1859,7 @@ impl AppState {
                 // (never worse than today's behavior).
                 .unwrap_or_else(|| stored.clone())
         };
+        RECONCILED.put(&key, reconciled.clone());
         if matches!(reconciled, ServingStatus::Idle) {
             // Stale-positive: the serve is gone. Heal the stored state
             // (clears the endpoint + re-advertises Idle over mDNS).
@@ -1860,6 +1869,14 @@ impl AppState {
             }
         }
         reconciled
+    }
+
+    /// The agent's own serve state in one string (status and lifecycle), for
+    /// keying what is cached about it: any start, stop or phase change gives a
+    /// new key, so nothing cached before it is reused after.
+    pub(crate) fn serve_key(&self) -> String {
+        let l = self.lifecycle();
+        format!("{:?}|{:?}|{}|{:?}|{:?}|{}", self.status(), l.phase, l.since, l.model, l.served_id, l.adopted)
     }
 
     /// Snapshot the currently-serving `Endpoint`, or `None` if idle.
@@ -3216,10 +3233,11 @@ async fn get_serving(
     let serving_host = state.serving_host().to_string();
     let serving_port = state.serving_port();
     let status = state.status();
+    let key = state.serve_key();
 
     let serving = tokio::task::spawn_blocking(move || {
         let runner = RealCommandRunner;
-        discover_serving(&runner, &serving_host, serving_port, &status)
+        discover_serving_cached(&runner, &key, &serving_host, serving_port, &status)
     })
     .await
     // A join failure (the blocking task panicked) is reported as "nothing
@@ -4318,8 +4336,21 @@ pub fn app(state: AppState) -> Router {
 /// How often the recorder samples the box.
 pub const METRICS_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How often the recorder runs `tt-smi -s` itself. A `/telemetry` viewer's
+/// reading (shared through `cached_snapshot`) is used whenever there is a fresh
+/// one; with nobody watching, a chip reading every 30 s is plenty for the
+/// dashboards' history, and each `tt-smi` touches the chips a model is using.
+pub const CHIPS_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Whether the recorder should read the chips itself now: no viewer has paid
+/// for a fresh reading, and its own last one (if any) is [`CHIPS_INTERVAL`] old.
+fn chips_due(last_read: Option<Instant>) -> bool {
+    last_read.is_none_or(|t| t.elapsed() >= CHIPS_INTERVAL)
+}
+
 /// Sample the box every [`METRICS_INTERVAL`] for as long as the agent runs:
-/// chip telemetry (the same deduplicated `tt-smi -s` `/telemetry` uses) and the
+/// chip telemetry (a `/telemetry` viewer's fresh reading, else its own every
+/// [`CHIPS_INTERVAL`] through the same deduplicated `tt-smi -s`) and the
 /// served model's metrics (the same scrape tt-toplike's view uses), into
 /// [`crate::history::History`]. Saves to `save_to` every minute.
 pub async fn record_metrics_forever(state: AppState, save_to: Option<PathBuf>) {
@@ -4328,21 +4359,29 @@ pub async fn record_metrics_forever(state: AppState, save_to: Option<PathBuf>) {
     let mut ticker = tokio::time::interval(METRICS_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut ticks: u64 = 0;
+    let mut chips: Vec<crate::history::ChipPoint> = Vec::new();
+    let mut chips_read: Option<Instant> = None;
     loop {
         ticker.tick().await;
         ticks += 1;
         let now = unix_now();
-        let chips = state
-            .cached_snapshot()
-            .await
-            .map(|json| crate::history::chips_from_snapshot(&json))
-            .unwrap_or_default();
+        // Between readings a point carries the last one.
+        if let Some(json) = state.peek_snapshot(METRICS_INTERVAL) {
+            chips = crate::history::chips_from_snapshot(&json);
+        } else if chips_due(chips_read) {
+            chips_read = Some(Instant::now());
+            chips = state
+                .cached_snapshot()
+                .await
+                .map(|json| crate::history::chips_from_snapshot(&json))
+                .unwrap_or_default();
+        }
         let scrape = scrape_vllm_metrics(resolve_metrics_port(&state)).await;
         let info = sampler.tick(&state.status(), scrape.as_deref());
         let serving = info.as_ref().and_then(|i| i.serving);
         let point = crate::history::Point {
             t: now,
-            chips,
+            chips: chips.clone(),
             gen_tps: serving.as_ref().map(|s| s.generation_tps),
             prompt_tps: serving.as_ref().map(|s| s.prompt_tps),
             running: serving.as_ref().map(|s| s.requests_running),
@@ -5260,6 +5299,53 @@ mod telemetry_inference_tests {
             "tt-smi ran once within the TTL, not per call (got {runs})"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_recorder_reads_the_chips_every_thirty_seconds_on_its_own() {
+        assert!(chips_due(None), "the first tick reads them");
+        assert!(!chips_due(Some(Instant::now())));
+        assert!(!chips_due(Some(Instant::now() - METRICS_INTERVAL * 5)));
+        assert!(chips_due(Some(Instant::now() - CHIPS_INTERVAL)));
+    }
+
+    #[tokio::test]
+    async fn concurrent_telemetry_viewers_share_one_tt_smi() {
+        // Eight `/telemetry` sockets ticking at once (each tick is a
+        // `cached_snapshot`) run tt-smi once between them, not once each.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ttsmi-herd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let counter = dir.join("count");
+        let _ = std::fs::remove_file(&counter);
+        let script = dir.join("tt-smi-stub.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf x >> '{c}'\nsleep 0.3\nprintf '{{\"device_info\":[]}}'\n",
+                c = counter.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let state = AppState::new(
+            "t".to_string(),
+            "1xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_telemetry_config(script.to_string_lossy().into_owned(), 1_000);
+        let ticks: Vec<_> = (0..8)
+            .map(|_| {
+                let st = state.clone();
+                tokio::spawn(async move { st.cached_snapshot().await.is_ok() })
+            })
+            .collect();
+        for t in ticks {
+            assert!(t.await.unwrap());
+        }
+        let runs = std::fs::read(&counter).map(|v| v.len()).unwrap_or(0);
+        assert_eq!(runs, 1, "eight viewers, one tt-smi (got {runs})");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

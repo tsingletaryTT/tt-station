@@ -16,9 +16,67 @@
 //! (`routes::get_serving`) is a thin wrapper that runs this on
 //! `spawn_blocking` with a `RealCommandRunner`.
 
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use libttstation::model::{ServingEntry, ServingStatus};
 
 use super::docker::CommandRunner;
+
+/// How long a look at docker is reused. `/status` and `/serving` are polled by
+/// every open app (and by the assistant), each look is a `docker ps` plus a
+/// `/v1/models` probe per candidate, and what is serving changes in minutes,
+/// not seconds -- and when the agent itself changes it, the key changes too.
+pub const DISCOVERY_TTL: Duration = Duration::from_secs(2);
+
+/// A value reused for [`DISCOVERY_TTL`] while its key is unchanged.
+pub struct Recent<T> {
+    slot: Mutex<Option<(Instant, String, T)>>,
+}
+
+impl<T: Clone> Recent<T> {
+    pub const fn new() -> Self {
+        Self { slot: Mutex::new(None) }
+    }
+
+    /// The value stored under `key` if it is younger than [`DISCOVERY_TTL`].
+    pub fn get(&self, key: &str) -> Option<T> {
+        let slot = self.slot.lock().expect("discovery cache");
+        let (at, k, v) = slot.as_ref()?;
+        (k == key && at.elapsed() < DISCOVERY_TTL).then(|| v.clone())
+    }
+
+    pub fn put(&self, key: &str, value: T) {
+        *self.slot.lock().expect("discovery cache") = Some((Instant::now(), key.to_string(), value));
+    }
+}
+
+impl<T: Clone> Default for Recent<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static DISCOVERED: Recent<Vec<ServingEntry>> = Recent::new();
+
+/// [`discover_serving`], reused for [`DISCOVERY_TTL`] while `serve_key` (the
+/// agent's own serve state: what it serves and the phase it is in) and the
+/// arguments are unchanged, so a start or stop by the agent is seen at once.
+pub fn discover_serving_cached(
+    runner: &dyn CommandRunner,
+    serve_key: &str,
+    serving_host: &str,
+    agent_port: u16,
+    agent_status: &ServingStatus,
+) -> Vec<ServingEntry> {
+    let key = format!("{serve_key}|{serving_host}|{agent_port}|{agent_status:?}");
+    if let Some(entries) = DISCOVERED.get(&key) {
+        return entries;
+    }
+    let entries = discover_serving(runner, serving_host, agent_port, agent_status);
+    DISCOVERED.put(&key, entries.clone());
+    entries
+}
 
 /// Substring an image name must contain (case-insensitive) to be considered a
 /// serving candidate. Matches the release image repo
@@ -385,6 +443,32 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("nothing listening on {port}"))
         }
+    }
+
+    #[test]
+    fn a_look_at_docker_is_reused_until_the_serve_state_changes() {
+        let ps = "c1\tghcr.io/tenstorrent/tt-inference-server:x\t0.0.0.0:8003->8000/tcp\tm";
+        let runner = FakeProbe::new(Some(ps), &[(8003, r#"{"data":[{"id":"m"}]}"#)]);
+        let probes = || runner.probed.lock().unwrap().len();
+        let status = ServingStatus::Serving("m".into());
+        let a = discover_serving_cached(&runner, "test-reuse|serving", "h", 8003, &status);
+        let b = discover_serving_cached(&runner, "test-reuse|serving", "h", 8003, &status);
+        assert_eq!((a.len(), a, probes()), (1, b, 1), "the second look reuses the first");
+        // The agent started or stopped something: look again.
+        discover_serving_cached(&runner, "test-reuse|stopping", "h", 8003, &status);
+        assert_eq!(probes(), 2);
+        // A different status for the same key is a different question too.
+        discover_serving_cached(&runner, "test-reuse|stopping", "h", 8003, &ServingStatus::Idle);
+        assert_eq!(probes(), 3);
+    }
+
+    #[test]
+    fn a_recent_value_expires() {
+        let r: Recent<u32> = Recent::new();
+        r.put("k", 1);
+        assert_eq!((r.get("k"), r.get("other")), (Some(1), None));
+        *r.slot.lock().unwrap() = Some((Instant::now() - DISCOVERY_TTL, "k".into(), 1));
+        assert_eq!(r.get("k"), None);
     }
 
     /// The happy path over a mixed `docker ps`: a matching container with a
