@@ -400,6 +400,8 @@ function sshPair(host, user, password) {
       try { r = JSON.parse(last); } catch { /* not ours */ }
       if (r) return r.error ? reject(Object.assign(new Error(r.error), { kind: "device" })) : resolve(r);
       const e = err.toLowerCase();
+      // A hardened box (deploy/harden-box.sh) offers keys only: "Permission denied (publickey)".
+      if (password && e.includes("permission denied (publickey)")) return reject(Object.assign(new Error("This device doesn't accept passwords over SSH, only keys. Use a pairing code instead."), { kind: "keys-only" }));
       if (e.includes("permission denied")) return reject(Object.assign(new Error(password ? "That username and password didn't work." : "No SSH key of yours is let in."), { kind: "auth" }));
       if (e.includes("host key verification failed") || e.includes("remote host identification has changed"))
         return reject(new Error(`${host}'s SSH identity changed since this computer last saw it. If that's expected, remove its line from ~/.ssh/known_hosts and try again.`));

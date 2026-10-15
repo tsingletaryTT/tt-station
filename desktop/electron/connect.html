@@ -93,14 +93,14 @@
         <input id="user" placeholder="Username" value="ttuser" spellcheck="false" autocapitalize="off" autocomplete="username">
         <input id="password" type="password" placeholder="Password" autocomplete="current-password">
       </div>
-      <p class="hint">The password goes straight to the device over SSH, only to let this Mac in. TT Station doesn't keep it.</p>
+      <p class="hint">The password goes straight to the device over SSH, only to let this computer in. TT Station doesn't keep it. Devices set up to accept SSH keys only need a pairing code instead.</p>
       <div class="error" id="login-error"></div>
       <div class="row" style="margin-top: 12px; justify-content: space-between">
         <button class="ghost" id="login-back">Back</button>
         <button class="primary" id="login-go">Connect</button>
       </div>
     </div>
-    <p class="alt"><button class="link" id="use-code">Use a pairing code instead</button> <span class="muted">— for when someone else has the device's login</span></p>
+    <p class="alt"><button class="link" id="use-code">Use a pairing code instead</button> <span class="muted">(works on every device, including ones that only accept SSH keys)</span></p>
   </section>
 
   <section id="code" hidden>
