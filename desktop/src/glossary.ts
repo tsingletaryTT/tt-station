@@ -26,6 +26,15 @@ export const TERMS = {
   mode: "mode",
   /** Developer tools: Bring-up, Terminals, the silicon check and chip leases. */
   developerTools: "Developer tools",
+  /** A job the box does on its own, on a timetable or when run; switching modes at set times is one. Never "schedule" in copy. */
+  routine: "routine",
+  /** The one list of everything waiting for this person's OK, under the bell at the top right (the phone calls it "Waiting for you"). */
+  needsYou: "Needs you",
+  /** Settings' one place for devices: the list, pairing a phone or computer, other boxes, SSH keys. */
+  devicesAndPairing: "Devices and pairing",
+  /** Owners manage the box (devices, keys, power, updates); members use it. */
+  owner: "owner",
+  member: "member",
 } as const;
 
 /** One line each, for a "What do these words mean?" list. */
@@ -39,4 +48,7 @@ export const GLOSSARY: { term: string; means: string }[] = [
   { term: "Quick port", means: "A bring-up that grafts a fine-tune onto a model that already runs here." },
   { term: "Agent port", means: "A bring-up where a coding agent writes a new architecture's code." },
   { term: "Chip scheduler", means: "Hands the chips to one job at a time, so two never collide." },
+  { term: "Routine", means: "A job the box does on its own, when you run it or on a timetable, like a morning check or switching modes at set times." },
+  { term: "Needs you", means: "Everything waiting for your OK, from Code, routines and, for owners, bring-up and pairing, in one list: the bell at the top right of the window." },
+  { term: "Owner and member", means: "Owners manage the box: devices, keys, power and updates. Members use it." },
 ];

@@ -139,8 +139,9 @@ pub struct Job {
     /// The mode the queue switched away from, to put back afterwards.
     #[serde(default)]
     pub restore: Option<String>,
-    /// The paired device that started it; `None` for the box itself (and the
-    /// recorder, which doesn't say), which only owners see unless shared.
+    /// The paired device that started it (for the recorder, the one that
+    /// started the recording); `None` for the box itself, which only owners see
+    /// unless shared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_by: Option<String>,
     /// That device's name, for lists.
@@ -388,7 +389,7 @@ impl Jobs {
     }
 
     /// Queue a job whose input file is already in [`Jobs::job_dir`]. For callers
-    /// that don't know who asked or what they chose (the recorder): `true`
+    /// that don't know who asked or what they chose: `true`
     /// leaves the Library and the audio to the household defaults, `false`
     /// keeps the transcript out of the Library.
     pub fn add(&self, id: String, kind: &str, title: &str, when: When, to_documents: bool) -> Job {
@@ -1355,7 +1356,7 @@ mod tests {
         let mut theirs = mine.clone();
         theirs.started_by = Some("phone-b".into());
         let mut boxes = mine.clone();
-        boxes.started_by = None; // the recorder, or the box itself
+        boxes.started_by = None; // the box itself
         let (a, owner) = (device("phone-a", false), device("laptop", true));
         assert!(visible(&mine, &a));
         assert!(!visible(&theirs, &a), "someone else's");

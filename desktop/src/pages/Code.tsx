@@ -27,6 +27,7 @@ import remarkGfm from "remark-gfm";
 import { ago, ApiError, del, get, post } from "../api";
 import { Eyebrow, MoreMenu, toastError, toastOk, usePoll, writeClipboard } from "../ui";
 import { ask, askText } from "../dialog";
+import { startConfirmingSharedFolder } from "../sharedFolder";
 import { reuse } from "../render";
 import { navigate } from "../App";
 import { FolderBrowser } from "./Terminals";
@@ -124,7 +125,10 @@ function NewSession({ d, onCreated, onCancel }: { d: Overview; onCreated: (s: Se
     if (busy) return;
     setBusy(true);
     setProjects([]);
-    try { const r = await post<{ session: Sess }>("/code/sessions", { folder, sandbox, think, policy: !sandbox && policy === "auto" ? "ask" : policy }); onCreated(r.session); }
+    try {
+      const r = await startConfirmingSharedFolder<{ session: Sess }>("/code/sessions", { folder, sandbox, think, policy: !sandbox && policy === "auto" ? "ask" : policy });
+      if (r) onCreated(r.session);
+    }
     catch (e) {
       const list = e instanceof ApiError ? (e.body as { projects?: string[] })?.projects : undefined;
       if (list?.length) setProjects(list); else toastError(e);

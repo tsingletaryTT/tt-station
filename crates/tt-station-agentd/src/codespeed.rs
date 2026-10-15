@@ -17,8 +17,9 @@
 //! what the server says (cached tokens in its answers, its `/metrics`) and
 //! failing that from the flags it was launched with.
 //!
-//! - `GET /code/sessions/{id}/speed` (authed): a session's recent steps, its
-//!   context against the compaction point and the window, and the prefix cache.
+//! - `GET /code/sessions/{id}/speed` (authed; for a member, sandboxed sessions
+//!   only): a session's recent steps, its context against the compaction point
+//!   and the window, and the prefix cache.
 //! - `GET /code/models` (authed): the models Code can use on this box, each with
 //!   its window, prefix caching, measured speed, and what choosing it would do.
 //!   Choosing one that isn't serving goes through `POST /serve`, like Models.
@@ -34,7 +35,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::routes::{AppState, BearerAuth, Phase};
+use crate::routes::{AppState, BearerAuth, CallerAuth, Phase};
 
 type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
@@ -606,11 +607,14 @@ pub fn decide(c: &Candidate, s: &Serving) -> Choice {
 // ---------------------------------------------------------------- routes
 
 /// `GET /code/sessions/{id}/speed`.
+/// A member reads only sandboxed sessions' (`workspace::may_use`).
 pub(crate) async fn get_speed(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
+    crate::workspace::may_use(&state, &caller, &id)?;
     if !crate::workspace::exists(&state, &id) {
         return Err((
             StatusCode::NOT_FOUND,

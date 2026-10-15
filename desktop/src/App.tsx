@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 // The app's frame: a sidebar of places, the box's live state at the bottom of
-// it, and the current place on the right. Routes live under /app/.
+// it, and the current place on the right under a slim top bar with the
+// notifications bell (Needs you). Routes live under /app/.
 
 import { type ComponentType, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -20,6 +21,7 @@ import { adoptFromBox, placeVisible, storedChoice, useDevTools } from "./devtool
 import { OfflineBanner } from "./OfflineBanner";
 import { RecordingBanner } from "./RecordingBanner";
 import { useConnectivity } from "./connectivity";
+import { NotificationBell } from "./NotificationBell";
 
 // Every place but Home loads when it's first opened, so the app starts on Home
 // without waiting for screens it may not need.
@@ -38,9 +40,10 @@ const Discover = named(() => import("./pages/Discover"), "Discover");
 const Settings = named(() => import("./pages/Settings"), "Settings");
 const Routines = named(() => import("./pages/Routines"), "Routines");
 const Library = named(() => import("./pages/Library"), "Library");
+const Inbox = named(() => import("./pages/Inbox"), "Inbox");
 const ToriWindow = named(() => import("./Tori"), "ToriWindow");
 
-export type Route = "home" | "chat" | "studio" | "research" | "code" | "terminals" | "models" | "bringup" | "orchard" | "hardware" | "discover" | "connect" | "routines" | "library" | "settings";
+export type Route = "home" | "inbox" | "chat" | "studio" | "research" | "code" | "terminals" | "models" | "bringup" | "orchard" | "hardware" | "discover" | "connect" | "routines" | "library" | "settings";
 
 const PLACES: { route: Route; label: string; icon: IconKind; group: number }[] = [
   { route: "home", label: "Home", icon: "quietbox", group: 0 },
@@ -59,16 +62,21 @@ const PLACES: { route: Route; label: string; icon: IconKind; group: number }[] =
   { route: "settings", label: "Settings", icon: "gear", group: 2 },
 ];
 
+/** Places with an address but no sidebar entry: Needs you opens from the bell's "See everything". */
+const UNLISTED: Route[] = ["inbox"];
+
 function routeFromPath(): Route {
   const r = location.pathname.replace(/^\/app\/?/, "").split("/")[0] as Route;
   // Orchard (Quick port) is one of Bring-up's ways; its old address still opens it there.
-  return r === "orchard" ? "bringup" : PLACES.some((p) => p.route === r) ? r : "home";
+  return r === "orchard" ? "bringup" : PLACES.some((p) => p.route === r) || UNLISTED.includes(r) ? r : "home";
 }
 
-export function navigate(route: Route) {
+/** Opens a place; `hash` picks something in it (a Code session, a run, a Settings section). */
+export function navigate(route: Route, hash?: string) {
   const path = route === "orchard" ? "bringup#orchard" : route === "home" ? "" : route;
-  history.pushState(null, "", `/app/${path}`);
+  history.pushState(null, "", `/app/${path}${hash ? `#${hash}` : ""}`);
   window.dispatchEvent(new PopStateEvent("popstate"));
+  if (hash) window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
 
 export function App() {
@@ -163,6 +171,7 @@ function Shell() {
     case "orchard": page = <BringupPage />; break;
     case "routines": page = <Routines />; break;
     case "library": page = <Library />; break;
+    case "inbox": page = <Inbox />; break;
     case "hardware": page = <Hardware />; break;
     case "discover": page = <Discover />; break;
     case "connect": page = <Connect />; break;
@@ -173,11 +182,16 @@ function Shell() {
   return (
     <div className="shell">
       <Sidebar route={route} places={places} />
-      <main className="content" key={route}>
-        <OfflineBanner />
-        <RecordingBanner />
-        <Suspense fallback={<div className="page-loading" role="status" aria-label="Loading" />}>{page}</Suspense>
-      </main>
+      <div className="main-col">
+        <header className="topbar">
+          <NotificationBell />
+        </header>
+        <main className="content" key={route}>
+          <OfflineBanner />
+          <RecordingBanner />
+          <Suspense fallback={<div className="page-loading" role="status" aria-label="Loading" />}>{page}</Suspense>
+        </main>
+      </div>
       <Toasts />
     </div>
   );
@@ -210,7 +224,7 @@ function Sidebar({ route, places }: { route: Route; places: typeof PLACES }) {
             <button className={`nav-item ${route === p.route ? "active" : ""}`} onClick={() => navigate(p.route)}
               aria-current={route === p.route ? "page" : undefined} title={i < 9 ? `${p.label} (Ctrl+${i + 1})` : p.label}>
               <Icon kind={p.icon} className="nav-icon" aria-hidden />
-              <span>{p.label}</span>
+              <span className="grow">{p.label}</span>
             </button>
           </div>
         ))}
@@ -266,14 +280,14 @@ function TokenGate({ onDone }: { onDone: () => void }) {
 
 type Boxes = { current: string; boxes: { id: string; name: string; host: string; local: boolean }[] };
 
-/** Which box this window shows, and pairing another (desktop app only). */
+/**
+ * Which box this window shows (desktop app only). Pairing lives in one place,
+ * Settings → Devices and pairing; this menu only points there, and "Add
+ * another box" opens the same connect screen a new computer starts on.
+ */
 function BoxSwitcher() {
   const [open, setOpen] = useState(false);
   const [list, setList] = useState<Boxes | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [link, setLink] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const load = () => { void window.ttDesktop?.boxes?.().then(setList); };
   useEffect(load, []);
   // The menu is drawn on top of the whole window (the sidebar's blur makes it
@@ -292,21 +306,14 @@ function BoxSwitcher() {
   }, [open]);
   useEffect(() => {
     if (!open) return;
-    const shut = () => { setOpen(false); setAdding(false); setError(null); };
+    const shut = () => setOpen(false);
     const close = (e: MouseEvent) => { if (!(e.target as HTMLElement).closest(".box-switcher, .box-switcher-menu")) shut(); };
     const esc = (e: KeyboardEvent) => { if (e.key === "Escape") { shut(); button.current?.focus(); } };
     window.addEventListener("mousedown", close);
     window.addEventListener("keydown", esc);
     return () => { window.removeEventListener("mousedown", close); window.removeEventListener("keydown", esc); };
   }, [open]);
-  const add = async () => {
-    setBusy(true); setError(null);
-    const r = await window.ttDesktop!.addBox!(link);
-    setBusy(false);
-    if (!r.ok) { setError(r.error ?? "It didn't work."); return; }
-    setLink(""); setAdding(false); setOpen(false);
-    await window.ttDesktop!.switchBox!(r.id!);
-  };
+  const toPairing = () => { setOpen(false); navigate("settings", "devices"); };
   const several = (list?.boxes.length ?? 0) > 1;
   return (
     <div className="box-switcher">
@@ -323,21 +330,13 @@ function BoxSwitcher() {
               {b.id === list.current && <Icon kind="checkmark" style={{ width: 14, height: 14 }} />}
             </button>
           ))}
-          {adding ? (
-            <div className="stack" style={{ gap: 6, padding: 8 }}>
-              <span className="muted" style={{ fontSize: 12 }}>On the other box: TT Station → Settings → Pairing and security → <b>Pair another computer</b>. Paste its link here.</span>
-              <TextInput size="sm" value={link} onChange={(e) => setLink(e.target.value)} placeholder="ttstation://pair?…" autoFocus />
-              {error && <span className="box-switcher-error">{error}</span>}
-              <div className="row" style={{ gap: 6 }}>
-                <Button size="xs" disabled={busy || !link.trim().startsWith("ttstation://")} onClick={add}>{busy ? "Pairing…" : "Pair"}</Button>
-                <Button size="xs" variant="ghost" onClick={() => { setAdding(false); setError(null); }}>Cancel</Button>
-              </div>
-            </div>
-          ) : (
-            <button className="box-switcher-item" onClick={() => { if (window.ttDesktop?.showConnect) { setOpen(false); void window.ttDesktop.showConnect(); } else setAdding(true); }}>
-              <Icon kind="add" style={{ width: 14, height: 14 }} aria-hidden /> Add another box…
-            </button>
-          )}
+          <div className="box-switcher-gap" role="separator" />
+          <button role="menuitem" className="box-switcher-item" onClick={() => { if (window.ttDesktop?.showConnect) { setOpen(false); void window.ttDesktop.showConnect(); } else toPairing(); }}>
+            <Icon kind="add" style={{ width: 14, height: 14 }} aria-hidden /> Add another box…
+          </button>
+          <button role="menuitem" className="box-switcher-item" onClick={toPairing}>
+            <Icon kind="phone" style={{ width: 14, height: 14 }} aria-hidden /> Pair a phone or computer with {boxName}…
+          </button>
         </div>,
         document.body,
       )}

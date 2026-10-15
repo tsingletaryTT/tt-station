@@ -691,7 +691,7 @@ enum AgentError: LocalizedError {
         switch self {
         case .http(401, _): return "This phone isn't paired with the box any more. Pair again."
         case .insecure:
-            return "Pair again to connect securely: scan the pairing code shown in TT Station on the box (Settings → Pairing and security)."
+            return "Pair again to connect securely: scan the pairing code shown in TT Station on the box (Settings → Devices and pairing)."
         case .http(_, let message): return message
         case .notPaired: return "Pair with the box first."
         case .badHost(let host): return "Can't make an address from \"\(host)\"."
@@ -1489,6 +1489,12 @@ enum PinnedSession {
         sessions[sha256] = session
         return session
     }
+
+    /// Whether a certificate (its DER bytes) is the pinned one: its SHA-256, in
+    /// hex, equals `sha256` (either case).
+    static func matches(certificateDER der: Data, sha256: String) -> Bool {
+        SHA256.hash(data: der).map { String(format: "%02x", $0) }.joined() == sha256.lowercased()
+    }
 }
 
 private final class PinningDelegate: NSObject, URLSessionDelegate {
@@ -1503,8 +1509,8 @@ private final class PinningDelegate: NSObject, URLSessionDelegate {
             return (.performDefaultHandling, nil)
         }
         let der = SecCertificateCopyData(leaf) as Data
-        let digest = SHA256.hash(data: der).map { String(format: "%02x", $0) }.joined()
-        return digest == sha256 ? (.useCredential, URLCredential(trust: trust)) : (.cancelAuthenticationChallenge, nil)
+        return PinnedSession.matches(certificateDER: der, sha256: sha256)
+            ? (.useCredential, URLCredential(trust: trust)) : (.cancelAuthenticationChallenge, nil)
     }
 }
 

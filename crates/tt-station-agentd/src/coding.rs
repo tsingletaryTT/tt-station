@@ -21,7 +21,9 @@
 //!
 //! - `GET /coding`: agents, sessions, recent folders, and whether the served
 //!   model suits coding agents (`check`).
-//! - `POST /coding/sessions`: `{agent, folder, task?}`; `POST /coding/sessions/{id}/stop`;
+//! - `POST /coding/sessions`: `{agent, folder, task?, confirm_shared?}` (`409` with
+//!   `needs_confirm: "shared_folder"` when a member's sandbox used the folder,
+//!   `crate::workspace::check_shared_folder`); `POST /coding/sessions/{id}/stop`;
 //!   `DELETE /coding/sessions/{id}`; `GET /coding/sessions/{id}/changes` (git status and diff).
 //! - `GET /coding/folders?path=`: folders to pick from; `POST /coding/folders`: `{parent, name}`
 //!   makes a new project (a git repository).
@@ -192,10 +194,10 @@ pub(crate) fn key(state: &AppState) -> Result<String, String> {
         }
     }
     let (_, k) = state.app_keys().create("Coding sessions", now())?;
-    std::fs::create_dir_all(root(state)).map_err(|e| e.to_string())?;
-    std::fs::write(&path, &k).map_err(|e| e.to_string())?;
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    // Whole or not at all, owner-only from the first byte: a half-written key
+    // would be thrown away (and a new one made) at the next start.
+    crate::fsio::write_atomic(&path, k.as_bytes(), crate::fsio::PRIVATE)
+        .map_err(|e| e.to_string())?;
     Ok(k)
 }
 
@@ -236,7 +238,8 @@ fn launch(
                 c["projects"][&f] = json!({});
             }
             c["projects"][&f]["hasTrustDialogAccepted"] = json!(true);
-            let _ = std::fs::write(&cfg, serde_json::to_vec_pretty(&c).unwrap_or_default());
+            // Claude Code keeps its account details in here too: owner-only.
+            crate::fsio::save_json(&cfg, &c, crate::fsio::PRIVATE);
             // Its context window: the served model's own (it can't know "quietbox").
             let context = FIT
                 .lock()
@@ -271,7 +274,8 @@ fn launch(
                     "models": { "quietbox": { "name": format!("QuietBox ({})", model.rsplit('/').next().unwrap_or(&model)), "limit": { "context": 131072, "output": 16384 } } }
                 } }
             });
-            std::fs::write(&cfg, serde_json::to_vec_pretty(&config).unwrap_or_default())
+            // It holds the app key: owner-only.
+            crate::fsio::write_json(&cfg, &config, crate::fsio::PRIVATE)
                 .map_err(|e| e.to_string())?;
             (
                 vec![b],
@@ -332,9 +336,12 @@ fn load(state: &AppState, id: &str) -> Option<Session> {
 }
 
 fn save(state: &AppState, s: &Session) {
-    let _ = std::fs::write(
-        sessions_dir(state).join(&s.id).join("session.json"),
-        serde_json::to_vec_pretty(s).unwrap_or_default(),
+    // Atomic, so a crash mid-save can't leave a session that no longer loads
+    // (and so vanishes from the list while its unit keeps running).
+    crate::fsio::save_json(
+        &sessions_dir(state).join(&s.id).join("session.json"),
+        s,
+        crate::fsio::PRIVATE,
     );
 }
 
@@ -504,6 +511,9 @@ pub struct StartBody {
     pub folder: String,
     #[serde(default)]
     pub task: Option<String>,
+    /// Start even though a member's sandboxed Code session used the folder.
+    #[serde(default)]
+    pub confirm_shared: bool,
 }
 
 /// Only folders in the user's home (not the home itself, not hidden ones' insides).
@@ -647,6 +657,12 @@ pub(crate) async fn post_session(
         Ok(p) if agent.id == "shell" && p == home_dir => p,
         _ => allowed_folder(&body.folder).map_err(|e| err(StatusCode::BAD_REQUEST, e))?,
     };
+    // Every session here runs as the box's account: ask first where a member's
+    // sandbox left files. Not for a terminal in the home folder itself, which
+    // holds every project and so would always ask.
+    if folder != home_dir {
+        crate::workspace::check_shared_folder(&state, &folder, body.confirm_shared)?;
+    }
     if agent.id != "shell" && state.endpoint().is_none() {
         return Err(err(
             StatusCode::CONFLICT,
@@ -1038,6 +1054,82 @@ pub async fn watch_forever(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_state() -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_config_dir(dir.path().to_path_buf());
+        (dir, state)
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn the_coding_key_is_written_whole_and_owner_only() {
+        let (_dir, state) = temp_state();
+        let k = key(&state).unwrap();
+        let path = root(&state).join("key");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), k);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        // The same key comes back while it's valid, and no temp file is left over.
+        assert_eq!(key(&state).unwrap(), k);
+        assert!(
+            !names_in(&root(&state)).iter().any(|n| n.contains(".tmp-")),
+            "{:?}",
+            names_in(&root(&state))
+        );
+    }
+
+    #[test]
+    fn a_session_saves_and_loads_back_with_no_temp_files() {
+        let (_dir, state) = temp_state();
+        let s = Session {
+            id: "123-abcdef".into(),
+            agent: "claude".into(),
+            folder: "/h/projects/site".into(),
+            task: Some("fix the tests".into()),
+            created: 123,
+            ended: None,
+            exit: None,
+        };
+        save(&state, &s);
+        let mut back = load(&state, &s.id).unwrap();
+        assert_eq!(back.task.as_deref(), Some("fix the tests"));
+        assert_eq!(back.folder, s.folder);
+        back.ended = Some(200);
+        back.exit = Some(0);
+        save(&state, &back);
+        let again = load(&state, &s.id).unwrap();
+        assert_eq!((again.ended, again.exit), (Some(200), Some(0)));
+        let dir = sessions_dir(&state).join(&s.id);
+        assert_eq!(names_in(&dir), vec!["session.json".to_string()]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join("session.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
 
     #[test]
     fn members_folders_are_projects_not_the_box_own_software() {

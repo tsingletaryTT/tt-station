@@ -28,7 +28,7 @@ struct PairSheet: View {
                         .glassEffect(.regular.tint(Brand.accent.opacity(0.3)), in: .circle)
                     Text(target.map { "Pair with \($0.name)" } ?? "Pair a box")
                         .font(.tt(.title2).weight(.bold))
-                    Text("Scan the pairing code shown in TT Station on the box (Settings → Pairing and security).")
+                    Text("Scan the pairing code shown in TT Station on the box (Settings → Devices and pairing).")
                         .font(.tt(.subheadline))
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)

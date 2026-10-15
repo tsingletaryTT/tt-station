@@ -2,20 +2,22 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 // Hardware: the chips, live and over the last hour; the chips as tt-toplike
-// draws them; the serving log; and, with developer tools on, who holds which
+// draws them; energy use (the one place for it: Home shows today's and links
+// here, `#energy`); the serving log; and, with developer tools on, who holds which
 // chips (the chip scheduler, gozer) and the silicon check (gpt-oss straight on
 // the chips with tt-lab).
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@tenstorrent/vesper/button";
 import { Badge } from "@tenstorrent/vesper/badge";
 import { Select } from "@tenstorrent/vesper/select";
 import { TextArea } from "@tenstorrent/vesper/text-area";
+import { TextInput } from "@tenstorrent/vesper/text-input";
 import { Switch } from "@tenstorrent/vesper/switch";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { Admonition } from "@tenstorrent/vesper/admonition";
-import { authHeader, boxName, type Chip, get, hardwareLabel, short, type Status } from "../api";
-import { Card, Eyebrow, Page, Spark, tempTone, tempWord, toastError, usePoll, useTelemetry } from "../ui";
+import { authHeader, boxName, type Chip, get, hardwareLabel, type MetricsNow, short, type Status } from "../api";
+import { Card, Eyebrow, Page, Spark, Stat, tempTone, tempWord, toastError, usePoll, useTelemetry } from "../ui";
 import { useDevTools } from "../devtools";
 import { TopTerm } from "../TopTerm";
 import { askToStop } from "../dialog";
@@ -85,6 +87,8 @@ export function Hardware() {
         </Card>}
       </div>
 
+      <Energy watts={watts} />
+
       <div>
         <Card>
           <Eyebrow>Serving log</Eyebrow>
@@ -94,6 +98,48 @@ export function Hardware() {
 
       {devTools && <Lab />}
     </Page>
+  );
+}
+
+interface EnergyReport { months: { month: string; energy_kwh: number; tokens: number }[]; days: { day: string; energy_kwh: number }[] }
+
+const PRICE_KEY = "tt.price";
+function loadPrice(): number {
+  try { const v = Number(localStorage.getItem(PRICE_KEY) ?? "0.15"); return Number.isFinite(v) && v >= 0 ? v : 0.15; } catch { return 0.15; }
+}
+
+/** Energy use: today, this month with what it costs, and each day of the last month. */
+function Energy({ watts }: { watts: number }) {
+  const report = usePoll(() => get<EnergyReport>("/energy"), 60000);
+  const metrics = usePoll(() => get<MetricsNow>("/metrics/now"), 15000);
+  const [price, setPrice] = useState(loadPrice);
+  useEffect(() => { try { localStorage.setItem(PRICE_KEY, String(price)); } catch { /* private */ } }, [price]);
+  const ref = useRef<HTMLDivElement>(null);
+  // Opened as /app/hardware#energy (from Home or Settings): bring it into view.
+  useEffect(() => { if (location.hash === "#energy") ref.current?.scrollIntoView({ block: "start" }); }, []);
+  const t = metrics.data?.totals;
+  const month = report.data?.months.at(-1);
+  const kwh = month?.energy_kwh ?? 0;
+  return (
+    <div id="energy" ref={ref} className="anchor">
+      <Card>
+        <div className="row-between"><Eyebrow>Energy</Eyebrow><span className="muted mono" style={{ fontSize: 12 }}>{Math.round(watts)} W now</span></div>
+        <div className="grid grid-3">
+          <Stat label="Today" value={((t?.energy_wh_today ?? 0) / 1000).toFixed(2)} unit="kWh" sub={`≈ $${(((t?.energy_wh_today ?? 0) / 1000) * price).toFixed(2)}`} />
+          <Stat label="This month" value={kwh.toFixed(1)} unit="kWh" sub={`≈ $${(kwh * price).toFixed(2)}`} />
+          <Stat label="All time" value={((t?.energy_wh_all ?? 0) / 1000).toFixed(1)} unit="kWh" />
+        </div>
+        <Spark title="Energy per day" axis values={(report.data?.days ?? []).map((d) => d.energy_kwh)} labels={(report.data?.days ?? []).map((d) => d.day)} height={60} format={(v) => `${v.toFixed(1)} kWh`} />
+        <div className="row-between wrap" style={{ gap: 12 }}>
+          <span className="muted" style={{ fontSize: 12 }}>Each day over the last month, from the chips' own power readings.</span>
+          <label className="row" style={{ gap: 8, fontSize: 13 }}>
+            <span className="muted">Price per kWh ($)</span>
+            <div style={{ width: 100 }}><TextInput size="sm" type="number" min={0} step={0.01} value={String(price)} aria-label="Price per kWh, in dollars"
+              onChange={(e) => setPrice(Math.max(0, Number(e.target.value) || 0))} /></div>
+          </label>
+        </div>
+      </Card>
+    </div>
   );
 }
 

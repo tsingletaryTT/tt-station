@@ -454,7 +454,7 @@ pub(crate) async fn post_source(
     let path_s = path.display().to_string();
     if let Some(dup) = with_sources(&state, |l| {
         l.iter()
-            .find(|s| path_s.starts_with(&s.path) || s.path.starts_with(&path_s))
+            .find(|s| path.starts_with(&s.path) || Path::new(&s.path).starts_with(&path))
             .map(|s| s.path.clone())
     }) {
         return Err(err(

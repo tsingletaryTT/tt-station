@@ -85,7 +85,7 @@ final class AppModel {
     }
 
     /// Handle a `ttstation://pair?...` link (the QR TT Station shows on the box in
-    /// Settings → Pairing and security, opened by the Camera app): pair with no typing.
+    /// Settings → Devices and pairing, opened by the Camera app): pair with no typing.
     /// The link carries the box's HTTPS port (`tls`) and certificate fingerprint
     /// (`fp`); pairing happens over HTTPS pinned to that fingerprint, so a link
     /// without them is refused.
@@ -105,44 +105,40 @@ final class AppModel {
             selectedTab = .create
             return
         }
-        guard url.scheme == "ttstation", url.host == "pair",
-              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return }
-        func value(_ key: String) -> String? { items.first { $0.name == key }?.value.flatMap { $0.isEmpty ? nil : $0 } }
-        guard let host = value("host"), let pairID = value("pair"), let code = value("code") else {
-            linkError = "That pairing code is incomplete. Show it again in TT Station on the box (Settings → Pairing and security)."
+        let link: PairLink
+        switch PairLink.parse(url) {
+        case .success(let parsed):
+            link = parsed
+        case .failure(.notPairing):
+            return
+        case .failure(.incomplete):
+            linkError = "That pairing code is incomplete. Show it again in TT Station on the box (Settings → Devices and pairing)."
+            return
+        case .failure(.noCertificate):
+            linkError = "That pairing code doesn't carry the box's security certificate, so TT Station can't connect securely. Update TT Station on the box, then scan the code in Settings → Devices and pairing."
             return
         }
-        guard let tls = value("tls").flatMap(Int.init), (1...65535).contains(tls),
-              let fp = value("fp")?.lowercased(), Self.isSHA256Hex(fp) else {
-            linkError = "That pairing code doesn't carry the box's security certificate, so TT Station can't connect securely. Update TT Station on the box, then scan the code in Settings → Pairing and security."
-            return
-        }
-        let port = value("port").flatMap(Int.init) ?? 8765
-        let pin = TLSPin(port: tls, sha256: fp)
-        var box = SavedBox(name: value("name") ?? host, host: host, port: port)
+        let host = link.host
+        let pin = link.pin
+        var box = SavedBox(name: link.name, host: host, port: link.port)
         box.tlsPort = pin.port
         box.certSHA256 = pin.sha256
-        box.sshUser = value("ssh")
+        box.sshUser = link.sshUser
         do {
             // The QR came from the box's own screen, so its fingerprint is the one
             // to trust: this client only accepts a certificate that matches it.
             let client = try AgentClient(host: host, pin: pin)
             // iOS 16+ reports a generic "iPhone" here unless the app has Apple's
             // device-name entitlement: still honest, and the list shows when it paired.
-            let result = try await client.pairComplete(pairID: pairID, code: code,
+            let result = try await client.pairComplete(pairID: link.pairID, code: link.code,
                                                        name: UIDevice.current.name, platform: "iOS")
             paired(box, token: result.token)
             await sendSSHKey(to: box)
         } catch AgentError.http(let status, _) where status == 401 || status == 404 || status == 410 {
-            linkError = "That code has expired. Show a new one in TT Station on the box (Settings → Pairing and security)."
+            linkError = "That code has expired. Show a new one in TT Station on the box (Settings → Devices and pairing)."
         } catch {
             linkError = error.localizedDescription
         }
-    }
-
-    /// 64 lowercase hex digits: a SHA-256 fingerprint.
-    private static func isSHA256Hex(_ text: String) -> Bool {
-        text.count == 64 && text.allSatisfy { $0.isHexDigit && !$0.isUppercase }
     }
 
     /// Put this iPhone's SSH public key on `box` (`POST /ssh/authorize`). Never

@@ -37,7 +37,7 @@ def main():
         try:
             os.execvp(cmd[0], cmd)
         except Exception as exc:  # the command doesn't exist: say so in the terminal
-            print(f"couldn't start {cmd[0]}: {exc}")
+            print(f"couldn't start {cmd[0]}: {exc}", flush=True)  # os._exit doesn't flush
             os._exit(127)
 
     def resize(c, r):

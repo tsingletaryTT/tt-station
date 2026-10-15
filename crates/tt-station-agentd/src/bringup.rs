@@ -2354,7 +2354,12 @@ pub(crate) async fn delete_run(
     let run = runs.remove(i);
     // Only ever inside TT Station's own bring-up folder.
     let root = state.config_dir().join("bringup/codex");
-    if run.log_dir.starts_with(&root) && run.log_dir != root {
+    // `starts_with` compares components, so `root/../..` would pass it: no `..`.
+    let walks_out = run
+        .log_dir
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    if run.log_dir.starts_with(&root) && run.log_dir != root && !walks_out {
         let _ = std::fs::remove_dir_all(&run.log_dir);
     }
     APPROVALS

@@ -74,7 +74,7 @@
     </div>
     <details class="card">
       <summary>Have a pairing link?</summary>
-      <p style="margin: 10px 0">On the box, open TT Station → Settings → Pairing and security → <b>Pair another computer</b>, make a link, and paste it here.</p>
+      <p style="margin: 10px 0">On the box, open TT Station → Settings → Devices and pairing → <b>Pair a device</b> → Another computer, make a link, and paste it here.</p>
       <div class="row">
         <input id="link" placeholder="ttstation://pair?…" spellcheck="false">
         <button class="primary" id="link-go">Pair</button>
@@ -136,7 +136,7 @@
     const el = $("found");
     el.innerHTML = "";
     if (!boxes.length) {
-      el.innerHTML = '<div class="muted">None found. Type the box\'s address below (on the box: TT Station → Settings → Pairing and security → Pair another computer shows it), or check this computer is on the same network. macOS may ask to let TT Station find boxes on your local network: allow it.</div>';
+      el.innerHTML = '<div class="muted">None found. Type the box\'s address below (on the box: TT Station → Settings → Devices and pairing → Pair a device → Another computer shows it), or check this computer is on the same network. macOS may ask to let TT Station find boxes on your local network: allow it.</div>';
       return;
     }
     for (const b of boxes) {

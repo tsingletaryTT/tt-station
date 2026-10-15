@@ -7,7 +7,7 @@ up at the next chunk (`progress.json` holds the chunks done and their segments, 
 before each chunk counts; a different cut of the recording starts over).
 
 Each job remembers the paired device that started it (`started_by`, `started_by_name`;
-none for the box itself and the recorder). Members see their own jobs and the `shared`
+none for the box itself, or a recording started on it). Members see their own jobs and the `shared`
 ones; owners see every job. Someone else's job answers `404` everywhere.
 
 ## Routes (authed)
@@ -61,15 +61,19 @@ The file is deleted only once the box has it; a failed or dismissed upload stays
 `recorder.rs` records the box's default microphone and whatever its default
 output is playing (PipeWire's `@DEFAULT_MONITOR@`), mixed to 16 kHz mono Opus,
 straight into a new job directory. Stopping queues it as an ordinary
-`transcribe` job. The recorder doesn't say who started it or what they chose, so its jobs
-are owners-only (until shared) and take the household's audio and Library defaults.
+`transcribe` job that belongs to the device that started the recording (its starter and
+owners see it; members' other devices don't, until it's shared). A recording started on the
+box itself, or by Tori there, has no starter, so it's owners-only. Each recording can say
+whether to keep the audio and whether the transcript goes to the Library; what it doesn't
+say takes the household's data settings when the job finishes.
 
 - `GET /record`: `{microphone, speakers, recording}`; while recording,
   `recording` has `seconds`, the devices in use and live levels (`mic_db`,
   `system_db`, dBFS over the last 100 ms).
-- `POST /record/start` `{title?, mic?, system?}`: both sides by default; the
-  microphone is skipped when none is plugged in. Four hours at most.
-- `POST /record/stop` `{discard?}`: `{job}` once queued.
+- `POST /record/start` `{title?, mic?, system?, keep_audio?, documents?}`: both sides by
+  default; the microphone is skipped when none is plugged in. Four hours at most.
+- `POST /record/stop` `{discard?, keep_audio?, documents?}`: `{job}` once queued. A choice made
+  at stop wins over one made at start.
 
 The desktop app shows it in Studio → Transcribe, on Home while recording, and
 in the tray ("Record a meeting").

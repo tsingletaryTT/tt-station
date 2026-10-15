@@ -22,6 +22,7 @@ import { Typography } from "@tenstorrent/vesper/typography";
 import { Sheet, useSheet } from "@tenstorrent/vesper/sheet";
 import { ago, del, get, post, wsProtocols } from "../api";
 import { Card, Eyebrow, Page, toastError, toastOk, usePoll } from "../ui";
+import { startConfirmingSharedFolder } from "../sharedFolder";
 import { ask } from "../dialog";
 import { navigate } from "../App";
 import { OWNER_ONLY_HOST } from "../role";
@@ -95,7 +96,8 @@ function NewSession({ d, onStarted, onClose }: { d: Coding; onStarted: (s: Sessi
   const start = async () => {
     setBusy(true);
     try {
-      const r = await post<{ session: Session }>("/coding/sessions", { agent, folder, task: agent === "claude" ? task : undefined });
+      const r = await startConfirmingSharedFolder<{ session: Session }>("/coding/sessions", { agent, folder, task: agent === "claude" ? task : undefined });
+      if (!r) return;
       toastOk(`${r.session.agent_name} is starting in ${base(folder)}.`);
       onStarted(r.session);
     } catch (e) { toastError(e); } finally { setBusy(false); }

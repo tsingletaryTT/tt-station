@@ -103,7 +103,18 @@ async fn members_get_code_in_the_sandbox_only_and_owners_choose() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["session"]["sandbox"], true);
 
-    let (status, body) = b.call(M::POST, "/code/sessions", &b.owner, outside).await;
+    // The member's sandbox used that folder: an owner outside the sandbox is
+    // asked first, then goes ahead once they confirm.
+    let (status, body) = b
+        .call(M::POST, "/code/sessions", &b.owner, outside.clone())
+        .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["needs_confirm"], "shared_folder", "{body}");
+    assert!(body["used_by"][0]["who"].is_string(), "{body}");
+    assert!(body["used_by"][0]["when"].is_u64(), "{body}");
+    let mut confirmed = outside;
+    confirmed["confirm_shared"] = json!(true);
+    let (status, body) = b.call(M::POST, "/code/sessions", &b.owner, confirmed).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["session"]["sandbox"], false);
 
@@ -117,6 +128,7 @@ async fn members_get_code_in_the_sandbox_only_and_owners_choose() {
         .collect();
     assert!(actions.contains(&"host_run"), "{log}");
     assert!(actions.contains(&"denied"), "{log}");
+    assert!(actions.contains(&"shared_folder_confirmed"), "{log}");
 }
 
 #[tokio::test]

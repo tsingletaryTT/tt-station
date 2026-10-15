@@ -144,8 +144,19 @@ re-pairs as) an owner by itself, so nobody is locked out.
 
 Being a person on the box (Settings → People) means seeing that person's memories, so a
 member can only claim a person no other device belongs to yet; sharing a person between
-devices is an owner's call (Settings → Pairing and security → Devices). A member's "forget
+devices is an owner's call (Settings → Devices and pairing). A member's "forget
 everything" forgets its own memories, not the household's.
+
+**A folder a member's sandbox worked in.** Code in the sandbox can write anything into its
+project folder, and some of what it leaves there runs later by itself: git hooks, a
+Makefile, npm scripts, `.claude` settings. Run outside the sandbox, as an owner can, those
+would run as the box's own account. So the box remembers which folders members' sandboxed
+sessions used, and who (`<config>/code/shared-folders.json`, 0600), and before an owner
+starts Code without the sandbox, or a terminal agent, in one of them (or a folder inside or
+around one) it answers `409 {needs_confirm: "shared_folder", used_by, folder}`. The desktop
+app says who worked there and asks; going ahead sends `confirm_shared: true`, is written to
+the activity log (`shared_folder_confirmed`), and clears those uses until a member works there
+again.
 
 **Live telemetry** lists the box's processes; for members, each command line is cut to the
 executable's name. Removing a device closes its open terminals, log and telemetry streams
@@ -158,7 +169,7 @@ The box keeps an append-only log of who did what (`~/.config/tt-station/audit.js
 SSH and app keys, power, security settings, updates, answered approvals, model starts and
 stops, meeting recordings started and stopped, and every owner-only request a member was
 refused. It records device ids and names,
-never tokens or keys. Owners read it in Settings → Pairing and security → Activity log, or
+never tokens or keys. Owners read it in Settings → Security and activity → Activity log, or
 `GET /audit`.
 
 ### Apps from the store (Connect)
@@ -290,7 +301,7 @@ Every client refuses to talk to it. The CLI says `certificate changed: <host> pr
 certificate with SHA-256 … but this computer paired with …` and sends nothing. The
 certificate is kept across restarts and upgrades, so a change means the box was reinstalled
 (its config folder wiped) — or something on the network is answering for it. Check the
-fingerprint on the box (Settings → Pairing and security) and pair again. Details:
+fingerprint on the box (Settings → Security and activity) and pair again. Details:
 [CLI HTTPS and pinning](reference/cli-https-pinning.md).
 
 **I paired the CLI before HTTPS. Is my pairing still good?**
@@ -351,7 +362,7 @@ escalation and no separate service account; the box is assumed to be your single
 machine.
 
 **How do I revoke access or wipe pairings?**
-- **One device**: TT Station → Settings → Pairing and security → **Devices** → Remove (or
+- **One device**: TT Station → Settings → **Devices and pairing** → Remove (or
   `DELETE /devices/{id}`; `GET /devices` lists them). It stops working on its next request,
   and its open terminals close. Removing the computer you're on signs it out.
 - **Reset** (GTK panel button, or clear the box's token store): forgets **all** pairings,
@@ -385,7 +396,7 @@ required for a normal home/lab setup:
       open to the whole LAN.
 - [ ] **Mind the telemetry process list**: don't launch box processes with secrets in their
       argv; the (unauthenticated) `/telemetry` stream exposes command lines.
-- [ ] **Remove devices you don't recognize** (Settings → Pairing and security → Devices). If
+- [ ] **Remove devices you don't recognize** (Settings → Devices and pairing). If
       you suspect a token leaked and can't tell which, Reset the box (signs out every device)
       and re-pair; revoke any SSH keys you didn't intend to keep.
 - [ ] **Only `--enable-ssh` when you mean it** — it grants a shell. Audit `ttstation:`-tagged

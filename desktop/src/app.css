@@ -82,12 +82,22 @@ input, textarea, .selectable, .markdown, pre, code { user-select: text; }
 .chip-hot { font-size: 10px; font-weight: 600; color: var(--vesper-text-warning); }
 .box-footer:focus-visible, .card-click:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
 
-.content { overflow-y: auto; height: 100%; animation: enter 220ms ease both; }
+.main-col { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; min-width: 0; }
+.content { overflow-y: auto; height: 100%; min-height: 0; animation: enter 220ms ease both; }
+
+/* The slim bar over the page: the notifications bell at the right. No-drag, for a frameless or inset title bar. */
+.topbar {
+  position: relative; z-index: 20; display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  height: 44px; padding: 0 16px;
+  background: color-mix(in srgb, var(--vesper-stone-50) 88%, transparent);
+  border-bottom: 1px solid var(--line);
+  -webkit-app-region: no-drag;
+}
 @keyframes enter { from { opacity: 0; transform: translateY(4px); } }
 
 /* ---------- page ---------- */
 
-.page { max-width: 1240px; margin: 0 auto; padding: 32px 40px 64px; display: flex; flex-direction: column; gap: var(--gap); }
+.page { max-width: 1240px; margin: 0 auto; padding: 24px 40px 64px; display: flex; flex-direction: column; gap: var(--gap); }
 .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 4px; }
 .page-head h1 { margin: 0 0 4px; }
 .page-actions { display: flex; gap: 8px; align-items: center; }
@@ -989,7 +999,8 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .box-switcher-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: none; border: 0; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .box-switcher-item:hover { background: var(--vesper-alpha-stone-100); }
 .box-switcher-item.on b { color: var(--vesper-teal-700); }
-.box-switcher-error { font-size: 12px; color: var(--vesper-text-error); }
+.box-switcher-gap { height: 1px; margin: 4px 6px; background: var(--line); }
+.box-switcher-item:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
 .pair-link { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; padding: 6px 8px; border-radius: 6px; background: color-mix(in srgb, var(--vesper-text-primary) 5%, transparent); }
 
 /* ---------------------------------------------------------------- Terminal on the box (another computer) */
@@ -1037,3 +1048,71 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .folder-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: 6px; }
 .folder-open:hover .grow { text-decoration: underline; text-underline-offset: 3px; }
 .folder-open:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
+
+/* Needs you (the inbox) */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.inbox-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.inbox-item {
+  display: flex; gap: 14px; align-items: flex-start;
+  padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--vesper-stone-50) 92%, transparent);
+  border-left: 3px solid var(--vesper-amber-600);
+}
+.inbox-item.inbox-pairing { border-left-color: var(--vesper-teal-600); }
+.inbox-item:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
+.inbox-icon { width: 20px; height: 20px; flex: none; margin-top: 2px; color: var(--accent); }
+.inbox-main { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+.inbox-where { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; font-weight: 500; color: var(--vesper-text-secondary); }
+.inbox-where .muted { font-weight: 400; white-space: nowrap; }
+.inbox-summary { font-size: 15px; color: var(--vesper-text-primary); overflow-wrap: anywhere; }
+.inbox-summary.mono { font-family: var(--mono); font-size: 13px; padding: 8px 10px; border-radius: var(--vesper-radius-2); background: var(--vesper-alpha-stone-100); white-space: pre-wrap; max-height: 9em; overflow: auto; }
+.inbox-detail { font-size: 12px; overflow-wrap: anywhere; }
+.inbox-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
+.inbox-hint { font-size: 12px; flex-basis: 100%; }
+.inbox-keys { font-size: 12px; margin: 4px 0 0; }
+.routine-select { font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--vesper-border-primary); background: var(--surface); color: var(--vesper-text-primary); max-width: 280px; }
+.day-toggle { font: 500 12px var(--sans); min-width: 40px; padding: 6px 8px; border-radius: 999px; border: 1px solid var(--vesper-border-primary); background: transparent; color: var(--vesper-text-secondary); cursor: pointer; }
+.day-toggle.on { background: var(--vesper-background-accent-base); border-color: var(--vesper-border-accent-base); color: var(--vesper-text-on-color); }
+.day-toggle:focus-visible, .routine-select:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
+.anchor { scroll-margin-top: 16px; }
+
+/* ---------------------------------------------------------------- Notifications bell (Needs you) */
+.bell { position: relative; -webkit-app-region: no-drag; }
+.bell-button { color: var(--vesper-text-secondary); }
+.bell-button svg { width: 20px; height: 20px; }
+.bell-button[aria-expanded="true"] { background: var(--vesper-alpha-stone-200); color: var(--vesper-text-primary); }
+.bell-count { position: absolute; top: -4px; right: -6px; min-width: 18px; justify-content: center; pointer-events: none; font-variant-numeric: tabular-nums; }
+.bell-pulse { animation: bell-pulse 900ms ease-out 1; }
+@keyframes bell-pulse {
+  0% { transform: scale(1); box-shadow: 0 0 0 0 color-mix(in srgb, var(--vesper-text-warning) 45%, transparent); }
+  30% { transform: scale(1.18); }
+  100% { transform: scale(1); box-shadow: 0 0 0 8px transparent; }
+}
+.bell-panel { position: absolute; top: calc(100% + 8px); right: 0; z-index: 1000; width: 380px; max-height: min(560px, calc(100vh - 72px));
+  display: flex; flex-direction: column; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--vesper-background-primary); box-shadow: var(--vesper-shadow-300); animation: bell-in 140ms ease-out both; }
+.bell-panel:focus-visible { outline: none; box-shadow: var(--vesper-shadow-300), var(--vesper-shadow-focus-ring); }
+@keyframes bell-in { from { opacity: 0; transform: translateY(-4px); } }
+.bell-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 12px 14px 8px; font-size: 13px; }
+.bell-title { font-weight: 600; font-size: 14px; }
+.bell-error { margin: 0 10px 6px; padding: 6px 10px; border-radius: 8px; font-size: 12px; color: var(--vesper-text-warning); background: var(--vesper-alpha-stone-100); }
+.bell-empty { display: flex; flex-direction: column; gap: 4px; padding: 20px 14px 22px; text-align: center; font-size: 13px; }
+.bell-list { list-style: none; margin: 0; padding: 0 4px 4px; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 2px; }
+.bell-item { display: flex; gap: 10px; padding: 10px; border-radius: 8px; border-left: 3px solid var(--vesper-text-warning); }
+.bell-item.inbox-pairing { border-left-color: var(--vesper-teal-600); }
+.bell-item:hover { background: var(--vesper-alpha-stone-100); }
+.bell-item:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
+.bell-icon { width: 18px; height: 18px; flex: none; margin-top: 1px; color: var(--accent); }
+.bell-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+.bell-where { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; font-weight: 500; color: var(--vesper-text-secondary); }
+.bell-where > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bell-where .muted { font-weight: 400; white-space: nowrap; flex: none; }
+.bell-summary { font-size: 13px; color: var(--vesper-text-primary); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.bell-summary.mono { font-family: var(--mono); font-size: 12px; }
+.bell-actions { display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.bell-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 14px; border-top: 1px solid var(--line); font-size: 12px; }
+.bell-all { background: none; border: 0; padding: 2px 0; color: var(--accent); font: inherit; font-weight: 500; cursor: pointer; }
+.bell-all:hover { text-decoration: underline; }
+.bell-all:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); border-radius: 4px; }
+.bell-keys .kbd { font-size: 10px; padding: 0 4px; }
+@media (prefers-reduced-motion: reduce) { .bell-pulse, .bell-panel { animation: none; } }

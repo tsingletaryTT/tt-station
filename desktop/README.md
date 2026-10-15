@@ -23,14 +23,31 @@ Tenstorrent's Vesper design system (`@tenstorrent/vesper`, React).
 
 ## Places
 
-Home (what's serving, modes, happening now, chips, today, Box Doctor) · Chat
-(streaming, Markdown, thinking, tool actions with confirmation) · Studio
-(images, video, transcription with drag and drop) · Models (catalogue,
-downloads, start, remove) · Bring-up (tt-orchard: preflight, stages, progress,
-reports, serve) · Hardware (live chips, last hour, tt-toplike starfield, gozer
-leases, serving log, Lab) · Connect (apps, API addresses, keys, code) ·
-Settings (desktop, power, household, schedules, energy, remote access,
-software).
+**Needs you** is the bell at the top right of the window, not a sidebar place:
+a count when something is waiting for your OK (9+ past nine), and a dropdown of
+it, newest first: Code's questions and routines' actions for everyone,
+bring-up's commands and pairing requests for owners, each with Allow/Deny or
+Open (keyboard: ↑ ↓ A D Enter; Escape closes). Its "See everything" opens the
+full page (`/app/inbox`).
+
+Home (what's serving, modes, happening now, chips, today's numbers with a link
+to energy, Box Doctor) · Chat (streaming, Markdown, thinking, tool actions
+with confirmation) · Studio (images, video, transcription with drag and drop) ·
+Routines (jobs the box does on its own, including switching modes at set times,
+which used to be Settings → Schedules) · Models (catalogue, downloads, start,
+remove) · Bring-up (tt-orchard: preflight, stages, progress, reports, serve) ·
+Hardware (live chips, last hour, tt-toplike starfield, energy, gozer leases,
+serving log, Lab) · Connect (apps, API addresses, keys, code) · Settings
+(desktop, Tori and voice, models, power, people, devices and pairing, security
+and activity, your data, software).
+
+**One place each.** Pairing is Settings → Devices and pairing (`#devices`); the
+box switcher and the connect screen on another computer point there. Energy is
+Hardware → Energy (`/app/hardware#energy`). Mode switches on a timetable are
+routines. Needs you reads the endpoints each feature already has (`GET
+/approvals`, `GET /bringup/codex/runs`, pairing events from `GET /events`) and
+answers through them (`POST /approvals/answer`, `POST
+/bringup/codex/runs/{id}/approvals/{aid}`); see `src/inbox.ts`.
 
 ## Build and install (on the box)
 

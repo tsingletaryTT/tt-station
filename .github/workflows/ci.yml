@@ -154,6 +154,17 @@ jobs:
       - name: Check docs/reference endpoints against the route table
         run: python3 scripts/check-doc-routes.py
 
+  python:
+    name: Python helpers (unittest)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # The agent's Python helpers (Code holder and session, bring-up permission
+      # policy, lease runner, Orchard bridge): standard library only, no hardware.
+      - name: Run the helpers' tests
+        working-directory: crates/tt-station-agentd/src
+        run: python3 -m unittest -v
+
   ios:
     name: iOS app (simulator build)
     # Never built in CI before, and it needs signing-free simulator settings

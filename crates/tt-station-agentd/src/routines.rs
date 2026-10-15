@@ -33,6 +33,15 @@
 //!
 //! One run at a time: runs share the chips.
 //!
+//! A routine can also just switch the box's mode at set times (`mode`): no
+//! model thinks, the runner switches, and -- as schedules always did -- it
+//! never interrupts a Lab run, an Orchard bring-up or a transcription job
+//! (it skips that time and says so), and a switch more than ten minutes late
+//! (the box was off) waits for the next time. These used to be Settings →
+//! Schedules (`crate::schedules`); schedules found there are turned into
+//! routines when routines load ([`absorb_schedules`]), keeping their ids,
+//! days, times and on/off.
+//!
 //! - `GET /routines`, `POST /routines`, `PUT /routines/{id}`, `DELETE /routines/{id}`
 //! - `POST /routines/{id}/run`: run it now.
 //! - `GET /routines/{id}/runs`, `GET /routines/runs/{run}`
@@ -70,21 +79,36 @@ pub const QUEUE_TTL: u64 = 24 * 3600;
 
 // ---------------------------------------------------------------- data
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Schedule {
-    /// `manual` | `daily` | `weekdays` | `hourly`
+    /// `manual` | `daily` | `weekdays` | `days` | `hourly`
     #[serde(default = "manual")]
     pub kind: String,
-    /// `HH:MM`, local time (daily, weekdays).
+    /// `HH:MM`, local time (daily, weekdays, days).
     #[serde(default)]
     pub time: Option<String>,
     /// Hours between runs (hourly).
     #[serde(default)]
     pub every_hours: Option<u32>,
+    /// Days of the week (`days`), 0 = Sunday … 6 = Saturday.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<Vec<u8>>,
 }
 
 fn manual() -> String {
     "manual".into()
+}
+
+/// Run by hand: what a routine (or request) with no `schedule` gets.
+impl Default for Schedule {
+    fn default() -> Self {
+        Schedule {
+            kind: manual(),
+            time: None,
+            every_hours: None,
+            days: None,
+        }
+    }
 }
 
 /// What a routine may do without asking: the action tools it was given.
@@ -107,6 +131,10 @@ pub struct Routine {
     pub next_run: Option<u64>,
     #[serde(default)]
     pub last_run: Option<String>,
+    /// Just switch the box to this mode (`crate::modes`) when it runs: no
+    /// model plans anything (see the module doc).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 fn yes() -> bool {
@@ -211,6 +239,12 @@ fn with_routines<T>(state: &AppState, f: impl FnOnce(&mut Vec<Routine>) -> T) ->
         crate::fsio::read_json_or_backup(&dir(state).join("routines.json")).unwrap_or_default()
     });
     let before = serde_json::to_vec(&*list).unwrap_or_default();
+    // Schedules (the old Settings → Schedules, an older phone app, an import)
+    // become routines here.
+    let incoming = state.schedules().take_all();
+    if !incoming.is_empty() {
+        absorb_into(list, incoming, now());
+    }
     let out = f(list);
     if serde_json::to_vec(&*list).unwrap_or_default() != before {
         crate::fsio::save_json(
@@ -255,6 +289,137 @@ pub(crate) fn merge_imported(state: &AppState, incoming: Vec<Routine>) -> (usize
 /// The routines as they are now (for an export's preview).
 pub(crate) fn list(state: &AppState) -> Vec<Routine> {
     with_routines(state, |l| l.clone())
+}
+
+/// A mode switch, in a person's words: "Switch to Images".
+fn switch_name(mode: &str) -> String {
+    format!(
+        "Switch to {}",
+        crate::modes::mode_title(mode).unwrap_or(mode)
+    )
+}
+
+/// A schedule (`crate::schedules`) as the routine it becomes: same id, mode,
+/// days, time and on/off. A schedule that already ran today has its next
+/// run worked out from now, so it doesn't run twice in a day.
+pub(crate) fn from_schedule(s: &crate::schedules::Schedule, at: u64) -> Routine {
+    let mut days = s.days.clone();
+    days.sort_unstable();
+    days.dedup();
+    let schedule = Schedule {
+        kind: "days".into(),
+        time: Some(s.time.clone()),
+        every_hours: None,
+        days: Some(days),
+    };
+    let title = crate::modes::mode_title(&s.mode).unwrap_or(&s.mode);
+    Routine {
+        id: s.id.clone(),
+        name: switch_name(&s.mode),
+        goal: format!("Switch the box to {title}."),
+        next_run: if s.enabled {
+            next_after(&schedule, at)
+        } else {
+            None
+        },
+        schedule,
+        allowed: vec!["start_model".into()],
+        enabled: s.enabled,
+        created: at,
+        last_run: None,
+        mode: Some(s.mode.clone()),
+    }
+}
+
+/// Adds schedules to `list` as routines; one whose id is already a routine
+/// updates its mode, time, days and on/off.
+fn absorb_into(list: &mut Vec<Routine>, incoming: Vec<crate::schedules::Schedule>, at: u64) {
+    for s in incoming {
+        let r = from_schedule(&s, at);
+        match list.iter_mut().find(|x| x.id == r.id) {
+            Some(cur) => {
+                cur.name = r.name;
+                cur.goal = r.goal;
+                cur.mode = r.mode;
+                cur.schedule = r.schedule;
+                cur.enabled = r.enabled;
+                cur.next_run = r.next_run;
+            }
+            None => list.push(r),
+        }
+    }
+}
+
+/// Turns any schedules waiting in `crate::schedules` into routines now.
+pub(crate) fn absorb_schedules(state: &AppState) {
+    with_routines(state, |_| ());
+}
+
+/// Mode-switching routines in the shape `GET /schedules` always had, for
+/// phone apps that still ask for schedules.
+pub(crate) fn as_schedules(state: &AppState) -> Vec<crate::schedules::Schedule> {
+    with_routines(state, |l| schedules_of(l))
+}
+
+fn schedules_of(list: &[Routine]) -> Vec<crate::schedules::Schedule> {
+    list.iter()
+        .filter_map(|r| {
+            let mode = r.mode.clone()?;
+            let days = match r.schedule.kind.as_str() {
+                "days" => r.schedule.days.clone().unwrap_or_default(),
+                "weekdays" => vec![1, 2, 3, 4, 5],
+                "daily" => (0..7).collect(),
+                _ => return None,
+            };
+            Some(crate::schedules::Schedule {
+                id: r.id.clone(),
+                mode,
+                time: r.schedule.time.clone().unwrap_or_default(),
+                days,
+                enabled: r.enabled,
+                last_run: None,
+            })
+        })
+        .collect()
+}
+
+/// `PATCH /schedules/{id}` for older phone apps: changes the routine it became.
+pub(crate) fn patch_from_schedule(
+    state: &AppState,
+    id: &str,
+    patch: &crate::schedules::Patch,
+) -> Result<(), String> {
+    let current = as_schedules(state)
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or("No such schedule.")?;
+    let mut next = current.clone();
+    if let Some(m) = &patch.mode {
+        next.mode = m.clone();
+    }
+    if let Some(t) = &patch.time {
+        next.time = t.clone();
+    }
+    if let Some(d) = &patch.days {
+        next.days = d.clone();
+    }
+    if let Some(e) = patch.enabled {
+        next.enabled = e;
+    }
+    crate::schedules::Schedules::check(&next.mode, &next.time, &next.days)?;
+    let (h, m) = crate::schedules::parse_time(&next.time).unwrap_or_default();
+    next.time = format!("{h:02}:{m:02}");
+    with_routines(state, |l| absorb_into(l, vec![next], now()));
+    Ok(())
+}
+
+/// `DELETE /schedules/{id}` for older phone apps.
+pub(crate) fn remove_mode_routine(state: &AppState, id: &str) -> bool {
+    with_routines(state, |l| {
+        let before = l.len();
+        l.retain(|r| !(r.id == id && r.mode.is_some()));
+        l.len() != before
+    })
 }
 
 fn run_path(state: &AppState, id: &str) -> PathBuf {
@@ -355,7 +520,7 @@ fn parse_hhmm(s: &str) -> Option<(i32, i32)> {
 pub fn next_after(s: &Schedule, after: u64) -> Option<u64> {
     match s.kind.as_str() {
         "hourly" => Some(after + u64::from(s.every_hours.unwrap_or(1).clamp(1, 168)) * 3600),
-        "daily" | "weekdays" => {
+        "daily" | "weekdays" | "days" => {
             let (h, m) = parse_hhmm(s.time.as_deref().unwrap_or("08:00"))?;
             let base = local(after);
             for day in 0..8 {
@@ -372,6 +537,15 @@ pub fn next_after(s: &Schedule, after: u64) -> Option<u64> {
                 if s.kind == "weekdays" && (wday == 0 || wday == 6) {
                     continue;
                 }
+                if s.kind == "days"
+                    && !s
+                        .days
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains(&(wday as u8))
+                {
+                    continue;
+                }
                 return Some(t);
             }
             None
@@ -385,6 +559,25 @@ pub fn describe(s: &Schedule) -> String {
     match s.kind.as_str() {
         "daily" => format!("Every day at {}", s.time.as_deref().unwrap_or("08:00")),
         "weekdays" => format!("Weekdays at {}", s.time.as_deref().unwrap_or("08:00")),
+        "days" => {
+            const NAMES: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+            let mut days = s.days.clone().unwrap_or_default();
+            days.sort_unstable();
+            days.dedup();
+            let at = s.time.as_deref().unwrap_or("08:00");
+            match days.as_slice() {
+                [0, 1, 2, 3, 4, 5, 6] => format!("Every day at {at}"),
+                [1, 2, 3, 4, 5] => format!("Weekdays at {at}"),
+                [0, 6] => format!("Weekends at {at}"),
+                d => {
+                    let names: Vec<&str> = d
+                        .iter()
+                        .filter_map(|x| NAMES.get(*x as usize).copied())
+                        .collect();
+                    format!("{} at {at}", names.join(", "))
+                }
+            }
+        }
         "hourly" => match s.every_hours.unwrap_or(1) {
             1 => "Every hour".into(),
             n => format!("Every {n} hours"),
@@ -888,6 +1081,10 @@ fn start(state: &AppState, r: &Routine, trigger: &str) -> Result<Run, String> {
     });
     let (st, rt, id) = (state.clone(), r.clone(), run.id.clone());
     tokio::spawn(async move {
+        if let Some(mode) = rt.mode.clone() {
+            finish_switch(&st, &rt, &id, &mode).await;
+            return;
+        }
         let outcome = execute(&st, &rt, &id).await;
         let (status, report) = match outcome {
             Ok(report) => ("done", report),
@@ -928,6 +1125,85 @@ fn start(state: &AppState, r: &Routine, trigger: &str) -> Result<Run, String> {
         }
     });
     Ok(run)
+}
+
+/// How a mode switch went, as (status, report): `done`, `skipped` (the chips
+/// were busy with something it mustn't interrupt) or `failed`.
+pub(crate) fn switch_outcome(
+    title: &str,
+    blocker: Option<String>,
+    started: Option<Result<bool, String>>,
+    time: &str,
+) -> (&'static str, String) {
+    if let Some(why) = blocker {
+        return (
+            "skipped",
+            format!("Skipped switching to {title}. {why} It tries again next time."),
+        );
+    }
+    match started {
+        Some(Ok(true)) => (
+            "done",
+            format!("Switching to {title} ({time}). You'll get a notification when it's ready."),
+        ),
+        Some(Ok(false)) => ("done", format!("{title} was already on.")),
+        Some(Err(e)) => ("failed", format!("Couldn't switch to {title}. {e}")),
+        None => ("failed", format!("Couldn't switch to {title}.")),
+    }
+}
+
+/// A mode-switching routine's run: no model thinks; the runner switches,
+/// unless the chips are busy with something a switch mustn't interrupt.
+async fn finish_switch(state: &AppState, r: &Routine, run_id: &str, mode: &str) {
+    let title = crate::modes::mode_title(mode).unwrap_or(mode).to_string();
+    let time = r.schedule.time.clone().unwrap_or_default();
+    let began = Instant::now();
+    let blocker = crate::schedules::blocker(state);
+    let started = if blocker.is_none() {
+        set_activity(state, run_id, &format!("Switching to {title}"));
+        Some(crate::modes::start(state, mode).await)
+    } else {
+        None
+    };
+    let (status, report) = switch_outcome(&title, blocker, started, &time);
+    update_run(state, run_id, |run| {
+        run.steps.push(Step {
+            ts: now(),
+            kind: if status == "skipped" {
+                "note"
+            } else {
+                "action"
+            }
+            .into(),
+            tool: (status != "skipped").then(|| "switch_mode".to_string()),
+            args: json!({ "mode": mode }),
+            result: report.clone(),
+            ok: status != "failed",
+            seconds: began.elapsed().as_secs(),
+        });
+        run.status = status.into();
+        run.finished = Some(now());
+        run.report = Some(report.clone());
+        run.activity = None;
+    });
+    mine(state).stop.lock().expect("routines").remove(run_id);
+    *mine(state).current.lock().expect("routines") = None;
+    prune_runs(state);
+    let draft = crate::notify::Draft {
+        kind: "routine",
+        title: match status {
+            "done" => format!("Switching to {title}"),
+            "skipped" => format!("Skipped switching to {title}"),
+            _ => format!("Couldn't switch to {title}"),
+        },
+        body: report,
+    };
+    // Starting is followed by a "ready" notification of its own.
+    if status == "done" {
+        state.notifier().record(draft);
+    } else {
+        state.notifier().emit(draft);
+    }
 }
 
 /// The run itself: the model plans, the runner acts. The report, or why it failed.
@@ -1244,6 +1520,13 @@ async fn ask_person(
     answer.filter(|_| !stopping(state, run_id))
 }
 
+/// How late a mode switch may still happen (seconds).
+const SWITCH_GRACE: u64 = 10 * 60;
+
+fn too_late(due: u64, now: u64) -> bool {
+    now >= due + SWITCH_GRACE
+}
+
 /// Runs scheduled routines when they're due. Started once, at agent start.
 pub async fn schedule_forever(state: AppState) {
     // Runs that were going when the agent stopped can't carry on.
@@ -1264,6 +1547,13 @@ pub async fn schedule_forever(state: AppState) {
             let t = now();
             for r in list.iter_mut() {
                 if r.next_run.is_none() && r.enabled {
+                    r.next_run = next_after(&r.schedule, t);
+                }
+            }
+            // A mode switch more than ten minutes late (the box was off)
+            // waits for its next time, as schedules always did.
+            for r in list.iter_mut() {
+                if r.mode.is_some() && r.next_run.is_some_and(|n| too_late(n, t)) {
                     r.next_run = next_after(&r.schedule, t);
                 }
             }
@@ -1327,6 +1617,7 @@ fn view(state: &AppState, r: &Routine) -> Value {
     json!({
         "id": r.id, "name": r.name, "goal": r.goal, "schedule": r.schedule, "when": describe(&r.schedule),
         "allowed": r.allowed, "enabled": r.enabled, "created": r.created, "next_run": if r.enabled { r.next_run } else { None },
+        "mode": r.mode,
         "last": last.map(|l| json!({ "id": l.id, "status": l.status, "started": l.started, "finished": l.finished,
             "headline": l.report.as_deref().map(headline) })),
     })
@@ -1353,6 +1644,29 @@ pub struct RoutineBody {
     pub allowed: Vec<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Just switch to this mode (see the module doc).
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+/// A body with its blanks filled in: a mode switch needs no goal of its own.
+fn normalized(mut b: RoutineBody) -> RoutineBody {
+    b.mode = b.mode.filter(|m| !m.trim().is_empty());
+    if let Some(m) = &b.mode {
+        if b.name.trim().is_empty() {
+            b.name = switch_name(m);
+        }
+        if b.goal.trim().is_empty() {
+            let title = crate::modes::mode_title(m).unwrap_or(m);
+            b.goal = format!("Switch the box to {title}.");
+        }
+        b.allowed = vec!["start_model".into()];
+    }
+    if let Some(days) = b.schedule.days.as_mut() {
+        days.sort_unstable();
+        days.dedup();
+    }
+    b
 }
 
 fn check(b: &RoutineBody) -> Result<(), ApiError> {
@@ -1362,13 +1676,26 @@ fn check(b: &RoutineBody) -> Result<(), ApiError> {
             "Give it a name and say what it should do.",
         ));
     }
-    if !["manual", "daily", "weekdays", "hourly"].contains(&b.schedule.kind.as_str()) {
+    if !["manual", "daily", "weekdays", "days", "hourly"].contains(&b.schedule.kind.as_str()) {
         return Err(err(StatusCode::BAD_REQUEST, "Pick when it runs."));
     }
-    if matches!(b.schedule.kind.as_str(), "daily" | "weekdays")
+    if matches!(b.schedule.kind.as_str(), "daily" | "weekdays" | "days")
         && parse_hhmm(b.schedule.time.as_deref().unwrap_or("")).is_none()
     {
         return Err(err(StatusCode::BAD_REQUEST, "Give a time like 08:30."));
+    }
+    if b.schedule.kind == "days"
+        && b.schedule
+            .days
+            .as_deref()
+            .is_none_or(|d| d.is_empty() || d.iter().any(|x| *x > 6))
+    {
+        return Err(err(StatusCode::BAD_REQUEST, "Pick at least one day."));
+    }
+    if let Some(m) = &b.mode {
+        if crate::modes::mode_title(m).is_none() {
+            return Err(err(StatusCode::BAD_REQUEST, format!("No mode called {m}.")));
+        }
     }
     if let Some(bad) = b.allowed.iter().find(|a| !is_action(a)) {
         return Err(err(
@@ -1385,6 +1712,7 @@ pub(crate) async fn post_routine(
     _auth: BearerAuth,
     Json(b): Json<RoutineBody>,
 ) -> Reply {
+    let b = normalized(b);
     check(&b)?;
     let r = Routine {
         id: crate::pairing::issue_pair_id()[..10].to_string(),
@@ -1396,6 +1724,7 @@ pub(crate) async fn post_routine(
         enabled: b.enabled.unwrap_or(true),
         created: now(),
         last_run: None,
+        mode: b.mode,
     };
     with_routines(&state, |l| l.push(r.clone()));
     Ok(Json(json!({ "routine": view(&state, &r) })))
@@ -1408,6 +1737,7 @@ pub(crate) async fn put_routine(
     UrlPath(id): UrlPath<String>,
     Json(b): Json<RoutineBody>,
 ) -> Reply {
+    let b = normalized(b);
     check(&b)?;
     let updated = with_routines(&state, |l| {
         let r = l.iter_mut().find(|r| r.id == id)?;
@@ -1418,6 +1748,7 @@ pub(crate) async fn put_routine(
         }
         r.schedule = b.schedule;
         r.allowed = b.allowed;
+        r.mode = b.mode;
         if let Some(e) = b.enabled {
             r.enabled = e;
         }
@@ -1453,6 +1784,7 @@ pub(crate) async fn delete_routine(
     }
     for run in all_runs(&state).into_iter().filter(|r| r.routine == id) {
         let _ = std::fs::remove_file(run_path(&state, &run.id));
+        mine(&state).live.lock().expect("routines").remove(&run.id);
     }
     Ok(Json(json!({ "deleted": true })))
 }
@@ -1465,7 +1797,10 @@ pub(crate) async fn post_run(
 ) -> Reply {
     let r = with_routines(&state, |l| l.iter().find(|r| r.id == id).cloned())
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such routine."))?;
-    if state.endpoint().is_none() && !matches!(state.lifecycle().phase, Phase::Starting) {
+    if r.mode.is_none()
+        && state.endpoint().is_none()
+        && !matches!(state.lifecycle().phase, Phase::Starting)
+    {
         return Err(err(
             StatusCode::CONFLICT,
             "No model is serving, and a routine needs one to think with. Start one in Models.",
@@ -1538,7 +1873,7 @@ pub(crate) async fn post_stop(
     _auth: BearerAuth,
     UrlPath(run): UrlPath<String>,
 ) -> Reply {
-    if load_run(&state, &run).is_none_or(|r| r.finished.is_some()) {
+    if !valid_id(&run) || load_run(&state, &run).is_none_or(|r| r.finished.is_some()) {
         return Err(err(StatusCode::CONFLICT, "It isn't running."));
     }
     mine(&state)
@@ -1786,6 +2121,192 @@ mod tests {
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    fn sched(
+        id: &str,
+        mode: &str,
+        time: &str,
+        days: Vec<u8>,
+        enabled: bool,
+    ) -> crate::schedules::Schedule {
+        crate::schedules::Schedule {
+            id: id.into(),
+            mode: mode.into(),
+            time: time.into(),
+            days,
+            enabled,
+            last_run: Some("2026-10-14".into()),
+        }
+    }
+
+    #[test]
+    fn schedules_become_mode_routines_keeping_what_they_did() {
+        let at = super::now();
+        let mut list = vec![];
+        absorb_into(
+            &mut list,
+            vec![
+                sched("abc123", "images", "07:30", vec![5, 1, 3, 3], true),
+                sched("def456", "chat", "19:00", vec![0, 6], false),
+            ],
+            at,
+        );
+        assert_eq!(list.len(), 2);
+        let r = &list[0];
+        assert_eq!(r.id, "abc123", "keeps its id");
+        assert_eq!(r.mode.as_deref(), Some("images"));
+        assert_eq!(r.name, "Switch to Images");
+        assert_eq!(r.schedule.kind, "days");
+        assert_eq!(r.schedule.time.as_deref(), Some("07:30"));
+        assert_eq!(r.schedule.days.as_deref(), Some(&[1u8, 3, 5][..]));
+        assert!(r.enabled);
+        let next = r.next_run.expect("an enabled one has a next run");
+        assert!(next > at, "never runs again for a time already past");
+        let tm = local(next);
+        assert_eq!((tm.tm_hour, tm.tm_min), (7, 30));
+        assert!([1, 3, 5].contains(&tm.tm_wday), "only on its days");
+        assert!(
+            !list[1].enabled && list[1].next_run.is_none(),
+            "off stays off"
+        );
+        assert_eq!(describe(&list[1].schedule), "Weekends at 19:00");
+        assert_eq!(describe(&r.schedule), "Mon, Wed, Fri at 07:30");
+
+        // The same schedule again (an older phone app editing it) updates, never duplicates.
+        absorb_into(
+            &mut list,
+            vec![sched("abc123", "video", "08:00", vec![2], true)],
+            at,
+        );
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].mode.as_deref(), Some("video"));
+        assert_eq!(list[0].schedule.days.as_deref(), Some(&[2u8][..]));
+
+        // And older phone apps still see them as schedules.
+        let back = schedules_of(&list);
+        assert_eq!(back.len(), 2);
+        assert_eq!(
+            (
+                back[0].id.as_str(),
+                back[0].mode.as_str(),
+                back[0].time.as_str()
+            ),
+            ("abc123", "video", "08:00")
+        );
+        assert_eq!(back[1].days, vec![0, 6]);
+        // A routine that thinks isn't a schedule.
+        let mut thinking = list[0].clone();
+        thinking.id = "zzz".into();
+        thinking.mode = None;
+        assert_eq!(schedules_of(&[thinking]).len(), 0);
+    }
+
+    #[test]
+    fn the_store_hands_its_schedules_over_once_and_keeps_a_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("schedules.json");
+        let store = crate::schedules::Schedules::open(&path);
+        store.add("images", "07:30", vec![1, 2]).unwrap();
+        let reopened = crate::schedules::Schedules::open(&path);
+        let taken = reopened.take_all();
+        assert_eq!(taken.len(), 1);
+        assert!(reopened.list().is_empty());
+        assert!(reopened.take_all().is_empty(), "only once");
+        assert!(
+            crate::schedules::Schedules::open(&path).list().is_empty(),
+            "the file is emptied"
+        );
+        let kept: Vec<crate::schedules::Schedule> = serde_json::from_slice(
+            &std::fs::read(tmp.path().join("schedules.json.migrated")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(kept, taken);
+    }
+
+    #[test]
+    fn a_mode_switch_skips_rather_than_interrupt_and_never_runs_late() {
+        let (status, report) = switch_outcome(
+            "Images",
+            Some("A transcription job is running.".into()),
+            None,
+            "07:30",
+        );
+        assert_eq!(status, "skipped");
+        assert!(
+            report.contains("A transcription job is running.") && report.contains("next time"),
+            "{report}"
+        );
+        assert_eq!(
+            switch_outcome("Images", None, Some(Ok(true)), "07:30").0,
+            "done"
+        );
+        assert_eq!(
+            switch_outcome("Images", None, Some(Ok(false)), "07:30").1,
+            "Images was already on."
+        );
+        let (status, report) = switch_outcome(
+            "Images",
+            None,
+            Some(Err("Needs a download.".into())),
+            "07:30",
+        );
+        assert_eq!(status, "failed");
+        assert!(report.contains("Needs a download."));
+        // Due from its minute until ten minutes after, as schedules were.
+        assert!(!too_late(1000, 1000 + 9 * 60));
+        assert!(too_late(1000, 1000 + 10 * 60));
+    }
+
+    #[test]
+    fn a_mode_routine_fills_in_its_own_name_and_goal_and_checks_its_days() {
+        let body = |kind: &str, days: Option<Vec<u8>>, mode: Option<&str>| RoutineBody {
+            name: String::new(),
+            goal: String::new(),
+            schedule: Schedule {
+                kind: kind.into(),
+                time: Some("06:00".into()),
+                every_hours: None,
+                days,
+            },
+            allowed: vec![],
+            enabled: None,
+            mode: mode.map(str::to_string),
+        };
+        let b = normalized(body("days", Some(vec![3, 1, 1]), Some("chat")));
+        assert_eq!(b.name, "Switch to Chat");
+        assert!(!b.goal.is_empty());
+        assert_eq!(b.allowed, vec!["start_model".to_string()]);
+        assert_eq!(b.schedule.days.as_deref(), Some(&[1u8, 3][..]));
+        assert!(check(&b).is_ok());
+        assert!(
+            check(&normalized(body("days", Some(vec![]), Some("chat")))).is_err(),
+            "no days"
+        );
+        assert!(
+            check(&normalized(body("days", Some(vec![7]), Some("chat")))).is_err(),
+            "no such day"
+        );
+        assert!(
+            check(&normalized(body("daily", None, Some("nonsense")))).is_err(),
+            "no such mode"
+        );
+        assert!(
+            check(&normalized(body("daily", None, None))).is_err(),
+            "a thinking routine needs a goal"
+        );
+        // Weekdays-only "days" never land on a weekend.
+        let s = Schedule {
+            kind: "days".into(),
+            time: Some("23:59".into()),
+            every_hours: None,
+            days: Some(vec![2]),
+        };
+        let mut t = super::now();
+        for _ in 0..4 {
+            t = next_after(&s, t).unwrap();
+            assert_eq!(local(t).tm_wday, 2);
         }
     }
 }

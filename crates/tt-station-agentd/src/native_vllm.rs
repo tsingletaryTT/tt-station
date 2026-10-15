@@ -468,7 +468,8 @@ pub fn serve_argv(meta: &Value, port: u16) -> Option<Launch> {
     }
     match argv.iter().position(|a| a == "--port") {
         Some(i) if i + 1 < argv.len() => argv[i + 1] = port.to_string(),
-        _ => argv.extend(["--port".into(), port.to_string()]),
+        Some(_) => argv.push(port.to_string()),
+        None => argv.extend(["--port".into(), port.to_string()]),
     }
     // Cached prompt tokens in each reply's usage (see `community::extra_vllm_args`;
     // the tt-metal vLLM this runs, merged from upstream 0.17, has the flag).

@@ -54,7 +54,7 @@ the box reports, and prints the fingerprint on stderr:
 ```
 qb2.local:8765: HTTPS on port 8766, certificate SHA-256
   27cb59aadcad9af36c82f4927cdf398030ead4eea04b68f3bc562c56f7bf2da5
-  (27cb 59aa dcad 9af3 -- the box shows this in TT Station → Settings → Pairing and security; check it matches)
+  (27cb 59aa dcad 9af3 -- the box shows this in TT Station → Settings → Security and activity → Encryption; check it matches)
 ```
 
 - `--fp` checks it for you: the full 64 hex digits or the first 16 or more (what the
