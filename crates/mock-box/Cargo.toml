@@ -2,6 +2,9 @@
 name = "mock-box"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+# Not published to crates.io (also lets cargo-deny accept path deps without a version).
+publish = false
 
 [dependencies]
 libttstation = { path = "../libttstation" }
