@@ -524,8 +524,10 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
             c.args(["-v", &format!("{}:/opt/node:ro", node.display()),
                 "-e", "PATH=/opt/cargo-bin:/opt/node/bin:/usr/local/bin:/usr/bin:/bin", "-e", "npm_config_cache=/tmp/npm-cache", "-e", "npm_config_offline=true"]);
         }
+        // Names only: docker takes each value from its own environment (the
+        // holder's spec), so the model key never shows in a process list.
         for (k, v) in &envs {
-            c.arg("-e").arg(format!("{k}={v}"));
+            c.arg("-e").arg(k).env(k, v);
         }
         c.arg(IMAGE).arg(inner_bin).args(&args);
         c

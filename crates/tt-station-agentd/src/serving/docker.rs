@@ -1176,12 +1176,10 @@ impl ServingBackend for DockerBackend {
         // Only pass `--env HF_TOKEN=...` when a real, non-empty token is
         // configured -- most local/open models need no token, and shipping
         // an empty one would be actively misleading in a `docker inspect`.
-        let hf_token_env = self
-            .config
-            .hf_token
-            .as_ref()
-            .filter(|token| !token.is_empty())
-            .map(|token| format!("HF_TOKEN={token}"));
+        // By name only: docker takes the value from its own environment
+        // (`run_in_dir_with_env` below), so the token never shows in a
+        // process list.
+        let hf_token = self.config.hf_token.as_deref().filter(|token| !token.is_empty());
 
         // Built as owned `String`s (several pieces are computed at runtime,
         // e.g. `publish_mapping`) then borrowed as `&str` for
@@ -1211,9 +1209,9 @@ impl ServingBackend for DockerBackend {
             "--volume".to_string(),
             volume_spec,
         ]);
-        if let Some(env) = hf_token_env {
+        if hf_token.is_some() {
             args.push("--env".to_string());
-            args.push(env);
+            args.push("HF_TOKEN".to_string());
         }
         args.push("--publish".to_string());
         args.push(publish_mapping);
@@ -1230,7 +1228,8 @@ impl ServingBackend for DockerBackend {
         }
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        self.runner.run(&arg_refs).inspect_err(|_| {
+        let env: Vec<(&str, &str)> = hf_token.map(|t| ("HF_TOKEN", t)).into_iter().collect();
+        self.runner.run_in_dir_with_env(".", &arg_refs, &env).inspect_err(|_| {
             // `docker run -d` can create a container and still exit non-zero
             // (it started and immediately died, or the daemon failed part
             // way through), so this exit can leave one behind. It must be

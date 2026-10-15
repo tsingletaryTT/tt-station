@@ -174,9 +174,9 @@ fn docker_start_keeps_raw_model_in_argv_but_sanitizes_container_name() {
     );
 }
 
-/// A configured HF token should show up as `--env HF_TOKEN=<token>` -- only
-/// needed for gated Hugging Face repos, so it must not appear when unset
-/// (see the sibling test below).
+/// A configured HF token should show up as `--env HF_TOKEN` -- by name only,
+/// the value going through docker's own environment so it never shows in a
+/// process list -- and only when set (see the sibling test below).
 #[test]
 fn docker_start_includes_hf_token_env_when_configured() {
     let runner = FakeRunner::new(0);
@@ -193,8 +193,12 @@ fn docker_start_includes_hf_token_env_when_configured() {
         "docker run args should carry --env when a token is configured: {run_cmd:?}"
     );
     assert!(
-        run_cmd.iter().any(|a| a == "HF_TOKEN=secret-token"),
-        "docker run args should carry the HF_TOKEN value: {run_cmd:?}"
+        run_cmd.windows(2).any(|w| w[0] == "--env" && w[1] == "HF_TOKEN"),
+        "docker run args should name HF_TOKEN: {run_cmd:?}"
+    );
+    assert!(
+        !run_cmd.iter().any(|a| a.contains("secret-token")),
+        "the token's value must not be in the command line: {run_cmd:?}"
     );
 }
 

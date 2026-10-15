@@ -400,8 +400,10 @@ pub(crate) async fn post_session(State(state): State<AppState>, _auth: BearerAut
         run.args(["--user", "--collect", "--quiet", &format!("--unit={}", unit(&sid)), &format!("--working-directory={}", folder.display())])
             .arg(format!("--setenv=PATH={path}"))
             .arg(format!("--setenv=HOME={}", home().display()));
+        // Names only: systemd-run takes each value from its own environment,
+        // so the key never shows in a process list.
         for (k, v) in &env {
-            run.arg(format!("--setenv={k}={v}"));
+            run.arg(format!("--setenv={k}")).env(k, v);
         }
         let out = run
             .args(["python3", "-c", HOST, &sock(&st, &sid).display().to_string(), &dir.join("term.log").display().to_string(), "120", "36", "--"])

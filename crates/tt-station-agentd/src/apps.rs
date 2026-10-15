@@ -684,7 +684,14 @@ fn install_blocking(state: &AppState, def: &'static AppDef, step: &dyn Fn(&str))
         }
     }
     for (k, v) in def.env {
-        cmd.args(["-e", &format!("{k}={}", fill(v, &base, &key, &token, &model).replace("{embed_dim}", &dims))]);
+        let value = fill(v, &base, &key, &token, &model).replace("{embed_dim}", &dims);
+        if v.contains("{key}") || v.contains("{token}") {
+            // A secret: docker takes it from its own environment, by name, so
+            // it never shows in a process list.
+            cmd.args(["-e", k]).env(k, value);
+        } else {
+            cmd.args(["-e", &format!("{k}={value}")]);
+        }
     }
     cmd.args(def.extra_args);
     if def.show_key {

@@ -1241,7 +1241,9 @@ fn launch(state: &AppState, env: &CodexEnv, run: &CodexRun, log_dir: &Path, stag
         .arg("--setenv=PYTHONUNBUFFERED=1")
         .arg(format!("--setenv=TT_STATION_URL=http://127.0.0.1:{}", state.ctrl_port()))
         .arg(format!("--setenv=TT_STATION_RUN={}", run.id))
-        .arg(format!("--setenv=TT_STATION_RUN_SECRET={}", run.secret))
+        // The value from systemd-run's environment, not its command line.
+        .arg("--setenv=TT_STATION_RUN_SECRET")
+        .env("TT_STATION_RUN_SECRET", &run.secret)
         .args(["sh", "-c", &script])
         .stdin(Stdio::null())
         .output()
