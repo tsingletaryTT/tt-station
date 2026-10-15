@@ -56,6 +56,10 @@
   <section id="pick">
     <h1>Connect a Tenstorrent device</h1>
     <p>A QuietBox, a Galaxy server, a workstation with Tenstorrent cards: anything running TT Station. This app connects to it over your network, encrypted and pinned to the device's own certificate.</p>
+    <div class="card" id="here" hidden>
+      <div class="eyebrow">This device</div>
+      <button class="box" id="here-go"><span class="dot"></span><span style="flex:1"><b id="here-name"></b> <span class="muted mono">this computer</span></span><span class="muted">Sign in</span></button>
+    </div>
     <div class="card">
       <div class="row" style="justify-content: space-between"><div class="eyebrow" style="margin: 0">On this network</div><button class="ghost" id="rescan" style="padding: 4px 8px">Look again</button></div>
       <div id="found" style="margin-top: 8px"><div class="row muted"><div class="spin"></div> Looking for devices…</div></div>
@@ -222,6 +226,14 @@
     const r = await tt.pairFinish({ ...target, code: $("code-input").value });
     if (!r.ok) { $("code-error").textContent = r.error; $("pair").disabled = false; }
   };
+  // Signed out of the box this app runs on: it can sign straight back in (no code needed).
+  tt.boxes?.().then((b) => {
+    const here = b.boxes.find((x) => x.local);
+    if (!here) return;
+    $("here-name").textContent = here.name;
+    $("here").hidden = false;
+  }).catch(() => {});
+  $("here-go").onclick = () => tt.switchBox("local");
   scan();
 </script>
 </body>

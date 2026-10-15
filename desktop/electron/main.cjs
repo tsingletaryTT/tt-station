@@ -9,12 +9,13 @@
 // agent's `local-secret` file (readable only by this user) proves we're the
 // box's owner, and buys a pairing token like the phone's.
 
-const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, shell, globalShortcut, nativeImage, net, session } = require("electron");
+const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, shell, globalShortcut, nativeImage, net, session, safeStorage } = require("electron");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { validHost, validUser, cleanName, sameOrigin, webAddress, shq } = require("./validate.cjs");
+const tokenstore = require("./tokenstore.cjs");
 
 app.setName("TT Station");
 // The dock groups windows by this id; it matches tt-station.desktop.
@@ -27,6 +28,7 @@ const IS_MAC = process.platform === "darwin";
 const CONFIG_DIR = process.env.TT_CONFIG_DIR || (IS_MAC ? path.join(app.getPath("appData"), "TT Station") : path.join(os.homedir(), ".config", "tt-station"));
 const TOKEN_FILE = path.join(CONFIG_DIR, "desktop-token");
 // Other boxes this app is paired with: [{ id, name, host, tls, fp, token }], and which one the window shows.
+// Both files hold tokens sealed with the OS keychain where there is one (./tokenstore.cjs).
 const BOXES_FILE = path.join(CONFIG_DIR, "desktop-boxes.json");
 const ICON = path.join(__dirname, "..", "assets", "icon.png");
 const TRAY_ICON = path.join(__dirname, "..", "assets", "tray.png");
@@ -91,21 +93,47 @@ async function call(base, method, route, { token, body, headers = {}, timeout = 
 // box's HTTPS port and its certificate's fingerprint, which every connection
 // to it is checked against (the box's certificate is its own, not a CA's).
 
-let boxes = readBoxes();
+// Read once the app is ready: safeStorage can't unseal tokens before then.
+let boxes = { current: "local", boxes: [] };
+
+/** Where this computer keeps box tokens: { protected, backend, where } (see tokenstore.cjs). */
+const tokenStorage = () => tokenstore.storageInfo(safeStorage, process.platform);
 
 function readBoxes() {
-  try {
-    const b = JSON.parse(fs.readFileSync(BOXES_FILE, "utf8"));
-    return { current: b.current || "local", boxes: Array.isArray(b.boxes) ? b.boxes : [] };
-  } catch {
-    return { current: "local", boxes: [] };
+  let text;
+  try { text = fs.readFileSync(BOXES_FILE, "utf8"); } catch { return { current: "local", boxes: [] }; }
+  const { current, boxes: list, migrate } = tokenstore.loadBoxes(text, safeStorage, tokenStorage());
+  const read = { current, boxes: list };
+  // Plain tokens from before the keychain: seal them now (the write is one rename,
+  // and a token is only sealed once it's been unsealed back, so none is lost).
+  if (migrate) {
+    try { tokenstore.writePrivate(BOXES_FILE, tokenstore.dumpBoxes(read, safeStorage, tokenStorage())); } catch (e) { console.error(`TT Station: couldn't move box tokens to the keychain: ${e.message}`); }
   }
+  return read;
 }
 
 function saveBoxes() {
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(BOXES_FILE, JSON.stringify(boxes, null, 2), { mode: 0o600 });
+  tokenstore.writePrivate(BOXES_FILE, tokenstore.dumpBoxes(boxes, safeStorage, tokenStorage()));
   if (typeof buildMenu === "function" && app.isReady()) buildMenu();
+}
+
+/** This desktop's own token for the box it runs on (null before the first pairing). */
+function readLocalToken() {
+  let text;
+  try { text = fs.readFileSync(TOKEN_FILE, "utf8"); } catch { return null; } // first run
+  const { token, migrate } = tokenstore.loadToken(text, safeStorage, tokenStorage());
+  if (token && migrate) {
+    // Only once it really sealed: a keychain that won't round-trip leaves the file as it is.
+    const sealed = tokenstore.seal(token, safeStorage, tokenStorage());
+    if (tokenstore.isSealed(sealed)) {
+      try { tokenstore.writePrivate(TOKEN_FILE, sealed); } catch (e) { console.error(`TT Station: couldn't move the token to the keychain: ${e.message}`); }
+    }
+  }
+  return token;
+}
+
+function writeLocalToken(token) {
+  tokenstore.writePrivate(TOKEN_FILE, tokenstore.seal(token, safeStorage, tokenStorage()));
 }
 
 /** The SHA-256 of a PEM certificate's DER bytes, in hex (how the box states its fingerprint). */
@@ -159,7 +187,7 @@ async function pairFinish(p) {
   const base = hostUrl(p.host, p.tls);
   pairing.set(p.host, p);
   try {
-    const done = await call(base, "POST", "/pair/complete", { body: { pair_id: p.pair, code: p.code, label: `${deviceName()} (TT Station)` } });
+    const done = await call(base, "POST", "/pair/complete", { body: { pair_id: p.pair, code: p.code, ...thisDevice() } });
     if (!done.ok || !done.json?.token) throw new Error(done.status === 401 ? "The code was wrong or has expired. Start again for a new one." : (done.json?.error || `The box answered ${done.status}.`));
     const id = p.fp.slice(0, 12);
     const old = boxes.boxes.find((b) => b.id === id);
@@ -180,17 +208,19 @@ async function credsFor(id) {
   if (id === "local") {
     const secret = readSecret();
     if (!secret) throw new Error("The TT Station agent isn't set up on this computer (no local secret).");
-    let token = null;
-    try { token = fs.readFileSync(TOKEN_FILE, "utf8").trim(); } catch { /* first run */ }
-    return { base: `http://127.0.0.1:${secret.port}`, token, name: secret.name };
+    return { base: `http://127.0.0.1:${secret.port}`, token: readLocalToken(), name: secret.name };
   }
   const b = boxes.boxes.find((x) => x.id === id);
   if (!b) throw new Error("That device isn't paired with this computer.");
   return { base: `https://${b.host.includes(":") ? `[${b.host}]` : b.host}:${b.tls}`, token: b.token, name: b.name };
 }
 
+/** Set when this computer signs itself out of the box it runs on (Settings → Devices). */
+let localSignedOut = false;
+
 function switchBox(id) {
   if (id !== "local" && !boxes.boxes.some((b) => b.id === id)) return;
+  if (id === "local") localSignedOut = false;
   boxes.current = id;
   saveBoxes();
   auth = null;
@@ -217,6 +247,8 @@ class NeedsBox extends Error {}
 
 /** A token for the box the window shows. */
 async function signIn() {
+  // Signed out from Settings: stay on the connect screen until asked back.
+  if (boxes.current === "local" && localSignedOut) throw new NeedsBox("Signed out.");
   if (boxes.current === "local" && !readSecret()) {
     if (!boxes.boxes.length) throw new NeedsBox("No box yet.");
     boxes.current = boxes.boxes[0].id;
@@ -224,9 +256,11 @@ async function signIn() {
   }
   if (boxes.current !== "local") {
     const c = await credsFor(boxes.current);
+    const box = boxes.boxes.find((b) => b.id === boxes.current);
+    if (!c.token && box?.sealedToken) throw new Error(`This computer's keychain wouldn't open the saved sign-in for ${c.name}. Unlock your keychain and reopen TT Station, or add the device again.`);
     const check = await call(c.base, "GET", "/people", { token: c.token }).catch((e) => ({ ok: false, status: 0, error: e }));
     if (check.ok) return c;
-    if (check.status === 401) throw new Error(`${c.name} doesn't recognize this computer any more. Add it again (the device name at top left → Add another device).`);
+    if (check.status === 401) throw new Error(`${c.name} doesn't recognize this computer any more${check.json?.error?.includes("expired") ? " (it went unused too long)" : ""}. Add it again (the device name at top left → Add another device).`);
     throw new Error(`Can't reach ${c.name} right now.`);
   }
   return signInLocal();
@@ -237,8 +271,7 @@ async function signInLocal() {
   const secret = readSecret();
   if (!secret) throw new Error("The TT Station agent isn't set up on this computer (no local secret).");
   const base = `http://127.0.0.1:${secret.port}`;
-  let token = null;
-  try { token = fs.readFileSync(TOKEN_FILE, "utf8").trim(); } catch { /* first run */ }
+  const token = readLocalToken();
   if (token) {
     const check = await call(base, "GET", "/people", { token });
     if (check.ok) return { base, token, name: secret.name };
@@ -246,11 +279,10 @@ async function signInLocal() {
   const offer = await call(base, "POST", "/pair/offer", { headers: { "x-tt-local-secret": secret.secret } });
   if (!offer.ok) throw new Error(offer.json?.error || `The agent refused (${offer.status}).`);
   const done = await call(base, "POST", "/pair/complete", {
-    body: { pair_id: offer.json.pair_id, code: offer.json.code, label: `${os.hostname()} desktop` },
+    body: { pair_id: offer.json.pair_id, code: offer.json.code, ...thisDevice() },
   });
   if (!done.ok || !done.json?.token) throw new Error(done.json?.error || "Pairing didn't complete.");
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(TOKEN_FILE, done.json.token, { mode: 0o600 });
+  writeLocalToken(done.json.token);
   return { base, token: done.json.token, name: secret.name };
 }
 
@@ -260,6 +292,12 @@ function deviceName() {
     try { return require("node:child_process").execFileSync("scutil", ["--get", "ComputerName"], { encoding: "utf8" }).trim() || os.hostname(); } catch { /* fall through */ }
   }
   return os.hostname().replace(/\.local$/, "");
+}
+
+/** How this computer introduces itself when pairing, for the box's device list. */
+function thisDevice() {
+  const platform = { darwin: "macOS", win32: "Windows", linux: "Linux" }[process.platform] ?? process.platform;
+  return { name: deviceName(), platform };
 }
 
 /** Boxes advertising themselves on this network (`_tenstorrent._tcp`), for a couple of seconds. */
@@ -1098,7 +1136,17 @@ handle("add-box", async (_e, link) => {
   try { const id = await addBox(link); return { ok: true, id }; } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
 handle("switch-box", (_e, id) => { switchBox(String(id)); });
-handle("remove-box", (_e, id) => {
+/** Best effort: tell a box to forget this computer, so a removed box isn't left holding a live pairing. */
+async function signOutOf(id) {
+  const c = await credsFor(id).catch(() => null);
+  if (!c?.token) return;
+  const list = await call(c.base, "GET", "/devices", { token: c.token, timeout: 5000 }).catch(() => null);
+  const me = list?.json?.devices?.find?.((d) => d.this_device);
+  if (me) await call(c.base, "DELETE", `/devices/${encodeURIComponent(me.id)}`, { token: c.token, timeout: 5000 }).catch(() => null);
+}
+
+handle("remove-box", async (_e, id) => {
+  await signOutOf(id);
   boxes.boxes = boxes.boxes.filter((b) => b.id !== id);
   saveBoxes();
   if (boxes.current === id) {
@@ -1109,6 +1157,30 @@ handle("remove-box", (_e, id) => {
   return boxList();
 });
 handle("show-connect", () => showConnect());
+// Where this computer keeps its box tokens, for Settings to say plainly.
+handle("token-storage", () => {
+  const t = tokenStorage();
+  return { protected: t.protected, where: t.where, backend: t.backend };
+});
+// The box already removed this computer (Settings → Devices): forget its token
+// and go back to the connect screen.
+handle("signed-out", () => {
+  const id = boxes.current;
+  auth = null;
+  if (overlay && !overlay.isDestroyed()) overlay.destroy();
+  overlay = null;
+  if (id === "local") {
+    fs.rmSync(TOKEN_FILE, { force: true });
+    localSignedOut = true;
+  } else {
+    boxes.boxes = boxes.boxes.filter((b) => b.id !== id);
+    boxes.current = "local";
+    saveBoxes();
+  }
+  lastSeq.delete(id);
+  refreshTray();
+  showConnect();
+});
 handle("discover", () => discover());
 handle("probe", async (_e, host, tls) => {
   try { return { ok: true, ...(await probe(String(host), Number(tls) || 8766)) }; } catch (e) { return { ok: false, error: String(e.message || e) }; }
@@ -1213,6 +1285,7 @@ function buildMenu() {
 }
 
 app.whenReady().then(() => {
+  boxes = readBoxes();
   trustPinnedBoxes();
   buildMenu();
   app.on("activate", show);

@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld("ttDesktop", {
   switchBox: (id) => ipcRenderer.invoke("switch-box", id),
   removeBox: (id) => ipcRenderer.invoke("remove-box", id),
   showConnect: () => ipcRenderer.invoke("show-connect"),
+  // Where this computer keeps its box tokens (the OS keychain, or a plain owner-only file).
+  tokenStorage: () => ipcRenderer.invoke("token-storage"),
+  // The box removed this computer (Settings → Devices): forget its token, back to the connect screen.
+  signedOut: () => ipcRenderer.invoke("signed-out"),
   // Pairing a box found on the network (the pairing screen).
   discover: () => ipcRenderer.invoke("discover"),
   probe: (host, tls) => ipcRenderer.invoke("probe", host, tls),
