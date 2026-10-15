@@ -309,7 +309,7 @@ pub(crate) async fn post_open(State(state): State<AppState>, _auth: BearerAuth) 
         // copy, which restores and focuses its window (Electron's second-instance).
         let id = "com.nousresearch.hermes.desktop";
         let raised = tokio::task::spawn_blocking(move || {
-            Command::new("gtk-launch").arg(id).stdin(Stdio::null()).output().is_ok_and(|o| o.status.success())
+            crate::scope::command("gtk-launch", &[id]).stdin(Stdio::null()).output().is_ok_and(|o| o.status.success())
         })
         .await
         .unwrap_or(false);

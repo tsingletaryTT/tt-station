@@ -218,8 +218,9 @@ pub fn find<'a>(
 }
 
 fn spawn(program: &str, args: &[&str]) -> Result<(), String> {
-    let mut child = Command::new(program)
-        .args(args)
+    // In its own scope: what this opens is the person's, not the agent's, and
+    // must not be left behind in the agent's cgroup (see `crate::scope`).
+    let mut child = crate::scope::command(program, args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

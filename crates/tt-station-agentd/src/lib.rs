@@ -62,6 +62,7 @@ pub mod skills;
 pub mod routes;
 pub mod safegit;
 pub mod schedules;
+pub mod scope;
 pub mod serving;
 pub mod sessions;
 pub mod telemetry;
