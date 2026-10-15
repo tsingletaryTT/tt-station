@@ -1082,6 +1082,14 @@ async fn main() -> Result<()> {
     // `rc.token_store` being `None` by `resolve`) opts back out to the
     // pre-persistence in-memory-only behavior.
     let backend: Arc<dyn tt_station_agentd::serving::ServingBackend> = Arc::from(backend);
+    // Tokens, people, recordings and research live under here: owner-only,
+    // whatever the umask made it (files written before 0600 saves included).
+    if let Err(e) = tt_station_agentd::fsio::ensure_private_dir(&config_dir()) {
+        tt_station_agentd::log::error(format!(
+            "couldn't make {} private (0700): {e}",
+            config_dir().display()
+        ));
+    }
     let state = match &rc.token_store {
         None => AppState::new(rc.name.clone(), rc.chips.clone(), backend),
         Some(path) => {

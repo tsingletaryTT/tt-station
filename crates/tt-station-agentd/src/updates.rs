@@ -285,13 +285,12 @@ pub struct Change {
 }
 
 fn history() -> Vec<Change> {
-    std::fs::read(history_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    crate::fsio::read_json_or_backup(&history_file()).unwrap_or_default()
 }
 
 fn save_history(h: &[Change]) {
-    let _ = std::fs::create_dir_all(root());
     let keep = &h[h.len().saturating_sub(30)..];
-    let _ = std::fs::write(history_file(), serde_json::to_vec_pretty(keep).unwrap_or_default());
+    crate::fsio::save_json(&history_file(), keep, crate::fsio::PRIVATE);
 }
 
 // ---------------------------------------------------------------- doing it

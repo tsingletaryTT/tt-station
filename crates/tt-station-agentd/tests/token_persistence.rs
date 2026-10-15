@@ -235,6 +235,19 @@ async fn a_corrupt_token_store_file_starts_empty_instead_of_panicking() {
         "a corrupt token store should start empty, rejecting every token"
     );
 
+    // ...and the bad file was moved aside (`<name>.corrupt-<ts>`), not dropped.
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    let aside: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(&format!("{name}.corrupt-")))
+        .collect();
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert_eq!(std::fs::read(&aside[0]).unwrap(), b"this is not json {{{");
+    for p in aside {
+        let _ = std::fs::remove_file(p);
+    }
     let _ = std::fs::remove_file(&path);
 }
 

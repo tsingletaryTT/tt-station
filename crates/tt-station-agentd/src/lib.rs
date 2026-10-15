@@ -27,6 +27,7 @@ pub mod evals;
 pub mod favorites;
 pub mod docs;
 pub mod doctor;
+pub mod fsio;
 pub mod gateway;
 pub mod gozer;
 pub mod hermes;

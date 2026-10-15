@@ -307,9 +307,14 @@ pub(crate) async fn start(
         };
         let id = crate::pairing::issue_pair_id()[..12].to_string();
         let dir = jobs.job_dir(&id);
-        std::fs::create_dir_all(&dir)
+        // A recording of whoever was talking: owner-only. ffmpeg writes into a
+        // file made here at 0600 (`-y` truncates it, keeping the mode), in a
+        // 0700 folder.
+        crate::fsio::ensure_private_dir(&dir)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let path = dir.join("input.ogg");
+        crate::fsio::write_atomic(&path, b"", crate::fsio::PRIVATE)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let mut child = Command::new("ffmpeg")
             .args(ffmpeg_args(want_mic, want_system, &path.to_string_lossy()))
             .stdin(Stdio::null())

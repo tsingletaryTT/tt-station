@@ -228,10 +228,9 @@ fn read_store(path: &Path) -> Loaded {
     if let Ok(tokens) = serde_json::from_str::<Vec<String>>(&contents) {
         return Loaded::Legacy(tokens);
     }
-    eprintln!(
-        "tt-station-agentd: token store at {} is not valid JSON -- starting with no paired devices",
-        path.display()
-    );
+    // Moved aside rather than left to be overwritten by the next pairing, so
+    // the devices it held can be recovered by hand.
+    crate::fsio::quarantine(path, "not valid JSON; starting with no paired devices");
     Loaded::Unreadable
 }
 
@@ -712,9 +711,19 @@ mod tests {
 
     #[test]
     fn corrupt_store_starts_empty() {
-        let (_dir, path) = temp_store();
+        let (dir, path) = temp_store();
         std::fs::write(&path, "not json {{").unwrap();
-        assert!(Sessions::open_at(path, T0).is_empty());
+        let sessions = Sessions::open_at(path.clone(), T0);
+        assert!(sessions.is_empty());
+        // The bad file was kept aside, so pairing again can't overwrite it.
+        sessions.pair_at("tok", None, None, T0);
+        let aside: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_string_lossy().contains("agentd-tokens.json.corrupt-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        assert_eq!(std::fs::read_to_string(&aside[0]).unwrap(), "not json {{");
     }
 
     #[test]

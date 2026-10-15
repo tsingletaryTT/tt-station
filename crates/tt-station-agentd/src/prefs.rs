@@ -49,15 +49,11 @@ fn path(state: &AppState) -> std::path::PathBuf {
 }
 
 pub fn load(state: &AppState) -> ModelPrefs {
-    std::fs::read(path(state))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    crate::fsio::read_json_or_backup(&path(state)).unwrap_or_default()
 }
 
 fn save(state: &AppState, prefs: &ModelPrefs) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(prefs).map_err(|e| e.to_string())?;
-    std::fs::write(path(state), bytes).map_err(|e| e.to_string())
+    crate::fsio::write_json(&path(state), prefs, crate::fsio::PRIVATE).map_err(|e| e.to_string())
 }
 
 /// What kind of model a catalog entry is: chat, image, video, speech, voice, or other.

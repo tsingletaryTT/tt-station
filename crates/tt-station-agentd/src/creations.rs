@@ -31,10 +31,11 @@ impl Creations {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(b64.trim())
             .map_err(std::io::Error::other)?;
-        std::fs::create_dir_all(&self.dir)?;
+        crate::fsio::ensure_private_dir(&self.dir)?;
         let id = crate::pairing::issue_pair_id()[..16].to_string();
-        std::fs::write(self.dir.join(format!("{id}.jpg")), bytes)?;
-        std::fs::write(self.dir.join(format!("{id}.txt")), prompt)?;
+        use crate::fsio::{write_atomic, PRIVATE};
+        write_atomic(&self.dir.join(format!("{id}.jpg")), &bytes, PRIVATE)?;
+        write_atomic(&self.dir.join(format!("{id}.txt")), prompt.as_bytes(), PRIVATE)?;
         self.prune();
         Ok(id)
     }
