@@ -32,6 +32,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value};
 
+use crate::error::{err, ApiError};
 use crate::routes::{AppState, BearerAuth};
 
 pub struct AppDef {
@@ -1008,11 +1009,7 @@ fn install_blocking(
 // Routes
 // ---------------------------------------------------------------------
 
-type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
-
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({ "error": msg.into() })))
-}
+type Reply = Result<Json<Value>, ApiError>;
 
 pub(crate) async fn get_apps(
     axum::extract::State(state): axum::extract::State<AppState>,

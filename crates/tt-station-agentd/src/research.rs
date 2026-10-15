@@ -35,13 +35,10 @@ use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::error::{err, ApiError};
 use crate::routes::{AppState, BearerAuth, Phase};
 
-type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
-
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({ "error": msg.into() })))
-}
+type Reply = Result<Json<Value>, ApiError>;
 
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -885,7 +882,7 @@ pub(crate) async fn get_research(State(state): State<AppState>, _auth: BearerAut
 }
 
 /// Start a job (the route, and the assistant's `research` tool).
-pub async fn start(state: &AppState, body: StartBody) -> Result<Job, (StatusCode, Json<Value>)> {
+pub async fn start(state: &AppState, body: StartBody) -> Result<Job, ApiError> {
     let question = body.question.trim().to_string();
     if question.len() < 8 {
         return Err(err(StatusCode::BAD_REQUEST, "Ask a full question."));
@@ -1089,7 +1086,7 @@ pub struct ExplainBody {
 /// The passage (whitespace collapsed), the mode, and the question (only when asking).
 type Checked = (String, ExplainMode, Option<String>);
 
-fn checked(b: ExplainBody) -> Result<Checked, (StatusCode, Json<Value>)> {
+fn checked(b: ExplainBody) -> Result<Checked, ApiError> {
     // Selections out of a rendered page come with stray line breaks and spaces.
     let selection = b.selection.split_whitespace().collect::<Vec<_>>().join(" ");
     if selection.chars().count() < 2 {
@@ -1329,7 +1326,7 @@ pub(crate) async fn post_explain(
     axum::response::sse::Sse<
         impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
     >,
-    (StatusCode, Json<Value>),
+    ApiError,
 > {
     if !valid_id(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such report."));

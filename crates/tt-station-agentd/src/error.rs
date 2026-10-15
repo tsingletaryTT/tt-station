@@ -45,6 +45,14 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// For a route that still answers `(StatusCode, Json<Value>)` (its errors can
+/// carry more than a message) and passes on an `ApiError` from one that doesn't.
+impl From<ApiError> for (StatusCode, Json<serde_json::Value>) {
+    fn from(e: ApiError) -> Self {
+        (e.status, Json(serde_json::json!({ "error": e.error })))
+    }
+}
+
 /// [`ApiError::new`], by the name the route modules' own helpers had.
 pub(crate) fn err(status: StatusCode, error: impl Into<String>) -> ApiError {
     ApiError::new(status, error)

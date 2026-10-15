@@ -50,7 +50,8 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::routes::{AppState, CallerAuth, ErrorResponse, OwnerAuth};
+use crate::error::{err, ApiError};
+use crate::routes::{AppState, CallerAuth, OwnerAuth};
 
 /// `manifest.json`'s `format`.
 pub const FORMAT: &str = "tt-station-export";
@@ -75,10 +76,6 @@ fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (status, Json(ErrorResponse { error: msg.into() }))
 }
 
 // ---------------------------------------------------------------- settings
@@ -146,7 +143,7 @@ pub(crate) async fn put_settings(
     _owner: OwnerAuth,
     CallerAuth(caller): CallerAuth,
     Json(patch): Json<SettingsPatch>,
-) -> Result<Json<DataSettings>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<DataSettings>, ApiError> {
     let mut s = settings(&state);
     if let Some(v) = patch.keep_audio {
         s.keep_audio = v;
@@ -1214,7 +1211,7 @@ pub(crate) async fn post_import(
     CallerAuth(caller): CallerAuth,
     axum::extract::Query(q): axum::extract::Query<ImportQuery>,
     body: axum::body::Body,
-) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Value>, ApiError> {
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
     let dry_run = q.dry_run.unwrap_or(false);

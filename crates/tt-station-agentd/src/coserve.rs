@@ -29,7 +29,8 @@ use axum::Json;
 use libttstation::model::Endpoint;
 use serde::Deserialize;
 
-use crate::routes::{AppState, BearerAuth, ErrorResponse, Lifecycle, Phase};
+use crate::error::{err, ApiError};
+use crate::routes::{AppState, BearerAuth, Lifecycle, Phase};
 use crate::serving::{Placement, ServingBackend};
 
 /// The device config for one slot.
@@ -261,10 +262,6 @@ pub fn is_split(state: &AppState) -> bool {
 // Routes
 // ---------------------------------------------------------------------
 
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (status, Json(ErrorResponse { error: msg.into() }))
-}
-
 /// Why this box can't co-serve, if it can't.
 fn unavailable(state: &AppState) -> Option<String> {
     if let Some(holder) = state.chips_holder() {
@@ -384,7 +381,7 @@ pub(crate) async fn post_coserve(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
     Json(req): Json<CoserveRequest>,
-) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     if let Some(reason) = unavailable(&state) {
         return Err(err(StatusCode::CONFLICT, reason));
     }
@@ -410,10 +407,7 @@ pub(crate) async fn post_coserve(
     let (chat, image) = tokio::task::spawn_blocking(move || choices_blocking(&probe))
         .await
         .unwrap_or_default();
-    let check = |list: &[Choice],
-                 wanted: &str,
-                 what: &str|
-     -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let check = |list: &[Choice], wanted: &str, what: &str| -> Result<String, ApiError> {
         let wanted_short = wanted.rsplit('/').next().unwrap_or(wanted);
         let found = list
             .iter()

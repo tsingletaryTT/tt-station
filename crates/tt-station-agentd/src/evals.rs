@@ -50,13 +50,10 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::error::{err, ApiError};
 use crate::routes::{AppState, BearerAuth};
 
-type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
-
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({ "error": msg.into() })))
-}
+type Reply = Result<Json<Value>, ApiError>;
 
 fn now() -> u64 {
     std::time::SystemTime::now()

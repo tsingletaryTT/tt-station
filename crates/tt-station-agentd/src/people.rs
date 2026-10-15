@@ -30,6 +30,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::error::{err, ApiError};
 use crate::routes::AppState;
 
 pub use crate::auth::Who;
@@ -266,15 +267,11 @@ pub fn current() -> Option<Person> {
 // Routes
 // ---------------------------------------------------------------------
 
-type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
-
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({ "error": msg.into() })))
-}
+type Reply = Result<Json<Value>, ApiError>;
 
 /// Whether the caller may make its own device `person`'s: an owner always; a
 /// member only when no other live device is that person's already.
-fn may_claim(state: &AppState, who: &Who, person: &str) -> Result<(), (StatusCode, Json<Value>)> {
+fn may_claim(state: &AppState, who: &Who, person: &str) -> Result<(), ApiError> {
     let sessions = state.sessions();
     let mine = digest(&who.token);
     if sessions.session_for(&who.token).is_some_and(|s| s.owner) {

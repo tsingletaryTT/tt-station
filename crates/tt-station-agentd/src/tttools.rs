@@ -21,7 +21,8 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::routes::{AppState, BearerAuth, ErrorResponse};
+use crate::error::{err, ApiError};
+use crate::routes::{AppState, BearerAuth};
 use crate::ttcli::TtCli;
 
 /// Browser apps `tt launch` can run, and the host port each gets (3000 is
@@ -31,11 +32,7 @@ pub const WEB_CLIENTS: [(&str, &str, u16); 2] = [
     ("anythingllm", "AnythingLLM", 3011),
 ];
 
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (status, Json(ErrorResponse { error: msg.into() }))
-}
-
-fn tt(state: &AppState) -> Result<Arc<TtCli>, (StatusCode, Json<ErrorResponse>)> {
+fn tt(state: &AppState) -> Result<Arc<TtCli>, ApiError> {
     state
         .tt_cli()
         .ok_or_else(|| err(StatusCode::CONFLICT, "This box doesn't have the tt CLI."))
@@ -157,7 +154,7 @@ fn dir_bytes(path: &std::path::Path) -> u64 {
 pub(crate) async fn get_software(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
-) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Value>, ApiError> {
     let tt = tt(&state)?;
     let driver = state
         .cached_snapshot()
@@ -225,7 +222,7 @@ pub(crate) async fn post_cli_update(
     axum::extract::State(state): axum::extract::State<AppState>,
     _owner: crate::routes::OwnerAuth,
     body: Option<Json<CliUpdateBody>>,
-) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Value>, ApiError> {
     let dry_run = body.is_some_and(|b| b.dry_run);
     let tt = tt(&state)?;
     if !dry_run
@@ -313,7 +310,7 @@ pub(crate) async fn delete_model(
     _auth: BearerAuth,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(q): axum::extract::Query<RemoveQuery>,
-) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Value>, ApiError> {
     let tt = tt(&state)?;
     let short = |m: &str| m.rsplit('/').next().unwrap_or(m).to_lowercase();
     let life = state.lifecycle();
@@ -367,7 +364,7 @@ fn client_url(state: &AppState, port: u16) -> String {
 pub(crate) async fn get_clients(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
-) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Value>, ApiError> {
     let tt = tt(&state)?;
     let list = tokio::task::spawn_blocking(move || tt.run_json(&["launch", "list"]))
         .await
@@ -402,7 +399,7 @@ pub(crate) async fn start_client(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
     axum::extract::Path(tool): axum::extract::Path<String>,
-) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Value>, ApiError> {
     let tt = tt(&state)?;
     let Some((_, label, port)) = WEB_CLIENTS.iter().find(|(t, _, _)| *t == tool).copied() else {
         return Err(err(
@@ -444,7 +441,7 @@ pub(crate) async fn stop_client(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
     axum::extract::Path(tool): axum::extract::Path<String>,
-) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Value>, ApiError> {
     let tt = tt(&state)?;
     if !WEB_CLIENTS.iter().any(|(t, _, _)| *t == tool) {
         return Err(err(

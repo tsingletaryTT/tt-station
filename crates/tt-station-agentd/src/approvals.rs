@@ -88,15 +88,14 @@ pub(crate) async fn post_answer(
             let done = crate::routines::answer_queued(&state, run, n, a.allow)?;
             Ok(Json(json!({ "ok": true, "status": done })))
         }
-        (Some("routine"), Some(run), None) => {
-            crate::routines::post_approve(
-                State(state),
-                auth,
-                UrlPath(run.to_string()),
-                Json(crate::routines::Decision { allow: a.allow }),
-            )
-            .await
-        }
+        (Some("routine"), Some(run), None) => crate::routines::post_approve(
+            State(state),
+            auth,
+            UrlPath(run.to_string()),
+            Json(crate::routines::Decision { allow: a.allow }),
+        )
+        .await
+        .map_err(Into::into),
         _ => Err((
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "Unknown approval." })),

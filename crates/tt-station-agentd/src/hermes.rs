@@ -25,9 +25,10 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value};
 
+use crate::error::{err, ApiError};
 use crate::routes::{AppState, BearerAuth, Phase};
 
-type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
+type Reply = Result<Json<Value>, ApiError>;
 
 /// Nous's installer, pinned (2026-10-15): `scripts/install.sh` at this commit of
 /// NousResearch/hermes-agent -- byte for byte what
@@ -64,7 +65,7 @@ fn verify_installer(body: &[u8], want_sha256: &str) -> Result<(), String> {
 
 /// Download the pinned installer, check it, and keep it where only this
 /// account can read or change it until it runs.
-async fn fetch_installer(dir: &Path) -> Result<PathBuf, (StatusCode, Json<Value>)> {
+async fn fetch_installer(dir: &Path) -> Result<PathBuf, ApiError> {
     let body = reqwest::Client::new()
         .get(installer_url())
         .timeout(std::time::Duration::from_secs(60))
@@ -105,10 +106,6 @@ const INSTALL_UNIT: &str = "tt-station-hermes-install";
 const DESKTOP_UNIT: &str = "tt-station-hermes-desktop";
 /// Hermes refuses models with less working memory than this.
 const MIN_CONTEXT: u64 = 64_000;
-
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({ "error": msg.into() })))
-}
 
 fn home() -> PathBuf {
     std::env::var_os("HOME")

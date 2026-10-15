@@ -19,7 +19,8 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::routes::{BearerAuth, ErrorResponse};
+use crate::error::{err, ApiError};
+use crate::routes::BearerAuth;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct DesktopApp {
@@ -681,10 +682,6 @@ pub fn open_station(page: &str) -> Result<Value, String> {
 // Routes
 // ---------------------------------------------------------------------
 
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (status, Json(ErrorResponse { error: msg.into() }))
-}
-
 /// `GET /desktop/apps` (authed): the apps the box can open.
 pub(crate) async fn get_apps(_auth: BearerAuth) -> Json<Value> {
     let apps = tokio::task::spawn_blocking(apps).await.unwrap_or_default();
@@ -704,7 +701,7 @@ pub struct OpenBody {
 pub(crate) async fn post_open(
     _owner: crate::routes::OwnerAuth,
     Json(body): Json<OpenBody>,
-) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Value>, ApiError> {
     tokio::task::spawn_blocking(move || open(body.app.as_deref(), body.url.as_deref()))
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?

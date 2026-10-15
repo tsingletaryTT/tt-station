@@ -2661,10 +2661,7 @@ pub(crate) async fn run_read_only(state: &AppState, call: &ToolCall) -> (Value, 
                     json!({ "started": true, "id": job.id, "note": "It runs in the background; the user gets a notification when the report is ready, and can follow it in TT Station's Research page." }),
                     "Started researching it".to_string(),
                 )),
-                Err((_, e)) => Err(e.0["error"]
-                    .as_str()
-                    .unwrap_or("couldn't start the research")
-                    .to_string()),
+                Err(e) => Err(e.error),
             }
         }
         "remember" => remember(state, &args),

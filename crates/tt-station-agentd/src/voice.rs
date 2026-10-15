@@ -31,7 +31,8 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::routes::{AppState, BearerAuth, ErrorResponse};
+use crate::error::{err, ApiError};
+use crate::routes::{AppState, BearerAuth};
 
 pub struct Service {
     pub container: &'static str,
@@ -96,11 +97,7 @@ fn mine(state: &AppState) -> &PerAgent {
     &state.per_agent().voice
 }
 
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (status, Json(ErrorResponse { error: msg.into() }))
-}
-
-type Reply<T> = Result<T, (StatusCode, Json<ErrorResponse>)>;
+type Reply<T> = Result<T, ApiError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {

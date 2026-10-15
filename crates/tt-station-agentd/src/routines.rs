@@ -49,13 +49,10 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::error::{err, ApiError};
 use crate::routes::{AppState, BearerAuth, Phase};
 
-type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
-
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({ "error": msg.into() })))
-}
+type Reply = Result<Json<Value>, ApiError>;
 
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -1154,7 +1151,7 @@ pub(crate) fn answer_queued(
     run_id: &str,
     n: usize,
     allow: bool,
-) -> Result<String, (StatusCode, Json<Value>)> {
+) -> Result<String, ApiError> {
     let _one = mine(state).answering.lock().expect("routines");
     if !valid_id(run_id) {
         return Err(err(StatusCode::NOT_FOUND, "No such run."));
@@ -1358,7 +1355,7 @@ pub struct RoutineBody {
     pub enabled: Option<bool>,
 }
 
-fn check(b: &RoutineBody) -> Result<(), (StatusCode, Json<Value>)> {
+fn check(b: &RoutineBody) -> Result<(), ApiError> {
     if b.name.trim().is_empty() || b.goal.trim().is_empty() {
         return Err(err(
             StatusCode::BAD_REQUEST,

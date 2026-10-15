@@ -333,7 +333,7 @@ pub async fn start(state: &AppState, id: &str) -> Result<bool, String> {
             }),
         )
         .await
-        .map_err(|(_, e)| e.0.error)?;
+        .map_err(|e| e.error)?;
     } else {
         crate::routes::begin_serve(state, &mode.models[0], false)
             .await

@@ -18,7 +18,8 @@ use axum::Json;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::routes::{AppState, BearerAuth, ErrorResponse, Phase};
+use crate::error::{err, ApiError};
+use crate::routes::{AppState, BearerAuth, Phase};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -792,10 +793,6 @@ fn local_day_hm() -> (String, u32, u32) {
 // Routes
 // ---------------------------------------------------------------------
 
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (status, Json(ErrorResponse { error: msg.into() }))
-}
-
 /// `GET /doctor` (authed): run the checks.
 pub(crate) async fn get_doctor(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -810,7 +807,7 @@ pub(crate) async fn post_fix(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
     axum::extract::Path(fix): axum::extract::Path<String>,
-) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Value>, ApiError> {
     if let Some(holder) = state.chips_holder() {
         return Err(err(StatusCode::CONFLICT, holder));
     }
@@ -879,7 +876,7 @@ pub(crate) async fn post_fix(
 pub(crate) async fn post_diagnostics(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
-) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<Value>, ApiError> {
     let (status, checks) = examine(&state).await;
     let snapshot = state.cached_snapshot().await.unwrap_or_default();
     let events = state.notifier().since(0);

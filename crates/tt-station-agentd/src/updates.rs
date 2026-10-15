@@ -53,14 +53,11 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::error::{err, ApiError};
 use crate::release_keys::{self, TrustedKey};
 use crate::routes::{AppState, BearerAuth};
 
-type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
-
-fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({ "error": msg.into() })))
-}
+type Reply = Result<Json<Value>, ApiError>;
 
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -970,7 +967,7 @@ pub struct InstallBody {
     pub allow_downgrade: bool,
 }
 
-fn refuse_source() -> Result<(), (StatusCode, Json<Value>)> {
+fn refuse_source() -> Result<(), ApiError> {
     if let Install::Source { repo, .. } = install_kind(&std::env::current_exe().unwrap_or_default())
     {
         return Err(err(StatusCode::CONFLICT, format!("This box runs TT Station built from source ({repo}). Update it with git and a rebuild; installing a release here would replace your build.")));
