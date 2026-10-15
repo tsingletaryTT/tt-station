@@ -1251,17 +1251,9 @@ pub fn compact_window(state: &AppState, model: Option<&str>) -> u64 {
 }
 
 async fn served_context(state: &AppState) -> Option<u64> {
-    let url = format!("http://127.0.0.1:{}/v1/models", state.serving_port());
-    let v: Value = reqwest::Client::new()
-        .get(url)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    v["data"][0]["max_model_len"].as_u64()
+    crate::served::local(state, Duration::from_secs(5))
+        .await?
+        .context
 }
 
 /// One line about an evaluation, for a routine's report or a notification.

@@ -198,27 +198,15 @@ pub async fn check(state: &AppState) -> Value {
     let life = state.lifecycle();
     let serving = matches!(life.phase, Phase::Serving) && state.endpoint().is_some();
     let (model, context) = if serving {
-        let url = format!("http://127.0.0.1:{}/v1/models", state.serving_port());
-        let v: Option<Value> = match reqwest::Client::new()
-            .get(url)
-            .timeout(Duration::from_secs(5))
-            .send()
+        let served = crate::served::local(state, Duration::from_secs(5))
             .await
-        {
-            Ok(r) => r.json().await.ok(),
-            Err(_) => None,
-        };
-        let first = v
-            .as_ref()
-            .map(|v| v["data"][0].clone())
-            .unwrap_or(Value::Null);
+            .unwrap_or_default();
         (
-            first["id"]
-                .as_str()
-                .map(str::to_string)
+            served
+                .model
                 .or(life.served_id.clone())
                 .or(state.endpoint().map(|e| e.model)),
-            first["max_model_len"].as_u64(),
+            served.context,
         )
     } else {
         (None, None)

@@ -181,22 +181,9 @@ async fn serving(state: &AppState) -> Option<(String, Option<u64>)> {
     if !matches!(life.phase, Phase::Serving) {
         return None;
     }
-    let url = format!("http://127.0.0.1:{}/v1/models", state.serving_port());
-    let models: Value = reqwest::Client::new()
-        .get(url)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    let first = &models["data"][0];
-    let id = first["id"]
-        .as_str()
-        .map(str::to_string)
-        .or(life.served_id.clone())?;
-    Some((id, first["max_model_len"].as_u64()))
+    let served = crate::served::local(state, std::time::Duration::from_secs(5)).await?;
+    let id = served.model.or(life.served_id.clone())?;
+    Some((id, served.context))
 }
 
 /// The box's own names, for telling whether Hermes already points here.

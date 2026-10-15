@@ -73,6 +73,7 @@ pub mod routines;
 pub mod safegit;
 pub mod schedules;
 pub mod scope;
+pub mod served;
 pub mod serving;
 pub mod sessions;
 pub mod skills;
