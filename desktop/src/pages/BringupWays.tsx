@@ -18,9 +18,11 @@ import { Button } from "@tenstorrent/vesper/button";
 import { TextInput } from "@tenstorrent/vesper/text-input";
 import { Badge } from "@tenstorrent/vesper/badge";
 import { Typography } from "@tenstorrent/vesper/typography";
+import { Admonition } from "@tenstorrent/vesper/admonition";
 import { get, type OrchardStatus, post, short } from "../api";
 import { Card, Eyebrow, Page, toastError, usePoll } from "../ui";
 import { navigate } from "../App";
+import { useOwner } from "../role";
 import { OrchardBody, HANDOFF_KEY } from "./Orchard";
 import { AgentPortBody, AGENT_HANDOFF_KEY } from "./Bringup";
 import { openCommunity } from "./CommunityModels";
@@ -60,6 +62,7 @@ function wayFromLocation(): Way | null {
 }
 
 export function BringupPage() {
+  const owner = useOwner();
   const orchard = usePoll(() => get<OrchardStatus>("/orchard").catch(() => null), 8000);
   const agents = usePoll(() => get<{ runs: CodexRun[] }>("/bringup/codex/runs").catch(() => ({ runs: [] })), 8000);
   const [way, setWayState] = useState<Way | null>(wayFromLocation);
@@ -87,6 +90,7 @@ export function BringupPage() {
 
   return (
     <Page title="Bring-up" subtitle="Get a model that isn't in Models running on this box. There are three ways to do it; which one fits depends on the model.">
+      {!owner && <Admonition variant="info" subtle size="sm">Orchard and agent ports run on the box as the box's own account, outside any sandbox, so only an owner of this box can start or steer one. You can follow their runs here, and community models are open to everyone.</Admonition>}
       <div className={`ways ${shown ? "compact" : ""}`} role="tablist" aria-label="Ways to bring up a model">
         {WAYS.map((w) => {
           const on = shown === w.id;

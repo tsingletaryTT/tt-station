@@ -39,7 +39,7 @@ import { boxOnlyReason } from "../boxapps";
 import { Card, copyText, Eyebrow, Page, Spark, toastError, toastOk, usePoll, writeClipboard } from "../ui";
 import { Switch } from "@tenstorrent/vesper/switch";
 import { ask } from "../dialog";
-import { OWNER_ONLY, useOwner } from "../role";
+import { OWNER_ONLY, OWNER_ONLY_HOST, useOwner } from "../role";
 import { navigate } from "../App";
 import { useDevTools } from "../devtools";
 import { AGENT_KEY } from "./Terminals";
@@ -200,6 +200,7 @@ function Step({ n, title, done, active, children }: { n: number; title: string; 
  * paste in, and ticks each step off as it sees it happen.
  */
 function HermesGuide({ s, refresh }: { s: Hermes; refresh: () => void }) {
+  const owner = useOwner();
   const [busy, setBusy] = useState<string | null>(null);
   const [creds, setCreds] = useState<{ base_url: string; api_key: string } | null>(null);
   const modelOk = !!s.serving_model && !s.context_too_small;
@@ -242,7 +243,7 @@ function HermesGuide({ s, refresh }: { s: Hermes; refresh: () => void }) {
         {s.running || connected ? <span className="muted" style={{ fontSize: 13 }}>{s.running ? "It's open on the box's screen." : "Done."}</span>
           : <>
             <span className="muted" style={{ fontSize: 13 }}>{s.desktop_built ? "It opens on the box's screen." : "The first time, it builds the app first (a few minutes), then opens on the box's screen."}</span>
-            <div><Button size="sm" disabled={busy === "open" || !s.has_session} onClick={() => act("open", () => post("/hermes/open"))}>Open Hermes</Button></div>
+            <div><Button size="sm" disabled={busy === "open" || !s.has_session || !owner} title={owner ? undefined : OWNER_ONLY_HOST} onClick={() => act("open", () => post("/hermes/open"))}>Open Hermes</Button></div>
           </>}
       </Step>
       <Step n={4} title="Connect it to your QuietBox" done={connected} active={step === 4}>
@@ -410,6 +411,7 @@ function TermiusTile({ ssh, refresh }: { ssh: SshInfo; refresh: () => void }) {
 
 /** Hermes Agent (Nous Research): its own desktop app, set up with a guide. */
 function HermesTile() {
+  const owner = useOwner();
   const h = usePoll(() => get<Hermes>("/hermes"), 3000);
   const guide = useSheet();
   const s = h.data;
@@ -434,7 +436,7 @@ function HermesTile() {
       {note && <Typography variant="copy-xs" className="muted">{note}</Typography>}
       <div className="grow" />
       <div className="row">
-        {ready ? <Button size="sm" disabled={!s?.has_session} title={s?.running ? "Bring Hermes to the front on the box's screen" : "Open Hermes on the box's screen"} onClick={async () => {
+        {ready ? <Button size="sm" disabled={!s?.has_session || !owner} title={!owner ? OWNER_ONLY_HOST : s?.running ? "Bring Hermes to the front on the box's screen" : "Open Hermes on the box's screen"} onClick={async () => {
             try {
               const r = await post<{ already_open?: boolean; building?: boolean }>("/hermes/open");
               // Say what actually happened: a new window, or a running one asked to come forward
@@ -618,7 +620,7 @@ function CodeToolTile({ t, base, model }: { t: (typeof CODE_TOOLS)[number]; base
       <div><Typography variant="heading-xs">{t.name}</Typography><Typography variant="copy-sm" className="muted">{t.blurb}</Typography></div>
       <div className="grow" />
       <div className="row">
-        {t.onBox && devTools && <Button size="sm" title="Its own terminal app, running on the box, shown in TT Station" onClick={() => { try { localStorage.setItem(AGENT_KEY, t.onBox!); } catch { /* private */ } navigate("terminals"); }}>Open on the box</Button>}
+        {t.onBox && devTools && <Button size="sm" disabled={!owner} title={owner ? "Its own terminal app, running on the box, shown in TT Station" : OWNER_ONLY_HOST} onClick={() => { try { localStorage.setItem(AGENT_KEY, t.onBox!); } catch { /* private */ } navigate("terminals"); }}>Open on the box</Button>}
         <Button size="sm" variant="subtle" onClick={guide.open}>{t.onBox ? "On your computer" : "Set it up"}</Button>
         <Button size="sm" variant="ghost" onClick={() => openExternal(t.homepage)}>Website</Button>
       </div>

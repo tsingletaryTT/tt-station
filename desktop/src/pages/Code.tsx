@@ -38,6 +38,8 @@ interface Overview {
   sessions: Sess[]; claude: boolean; home: string;
   check: { ok: boolean; level: string; why: string; model?: string };
   sandbox: { ready: boolean; step: string | null; error: string | null };
+  /** Whether this device may run Code outside the sandbox (owners); absent from an older box. */
+  outside_sandbox?: boolean;
 }
 interface Ev { seq: number; ts: number; kind: string; [k: string]: unknown }
 interface Todo { content: string; status: string; activeForm?: string }
@@ -112,6 +114,7 @@ function NewSession({ d, onCreated, onCancel }: { d: Overview; onCreated: (s: Se
   const recent = [...new Set(d.sessions.map((s) => s.folder))].slice(0, 6);
   const [folder, setFolder] = useState(recent[0] ?? "");
   const [sandbox, setSandbox] = useState(true);
+  const outside = d.outside_sandbox !== false;
   const [policy, setPolicy] = useState("ask");
   const [think, setThink] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -171,8 +174,9 @@ function NewSession({ d, onCreated, onCancel }: { d: Overview; onCreated: (s: Se
             </span>
             {sandbox && !d.sandbox.ready && <span className="muted" style={{ fontSize: 12 }}>{d.sandbox.step ?? "The first session sets the sandbox up: a one-time download of about 370 MB."}</span>}
             {d.sandbox.error && <span style={{ fontSize: 12, color: "var(--vesper-text-error)" }}>{d.sandbox.error}</span>}
+            {!outside && <span className="muted" style={{ fontSize: 12 }}>Always on for members: outside the sandbox the agent runs as the box's own account, which can reach the box's keys and settings, so only an owner can turn it off.</span>}
           </div>
-          <Switch checked={sandbox} onChange={(e) => { setSandbox(e.target.checked); if (!e.target.checked && policy === "auto") setPolicy("ask"); }} aria-label="Work in a sandbox" />
+          <Switch checked={sandbox} disabled={!outside} onChange={(e) => { setSandbox(e.target.checked); if (!e.target.checked && policy === "auto") setPolicy("ask"); }} aria-label="Work in a sandbox" />
         </div>
       </div>
 
