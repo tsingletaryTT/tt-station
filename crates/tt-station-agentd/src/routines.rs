@@ -1454,6 +1454,7 @@ pub(crate) async fn delete_routine(
     }
     for run in all_runs(&state).into_iter().filter(|r| r.routine == id) {
         let _ = std::fs::remove_file(run_path(&state, &run.id));
+        LIVE.lock().expect("routines").remove(&run.id);
     }
     Ok(Json(json!({ "deleted": true })))
 }
