@@ -113,6 +113,7 @@ pub struct AppState {
 /// (each test's, too) has its own.
 #[derive(Default)]
 pub(crate) struct PerAgent {
+    pub(crate) anthropic: crate::anthropic::PerAgent,
     pub(crate) apps: crate::apps::PerAgent,
     pub(crate) assistant: crate::assistant::PerAgent,
     pub(crate) bench: crate::bench::PerAgent,

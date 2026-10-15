@@ -2640,10 +2640,9 @@ mod tests {
             results[1]["content"],
             "<tool_use_error>Error: No such tool available: Search</tool_use_error>"
         );
-        // None of it counts as a client's call.
-        assert!(crate::anthropic::tool_call_health()
-            .iter()
-            .all(|h| h["model"] != model));
+        // None of it counts as a client's call: `translate` checks uncounted,
+        // with no agent's table to count into (see anthropic's
+        // `an_uncounted_check_stays_out_of_the_health`).
     }
 
     #[test]

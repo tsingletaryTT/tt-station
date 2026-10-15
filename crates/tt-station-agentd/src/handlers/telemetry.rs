@@ -433,7 +433,7 @@ pub(crate) async fn metrics_now(
         "point": history.latest(),
         "inference": history.inference(),
         "totals": history.totals(),
-        "tool_calls": crate::anthropic::tool_call_health(),
+        "tool_calls": crate::anthropic::tool_call_health(&state),
     }))
 }
 

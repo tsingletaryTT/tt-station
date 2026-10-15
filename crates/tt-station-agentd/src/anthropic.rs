@@ -495,15 +495,27 @@ struct CallCounts {
 
 /// Keyed by the served model's id, which comes from the box, not the client,
 /// so it stays a handful of entries. Locked once per tool call, briefly.
-static CALL_COUNTS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, CallCounts>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+type CallCountTable = std::sync::Arc<std::sync::Mutex<HashMap<String, CallCounts>>>;
+
+/// What `crate::anthropic` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// Tool-call counts per served model, for [`tool_call_health`].
+    call_counts: CallCountTable,
+}
 
 /// How well each served model's `/v1/messages` tool calls have fit their
 /// schemas since the agent started: `[{model, calls, valid, repaired, invalid,
 /// leaked_as_text}]`. `calls = valid + repaired + invalid`; `leaked_as_text`
 /// are calls the model wrote as text that became calls, counted in those too.
-pub fn tool_call_health() -> Vec<Value> {
-    let counts = CALL_COUNTS.lock().expect("call counts").clone();
+pub fn tool_call_health(state: &AppState) -> Vec<Value> {
+    let counts = state
+        .per_agent()
+        .anthropic
+        .call_counts
+        .lock()
+        .expect("call counts")
+        .clone();
     let mut out: Vec<Value> = counts
         .into_iter()
         .map(|(model, c)| json!({
@@ -527,6 +539,8 @@ pub struct ToolCheck {
     /// Off for a check that isn't a real client's call (the agent reliability
     /// eval): it mends the same, but isn't counted or logged.
     uncounted: bool,
+    /// Where its calls are counted: the agent's table once [`ToolCheck::counted_on`].
+    counts: CallCountTable,
 }
 
 impl ToolCheck {
@@ -544,7 +558,14 @@ impl ToolCheck {
             schemas,
             open: HashMap::new(),
             uncounted: false,
+            counts: CallCountTable::default(),
         }
+    }
+
+    /// Count its calls in `state`'s [`tool_call_health`].
+    pub fn counted_on(mut self, state: &AppState) -> Self {
+        self.counts = std::sync::Arc::clone(&state.per_agent().anthropic.call_counts);
+        self
     }
 
     /// As [`ToolCheck::new`], for calls that aren't a client's: checked and
@@ -604,7 +625,7 @@ impl ToolCheck {
                 problems.join(", ")
             );
         }
-        let mut counts = CALL_COUNTS.lock().expect("call counts");
+        let mut counts = self.counts.lock().expect("call counts");
         let c = counts.entry(model.clone()).or_default();
         match outcome {
             CallOutcome::Valid => c.valid += 1,
@@ -1228,11 +1249,11 @@ pub(crate) async fn v1_messages(
             v["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
             v["usage"]["completion_tokens"].as_u64().unwrap_or(0),
         );
-        let check = ToolCheck::new(&req["tools"], &endpoint.model);
+        let check = ToolCheck::new(&req["tools"], &endpoint.model).counted_on(&state);
         return Json(from_openai_checked(&v, &asked, &check)).into_response();
     }
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(64);
-    let check = ToolCheck::new(&req["tools"], &endpoint.model);
+    let check = ToolCheck::new(&req["tools"], &endpoint.model).counted_on(&state);
     let served = endpoint.model.clone();
     tokio::spawn(async move {
         let mut s = Stream::with_thinking(&asked, thinking)
@@ -1725,8 +1746,24 @@ mod tests {
         );
     }
 
-    fn health(model: &str) -> Value {
-        tool_call_health()
+    fn test_state() -> AppState {
+        AppState::new(
+            "t".to_string(),
+            "1xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+    }
+
+    #[test]
+    fn an_uncounted_check_stays_out_of_the_health() {
+        let state = test_state();
+        let check = ToolCheck::uncounted(&code_tools(), "unit-uncounted").counted_on(&state);
+        check.call("read", json!({ "file_path": "a" }), false);
+        assert!(tool_call_health(&state).is_empty());
+    }
+
+    fn health(state: &AppState, model: &str) -> Value {
+        tool_call_health(state)
             .into_iter()
             .find(|h| h["model"] == model)
             .unwrap_or(Value::Null)
@@ -1734,6 +1771,7 @@ mod tests {
 
     #[test]
     fn checked_and_counted_without_streaming() {
+        let state = test_state();
         let resp = json!({ "choices": [{ "finish_reason": "tool_calls", "message": { "content": "", "tool_calls": [
             { "id": "c1", "function": { "name": "read", "arguments": "{\"file_path\":\"a\",\"offset\":\"5\"}" } },
             { "id": "c2", "function": { "name": "Read", "arguments": "{\"file_path\":\"a\"}" } },
@@ -1742,12 +1780,12 @@ mod tests {
         let m = from_openai_checked(
             &resp,
             "claude",
-            &ToolCheck::new(&code_tools(), "unit-plain"),
+            &ToolCheck::new(&code_tools(), "unit-plain").counted_on(&state),
         );
         assert_eq!(m["content"][0]["name"], "Read");
         assert_eq!(m["content"][0]["input"]["offset"], 5);
         assert_eq!(m["content"][2]["name"], "Search");
-        let h = health("unit-plain");
+        let h = health(&state, "unit-plain");
         assert_eq!(
             (
                 h["calls"].as_u64(),
@@ -1760,16 +1798,20 @@ mod tests {
 
         // A call written as text is checked too, and counted as leaked.
         let resp = json!({ "choices": [{ "finish_reason": "stop", "message": { "content": LEAKED } }], "usage": {} });
-        let m = from_openai_checked(&resp, "claude", &ToolCheck::new(&code_tools(), "unit-leak"));
+        let m = from_openai_checked(
+            &resp,
+            "claude",
+            &ToolCheck::new(&code_tools(), "unit-leak").counted_on(&state),
+        );
         assert_eq!(m["content"][1]["name"], "Read");
-        let h = health("unit-leak");
+        let h = health(&state, "unit-leak");
         assert_eq!(
             (h["valid"].as_u64(), h["leaked_as_text"].as_u64()),
             (Some(1), Some(1))
         );
 
         // Without the request's tools nothing is checked or counted.
-        let before = tool_call_health().len();
+        let before = tool_call_health(&state).len();
         let m = from_openai(
             &json!({ "choices": [{ "finish_reason": "tool_calls", "message": { "tool_calls": [
             { "id": "c", "function": { "name": "read", "arguments": "{\"offset\":\"5\"}" } }] } }] }),
@@ -1782,12 +1824,14 @@ mod tests {
             ),
             (Some("read"), Some("5"))
         );
-        assert_eq!(tool_call_health().len(), before);
+        assert_eq!(tool_call_health(&state).len(), before);
     }
 
     #[test]
     fn checked_and_counted_while_streaming() {
-        let mut s = Stream::new("m").checking(ToolCheck::new(&code_tools(), "unit-stream"));
+        let state = test_state();
+        let mut s = Stream::new("m")
+            .checking(ToolCheck::new(&code_tools(), "unit-stream").counted_on(&state));
         let mut all = Vec::new();
         let call = |i: u64, id: Option<&str>, name: Option<&str>, args: &str| {
             let mut f = json!({ "arguments": args });
@@ -1839,7 +1883,7 @@ mod tests {
         );
         // Input still goes out once per call, whole, when its block closes.
         assert_eq!(inputs.len(), 2);
-        let h = health("unit-stream");
+        let h = health(&state, "unit-stream");
         assert_eq!(
             (
                 h["calls"].as_u64(),
@@ -1850,11 +1894,12 @@ mod tests {
         );
 
         // A call gpt-oss wrote as text, streamed.
-        let mut s = Stream::new("m").checking(ToolCheck::new(&code_tools(), "unit-stream-leak"));
+        let mut s = Stream::new("m")
+            .checking(ToolCheck::new(&code_tools(), "unit-stream-leak").counted_on(&state));
         s.chunk(&json!({ "choices": [{ "delta": { "content": LEAKED.replace("functions.Readjson", "functions.READjson") }, "finish_reason": "stop" }] }));
         let text = s.finish().join("");
         assert!(text.contains("\"name\":\"Read\""));
-        let h = health("unit-stream-leak");
+        let h = health(&state, "unit-stream-leak");
         assert_eq!(
             (h["repaired"].as_u64(), h["leaked_as_text"].as_u64()),
             (Some(1), Some(1))
