@@ -1,5 +1,5 @@
 //! Who may call what: the bearer-token extractors (`BearerAuth`,
-//! `OwnerAuth`, `CallerAuth`, `LocalOrPaired`, `ThisDevice`, `PlainHttp`),
+//! `OwnerAuth`, `CallerAuth`, `Who`, `LocalOrPaired`, `ThisDevice`, `PlainHttp`),
 //! the route allow-lists (`PUBLIC_ROUTES`, `HANDLER_AUTHED_ROUTES`) and the
 //! layers that enforce them (`require_auth`, `only_local`, `known_host`).
 
@@ -11,6 +11,7 @@ use axum::{
 };
 
 use crate::error::{tt_error, ErrorResponse};
+use crate::people::Person;
 use crate::state::AppState;
 
 /// The bearer token on a request, if it carries one.
@@ -501,6 +502,32 @@ pub fn host_is_the_box(host: &str, name: &str) -> bool {
         || h == "host.docker.internal"
         || (!me.is_empty() && (h == me || h == format!("{me}.local")))
         || (!hostname.is_empty() && (h == hostname || h == format!("{hostname}.local")))
+}
+
+/// An authenticated request, with its token and the person it belongs to.
+pub struct Who {
+    pub token: String,
+    pub person: Option<Person>,
+}
+
+impl FromRequestParts<AppState> for Who {
+    type Rejection = AuthRejection;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        BearerAuth::from_request_parts(parts, state).await?;
+        let token = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or_default()
+            .to_string();
+        let person = state.people().for_token(&token);
+        Ok(Who { token, person })
+    }
 }
 
 #[cfg(test)]

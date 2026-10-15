@@ -25,13 +25,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use axum::extract::FromRequestParts;
-use axum::http::{request::Parts, StatusCode};
+use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::routes::AppState;
+
+pub use crate::auth::Who;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Person {
@@ -259,32 +260,6 @@ tokio::task_local! {
 /// The person behind the current assistant request.
 pub fn current() -> Option<Person> {
     CALLER.try_with(Clone::clone).ok().flatten()
-}
-
-/// An authenticated request, with its token and the person it belongs to.
-pub struct Who {
-    pub token: String,
-    pub person: Option<Person>,
-}
-
-impl FromRequestParts<AppState> for Who {
-    type Rejection = crate::routes::AuthRejection;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        crate::routes::BearerAuth::from_request_parts(parts, state).await?;
-        let token = parts
-            .headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .unwrap_or_default()
-            .to_string();
-        let person = state.people().for_token(&token);
-        Ok(Who { token, person })
-    }
 }
 
 // ---------------------------------------------------------------------
