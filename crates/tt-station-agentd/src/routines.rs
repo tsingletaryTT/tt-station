@@ -1538,7 +1538,7 @@ pub(crate) async fn post_stop(
     _auth: BearerAuth,
     UrlPath(run): UrlPath<String>,
 ) -> Reply {
-    if load_run(&state, &run).is_none_or(|r| r.finished.is_some()) {
+    if !valid_id(&run) || load_run(&state, &run).is_none_or(|r| r.finished.is_some()) {
         return Err(err(StatusCode::CONFLICT, "It isn't running."));
     }
     STOP.lock().expect("routines").insert(run.clone());
