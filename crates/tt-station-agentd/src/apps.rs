@@ -651,8 +651,16 @@ impl Installs {
     }
 }
 
-static INSTALLS: std::sync::LazyLock<Arc<Installs>> =
-    std::sync::LazyLock::new(|| Arc::new(Installs::default()));
+/// What `crate::apps` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// Installs in progress, and how far each has got.
+    installs: Arc<Installs>,
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().apps
+}
 
 /// Its address: on the network while it's open and published there; otherwise
 /// the box's own (another computer's TT Station tunnels to it).
@@ -671,7 +679,7 @@ fn url_for(state: &AppState, def: &AppDef, token: Option<&str>, on_network: bool
 
 fn describe(state: &AppState, def: &AppDef) -> Value {
     let docker = docker_state(def.id);
-    let install = INSTALLS.get(def.id);
+    let install = mine(state).installs.get(def.id);
     // A container that keeps restarting is broken: say so, with what it last said.
     let crash = (docker == "restarting").then(|| {
         Command::new("docker")
@@ -756,11 +764,11 @@ fn fill(text: &str, base: &str, key: &str, token: &str, model: &str) -> String {
 }
 
 fn install(state: AppState, def: &'static AppDef) {
-    INSTALLS.set(def.id, "Downloading", None);
+    mine(&state).installs.set(def.id, "Downloading", None);
     std::thread::spawn(move || {
         // The box's embeddings service, when it needs one: on, and answering.
         if def.needs.contains(&EMBEDDINGS) {
-            INSTALLS.set(
+            mine(&state).installs.set(
                 def.id,
                 "Setting up embeddings (downloading the model)",
                 None,
@@ -786,35 +794,44 @@ fn install(state: AppState, def: &'static AppDef) {
                 })
                 .unwrap_or(false);
             if !ready {
-                return INSTALLS.set(def.id, "Failed", Some("The embeddings service didn't come up. Check it in Models → Embeddings and reranking.".into()));
+                return mine(&state).installs.set(def.id, "Failed", Some("The embeddings service didn't come up. Check it in Models → Embeddings and reranking.".into()));
             }
         }
         // What it needs first, each the same way (installed, or started if it's stopped).
         for need in def.needs.iter().filter_map(|n| app(n)) {
-            INSTALLS.set(def.id, &format!("Setting up {}", need.name), None);
+            mine(&state)
+                .installs
+                .set(def.id, &format!("Setting up {}", need.name), None);
             let ready = match docker_state(need.id).as_str() {
                 "missing" => install_blocking(
                     &state,
                     need,
-                    &|step| INSTALLS.set(need.id, step, None),
+                    &|step| mine(&state).installs.set(need.id, step, None),
                     None,
                 )
-                .map(|_| INSTALLS.clear(need.id)),
+                .map(|_| mine(&state).installs.clear(need.id)),
                 "running" => Ok(()),
                 _ => start_existing(&state, need),
             };
             if let Err(e) = ready {
-                INSTALLS.set(need.id, "Failed", Some(e.clone()));
-                return INSTALLS.set(
+                mine(&state)
+                    .installs
+                    .set(need.id, "Failed", Some(e.clone()));
+                return mine(&state).installs.set(
                     def.id,
                     "Failed",
                     Some(format!("{} didn't start: {e}", need.name)),
                 );
             }
         }
-        match install_blocking(&state, def, &|step| INSTALLS.set(def.id, step, None), None) {
-            Ok(()) => INSTALLS.clear(def.id),
-            Err(e) => INSTALLS.set(def.id, "Failed", Some(e)),
+        match install_blocking(
+            &state,
+            def,
+            &|step| mine(&state).installs.set(def.id, step, None),
+            None,
+        ) {
+            Ok(()) => mine(&state).installs.clear(def.id),
+            Err(e) => mine(&state).installs.set(def.id, "Failed", Some(e)),
         }
     });
 }
@@ -829,7 +846,11 @@ fn start_needs(state: &AppState, def: &AppDef) {
         match docker_state(need.id).as_str() {
             "running" => {}
             "missing" => {
-                if INSTALLS.get(need.id).is_none_or(|(_, e)| e.is_some()) {
+                if mine(state)
+                    .installs
+                    .get(need.id)
+                    .is_none_or(|(_, e)| e.is_some())
+                {
                     install(state.clone(), need);
                 }
             }
@@ -1009,7 +1030,11 @@ pub(crate) async fn get_apps(
 /// Start an app, installing it (and what it needs) first if it isn't there.
 /// Blocking. `installing` or `running`.
 pub fn start_or_install(state: &AppState, def: &'static AppDef) -> Result<&'static str, String> {
-    if INSTALLS.get(def.id).is_some_and(|(_, e)| e.is_none()) {
+    if mine(state)
+        .installs
+        .get(def.id)
+        .is_some_and(|(_, e)| e.is_none())
+    {
         return Ok("installing");
     }
     // A container stuck restarting is replaced with a fresh one (its data volume stays).
@@ -1024,7 +1049,7 @@ pub fn start_or_install(state: &AppState, def: &'static AppDef) -> Result<&'stat
     }
     match docker_state(def.id).as_str() {
         "missing" => {
-            INSTALLS.clear(def.id);
+            mine(state).installs.clear(def.id);
             install(state.clone(), def);
             Ok("installing")
         }
@@ -1135,12 +1160,12 @@ pub(crate) async fn put_network(
 }
 
 pub(crate) async fn delete_app(
-    axum::extract::State(_state): axum::extract::State<AppState>,
+    axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Reply {
     let def = app(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such app."))?;
-    INSTALLS.clear(def.id);
+    mine(&state).installs.clear(def.id);
     tokio::task::spawn_blocking(move || {
         Command::new("docker")
             .args(["rm", "-f", &container(def.id)])
