@@ -5,7 +5,11 @@
 // in plain words and when to run it; the served model works out the steps,
 // looks things up freely, asks before changing the box (unless the routine
 // was given that action ahead of time), and ends with a report. Runs that
-// need an answer show here and as a notification.
+// need an answer show here, in Needs you, and as a notification.
+//
+// A routine can also just switch the box's mode at set times (what Settings →
+// Schedules used to do): no model plans it, and it never interrupts a silicon
+// check, a bring-up or a transcription. `#run-<id>` opens a run.
 
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@tenstorrent/vesper/button";
@@ -19,13 +23,13 @@ import { Sheet, useSheet } from "@tenstorrent/vesper/sheet";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { externalLinks } from "../links";
-import { ago, ApiError, del, get, post, put } from "../api";
+import { ago, ApiError, del, get, type Mode, post, put } from "../api";
 import { Card, Empty, Eyebrow, Page, toastError, toastOk, usePoll } from "../ui";
 import { ask } from "../dialog";
 
-interface Schedule { kind: "manual" | "daily" | "weekdays" | "hourly"; time?: string | null; every_hours?: number | null }
+interface Schedule { kind: "manual" | "daily" | "weekdays" | "days" | "hourly"; time?: string | null; every_hours?: number | null; days?: number[] | null }
 interface LastRun { id: string; status: string; started: number; finished: number | null; headline: string | null }
-interface Routine { id: string; name: string; goal: string; schedule: Schedule; when: string; allowed: string[]; enabled: boolean; created: number; next_run: number | null; last: LastRun | null }
+interface Routine { id: string; name: string; goal: string; schedule: Schedule; when: string; allowed: string[]; enabled: boolean; created: number; next_run: number | null; last: LastRun | null; mode?: string | null }
 interface Step { ts: number; kind: string; tool: string | null; args: Record<string, unknown>; result: string; ok: boolean; seconds: number }
 interface Pending { tool: string; args: Record<string, unknown>; summary: string; since: number }
 interface Run { id: string; routine: string; name: string; trigger: string; started: number; finished: number | null; status: string; steps: Step[]; report: string | null; pending: Pending | null; activity: string | null; queued?: Queued[] }
@@ -79,7 +83,14 @@ const STATUS: Record<string, { label: string; tone: "mint" | "info" | "warning" 
   done: { label: "Done", tone: "mint" },
   failed: { label: "Didn't finish", tone: "danger" },
   stopped: { label: "Stopped", tone: "contrast" },
+  skipped: { label: "Skipped", tone: "contrast" },
 };
+
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+/** `#run-<id>` (from Needs you): the run to open. */
+const runFromHash = () => { const h = location.hash.replace("#", ""); return h.startsWith("run-") ? h.slice(4) : null; };
 
 const when = (t: number) => {
   const d = new Date(t * 1000), today = new Date();
@@ -107,7 +118,7 @@ export function Routines() {
     catch (e) { toastError(e); }
   };
   const toggle = async (r: Routine, enabled: boolean) => {
-    try { await put(`/routines/${r.id}`, { name: r.name, goal: r.goal, schedule: r.schedule, allowed: r.allowed, enabled }); void data.refresh(); }
+    try { await put(`/routines/${r.id}`, { name: r.name, goal: r.goal, schedule: r.schedule, allowed: r.allowed, enabled, mode: r.mode ?? null }); void data.refresh(); }
     catch (e) { toastError(e); }
   };
   const remove = async (r: Routine) => {
@@ -115,10 +126,25 @@ export function Routines() {
     try { await del(`/routines/${r.id}`); detail.close(); void data.refresh(); } catch (e) { toastError(e); }
   };
   const opened = routines.find((r) => r.id === open) ?? null;
+  // Opened from Needs you: show that run once its routine is known.
+  const [wanted, setWanted] = useState<string | null>(runFromHash);
+  useEffect(() => {
+    const onHash = () => setWanted(runFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  useEffect(() => {
+    if (!wanted || !data.data) return;
+    const id = wanted;
+    setWanted(null);
+    history.replaceState(null, "", "/app/routines");
+    void get<{ run: Run }>(`/routines/runs/${id}`).then((x) => show(x.run.routine, x.run.id)).catch(toastError);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wanted, data.data]);
 
   return (
     <Page title="Routines"
-      subtitle="Jobs the box does on its own. Say what you want in plain words and when; it works out the steps, asks before changing anything, and reports back."
+      subtitle="Jobs the box does on its own. Say what you want in plain words and when; it works out the steps, asks before changing anything, and reports back. Or have it switch the box's mode at set times."
       actions={<Button iconLeft={<Icon kind="add" />} onClick={() => edit(null)}>New routine</Button>}>
       {data.error && <Admonition variant="warning" subtle size="sm">Couldn't load routines: {data.error}</Admonition>}
       {running && <RunningBanner run={running} onOpen={() => show(running.routine, running.id)} onChanged={() => void data.refresh()} />}
@@ -144,7 +170,8 @@ export function Routines() {
             <div className="row wrap" style={{ gap: 6 }}>
               <Badge size="sm" variant="contrast" subtle><Icon kind="clock" style={{ width: 12, height: 12 }} /> {r.when}</Badge>
               {r.enabled && r.next_run && <span className="muted" style={{ fontSize: 12 }}>next {when(r.next_run)}</span>}
-              {r.allowed.length > 0 && <span className="muted" style={{ fontSize: 12 }} title={r.allowed.map((a) => ACTION_LABELS[a]?.[0] ?? a).join(", ")}>· may act without asking</span>}
+              {r.mode && <Badge size="sm" variant="info" subtle>Switches mode</Badge>}
+              {!r.mode && r.allowed.length > 0 && <span className="muted" style={{ fontSize: 12 }} title={r.allowed.map((a) => ACTION_LABELS[a]?.[0] ?? a).join(", ")}>· may act without asking</span>}
             </div>
             {r.last && (
               <button className="routine-last" onClick={() => show(r.id, r.last!.id)}>
@@ -155,7 +182,7 @@ export function Routines() {
             )}
             <div className="grow" />
             <div className="row" style={{ gap: 6 }}>
-              <Button size="sm" disabled={!!running} title={running ? "One routine runs at a time" : undefined} onClick={() => runNow(r)}>Run now</Button>
+              <Button size="sm" disabled={!!running} title={running ? "One routine runs at a time" : undefined} onClick={() => runNow(r)}>{r.mode ? "Switch now" : "Run now"}</Button>
               <Button size="sm" variant="subtle" onClick={() => edit(r)}>Edit</Button>
               <Button size="sm" variant="ghost" onClick={() => show(r.id)}>History</Button>
             </div>
@@ -261,11 +288,19 @@ function Editor({ start, onDone }: { start: Partial<Routine>; onDone: (saved: bo
   const [kind, setKind] = useState<Schedule["kind"]>(start.schedule?.kind ?? "manual");
   const [time, setTime] = useState(start.schedule?.time ?? "08:30");
   const [hours, setHours] = useState(start.schedule?.every_hours ?? 6);
+  const [days, setDays] = useState<number[]>(start.schedule?.days ?? [1, 2, 3, 4, 5]);
   const [allowed, setAllowed] = useState<string[]>(start.allowed ?? []);
+  const [mode, setMode] = useState<string | null>(start.mode ?? null);
+  const modes = usePoll(() => get<{ modes: Mode[] }>("/modes"), 60000);
   const [busy, setBusy] = useState(false);
+  const switching = mode !== null;
+  const timed = kind === "daily" || kind === "weekdays" || kind === "days";
   const save = async () => {
     setBusy(true);
-    const body = { name, goal, allowed, enabled: start.enabled ?? true, schedule: { kind, time: kind === "daily" || kind === "weekdays" ? time : null, every_hours: kind === "hourly" ? hours : null } };
+    const body = {
+      name, goal: switching ? "" : goal, allowed, enabled: start.enabled ?? true, mode,
+      schedule: { kind, time: timed ? time : null, every_hours: kind === "hourly" ? hours : null, days: kind === "days" ? days : null },
+    };
     try {
       if (start.id) await put(`/routines/${start.id}`, body); else await post("/routines", body);
       onDone(true);
@@ -283,33 +318,57 @@ function Editor({ start, onDone }: { start: Partial<Routine>; onDone: (saved: bo
           </div>
         </div>
       )}
+      <div className="stack" style={{ gap: 6 }}>
+        <b>What kind</b>
+        <div className="pill-tabs" role="radiogroup" aria-label="What kind of routine">
+          <button role="radio" aria-checked={!switching} className={!switching ? "on" : ""} onClick={() => setMode(null)}>A job, in plain words</button>
+          <button role="radio" aria-checked={switching} className={switching ? "on" : ""} onClick={() => { setMode(mode ?? modes.data?.modes[0]?.id ?? "chat"); if (kind === "hourly") setKind("weekdays"); }}>Switch the box's mode</button>
+        </div>
+      </div>
+      {switching && (
+        <label className="stack" style={{ gap: 4 }}>
+          <b>Switch to</b>
+          <select className="routine-select" value={mode ?? ""} onChange={(e) => setMode(e.target.value)}>
+            {(modes.data?.modes ?? []).map((m) => <option key={m.id} value={m.id}>{m.title}{m.ready ? "" : " (needs a download)"}</option>)}
+          </select>
+          <span className="muted" style={{ fontSize: 12 }}>No model needs to be serving for this. If the chips are busy with a silicon check, a bring-up or a transcription, it skips that time and tells you.</span>
+        </label>
+      )}
       <label className="stack" style={{ gap: 4 }}>
-        <b>Name</b>
-        <TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="Morning health check" />
+        <b>Name{switching ? " (optional)" : ""}</b>
+        <TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder={switching ? `Switch to ${modes.data?.modes.find((m) => m.id === mode)?.title ?? "a mode"}` : "Morning health check"} />
       </label>
-      <label className="stack" style={{ gap: 4 }}>
+      {!switching && <label className="stack" style={{ gap: 4 }}>
         <b>What should it do?</b>
         <textarea className="routine-goal-input" rows={6} value={goal} onChange={(e) => setGoal(e.target.value)}
           placeholder="In plain words, as you'd ask a colleague: what to check or do, and what you want to hear back." />
         <span className="muted" style={{ fontSize: 12 }}>It can check the box, the chips, the logs and the models; search the web; ask the serving model questions; and start, stop or download models.</span>
-      </label>
+      </label>}
       <div className="stack" style={{ gap: 6 }}>
         <b>When</b>
         <div className="pill-tabs" role="radiogroup" aria-label="When it runs">
-          {(["manual", "daily", "weekdays", "hourly"] as const).map((k) => (
+          {(["manual", "daily", "weekdays", "days", "hourly"] as const).filter((k) => !(switching && k === "hourly")).map((k) => (
             <button key={k} role="radio" aria-checked={kind === k} className={kind === k ? "on" : ""} onClick={() => setKind(k)}>
-              {{ manual: "When I run it", daily: "Every day", weekdays: "Weekdays", hourly: "Every few hours" }[k]}
+              {{ manual: "When I run it", daily: "Every day", weekdays: "Weekdays", days: "Certain days", hourly: "Every few hours" }[k]}
             </button>
           ))}
         </div>
-        {(kind === "daily" || kind === "weekdays") && (
+        {kind === "days" && (
+          <div className="row" role="group" aria-label="Days" style={{ gap: 4 }}>
+            {DAYS.map((d, i) => (
+              <button key={d} className={`day-toggle ${days.includes(i) ? "on" : ""}`} aria-label={DAY_NAMES[i]} aria-pressed={days.includes(i)}
+                onClick={() => setDays((x) => (x.includes(i) ? x.filter((y) => y !== i) : [...x, i].sort()))}>{d}</button>
+            ))}
+          </div>
+        )}
+        {timed && (
           <label className="row" style={{ gap: 8 }}>at <input type="time" className="routine-time" value={time ?? "08:30"} onChange={(e) => setTime(e.target.value)} /></label>
         )}
         {kind === "hourly" && (
           <label className="row" style={{ gap: 8 }}>every <input type="number" min={1} max={168} className="routine-time" value={hours ?? 6} onChange={(e) => setHours(Number(e.target.value))} /> hours</label>
         )}
       </div>
-      <div className="stack" style={{ gap: 6 }}>
+      {!switching && <div className="stack" style={{ gap: 6 }}>
         <b>May do without asking</b>
         <span className="muted" style={{ fontSize: 12 }}>Looking things up never needs asking. Anything below that isn't ticked asks you first, with a notification; tick what it needs when nobody's around (overnight). Once a run has read the web, everything that acts waits for you, ticked or not: the run finishes and tells you what's waiting.</span>
         {Object.entries(ACTION_LABELS).map(([id, [label, hint]]) => (
@@ -318,9 +377,9 @@ function Editor({ start, onDone }: { start: Partial<Routine>; onDone: (saved: bo
             <span><b>{label}</b> <span className="muted">· {hint}</span></span>
           </label>
         ))}
-      </div>
+      </div>}
       <div className="row" style={{ gap: 8 }}>
-        <Button disabled={busy || !name.trim() || !goal.trim()} onClick={save}>{busy ? "Saving…" : start.id ? "Save" : "Create routine"}</Button>
+        <Button disabled={busy || (kind === "days" && days.length === 0) || (switching ? !mode : !name.trim() || !goal.trim())} onClick={save}>{busy ? "Saving…" : start.id ? "Save" : "Create routine"}</Button>
         <Button variant="ghost" onClick={() => onDone(false)}>Cancel</Button>
       </div>
     </div>
@@ -336,7 +395,7 @@ function Detail({ r, run, setRun, busy, onRun, onEdit, onDelete }: { r: Routine;
     <div className="stack" style={{ gap: 14 }}>
       <div className="routine-goal-box">{r.goal}</div>
       <div className="row wrap" style={{ gap: 6 }}>
-        <Button size="sm" disabled={busy} onClick={onRun}>Run now</Button>
+        <Button size="sm" disabled={busy} onClick={onRun}>{r.mode ? "Switch now" : "Run now"}</Button>
         <Button size="sm" variant="subtle" onClick={onEdit}>Edit</Button>
         <Button size="sm" variant="ghost" onClick={onDelete}>Delete</Button>
       </div>
@@ -361,6 +420,7 @@ const TOOL_LABEL: Record<string, string> = {
   research: "Started research", research_check: "Checked the research", search_documents: "Searched documents", remember: "Remembered something",
   community_models: "Checked community models", ask_model: "Asked the model", wait_until_ready: "Waited for the model", wait_for_download: "Waited for the download",
   start_model: "Started a model", stop_model: "Stopped the model", download_model: "Started a download", reset_chips: "Reset the chips",
+  switch_mode: "Switched mode",
 };
 
 function stepTitle(s: Step) {

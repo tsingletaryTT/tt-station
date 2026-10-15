@@ -35,7 +35,7 @@ config directory, an allowlist (`export::classify`):
 |---|---|
 | Research reports (`research/<id>/`: job, plan, report, sources, cited, events), finished only | Paired-device tokens (`agentd-tokens.json`), app keys, `desktop-token` |
 | Finished transcripts (`jobs/<id>/`: job, txt, srt, json); the recording only if kept | TLS key and certificate, APNs config and keys, push device tokens (`notify.json`) |
-| Memories, people (names only: which device is whose stays behind), schedules | The local secret, `secrets.json` (HF token), app keys under `apps/`, `coding/`, `hermes/` |
+| Memories, people (names only: which device is whose stays behind), schedules (now mode-switching routines) | The local secret, `secrets.json` (HF token), app keys under `apps/`, `coding/`, `hermes/` |
 | Routines and their finished runs | Code projects, conversations (`events.jsonl`), the sandbox's credentials |
 | Preferences: model, favorites, idle, embeddings, voice, data settings | Images (only their prompts), metrics, logs, models, downloads, the audit log |
 | Evaluations (and their raw trials), finished only | Anything not on the allowlist, and any path that even looks like a secret (`export::looks_secret`) |
@@ -60,7 +60,7 @@ and work out what would change, and (without `dry_run`) once to write.
   import never starts anything).
 - People, memories, schedules and routines merge by id into what the box has (the box's
   own limits apply; a routine keeps only real actions in `allowed` and works out its next
-  run here). Everything else is written file by file, atomically, replacing a file at the
+  run here). Schedules from an older export become mode-switching routines, as on any box. Everything else is written file by file, atomically, replacing a file at the
   same path. Imported transcripts appear in `GET /jobs` straight away.
 - The answer: `{dry_run, preview: {agent_version, format_version, created, box, categories:
   {<kind>: {added, overwritten, unchanged}}, overwritten: [...], skipped: [...], bytes}}`.

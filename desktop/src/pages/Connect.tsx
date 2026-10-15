@@ -499,7 +499,7 @@ const CODE_TOOLS: { id: string; name: string; blurb: string; homepage: string; c
 export ANTHROPIC_AUTH_TOKEN=<your app key>
 export ANTHROPIC_MODEL=quietbox
 claude`}</CodeBlock>
-      <span className="muted" style={{ fontSize: 12 }}>The box's address is encrypted with its own certificate. If Claude Code refuses it, allow unencrypted access in Settings → Pairing and security and use the http address instead.</span>
+      <span className="muted" style={{ fontSize: 12 }}>The box's address is encrypted with its own certificate. If Claude Code refuses it, allow unencrypted access in Settings → Security and activity and use the http address instead.</span>
     </>,
   },
   {
@@ -888,7 +888,7 @@ export function Connect() {
       <div className="section-title"><Eyebrow>Your box as an API</Eyebrow></div>
       <div className="grid grid-2" style={{ alignItems: "start" }}>
         <Card>
-          <Typography variant="copy-sm" className="muted">Any app that speaks the OpenAI API works with the box: point it at this address with an app key. Requests follow whatever model is serving. From other computers the address is encrypted with the box's own certificate; if an app refuses it, trust the certificate in that app, or allow unencrypted access in Settings → Pairing and security.</Typography>
+          <Typography variant="copy-sm" className="muted">Any app that speaks the OpenAI API works with the box: point it at this address with an app key. Requests follow whatever model is serving. From other computers the address is encrypted with the box's own certificate; if an app refuses it, trust the certificate in that app, or allow unencrypted access in Settings → Security and activity.</Typography>
           {(connect.data?.urls ?? []).map((u) => (
             <div key={u.url} className="stack" style={{ gap: 4 }}><Eyebrow>{u.label}</Eyebrow><Snippet>{u.url}</Snippet></div>
           ))}

@@ -49,7 +49,7 @@ struct WelcomeView: View {
                             .foregroundStyle(Brand.accent)
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Scan the pairing code").font(.tt(.headline))
-                            Text("Open TT Station on the box (**Settings → Pairing and security**), then point this iPhone's Camera at the code.")
+                            Text("Open TT Station on the box (**Settings → Devices and pairing**), then point this iPhone's Camera at the code.")
                                 .font(.tt(.subheadline))
                                 .foregroundStyle(.secondary)
                         }

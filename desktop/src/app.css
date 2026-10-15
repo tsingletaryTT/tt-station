@@ -989,7 +989,8 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .box-switcher-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: none; border: 0; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .box-switcher-item:hover { background: var(--vesper-alpha-stone-100); }
 .box-switcher-item.on b { color: var(--vesper-teal-700); }
-.box-switcher-error { font-size: 12px; color: var(--vesper-text-error); }
+.box-switcher-gap { height: 1px; margin: 4px 6px; background: var(--line); }
+.box-switcher-item:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
 .pair-link { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; padding: 6px 8px; border-radius: 6px; background: color-mix(in srgb, var(--vesper-text-primary) 5%, transparent); }
 
 /* ---------------------------------------------------------------- Terminal on the box (another computer) */
@@ -1037,3 +1038,31 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .folder-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: 6px; }
 .folder-open:hover .grow { text-decoration: underline; text-underline-offset: 3px; }
 .folder-open:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
+
+/* Needs you (the inbox) */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.nav-count { flex: none; }
+.inbox-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.inbox-item {
+  display: flex; gap: 14px; align-items: flex-start;
+  padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--vesper-stone-50) 92%, transparent);
+  border-left: 3px solid var(--vesper-amber-600);
+}
+.inbox-item.inbox-pairing { border-left-color: var(--vesper-teal-600); }
+.inbox-item:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
+.inbox-icon { width: 20px; height: 20px; flex: none; margin-top: 2px; color: var(--accent); }
+.inbox-main { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+.inbox-where { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; font-weight: 500; color: var(--vesper-text-secondary); }
+.inbox-where .muted { font-weight: 400; white-space: nowrap; }
+.inbox-summary { font-size: 15px; color: var(--vesper-text-primary); overflow-wrap: anywhere; }
+.inbox-summary.mono { font-family: var(--mono); font-size: 13px; padding: 8px 10px; border-radius: var(--vesper-radius-2); background: var(--vesper-alpha-stone-100); white-space: pre-wrap; max-height: 9em; overflow: auto; }
+.inbox-detail { font-size: 12px; overflow-wrap: anywhere; }
+.inbox-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
+.inbox-hint { font-size: 12px; flex-basis: 100%; }
+.inbox-keys { font-size: 12px; margin: 4px 0 0; }
+.routine-select { font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--vesper-border-primary); background: var(--surface); color: var(--vesper-text-primary); max-width: 280px; }
+.day-toggle { font: 500 12px var(--sans); min-width: 40px; padding: 6px 8px; border-radius: 999px; border: 1px solid var(--vesper-border-primary); background: transparent; color: var(--vesper-text-secondary); cursor: pointer; }
+.day-toggle.on { background: var(--vesper-background-accent-base); border-color: var(--vesper-border-accent-base); color: var(--vesper-text-on-color); }
+.day-toggle:focus-visible, .routine-select:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
+.anchor { scroll-margin-top: 16px; }

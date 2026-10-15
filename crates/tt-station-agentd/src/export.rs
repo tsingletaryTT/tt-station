@@ -746,7 +746,8 @@ impl Current {
         Current {
             people: to_values(&state.people().list()),
             memories: to_values(&state.memories().list()),
-            schedules: to_values(&state.schedules().list()),
+            // Schedules live on as mode-switching routines (`crate::routines`).
+            schedules: to_values(&crate::routines::as_schedules(state)),
             routines: to_values(&crate::routines::list(state)),
         }
     }
@@ -796,6 +797,11 @@ fn merged_entries(kind: Kind, bytes: &[u8]) -> Result<Vec<Value>, String> {
 /// box, and only real actions are kept (see `routines::merge_imported`).
 fn comparable(kind: Kind, v: &Value) -> Value {
     let mut v = v.clone();
+    if kind == Kind::Schedules {
+        if let Some(o) = v.as_object_mut() {
+            o.remove("last_run");
+        }
+    }
     if kind == Kind::Routines {
         if let Some(o) = v.as_object_mut() {
             o.remove("next_run");
@@ -1768,7 +1774,12 @@ mod tests {
             texts.contains(&"Has a cat".to_string()) && texts.contains(&"Likes tea".to_string())
         );
         assert_eq!(state.people().list()[0].name, "Ada");
-        assert_eq!(state.schedules().list().len(), 1);
+        assert!(
+            crate::routines::as_schedules(&state)
+                .iter()
+                .any(|s| s.id == "s1"),
+            "the schedule came in as a routine"
+        );
         let routines = crate::routines::list(&state);
         let r1 = routines.iter().find(|r| r.id == "r1").unwrap();
         assert_eq!(
