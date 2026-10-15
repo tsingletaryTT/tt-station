@@ -5,7 +5,8 @@
 //! an operator (or the Task 12 e2e test) actually runs:
 //!
 //!   tt-station [--json] discover [--host <h:p>]... [--no-mdns] [--timeout-ms <ms>]
-//!   tt-station [--json] pair <host:port> [--code <code>] [--enable-ssh]
+//!   tt-station [--json] pair <host:port> [--code <code>] [--fp <sha256>] [--enable-ssh]
+//!   tt-station [--json] pair --link 'ttstation://pair?...' [--enable-ssh]
 //!   tt-station [--json] models --host <host:port>
 //!   tt-station [--json] run <model> --host <host:port> [--force]
 //!   tt-station [--json] stop --host <host:port>
@@ -32,6 +33,14 @@
 //! same thing you meant. It also matches how the e2e test drives this CLI:
 //! `pair 127.0.0.1:<p> --code 000000` then `run llama3 --host 127.0.0.1:<p>`.
 //!
+//! ## How a box is reached
+//!
+//! Plain HTTP only to this computer itself (`127.0.0.1`/`localhost`); every
+//! other box over HTTPS with its certificate pinned at pairing and stored with
+//! the token -- see `remote` and `libttstation::transport`. A box that presents
+//! a different certificate is refused with a "certificate changed" error
+//! before anything is sent.
+//!
 //! ## Why `main` isn't `#[tokio::main]`
 //!
 //! `discover`'s manual-host probe (see [`manual_status_fetch`]) uses
@@ -46,6 +55,7 @@
 //! call-per-runtime rules.
 
 mod catalog;
+mod remote;
 mod ssh;
 
 use std::path::PathBuf;
@@ -111,9 +121,28 @@ enum Command {
 
     /// Pair with a box: exchange a human-read code for a bearer token and
     /// store it for future commands against the same host:port.
+    ///
+    /// From another computer this goes over HTTPS: the box's certificate
+    /// fingerprint is shown (and checked against `--fp` or the pairing link's),
+    /// then pinned and stored with the token, and every later connection must
+    /// present the same certificate.
     Pair {
-        /// The box's control-plane address, as `host:port`.
-        host: String,
+        /// The box's control-plane address, as `host:port`. Not needed with
+        /// `--link`.
+        #[arg(required_unless_present = "link")]
+        host: Option<String>,
+
+        /// A `ttstation://pair?...` link from the box (TT Station on the box:
+        /// Settings → Pairing and security → Pair another computer). Carries
+        /// the address, the code and the certificate fingerprint.
+        #[arg(long, conflicts_with_all = ["code", "fp"])]
+        link: Option<String>,
+
+        /// The certificate fingerprint the box shows (SHA-256: all 64 hex
+        /// digits, or the first 16 or more). Pairing stops if the box presents
+        /// a different one.
+        #[arg(long)]
+        fp: Option<String>,
 
         /// The pairing code displayed on the box. If omitted, prompts on
         /// stdin (an operator reading the box's screen); the e2e test and
@@ -138,6 +167,10 @@ enum Command {
     PairInit {
         /// The box's control-plane address, as `host:port`.
         host: String,
+
+        /// The certificate fingerprint the box shows; see `pair --fp`.
+        #[arg(long)]
+        fp: Option<String>,
     },
 
     /// Finish pairing with a box: exchange the `pair_id` from `tt-station pair-init`
@@ -154,6 +187,11 @@ enum Command {
         /// The 6-digit code shown on the box's console.
         #[arg(long)]
         code: String,
+
+        /// The certificate fingerprint to pin: what `pair-init` printed (its
+        /// `fp`). Without it, the certificate the box presents now is pinned.
+        #[arg(long)]
+        fp: Option<String>,
 
         /// Also install this Mac's SSH public key on the box as part of
         /// pairing -- see `Pair::enable_ssh`'s doc for the full rationale.
@@ -437,8 +475,11 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // A refused certificate surfaces deep inside reqwest's error; say it plainly.
+    run(Cli::parse()).map_err(libttstation::transport::explain)
+}
 
+fn run(cli: Cli) -> Result<()> {
     match &cli.command {
         Command::Discover {
             hosts,
@@ -450,24 +491,39 @@ fn main() -> Result<()> {
         }
         Command::Pair {
             host,
+            link,
+            fp,
             code,
             enable_ssh,
         } => {
-            let (token, ssh) = run_async(cmd_pair(host, code.clone(), *enable_ssh))?;
-            print_pair(host, &token, ssh.as_ref(), cli.json);
+            let paired = match link {
+                Some(link) => run_async(cmd_pair_link(link, *enable_ssh))?,
+                None => {
+                    let host = host.as_deref().expect("clap: host unless --link");
+                    run_async(cmd_pair(host, fp.as_deref(), code.clone(), *enable_ssh))?
+                }
+            };
+            print_pair(&paired, cli.json);
         }
-        Command::PairInit { host } => {
-            let pair_id = run_async(cmd_pair_init(host))?;
-            print_pair_init(host, &pair_id, cli.json);
+        Command::PairInit { host, fp } => {
+            let (pair_id, target) = run_async(cmd_pair_init(host, fp.as_deref()))?;
+            print_pair_init(host, &pair_id, &target, cli.json);
         }
         Command::PairComplete {
             host,
             pair_id,
             code,
+            fp,
             enable_ssh,
         } => {
-            let ssh = run_async(cmd_pair_complete(host, pair_id, code, *enable_ssh))?;
-            print_pair_complete(host, ssh.as_ref(), cli.json);
+            let paired = run_async(cmd_pair_complete(
+                host,
+                pair_id,
+                code,
+                fp.as_deref(),
+                *enable_ssh,
+            ))?;
+            print_pair_complete(&paired, cli.json);
         }
         Command::Models { host } => {
             let resp = run_async(cmd_models(host))?;
@@ -679,8 +735,15 @@ fn cmd_discover(hosts: &[String], no_mdns: bool, timeout_ms: u64) -> Result<Vec<
 /// answering, which makes `tt-station discover --host <dead-ip>:<port> --timeout-ms
 /// <n>` hang far longer than `--timeout-ms` promises. Split out as its own
 /// function so it's unit-testable without making a real network call.
-fn build_probe_client(timeout: Duration) -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
+fn build_probe_client(
+    timeout: Duration,
+    tls: Option<rustls::ClientConfig>,
+) -> Result<reqwest::blocking::Client> {
+    let builder = match tls {
+        Some(config) => reqwest::blocking::Client::builder().use_preconfigured_tls(config),
+        None => reqwest::blocking::Client::builder(),
+    };
+    builder
         .timeout(timeout)
         .connect_timeout(timeout)
         .build()
@@ -714,16 +777,59 @@ fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> Result<BoxRe
         mac: Option<String>,
     }
 
-    let url = format!("http://{host}:{port}/status");
-    let client = build_probe_client(timeout)?;
-    let resp: StatusResponse = client
-        .get(&url)
-        .send()
-        .with_context(|| format!("GET {url}"))?
-        .error_for_status()
-        .with_context(|| format!("GET {url}"))?
-        .json()
-        .with_context(|| format!("parsing response from {url}"))?;
+    let get = |url: &str, client: &reqwest::blocking::Client| -> Result<StatusResponse> {
+        client
+            .get(url)
+            .send()
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("GET {url}"))?
+            .json()
+            .with_context(|| format!("parsing response from {url}"))
+    };
+    let resp = if libttstation::transport::is_box_local(host) {
+        let url = format!("http://{host}:{port}/status");
+        get(&url, &build_probe_client(timeout, None)?)?
+    } else {
+        // Another computer reaches the box over HTTPS only: on the typed port,
+        // else the one above it (the TLS port next to the control port).
+        // `/status` is public and nothing secret is sent, so an unpaired box's
+        // certificate is accepted here; a paired box's must match its pin.
+        let pinned = build_store()
+            .ok()
+            .and_then(|store| store.get(&format!("{host}:{port}")).ok().flatten())
+            .map(|raw| libttstation::secrets::StoredPairing::decode(&raw))
+            .filter(|p| p.is_pinned());
+        let host_in_url = libttstation::transport::url_host(host);
+        let ports: Vec<u16> = match &pinned {
+            Some(p) => p.tls_port.into_iter().collect(),
+            None => [Some(port), port.checked_add(1)]
+                .into_iter()
+                .flatten()
+                .collect(),
+        };
+        let mut last = None;
+        let mut found = None;
+        for tls_port in ports {
+            let authority = format!("{host_in_url}:{tls_port}");
+            let (config, _) = libttstation::transport::tls_config(
+                &authority,
+                pinned.as_ref().and_then(|p| p.sha256.as_deref()),
+            );
+            let url = format!("https://{authority}/status");
+            match get(&url, &build_probe_client(timeout, Some(config))?) {
+                Ok(r) => {
+                    found = Some(r);
+                    break;
+                }
+                Err(e) => last = Some(libttstation::transport::explain(e)),
+            }
+        }
+        match found {
+            Some(r) => r,
+            None => return Err(last.unwrap_or_else(|| anyhow::anyhow!("no port to try"))),
+        }
+    };
 
     Ok(BoxRecord {
         name: resp.name,
@@ -745,63 +851,115 @@ fn manual_status_fetch(host: &str, port: u16, timeout: Duration) -> Result<BoxRe
     })
 }
 
-/// `tt-station pair <host:port> [--enable-ssh]`: run the pairing handshake and store
-/// the resulting token under `host` in the `SecretStore`. Returns the token
-/// (so the caller can decide how much of it to print) and, when
-/// `enable_ssh` was requested, the outcome of the inline SSH-authorize step
-/// -- see [`maybe_enable_ssh`] for why an SSH failure here never turns into
-/// an `Err` from this function: pairing has already succeeded and been
-/// persisted by the time SSH runs, so the two outcomes must never share a
-/// single `Result`.
+/// A finished pairing, for `print_pair`/`print_pair_complete`.
+struct Paired {
+    host: String,
+    token: String,
+    /// The pinned certificate (`None` on this computer itself: plain HTTP).
+    cert: Option<libttstation::transport::BoxCert>,
+    ssh: Option<SshEnableOutcome>,
+}
+
+/// `tt-station pair <host:port> [--fp <sha256>] [--enable-ssh]`: find the box's
+/// HTTPS and show (and, with `--fp`, check) its certificate before anything is
+/// sent, then run the pairing handshake over that pinned connection and store
+/// the token with the pin under `host` (see `remote`).
+///
+/// When `enable_ssh` was requested, the outcome of the inline SSH-authorize
+/// step rides along -- see [`maybe_enable_ssh`] for why an SSH failure never
+/// turns into an `Err` here: pairing has already succeeded and been persisted
+/// by the time SSH runs.
 async fn cmd_pair(
     host: &str,
+    fp: Option<&str>,
     code: Option<String>,
     enable_ssh: bool,
-) -> Result<(String, Option<SshEnableOutcome>)> {
-    let base = format!("http://{host}");
-    let pair_id = pair_init(&base).await?;
+) -> Result<Paired> {
+    let target = remote::prepare_pair(host, None, fp, &mut std::io::stderr()).await?;
+    let pair_id = pair_init(&target.base).await?;
 
     let code = match code {
         Some(c) => c,
         None => prompt_for_code()?,
     };
 
-    let token = pair_complete(&base, &pair_id, &code).await?;
-    build_store()?.set(host, &token)?;
-
-    let ssh = maybe_enable_ssh(host, &token, enable_ssh).await;
-    Ok((token, ssh))
+    let token = pair_complete(&target.base, &pair_id, &code).await?;
+    finish_pair(host, token, target, enable_ssh).await
 }
 
-/// `tt-station pair-init <host:port>`: one-shot first half of pairing. Triggers the
-/// box to mint a 6-digit code (printed on ITS console) and returns the
-/// `pair_id` needed to complete the handshake via `tt-station pair-complete`. Unlike
-/// `cmd_pair`, this never reads stdin -- it's meant to be called by a caller
-/// (e.g. a GUI shell) that will surface the `pair_id` and prompt for the code
-/// itself, potentially across a process boundary.
-async fn cmd_pair_init(host: &str) -> Result<String> {
-    let base = format!("http://{host}");
-    pair_init(&base).await
+/// `tt-station pair --link 'ttstation://pair?...'`: the link already carries the
+/// pairing id, the code, the HTTPS port and the certificate fingerprint, so
+/// this checks the certificate against the link and completes pairing directly
+/// (no `pair/init`). Stored under the link's `host:port` (the control port,
+/// like every other command takes).
+async fn cmd_pair_link(link: &str, enable_ssh: bool) -> Result<Paired> {
+    let link = remote::parse_pair_link(link)?;
+    let key = format!(
+        "{}:{}",
+        libttstation::transport::url_host(&link.host),
+        link.port
+    );
+    let target = remote::prepare_pair(
+        &key,
+        Some(link.tls_port),
+        Some(&link.fp),
+        &mut std::io::stderr(),
+    )
+    .await?;
+    let token = pair_complete(&target.base, &link.pair_id, &link.code).await?;
+    finish_pair(&key, token, target, enable_ssh).await
 }
 
-/// `tt-station pair-complete <host:port> --pair-id <id> --code <code> [--enable-ssh]`:
+/// Store a finished pairing (token + pin) and run the optional SSH step.
+async fn finish_pair(
+    host: &str,
+    token: String,
+    target: remote::PairTarget,
+    enable_ssh: bool,
+) -> Result<Paired> {
+    build_store()?.set(host, &remote::stored_for(&token, &target).encode())?;
+    let ssh = maybe_enable_ssh(&target.base, &token, enable_ssh).await;
+    Ok(Paired {
+        host: host.to_string(),
+        token,
+        cert: target.cert,
+        ssh,
+    })
+}
+
+/// `tt-station pair-init <host:port> [--fp <sha256>]`: one-shot first half of
+/// pairing. Finds the box's HTTPS and its certificate (shown on stderr, and in
+/// `--json` as `tls`, so the caller can pass it to `pair-complete --fp`),
+/// triggers the box to mint a 6-digit code (printed on ITS console) and returns
+/// the `pair_id` needed to complete the handshake via `tt-station
+/// pair-complete`. Unlike `cmd_pair`, this never reads stdin -- it's meant to
+/// be called by a caller (e.g. a GUI shell) that will surface the `pair_id` and
+/// prompt for the code itself, potentially across a process boundary.
+async fn cmd_pair_init(host: &str, fp: Option<&str>) -> Result<(String, remote::PairTarget)> {
+    let target = remote::prepare_pair(host, None, fp, &mut std::io::stderr()).await?;
+    let pair_id = pair_init(&target.base).await?;
+    Ok((pair_id, target))
+}
+
+/// `tt-station pair-complete <host:port> --pair-id <id> --code <code> [--fp <sha256>] [--enable-ssh]`:
 /// one-shot second half of pairing. Exchanges the `pair_id` from a prior `tt-station
-/// pair-init` and the code the box printed for a bearer token, and stores it
-/// under `host` exactly like `cmd_pair` does -- so `tt-station run`/`tt-station status`/etc.
-/// against the same `host` work identically regardless of which pairing path
-/// was used. Like `cmd_pair`, an `--enable-ssh` request runs AFTER the token
-/// is stored and its result is reported rather than propagated as an error
-/// (see [`maybe_enable_ssh`]).
+/// pair-init` and the code the box printed for a bearer token, over HTTPS
+/// pinned to `fp` (what `pair-init` reported; without it, whatever the box
+/// presents now), and stores token + pin under `host` exactly like `cmd_pair`
+/// does -- so `tt-station run`/`tt-station status`/etc. against the same `host`
+/// work identically regardless of which pairing path was used. Like `cmd_pair`,
+/// an `--enable-ssh` request runs AFTER the token is stored and its result is
+/// reported rather than propagated as an error (see [`maybe_enable_ssh`]).
 async fn cmd_pair_complete(
     host: &str,
     pair_id: &str,
     code: &str,
+    fp: Option<&str>,
     enable_ssh: bool,
-) -> Result<Option<SshEnableOutcome>> {
-    let base = format!("http://{host}");
-    let token = pair_complete(&base, pair_id, code).await?;
-    build_store()?.set(host, &token)?;
-    Ok(maybe_enable_ssh(host, &token, enable_ssh).await)
+) -> Result<Paired> {
+    let target = remote::prepare_pair(host, None, fp, &mut std::io::stderr()).await?;
+    let token = pair_complete(&target.base, pair_id, code).await?;
+    finish_pair(host, token, target, enable_ssh).await
 }
 
 /// The outcome of `--enable-ssh`'s inline SSH-authorize step on `tt-station pair`/
@@ -830,12 +988,12 @@ enum SshEnableOutcome {
 /// unset, ...) is captured as `SshEnableOutcome::Err` and returned, NEVER
 /// propagated with `?` -- that's the whole non-fatal contract this task
 /// exists to implement.
-async fn maybe_enable_ssh(host: &str, token: &str, enable_ssh: bool) -> Option<SshEnableOutcome> {
+async fn maybe_enable_ssh(base: &str, token: &str, enable_ssh: bool) -> Option<SshEnableOutcome> {
     if !enable_ssh {
         return None;
     }
 
-    let client = AgentClient::new(format!("http://{host}"), token.to_string());
+    let client = AgentClient::new(base.to_string(), token.to_string());
     let result: Result<ssh::AuthorizeOutcome> = async {
         let home = home_dir()?;
         let date = ssh::today_ymd();
@@ -873,8 +1031,7 @@ fn prompt_for_code() -> Result<String> {
 /// UNAUTHED on the agent side, so this needs no stored token -- unlike
 /// every other command below, it doesn't go through `authed_client`.
 async fn cmd_models(host: &str) -> Result<ModelsResponse> {
-    let base = format!("http://{host}");
-    libttstation::agent_client::list_models(&base).await
+    libttstation::agent_client::list_models(&conn(host).await?.base).await
 }
 
 /// `tt-station run <model> --host <host:port> [--force]`: load the stored token for
@@ -884,13 +1041,13 @@ async fn cmd_models(host: &str) -> Result<ModelsResponse> {
 /// (another tenant holds the chips, or gozer could not be read) into an
 /// UNLEASED whole-box serve on the box's side. See `AgentClient::run`.
 async fn cmd_run(host: &str, model: &str, force: bool) -> Result<Endpoint> {
-    let client = authed_client(host)?;
+    let client = authed_client(host).await?;
     client.run(model, force).await
 }
 
 /// `tt-station stop --host <host:port>`.
 async fn cmd_stop(host: &str) -> Result<()> {
-    authed_client(host)?.stop().await
+    authed_client(host).await?.stop().await
 }
 
 /// `tt-station status --host <host:port>`: UNAUTHED, like `cmd_models` -- the
@@ -903,8 +1060,7 @@ async fn cmd_stop(host: &str) -> Result<()> {
 /// and `/endpoint` ARE bearer-gated on the agent side and still go through
 /// `authed_client()`.
 async fn cmd_status(host: &str) -> Result<StatusInfo> {
-    let base = format!("http://{host}");
-    libttstation::agent_client::get_status(&base).await
+    libttstation::agent_client::get_status(&conn(host).await?.base).await
 }
 
 /// `tt-station config --host <host:port>`: sends the stored pairing token when
@@ -913,13 +1069,13 @@ async fn cmd_status(host: &str) -> Result<StatusInfo> {
 /// panel/Mac app) see "what will this box actually serve with" even against
 /// a box `tt-station pair` was never run against.
 async fn cmd_config(host: &str) -> Result<ConfigSummary> {
-    let base = format!("http://{host}");
-    libttstation::agent_client::get_config(&base, stored_token(host).as_deref()).await
+    let c = conn(host).await?;
+    libttstation::agent_client::get_config(&c.base, c.token.as_deref()).await
 }
 
 /// `tt-station endpoint --host <host:port>`.
 async fn cmd_endpoint(host: &str) -> Result<Endpoint> {
-    authed_client(host)?.endpoint().await
+    authed_client(host).await?.endpoint().await
 }
 
 /// `tt-station serving --host <host:port>`: list every live `tt-inference-server`
@@ -927,8 +1083,7 @@ async fn cmd_endpoint(host: &str) -> Result<Endpoint> {
 /// `cmd_models`/`cmd_status`) it needs no stored token and doesn't go through
 /// `authed_client`.
 async fn cmd_serving(host: &str) -> Result<ServingList> {
-    let base = format!("http://{host}");
-    libttstation::agent_client::list_serving(&base).await
+    libttstation::agent_client::list_serving(&conn(host).await?.base).await
 }
 
 /// `tt-station leases --host <host:port>`: AUTHED, unlike `cmd_serving`/`cmd_status`/
@@ -936,15 +1091,15 @@ async fn cmd_serving(host: &str) -> Result<ServingList> {
 /// extractor (Task 4), so this goes through `authed_client()` exactly like
 /// `cmd_run`/`cmd_stop`/`cmd_endpoint`.
 async fn cmd_leases(host: &str) -> Result<LeaseList> {
-    authed_client(host)?.list_leases().await
+    authed_client(host).await?.list_leases().await
 }
 
 /// `tt-station logs --host <host:port> [--source <source>] [--tail <n>]`: sends
 /// the stored pairing token when there is one, like `cmd_config`. This is the one-shot snapshot path; `--follow` instead
 /// takes `cmd_logs_follow` below.
 async fn cmd_logs(host: &str, source: &str, tail: usize) -> Result<LogsInfo> {
-    let base = format!("http://{host}");
-    libttstation::agent_client::get_logs(&base, source, tail, stored_token(host).as_deref()).await
+    let c = conn(host).await?;
+    libttstation::agent_client::get_logs(&c.base, source, tail, c.token.as_deref()).await
 }
 
 /// `tt-station logs --follow --host <host:port> [--source <source>] [--tail <n>]`:
@@ -965,13 +1120,14 @@ async fn cmd_logs_follow(host: &str, source: &str, tail: usize) -> Result<()> {
     use tokio_tungstenite::tungstenite::Message;
 
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let url = format!("ws://{host}/logs/stream?source={source}&tail={tail}");
+    let c = conn(host).await?;
+    let url = format!("{}/logs/stream?source={source}&tail={tail}", c.ws_base());
     let mut request = url
         .as_str()
         .into_client_request()
         .with_context(|| format!("bad address {url}"))?;
     // From another machine the box wants the pairing token (in a header, never the URL).
-    if let Some(token) = stored_token(host) {
+    if let Some(token) = &c.token {
         request.headers_mut().insert(
             "Authorization",
             format!("Bearer {token}")
@@ -979,18 +1135,22 @@ async fn cmd_logs_follow(host: &str, source: &str, tail: usize) -> Result<()> {
                 .context("token isn't a valid header value")?,
         );
     }
-    let (ws_stream, _) = tokio_tungstenite::connect_async(request)
+    let mut read = connect_ws(request, &c)
         .await
         .with_context(|| format!("failed to connect to {url}"))?;
-    let (_write, mut read) = ws_stream.split();
 
     while let Some(msg) = read.next().await {
         // Non-text frames (ping/pong/close/binary) carry no log content --
         // the agent's `/logs/stream` only ever sends `Message::Text` frames,
         // but ignoring anything else here keeps this robust instead of
         // erroring out on a stray control frame.
-        if let Message::Text(line) = msg? {
-            println!("{line}");
+        match msg? {
+            Message::Text(line) => println!("{line}"),
+            // The box ended the stream. Stop here: over TLS a box that then
+            // drops the connection without a close_notify would otherwise read
+            // as an error after a clean goodbye.
+            Message::Close(_) => break,
+            _ => {}
         }
     }
 
@@ -1028,7 +1188,11 @@ async fn cmd_catalog(
     catalog: Option<&libttstation::catalog::CompatCatalog>,
     stale: bool,
 ) -> libttstation::catalog::BoxCatalog {
-    let base = format!("http://{host}");
+    // Unreachable (or not paired and not answering HTTPS): the catalog alone.
+    let base = match conn(host).await {
+        Ok(c) => c.base,
+        Err(_) => format!("http://{host}"),
+    };
 
     let box_mesh = libttstation::agent_client::get_status(&base)
         .await
@@ -1052,7 +1216,7 @@ async fn cmd_catalog(
 /// `ssh::authorize` directly with an `AgentClient` it already built for
 /// pairing, instead of going through this CLI-argument-shaped entry point.
 async fn cmd_ssh_authorize(host: &str, date: &str) -> Result<ssh::AuthorizeOutcome> {
-    let client = authed_client(host)?;
+    let client = authed_client(host).await?;
     let home = home_dir()?;
     ssh::authorize(&client, &home, date).await
 }
@@ -1071,7 +1235,7 @@ async fn cmd_ssh_authorize(host: &str, date: &str) -> Result<ssh::AuthorizeOutco
 /// nothing sensible to revoke on the agent for a key this Mac doesn't even
 /// have, so a missing `~/.ssh/id_{ed25519,rsa}.pub` is a hard error here.
 async fn cmd_ssh_revoke(host: &str) -> Result<PathBuf> {
-    let client = authed_client(host)?;
+    let client = authed_client(host).await?;
     let home = home_dir()?;
     let ssh_dir = home.join(".ssh");
 
@@ -1136,10 +1300,19 @@ async fn cmd_reset(host: Option<&str>, force: bool) -> Result<ResetSummary> {
 
     if let Some(host) = host {
         // Reset the remote box BEFORE forgetting its token locally.
-        match build_store()?.get(host)? {
-            Some(token) => {
-                let base = format!("http://{host}");
-                match libttstation::agent_client::reset(&base, &token, force).await {
+        let store = build_store()?;
+        let reached = match store.get(host)? {
+            Some(_) => Some(remote::connect(host, store.as_ref()).await),
+            None => None,
+        };
+        match reached {
+            Some(Err(e)) => eprintln!(
+                "warning: failed to reach box {host}: {:#}; clearing local state anyway",
+                libttstation::transport::explain(e)
+            ),
+            Some(Ok(c)) => {
+                let token = c.require_token(host)?;
+                match libttstation::agent_client::reset(&c.base, token, force).await {
                     Ok(()) => box_reset = true,
                     // A REFUSAL (409) is not a failed call -- the box is
                     // healthy, it declined, and it reset NOTHING (it also
@@ -1159,7 +1332,8 @@ async fn cmd_reset(host: Option<&str>, force: bool) -> Result<ResetSummary> {
                     // forgetting every box on this machine -- must not be
                     // blocked by a box that has gone away.
                     Err(e) => eprintln!(
-                        "warning: failed to reset box {host}: {e}; clearing local state anyway"
+                        "warning: failed to reset box {host}: {}; clearing local state anyway",
+                        libttstation::transport::explain(e)
                     ),
                 }
             }
@@ -1194,11 +1368,9 @@ async fn cmd_reset(host: Option<&str>, force: bool) -> Result<ResetSummary> {
 /// back to; if the box was never paired, there's nothing this command can
 /// usefully do.
 async fn cmd_power(host: &str, action: &str, force: bool) -> Result<()> {
-    let token = build_store()?.get(host)?.ok_or_else(|| {
-        anyhow::anyhow!("no token stored for {host}; run `tt-station pair {host}` first")
-    })?;
-    let base = format!("http://{host}");
-    libttstation::agent_client::power(&base, &token, action, force).await
+    let c = conn(host).await?;
+    let token = c.require_token(host)?;
+    libttstation::agent_client::power(&c.base, token, action, force).await
 }
 
 /// `tt-station wake --mac <mac>`: broadcast a Wake-on-LAN magic packet to the LAN
@@ -1265,7 +1437,7 @@ async fn cmd_ask(host: &str, message: &str) -> Result<AssistantReply> {
         role: "user".to_string(),
         content: message.to_string(),
     };
-    authed_client(host)?.assistant(&[turn]).await
+    authed_client(host).await?.assistant(&[turn]).await
 }
 
 /// `tt-station ask --host <host:port> --confirm <id> [--deny]`: answer a
@@ -1275,21 +1447,55 @@ async fn cmd_ask_confirm(
     action_id: &str,
     approve: bool,
 ) -> Result<AssistantConfirmation> {
-    authed_client(host)?
+    authed_client(host)
+        .await?
         .assistant_confirm(action_id, approve)
         .await
 }
 
-/// The pairing token stored for `host`, if `tt-station pair` was run against it.
-fn stored_token(host: &str) -> Option<String> {
-    build_store().ok()?.get(host).ok().flatten()
+/// How to reach `host` (see `remote`): plain HTTP on this computer, HTTPS
+/// with the pinned certificate elsewhere -- pinning an old pairing on first use.
+async fn conn(host: &str) -> Result<remote::Conn> {
+    remote::connect(host, build_store()?.as_ref()).await
 }
 
-fn authed_client(host: &str) -> Result<AgentClient> {
-    let token = build_store()?.get(host)?.ok_or_else(|| {
-        anyhow::anyhow!("no token stored for {host}; run `tt-station pair {host}` first")
-    })?;
-    Ok(AgentClient::new(format!("http://{host}"), token))
+/// An `AgentClient` for `host`, with the token stored by a prior `tt-station
+/// pair`. Shared by every command that needs an authenticated call.
+async fn authed_client(host: &str) -> Result<AgentClient> {
+    let c = conn(host).await?;
+    let token = c.require_token(host)?.to_string();
+    Ok(AgentClient::new(c.base, token))
+}
+
+/// Open a WebSocket to the box: `ws://` on this computer, `wss://` checked
+/// against the pinned certificate elsewhere (the same verifier as every HTTPS
+/// request -- `libttstation::transport`).
+async fn connect_ws(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+    c: &remote::Conn,
+) -> Result<
+    futures_util::stream::BoxStream<
+        'static,
+        Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>,
+    >,
+> {
+    use futures_util::StreamExt;
+    let Some(pin) = &c.pin else {
+        let (ws, _) = tokio_tungstenite::connect_async(request).await?;
+        return Ok(ws.boxed());
+    };
+    let authority = c.base.trim_start_matches("https://").to_string();
+    let (host, port) = remote::split_key(&authority)?;
+    let (config, _) = libttstation::transport::tls_config(&authority, Some(pin));
+    let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+    let name = rustls::pki_types::ServerName::try_from(host.clone())
+        .with_context(|| format!("{host} isn't a valid server name"))?;
+    let tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+        .connect(name, tcp)
+        .await
+        .map_err(|e| libttstation::transport::explain(e.into()))?;
+    let (ws, _) = tokio_tungstenite::client_async(request, tls).await?;
+    Ok(ws.boxed())
 }
 
 /// The Mac operator's home directory, as `ssh::authorize`/`cmd_ssh_revoke`
@@ -1379,34 +1585,60 @@ fn print_discover(boxes: &[BoxRecord], json: bool) {
     }
 }
 
+/// The `tls` field of pairing's JSON: the HTTPS port and pinned certificate,
+/// or `null` on this computer itself (plain HTTP, nothing pinned).
+fn tls_json(cert: Option<&libttstation::transport::BoxCert>) -> serde_json::Value {
+    match cert {
+        Some(c) => serde_json::json!({ "port": c.port, "sha256": c.sha256 }),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// The human line about the pin, after "paired with ...".
+fn print_pin_note(cert: Option<&libttstation::transport::BoxCert>) {
+    if let Some(c) = cert {
+        println!(
+            "HTTPS on port {}; certificate pinned (SHA-256 {}…). A different certificate will be refused.",
+            c.port,
+            remote::short_fingerprint(&c.sha256)
+        );
+    }
+}
+
 /// `tt-station pair`'s output. `ssh` is `None` when `--enable-ssh` wasn't passed
 /// (JSON: `"ssh": null`; human: no extra line) -- see [`ssh_json`] and
 /// [`print_ssh_note`] for the two output shapes when it was.
-fn print_pair(host: &str, token: &str, ssh: Option<&SshEnableOutcome>, json: bool) {
+fn print_pair(p: &Paired, json: bool) {
     if json {
-        let mut value = serde_json::json!({ "host": host, "paired": true, "token": token });
-        value["ssh"] = ssh_json(ssh);
+        let mut value = serde_json::json!({ "host": p.host, "paired": true, "token": p.token });
+        value["tls"] = tls_json(p.cert.as_ref());
+        value["ssh"] = ssh_json(p.ssh.as_ref());
         println!("{value}");
     } else {
-        println!("paired with {host}; token stored");
-        print_ssh_note(host, ssh);
+        println!("paired with {}; token stored", p.host);
+        print_pin_note(p.cert.as_ref());
+        print_ssh_note(&p.host, p.ssh.as_ref());
     }
 }
 
 /// `tt-station pair-init`'s output: JSON carries the `pair_id` a caller needs to pass
-/// to `tt-station pair-complete`; human mode spells out the whole next step so a
-/// human operator (not just a scripted caller) can complete pairing without
-/// re-reading `--help`.
-fn print_pair_init(host: &str, pair_id: &str, json: bool) {
+/// to `tt-station pair-complete`, and the certificate (`tls`) to pass as its
+/// `--fp`; human mode spells out the whole next step so a human operator (not
+/// just a scripted caller) can complete pairing without re-reading `--help`.
+fn print_pair_init(host: &str, pair_id: &str, target: &remote::PairTarget, json: bool) {
     if json {
-        println!(
-            "{}",
-            serde_json::json!({ "pair_id": pair_id, "host": host })
-        );
+        let mut value = serde_json::json!({ "pair_id": pair_id, "host": host });
+        value["tls"] = tls_json(target.cert.as_ref());
+        println!("{value}");
     } else {
+        let fp = target
+            .cert
+            .as_ref()
+            .map(|c| format!(" --fp {}", c.sha256))
+            .unwrap_or_default();
         println!(
             "pairing started with {host}; enter the 6-digit code shown on the box, then run: \
-             tt-station pair-complete {host} --pair-id {pair_id} --code <CODE>"
+             tt-station pair-complete {host} --pair-id {pair_id}{fp} --code <CODE>"
         );
     }
 }
@@ -1416,14 +1648,16 @@ fn print_pair_init(host: &str, pair_id: &str, json: bool) {
 /// `SecretStore` entry, and this command's whole point is to be driven by a
 /// non-interactive caller that just needs a success/failure signal. `ssh`
 /// behaves exactly like `print_pair`'s -- see its doc.
-fn print_pair_complete(host: &str, ssh: Option<&SshEnableOutcome>, json: bool) {
+fn print_pair_complete(p: &Paired, json: bool) {
     if json {
-        let mut value = serde_json::json!({ "host": host, "paired": true });
-        value["ssh"] = ssh_json(ssh);
+        let mut value = serde_json::json!({ "host": p.host, "paired": true });
+        value["tls"] = tls_json(p.cert.as_ref());
+        value["ssh"] = ssh_json(p.ssh.as_ref());
         println!("{value}");
     } else {
-        println!("paired with {host}; token stored");
-        print_ssh_note(host, ssh);
+        println!("paired with {}; token stored", p.host);
+        print_pin_note(p.cert.as_ref());
+        print_ssh_note(&p.host, p.ssh.as_ref());
     }
 }
 
@@ -2060,7 +2294,7 @@ mod tests {
     /// below.
     #[test]
     fn build_probe_client_succeeds_with_a_short_timeout() {
-        assert!(build_probe_client(Duration::from_millis(200)).is_ok());
+        assert!(build_probe_client(Duration::from_millis(200), None).is_ok());
     }
 
     /// `print_pair_init` and `print_pair_complete` don't print through a

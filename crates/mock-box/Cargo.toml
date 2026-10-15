@@ -30,3 +30,9 @@ rand = { workspace = true }
 # key parsing/dedupe/permission-hardening here -- this mock only supplies a
 # throwaway temp-dir path, never `~/.ssh` (see `serve`'s authorized-keys path).
 tt-station-agentd = { path = "../tt-station-agentd" }
+# `serve --tls-port`: the same API over HTTPS, like a box's TLS port, so the
+# CLI's certificate pinning can be tested end to end. Same stack as the agent
+# (axum-server + rustls with ring); the certificate comes from the agent's own
+# `tls::identity`.
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

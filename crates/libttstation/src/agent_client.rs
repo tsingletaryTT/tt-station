@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 /// pairing), and the agent's `/models` route doesn't require one anyway.
 pub async fn list_models(base: &str) -> anyhow::Result<ModelsResponse> {
     let url = join(base, "models");
-    let resp = reqwest::Client::new()
+    let resp = crate::transport::client_for(&url)
         .get(&url)
         .send()
         .await?
@@ -50,7 +50,7 @@ pub async fn list_models(base: &str) -> anyhow::Result<ModelsResponse> {
 /// `authed_client()`.
 pub async fn list_serving(base: &str) -> anyhow::Result<ServingList> {
     let url = join(base, "serving");
-    let resp = reqwest::Client::new()
+    let resp = crate::transport::client_for(&url)
         .get(&url)
         .send()
         .await?
@@ -103,7 +103,7 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
     }
 
     let url = join(base, "status");
-    let resp = reqwest::Client::new()
+    let resp = crate::transport::client_for(&url)
         .get(&url)
         .send()
         .await?
@@ -135,7 +135,7 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
 /// unauthenticated requests, but from another machine it needs the token.
 pub async fn get_config(base: &str, token: Option<&str>) -> anyhow::Result<ConfigSummary> {
     let url = join(base, "config");
-    let resp = with_token(reqwest::Client::new().get(&url), token)
+    let resp = with_token(crate::transport::client_for(&url).get(&url), token)
         .send()
         .await?
         .error_for_status()
@@ -165,7 +165,7 @@ pub async fn get_logs(
     token: Option<&str>,
 ) -> anyhow::Result<LogsInfo> {
     let url = format!("{}?source={source}&tail={tail}", join(base, "logs"));
-    let resp = with_token(reqwest::Client::new().get(&url), token)
+    let resp = with_token(crate::transport::client_for(&url).get(&url), token)
         .send()
         .await?
         .error_for_status()
@@ -216,7 +216,9 @@ fn with_token(request: reqwest::RequestBuilder, token: Option<&str>) -> reqwest:
 /// its handler's `Option<Json<..>>`).
 pub async fn reset(base: &str, token: &str, force: bool) -> anyhow::Result<()> {
     let url = join(base, "reset");
-    let request = reqwest::Client::new().post(&url).bearer_auth(token);
+    let request = crate::transport::client_for(&url)
+        .post(&url)
+        .bearer_auth(token);
     let request = if force {
         request.json(&serde_json::json!({ "force": true }))
     } else {
@@ -309,7 +311,7 @@ async fn refusal_detail(resp: reqwest::Response) -> String {
 /// the field simply ignores it.
 pub async fn power(base: &str, token: &str, action: &str, force: bool) -> anyhow::Result<()> {
     let url = join(base, "power");
-    let resp = reqwest::Client::new()
+    let resp = crate::transport::client_for(&url)
         .post(&url)
         .bearer_auth(token)
         .json(&serde_json::json!({ "action": action, "force": force }))
@@ -406,7 +408,7 @@ impl AgentClient {
         }
 
         let url = join(&self.base, "run");
-        let resp = reqwest::Client::new()
+        let resp = crate::transport::client_for(&url)
             .post(&url)
             .bearer_auth(&self.token)
             .json(&RunRequest { model, force })
@@ -449,7 +451,8 @@ impl AgentClient {
     /// parse out of it.
     pub async fn stop(&self) -> anyhow::Result<()> {
         let url = join(&self.base, "stop");
-        self.send(reqwest::Client::new().post(&url), &url).await?;
+        self.send(crate::transport::client_for(&url).post(&url), &url)
+            .await?;
         Ok(())
     }
 
@@ -463,7 +466,7 @@ impl AgentClient {
     /// the shared status-including error path.
     pub async fn endpoint(&self) -> anyhow::Result<Endpoint> {
         let url = join(&self.base, "endpoint");
-        let resp = reqwest::Client::new()
+        let resp = crate::transport::client_for(&url)
             .get(&url)
             .bearer_auth(&self.token)
             .send()
@@ -497,7 +500,7 @@ impl AgentClient {
         messages: &[crate::model::AssistantTurn],
     ) -> anyhow::Result<crate::model::AssistantReply> {
         let url = join(&self.base, "assistant");
-        let resp = reqwest::Client::new()
+        let resp = crate::transport::client_for(&url)
             .post(&url)
             .bearer_auth(&self.token)
             .json(&serde_json::json!({ "messages": messages }))
@@ -517,7 +520,7 @@ impl AgentClient {
         approve: bool,
     ) -> anyhow::Result<crate::model::AssistantConfirmation> {
         let url = join(&self.base, "assistant/confirm");
-        let resp = reqwest::Client::new()
+        let resp = crate::transport::client_for(&url)
             .post(&url)
             .bearer_auth(&self.token)
             .json(&serde_json::json!({ "action_id": action_id, "approve": approve }))
@@ -564,7 +567,9 @@ impl AgentClient {
     /// conflict.
     pub async fn list_leases(&self) -> anyhow::Result<LeaseList> {
         let url = join(&self.base, "leases");
-        let resp = self.send(reqwest::Client::new().get(&url), &url).await?;
+        let resp = self
+            .send(crate::transport::client_for(&url).get(&url), &url)
+            .await?;
         Ok(resp.json().await?)
     }
 
@@ -588,7 +593,7 @@ impl AgentClient {
         let url = join(&self.base, "ssh/authorize");
         let resp = self
             .send(
-                reqwest::Client::new()
+                crate::transport::client_for(&url)
                     .post(&url)
                     .json(&SshAuthorizeRequest { public_key, label }),
                 &url,
@@ -625,8 +630,11 @@ impl AgentClient {
         };
 
         let url = join(&self.base, "ssh/authorize");
-        self.send(reqwest::Client::new().delete(&url).json(&body), &url)
-            .await?;
+        self.send(
+            crate::transport::client_for(&url).delete(&url).json(&body),
+            &url,
+        )
+        .await?;
         Ok(())
     }
 

@@ -33,13 +33,13 @@ flowchart LR
 
         subgraph box["🖥️ QuietBox"]
             direction TB
-            agent["tt-station-agentd<br/>HTTP control plane :8765 (0.0.0.0)"]
+            agent["tt-station-agentd<br/>HTTPS :8766 (pinned cert) · plain HTTP :8765 for the box itself"]
             vllm["Model server /v1<br/>(vLLM, serving port e.g. :8003)"]
             hw["Blackhole chips · docker · /dev/tenstorrent"]
             agent --> vllm --> hw
         end
 
-        mac -->|"HTTP + bearer token<br/>(pair once)"| agent
+        mac -->|"HTTPS, box's certificate pinned<br/>+ bearer token (pair once)"| agent
         mac -->|"OpenAI /v1 requests"| vllm
     end
 
@@ -51,9 +51,11 @@ flowchart LR
     class lan,box trust;
 ```
 
-**The trust boundary is your LAN.** The agent binds `0.0.0.0:<ctrl-port>` (default `8765`),
-so anything on your LAN can reach it. That's deliberate — it's how your Mac discovers and
-talks to the box. The security assumption is that your LAN is *yours*.
+**The trust boundary is your LAN.** The agent listens on `0.0.0.0`, so anything on your LAN
+can reach it. That's deliberate — it's how your Mac discovers and talks to the box. Other
+computers and phones talk to it over **HTTPS on the control port + 1** (default `8766`),
+trusting the box's own certificate by its fingerprint; plain HTTP on `8765` serves only the
+box itself (and, for `/v1`, its Docker apps).
 
 ---
 
@@ -222,11 +224,40 @@ iPhone app fills in the real text from the box itself (see
 ## FAQ
 
 **Is the traffic encrypted (TLS/HTTPS)?**
-No. The control plane is plain HTTP and the bearer token travels in an `Authorization`
-header in the clear. This is fine on a LAN you trust (the same trust you already extend to,
-say, a printer or a NAS admin page), and it keeps setup zero-config. It is **not** okay
-across an untrusted network — so don't expose the port to the internet. If you need remote
-access, put it behind a VPN or Tailscale (see [hardening](#hardening-checklist)).
+Yes, from every other computer and phone. The box makes its own certificate once and serves
+the control plane over HTTPS on the control port + 1 (`8766`). Clients **pin** that
+certificate's SHA-256 when they pair — the phone from the QR code, the desktop app from the
+pairing link, the `tt-station` CLI from `GET /tls` (shown to you, and checked against `--fp`
+or the link's `fp` when you give one) — store it with the token, and refuse any other
+certificate afterwards, so the bearer token never crosses the network in the clear. Plain
+HTTP is for the box itself (`127.0.0.1`); other computers get it only for `/v1`, and only if
+the owner turns that on. Still: don't expose the ports to the internet; use a VPN or
+Tailscale (see [hardening](#hardening-checklist)).
+
+**What happens if the box's certificate changes?**
+Every client refuses to talk to it. The CLI says `certificate changed: <host> presented a
+certificate with SHA-256 … but this computer paired with …` and sends nothing. The
+certificate is kept across restarts and upgrades, so a change means the box was reinstalled
+(its config folder wiped) — or something on the network is answering for it. Check the
+fingerprint on the box (Settings → Pairing and security) and pair again. Details:
+[CLI HTTPS and pinning](reference/cli-https-pinning.md).
+
+**I paired the CLI before HTTPS. Is my pairing still good?**
+Yes. The first command that uses it finds the box's HTTPS, pins the certificate it presents
+(trust on first use), stores it with your token and tells you so. To verify rather than
+trust, pair again with `tt-station pair <host:port> --fp <fingerprint shown on the box>`.
+
+**Can a box open things on my computer?**
+Only if you say so. When TT Station runs on another computer, Tori's computer tools act on
+that computer. Before a box opens a web or mail link, or launches an app, the desktop app
+shows a dialog with the box's name and address and exactly what will open (the full link, or
+the app), with **Allow once**, **Always allow <site/app> from <box>** and **Don't allow**
+(the default; closing the dialog is "don't allow"). "Always" is remembered per box and per
+site (scheme, host and port) or app; see and clear those choices in Settings → General →
+This app, and they're dropped when you remove the box. Links with hidden characters, a
+user name or password, or anything but `http`, `https` and `mailto` never open; look-alike
+host names are shown in their real (punycode) form. `open_folder` opens folders only, never a
+file or an app.
 
 **How are app keys stored?**
 As SHA-256 digests in `~/.config/tt-station/app-keys.json` (`0600`): a key is shown once,
@@ -258,8 +289,9 @@ keys you added by hand.
 - In the **TT Station desktop app**: tokens are encrypted with the operating system's
   keychain (macOS Keychain; GNOME Keyring/KWallet on Linux). Where Linux has no keyring, the
   app says so in Settings and keeps the token in an owner-only (`0600`) file instead.
-- On your **Mac**: the `tt-station` CLI stores its token in the macOS Keychain (file store as
-  fallback). The app tracks *which* hosts are paired locally.
+- On your **Mac**: the `tt-station` CLI stores its token, together with the box's HTTPS port
+  and pinned certificate fingerprint, in the macOS Keychain (`~/.config/tt-station/secrets.json`,
+  `0600`, as fallback and on Linux). The app tracks *which* hosts are paired locally.
 
 **What privileges does the agent run with?**
 It runs as **you** — a `systemctl --user` service under your own account (not root). It can
@@ -278,9 +310,9 @@ machine.
   offline; a running model container keeps serving until you stop it.
 
 **Can I put this on the internet / access it remotely?**
-Don't expose the port directly. Use a VPN or Tailscale so the box stays on a "virtual LAN"
-you control — you keep the zero-config friendliness and never put a plaintext control plane
-on the open internet.
+Don't expose the ports directly. Use a VPN or Tailscale so the box stays on a "virtual LAN"
+you control — HTTPS with a pinned certificate protects the token on the wire, but the
+pairing endpoints and the always-open reads are still meant for a network you trust.
 
 **Does the box "phone home" / send telemetry anywhere?**
 No. Everything is on your LAN. `tt-smi` telemetry and the process list are only sent to
@@ -307,6 +339,10 @@ required for a normal home/lab setup:
       and re-pair; revoke any SSH keys you didn't intend to keep.
 - [ ] **Only `--enable-ssh` when you mean it** — it grants a shell. Audit `ttstation:`-tagged
       lines in `~/.ssh/authorized_keys`.
+- [ ] **Pair the CLI with the fingerprint**: `tt-station pair <host:port> --fp <first 16+ hex
+      digits shown on the box>`, or `--link` with the box's pairing link.
+- [ ] **Review "always allow" choices** for what boxes may open on your computer (desktop app:
+      Settings → General → This app).
 
 ---
 
@@ -314,8 +350,10 @@ required for a normal home/lab setup:
 
 Being upfront about the trade-offs, so there are no surprises:
 
-- **No TLS on the control plane.** Plaintext HTTP on a trusted LAN, for zero-config setup.
-  Mitigation: keep it on your LAN / behind a VPN.
+- **Pinning, not a certificate authority.** The box's certificate is its own; clients trust
+  it by fingerprint, learned at pairing. A CLI pairing that predates HTTPS is pinned on first
+  use. Mitigation: compare the fingerprint the CLI shows (or pass `--fp`) with the one on the
+  box's screen.
 - **No user accounts / RBAC.** One bearer token = full control; the box is a single-operator
   machine. There's no notion of "read-only users" beyond the always-open informational reads.
 - **The pairing code isn't a brute-force fortress.** It's a short-lived (120s), on-screen

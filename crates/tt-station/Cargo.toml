@@ -26,11 +26,17 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 # `tt-station logs --follow` (Task 4): WebSocket client for the agent's
 # `GET /logs/stream` route, mirroring the versions `tt-station-agentd` already
-# uses as dev-deps for its own `/telemetry` WS integration test. The URL
-# scheme is `ws://` (never `wss://`), so no TLS feature is enabled on
-# tokio-tungstenite -- default features only.
+# uses as dev-deps for its own `/telemetry` WS integration test. Default
+# features only: `wss://` to another computer's box is opened here over
+# tokio-rustls with the pinned-certificate verifier (src/main.rs `connect_ws`),
+# so tokio-tungstenite needs no TLS feature of its own.
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+# HTTPS / WSS to boxes with their certificate pinned (libttstation::transport):
+# the same rustls reqwest uses, ring as the provider, no default features (which
+# would pull in aws-lc).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 
 [dev-dependencies]
 assert_cmd = "2"

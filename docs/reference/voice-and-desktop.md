@@ -69,6 +69,21 @@ nothing is serving), she thinks on the CPU with Ollama's `qwen3-coder:30b`
 `{"where": "chips" | "cpu" | null, "model"}`. About 18 tokens/s; the first
 question after a while waits ~20 s for Ollama to load the model (kept for 2 h).
 
+**On another computer, the desktop app asks first.** When TT Station runs on a
+computer other than the box, Tori's computer tools run there (`status: "on_client"`,
+`desktop/electron/main.cjs` `computerTool`). Before `open_app` opens a web or mail
+link or launches an app, the app shows a native dialog: which box asked (name and
+address), exactly what will open (the full, normalized link; or the app, as found on
+this computer), and **Allow once** / **Always allow <site or app> from <box>** /
+**Don't allow** (default and cancel). One dialog at a time. "Always" choices are kept
+per box in `desktop.json` (`allowedActions: {<box id>: {name, sites, apps}}`; a site
+is a link's origin, a mail link its address, an app its lower-cased name), listed and
+cleared in Settings → General → This app, and dropped when the box is removed.
+Links with control or bidi characters, credentials, more than 2000 characters or any
+scheme but `http`/`https`/`mailto` never open. `open_folder` there opens folders only
+(never a file or app bundle). The decisions are a pure module,
+`desktop/electron/clientactions.cjs`, tested by `desktop/test/clientactions.test.cjs`.
+
 More computer tools: `control_computer` (volume via `wpctl`, media via MPRIS
 over `gdbus`, `loginctl lock-session`, GNOME dark mode and do-not-disturb via
 `gsettings`), `open_folder` (`gio open`, paths inside home only) and

@@ -9,13 +9,14 @@
 // agent's `local-secret` file (readable only by this user) proves we're the
 // box's owner, and buys a pairing token like the phone's.
 
-const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, shell, globalShortcut, nativeImage, nativeTheme, net, session, safeStorage } = require("electron");
+const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, shell, globalShortcut, nativeImage, nativeTheme, net, session, safeStorage, dialog } = require("electron");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { validHost, validUser, cleanName, sameOrigin, webAddress, shq } = require("./validate.cjs");
 const tokenstore = require("./tokenstore.cjs");
+const clientactions = require("./clientactions.cjs");
 
 app.setName("TT Station");
 // The dock groups windows by this id; it matches tt-station.desktop.
@@ -565,27 +566,61 @@ function resolveFolder(said) {
   return path.isAbsolute(s) ? s : path.join(os.homedir(), s);
 }
 
+/** The .app a name means on this Mac: an exact name first, then one containing it; null if none. */
+function findMacApp(name) {
+  const apps = ["/Applications", "/System/Applications", "/System/Applications/Utilities", path.join(os.homedir(), "Applications")]
+    .flatMap((d) => { try { return fs.readdirSync(d).filter((f) => f.endsWith(".app")).map((f) => path.join(d, f)); } catch { return []; } });
+  const want = name.toLowerCase().replace(/\.app$/, "");
+  return apps.find((a) => path.basename(a, ".app").toLowerCase() === want) || apps.find((a) => path.basename(a, ".app").toLowerCase().includes(want)) || null;
+}
+
+/** The box the window is showing, as the person knows it: { id, name, host }. */
+function askingBox() {
+  if (boxes.current === "local") return { id: "local", name: auth?.name || readSecret()?.name || "This box", host: null };
+  const b = boxes.boxes.find((x) => x.id === boxes.current);
+  return b ? { id: b.id, name: cleanName(b.name) || b.host, host: b.host } : { id: boxes.current, name: auth?.name || "A box", host: null };
+}
+
+// One prompt at a time: a box asking for several things gets them asked in turn.
+let promptQueue = Promise.resolve();
+
+/** Asks the person before `action` (clientactions.describe) runs; throws if they say no. */
+async function confirmOnThisComputer(action) {
+  const box = askingBox();
+  if (clientactions.isAllowed(prefs(), box.id, action)) return;
+  const ask = promptQueue.then(() => {
+    const parent = BrowserWindow.getFocusedWindow() || (win && !win.isDestroyed() && win.isVisible() ? win : null);
+    const options = clientactions.dialogFor(action, box);
+    return parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options);
+  });
+  promptQueue = ask.catch(() => {});
+  const answer = clientactions.choice((await ask).response);
+  if (answer === "deny") throw new Error(`The person at this computer didn't allow that (${action.kind === "app" ? action.label : action.target}).`);
+  if (answer === "always") savePrefs({ [clientactions.PREF_KEY]: clientactions.remember(prefs(), box.id, box.name, action)[clientactions.PREF_KEY] });
+}
+
 async function computerTool(tool, args) {
   switch (tool) {
     case "open_app": {
-      const url = args.url ? String(args.url) : null;
-      if (url) {
-        if (!/^(https?:|mailto:)/i.test(url)) throw new Error("Only web and mail links open from here.");
-        await shell.openExternal(url);
-        return { summary: `Opened ${url.replace(/^https?:\/\//, "").split("/")[0]}`, result: { opened: url } };
+      if (args.url) {
+        // Exactly what was shown is what opens (the normalized link).
+        const action = clientactions.describe(tool, { url: args.url });
+        await confirmOnThisComputer(action);
+        await shell.openExternal(action.target);
+        return { summary: `Opened ${action.label}`, result: { opened: action.target } };
       }
       const name = String(args.app || "").trim();
       if (!name) throw new Error("Say which app.");
       if (IS_MAC) {
-        try { await run("open", ["-a", name]); return { summary: `Opened ${name}`, result: { opened: name } }; } catch { /* look for it */ }
-        const apps = ["/Applications", "/System/Applications", "/System/Applications/Utilities", path.join(os.homedir(), "Applications")]
-          .flatMap((d) => { try { return fs.readdirSync(d).filter((f) => f.endsWith(".app")).map((f) => path.join(d, f)); } catch { return []; } });
-        const want = name.toLowerCase().replace(/\.app$/, "");
-        const hit = apps.find((a) => path.basename(a, ".app").toLowerCase() === want) || apps.find((a) => path.basename(a, ".app").toLowerCase().includes(want));
-        if (!hit) throw new Error(`There's no app called ${name} on this Mac.`);
-        await run("open", [hit]);
-        return { summary: `Opened ${path.basename(hit, ".app")}`, result: { opened: path.basename(hit, ".app") } };
+        // Find the app first, so the prompt names the one that will open.
+        const hit = findMacApp(name);
+        const shown = hit ? path.basename(hit, ".app") : name;
+        await confirmOnThisComputer(clientactions.describe(tool, { app: shown }));
+        if (hit) { await run("open", [hit]); return { summary: `Opened ${shown}`, result: { opened: shown } }; }
+        await run("open", ["-a", name]).catch(() => { throw new Error(`There's no app called ${name} on this Mac.`); });
+        return { summary: `Opened ${name}`, result: { opened: name } };
       }
+      await confirmOnThisComputer(clientactions.describe(tool, { app: name }));
       await run("gtk-launch", [name]).catch(() => { throw new Error(`Couldn't open ${name} here.`); });
       return { summary: `Opened ${name}`, result: { opened: name } };
     }
@@ -623,6 +658,11 @@ async function computerTool(tool, args) {
     }
     case "open_folder": {
       const p = resolveFolder(args.path);
+      // Folders only: opening a file or an app bundle would run it.
+      let stat = null;
+      try { stat = fs.statSync(p); } catch { /* none */ }
+      const problem = clientactions.folderProblem(p, stat);
+      if (problem) throw new Error(problem);
       const err = await shell.openPath(p);
       if (err) throw new Error(`Couldn't open ${p}: ${err}`);
       return { summary: `Opened ${p.replace(os.homedir(), "~")}`, result: { opened: p } };
@@ -1179,6 +1219,8 @@ handle("remove-box", async (_e, id) => {
   await signOutOf(id);
   boxes.boxes = boxes.boxes.filter((b) => b.id !== id);
   saveBoxes();
+  // What it was always allowed to open here goes with it.
+  savePrefs({ [clientactions.PREF_KEY]: clientactions.forget(prefs(), String(id))[clientactions.PREF_KEY] });
   if (boxes.current === id) {
     if (readSecret()) switchBox("local");
     else if (boxes.boxes.length) switchBox(boxes.boxes[0].id);
@@ -1248,6 +1290,13 @@ handle("open-external", async (_e, url) => {
 handle("computer", async (_e, tool, args) => {
   try { return { ok: true, ...(await computerTool(String(tool), args && typeof args === "object" ? args : {})) }; }
   catch (e) { return { ok: false, error: String(e.message || e) }; }
+});
+// What boxes may open on this computer without asking (Settings → General → This app).
+handle("allowed-actions", () => clientactions.listAllowed(prefs()));
+handle("forget-allowed-actions", (_e, boxId, one) => {
+  const which = one && typeof one === "object" ? { kind: one.kind === "app" ? "app" : "site", key: String(one.key) } : undefined;
+  savePrefs({ [clientactions.PREF_KEY]: clientactions.forget(prefs(), boxId ? String(boxId) : undefined, which)[clientactions.PREF_KEY] });
+  return clientactions.listAllowed(prefs());
 });
 handle("start-at-login", (_e, on) => (typeof on === "boolean" ? setStartAtLogin(on) : IS_MAC ? app.getLoginItemSettings().openAtLogin : fs.existsSync(AUTOSTART)));
 handle("notify", (_e, title, body) => {
