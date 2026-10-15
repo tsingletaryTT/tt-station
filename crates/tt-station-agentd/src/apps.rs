@@ -682,16 +682,12 @@ fn describe(state: &AppState, def: &AppDef) -> Value {
                 String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr)
             })
             .and_then(|t| {
-                t.lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .last()
-                    .map(|l| {
-                        format!(
-                            "It keeps stopping: {}",
-                            l.chars().take(240).collect::<String>()
-                        )
-                    })
+                t.lines().map(str::trim).rfind(|l| !l.is_empty()).map(|l| {
+                    format!(
+                        "It keeps stopping: {}",
+                        l.chars().take(240).collect::<String>()
+                    )
+                })
             })
             .unwrap_or_else(|| "It keeps stopping right after it starts.".into())
     });
@@ -833,7 +829,7 @@ fn start_needs(state: &AppState, def: &AppDef) {
         match docker_state(need.id).as_str() {
             "running" => {}
             "missing" => {
-                if !INSTALLS.get(need.id).is_some_and(|(_, e)| e.is_none()) {
+                if INSTALLS.get(need.id).is_none_or(|(_, e)| e.is_some()) {
                     install(state.clone(), need);
                 }
             }

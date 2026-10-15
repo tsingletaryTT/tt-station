@@ -265,7 +265,7 @@ fn all_runs(state: &AppState) -> Vec<Run> {
                 .unwrap_or(r)
         })
         .collect();
-    runs.sort_by(|a, b| b.started.cmp(&a.started));
+    runs.sort_by_key(|r| std::cmp::Reverse(r.started));
     runs
 }
 
@@ -1276,7 +1276,7 @@ pub fn headline(report: &str) -> String {
         .iter()
         .find(|l| l.to_lowercase().contains("headline:"))
     {
-        let after = l.splitn(2, |c| c == ':').nth(1).unwrap_or(l);
+        let after = l.split_once(':').map(|x| x.1).unwrap_or(l);
         return clean(after);
     }
     if let Some(l) = lines.iter().find(|l| l.starts_with('#')) {

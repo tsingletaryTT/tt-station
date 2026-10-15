@@ -4737,7 +4737,7 @@ async fn pair_qr(
         pair_id,
         code,
         remote_host: None,
-        tls_port: Some(port as u16),
+        tls_port: Some(port),
         cert_sha256: Some(sha.to_string()),
     };
     let url = format!(
@@ -4797,7 +4797,7 @@ async fn post_security(
             }
         })
     };
-    done.map_err(|e| tt_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    done.map_err(|e| tt_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     crate::audit::record(
         &state,
         "security",

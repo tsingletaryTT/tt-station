@@ -107,8 +107,7 @@ pub(crate) async fn post_hermes(
         let last = said
             .lines()
             .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .last()
+            .rfind(|l| !l.is_empty())
             .unwrap_or("hermes refused")
             .to_string();
         return Err(err(

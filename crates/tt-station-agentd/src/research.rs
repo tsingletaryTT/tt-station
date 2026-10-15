@@ -183,7 +183,7 @@ fn all_jobs(state: &AppState) -> Vec<Job> {
         .flatten()
         .filter_map(|e| read_json(&e.path().join("job.json")))
         .collect();
-    jobs.sort_by(|a, b| b.created.cmp(&a.created));
+    jobs.sort_by_key(|j| std::cmp::Reverse(j.created));
     jobs
 }
 

@@ -877,7 +877,7 @@ fn stage_usage(logs: &[PathBuf]) -> Option<Value> {
         total.cost += u.cost;
         for (t, (i, o)) in &u.threads {
             let e = total.threads.entry(t.clone()).or_default();
-            *e = ((*e).0.max(*i), (*e).1.max(*o));
+            *e = (e.0.max(*i), e.1.max(*o));
         }
     }
     let (cin, cout) = total
@@ -1590,13 +1590,8 @@ async fn port_bundle(state: &AppState, env: &CodexEnv, run: &CodexRun) -> Result
     let class = src
         .lines()
         .filter_map(|l| {
-            l.strip_prefix("class ").map(|r| {
-                r.split(|c: char| c == '(' || c == ':')
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            })
+            l.strip_prefix("class ")
+                .map(|r| r.split(['(', ':']).next().unwrap_or("").trim().to_string())
         })
         .find(|c| c.ends_with("ForCausalLM") || c.ends_with("ForConditionalGeneration"))
         .ok_or("The port's vLLM adapter has no …ForCausalLM class.")?;
@@ -2875,7 +2870,7 @@ print("ok")
             lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
         )
         .unwrap();
-        let u = stage_usage(&[log.clone()]).unwrap();
+        let u = stage_usage(std::slice::from_ref(&log)).unwrap();
         assert_eq!(u["tokens_in"], 1100);
         assert_eq!(u["tokens_out"], 55);
         assert_eq!(u["cost_usd"], 0.4);

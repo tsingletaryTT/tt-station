@@ -166,7 +166,7 @@ pub fn all(state: &AppState) -> Vec<Eval> {
         .filter_map(|e| std::fs::read(e.path()).ok())
         .filter_map(|b| serde_json::from_slice(&b).ok())
         .collect();
-    out.sort_by(|a: &Eval, b: &Eval| b.started.cmp(&a.started));
+    out.sort_by_key(|e: &Eval| std::cmp::Reverse(e.started));
     out
 }
 

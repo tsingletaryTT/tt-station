@@ -82,16 +82,9 @@ jobs:
           done
       - name: Test (hardware stubbed)
         run: PATH="$RUNNER_TEMP/hw-stubs:$PATH" cargo test --workspace --locked
-      # TODO(eng-hygiene): make this blocking (`-- -D warnings`) once the
-      # repo-wide clippy cleanup lands after the in-flight Rust branches merge.
-      # Until then it reports warnings (as annotations) without failing.
-      - name: Clippy (warnings reported, not yet blocking)
-        run: cargo clippy --workspace --all-targets --locked
-      # TODO(eng-hygiene): drop continue-on-error once the one-shot
-      # `cargo fmt --all` reformat lands (deferred so it doesn't conflict with
-      # the branches being merged). Shows as a failed-but-allowed step.
-      - name: Rustfmt (not yet blocking)
-        continue-on-error: true
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Rustfmt
         run: cargo fmt --all --check
 
   cargo-deny:

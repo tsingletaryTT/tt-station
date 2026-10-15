@@ -180,8 +180,7 @@ fn last_line(path: &Path) -> Option<String> {
     text.lines()
         .flat_map(|l| l.split('\r'))
         .map(|l| strip_ansi(l).trim().to_string())
-        .filter(|l| !l.is_empty())
-        .last()
+        .rfind(|l| !l.is_empty())
 }
 
 /// Will a package needing `chips` chips described as `hardware` run here?
@@ -287,7 +286,7 @@ pub(crate) async fn get_community(State(state): State<AppState>, _auth: BearerAu
                 // Paused, but everything arrived anyway (another package fetched the same weights).
                 let finished = paused
                     && on_box.iter().any(|p| p["id"] == id.as_str()
-                        && p["weights"].as_str().map_or(true, |w| crate::native_vllm::weights_complete(w).0));
+                        && p["weights"].as_str().is_none_or(|w| crate::native_vllm::weights_complete(w).0));
                 if finished {
                     for f in ["pull.log", "paused"] {
                         let _ = std::fs::remove_file(dir.join(f));
@@ -349,8 +348,11 @@ fn starting(state: &AppState, life: &crate::routes::Lifecycle) -> Option<Value> 
     Some(json!({ "id": id, "since": since, "step": step, "stalled_s": stalled_s() }))
 }
 
+/// A fetched list: when it was fetched (as an instant and in Unix seconds), and its items.
+type Fetched = (Instant, u64, Vec<Value>);
+
 /// Fetched lists, by scope (`catalog` | `all`): when, and what.
-static CATALOG: std::sync::LazyLock<Mutex<HashMap<bool, (Instant, u64, Vec<Value>)>>> =
+static CATALOG: std::sync::LazyLock<Mutex<HashMap<bool, Fetched>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A community package (from the last catalog listings fetched) whose name is
@@ -997,11 +999,9 @@ pub(crate) fn serving_package(state: &AppState, life: &crate::routes::Lifecycle)
 fn current(state: &AppState, life: &crate::routes::Lifecycle) -> Option<String> {
     let (id, model) = serving(state)?;
     match life.phase {
-        Phase::Starting => (life
-            .model
-            .as_deref()
-            .map_or(true, |m| same_model(m, &model)))
-        .then_some(id),
+        Phase::Starting => {
+            (life.model.as_deref().is_none_or(|m| same_model(m, &model))).then_some(id)
+        }
         Phase::Serving => {
             let served = life
                 .served_id
@@ -1077,15 +1077,15 @@ pub(crate) async fn post_serve(
         }
     }
     let life = state.lifecycle();
-    if !matches!(life.phase, Phase::Idle | Phase::Failed) || crate::coserve::is_split(&state) {
-        if !body.stop_serving {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(
-                    json!({ "error": "Starting it replaces what's serving now. Stop it first?", "needs_stop": true }),
-                ),
-            ));
-        }
+    if (!matches!(life.phase, Phase::Idle | Phase::Failed) || crate::coserve::is_split(&state))
+        && !body.stop_serving
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(
+                json!({ "error": "Starting it replaces what's serving now. Stop it first?", "needs_stop": true }),
+            ),
+        ));
     }
     if let Some((id, _)) = STOPPING.lock().expect("community").clone() {
         return Err(err(
@@ -1450,13 +1450,10 @@ async fn recover(state: &AppState, stuck: &str, minutes: u64) {
     }
     let back = last_good(state)
         .filter(|g| g != stuck && installed().iter().any(|p| p["id"] == g.as_str()));
-    match (&back, RESTART.get()) {
-        // Started by the restarter: a start can't start one from inside its own watch.
-        (Some(g), Some(tx)) => {
-            let _ = tx.send((stuck.to_string(), g.clone(), minutes));
-            return;
-        }
-        _ => {}
+    // Started by the restarter: a start can't start one from inside its own watch.
+    if let (Some(g), Some(tx)) = (&back, RESTART.get()) {
+        let _ = tx.send((stuck.to_string(), g.clone(), minutes));
+        return;
     }
     let restarted = false;
     state.notifier().emit(crate::notify::Draft {
@@ -1547,7 +1544,7 @@ async fn watch_boot(state: AppState, id: String) {
         if unit_active(crate::orchard::HARVEST_UNIT) || container_up(&id).await {
             ticks += 1;
             // Every minute: has it got anywhere since the last look?
-            if ticks % 6 == 0 {
+            if ticks.is_multiple_of(6) {
                 let (printed, bytes) = boot_progress(&id, checked).await;
                 checked = now_secs();
                 let moved = printed || (bytes != cache_bytes && cache_bytes != 0);
@@ -1988,8 +1985,7 @@ pub(crate) async fn delete_package(
         return Err(err(
             StatusCode::INTERNAL_SERVER_ERROR,
             text.lines()
-                .filter(|l| !l.trim().is_empty())
-                .last()
+                .rfind(|l| !l.trim().is_empty())
                 .unwrap_or("couldn't remove it")
                 .to_string(),
         ));

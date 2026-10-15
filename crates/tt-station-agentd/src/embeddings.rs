@@ -98,8 +98,11 @@ fn save(state: &AppState, s: &HashMap<String, String>) {
     );
 }
 
+/// A service's setup: its step, and why it failed if it did.
+type Step = (String, Option<String>);
+
 /// Setting a service up: its step, or why it failed.
-static STEPS: LazyLock<Mutex<HashMap<&'static str, (String, Option<String>)>>> =
+static STEPS: LazyLock<Mutex<HashMap<&'static str, Step>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn docker_state(container: &str) -> String {
@@ -292,7 +295,7 @@ pub fn set(state: &AppState, svc: &'static Service, model: Option<String>) {
 
 /// Turn embeddings on with the default model if they're off (an app that needs them is being set up).
 pub fn ensure_embed(state: &AppState) {
-    if settings(state).get(EMBED.id).is_none() {
+    if !settings(state).contains_key(EMBED.id) {
         set(state, &EMBED, Some(EMBED.models[0].0.to_string()));
     } else if docker_state(EMBED.container) != "running" {
         let _ = Command::new("docker")

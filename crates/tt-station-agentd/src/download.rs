@@ -165,7 +165,10 @@ pub fn unlink_small_files(hub: &Path, repo: &str) -> usize {
     copied
 }
 
-static TOTALS: LazyLock<Mutex<HashMap<String, (Instant, Option<u64>)>>> =
+/// A repo's full size: when it was asked for, and the answer once it's in.
+type Total = (Instant, Option<u64>);
+
+static TOTALS: LazyLock<Mutex<HashMap<String, Total>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The full size of `repo` on the Hub, if known yet. The first ask looks it up
@@ -218,7 +221,10 @@ async fn fetch_total(repo: &str) -> Option<u64> {
     (n > 0).then_some(n)
 }
 
-static SAMPLES: LazyLock<Mutex<HashMap<String, VecDeque<(Instant, u64)>>>> =
+/// A download's recent progress: when, and the bytes done by then.
+type Samples = VecDeque<(Instant, u64)>;
+
+static SAMPLES: LazyLock<Mutex<HashMap<String, Samples>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Bytes per second over the last few seconds of `key`'s download, given what's done now.

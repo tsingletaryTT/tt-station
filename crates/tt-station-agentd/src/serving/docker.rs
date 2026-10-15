@@ -326,8 +326,7 @@ fn run_and_capture(cmd: &mut std::process::Command, display_args: &[&str]) -> Re
             String::from_utf8_lossy(&output.stdout)
                 .lines()
                 .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .last()
+                .rfind(|l| !l.is_empty())
                 .map(str::to_string)
                 .unwrap_or_else(|| output.status.to_string())
         };

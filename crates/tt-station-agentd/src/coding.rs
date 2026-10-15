@@ -196,13 +196,16 @@ pub(crate) fn key(state: &AppState) -> Result<String, String> {
 }
 
 /// The command and environment that start `agent` on the box's model.
+/// A launch: the command line, and the environment it runs with.
+type Launch = (Vec<String>, Vec<(String, String)>);
+
 fn launch(
     state: &AppState,
     agent: &Agent,
     bin: &Path,
     task: Option<&str>,
     folder: &Path,
-) -> Result<(Vec<String>, Vec<(String, String)>), String> {
+) -> Result<Launch, String> {
     let base = format!("http://127.0.0.1:{}", state.ctrl_port());
     let k = key(state)?;
     let b = bin.display().to_string();
@@ -362,7 +365,7 @@ fn all(state: &AppState) -> Vec<Session> {
         .filter_map(|e| load(state, &e.file_name().to_string_lossy()))
         .map(|s| refresh(state, s))
         .collect();
-    v.sort_by(|a, b| b.created.cmp(&a.created));
+    v.sort_by_key(|s| std::cmp::Reverse(s.created));
     v
 }
 

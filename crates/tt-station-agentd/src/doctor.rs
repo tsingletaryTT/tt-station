@@ -671,8 +671,11 @@ pub async fn gather(state: &AppState) -> Facts {
     }
 }
 
+/// The network route: its interface, whether it's Wi-Fi, and an unplugged wired port.
+type Route = (String, bool, Option<String>);
+
 /// The network route, the IOMMU mode and driver hangs, from the system itself.
-fn system_facts() -> (Option<(String, bool, Option<String>)>, Option<bool>, u32) {
+fn system_facts() -> (Option<Route>, Option<bool>, u32) {
     use std::process::{Command, Stdio};
     let run = |cmd: &str, args: &[&str]| {
         Command::new(cmd)

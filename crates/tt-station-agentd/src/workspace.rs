@@ -424,8 +424,10 @@ fn sandbox_ready(port: u16) -> (bool, bool) {
     (image, gate)
 }
 
-static SETUP: LazyLock<Mutex<Option<(String, Option<String>)>>> =
-    LazyLock::new(|| Mutex::new(None));
+/// The sandbox setup: its step, and why it failed if it did.
+type Setup = (String, Option<String>);
+
+static SETUP: LazyLock<Mutex<Option<Setup>>> = LazyLock::new(|| Mutex::new(None));
 /// One setup at a time, whoever asks (the Set up button, a first message).
 static SETTING_UP: AtomicBool = AtomicBool::new(false);
 
@@ -491,8 +493,8 @@ fn setup_sandbox(port: u16) -> Result<(), String> {
         }
     }
     // The Rust build volume, owned by the sandbox's user.
-    if !docker_ok(&["volume", "inspect", CARGO_VOLUME]) {
-        if !docker_ok(&["volume", "create", CARGO_VOLUME])
+    if !docker_ok(&["volume", "inspect", CARGO_VOLUME])
+        && (!docker_ok(&["volume", "create", CARGO_VOLUME])
             || !docker_ok(&[
                 "run",
                 "--rm",
@@ -504,10 +506,9 @@ fn setup_sandbox(port: u16) -> Result<(), String> {
                 "chown",
                 "1000:1000",
                 "/v",
-            ])
-        {
-            return Err("couldn't make the sandbox's build volume".into());
-        }
+            ]))
+    {
+        return Err("couldn't make the sandbox's build volume".into());
     }
     step("Starting the gate");
     // The sandbox's network has no address on the box and no way out: only the gate is on it.
@@ -1595,7 +1596,7 @@ pub(crate) async fn get_code(State(state): State<AppState>, _auth: BearerAuth) -
             .flatten()
             .filter_map(|e| load(&st, &e.file_name().to_string_lossy()))
             .collect();
-        v.sort_by(|a, b| b.last.max(b.created).cmp(&a.last.max(a.created)));
+        v.sort_by_key(|s| std::cmp::Reverse(s.last.max(s.created)));
         let (image, gate) = sandbox_ready(port);
         (
             v.iter().map(|s| describe(&st, s)).collect::<Vec<_>>(),
@@ -2095,12 +2096,7 @@ fn edited_changes(r: Option<&crate::safegit::Reach>, s: &Session, events: &Path)
             ) {
                 // Committed since, or edited back to how it was.
                 Ok(st) if st.trim().is_empty() => continue,
-                Ok(st) => st
-                    .trim()
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("M")
-                    .to_string(),
+                Ok(st) => st.split_whitespace().next().unwrap_or("M").to_string(),
                 Err(_) => "M".to_string(),
             }
         };

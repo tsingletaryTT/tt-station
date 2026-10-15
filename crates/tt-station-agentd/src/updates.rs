@@ -223,7 +223,10 @@ pub struct Asset {
     pub digest: Option<String>,
 }
 
-static RELEASES: LazyLock<Mutex<Option<(u64, Vec<Release>)>>> = LazyLock::new(|| Mutex::new(None));
+/// Releases as last fetched: when, and the list.
+type Fetched = (u64, Vec<Release>);
+
+static RELEASES: LazyLock<Mutex<Option<Fetched>>> = LazyLock::new(|| Mutex::new(None));
 
 /// The project's releases, newest first (cached for an hour).
 async fn releases(fresh: bool) -> Result<Vec<Release>, String> {
@@ -464,12 +467,8 @@ async fn fetch(release: &Release) -> Result<(), String> {
         file.write_all(&chunk).map_err(|e| e.to_string())?;
         hasher.update(&chunk);
         got += chunk.len() as u64;
-        if asset.size > 0 {
-            working(Some(&format!(
-                "Downloading {} ({}%)",
-                release.version,
-                got * 100 / asset.size
-            )));
+        if let Some(pct) = (got * 100).checked_div(asset.size) {
+            working(Some(&format!("Downloading {} ({}%)", release.version, pct)));
         }
     }
     drop(file);
@@ -752,7 +751,7 @@ pub(crate) async fn post_install(
     let release = match &b.version {
         Some(v) => list
             .iter()
-            .find(|r| &r.version == v.trim_start_matches('v'))
+            .find(|r| r.version == v.trim_start_matches('v'))
             .cloned(),
         None => list.first().cloned(),
     }

@@ -436,9 +436,12 @@ pub(crate) async fn post_setup(State(state): State<AppState>, _auth: BearerAuth)
 /// What native vLLM last started: (bundle id, the model it serves).
 static NATIVE_SERVING: Mutex<Option<(String, String)>> = Mutex::new(None);
 
+/// A launch: the command line, and the environment it runs with.
+type Launch = (Vec<String>, Vec<(String, String)>);
+
 /// The bundle's launch command, made to run here: tt-metal's Python, the
 /// serving port, everything else as the bundle says.
-pub fn serve_argv(meta: &Value, port: u16) -> Option<(Vec<String>, Vec<(String, String)>)> {
+pub fn serve_argv(meta: &Value, port: u16) -> Option<Launch> {
     let l = launch(meta)?;
     let mut argv: Vec<String> = l["command"]
         .as_array()?
