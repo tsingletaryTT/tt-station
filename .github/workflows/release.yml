@@ -4,14 +4,15 @@ on:
   push:
     tags:
       - 'v*'
-  # Manual, on-demand build. Produces the same per-suite .debs but uploads them
-  # as downloadable GitHub Actions artifacts (see the workflow_dispatch-gated
-  # step below) instead of publishing a GitHub Release — a pre-release flow for
-  # grabbing a test build without cutting a tag.
+  # Manual, on-demand build. Produces the same per-suite .debs but leaves them
+  # as downloadable GitHub Actions artifacts instead of publishing a GitHub
+  # Release — a pre-release flow for grabbing a test build without cutting a
+  # tag. Those builds are NOT signed, so a box's updater won't install them.
   workflow_dispatch:
 
+# Building gets read access only; the publish job below asks for write.
 permissions:
-  contents: write   # upload release assets
+  contents: read
 
 jobs:
   build-deb:
@@ -23,8 +24,10 @@ jobs:
         include:
           - runner: ubuntu-24.04
             suite:  noble
+            image:  ubuntu:24.04
           - runner: ubuntu-22.04
             suite:  jammy
+            image:  ubuntu:22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -60,37 +63,11 @@ jobs:
             echo "Renamed: $(basename "$deb") → $(basename "$newname")"
           done
 
-      # Tag push (v*): publish to a GitHub Release. Gated to push events so a
-      # manual workflow_dispatch run never touches a Release (and never
-      # mis-resolves $GITHUB_REF_NAME to a branch name).
-      - name: Ensure release exists, then upload packages
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          SUITE="${{ matrix.suite }}"
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $GITHUB_REF_NAME already exists — skipping create."
-          else
-            gh release create "$GITHUB_REF_NAME" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "$GITHUB_REF_NAME" \
-              --generate-notes \
-              --verify-tag || true
-          fi
-          gh release upload "$GITHUB_REF_NAME" \
-            ../tt-station_*_amd64_${SUITE}.deb \
-            ../tt-station-panel_*_amd64_${SUITE}.deb \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
-
-      # Manual run (workflow_dispatch): no Release — upload the two .debs as a
-      # downloadable Actions artifact instead. dpkg-buildpackage writes the .debs
-      # to the parent dir; stage them into a dir INSIDE the workspace first, since
-      # actions/upload-artifact derives its layout from the paths' common ancestor
-      # and mishandles paths above the workspace root.
-      - name: Stage .debs for artifact upload
-        if: github.event_name == 'workflow_dispatch'
+      # dpkg-buildpackage writes the .debs to the parent dir; stage them into a
+      # dir INSIDE the workspace, since actions/upload-artifact derives its
+      # layout from the paths' common ancestor and mishandles paths above the
+      # workspace root.
+      - name: Stage .debs
         run: |
           SUITE="${{ matrix.suite }}"
           mkdir -p dist
@@ -98,12 +75,78 @@ jobs:
              ../tt-station-panel_*_amd64_${SUITE}.deb dist/
           ls -lh dist/
 
-      # One artifact per suite — v4 requires unique artifact names per job.
+      # Packaging gate: install the .deb in a clean image of the Ubuntu it's
+      # for, start the installed agent (stubbed hardware, throwaway config) and
+      # wait for GET /healthz and GET /status. A release whose agent can't
+      # start is never published (a crash-looping build once shipped 23 times).
+      - name: Install in a clean ${{ matrix.image }} and smoke test
+        run: scripts/smoke-deb.sh "${{ matrix.image }}" dist
+
+      # One artifact per suite — v4 requires unique artifact names per job. The
+      # publish job collects them; a manual run stops here.
       - name: Upload .debs as artifacts
-        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: tt-station-debs-${{ matrix.suite }}
           path: dist/*.deb
           if-no-files-found: error
           retention-days: 90
+
+  # Tag push (v*) only: sign every package and publish them with their .sig
+  # files to the GitHub Release. Signing happens here, not in the build jobs,
+  # so the key is never in a job that runs cargo build scripts. The key lives
+  # in the `release` environment's secret TT_STATION_RELEASE_SIGNING_KEY (an
+  # Ed25519 PEM private key); restrict that environment to v* tags. Docs:
+  # docs/reference/releases.md.
+  sign-and-publish:
+    name: Sign and publish
+    needs: build-deb
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write   # create the release, upload assets
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect the built packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tt-station-debs-*
+          path: dist
+          merge-multiple: true
+
+      # No key, no release: a box only installs packages signed by a key it
+      # pins, so an unsigned release would just be a release nobody can take.
+      - name: Sign packages
+        env:
+          TT_STATION_RELEASE_SIGNING_KEY: ${{ secrets.TT_STATION_RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$TT_STATION_RELEASE_SIGNING_KEY" ]; then
+            echo "::error::TT_STATION_RELEASE_SIGNING_KEY isn't set in the 'release' environment; refusing to publish unsigned packages. See docs/reference/releases.md."
+            exit 1
+          fi
+          scripts/sign-release.sh sign dist/*.deb
+
+      # The signature must check out against the keys this very release pins
+      # (deploy/release-keys.pub, compiled into the agent): catches a secret
+      # that was rotated without pinning its public key first.
+      - name: Verify signatures against the pinned keys
+        run: scripts/sign-release.sh verify dist/*.deb
+
+      - name: Ensure release exists, then upload packages and signatures
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — skipping create."
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              --verify-tag
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/*.deb dist/*.deb.sig \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

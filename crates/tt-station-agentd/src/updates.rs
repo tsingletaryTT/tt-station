@@ -24,13 +24,24 @@
 //! - `POST /updates/install {version?, allow_downgrade?}`, `POST /updates/undo`.
 //!
 //! What's checked before a release is used: its tag is a plain version
-//! ([`valid_version`]) -- it ends up in a path and the watchdog script; its
-//! package has a sha256 from GitHub, and the download matches it; and it isn't
-//! older than the running major.minor unless the request says
-//! `allow_downgrade` ([`below_floor`]), so a paired device can't quietly move
-//! the box back to a release with known holes. GitHub's digest only proves the
-//! download is the file the release lists; signing releases (a key the box
-//! trusts, checked here) is the follow-up, once someone decides who holds it.
+//! ([`valid_version`]) -- it ends up in a path and the watchdog script -- and
+//! its package is named for that version; the package has a sha256 from
+//! GitHub, and the download matches it; the package is **signed** by a key the
+//! box trusts ([`crate::release_keys`]: compiled-in keys plus the owner's
+//! channel file), checked against the download's own hash; and it isn't older
+//! than the running major.minor unless the request says `allow_downgrade`
+//! ([`below_floor`]), so a paired device can't quietly move the box back to a
+//! release with known holes. GitHub's digest only catches a broken download;
+//! the signature is what shows the package came from whoever holds the release
+//! key, not just from whoever can publish to the repository.
+//!
+//! Where releases come from and which extra keys count is the box's update
+//! channel ([`channel`]): [`DEFAULT_REPO`] and the compiled-in keys, unless
+//! the owner's `update-channel.toml` in the agent's config directory says
+//! otherwise. The only way past a missing or bad signature is
+//! [`ALLOW_UNSIGNED_ENV`] in the service's own environment (never a request
+//! field), and every use of it is logged as an error.
+//! Doc: docs/reference/releases.md.
 
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -42,6 +53,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::release_keys::{self, TrustedKey};
 use crate::routes::{AppState, BearerAuth};
 
 type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -62,8 +74,143 @@ const UNIT: &str = "tt-station-agentd";
 /// Versions kept on disk for undo.
 const KEEP: usize = 3;
 
-fn repo() -> String {
-    std::env::var("TT_STATION_UPDATE_REPO").unwrap_or_else(|_| "tsingletaryTT/tt-station".into())
+/// The GitHub repository releases come from when nothing says otherwise.
+///
+/// TODO(release-channel): this MUST move to an org-owned repository (under
+/// Tenstorrent's GitHub organization, with its own branch protection and
+/// release environment) before TT Station rolls out company-wide: a personal
+/// repository is one account away from shipping code to every box. Which org
+/// repository is still being decided; the switch is one line here plus a
+/// release from the old repository that carries it (docs/reference/releases.md,
+/// "Moving the release channel"). Boxes can follow another repository today
+/// through their channel file.
+pub const DEFAULT_REPO: &str = "tsingletaryTT/tt-station";
+
+/// The owner's channel file, in the agent's config directory.
+pub const CHANNEL_FILE: &str = "update-channel.toml";
+
+/// Set (`1`) in the agent service's environment to install updates whose
+/// signature is missing or doesn't check out. For developing the updater only;
+/// every use is logged as an error and recorded in the activity log.
+pub const ALLOW_UNSIGNED_ENV: &str = "TT_STATION_ALLOW_UNSIGNED_UPDATES";
+
+/// Where this box gets releases, and whose signatures it accepts.
+#[derive(Debug, Clone, Serialize)]
+pub struct Channel {
+    /// `owner/name` on GitHub.
+    pub repo: String,
+    /// Where `repo` came from: `default`, `channel file` or `environment`
+    /// (`TT_STATION_UPDATE_REPO`).
+    pub repo_from: String,
+    /// Compiled-in keys first, then the channel file's.
+    pub keys: Vec<TrustedKey>,
+    /// [`ALLOW_UNSIGNED_ENV`] is set on the service.
+    pub unsigned_allowed: bool,
+}
+
+/// `update-channel.toml`:
+///
+/// ```toml
+/// repo = "example-org/tt-station"          # optional
+/// [[keys]]                                 # optional, any number
+/// name = "example-2026a"
+/// key = "<base64 Ed25519 public key>"
+/// ```
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChannelFile {
+    repo: Option<String>,
+    #[serde(default)]
+    keys: Vec<ChannelKey>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChannelKey {
+    name: String,
+    key: String,
+}
+
+/// `owner/name`, GitHub's characters only: it goes into the API URL.
+pub fn valid_repo(r: &str) -> bool {
+    let ok = |p: &str| {
+        !p.is_empty()
+            && p.len() <= 100
+            && !p.starts_with('.')
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    };
+    matches!(r.split('/').collect::<Vec<_>>()[..], [o, n] if ok(o) && ok(n))
+}
+
+fn unsigned_allowed() -> bool {
+    matches!(
+        std::env::var(ALLOW_UNSIGNED_ENV).as_deref(),
+        Ok("1" | "true" | "yes")
+    )
+}
+
+/// This box's channel. A channel file that can't be read is an error, not a
+/// fallback: a box meant to follow a company channel mustn't quietly go back
+/// to the default one.
+pub fn channel(config_dir: &Path) -> Result<Channel, String> {
+    channel_from(
+        config_dir,
+        std::env::var("TT_STATION_UPDATE_REPO").ok(),
+        unsigned_allowed(),
+    )
+}
+
+fn channel_from(
+    config_dir: &Path,
+    env_repo: Option<String>,
+    unsigned_allowed: bool,
+) -> Result<Channel, String> {
+    let path = config_dir.join(CHANNEL_FILE);
+    let mut c = Channel {
+        repo: DEFAULT_REPO.into(),
+        repo_from: "default".into(),
+        keys: release_keys::builtin(),
+        unsigned_allowed,
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            let f: ChannelFile = toml::from_str(&text).map_err(|e| {
+                format!(
+                    "The update channel file {} isn't valid: {e}",
+                    path.display()
+                )
+            })?;
+            if let Some(r) = f.repo {
+                if !valid_repo(&r) {
+                    return Err(format!(
+                        "The update channel file {} names \"{r}\", which isn't a GitHub owner/name.",
+                        path.display()
+                    ));
+                }
+                c.repo = r;
+                c.repo_from = "channel file".into();
+            }
+            for k in f.keys {
+                c.keys.push(
+                    TrustedKey::new(&k.name, &k.key, "channel")
+                        .map_err(|e| format!("The update channel file {}: {e}", path.display()))?,
+                );
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Couldn't read {}: {e}", path.display())),
+    }
+    if let Some(r) = env_repo.filter(|r| !r.is_empty()) {
+        if !valid_repo(&r) {
+            return Err(format!(
+                "TT_STATION_UPDATE_REPO is \"{r}\", which isn't a GitHub owner/name."
+            ));
+        }
+        c.repo = r;
+        c.repo_from = "environment".into();
+    }
+    Ok(c)
 }
 
 fn home() -> PathBuf {
@@ -221,26 +368,26 @@ pub struct Asset {
     pub size: u64,
     /// `sha256:<hex>`, when GitHub gives one.
     pub digest: Option<String>,
+    /// Where its `<name>.sig` is, if the release has one.
+    #[serde(default)]
+    pub signature: Option<String>,
 }
 
-/// Releases as last fetched: when, and the list.
-type Fetched = (u64, Vec<Release>);
+/// Releases as last fetched: from where, when, and the list.
+type Fetched = (String, u64, Vec<Release>);
 
 static RELEASES: LazyLock<Mutex<Option<Fetched>>> = LazyLock::new(|| Mutex::new(None));
 
-/// The project's releases, newest first (cached for an hour).
-async fn releases(fresh: bool) -> Result<Vec<Release>, String> {
+/// `repo`'s releases, newest first (cached for an hour).
+async fn releases(repo: &str, fresh: bool) -> Result<Vec<Release>, String> {
     if !fresh {
-        if let Some((at, list)) = RELEASES.lock().expect("updates").clone() {
-            if now() - at < 3600 {
+        if let Some((from, at, list)) = RELEASES.lock().expect("updates").clone() {
+            if from == repo && now() - at < 3600 {
                 return Ok(list);
             }
         }
     }
-    let url = format!(
-        "https://api.github.com/repos/{}/releases?per_page=15",
-        repo()
-    );
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=15");
     let v: Value = reqwest::Client::new()
         .get(url)
         .header("user-agent", format!("tt-station/{VERSION}"))
@@ -270,7 +417,8 @@ async fn releases(fresh: bool) -> Result<Vec<Release>, String> {
             if !valid_version(&version) {
                 return None;
             }
-            let asset = r["assets"].as_array().into_iter().flatten().find(|a| {
+            let assets: Vec<&Value> = r["assets"].as_array().into_iter().flatten().collect();
+            let asset = assets.iter().find(|a| {
                 let n = a["name"].as_str().unwrap_or("");
                 n.starts_with("tt-station_")
                     && n.ends_with(".deb")
@@ -278,6 +426,14 @@ async fn releases(fresh: bool) -> Result<Vec<Release>, String> {
                         .as_deref()
                         .is_none_or(|s| n.contains(&format!("_{s}.deb")))
             });
+            let signature = |name: &str| {
+                let sig = format!("{name}.sig");
+                assets
+                    .iter()
+                    .find(|a| a["name"] == sig.as_str())
+                    .and_then(|a| a["browser_download_url"].as_str())
+                    .map(str::to_string)
+            };
             Some(Release {
                 version,
                 name: r["name"].as_str().unwrap_or("").to_string(),
@@ -294,6 +450,7 @@ async fn releases(fresh: bool) -> Result<Vec<Release>, String> {
                     url: a["browser_download_url"].as_str().unwrap_or("").to_string(),
                     size: a["size"].as_u64().unwrap_or(0),
                     digest: a["digest"].as_str().map(str::to_string),
+                    signature: signature(a["name"].as_str().unwrap_or("")),
                 }),
             })
         })
@@ -305,7 +462,7 @@ async fn releases(fresh: bool) -> Result<Vec<Release>, String> {
             std::cmp::Ordering::Less
         }
     });
-    *RELEASES.lock().expect("updates") = Some((now(), list.clone()));
+    *RELEASES.lock().expect("updates") = Some((repo.to_string(), now(), list.clone()));
     Ok(list)
 }
 
@@ -419,8 +576,71 @@ fn checksum(asset: &Asset) -> Result<&str, String> {
         .ok_or_else(|| format!("{} has no sha256 checksum on its release, so it can't be checked and wasn't installed.", asset.name))
 }
 
+/// The package is named for the release's version (`tt-station_0.12.0_…` for
+/// tag `v0.12.0`; Debian's `~` stands for semver's `-`). The signature covers
+/// the name, so this is what stops a signed old package being re-published
+/// under a newer tag.
+pub fn names_version(asset_name: &str, version: &str) -> bool {
+    asset_name
+        .strip_prefix("tt-station_")
+        .and_then(|rest| rest.split('_').next())
+        .is_some_and(|v| v.replace('~', "-") == version.replace('~', "-"))
+}
+
+fn missing_signature(asset: &Asset) -> String {
+    format!(
+        "{} has no signature ({}.sig) on its release, so it can't be checked and wasn't installed.",
+        asset.name, asset.name
+    )
+}
+
+/// Whether `asset`, whose download hashed to `sha256_hex`, may be installed,
+/// given its `.sig` text (`None`: the release has none). Says who signed it;
+/// with [`ALLOW_UNSIGNED_ENV`] set, a missing or bad signature is logged as an
+/// error and let through.
+fn check_signature(
+    channel: &Channel,
+    asset: &Asset,
+    sha256_hex: &str,
+    sig: Option<&str>,
+) -> Result<String, String> {
+    let checked = match sig {
+        Some(sig) => release_keys::verify(&channel.keys, &asset.name, sha256_hex, sig)
+            .map(|k| format!("signed by {} ({})", k.name, k.fingerprint)),
+        None => Err(missing_signature(asset)),
+    };
+    match checked {
+        Err(e) if channel.unsigned_allowed => {
+            crate::log::error(format!(
+                "update: INSTALLING AN UNVERIFIED PACKAGE because {ALLOW_UNSIGNED_ENV} is set on the service: {e}"
+            ));
+            Ok(format!("UNVERIFIED ({ALLOW_UNSIGNED_ENV}): {e}"))
+        }
+        other => other,
+    }
+}
+
+async fn download_signature(url: &str) -> Result<String, String> {
+    let bytes = reqwest::Client::new()
+        .get(url)
+        .header("user-agent", format!("tt-station/{VERSION}"))
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| format!("Couldn't download the signature: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("Couldn't download the signature: {e}"))?;
+    if bytes.len() > 4096 {
+        return Err("The signature file is far too big to be a signature.".into());
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Downloads and unpacks `release`'s package; checks it before it's used.
-async fn fetch(release: &Release) -> Result<(), String> {
+/// Says how it was verified (for the activity log).
+async fn fetch(release: &Release, channel: &Channel) -> Result<String, String> {
     let asset = release.asset.as_ref().ok_or_else(|| {
         format!(
             "Release {} has no package for this box's Ubuntu ({}).",
@@ -435,6 +655,7 @@ async fn fetch(release: &Release) -> Result<(), String> {
             .name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '~'))
+        || !names_version(&asset.name, &release.version)
     {
         return Err(format!(
             "Release {} has an unexpected name, so it wasn't used.",
@@ -443,8 +664,14 @@ async fn fetch(release: &Release) -> Result<(), String> {
     }
     let dest = versions_dir().join(&release.version);
     if dest.join("usr/bin/tt-station-agentd").is_file() {
-        return Ok(());
+        return Ok("already on the box".into());
     }
+    // The signature first: a release without one isn't worth downloading.
+    let sig = match &asset.signature {
+        Some(url) => Some(download_signature(url).await?),
+        None if channel.unsigned_allowed => None,
+        None => return Err(missing_signature(asset)),
+    };
     std::fs::create_dir_all(root().join("downloads")).map_err(|e| e.to_string())?;
     let deb = root().join("downloads").join(&asset.name);
     let mut resp = reqwest::Client::new()
@@ -482,6 +709,13 @@ async fn fetch(release: &Release) -> Result<(), String> {
         let _ = std::fs::remove_file(&deb);
         return Err("The download didn't match the release's checksum, so it wasn't used.".into());
     }
+    let verified = match check_signature(channel, asset, &hex, sig.as_deref()) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_file(&deb);
+            return Err(e);
+        }
+    };
     working(Some(&format!("Unpacking {}", release.version)));
     let tmp = versions_dir().join(format!(".{}.partial", release.version));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -517,7 +751,7 @@ async fn fetch(release: &Release) -> Result<(), String> {
     }
     std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&deb);
-    Ok(())
+    Ok(verified)
 }
 
 fn label(v: &Option<String>, base: &str) -> String {
@@ -647,6 +881,11 @@ touch '{marker}'
 /// At startup: settle the last switch's history entry (it worked if this is
 /// the version it switched to; the watchdog left a mark if it rolled back).
 pub fn settle() {
+    if unsigned_allowed() {
+        crate::log::error(format!(
+            "update: {ALLOW_UNSIGNED_ENV} is set on this service: updates with a missing or bad signature WILL be installed. Remove it unless you are developing the updater."
+        ));
+    }
     let mut h = history();
     let Some(last) = h.last_mut().filter(|c| c.status == "switching") else {
         return;
@@ -684,9 +923,13 @@ fn prune() {
 pub(crate) async fn get_updates(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
     let exe = std::env::current_exe().unwrap_or_default();
     let install = install_kind(&exe);
-    let (list, problem) = match releases(false).await {
-        Ok(l) => (l, None),
-        Err(e) => (vec![], Some(e)),
+    let channel = channel(&state.config_dir());
+    let (list, problem) = match &channel {
+        Ok(c) => match releases(&c.repo, false).await {
+            Ok(l) => (l, None),
+            Err(e) => (vec![], Some(e)),
+        },
+        Err(e) => (vec![], Some(e.clone())),
     };
     let latest = list.first().cloned();
     let newer = latest
@@ -711,6 +954,7 @@ pub(crate) async fn get_updates(State(state): State<AppState>, _auth: BearerAuth
         "history": h.iter().rev().take(10).collect::<Vec<_>>(),
         "undo": if can_undo { h.last().map(|c| json!({ "to": c.from, "label": c.from_label })) } else { None },
         "working": WORK.lock().expect("updates").clone(),
+        "channel": channel.ok(),
         "problem": problem,
     }))
 }
@@ -745,7 +989,8 @@ pub(crate) async fn post_install(
     if WORK.lock().expect("updates").is_some() {
         return Err(err(StatusCode::CONFLICT, "An update is already going."));
     }
-    let list = releases(true)
+    let channel = channel(&state.config_dir()).map_err(|e| err(StatusCode::CONFLICT, e))?;
+    let list = releases(&channel.repo, true)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
     let release = match &b.version {
@@ -767,6 +1012,9 @@ pub(crate) async fn post_install(
     }
     if let Some(asset) = &release.asset {
         checksum(asset).map_err(|e| err(StatusCode::CONFLICT, e))?;
+        if asset.signature.is_none() && !channel.unsigned_allowed {
+            return Err(err(StatusCode::CONFLICT, missing_signature(asset)));
+        }
     }
     if release.version == VERSION {
         return Err(err(
@@ -778,7 +1026,8 @@ pub(crate) async fn post_install(
     let st = state.clone();
     tokio::spawn(async move {
         working(Some(&format!("Getting {}", release.version)));
-        let result = fetch(&release).await.and_then(|()| {
+        let result = fetch(&release, &channel).await.and_then(|verified| {
+            crate::audit::record(&st, "update_verified", &release.version, &verified);
             working(Some(&format!("Switching to {}", release.version)));
             switch(&st, selected(), Some(release.version.clone()))
         });
@@ -866,6 +1115,7 @@ mod tests {
             url: String::new(),
             size: 1,
             digest: digest.map(str::to_string),
+            signature: None,
         };
         let hex = "ab".repeat(32);
         assert_eq!(
@@ -880,8 +1130,18 @@ mod tests {
         );
     }
 
+    fn test_channel(keys: Vec<TrustedKey>, unsigned_allowed: bool) -> Channel {
+        Channel {
+            repo: DEFAULT_REPO.into(),
+            repo_from: "default".into(),
+            keys,
+            unsigned_allowed,
+        }
+    }
+
     #[tokio::test]
     async fn fetch_refuses_a_release_without_a_checksum_before_downloading() {
+        let channel = test_channel(vec![], false);
         let r = Release {
             version: "0.99.0".into(),
             asset: Some(Asset {
@@ -889,10 +1149,31 @@ mod tests {
                 url: "http://127.0.0.1:9/never".into(),
                 size: 1,
                 digest: None,
+                signature: None,
             }),
             ..Default::default()
         };
-        assert!(fetch(&r).await.unwrap_err().contains("no sha256"));
+        assert!(fetch(&r, &channel).await.unwrap_err().contains("no sha256"));
+        // A checksum but no signature: refused before anything is downloaded
+        // (the URL goes nowhere, so getting further would be a different error).
+        let unsigned = Release {
+            asset: Some(Asset {
+                digest: Some(format!("sha256:{}", "ab".repeat(32))),
+                ..r.asset.clone().unwrap()
+            }),
+            ..r.clone()
+        };
+        let e = fetch(&unsigned, &channel).await.unwrap_err();
+        assert!(e.contains("has no signature"), "{e}");
+        // A package named for another version.
+        let renamed = Release {
+            version: "0.99.1".into(),
+            ..unsigned.clone()
+        };
+        assert!(fetch(&renamed, &channel)
+            .await
+            .unwrap_err()
+            .contains("unexpected name"));
         let r = Release {
             version: "0.99.0'; id; '".into(),
             asset: Some(Asset {
@@ -901,7 +1182,145 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert!(fetch(&r).await.unwrap_err().contains("unexpected name"));
+        assert!(fetch(&r, &channel)
+            .await
+            .unwrap_err()
+            .contains("unexpected name"));
+    }
+
+    fn signed(kp: &ring::signature::Ed25519KeyPair, name: &str, sha: &str) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(
+            kp.sign(release_keys::statement(name, sha).as_bytes())
+                .as_ref(),
+        )
+    }
+
+    fn keypair() -> (ring::signature::Ed25519KeyPair, TrustedKey) {
+        use base64::Engine as _;
+        use ring::signature::KeyPair as _;
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                .unwrap();
+        let kp = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(kp.public_key().as_ref());
+        let key = TrustedKey::new("test-key", &b64, "channel").unwrap();
+        (kp, key)
+    }
+
+    #[test]
+    fn installs_need_a_trusted_signature_unless_the_service_says_otherwise() {
+        let (kp, key) = keypair();
+        let (other, _) = keypair();
+        let asset = Asset {
+            name: "tt-station_0.12.0_amd64_noble.deb".into(),
+            ..Default::default()
+        };
+        let sha = "cd".repeat(32);
+        let strict = test_channel(vec![key.clone()], false);
+        let good = signed(&kp, &asset.name, &sha);
+        let who = check_signature(&strict, &asset, &sha, Some(&good)).unwrap();
+        assert!(who.contains("signed by test-key"), "{who}");
+        let bad = signed(&other, &asset.name, &sha);
+        assert!(check_signature(&strict, &asset, &sha, Some(&bad))
+            .unwrap_err()
+            .contains("isn't signed by a key this box trusts"));
+        assert!(check_signature(&strict, &asset, &"ce".repeat(32), Some(&good)).is_err());
+        assert!(check_signature(&strict, &asset, &sha, None)
+            .unwrap_err()
+            .contains("has no signature"));
+        // The dev escape hatch lets it through, and says so.
+        let dev = test_channel(vec![key], true);
+        for sig in [None, Some(bad.as_str())] {
+            assert!(check_signature(&dev, &asset, &sha, sig)
+                .unwrap()
+                .starts_with("UNVERIFIED"));
+        }
+    }
+
+    #[test]
+    fn package_names_carry_the_release_version() {
+        assert!(names_version("tt-station_0.12.0_amd64_noble.deb", "0.12.0"));
+        assert!(names_version(
+            "tt-station_1.0.0~rc.1_amd64_noble.deb",
+            "1.0.0-rc.1"
+        ));
+        assert!(!names_version(
+            "tt-station_0.11.0_amd64_noble.deb",
+            "0.12.0"
+        ));
+        assert!(!names_version(
+            "tt-station_0.12.01_amd64_noble.deb",
+            "0.12.0"
+        ));
+        assert!(!names_version(
+            "tt-station-panel_0.12.0_amd64_noble.deb",
+            "0.12.0"
+        ));
+    }
+
+    #[test]
+    fn the_channel_comes_from_the_default_the_owners_file_or_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = channel_from(dir.path(), None, false).unwrap();
+        assert_eq!(
+            (c.repo.as_str(), c.repo_from.as_str()),
+            (DEFAULT_REPO, "default")
+        );
+        assert_eq!(c.keys, release_keys::builtin());
+
+        let (_, key) = keypair();
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(key.key);
+        std::fs::write(
+            dir.path().join(CHANNEL_FILE),
+            format!("repo = \"example-org/tt-station\"\n[[keys]]\nname = \"example-2026a\"\nkey = \"{b64}\"\n"),
+        )
+        .unwrap();
+        let c = channel_from(dir.path(), None, false).unwrap();
+        assert_eq!(c.repo, "example-org/tt-station");
+        assert_eq!(c.repo_from, "channel file");
+        let added = c.keys.last().unwrap();
+        assert_eq!(
+            (added.name.as_str(), added.origin.as_str()),
+            ("example-2026a", "channel")
+        );
+        assert_eq!(added.key, key.key);
+
+        let c = channel_from(dir.path(), Some("other/tt-station".into()), true).unwrap();
+        assert_eq!(
+            (c.repo.as_str(), c.repo_from.as_str()),
+            ("other/tt-station", "environment")
+        );
+        assert!(c.unsigned_allowed);
+        assert!(channel_from(dir.path(), Some("../../x".into()), false).is_err());
+
+        // A broken channel file stops updates rather than falling back.
+        for bad in [
+            "repo = \"https://evil.example/x\"\n",
+            "repo = \"a/b\"\nkeys = [{ name = \"k\", key = \"AAAA\" }]\n",
+            "repos = \"a/b\"\n",
+            "not toml",
+        ] {
+            std::fs::write(dir.path().join(CHANNEL_FILE), bad).unwrap();
+            assert!(channel_from(dir.path(), None, false).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn repos_are_owner_and_name() {
+        for r in [
+            "tsingletaryTT/tt-station",
+            "tenstorrent/tt-station",
+            "a.b/c_d-e",
+        ] {
+            assert!(valid_repo(r), "{r}");
+        }
+        for r in [
+            "", "a", "a/b/c", "/b", "a/", "../x", "a/b?x=1", "a /b", ".a/b",
+        ] {
+            assert!(!valid_repo(r), "{r}");
+        }
     }
 
     #[test]

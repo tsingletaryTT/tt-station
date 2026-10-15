@@ -13,6 +13,11 @@ ExecStart=/usr/bin/tt-station-agentd
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Restart=on-failure
 RestartSec=2
+# Stop/restart only the agent, not what it spawned (a model download or an
+# in-flight `tt serve` keeps going and is re-adopted at startup), the same as
+# the source-checkout unit (deploy/tt-station-agentd.service, which explains
+# why). Without it, a self-update's restart killed downloads on .deb installs.
+KillMode=process
 
 [Install]
 WantedBy=default.target
