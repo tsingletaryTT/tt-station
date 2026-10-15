@@ -38,6 +38,7 @@ import { type AppKey, type Client, del, get, onAnotherComputer, openBoxShell, pa
 import { Card, copyText, Eyebrow, Page, Spark, toastError, toastOk, usePoll, writeClipboard } from "../ui";
 import { Switch } from "@tenstorrent/vesper/switch";
 import { ask } from "../dialog";
+import { OWNER_ONLY, useOwner } from "../role";
 import { navigate } from "../App";
 import { AGENT_KEY } from "./Terminals";
 
@@ -264,6 +265,7 @@ function FromThisComputer() {
  * which opens in whichever SSH app handles those links).
  */
 function TermiusGuide({ ssh, refresh }: { ssh: SshInfo; refresh: () => void }) {
+  const owner = useOwner();
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const keyIn = ssh.keys.some((k) => k.label.toLowerCase().startsWith("termius"));
@@ -284,7 +286,8 @@ function TermiusGuide({ ssh, refresh }: { ssh: SshInfo; refresh: () => void }) {
           {keyIn ? <span className="muted" style={{ fontSize: 13 }}>Termius's key is added, so it signs in without a password.</span> : <>
             <span className="muted" style={{ fontSize: 13 }}>In Termius, open <b>Keychain</b>, pick your key (or <b>Generate</b> one) and copy its <b>public key</b>. Paste it here.</span>
             <TextInput size="sm" value={key} onChange={(e) => setKey(e.target.value)} placeholder="ssh-ed25519 AAAA… (the public key, never the private one)" />
-            <div><Button size="sm" disabled={busy || !/^(ssh-|ecdsa-|sk-)/.test(key.trim())} onClick={addKey}>Add the key</Button></div>
+            <div><Button size="sm" disabled={busy || !owner || !/^(ssh-|ecdsa-|sk-)/.test(key.trim())} onClick={addKey}>Add the key</Button></div>
+            {!owner && <span className="muted" style={{ fontSize: 12 }}>{OWNER_ONLY}</span>}
           </>}
         </div>
       </div>
@@ -538,6 +541,7 @@ tradingagents`}</CodeBlock>
 /** A tool you set up yourself: what to paste, and a key made for it. */
 function CodeToolTile({ t, base, model }: { t: (typeof CODE_TOOLS)[number]; base: string; model: string }) {
   const guide = useSheet();
+  const owner = useOwner();
   const [key, setKey] = useState<string | null>(null);
   const makeKey = async () => {
     try { const r = await post<{ key: string }>("/keys", { name: t.name }); setKey(r.key); } catch (e) { toastError(e); }
@@ -559,7 +563,7 @@ function CodeToolTile({ t, base, model }: { t: (typeof CODE_TOOLS)[number]; base
         <div className="stack" style={{ gap: 12 }}>
           {t.steps(base, model)}
           {key ? <PasteValue label={`App key for ${t.name}`} value={key} secret />
-            : <div><Button size="sm" onClick={makeKey}>Make an app key for {t.name}</Button></div>}
+            : <div className="stack" style={{ gap: 4 }}><div><Button size="sm" disabled={!owner} onClick={makeKey}>Make an app key for {t.name}</Button></div>{!owner && <span className="muted" style={{ fontSize: 12 }}>{OWNER_ONLY}</span>}</div>}
           <span className="muted" style={{ fontSize: 12 }}>The key is shown once, and you can revoke it under "Your box as an API". Requests follow whatever model the box is serving.</span>
         </div>
       </Sheet>
@@ -666,6 +670,7 @@ export function Connect() {
   const apps = usePoll(() => get<{ apps: BoxApp[] }>("/apps").catch(() => ({ apps: [] })), 4000);
   const connect = usePoll(() => get<{ urls: { label: string; url: string }[]; models: { id: string }[] }>("/connect"), 30000);
   const keys = usePoll(() => get<{ keys: AppKey[] }>("/keys"), 15000);
+  const owner = useOwner();
   const ssh = usePoll(() => get<SshInfo>("/ssh/info"), 30000);
   const hermes = usePoll(() => get<Hermes>("/hermes").catch(() => null), 15000);
   const [busy, setBusy] = useState<string | null>(null);
@@ -829,11 +834,12 @@ export function Connect() {
             </Admonition>
           )}
           <div className="list">
-            {(keys.data?.keys ?? []).map((k) => <KeyRow key={k.id} k={k} onChanged={() => keys.refresh()} />)}
+            {(keys.data?.keys ?? []).map((k) => <KeyRow key={k.id} k={k} owner={owner} onChanged={() => keys.refresh()} />)}
           </div>
+          {!owner && <Typography variant="copy-xs" className="muted">{OWNER_ONLY}</Typography>}
           <div className="row">
-            <div className="grow"><TextInput size="sm" value={keyName} onChange={(e) => setKeyName(e.target.value)} placeholder="Name it after the app, e.g. Cursor" /></div>
-            <Button size="sm" variant="subtle" disabled={!keyName.trim()} onClick={async () => {
+            <div className="grow"><TextInput size="sm" value={keyName} disabled={!owner} onChange={(e) => setKeyName(e.target.value)} placeholder="Name it after the app, e.g. Cursor" /></div>
+            <Button size="sm" variant="subtle" disabled={!owner || !keyName.trim()} onClick={async () => {
               try {
                 const r = await post<{ key: string; info: AppKey }>("/keys", { name: keyName.trim() });
                 setNewKey({ name: r.info.name, key: r.key });
@@ -867,7 +873,7 @@ const SCOPE_LABELS: [string, string][] = [["chat", "Chat and completions"], ["im
 const tokens = (n: number) => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(n >= 1e4 ? 0 : 1)}K` : `${n}`;
 
 /** One app key: who it's for, how much it's used, and its limits. */
-function KeyRow({ k, onChanged }: { k: AppKey; onChanged: () => void }) {
+function KeyRow({ k, owner, onChanged }: { k: AppKey; owner: boolean; onChanged: () => void }) {
   const sheet = useSheet();
   const [rpm, setRpm] = useState("");
   const [perDay, setPerDay] = useState("");
@@ -912,6 +918,7 @@ function KeyRow({ k, onChanged }: { k: AppKey; onChanged: () => void }) {
         <div className="row" style={{ gap: 6 }}>
           <b>{k.name}</b>
           {k.paused && <Badge size="sm" variant="warning" subtle>Paused</Badge>}
+          {k.expires != null && <Badge size="sm" variant={k.expires < Date.now() / 1000 ? "warning" : "contrast"} subtle>{k.expires < Date.now() / 1000 ? "Expired" : `Expires ${new Date(k.expires * 1000).toLocaleDateString()}`}</Badge>}
           {limits.map((l) => <Badge key={l} size="sm" variant="contrast" subtle>{l}</Badge>)}
         </div>
         <div className="muted mono" style={{ fontSize: 12 }}>
@@ -923,9 +930,9 @@ function KeyRow({ k, onChanged }: { k: AppKey; onChanged: () => void }) {
           <Spark values={days.map(([, u]) => u.input_tokens + u.output_tokens)} labels={days.map(([d]) => d)} format={(v) => `${tokens(v)} tokens`} height={28} title="Tokens a day, last 14 days" />
         </div>
       )}
-      <Button size="xs" variant="subtle" onClick={open}>Limits</Button>
-      <Button size="xs" variant="ghost" onClick={togglePause}>{k.paused ? "Resume" : "Pause"}</Button>
-      <Button size="xs" variant="ghost" onClick={revoke}>Revoke</Button>
+      <Button size="xs" variant="subtle" disabled={!owner} onClick={open}>Limits</Button>
+      <Button size="xs" variant="ghost" disabled={!owner} onClick={togglePause}>{k.paused ? "Resume" : "Pause"}</Button>
+      <Button size="xs" variant="ghost" disabled={!owner} onClick={revoke}>Revoke</Button>
       <Sheet ref={sheet.ref} popover title={`Limits for ${k.name}`} description="For sharing the box: keep one app or person from crowding out the others. Leave a limit empty for none.">
         <div className="stack" style={{ gap: 14 }}>
           <label className="stack" style={{ gap: 4 }}>

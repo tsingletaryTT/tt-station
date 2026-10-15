@@ -12,7 +12,8 @@ import { Select } from "@tenstorrent/vesper/select";
 import { Badge } from "@tenstorrent/vesper/badge";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { useModal, Modal } from "@tenstorrent/vesper/modal";
-import { ago, boxName, del, delWith, get, type Mode, patch, type PairedDevice, type Person, post, put, type Schedule } from "../api";
+import { ago, type AuditEntry, boxName, del, delWith, get, type Mode, patch, type PairedDevice, type Person, post, put, type Schedule } from "../api";
+import { OWNER_ONLY, useOwner } from "../role";
 import { ThemeSwitcher } from "@tenstorrent/vesper/theme-switcher";
 import { Card, copyText, Empty, Eyebrow, Page, readable, Spark, toastError, toastOk, usePoll } from "../ui";
 import { Speaker, type VoiceStatus } from "../voice";
@@ -25,7 +26,7 @@ const SECTIONS: { id: Section; label: string; hint: string }[] = [
   { id: "models", label: "Models", hint: "Which models the box uses" },
   { id: "power", label: "Power and energy", hint: "Power, schedules, energy use" },
   { id: "people", label: "People", hint: "You and your household" },
-  { id: "phone", label: "Pairing and security", hint: "Devices, phones, other computers, SSH keys, encryption" },
+  { id: "phone", label: "Pairing and security", hint: "Devices, phones, other computers, SSH keys, encryption, activity" },
   { id: "about", label: "About", hint: "Software on the box" },
 ];
 
@@ -311,6 +312,7 @@ function Voice() {
 
 function Power() {
   const info = usePoll(() => get<{ can_power_off: string; can_reboot: string; can_suspend: string; headless_power: boolean }>("/power/info"), 60000);
+  const owner = useOwner();
   const modal = useModal();
   const [action, setAction] = useState<{ id: string; label: string; detail: string } | null>(null);
   const ask = (id: string, label: string, detail: string) => { setAction({ id, label, detail }); modal.open(); };
@@ -318,11 +320,12 @@ function Power() {
     <Card>
       <Eyebrow>Power</Eyebrow>
       <div className="row wrap">
-        <Button size="sm" variant="subtle" disabled={info.data?.can_suspend !== "yes"} onClick={() => ask("suspend", "Sleep", "The box sleeps; wake it from the phone app or its power button.")}>Sleep</Button>
-        <Button size="sm" variant="subtle" disabled={info.data?.can_reboot !== "yes"} onClick={() => ask("reboot", "Restart", "The box restarts. TT Station reconnects in a minute or two.")}>Restart</Button>
-        <Button size="sm" variant="ghost" disabled={info.data?.can_power_off !== "yes"} onClick={() => ask("shutdown", "Shut down", "The box turns off.")}>Shut down</Button>
-        <Button size="sm" variant="ghost" onClick={() => ask("reset_chips", "Reset the chips", "Stops serving and resets the four Blackhole chips.")}>Reset chips</Button>
+        <Button size="sm" variant="subtle" disabled={!owner || info.data?.can_suspend !== "yes"} onClick={() => ask("suspend", "Sleep", "The box sleeps; wake it from the phone app or its power button.")}>Sleep</Button>
+        <Button size="sm" variant="subtle" disabled={!owner || info.data?.can_reboot !== "yes"} onClick={() => ask("reboot", "Restart", "The box restarts. TT Station reconnects in a minute or two.")}>Restart</Button>
+        <Button size="sm" variant="ghost" disabled={!owner || info.data?.can_power_off !== "yes"} onClick={() => ask("shutdown", "Shut down", "The box turns off.")}>Shut down</Button>
+        <Button size="sm" variant="ghost" disabled={!owner} onClick={() => ask("reset_chips", "Reset the chips", "Stops serving and resets the four Blackhole chips.")}>Reset chips</Button>
       </div>
+      {!owner && <Typography variant="copy-xs" className="muted">{OWNER_ONLY}</Typography>}
       <Modal ref={modal.ref} title={`${action?.label ?? ""}?`} description={action?.detail ?? ""}
         buttons={[{ children: "Cancel", onClick: modal.close }, { children: action?.label ?? "OK", variant: "danger", onClick: async () => {
           modal.close();
@@ -334,6 +337,7 @@ function Power() {
 
 function Household() {
   const people = usePoll(() => get<{ people: Person[]; me: string | null }>("/people"), 30000);
+  const owner = useOwner();
   const [name, setName] = useState("");
   const run = async (fn: () => Promise<{ people: Person[]; me: string | null }>) => {
     try { people.setData(await fn()); } catch (e) { toastError(e); }
@@ -342,7 +346,7 @@ function Household() {
   return (
     <Card>
       <Eyebrow>You and your household</Eyebrow>
-      <Typography variant="copy-sm" className="muted">Each person gets their own memories with the assistant. A person is just a name on the box.</Typography>
+      <Typography variant="copy-sm" className="muted">Each person gets their own memories with the assistant. A person is just a name on the box. You can pick someone no other device belongs to yet; to share a person between devices, an owner sets it under Pairing and security → Devices.</Typography>
       {list && (
         <Select value={list.me ?? "anyone"} onValueChange={(v) => run(() => put("/people/me", { person: v === "anyone" ? null : v }))}
           options={[{ label: "This computer is: anyone (shared)", value: "anyone" }, ...list.people.map((p) => ({ label: `This computer is: ${p.name}`, value: p.id }))]} />
@@ -351,8 +355,8 @@ function Household() {
         {(list?.people ?? []).map((p) => (
           <div key={p.id} className="list-row">
             <span className="grow">{p.name}{list?.me === p.id && <Badge size="sm" subtle variant="mint" style={{ marginLeft: 8 }}>you</Badge>}</span>
-            <Button size="xs" variant="ghost" onClick={async () => { const n = await askText(`Rename ${p.name}`, p.name); if (n) run(() => patch(`/people/${p.id}`, { name: n })); }}>Rename</Button>
-            <Button size="xs" variant="ghost" onClick={async () => { if (await ask(`Remove ${p.name}?`, { body: "Tori forgets what she remembered about them. Their phone or computer stays paired: remove it under Pairing and security → Devices.", confirm: "Remove", danger: true })) run(() => del(`/people/${p.id}`)); }}>Remove</Button>
+            <Button size="xs" variant="ghost" disabled={!owner} title={owner ? undefined : OWNER_ONLY} onClick={async () => { const n = await askText(`Rename ${p.name}`, p.name); if (n) run(() => patch(`/people/${p.id}`, { name: n })); }}>Rename</Button>
+            <Button size="xs" variant="ghost" disabled={!owner} title={owner ? undefined : OWNER_ONLY} onClick={async () => { if (await ask(`Remove ${p.name}?`, { body: "Tori forgets what she remembered about them. Their phone or computer stays paired: remove it under Pairing and security → Devices.", confirm: "Remove", danger: true })) run(() => del(`/people/${p.id}`)); }}>Remove</Button>
           </div>
         ))}
       </div>
@@ -436,6 +440,7 @@ const grouped = (hex: string) => hex.match(/.{1,4}/g)?.join(" ") ?? hex;
  * the public half; the private key never leaves the phone.
  */
 function Phone() {
+  const owner = useOwner();
   const [qr, setQr] = useState<PairQr | null>(null);
   const [left, setLeft] = useState(0);
   const security = usePoll(() => get<Security>("/security"), 30000);
@@ -491,11 +496,12 @@ function Phone() {
           {(ssh.data?.keys ?? []).map((k) => (
             <div key={k.raw} className="list-row">
               <div className="grow"><b>{k.label}</b><div className="muted mono" style={{ fontSize: 12 }}>{k.type}{k.added ? ` · added ${k.added}` : ""}</div></div>
-              <Button size="xs" variant="ghost" onClick={() => revoke(k)}>Remove</Button>
+              <Button size="xs" variant="ghost" disabled={!owner} title={owner ? undefined : OWNER_ONLY} onClick={() => revoke(k)}>Remove</Button>
             </div>
           ))}
-          {ssh.data && ssh.data.keys.length === 0 && <span className="muted" style={{ fontSize: 13 }}>None added through TT Station yet. Pairing a phone adds its key.</span>}
+          {ssh.data && ssh.data.keys.length === 0 && <span className="muted" style={{ fontSize: 13 }}>None added through TT Station yet. Pairing a phone adds its key (an owner's phone: SSH is a way into the whole box).</span>}
         </div>
+        {!owner && <Typography variant="copy-xs" className="muted">{OWNER_ONLY}</Typography>}
       </Card>
 
       <Card>
@@ -510,14 +516,18 @@ function Phone() {
             <b style={{ fontSize: 14 }}>Unencrypted API for other computers</b>
             <span className="muted" style={{ fontSize: 12 }}>Only for apps on other computers that can't use the box's certificate. Off is safer.</span>
           </div>
-          <Switch checked={!!security.data?.lan_http} onChange={(e) => setLanHttp(e.target.checked)} />
+          <Switch checked={!!security.data?.lan_http} disabled={!owner} onChange={(e) => setLanHttp(e.target.checked)} />
         </div>
+        {!owner && <Typography variant="copy-xs" className="muted">{OWNER_ONLY}</Typography>}
       </Card>
+
+      {owner && <ActivityLog />}
     </>
   );
 }
 
 function Software() {
+  const owner = useOwner();
   const sw = usePoll(() => get<{ tt?: { current?: string; latest?: string; newer?: boolean }; tools?: { name: string; installed: string | null; golden: string | null; up_to_date: boolean }[];
     system?: { installed_kmd?: string; advice?: string }; firmware_target?: string }>("/software"), 300000);
   const d = sw.data;
@@ -547,7 +557,7 @@ function Software() {
       <Eyebrow>Software</Eyebrow>
       <div className="list">
         <div className="list-row"><span className="grow">tt CLI</span><span className="mono muted">{d?.tt?.current ?? "–"}</span>
-          {d?.tt?.newer && <Button size="xs" variant="subtle" disabled={updating} onClick={updateTt}>{updating ? "Updating…" : `Update to ${d.tt.latest}`}</Button>}</div>
+          {d?.tt?.newer && <Button size="xs" variant="subtle" disabled={updating || !owner} title={owner ? undefined : OWNER_ONLY} onClick={updateTt}>{updating ? "Updating…" : `Update to ${d.tt.latest}`}</Button>}</div>
         {plan?.blocked && (
           <div className="stack" style={{ gap: 6, padding: "8px 0" }}>
             <span style={{ fontSize: 13 }}>Updating tt here would also change <b>{plan.others.map((o) => o.replace(/-\d[\w.]*$/, "")).join(", ")}</b>, which other tools in this shared environment use, so TT Station won't do it for you. To go ahead yourself, run:</span>
@@ -586,6 +596,7 @@ interface Updates {
 /** TT Station's own updates: install the newest release, and undo it. */
 function Updates() {
   const u = usePoll(() => get<Updates>("/updates"), 4000);
+  const owner = useOwner();
   const d = u.data;
   const [busy, setBusy] = useState(false);
   const install = async () => {
@@ -620,7 +631,7 @@ function Updates() {
           <span><b>{d.update.version}</b> is out{d.update.published ? ` (${new Date(d.update.published).toLocaleDateString()})` : ""}.</span>
           {d.update.notes && <details className="update-notes"><summary>What's new</summary><pre>{d.update.notes}</pre></details>}
           {d.update.asset
-            ? <div><Button disabled={busy} onClick={install}>Update to {d.update.version}</Button></div>
+            ? <div className="stack" style={{ gap: 4 }}><div><Button disabled={busy || !owner} onClick={install}>Update to {d.update.version}</Button></div>{!owner && <span className="muted" style={{ fontSize: 12 }}>{OWNER_ONLY}</span>}</div>
             : <span className="muted" style={{ fontSize: 13 }}>It has no package for this box's Ubuntu yet.</span>}
         </div>
       ) : (
@@ -634,7 +645,7 @@ function Updates() {
             : `Updated from ${last.from_label} to ${last.to_label} ${new Date(last.at * 1000).toLocaleDateString()}.`}
         </span>
       )}
-      {d.undo && !d.working && <div><Button size="sm" variant="subtle" onClick={undo}>Undo: go back to {d.undo.label}</Button></div>}
+      {d.undo && !d.working && <div><Button size="sm" variant="subtle" disabled={!owner} title={owner ? undefined : OWNER_ONLY} onClick={undo}>Undo: go back to {d.undo.label}</Button></div>}
     </Card>
   );
 }
@@ -692,9 +703,15 @@ const pairedOn = (unix: number) => new Date(unix * 1000).toLocaleDateString(unde
  * Every computer and phone that can control this box, each signed out on its
  * own. The box keeps a device for 90 days after it was last used; removing
  * one stops its next request and closes any terminal it has open.
+ *
+ * Owners see every device, and make others owners or members, and say whose
+ * each device is. A member sees only itself.
  */
 function Devices() {
-  const devices = usePoll(() => get<{ devices: PairedDevice[]; idle_expiry_days: number }>("/devices"), 30000);
+  const devices = usePoll(() => get<{ devices: PairedDevice[]; idle_expiry_days: number; owner?: boolean }>("/devices"), 30000);
+  const owner = devices.data?.owner !== false;
+  const roles = devices.data?.owner !== undefined;
+  const people = usePoll(() => (owner && roles ? get<{ people: Person[] }>("/people") : Promise.resolve({ people: [] as Person[] })), 60000, [owner, roles]);
   const storage = useTokenStorage();
   const [onBox, setOnBox] = useState(false);
   useEffect(() => { window.ttDesktop?.boxes?.().then((b) => setOnBox(b.current === "local")).catch(() => {}); }, []);
@@ -715,9 +732,20 @@ function Devices() {
     try { localStorage.removeItem("tt.token"); } catch { /* private */ }
     window.location.reload();
   };
+  const setOwner = async (d: PairedDevice, makeOwner: boolean) => {
+    const body = makeOwner
+      ? `${d.name} can then see and remove devices, make other devices owners, add SSH keys and app keys, and use power, updates and reset.`
+      : `${d.name} keeps chat, research, Code, the studio, the library and its own memories, but can't manage devices, keys, power or updates.`;
+    if (!(await ask(makeOwner ? `Make ${d.name} an owner?` : `Make ${d.name} a member?`, { body, confirm: makeOwner ? "Make owner" : "Make member", danger: makeOwner }))) return;
+    try { await post(`/devices/${encodeURIComponent(d.id)}/owner`, { owner: makeOwner }); toastOk(`${d.name} is ${makeOwner ? "an owner" : "a member"} now.`); devices.refresh(); } catch (e) { toastError(e); }
+  };
+  const setPerson = async (d: PairedDevice, person: string | null) => {
+    try { await put(`/devices/${encodeURIComponent(d.id)}/person`, { person }); devices.refresh(); } catch (e) { toastError(e); }
+  };
   const days = devices.data?.idle_expiry_days ?? 90;
   const now = Date.now() / 1000;
   const list = devices.data?.devices ?? [];
+  const folks = people.data?.people ?? [];
   return (
     <Card>
       <Eyebrow>Devices</Eyebrow>
@@ -742,6 +770,7 @@ function Devices() {
                 <div className="grow">
                   <b>{d.name}</b>
                   {d.this_device && <Badge size="sm" subtle variant="mint" style={{ marginLeft: 8 }}>{here}</Badge>}
+                  {roles && <Badge size="sm" subtle variant={d.owner ? "info" : "contrast"} style={{ marginLeft: 8 }}>{d.owner ? "Owner" : "Member"}</Badge>}
                   <div className="muted" style={{ fontSize: 12 }}>
                     {[d.platform,
                       d.paired != null ? `paired ${pairedOn(d.paired)}` : "pairing date not recorded",
@@ -750,16 +779,73 @@ function Devices() {
                     ].filter(Boolean).join(" · ")}
                   </div>
                 </div>
+                {roles && owner && folks.length > 0 && (
+                  <Select size="sm" aria-label={`Whose is ${d.name}`} value={d.person ?? "anyone"} onValueChange={(v) => setPerson(d, v === "anyone" ? null : v)}
+                    options={[{ label: "Anyone's", value: "anyone" }, ...folks.map((p) => ({ label: `${p.name}'s`, value: p.id }))]} />
+                )}
+                {roles && owner && <Button size="xs" variant="subtle" onClick={() => setOwner(d, !d.owner)}>{d.owner ? "Make member" : "Make owner"}</Button>}
                 <Button size="xs" variant="ghost" onClick={() => remove(d)}>{d.this_device ? "Sign out" : "Remove"}</Button>
               </div>
             );
           })}
         </div>
       )}
+      {roles && !owner && (
+        <Typography variant="copy-xs" className="muted">
+          {here} is a member of this box: it can use the box, but only an owner can see and remove other devices, add SSH or app keys, or use power, updates and reset. An owner can make it one here.
+        </Typography>
+      )}
       {storage && !storage.protected && (
         <Typography variant="copy-xs" className="muted">
           {here}'s own sign-in isn't in a keychain: it's kept in a file only your account can read (Settings → General → This app).
         </Typography>
+      )}
+    </Card>
+  );
+}
+
+const ACTIONS: Record<string, string> = {
+  pair: "Paired", revoke: "Removed a device", promote: "Made an owner", demote: "Made a member", reset: "Reset the box",
+  ssh_key_add: "Added an SSH key", ssh_key_remove: "Removed an SSH key", app_key_create: "Made an app key", app_key_change: "Changed an app key",
+  app_key_revoke: "Revoked an app key", power: "Power", security: "Security settings", update_install: "Updated TT Station",
+  update_undo: "Undid an update", update_tt_cli: "Updated tt", approval: "Answered an approval", bringup_approval: "Answered a bring-up approval",
+  assistant_approval: "Answered Tori", model_start: "Started a model", model_stop: "Stopped the model", model_switch: "Switched models",
+  mode_switch: "Switched mode", device_person: "Set whose a device is", person_remove: "Removed a person", denied: "Refused (owners only)",
+};
+
+/** The box's activity log (owners): who did what, newest first, kept on the box. */
+function ActivityLog() {
+  const [offset, setOffset] = useState(0);
+  const PAGE = 25;
+  const log = usePoll(() => get<{ entries: AuditEntry[]; more: boolean }>(`/audit?offset=${offset}&limit=${PAGE}`), 30000, [offset]);
+  const entries = log.data?.entries ?? [];
+  return (
+    <Card>
+      <Eyebrow>Activity log</Eyebrow>
+      <Typography variant="copy-sm" className="muted">
+        Who paired, removed devices, changed keys, power, updates or security, answered approvals, and started or stopped models, and what members were refused. Kept on the box, readable only by its owners.
+      </Typography>
+      {log.error && !log.data ? (
+        <span className="muted">Couldn't load the activity log: {log.error}</span>
+      ) : entries.length === 0 ? (
+        <span className="muted" style={{ fontSize: 13 }}>{log.data ? "Nothing yet." : "Loading…"}</span>
+      ) : (
+        <div className="list">
+          {entries.map((e, i) => (
+            <div key={`${e.ts}-${i}`} className="list-row">
+              <div className="grow">
+                <b>{ACTIONS[e.action] ?? e.action}</b>{e.target ? <span className="muted">: {e.target}</span> : null}
+                <div className="muted" style={{ fontSize: 12 }}>{e.device_name} · {ago(e.ts)}{e.result !== "ok" ? ` · ${e.result.replace("_", " ")}` : ""}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {(offset > 0 || log.data?.more) && (
+        <div className="row">
+          <Button size="xs" variant="ghost" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>Newer</Button>
+          <Button size="xs" variant="ghost" disabled={!log.data?.more} onClick={() => setOffset(offset + PAGE)}>Older</Button>
+        </div>
       )}
     </Card>
   );

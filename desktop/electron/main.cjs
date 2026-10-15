@@ -266,16 +266,35 @@ async function signIn() {
   return signInLocal();
 }
 
-/** A token for this desktop: the saved one if it still works, else a new pairing. */
+/**
+ * A token for this desktop: the saved one if it still works, else a new pairing.
+ *
+ * The desktop on the box is one of its owners (the local secret is the box
+ * user's). A token saved before the box had owners and members may have
+ * become a member's; then this pairs again as an owner and signs the old
+ * one out, so the person at the box is never locked out of managing it.
+ */
 async function signInLocal() {
   const secret = readSecret();
   if (!secret) throw new Error("The TT Station agent isn't set up on this computer (no local secret).");
   const base = `http://127.0.0.1:${secret.port}`;
   const token = readLocalToken();
   if (token) {
-    const check = await call(base, "GET", "/people", { token });
-    if (check.ok) return { base, token, name: secret.name };
+    const check = await call(base, "GET", "/devices", { token });
+    // `owner` is absent on agents from before roles: nothing to fix there.
+    if (check.ok && check.json?.owner !== false) return { base, token, name: secret.name };
+    if (check.ok) {
+      const fresh = await pairLocal(base, secret);
+      const old = check.json?.devices?.find((d) => d.this_device)?.id;
+      if (old) await call(base, "DELETE", `/devices/${encodeURIComponent(old)}`, { token: fresh.token }).catch(() => null);
+      return fresh;
+    }
   }
+  return pairLocal(base, secret);
+}
+
+/** Pair this desktop with the box it runs on, through the local secret (as an owner). */
+async function pairLocal(base, secret) {
   const offer = await call(base, "POST", "/pair/offer", { headers: { "x-tt-local-secret": secret.secret } });
   if (!offer.ok) throw new Error(offer.json?.error || `The agent refused (${offer.status}).`);
   const done = await call(base, "POST", "/pair/complete", {
