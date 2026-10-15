@@ -358,7 +358,10 @@ pub(crate) fn absorb_schedules(state: &AppState) {
 /// Mode-switching routines in the shape `GET /schedules` always had, for
 /// phone apps that still ask for schedules.
 pub(crate) fn as_schedules(state: &AppState) -> Vec<crate::schedules::Schedule> {
-    with_routines(state, |l| schedules_of(l))
+    let mut list = with_routines(state, |l| schedules_of(l));
+    // Kept in time order, as `/schedules` always answered.
+    list.sort_by(|a, b| a.time.cmp(&b.time));
+    list
 }
 
 fn schedules_of(list: &[Routine]) -> Vec<crate::schedules::Schedule> {

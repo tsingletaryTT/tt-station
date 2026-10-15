@@ -309,6 +309,15 @@ pub(crate) async fn post_schedule(
     _auth: BearerAuth,
     Json(req): Json<NewSchedule>,
 ) -> Reply {
+    // The cap counts the schedules already turned into routines, too.
+    Schedules::check(&req.mode, &req.time, &req.days)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    if crate::routines::as_schedules(&state).len() >= MAX_SCHEDULES {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!("Up to {MAX_SCHEDULES} schedules."),
+        ));
+    }
     state
         .schedules()
         .add(&req.mode, &req.time, req.days)
