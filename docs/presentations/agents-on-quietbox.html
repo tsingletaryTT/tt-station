@@ -97,7 +97,7 @@ svg text { font-family: var(--mono); }
   <div class="cols3">
     <div class="card"><span class="big num">300</span><p>graded tool calls across 6 session lengths, on the box's own model</p></div>
     <div class="card"><span class="big num">12<small>/12</small></span><p>security review findings fixed and tested, plus box network hardening</p></div>
-    <div class="card"><span class="big num">757</span><p>automated tests passing (agent 695, desktop 62). Before: 20–29 agent tests failing, no desktop tests</p></div>
+    <div class="card"><span class="big num">1,057</span><p>automated tests passing (Rust 951, desktop 106). Before: 20–29 agent tests failing, no desktop tests</p></div>
   </div>
   <div class="foot"><span>jberkowitz@tenstorrent.com</span><span>1 / 13</span></div>
 </section>
@@ -200,7 +200,7 @@ svg text { font-family: var(--mono); }
         <li><b>Garbled tool names</b> (<code>Read&lt;|channel|&gt;commentary</code>) appear at every size. We now repair them; on this data, 8K–16K would reach about 92%.</li>
         <li>Compaction now uses each model's measured window when a check-up finds one.</li>
       </ul>
-      <p class="note">Synthetic sessions; first reply only (Claude Code's retry after an error isn't scored); one model.</p>
+      <p class="note">First reply only. Counting what users feel (the translator's repairs plus one retry after Claude Code's error), valid calls are 98–100% up to 64K, 94% at 96K and 78% at 120K. Synthetic sessions; one model.</p>
     </div>
   </div>
   <div class="foot"><span>Measured</span><span>4 / 13</span></div>
@@ -330,13 +330,15 @@ svg text { font-family: var(--mono); }
 
 <section class="slide" id="s10" aria-label="Remote access hardening">
   <div class="kicker">Remote access, hardened</div>
-  <h2>Per-device sessions, key-only SSH, a firewall and a lockout</h2>
+  <h2>Roles, per-device sessions, an activity log, key-only SSH and a firewall</h2>
   <div class="tablewrap">
     <table>
       <thead><tr><th style="width:24%">Change</th><th>What it does</th><th style="width:16%">Status</th></tr></thead>
       <tbody>
         <tr><td><b>Per-device sessions</b></td><td>Each device gets its own session: named, hashed at rest, expiring after 90 idle days. Settings → Devices lists them; Remove signs one out immediately.</td><td id="st-sessions"><span class="pill ok">Live on box</span></td></tr>
         <tr><td><b>Keychain on desktop</b></td><td>Box tokens encrypted with the OS keychain (Electron safeStorage); the app says so plainly when a Linux desktop has no keyring.</td><td id="st-keychain"><span class="pill med">Next desktop build</span></td></tr>
+        <tr><td><b>Owners and members</b></td><td>Only owners manage devices, keys, power, updates and security; members chat, research and code. Deny-by-default auth with a test over every route.</td><td><span class="pill ok">Live on box</span></td></tr>
+        <tr><td><b>Activity log</b></td><td>Pairing, removals, key changes, power, updates, approvals and model switches recorded with the device that did them. Owner-only.</td><td><span class="pill ok">Live on box</span></td></tr>
         <tr><td><b>Key-only SSH</b></td><td>No passwords or root over SSH; 3 tries per connection. Paired computers already hold keys.</td><td><span class="pill ok">Live on box</span></td></tr>
         <tr><td><b>Firewall</b></td><td>Only SSH, TT Station HTTPS and discovery from the network; the box's own Docker networks allowed.</td><td><span class="pill ok">Live on box</span></td></tr>
         <tr><td><b>Lockout</b></td><td>5 failed SSH sign-ins in 10 minutes bans an address for an hour. The stock rule watched the wrong service name on Ubuntu; fixed and verified.</td><td><span class="pill ok">Live on box</span></td></tr>
@@ -351,8 +353,8 @@ svg text { font-family: var(--mono); }
   <div class="kicker">Quality</div>
   <h2>From a failing suite to every check green, in CI</h2>
   <div class="cols3">
-    <div class="card"><span class="big num">695</span><p>agent tests passing. 20–29 were failing before, depending on order: a rate limit shared across test harnesses.</p></div>
-    <div class="card"><span class="big num">62</span><p>desktop tests where there were none: clipboard, theme, report export, undo, explain helpers, Electron input checks, keychain storage.</p></div>
+    <div class="card"><span class="big num">951</span><p>Rust tests passing. 20–29 were failing before, depending on order: a rate limit shared across test harnesses.</p></div>
+    <div class="card"><span class="big num">106</span><p>desktop tests where there were none: clipboard, theme, report export, undo, explain helpers, Electron input checks, keychain storage.</p></div>
     <div class="card"><span class="big num">2</span><p>real bugs caught by the new tests: "Download all" froze on two long identical titles, and a power-command test failed one run in three.</p></div>
   </div>
   <ul>
@@ -370,9 +372,9 @@ svg text { font-family: var(--mono); }
     <div style="display:flex;flex-direction:column;gap:1.2cqh">
       <h3>Security</h3>
       <ul>
-        <li><b>Store apps on the LAN without login</b>: Langflow (its auto-login can run code), Flowise, n8n, LightRAG. Box-only by default, or behind the gateway?</li>
-        <li><b>Routines</b> can still let web text drive memory and pre-approved actions.</li>
-        <li><b>After a web read, a model could leak data</b> through the URL of a later fetch.</li>
+        <li><b>Code isolation for members</b>: unsandboxed Code runs as the box's account, so a member could make themselves an owner. Sandboxed-only for members?</li>
+        <li><b>Signed releases</b> and an org-owned update channel (checksums and downgrade rules are in).</li>
+        <li><b>Store app catalog</b>: legal sign-off (n8n's license) and which apps company boxes offer.</li>
         <li><b>SSO and MFA</b> for company-managed boxes.</li>
       </ul>
     </div>
@@ -381,8 +383,8 @@ svg text { font-family: var(--mono); }
       <ul>
         <li><b>Where this lands</b>: all of it is local commits on <code>jberkowitz/mobile-voice</code>; nothing is pushed.</li>
         <li><b>Not yet verified live</b>: iOS build, macOS keychain, Electron click-through on another computer, the explain route end to end.</li>
-        <li><b>Cached-token numbers</b> need <code>--enable-prompt-tokens-details</code> on the model server.</li>
-        <li><b>Recovery isn't scored</b>: the eval grades first replies, not Claude Code's retry.</li>
+        <li><b>Restart window</b>: the model server and one app keep old network bindings and flags until restarted.</li>
+        <li><b>Your Macs are members</b> after the role migration; promote them from the box's Devices list.</li>
       </ul>
     </div>
   </div>
