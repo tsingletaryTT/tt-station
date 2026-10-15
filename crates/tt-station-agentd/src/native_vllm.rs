@@ -355,6 +355,12 @@ pub fn serve_argv(meta: &Value, port: u16) -> Option<(Vec<String>, Vec<(String, 
         Some(i) if i + 1 < argv.len() => argv[i + 1] = port.to_string(),
         _ => argv.extend(["--port".into(), port.to_string()]),
     }
+    // Cached prompt tokens in each reply's usage (see `community::extra_vllm_args`;
+    // the tt-metal vLLM this runs, merged from upstream 0.17, has the flag).
+    let vllm = argv.iter().any(|a| a == "vllm.entrypoints.openai.api_server") || argv.windows(2).any(|w| w[0].ends_with("vllm") && w[1] == "serve");
+    if vllm && !argv.iter().any(|a| a == "--enable-prompt-tokens-details") {
+        argv.push("--enable-prompt-tokens-details".into());
+    }
     let env = l["env"]
         .as_object()
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect())
@@ -472,12 +478,14 @@ mod tests {
         }});
         let (argv, env) = serve_argv(&meta, 8123).unwrap();
         assert!(argv[0].ends_with("python_env/bin/python"));
-        assert_eq!(&argv[argv.len() - 2..], ["--port", "8123"]);
+        assert_eq!(&argv[argv.len() - 3..], ["--port", "8123", "--enable-prompt-tokens-details"]);
         assert!(argv.contains(&"g/m".to_string()));
         assert_eq!(env, vec![("MESH_DEVICE".to_string(), "P150x4".to_string())]);
         // No --port in the bundle: added.
         let bare = json!({"launch": {"default": {"command": ["python", "-m", "y"]}}});
-        assert_eq!(&serve_argv(&bare, 9).unwrap().0[3..], ["--port", "9"]);
+        assert_eq!(&serve_argv(&bare, 9).unwrap().0[3..], ["--port", "9"], "not vLLM: no vLLM flags");
+        let serve = json!({"launch": {"default": {"command": ["vllm", "serve", "g/m", "--enable-prompt-tokens-details"]}}});
+        assert_eq!(serve_argv(&serve, 9).unwrap().0.iter().filter(|a| *a == "--enable-prompt-tokens-details").count(), 1, "not twice");
         assert!(serve_argv(&json!({}), 9).is_none());
     }
 }
