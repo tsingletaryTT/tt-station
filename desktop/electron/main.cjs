@@ -581,6 +581,16 @@ function askingBox() {
   return b ? { id: b.id, name: cleanName(b.name) || b.host, host: b.host } : { id: boxes.current, name: auth?.name || "A box", host: null };
 }
 
+// When the person last clicked or typed in one of this app's windows (see
+// clientactions.byThePerson): links the app's own screens open right after that
+// are theirs.
+let lastInputAt = -Infinity;
+app.on("browser-window-created", (_e, w) => {
+  w.webContents.on("input-event", (_ev, input) => {
+    if (input.type === "mouseUp" || input.type === "keyDown") lastInputAt = Date.now();
+  });
+});
+
 // One prompt at a time: a box asking for several things gets them asked in turn.
 let promptQueue = Promise.resolve();
 
@@ -595,7 +605,7 @@ async function confirmOnThisComputer(action) {
   });
   promptQueue = ask.catch(() => {});
   const answer = clientactions.choice((await ask).response);
-  if (answer === "deny") throw new Error(`The person at this computer didn't allow that (${action.kind === "app" ? action.label : action.target}).`);
+  if (answer === "deny") throw new Error(`The person at this computer didn't allow that (${action.kind === "site" ? action.target : action.label}).`);
   if (answer === "always") savePrefs({ [clientactions.PREF_KEY]: clientactions.remember(prefs(), box.id, box.name, action)[clientactions.PREF_KEY] });
 }
 
@@ -652,6 +662,7 @@ async function computerTool(tool, args) {
         light_mode: () => osa('tell application "System Events" to tell appearance preferences to set dark mode to false'),
       };
       if (!actions[action]) throw new Error(action.startsWith("dnd") || action.includes("disturb") ? "macOS doesn't let apps change Focus / Do Not Disturb." : `${action} isn't something this Mac can do from here.`);
+      await confirmOnThisComputer(clientactions.describe(tool, args));
       await actions[action]();
       const words = { volume_set: "Set the volume", volume_up: "Turned the volume up", volume_down: "Turned the volume down", mute: "Muted", unmute: "Unmuted", lock_screen: "Locked the screen", dark_mode: "Changed dark mode", light_mode: "Switched to light mode" };
       return { summary: `${words[action] || "Done"} on this Mac`, result: { done: action } };
@@ -670,6 +681,8 @@ async function computerTool(tool, args) {
     case "find_files": {
       const name = String(args.name || "").trim();
       if (!name) throw new Error("Say what to look for.");
+      // The matching names go back to the box, so the person says yes first.
+      await confirmOnThisComputer(clientactions.describe(tool, { name }));
       const out = IS_MAC
         ? await run("mdfind", ["-onlyin", os.homedir(), "-name", name])
         : await run("find", [os.homedir(), "-maxdepth", "6", "-iname", `*${name}*`, "-not", "-path", "*/.*"]).catch(() => "");
@@ -683,6 +696,7 @@ async function computerTool(tool, args) {
       return { summary: `Opened ${page} in TT Station`, result: { page } };
     }
     case "start_recording": {
+      await confirmOnThisComputer(clientactions.describe(tool, args));
       const r = await clientRecord("start", args.title ? String(args.title) : undefined);
       if (!r.ok) throw new Error(r.error);
       return { summary: r.summary || "Started recording on this computer" };
@@ -1284,7 +1298,12 @@ handle("open-app-window", async (_e, url, title) => {
 });
 handle("open-external", async (_e, url) => {
   if (typeof url !== "string" || !/^https?:\/\//.test(url)) return;
-  try { await shell.openExternal(await reachable(url)); }
+  try {
+    // A link the person just clicked opens; one the box's page asks for on its
+    // own (no recent click or key press here) is asked about first.
+    if (!clientactions.byThePerson(lastInputAt, Date.now())) await confirmOnThisComputer(clientactions.describe("open_app", { url }));
+    await shell.openExternal(await reachable(url));
+  }
   catch (e) { notify({ title: "Couldn't open that", body: String(e.message || e) }); }
 });
 handle("computer", async (_e, tool, args) => {
@@ -1294,7 +1313,7 @@ handle("computer", async (_e, tool, args) => {
 // What boxes may open on this computer without asking (Settings → General → This app).
 handle("allowed-actions", () => clientactions.listAllowed(prefs()));
 handle("forget-allowed-actions", (_e, boxId, one) => {
-  const which = one && typeof one === "object" ? { kind: one.kind === "app" ? "app" : "site", key: String(one.key) } : undefined;
+  const which = one && typeof one === "object" ? { kind: ["app", "cap"].includes(one.kind) ? one.kind : "site", key: String(one.key) } : undefined;
   savePrefs({ [clientactions.PREF_KEY]: clientactions.forget(prefs(), boxId ? String(boxId) : undefined, which)[clientactions.PREF_KEY] });
   return clientactions.listAllowed(prefs());
 });

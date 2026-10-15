@@ -9,7 +9,11 @@
 import { useEffect, useState } from "react";
 import { Button } from "@tenstorrent/vesper/button";
 
-export type AllowedOnThisComputer = { boxId: string; name: string; sites: string[]; apps: string[] };
+export type AllowedOnThisComputer = { boxId: string; name: string; sites: string[]; apps: string[]; caps?: string[] };
+
+/** How a remembered action reads in the list. */
+const capLabel = (key: string) =>
+  key === "record" ? "Recording with the microphone" : key === "find_files" ? "Searching your files" : key.startsWith("control:") ? `Changing a setting (${key.slice(8).replace(/_/g, " ")})` : key;
 
 const shown = (site: string) => site.replace(/^https?:\/\//, "").replace(/^mailto:/, "email to ");
 
@@ -21,18 +25,19 @@ export function AllowedActionsSetting() {
   return (
     <div className="stack" style={{ gap: 4 }}>
       <div className="row-between wrap" style={{ gap: 12 }}>
-        <span>Links and apps boxes may open here</span>
+        <span>What boxes may do on this computer without asking</span>
         {list.length > 0 && <Button size="sm" variant="ghost" onClick={async () => setList(await forget())}>Clear all</Button>}
       </div>
       {list.length === 0 ? (
         <span className="muted" style={{ fontSize: 12 }}>
-          None: TT Station asks you each time Tori on a box wants to open a link or an app on this computer.
+          Nothing: TT Station asks you each time Tori on a box wants to open a link or an app, record, search your files or change a setting on this computer.
         </span>
       ) : (
         <div className="list">
           {list.flatMap((box) => [
             ...box.sites.map((key) => ({ box, kind: "site" as const, key, label: shown(key) })),
             ...box.apps.map((key) => ({ box, kind: "app" as const, key, label: `${key} (app)` })),
+            ...(box.caps ?? []).map((key) => ({ box, kind: "cap" as const, key, label: capLabel(key) })),
           ]).map(({ box, kind, key, label }) => (
             <div key={`${box.boxId}:${kind}:${key}`} className="list-row row-between" style={{ gap: 12 }}>
               <span>{label} <span className="muted">from {box.name}</span></span>

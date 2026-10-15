@@ -3,7 +3,8 @@
 
 // Asking before a box acts on this computer. When TT Station runs on another
 // computer than the box, Tori's computer tools run here (main.cjs
-// `computerTool`): a box could open any web or mail link, or launch any app,
+// `computerTool`): a box could open any web or mail link, launch any app,
+// record with the microphone, search the person's files or change settings,
 // with nobody at the keyboard agreeing. So each such action is put to the
 // person first -- exactly what will open, and which box asked -- with "Allow
 // once", "Always allow <site/app> from <box>" and "Don't allow". "Always"
@@ -15,6 +16,16 @@
 
 const PREF_KEY = "allowedActions";
 const MAX_URL = 2000;
+/** A link the app's own screens open is the person's own click when they touched the window this recently. */
+const GESTURE_MS = 3000;
+
+/** What control_computer actions do, in the prompt's words. */
+const CONTROL_WORDS = {
+  volume_set: "set the volume", volume_up: "turn the volume up", volume_down: "turn the volume down",
+  mute: "mute the sound", unmute: "unmute the sound", play_pause: "play or pause music", pause_media: "pause music",
+  play_media: "play music", stop_media: "stop music", next_track: "skip to the next track", previous_track: "go back a track",
+  lock_screen: "lock the screen", dark_mode: "change dark mode", light_mode: "switch to light mode",
+};
 
 // Control characters, and the bidirectional overrides that can make a URL or
 // name read differently from what it is.
@@ -27,14 +38,33 @@ const DECEPTIVE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2028\u
  *
  *   { kind: "site", target, key, label }  -- a web or mail link
  *   { kind: "app",  target, key, label }  -- an app, by name
+ *   { kind: "cap",  target, key, label, detail } -- recording, searching files, or a setting
  *
  * `target` is exactly what will be opened (a normalized URL, or the app name);
  * `key` is what an "always" choice remembers (a site's origin, a mail
  * address, an app's name); `label` is how the prompt names it.
  */
 function describe(tool, args) {
-  if (tool !== "open_app") return null;
   const a = args && typeof args === "object" ? args : {};
+  if (tool === "start_recording") {
+    const title = String(a.title ?? "").trim().slice(0, 100);
+    return { kind: "cap", target: "microphone", key: "record", label: "record with the microphone",
+      detail: `${title && !DECEPTIVE.test(title) ? `Recording: ${title}\n` : ""}It records until it's stopped, then sends the audio to the box to transcribe.` };
+  }
+  if (tool === "find_files") {
+    const name = String(a.name ?? "").trim();
+    if (!name) throw new Error("Say what to look for.");
+    if (name.length > 200 || DECEPTIVE.test(name)) throw new Error("That isn't something to search for.");
+    return { kind: "cap", target: name, key: "find_files", label: "search your files",
+      detail: `Search for: ${name}\nThe names of matching files in your home folder are sent to the box.` };
+  }
+  if (tool === "control_computer") {
+    const action = String(a.action ?? "");
+    const words = CONTROL_WORDS[action];
+    if (!words) return null; // computerTool refuses it anyway
+    return { kind: "cap", target: action, key: `control:${action}`, label: words, detail: `Action: ${words}` };
+  }
+  if (tool !== "open_app") return null;
   if (a.url != null && a.url !== "") {
     const raw = String(a.url).trim();
     if (raw.length > MAX_URL) throw new Error("That link is too long to open from here.");
@@ -62,20 +92,22 @@ function entry(prefs, boxId) {
   const all = prefs && typeof prefs[PREF_KEY] === "object" && prefs[PREF_KEY] ? prefs[PREF_KEY] : {};
   const e = all[boxId] && typeof all[boxId] === "object" ? all[boxId] : {};
   const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
-  return { name: typeof e.name === "string" ? e.name : boxId, sites: list(e.sites), apps: list(e.apps) };
+  return { name: typeof e.name === "string" ? e.name : boxId, sites: list(e.sites), apps: list(e.apps), caps: list(e.caps) };
 }
+
+/** Which remembered list an action kind lives in. */
+const fieldOf = (kind) => (kind === "app" ? "apps" : kind === "cap" ? "caps" : "sites");
 
 /** Whether the person already said "always" to this action from this box. */
 function isAllowed(prefs, boxId, action) {
   if (!action || !boxId) return false;
-  const e = entry(prefs, boxId);
-  return (action.kind === "app" ? e.apps : e.sites).includes(action.key);
+  return entry(prefs, boxId)[fieldOf(action.kind)].includes(action.key);
 }
 
 /** Prefs with "always allow `action` from this box" added (a new object; the input is untouched). */
 function remember(prefs, boxId, boxName, action) {
   const e = entry(prefs, boxId);
-  const field = action.kind === "app" ? "apps" : "sites";
+  const field = fieldOf(action.kind);
   const next = { ...e, name: boxName || e.name, [field]: e[field].includes(action.key) ? e[field] : [...e[field], action.key] };
   return { ...(prefs || {}), [PREF_KEY]: { ...((prefs || {})[PREF_KEY] || {}), [boxId]: next } };
 }
@@ -90,9 +122,9 @@ function forget(prefs, boxId, one) {
   const all = { ...(base[PREF_KEY] || {}) };
   if (one) {
     const e = entry(base, boxId);
-    const field = one.kind === "app" ? "apps" : "sites";
+    const field = fieldOf(one.kind);
     const next = { ...e, [field]: e[field].filter((k) => k !== one.key) };
-    if (next.sites.length || next.apps.length) all[boxId] = next;
+    if (next.sites.length || next.apps.length || next.caps.length) all[boxId] = next;
     else delete all[boxId];
   } else {
     delete all[boxId];
@@ -105,7 +137,7 @@ function listAllowed(prefs) {
   const all = prefs && typeof prefs[PREF_KEY] === "object" && prefs[PREF_KEY] ? prefs[PREF_KEY] : {};
   return Object.keys(all)
     .map((boxId) => ({ boxId, ...entry(prefs, boxId) }))
-    .filter((e) => e.sites.length || e.apps.length);
+    .filter((e) => e.sites.length || e.apps.length || e.caps.length);
 }
 
 /** How the prompt names the box: its name, and where it is. */
@@ -121,6 +153,18 @@ const ONCE = 0, ALWAYS = 1, DENY = 2;
 function dialogFor(action, box) {
   const who = boxLabel(box);
   const short = box?.name || "this box";
+  if (action.kind === "cap") {
+    return {
+      type: "question",
+      title: "Allow this?",
+      message: `${who} wants to ${action.label} on this computer.`,
+      detail: `${action.detail}\n\nTori on ${short} asked for this. Only allow it if you asked Tori to.`,
+      buttons: ["Allow once", `Always let ${short} ${action.label}`, "Don't allow"],
+      defaultId: DENY,
+      cancelId: DENY,
+      noLink: true,
+    };
+  }
   const what = action.kind === "app" ? `open the app “${action.label}”` : action.key.startsWith("mailto:") ? `start an ${action.label}` : `open a page on ${action.label}`;
   return {
     type: "question",
@@ -150,4 +194,9 @@ function folderProblem(p, stat) {
   return null;
 }
 
-module.exports = { PREF_KEY, describe, isAllowed, remember, forget, listAllowed, dialogFor, choice, folderProblem };
+/** Whether a link the app's own screens ask to open follows the person's own click or key press. */
+function byThePerson(lastInputAt, now) {
+  return Number.isFinite(lastInputAt) && now - lastInputAt >= 0 && now - lastInputAt <= GESTURE_MS;
+}
+
+module.exports = { PREF_KEY, describe, isAllowed, remember, forget, listAllowed, dialogFor, choice, folderProblem, byThePerson };

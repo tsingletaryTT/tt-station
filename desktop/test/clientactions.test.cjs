@@ -9,8 +9,46 @@ const ca = require("../electron/clientactions.cjs");
 
 const box = { name: "QuietBox", host: "192.168.1.20" };
 
-test("only opening links and apps is asked about", () => {
-  for (const tool of ["control_computer", "open_folder", "find_files", "open_station", "start_recording"]) assert.equal(ca.describe(tool, {}), null, tool);
+test("tools that don't act on this computer aren't asked about", () => {
+  for (const tool of ["open_folder", "open_station", "stop_recording"]) assert.equal(ca.describe(tool, {}), null, tool);
+  // An action computerTool would refuse anyway.
+  assert.equal(ca.describe("control_computer", { action: "format_disk" }), null);
+});
+
+test("recording, searching files and changing settings are asked about", () => {
+  const rec = ca.describe("start_recording", { title: "Standup" });
+  assert.deepEqual([rec.kind, rec.key], ["cap", "record"]);
+  assert.match(rec.detail, /Recording: Standup/);
+  const find = ca.describe("find_files", { name: "budget" });
+  assert.deepEqual([find.kind, find.key, find.target], ["cap", "find_files", "budget"]);
+  assert.match(find.detail, /sent to the box/);
+  assert.throws(() => ca.describe("find_files", { name: "" }), /look for/);
+  assert.throws(() => ca.describe("find_files", { name: "a\u202eb" }), /search for/);
+  const vol = ca.describe("control_computer", { action: "mute" });
+  assert.deepEqual([vol.kind, vol.key, vol.label], ["cap", "control:mute", "mute the sound"]);
+  const d = ca.dialogFor(find, box);
+  assert.match(d.message, /QuietBox \(192\.168\.1\.20\) wants to search your files on this computer/);
+  assert.equal(d.defaultId, 2);
+  assert.match(d.buttons[1], /Always let QuietBox search your files/);
+});
+
+test("'always' for an action is per box and per action, and can be forgotten", () => {
+  const rec = ca.describe("start_recording", {});
+  let prefs = ca.remember({}, "box1", "QuietBox", rec);
+  assert.ok(ca.isAllowed(prefs, "box1", rec));
+  assert.ok(!ca.isAllowed(prefs, "box2", rec));
+  assert.ok(!ca.isAllowed(prefs, "box1", ca.describe("find_files", { name: "x" })));
+  assert.deepEqual(ca.listAllowed(prefs)[0].caps, ["record"]);
+  prefs = ca.forget(prefs, "box1", { kind: "cap", key: "record" });
+  assert.ok(!ca.isAllowed(prefs, "box1", rec));
+  assert.deepEqual(ca.listAllowed(prefs), []);
+});
+
+test("a link the app opens is the person's own only right after their click or key press", () => {
+  assert.ok(ca.byThePerson(1000, 2500));
+  assert.ok(!ca.byThePerson(1000, 5000));
+  assert.ok(!ca.byThePerson(-Infinity, 5000));
+  assert.ok(!ca.byThePerson(5000, 1000));
 });
 
 test("a web link: the full address opens, its site is what 'always' remembers", () => {
@@ -102,8 +140,8 @@ test("remembered choices can be listed and cleared: one, one box, or all", () =>
   p = ca.remember(p, "a", "Box A", app);
   p = ca.remember(p, "b", "Box B", site);
   assert.deepEqual(ca.listAllowed(p), [
-    { boxId: "a", name: "Box A", sites: ["https://example.com"], apps: ["terminal"] },
-    { boxId: "b", name: "Box B", sites: ["https://example.com"], apps: [] },
+    { boxId: "a", name: "Box A", sites: ["https://example.com"], apps: ["terminal"], caps: [] },
+    { boxId: "b", name: "Box B", sites: ["https://example.com"], apps: [], caps: [] },
   ]);
   const oneGone = ca.forget(p, "a", { kind: "app", key: "terminal" });
   assert.ok(!ca.isAllowed(oneGone, "a", app));
