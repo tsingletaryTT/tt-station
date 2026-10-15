@@ -72,12 +72,28 @@ struct Watch {
     waking: bool,
 }
 
-static WATCH: LazyLock<Mutex<Watch>> = LazyLock::new(|| {
-    Mutex::new(Watch {
-        last_active: now(),
-        ..Default::default()
-    })
-});
+/// What `crate::idle` keeps for the life of one agent (`crate::state::PerAgent`).
+pub(crate) struct PerAgent {
+    /// Set up on first use, so "last active" starts when the watch does.
+    watch: LazyLock<Mutex<Watch>, fn() -> Mutex<Watch>>,
+}
+
+impl Default for PerAgent {
+    fn default() -> Self {
+        PerAgent {
+            watch: LazyLock::new(|| {
+                Mutex::new(Watch {
+                    last_active: now(),
+                    ..Default::default()
+                })
+            }),
+        }
+    }
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().idle
+}
 
 fn settings_file(state: &AppState) -> std::path::PathBuf {
     state.config_dir().join("idle.json")
@@ -151,7 +167,7 @@ async fn active(state: &AppState) -> Option<bool> {
         return None;
     }
     let (busy, tokens) = parse_metrics(&text);
-    let mut w = WATCH.lock().expect("idle");
+    let mut w = mine(state).watch.lock().expect("idle");
     let moved = w.tokens.is_some_and(|t| (tokens - t).abs() > 0.5);
     w.tokens = Some(tokens);
     Some(busy > 0.0 || moved)
@@ -192,20 +208,22 @@ pub async fn watch_forever(state: AppState) {
         let s = settings(&state);
         let life = state.lifecycle();
         if life.phase != Phase::Serving {
-            WATCH.lock().expect("idle").last_active = now();
-            WATCH.lock().expect("idle").tokens = None;
+            mine(&state).watch.lock().expect("idle").last_active = now();
+            mine(&state).watch.lock().expect("idle").tokens = None;
             continue;
         }
         match active(&state).await {
-            Some(true) => WATCH.lock().expect("idle").last_active = now(),
-            Some(false) if working(&state) => WATCH.lock().expect("idle").last_active = now(),
+            Some(true) => mine(&state).watch.lock().expect("idle").last_active = now(),
+            Some(false) if working(&state) => {
+                mine(&state).watch.lock().expect("idle").last_active = now()
+            }
             Some(false) => {}
             None => continue,
         }
         if !s.enabled {
             continue;
         }
-        let idle_for = now().saturating_sub(WATCH.lock().expect("idle").last_active);
+        let idle_for = now().saturating_sub(mine(&state).watch.lock().expect("idle").last_active);
         if idle_for < s.after_minutes.max(5) as u64 * 60 {
             continue;
         }
@@ -272,7 +290,7 @@ pub async fn wake_for_request(state: &AppState) -> Option<String> {
         _ => {}
     }
     {
-        let mut w = WATCH.lock().expect("idle");
+        let mut w = mine(state).watch.lock().expect("idle");
         if w.waking {
             return Some(format!(
                 "{} is waking up; it'll be ready{}.",
@@ -283,7 +301,7 @@ pub async fn wake_for_request(state: &AppState) -> Option<String> {
         w.waking = true;
     }
     let started = wake(state, &a).await;
-    WATCH.lock().expect("idle").waking = false;
+    mine(state).watch.lock().expect("idle").waking = false;
     match started {
         Ok(()) => Some(format!(
             "{} was asleep to save power. It's waking up now and will be ready{}.",
@@ -302,7 +320,7 @@ async fn wake(state: &AppState, a: &Asleep) -> Result<(), String> {
     let (ok, msg) = crate::routines::start_model(state, &a.target).await;
     if ok {
         set_asleep(state, None);
-        WATCH.lock().expect("idle").last_active = now();
+        mine(state).watch.lock().expect("idle").last_active = now();
         Ok(())
     } else {
         Err(msg)
@@ -313,7 +331,7 @@ async fn wake(state: &AppState, a: &Asleep) -> Result<(), String> {
 
 /// `GET /idle`
 pub(crate) async fn get_idle(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
-    let w = WATCH.lock().expect("idle");
+    let w = mine(&state).watch.lock().expect("idle");
     let serving = state.lifecycle().phase == Phase::Serving;
     Json(json!({
         "settings": settings(&state),
@@ -342,7 +360,7 @@ pub(crate) async fn put_idle(
     })?;
     if !s.enabled {
         // Turning it off forgets nothing: a model put to sleep can still be woken by hand.
-        WATCH.lock().expect("idle").last_active = now();
+        mine(&state).watch.lock().expect("idle").last_active = now();
     }
     Ok(Json(json!({ "settings": s })))
 }
