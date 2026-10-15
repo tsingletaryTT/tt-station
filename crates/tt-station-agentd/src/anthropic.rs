@@ -353,6 +353,10 @@ struct Live {
     phase: &'static str,
     tool: Option<String>,
     input_tokens: u64,
+    /// When its first token came out (thinking, text or a tool call).
+    first_token: Option<std::time::Instant>,
+    /// The model that answered (`served_by`), for the box's speed book.
+    served: Option<String>,
 }
 
 static LIVE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Live>>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
@@ -361,9 +365,12 @@ static LIVE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Live>>> = std:
 pub fn activity() -> Vec<Value> {
     LIVE.lock().expect("live").values().map(|l| {
         let secs = l.started.elapsed().as_secs_f64();
+        // Its speed from the first token on: reading the prompt isn't writing.
+        let writing = l.first_token.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
         json!({
             "session": l.session, "seconds": secs.round(), "phase": l.phase, "tool": l.tool, "context_tokens": l.input_tokens,
-            "tokens": l.chars / 4, "tokens_per_s": if secs > 1.0 { ((l.chars as f64 / 4.0) / secs).round() } else { 0.0 },
+            "tokens": l.chars / 4, "tokens_per_s": if writing > 1.0 { ((l.chars as f64 / 4.0) / writing).round() } else { 0.0 },
+            "ttft_s": l.first_token.map(|t| (t.duration_since(l.started).as_secs_f64() * 10.0).round() / 10.0),
         })
     }).collect()
 }
@@ -384,6 +391,9 @@ pub struct Stream {
     finish: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
+    /// Prompt tokens the server found in its prefix cache, when it says
+    /// (`usage.prompt_tokens_details.cached_tokens`).
+    cached_tokens: Option<u64>,
     /// Qwen-style `<think>` text that leaked into content: dropped until it closes.
     in_think: bool,
     show_thinking: bool,
@@ -404,15 +414,24 @@ impl Stream {
 
     pub fn with_thinking(model: &str, show_thinking: bool) -> Self {
         let id = crate::pairing::issue_pair_id();
-        LIVE.lock().expect("live").insert(id.clone(), Live { session: None, started: std::time::Instant::now(), chars: 0, phase: "reading", tool: None, input_tokens: 0 });
+        LIVE.lock().expect("live").insert(id.clone(), Live { session: None, started: std::time::Instant::now(), chars: 0, phase: "reading", tool: None, input_tokens: 0,
+            first_token: None, served: None });
         Stream { id, model: model.into(), started: false, open: None, next: 0, tools: HashMap::new(), tool_order: Vec::new(), finish: None,
-            input_tokens: 0, output_tokens: 0, in_think: false, show_thinking, tail: String::new(), leak: None }
+            input_tokens: 0, output_tokens: 0, cached_tokens: None, in_think: false, show_thinking, tail: String::new(), leak: None }
     }
 
     /// Which Code session this generation is for.
     pub fn for_session(self, session: Option<String>) -> Self {
         if let Some(l) = LIVE.lock().expect("live").get_mut(&self.id) {
             l.session = session;
+        }
+        self
+    }
+
+    /// Which model answers it (the served id), for the box's speed book.
+    pub fn served_by(self, model: &str) -> Self {
+        if let Some(l) = LIVE.lock().expect("live").get_mut(&self.id) {
+            l.served = Some(model.to_string());
         }
         self
     }
@@ -431,6 +450,7 @@ impl Stream {
             }
             l.chars += chars;
             l.input_tokens = self.input_tokens;
+            l.first_token.get_or_insert_with(std::time::Instant::now);
         }
     }
 
@@ -473,6 +493,7 @@ impl Stream {
         if let Some(u) = c["usage"].as_object() {
             self.input_tokens = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(self.input_tokens);
             self.output_tokens = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(self.output_tokens);
+            self.cached_tokens = u.get("prompt_tokens_details").and_then(|d| d.get("cached_tokens")).and_then(Value::as_u64).or(self.cached_tokens);
         }
         self.start(&mut out);
         let choice = &c["choices"][0];
@@ -598,7 +619,15 @@ impl Stream {
 
 impl Drop for Stream {
     fn drop(&mut self) {
-        LIVE.lock().expect("live").remove(&self.id);
+        let live = LIVE.lock().expect("live").remove(&self.id);
+        // A Code step that ran to its end goes in that session's speed record.
+        if let Some(l) = live.filter(|_| self.finished()) {
+            if let Some(session) = &l.session {
+                let step = crate::codespeed::Step::measured(l.served.clone(), l.started, l.first_token, std::time::Instant::now(),
+                    self.input_tokens, self.cached_tokens, self.output_tokens);
+                crate::codespeed::record(session, step);
+            }
+        }
     }
 }
 
@@ -649,8 +678,9 @@ pub(crate) async fn v1_messages(State(state): State<AppState>, auth: GatewayAuth
         return Json(from_openai(&v, &asked)).into_response();
     }
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(64);
+    let served = endpoint.model.clone();
     tokio::spawn(async move {
-        let mut s = Stream::with_thinking(&asked, thinking).for_session(session);
+        let mut s = Stream::with_thinking(&asked, thinking).for_session(session).served_by(&served);
         relay(&mut s, upstream, &tx).await;
         let (input, output) = s.tokens();
         auth.record(&state, input, output);
@@ -784,6 +814,25 @@ mod tests {
         assert_eq!(kind(400, "This model's maximum context length is 32768 tokens").0, 400);
         assert_eq!(kind(503, "Service Unavailable").0, 529);
         assert_eq!(kind(404, "The model `x` does not exist.").0, 404);
+    }
+
+    #[test]
+    fn a_finished_code_step_leaves_its_usage_and_timing() {
+        let mut s = Stream::new("m").for_session(Some("test-anthropic-step".into())).served_by("test-anthropic-model");
+        s.chunk(&json!({ "choices": [{ "delta": { "content": "Done." } }] }));
+        s.chunk(&json!({ "choices": [{ "delta": {}, "finish_reason": "stop" }] }));
+        s.chunk(&json!({ "choices": [], "usage": { "prompt_tokens": 41000, "completion_tokens": 12, "prompt_tokens_details": { "cached_tokens": 40960 } } }));
+        drop(s);
+        let steps = crate::codespeed::steps("test-anthropic-step");
+        assert_eq!(steps.len(), 1);
+        assert_eq!((steps[0].prompt_tokens, steps[0].cached_tokens, steps[0].output_tokens), (41000, Some(40960), 12));
+        assert_eq!(steps[0].model.as_deref(), Some("test-anthropic-model"));
+        assert!(steps[0].ttft_ms.is_some());
+        // Cut off before a finish reason: not a step to measure.
+        let mut cut = Stream::new("m").for_session(Some("test-anthropic-cut".into()));
+        cut.chunk(&json!({ "choices": [{ "delta": { "content": "Half" } }] }));
+        drop(cut);
+        assert!(crate::codespeed::steps("test-anthropic-cut").is_empty());
     }
 
     #[test]

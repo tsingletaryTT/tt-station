@@ -62,6 +62,8 @@ pub struct CatalogModel {
     pub min_disk_gb: Option<f64>,
     /// Billions of parameters, when known.
     pub param_count: Option<f64>,
+    /// The longest context tt serves it with on this mesh, in tokens.
+    pub max_context: Option<u64>,
     /// Whether this model's weights are really all here -- measured by the agent,
     /// because tt's `cached` only means "something for this repo is in the HF
     /// cache" (a 385 MB stub of a 62 GB model counts). See [`weights_state`].
@@ -289,6 +291,7 @@ pub fn parse_catalog(json: &str, device: Option<&str>) -> Result<Catalog> {
                     .unwrap_or(0),
                 min_disk_gb: m.get("min_disk_gb").and_then(Value::as_f64),
                 param_count: m.get("param_count").and_then(Value::as_f64),
+                max_context: per_device.get("max_context").and_then(Value::as_u64),
                 // Filled in from the disk by `TtCli::catalog`.
                 weights: Weights::Missing,
                 downloaded_bytes: 0,
@@ -943,7 +946,7 @@ mod tests {
           "engines": ["vLLM"], "cached": true, "cache_size_bytes": 65500000000,
           "min_disk_gb": 84, "param_count": 32,
           "devices": { "p300x2": { "engines": ["vLLM"], "status": "FUNCTIONAL", "supported": true,
-                                    "tool_call_parser": "hermes" } } },
+                                    "tool_call_parser": "hermes", "max_context": 131072 } } },
         { "name": "whisper-large-v3", "hf_repo": "openai/whisper-large-v3", "model_type": "audio",
           "engines": ["media"], "cached": false, "cache_size_bytes": 0, "min_disk_gb": 15,
           "param_count": null,
@@ -961,12 +964,14 @@ mod tests {
         assert!(qwen.supported && qwen.cached);
         assert_eq!(qwen.tool_call_parser.as_deref(), Some("hermes"));
         assert_eq!(qwen.cache_size_bytes, 65_500_000_000);
+        assert_eq!(qwen.max_context, Some(131_072));
         // No entry for this mesh: not supported, engines fall back to the model's.
         let whisper = &cat.models[1];
         assert!(!whisper.supported);
         assert_eq!(whisper.status, None);
         assert_eq!(whisper.engines, vec!["media"]);
         assert_eq!(whisper.param_count, None);
+        assert_eq!(whisper.max_context, None);
     }
 
     #[test]

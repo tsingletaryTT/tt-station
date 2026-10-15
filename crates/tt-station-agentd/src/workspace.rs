@@ -118,6 +118,11 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 40 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// A Code session by that id is on the box.
+pub(crate) fn exists(state: &AppState, id: &str) -> bool {
+    valid_id(id) && dir(state, id).join("session.json").is_file()
+}
+
 fn load(state: &AppState, id: &str) -> Option<Session> {
     std::fs::read(dir(state, id).join("session.json")).ok().and_then(|b| serde_json::from_slice(&b).ok())
 }
