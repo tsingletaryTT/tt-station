@@ -212,7 +212,10 @@ come into a Tori turn or a routine run:
 A push notification's text passes through Apple. When another computer asks to pair, the
 push says only "A computer is asking to pair: open TT Station to see the code"; the code is
 shown in TT Station (the desktop app, and the phone app's banner while it's open), which
-reads it from the box over its authenticated connection (`GET /events`).
+reads it from the box over its authenticated connection (`GET /events`). Every other push
+works the same way: Apple sees generic words for the kind of event and an event id; the
+iPhone app fills in the real text from the box itself (see
+`docs/reference/alerts-and-power.md`).
 
 ---
 

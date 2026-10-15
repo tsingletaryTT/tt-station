@@ -45,7 +45,7 @@ pub struct Service {
 
 pub const SPEAK: Service = Service {
     container: "tt-voice-kokoro",
-    image: "ghcr.io/remsky/kokoro-fastapi-cpu:latest",
+    image: "ghcr.io/remsky/kokoro-fastapi-cpu:latest@sha256:ee3111d6a2c903ed62f3b4fa19543c6901205ed39fce3c177e895b34a8386b9c",
     port: 8880,
     container_port: 8880,
     volume: None,
@@ -54,7 +54,7 @@ pub const SPEAK: Service = Service {
 
 pub const LISTEN: Service = Service {
     container: "tt-voice-ears",
-    image: "ghcr.io/speaches-ai/speaches:latest-cpu",
+    image: "ghcr.io/speaches-ai/speaches:latest-cpu@sha256:21e3df06d842fb7802ab470dd77c25f0e8c0d22950e8d8c6ae886e851af53ef8",
     port: 8881,
     container_port: 8000,
     volume: Some(("tt-voice-hf", "/home/ubuntu/.cache/huggingface/hub")),

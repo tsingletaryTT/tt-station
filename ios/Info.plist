@@ -35,6 +35,8 @@
     <array>
         <string>com.tenstorrent.ttstation.mobile.refresh</string>
     </array>
+    <!-- The Keychain group shared with the notification service extension (PushCredentials). -->
+    <key>TTKeychainGroup</key><string>$(AppIdentifierPrefix)com.tenstorrent.ttstation.shared</string>
     <key>NSSupportsLiveActivities</key>
     <true/>
     <key>UIAppFonts</key>

@@ -9,8 +9,8 @@
 //! changes into [`Event`]s. Each is kept for clients (`GET /events?since=`) and
 //! pushed through Apple's push service to every phone that registered its
 //! device token (`POST /notify/devices`) -- see `crate::apns`. Pushes carry
-//! model names and events, never chat content -- and never a pairing code
-//! (see [`push_alert`]).
+//! generic words per kind of event and the event's id, never what happened
+//! (see [`push_payload`]); the app fetches the event itself.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -373,7 +373,7 @@ impl Notifier {
     }
 
     /// Push `event` to every registered phone; returns how many got it.
-    /// What's sent is [`push_alert`]'s version of it.
+    /// What's sent is [`push_payload`]'s version of it.
     /// Forgets tokens Apple says are dead, and fixes a token's environment when
     /// Apple says it's the other one.
     pub async fn push(&self, event: &Event) -> usize {
@@ -381,34 +381,14 @@ impl Notifier {
             return 0;
         };
         let subtitle = self.box_name.lock().expect("notify mutex poisoned").clone();
-        let (title, body, data) = push_alert(event);
+        let payload = push_payload(event, &subtitle);
         let mut sent = 0;
         for device in self.devices() {
             let mut sandbox = device.sandbox;
-            let mut outcome = apns
-                .send(
-                    &device.token,
-                    sandbox,
-                    &title,
-                    &subtitle,
-                    &body,
-                    &event.kind,
-                    data,
-                )
-                .await;
+            let mut outcome = apns.send(&device.token, sandbox, &payload).await;
             if outcome == crate::apns::Delivery::WrongEnvironment {
                 sandbox = !sandbox;
-                outcome = apns
-                    .send(
-                        &device.token,
-                        sandbox,
-                        &title,
-                        &subtitle,
-                        &body,
-                        &event.kind,
-                        data,
-                    )
-                    .await;
+                outcome = apns.send(&device.token, sandbox, &payload).await;
                 if outcome == crate::apns::Delivery::Sent {
                     let _ = self.register(&device.token, sandbox, &device.name);
                 }
@@ -503,20 +483,66 @@ impl Notifier {
     }
 }
 
-/// What a push says about `event`: (title, body, data). A push's text passes
-/// through Apple, so a pairing code -- which lets whoever types it in control
-/// the box -- never rides along: the push only says someone is asking, and
-/// TT Station shows the code from `GET /events`, over its own authenticated
-/// connection.
-pub fn push_alert(event: &Event) -> (String, String, Option<&serde_json::Value>) {
-    match event.kind.as_str() {
-        "pairing" => (
-            "A computer is asking to pair".to_string(),
-            "Open TT Station to see the code. If you didn't start pairing, ignore this.".to_string(),
-            None,
-        ),
-        _ => (event.title.clone(), event.body.clone(), event.data.as_ref()),
+/// What a push says about `event`: generic words for its kind, never its own
+/// title or body. A push passes through Apple and lands on every registered
+/// phone's lock screen, so a report's question, a transcript's title, the
+/// command a session wants to run, a model's error -- and a pairing code,
+/// which lets whoever types it control the box -- stay on the box. The app's
+/// notification service extension fetches the event by id over its own
+/// authenticated connection and shows the real text; these words are what
+/// shows when it can't (the phone is away from the box, say).
+pub fn push_alert(event: &Event) -> (&'static str, &'static str) {
+    if event.data.as_ref().is_some_and(|d| d.get("approval").is_some()) {
+        let who = match event.kind.as_str() {
+            "coding" => "Code needs your OK",
+            "routine" => "A routine needs your OK",
+            "bringup" => "A bring-up needs your OK",
+            _ => "TT Station needs your OK",
+        };
+        return (who, "Open TT Station to see what it's asking.");
     }
+    match event.kind.as_str() {
+        "pairing" => ("A computer is asking to pair", "Open TT Station to see the code. If you didn't start pairing, ignore this."),
+        "research" => ("Your research has news", "Open TT Station to read it."),
+        "job_done" => ("A meeting transcript is ready", "Open TT Station to read it."),
+        "coding" => ("A coding session finished", "Open TT Station to review it."),
+        "routine" => ("A routine has news", "Open TT Station to see how it went."),
+        "bringup" => ("A model bring-up has news", "Open TT Station to see it."),
+        "orchard" | "orchard_done" => ("Orchard has news", "Open TT Station to see it."),
+        "model_ready" => ("A model is ready", "Loaded and ready in TT Station."),
+        "model_failed" => ("A model couldn't start", "Open TT Station for details."),
+        "model" => ("A model needs a look", "Open TT Station for details."),
+        "download_done" => ("A download finished", "Ready to start in TT Station."),
+        "download_failed" => ("A download failed", "Open TT Station for details."),
+        "chips_hot" => ("The chips are running hot", "Check the box's airflow; it will slow down to protect itself."),
+        "box_online" => ("Your box is online", "TT Station can reach it."),
+        "power" => ("Your box's power changed", "Open TT Station for details."),
+        "devices" => ("The devices that can use your box changed", "Check them in TT Station: Settings, Devices."),
+        "schedule" => ("A schedule ran", "Open TT Station for details."),
+        "doctor" => ("A box check found something", "Open TT Station for details."),
+        "test" => ("Notifications are working", "You'll hear when downloads finish and models are ready."),
+        _ => ("TT Station", "Open TT Station for details."),
+    }
+}
+
+/// The whole push for `event`: [`push_alert`]'s words, the box's name as the
+/// subtitle, and the event's id (`event`, its `seq`) -- nothing else.
+/// `mutable-content` lets the app's notification service extension replace
+/// the words with the event's own, fetched from the box.
+pub fn push_payload(event: &Event, box_name: &str) -> Value {
+    let (title, body) = push_alert(event);
+    let approval = event.data.as_ref().is_some_and(|d| d.get("approval").is_some());
+    let urgent = approval || event.kind.contains("failed") || event.kind == "chips_hot";
+    json!({
+        "aps": {
+            "alert": { "title": title, "subtitle": box_name, "body": body },
+            "sound": "default",
+            "interruption-level": if urgent { "time-sensitive" } else { "active" },
+            "thread-id": box_name,
+            "mutable-content": 1,
+        },
+        "event": event.seq,
+    })
 }
 
 /// The current snapshot (blocking: reads the tt catalog's pull jobs and the
@@ -787,6 +813,45 @@ mod tests {
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].title, "FLUX.1-schnell is ready");
         assert!(e[0].body.contains("beside chat"));
+    }
+
+    #[test]
+    fn a_push_carries_no_content_only_the_event_id() {
+        let secret = "Q3 layoffs plan for Dana";
+        let kinds = [
+            "research", "job_done", "coding", "routine", "bringup", "orchard", "orchard_done", "model_ready", "model_failed",
+            "model", "download_done", "download_failed", "chips_hot", "box_online", "power", "devices", "pairing", "schedule",
+            "doctor", "test", "something_new",
+        ];
+        for (i, kind) in kinds.iter().enumerate() {
+            for data in [None, Some(json!({ "approval": { "id": "ap-1", "kind": "command", "summary": secret, "can_always": true } }))] {
+                let event = Event {
+                    seq: 1_000 + i as u64,
+                    at: 1,
+                    kind: kind.to_string(),
+                    title: format!("Report ready: {secret}"),
+                    body: format!("rm -rf {secret}; 123 456"),
+                    data,
+                };
+                let p = push_payload(&event, "qb2-lab");
+                let text = p.to_string();
+                assert!(!text.contains("Dana") && !text.contains("rm -rf") && !text.contains("123 456") && !text.contains("ap-1"), "{kind}: {text}");
+                assert_eq!(p["event"], event.seq, "{kind}");
+                assert_eq!(p["aps"]["mutable-content"], 1, "{kind}");
+                assert_eq!(p["aps"]["alert"]["subtitle"], "qb2-lab");
+                let mut keys: Vec<&String> = p.as_object().unwrap().keys().collect();
+                keys.sort();
+                assert_eq!(keys, ["aps", "event"], "{kind}");
+                assert!(p["aps"].get("category").is_none(), "the extension sets the approval buttons once it has the approval");
+                assert!(!p["aps"]["alert"]["title"].as_str().unwrap().is_empty());
+            }
+        }
+        let ask = Event { seq: 7, at: 1, kind: "coding".into(), title: String::new(), body: String::new(), data: Some(json!({ "approval": {} })) };
+        assert_eq!(push_alert(&ask).0, "Code needs your OK");
+        assert_eq!(push_payload(&ask, "")["aps"]["interruption-level"], "time-sensitive");
+        let done = Event { kind: "job_done".into(), data: None, ..ask.clone() };
+        assert_eq!(push_alert(&done).0, "A meeting transcript is ready");
+        assert_eq!(push_payload(&done, "")["aps"]["interruption-level"], "active");
     }
 
     #[test]

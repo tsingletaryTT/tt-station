@@ -21,7 +21,16 @@
 //!
 //! - `GET /updates`: this version, how it's installed, the newest release,
 //!   versions on disk, history, and what's happening now.
-//! - `POST /updates/install {version?}`, `POST /updates/undo`.
+//! - `POST /updates/install {version?, allow_downgrade?}`, `POST /updates/undo`.
+//!
+//! What's checked before a release is used: its tag is a plain version
+//! ([`valid_version`]) -- it ends up in a path and the watchdog script; its
+//! package has a sha256 from GitHub, and the download matches it; and it isn't
+//! older than the running major.minor unless the request says
+//! `allow_downgrade` ([`below_floor`]), so a paired device can't quietly move
+//! the box back to a release with known holes. GitHub's digest only proves the
+//! download is the file the release lists; signing releases (a key the box
+//! trusts, checked here) is the follow-up, once someone decides who holds it.
 
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -119,6 +128,22 @@ fn suite() -> Option<String> {
     text.lines().find_map(|l| l.strip_prefix("VERSION_CODENAME=")).map(|v| v.trim_matches('"').to_string())
 }
 
+/// A release tag the updater will use: a digit first, then letters, digits and
+/// `.+-` only (`0.12.0`, `1.0.0-rc.1`), at most 64. It becomes a folder name and
+/// is written into the watchdog script, so nothing else gets through.
+pub fn valid_version(v: &str) -> bool {
+    v.len() <= 64
+        && v.chars().next().is_some_and(|c| c.is_ascii_digit())
+        && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
+}
+
+/// `candidate` is older than `running`'s major.minor (`0.10.9` under `0.11.0`;
+/// `0.11.0` under `0.11.3` is not: a patch back within a line is allowed).
+pub fn below_floor(running: &str, candidate: &str) -> bool {
+    let floor: Vec<&str> = running.trim_start_matches('v').split(['.', '-', '+']).take(2).collect();
+    older(candidate, &floor.join("."))
+}
+
 /// `a < b` for dotted versions (`0.9.0 < 0.11.0`).
 pub fn older(a: &str, b: &str) -> bool {
     let parts = |v: &str| v.trim_start_matches('v').split(['.', '-', '+']).map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
@@ -187,7 +212,7 @@ async fn releases(fresh: bool) -> Result<Vec<Release>, String> {
         .filter(|r| r["draft"] != true && r["prerelease"] != true)
         .filter_map(|r| {
             let version = r["tag_name"].as_str()?.trim_start_matches('v').to_string();
-            if !version.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            if !valid_version(&version) {
                 return None;
             }
             let asset = r["assets"].as_array().into_iter().flatten().find(|a| {
@@ -301,9 +326,25 @@ fn working(what: Option<&str>) {
     *WORK.lock().expect("updates") = what.map(str::to_string);
 }
 
+/// The package's sha256 (hex), or why there isn't a usable one: a release
+/// without one isn't installed, since nothing would show the download is the
+/// file the release lists.
+fn checksum(asset: &Asset) -> Result<&str, String> {
+    asset
+        .digest
+        .as_deref()
+        .and_then(|d| d.strip_prefix("sha256:"))
+        .filter(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()))
+        .ok_or_else(|| format!("{} has no sha256 checksum on its release, so it can't be checked and wasn't installed.", asset.name))
+}
+
 /// Downloads and unpacks `release`'s package; checks it before it's used.
 async fn fetch(release: &Release) -> Result<(), String> {
     let asset = release.asset.as_ref().ok_or_else(|| format!("Release {} has no package for this box's Ubuntu ({}).", release.version, suite().unwrap_or_default()))?;
+    let want = checksum(asset)?.to_string();
+    if !valid_version(&release.version) || asset.name.starts_with('.') || !asset.name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '~')) {
+        return Err(format!("Release {} has an unexpected name, so it wasn't used.", release.version));
+    }
     let dest = versions_dir().join(&release.version);
     if dest.join("usr/bin/tt-station-agentd").is_file() {
         return Ok(());
@@ -332,11 +373,9 @@ async fn fetch(release: &Release) -> Result<(), String> {
     }
     drop(file);
     let hex: String = hasher.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect();
-    if let Some(want) = asset.digest.as_deref().and_then(|d| d.strip_prefix("sha256:")) {
-        if !want.eq_ignore_ascii_case(&hex) {
-            let _ = std::fs::remove_file(&deb);
-            return Err("The download didn't match the release's checksum, so it wasn't used.".into());
-        }
+    if !want.eq_ignore_ascii_case(&hex) {
+        let _ = std::fs::remove_file(&deb);
+        return Err("The download didn't match the release's checksum, so it wasn't used.".into());
     }
     working(Some(&format!("Unpacking {}", release.version)));
     let tmp = versions_dir().join(format!(".{}.partial", release.version));
@@ -391,6 +430,10 @@ fn unit_exec() -> Option<PathBuf> {
 fn switch(state: &AppState, from: Option<String>, to: Option<String>) -> Result<(), String> {
     if !state.manages_units() {
         return Err("This agent doesn't manage its own service (a test run).".into());
+    }
+    // Both end up in the watchdog script (paths in a heredoc and in quotes).
+    if let Some(bad) = [&from, &to].into_iter().flatten().find(|v| !valid_version(v)) {
+        return Err(format!("\"{bad}\" isn't a version TT Station will switch to."));
     }
     write_dropin(to.as_deref()).map_err(|e| format!("Couldn't point the service at it: {e}"))?;
     let base = base_label(state);
@@ -509,6 +552,11 @@ pub(crate) async fn get_updates(State(state): State<AppState>, _auth: BearerAuth
 pub struct InstallBody {
     #[serde(default)]
     pub version: Option<String>,
+    /// Install a release older than the running major.minor. Any paired
+    /// device may say so here; once the route is owner-only (roles), only an
+    /// owner can.
+    #[serde(default)]
+    pub allow_downgrade: bool,
 }
 
 fn refuse_source() -> Result<(), (StatusCode, Json<Value>)> {
@@ -518,7 +566,8 @@ fn refuse_source() -> Result<(), (StatusCode, Json<Value>)> {
     Ok(())
 }
 
-/// `POST /updates/install {version?}`: the newest release, or `version`.
+/// `POST /updates/install {version?, allow_downgrade?}`: the newest release, or `version`.
+/// Owners only, so only an owner can allow a downgrade.
 pub(crate) async fn post_install(State(state): State<AppState>, _owner: crate::routes::OwnerAuth, Json(b): Json<InstallBody>) -> Reply {
     refuse_source()?;
     if WORK.lock().expect("updates").is_some() {
@@ -530,6 +579,12 @@ pub(crate) async fn post_install(State(state): State<AppState>, _owner: crate::r
         None => list.first().cloned(),
     }
     .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such release."))?;
+    if below_floor(VERSION, &release.version) && !b.allow_downgrade {
+        return Err(err(StatusCode::CONFLICT, format!("{} is older than {VERSION}'s line; going back that far needs allow_downgrade.", release.version)));
+    }
+    if let Some(asset) = &release.asset {
+        checksum(asset).map_err(|e| err(StatusCode::CONFLICT, e))?;
+    }
     if release.version == VERSION {
         return Err(err(StatusCode::CONFLICT, format!("{VERSION} is already running.")));
     }
@@ -571,6 +626,49 @@ pub(crate) async fn post_undo(State(state): State<AppState>, _owner: crate::rout
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_plain_versions_reach_the_watchdog() {
+        for v in ["0.12.0", "1.0.0-rc.1", "0.11.0+noble", "2026.10.15"] {
+            assert!(valid_version(v), "{v}");
+        }
+        for v in ["", "v0.12.0", "0.12.0'; rm -rf ~; '", "0.12/../../x", "0.12.0\nExecStart=/bin/sh", "0.12 0", "$(id)", "-1", &"9".repeat(65)] {
+            assert!(!valid_version(v), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn a_release_needs_a_checksum() {
+        let asset = |digest: Option<&str>| Asset { name: "tt-station_0.12.0_noble.deb".into(), url: String::new(), size: 1, digest: digest.map(str::to_string) };
+        let hex = "ab".repeat(32);
+        assert_eq!(checksum(&asset(Some(&format!("sha256:{hex}")))).unwrap(), hex);
+        assert!(checksum(&asset(None)).unwrap_err().contains("no sha256"));
+        assert!(checksum(&asset(Some("sha512:abcd"))).is_err());
+        assert!(checksum(&asset(Some("sha256:abcd"))).is_err(), "not a whole digest");
+    }
+
+    #[tokio::test]
+    async fn fetch_refuses_a_release_without_a_checksum_before_downloading() {
+        let r = Release {
+            version: "0.99.0".into(),
+            asset: Some(Asset { name: "tt-station_0.99.0_noble.deb".into(), url: "http://127.0.0.1:9/never".into(), size: 1, digest: None }),
+            ..Default::default()
+        };
+        assert!(fetch(&r).await.unwrap_err().contains("no sha256"));
+        let r = Release { version: "0.99.0'; id; '".into(), asset: Some(Asset { digest: Some(format!("sha256:{}", "ab".repeat(32))), ..r.asset.unwrap() }), ..Default::default() };
+        assert!(fetch(&r).await.unwrap_err().contains("unexpected name"));
+    }
+
+    #[test]
+    fn no_downgrade_below_the_running_line() {
+        assert!(below_floor("0.11.3", "0.10.9"));
+        assert!(below_floor("0.11.0", "0.9.0"));
+        assert!(below_floor("1.0.0", "0.99.0"));
+        assert!(!below_floor("0.11.3", "0.11.0"), "a patch back within the line is fine");
+        assert!(!below_floor("0.11.3", "0.11.3"));
+        assert!(!below_floor("0.11.3", "0.12.0"));
+        assert!(!below_floor("0.11.0-rc.1", "0.11.0"));
+    }
 
     #[test]
     fn compares_versions_and_knows_how_its_installed() {

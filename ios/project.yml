@@ -1,13 +1,13 @@
 name: TTStationMobile
 options:
   bundleIdPrefix: com.tenstorrent
+  deploymentTarget:
+    iOS: "26.0"
 packages:
   # A terminal emulator (MIT), to draw the real tt-toplike streamed from the box.
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
     from: 1.2.0
-  deploymentTarget:
-    iOS: "26.0"
 targets:
   TTStationMobile:
     type: application
@@ -21,6 +21,8 @@ targets:
     dependencies:
       # The Lock Screen / Dynamic Island Live Activity.
       - target: TTStationActivity
+      # Fills in a push's real text from the box (pushes carry only an event id).
+      - target: TTStationNotificationService
       - package: SwiftTerm
     settings:
       base:
@@ -38,8 +40,9 @@ targets:
         CODE_SIGN_STYLE: Automatic
         # Push notifications are off for now: a personal (free) team can't sign
         # the capability. To turn them on with a paid team, add back
-        # `CODE_SIGN_ENTITLEMENTS: TTStationMobile.entitlements` and set
-        # `AlertCenter.remotePush` to true.
+        # `CODE_SIGN_ENTITLEMENTS: TTStationMobile.entitlements` (push, and the
+        # Keychain group shared with the notification service extension) and
+        # set `AlertCenter.remotePush` to true.
   TTStationActivity:
     type: app-extension
     platform: iOS
@@ -57,6 +60,24 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
         SKIP_INSTALL: YES
+  TTStationNotificationService:
+    type: app-extension
+    platform: iOS
+    sources:
+      - NotificationService
+      - path: Shared/PushCredentials.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tenstorrent.ttstation.mobile.notifications
+        SWIFT_VERSION: "5.0"
+        INFOPLIST_FILE: NotificationService/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: NotificationService/NotificationService.entitlements
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        SKIP_INSTALL: YES
 schemes:
   # The app's own scheme, so Xcode runs the app (running the Live Activity
   # extension's scheme fails with deviceprocesscontrolservice Code=8).
@@ -65,6 +86,7 @@ schemes:
       targets:
         TTStationMobile: all
         TTStationActivity: all
+        TTStationNotificationService: all
     run:
       config: Debug
       executable: TTStationMobile

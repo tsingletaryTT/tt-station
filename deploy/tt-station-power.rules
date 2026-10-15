@@ -1,16 +1,27 @@
-// tt-station: let box operators power-manage this machine without an
+// tt-station: let the TT Station agent power-manage this machine without an
 // interactive auth prompt, so `POST /power` (agent) and the box panel's
 // power row work headlessly. Grants ONLY the logind power actions, and only
-// to members of the `sudo` group (the QuietBox run-user is in it). Retarget
-// the group for a different setup — see docs/reference/power-controls.md.
+// to a process that is both:
+//  - run by a member of the `tt-station-power` group. Put the agent's own
+//    account in it and no other: `sudo groupadd -f tt-station-power &&
+//    sudo usermod -aG tt-station-power <user>` (polkit reads the group list
+//    each time; nothing needs restarting); and
+//  - inside that account's systemd user manager (`user@<uid>.service`), where
+//    the agent runs as a user service -- not a login shell (SSH, a console).
+// The limit: polkit can't single out one user service. User units are named
+// by their user, so `system_unit` only ever names the user manager, and any
+// process the agent's account runs under it (its desktop apps too) passes.
+// Needs polkit 121+ for `system_unit`; older polkit never grants. See
+// docs/reference/power-controls.md §6.
 polkit.addRule(function(action, subject) {
-    if (subject.isInGroup("sudo") && (
-            action.id == "org.freedesktop.login1.reboot" ||
+    if ((action.id == "org.freedesktop.login1.reboot" ||
             action.id == "org.freedesktop.login1.reboot-multiple-sessions" ||
             action.id == "org.freedesktop.login1.power-off" ||
             action.id == "org.freedesktop.login1.power-off-multiple-sessions" ||
             action.id == "org.freedesktop.login1.suspend" ||
-            action.id == "org.freedesktop.login1.suspend-multiple-sessions")) {
+            action.id == "org.freedesktop.login1.suspend-multiple-sessions") &&
+        subject.isInGroup("tt-station-power") &&
+        /^user[@-][0-9]+\.service$/.test(subject.system_unit || "")) {
         return polkit.Result.YES;
     }
 });

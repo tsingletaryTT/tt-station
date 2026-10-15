@@ -4,7 +4,7 @@
 # On purge, remove the polkit rule installed to
 # /etc/polkit-1/rules.d/49-tt-station-power.rules (see debian/rules'
 # override_dh_auto_install and deploy/tt-station-power.rules). That rule
-# grants the `sudo` group headless reboot/power-off/suspend so the agent's
+# grants the `tt-station-power` group headless reboot/power-off/suspend so the agent's
 # `POST /power` and the box panel's local power row don't hit an interactive
 # polkit auth prompt -- see docs/reference/power-controls.md.
 #

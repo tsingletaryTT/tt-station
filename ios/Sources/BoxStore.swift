@@ -35,6 +35,8 @@ final class BoxStore {
            let saved = try? JSONDecoder().decode([SavedBox].self, from: data) {
             boxes = saved
         }
+        // Boxes paired before the notification extension shared credentials.
+        for box in boxes { sharePush(box) }
     }
 
     func save(_ box: SavedBox, token: String) {
@@ -42,6 +44,7 @@ final class BoxStore {
         boxes.removeAll { $0.id == box.id }
         boxes.insert(box, at: 0)
         persist()
+        sharePush(box)
     }
 
     /// Update a saved box's details in place (keeps its token and position).
@@ -53,11 +56,21 @@ final class BoxStore {
 
     func forget(_ box: SavedBox) {
         Keychain.delete(box.id)
+        PushCredentials.remove(box.id)
         boxes.removeAll { $0.id == box.id }
         persist()
     }
 
     func token(for box: SavedBox) -> String? { Keychain.get(box.id) }
+
+    /// What the notification service extension needs to show a push's real
+    /// text (pushes carry only an event id): see `PushCredentials`.
+    private func sharePush(_ box: SavedBox) {
+        guard let pin = box.pin, let token = token(for: box) else { return }
+        let credential = PushCredential(id: box.id, name: box.name, host: box.host, tlsPort: pin.port,
+                                        certSHA256: pin.sha256, token: token)
+        if !PushCredentials.all().contains(credential) { PushCredentials.save(credential) }
+    }
 
     private func persist() {
         if let data = try? JSONEncoder().encode(boxes) {

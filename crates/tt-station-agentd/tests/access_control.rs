@@ -172,6 +172,7 @@ async fn the_first_device_is_an_owner_and_members_cannot_manage_the_box() {
         (M::POST, format!("{base}/power"), json!({ "action": "reboot" })),
         (M::POST, format!("{base}/reset"), json!({})),
         (M::PUT, format!("{base}/apps/n8n/network"), json!({ "open": true })),
+        (M::POST, format!("{base}/hermes/install"), json!({})),
         (M::POST, format!("{base}/updates/install"), json!({})),
         (M::POST, format!("{base}/updates/undo"), json!({})),
         (M::POST, format!("{base}/software/cli-update"), json!({ "dry_run": true })),
