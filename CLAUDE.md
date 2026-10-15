@@ -4,7 +4,10 @@ Plug-and-play Tenstorrent from a Mac: discover a QuietBox on the LAN, pair once,
 `tt-station run <model>`, get one OpenAI-compatible `/v1`. **No llama.cpp** — usability rides
 on the `/v1` that `tt-inference-server` (vLLM, via `run.py`) exposes.
 
-Repo: github.com/tsingletaryTT/tt-station (private). Work happens on `main`.
+Repo: github.com/tsingletaryTT/tt-station (private). `main` (last: `8daa46e`, v0.11.0) is the
+released line. Current work happens on feature branches named `jberkowitz/<feature>`, merged
+into the integration branch **`jberkowitz/mobile-voice`**, which is ~94K lines ahead of
+`origin/main` and not merged yet (see `docs/landing-plan.md` for how it lands as PRs).
 This box (`tsingletaryTT-quietbox`) IS a real QuietBox: 4× Blackhole (`p300c`),
 `tt-smi`, docker, `~/code/tt-inference-server`. Real serving has been proven here.
 
@@ -66,7 +69,7 @@ denial → 403), the NIC MAC is advertised in `/status` + mDNS TXT for **Wake-on
 (`deploy/tt-station-power.rules`). Reference: `docs/reference/power-controls.md`.
 
 **Box-side is built, installed, and verified live on this box (2026-07-15):** `cargo build/test/
-clippy` all green (fixed a pre-existing clippy `doc_lazy_continuation` in `catalog.rs`, commit
+clippy` were green at the time (not true today, see "Run / test") (fixed a pre-existing clippy `doc_lazy_continuation` in `catalog.rs`, commit
 `876ffd3`); fresh `tt-station` + `tt-station-agentd` copied into `~/.local/bin` and the systemd `--user`
 agent restarted. Confirmed live: `/status` carries `mac`, `POST /power` → 401 unauthed (route
 exists), `tt-station power`/`tt-station wake` in `--help`. **Still owner-gated:** macOS click-through of the new
@@ -131,7 +134,9 @@ of it. #23 also reads tt-smi **6.x**'s top-level `processes[]`; this box is on t
 
 ---
 
-## Current state (what's shipped on `main`)
+## Current state (`main` plus the `jberkowitz/mobile-voice` integration branch)
+
+Items marked "(branch)" are committed on `jberkowitz/mobile-voice` but not yet on `main`.
 
 **Agent (`crates/tt-station-agentd`)** — box-side daemon, default backend `runpy`:
 - Serves via `tt-inference-server/run.py`, deferring device/image/impl/engine to it.
@@ -157,39 +162,39 @@ of it. #23 also reads tt-smi **6.x**'s top-level `processes[]`; this box is on t
   OMITTED when agentd has no authoritative opinion, which is what makes tt-toplike fall back
   to its local view for that panel — see `TT_TOPLIKE_STREAM.md`),
   `GET /serving` (unauthed — every running `tt-inference-server` `/v1`, `source: agent|external`),
-  `GET /config` (unauthed — redacted resolved config, no secrets),
-  `GET /logs` (unauthed — `?source=container|run&tail=N` tail of a `workflow_logs/` file;
+  `GET /config` (box itself or paired — redacted resolved config, no secrets),
+  `GET /logs` (box itself or paired — `?source=container|run&tail=N` tail of a `workflow_logs/` file;
   `container`=serving-container stdout/stderr where failures actually live, `run`=run.py's
   own log; `409` on non-runpy backends, `200`/`lines: []` when nothing's logged yet),
-  `GET /logs/stream` (unauthed **WebSocket** — replays then follows the same source,
+  `GET /logs/stream` (box itself or paired, **WebSocket** — replays then follows the same source,
   re-resolving the newest file each ~500ms so a fresh serve is picked up). Every emitted
   log line is redacted (masks `hf_…`/`sk-…`/`Bearer …` shapes) — see `docs/reference/logs.md`.
   **`POST /power` (authed)** — `reset-chips` (`tt-smi -r`, keeps pairing) → 200; machine ops
   `suspend`/`reboot`/`shutdown` → 202 (box disconnects shortly after); polkit denial → 403.
   The primary-NIC MAC is advertised in `/status` + the mDNS TXT record so a Mac can Wake-on-LAN
   a powered-down box. Command executor is configurable; see `docs/reference/power-controls.md`.
-  **`POST /assistant` + `POST /assistant/confirm` (authed, local branch `jberkowitz/mobile-voice`,
-  uncommitted)** — natural-language chat whose brain is the box's own served model via OpenAI
+  **`POST /assistant` + `POST /assistant/confirm` (authed; branch `jberkowitz/mobile-voice`,
+  committed, not on `main`)** — natural-language chat whose brain is the box's own served model via OpenAI
   tool calls: read-only tools (`box_status` incl. a fresh deduped `tt-smi -s`, `list_models`,
   `recent_logs`) run immediately; disruptive ones (`run_model`, `stop_model`, `reset_chips`) are
   parked as 5-minute pending actions and only run on confirm (a confirmed `run_model` is
   backgrounded, since `/run` blocks). The assistant runs on the model it controls, so every
   disruptive action takes it offline. Qwen3-32B: 10/10 on the command test; Llama-3.1-8B was not
   reliable. CLI: `tt-station ask`. First client: `ios/`. See `docs/reference/assistant.md`.
-  **Model manager via the official `tt` CLI (same branch, uncommitted)** — `GET /tt/models`
+  **Model manager via the official `tt` CLI (branch)** — `GET /tt/models`
   (`tt model list --hw <mesh>`: support, tool parser, downloaded, size, free disk), `GET /tt/pulls`,
   `POST /tt/pull` / `POST /tt/pull/cancel` (authed; background `tt model pull` jobs with progress
   = HF cache dir size), and `--serve-with tt` (runpy backend launches `tt serve` instead of
   `python3 run.py`; logs default to tt's managed checkout). `tt` is auto-found (`--tt-cli`).
   Verified live: Qwen3-32B via `tt serve`. See `docs/reference/tt-cli.md`.
-  **Phone-proofing (same branch):** launches are non-interactive (`AUTOMATIC_HOST_SETUP`,
+  **Phone-proofing (branch):** launches are non-interactive (`AUTOMATIC_HOST_SETUP`,
   `JWT_SECRET`, `HF_TOKEN`; subprocesses `setsid` + null stdin — run.py's `getpass` prompt used
   to hang on the box console); catalog `weights` = agent-measured completeness (tt's `cached`
   lies for partial repos) and starts of non-downloaded models are refused; serving lifecycle
   `GET/POST /serve` (starts survive client disconnect, failures keep their reason, startup
   adopts an already-serving model); `/generate/image` + `/generate/video*` proxy the media
   server; discovery now matches `tt-media-inference-server` images.
-  **Beyond chat (same branch):** `/assistant/stream` (SSE, think/reasoning, Markdown);
+  **Beyond chat (branch):** `/assistant/stream` (SSE, think/reasoning, Markdown);
   `/metrics/history|now` (recorded telemetry + inference + energy); `/docs` + `search_documents`
   (BM25 over uploaded text); `web_search`/`read_webpage` (DuckDuckGo HTML; private networks
   refused); `remember`/`forget` + `/memories`; `create_image` + `/creations/{id}`; tools offered
@@ -209,10 +214,11 @@ of it. #23 also reads tt-smi **6.x**'s top-level `processes[]`; this box is on t
   (`app_ui.rs`); the shell signs in via `local-secret`, adds tray/notifications/hotkey/autostart; app
   catalogue `/apps` (`apps.rs`: LobeChat, Jupyter, n8n, Flowise in Docker, each with its own app key).
   Build with Node 22 (`~/.local/share/node/current/bin`). See `desktop/README.md`.
-- **People / schedules / energy / remote access** (no accounts): `/people` (per-person memories,
+- **People / schedules / energy** (no accounts): `/people` (per-person memories,
   assistant knows who it's talking with), `/schedules` (switch modes at set times), `/energy`
-  (per-day kWh), `/remote/wireguard` (agent-made WireGuard keys, one sudo script, 8 phone slots),
-  and `/orchard/runs/{name}/serve`. See `docs/reference/household-schedules-remote.md`.
+  (per-day kWh), and `/orchard/runs/{name}/serve`. (A WireGuard remote-access feature was
+  described here but **was never implemented**: no route, no module. Off-LAN access is via the
+  owner's own VPN, e.g. Tailscale, whose address QR pairing carries.) See `docs/reference/household-schedules-remote.md`.
 - mDNS `_tenstorrent._tcp` status re-published on run/stop; graceful shutdown unregisters.
 - **Config file + named profiles:** optionally reads `agentd.toml` (default
   `$TT_CONFIG_DIR/agentd.toml` or `~/.config/tt-station/agentd.toml`, override with
@@ -227,8 +233,8 @@ of it. #23 also reads tt-smi **6.x**'s top-level `processes[]`; this box is on t
 **`power`** (authed — `reset-chips`/`suspend`/`reboot`/`shutdown`) and **`wake`** (broadcasts a
 Wake-on-LAN magic packet from this machine using the MAC learned at discovery, or `--mac`; needs
 WoL enabled in the box BIOS/NIC — see `docs/reference/power-controls.md`),
-`config` (unauthed — active/available profiles + resolved backend + serving host/port, mirrors
-`GET /config`; see `docs/reference/agentd-config.md`), **`logs`** (unauthed —
+`config` (box-local or paired; the CLI doesn't send a token yet — active/available profiles + resolved backend + serving host/port, mirrors
+`GET /config`; see `docs/reference/agentd-config.md`), **`logs`** (same auth as `config` —
 `tt-station logs [--source container|run] [--tail N] [--follow]`; one-shot tail respects global
 `--json`, `--follow` streams plain lines from `GET /logs/stream` until Ctrl-C; see
 `docs/reference/logs.md`), **`console`** (ratatui SSH operator TUI
@@ -360,7 +366,15 @@ routes/fixes: **hit Restart on the panel** (or relaunch it). Box-local config it
 agent is fine now — **persist-tokens** keeps the Mac paired across restarts.
 
 ## Run / test (Rust, on this box)
-- `cargo test --workspace` · `cargo clippy --workspace --all-targets -- -D warnings`.
+- `cargo test --workspace` (871 pass on `jberkowitz/mobile-voice` @ `8d1725c`). Tests must run with
+  no-op `tt-smi`/`docker`/`systemctl`/`systemd-run`/`tt` stubs first on `PATH` (CI does this); some
+  agentd tests otherwise run a real chip reset.
+- `cargo clippy --workspace --all-targets` is **not** clean: 38 warnings in `tt-station-agentd`
+  (2026-10-15), and `cargo fmt --check` differs in most files. CI reports both without failing until
+  a one-shot cleanup lands after the in-flight branches merge; then both become blocking
+  (`-D warnings`). Don't reformat the whole tree in a feature branch.
+- `cargo deny check` (config `deny.toml`); `scripts/check-doc-routes.py` (docs name only real
+  routes); `scripts/gen-third-party-licenses.py` (regenerates `THIRD_PARTY_LICENSES.md`).
 - CLI e2e (no hardware): `cargo test -p tt-station --test e2e_mock -- --ignored`.
 - Live remote-telemetry smoke: start the agent, `python3` WebSocket read of `ws://…/telemetry`.
 

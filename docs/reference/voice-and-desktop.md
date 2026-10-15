@@ -119,7 +119,9 @@ Chat shows "Chat is on the CPU right now… Load Qwen3-32B" when
 ## tt-toplike in TT Station (`toplike_term.rs`)
 
 The Hardware page (desktop) and the Box tab's tt-toplike mode (phone) show the
-real tt-toplike, not a re-drawing: `GET /toplike/term` (WebSocket, `?token=`)
+real tt-toplike, not a re-drawing: `GET /toplike/term` (WebSocket; the pairing token
+goes in an `Authorization: Bearer` header or, from browsers, which can't set headers on a socket,
+as a `tt-token.<token>` WebSocket subprotocol next to `tt-station`; `?mode=`, `cols`, `rows`)
 runs `tt-toplike --remote 127.0.0.1:<agent port> --mode … -q` in a private
 pty and streams the screen; the desktop draws it with xterm.js, the phone with
 SwiftTerm. Keys go back to tt-toplike (`v`, `i`, `l`, `/explain`), and

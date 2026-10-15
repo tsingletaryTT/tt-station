@@ -21,8 +21,8 @@ both were just "not ready yet" until the ceiling tripped, and finding out which 
 had meant SSHing in and reading `docker logs` by hand.
 
 The fix is visibility: expose both log files — the point where failures actually surface,
-and run.py's own launch log — over HTTP/WebSocket, unauthed-read like the rest of the
-box's discovery surface (`/status`, `/models`, `/serving`, `/config`, `/telemetry`).
+and run.py's own launch log — over HTTP/WebSocket. Originally unauthed like the discovery surface; since the 2026-10
+security fixes they need the box itself or a pairing (see below).
 
 ## The two sources
 
@@ -51,8 +51,8 @@ fresh serve writes a new timestamped file, and both routes pick it up automatica
 GET /logs?source=<container|run>&tail=<N>
 ```
 
-**Unauthed** — same group as `/status`, `/models`, `/serving`, `/config`, `/telemetry`.
-Plain read-only file access; no bearer token needed, no pairing required.
+**The box itself or a paired caller** (`LocalOrPaired` in `routes.rs`, same as `GET /config`):
+plain HTTP from the box needs no token; from the network it needs a paired bearer token.
 
 - `source` — defaults to `container`.
 - `tail` — number of trailing lines to return. Defaults to `200`, capped at `2000`
@@ -90,7 +90,8 @@ to tail yet.
 GET /logs/stream?source=<container|run>&tail=<N>
 ```
 
-**Unauthed**, WebSocket. Same query params/defaults as `GET /logs`. On connect:
+**The box itself or a paired caller**, WebSocket (token in an `Authorization: Bearer` header or a
+`tt-token.<token>` subprotocol). Same query params/defaults as `GET /logs`. On connect:
 
 1. Resolves the newest log file for `source` and replays its last `tail` lines as one
    text frame per line (through the same redactor `GET /logs` uses).
@@ -126,7 +127,7 @@ ever leaves the box:
 This is **defense-in-depth, not the primary control**: `run.py` already avoids printing
 the real HF token (it logs `✅ HF_TOKEN is valid` and passes secrets to `docker run` via
 `--env-file`, not argv), so no secret is *expected* in these logs in the first place. The
-redactor exists because `/logs`/`/logs/stream` are unauthed reads on a LAN-trust surface,
+redactor exists because `/logs`/`/logs/stream` were designed as unauthed LAN reads (and paired devices still read them),
 and cheap insurance costs nothing.
 
 ## `tt-station logs`
@@ -135,8 +136,9 @@ and cheap insurance costs nothing.
 tt-station logs --host <host:port> [--source container|run] [--tail N] [--follow]
 ```
 
-Unauthed on the agent side, so — like `tt-station status`/`tt-station models`/`tt-station serving`/`tt-station config` —
-this works against a box you've never `tt-station pair`ed with.
+Works unpaired on the box itself. **Known gap:** the CLI's `config`/`logs` calls (`libttstation::agent_client::get_config`/`get_logs`
+and the `--follow` WebSocket) don't send a stored token yet, so from another machine they get
+`401` until the CLI is updated; on the box itself they work unpaired.
 
 - No `--follow` (default): one `GET /logs` call, printed as plain lines (`origin` header
   line, then one line per log line) — or the whole `LogsInfo` object as JSON under the

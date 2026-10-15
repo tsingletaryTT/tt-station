@@ -1,0 +1,4 @@
+# Raw eval dumps under docs/notes/ (e.g. agent-reliability-gpt-oss-20b.json, which
+# backs a presentation) are machine-written: collapse them in GitHub diffs and
+# language stats, and keep `git diff`/`git log -p` from printing them.
+docs/notes/*.json linguist-generated=true -diff

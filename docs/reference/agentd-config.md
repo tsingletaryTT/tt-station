@@ -191,7 +191,8 @@ tt-station-agentd --config ~/.config/tt-station/agentd.toml --profile stable --p
 
 ## `GET /config` and `tt-station config`
 
-`GET /config` is **unauthed** (like `/status`, `/models`, `/serving`) and
+`GET /config` needs **the box itself or a pairing** (`LocalOrPaired`; it was unauthed
+like `/status`, `/models`, `/serving` until the 2026-10 security fixes) and
 returns the same redacted summary as `--print-config`, reflecting whatever
 was actually resolved at boot:
 
@@ -224,8 +225,9 @@ tt-station config --host <host:port>            # human-readable: active profile
 tt-station config --host <host:port> --json     # pretty-printed ConfigSummary
 ```
 
-`tt-station config` is unauthed, same as `tt-station status`/`tt-station models`/`tt-station serving` — it
-works against a box you've never paired with.
+`tt-station config` works unpaired on the box itself. **Known gap:** the CLI's `config`/`logs` calls (`libttstation::agent_client::get_config`/`get_logs`
+and the `--follow` WebSocket) don't send a stored token yet, so from another machine they get
+`401` until the CLI is updated; on the box itself they work unpaired.
 
 The GTK box panel (`box-panel/tt-station-panel.py`) reads the profile list
 directly from the box-local TOML to populate a profile dropdown *before* the

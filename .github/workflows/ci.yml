@@ -47,3 +47,114 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+
+  rust:
+    name: Rust (build, test, lint)
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      # rustup is preinstalled on GitHub runners; with no argument it installs
+      # the channel and components pinned in rust-toolchain.toml, so CI, release
+      # builds and developer machines all use the same rustc/clippy/rustfmt.
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install || rustup show  # older rustup: `show` installs it
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --locked
+      # Hardware stubs. Some agentd tests build an AppState whose defaults run
+      # real host commands: the power path's default is a real `tt-smi -r`
+      # chip reset (and `systemctl suspend/reboot/poweroff`), and serving /
+      # apps code shells out to `docker`, `systemctl --user`, `systemd-run`
+      # and Tenstorrent's `tt` CLI. On a QuietBox that would reset the chips
+      # mid-test; on a runner the binaries are missing or (docker,
+      # systemctl) real. No-op stubs that exit 0 keep every test hermetic.
+      # They go on PATH for the test step only.
+      - name: Create no-op hardware stubs
+        run: |
+          mkdir -p "$RUNNER_TEMP/hw-stubs"
+          for cmd in tt-smi docker systemctl systemd-run tt; do
+            printf '#!/bin/sh\nexit 0\n' > "$RUNNER_TEMP/hw-stubs/$cmd"
+            chmod +x "$RUNNER_TEMP/hw-stubs/$cmd"
+          done
+      - name: Test (hardware stubbed)
+        run: PATH="$RUNNER_TEMP/hw-stubs:$PATH" cargo test --workspace --locked
+      # TODO(eng-hygiene): make this blocking (`-- -D warnings`) once the
+      # repo-wide clippy cleanup lands after the in-flight Rust branches merge.
+      # Until then it reports warnings (as annotations) without failing.
+      - name: Clippy (warnings reported, not yet blocking)
+        run: cargo clippy --workspace --all-targets --locked
+      # TODO(eng-hygiene): drop continue-on-error once the one-shot
+      # `cargo fmt --all` reformat lands (deferred so it doesn't conflict with
+      # the branches being merged). Shows as a failed-but-allowed step.
+      - name: Rustfmt (not yet blocking)
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+  cargo-deny:
+    name: Dependencies (cargo-deny)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Licenses (allow-list in deny.toml), bans (duplicate majors warn,
+      # wildcards deny) and sources (crates.io only): blocking.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+      # RustSec advisories. Non-blocking for now: new advisories land daily and
+      # would turn unrelated PRs red. As of 2026-10-15 it reports rustls,
+      # h2 and crossbeam-epoch advisories, all fixed by
+      # `cargo update -p rustls -p h2 -p crossbeam-epoch` (lockfile-only).
+      # TODO(eng-hygiene): make blocking after that update lands.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        continue-on-error: true
+        with:
+          command: check advisories
+
+  docs:
+    name: Docs reference only real routes
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Every endpoint named in docs/reference/*.md must exist in the agent's
+      # router (crates/tt-station-agentd/src/routes.rs), with the stated method.
+      - name: Check docs/reference endpoints against the route table
+        run: python3 scripts/check-doc-routes.py
+
+  ios:
+    name: iOS app (simulator build)
+    # Never built in CI before, and it needs signing-free simulator settings
+    # and Xcode 26 (the app targets iOS 26 / Liquid Glass): allowed to fail
+    # until it has gone green once. TODO(eng-hygiene): drop continue-on-error.
+    #
+    # macos-14 images ship Xcode 15/16 only, which can't build an iOS 26 app,
+    # so this uses macos-15, whose image carries Xcode 26.
+    runs-on: macos-15
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the newest Xcode 26
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate the Xcode project (ios/project.yml)
+        run: xcodegen generate
+      - name: Build for the iOS Simulator (unsigned)
+        run: |
+          xcodebuild build \
+            -project TTStationMobile.xcodeproj \
+            -scheme TTStationMobile \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
