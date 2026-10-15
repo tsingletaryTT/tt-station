@@ -361,6 +361,8 @@ struct Inner {
     chips_resetting: Arc<std::sync::atomic::AtomicUsize>,
     /// An agent-driven bring-up (Codex, fast-models-fast) holds the whole box.
     bringup_busy: std::sync::atomic::AtomicBool,
+    /// Whether the served chat model answers (`crate::liveness`).
+    liveness: Arc<crate::liveness::Liveness>,
 }
 
 /// The serving lifecycle `GET /serve` reports. `/status` only ever says `idle`
@@ -563,6 +565,7 @@ impl AppState {
                 orchard_chips: std::sync::atomic::AtomicBool::new(false),
                 chips_resetting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 bringup_busy: std::sync::atomic::AtomicBool::new(false),
+                liveness: Arc::new(crate::liveness::Liveness::default()),
                 creations: crate::creations::Creations::new(
                     std::env::temp_dir()
                         .join(format!("tt-station-creations-{}", std::process::id())),
@@ -1002,6 +1005,11 @@ impl AppState {
 
     pub fn history(&self) -> Arc<crate::history::History> {
         Arc::clone(&self.inner.history)
+    }
+
+    /// Whether the served chat model is answering (see `crate::liveness`).
+    pub fn liveness(&self) -> Arc<crate::liveness::Liveness> {
+        Arc::clone(&self.inner.liveness)
     }
 
     pub(crate) fn tt_cli(&self) -> Option<Arc<crate::ttcli::TtCli>> {
@@ -2207,6 +2215,11 @@ struct StatusResponse {
     /// never a guessed version or a fabricated board count for hardware
     /// this agent never actually asked gozer about.
     leasing: LeasingSummary,
+    /// Whether the served chat model is answering (`crate::liveness`):
+    /// `state` is `unknown`, `ok` or `degraded`; a degraded model carries a
+    /// `reason` and the `restart` action (`POST /doctor/fix/restart_model`).
+    /// `status` stays `serving:<id>` either way -- older clients parse it.
+    model_health: crate::liveness::Health,
 }
 
 async fn get_status(
@@ -2224,6 +2237,7 @@ async fn get_status(
         device_mesh: state.device_mesh().map(str::to_string),
         mac: state.mac().map(str::to_string),
         leasing,
+        model_health: state.liveness().health(),
     })
 }
 
@@ -4567,6 +4581,8 @@ async fn get_serve(
         "eta_s": life_model_eta,
         // A start that has shown no progress for a while (community packages): seconds.
         "stalled_s": (life.phase == Phase::Starting).then(crate::community::stalled_s).flatten(),
+        // `ok`, `degraded` (loaded but not answering) or `unknown`; see `/status`'s `model_health`.
+        "health": state.liveness().health().state,
         "companion": state.companion().map(|c| {
             let life = c.lifecycle();
             serde_json::json!({

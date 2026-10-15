@@ -1420,6 +1420,11 @@ async fn main() -> Result<()> {
     // Code sessions still running in their holders: picked back up.
     tokio::spawn(tt_station_agentd::workspace::resume(state.clone()));
     tokio::spawn(tt_station_agentd::schedules::run_forever(state.clone()));
+    // Whether the served chat model still answers (not just whether it's up).
+    tokio::spawn(tt_station_agentd::liveness::watch_forever(
+        state.clone(),
+        tt_station_agentd::liveness::Config::default(),
+    ));
     tokio::spawn(tt_station_agentd::routes::record_metrics_forever(
         state.clone(),
         Some(history_path),
