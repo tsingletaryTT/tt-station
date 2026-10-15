@@ -4391,7 +4391,8 @@ async fn metrics_history(
 }
 
 /// `GET /metrics/now` (unauthed): the latest sample, the live inference view
-/// (phase, throughput, latency, media counters) and the energy/token totals.
+/// (phase, throughput, latency, media counters), the energy/token totals, and
+/// how well each model's tool calls fit their schemas (`/v1/messages`).
 async fn metrics_now(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Json<serde_json::Value> {
@@ -4400,6 +4401,7 @@ async fn metrics_now(
         "point": history.latest(),
         "inference": history.inference(),
         "totals": history.totals(),
+        "tool_calls": crate::anthropic::tool_call_health(),
     }))
 }
 
