@@ -158,16 +158,71 @@ fn event(state: &AppState, id: &str, mut e: Value) {
     }
 }
 
+/// Where recent reads of each session's events ended: `(seq of the last event,
+/// byte offset just past its line)`, a few per session (more than one app may
+/// be watching). A poll that carries on from one reads only what was added
+/// since, not the whole file.
+static READ_TO: LazyLock<Mutex<HashMap<String, Vec<ReadTo>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// `(seq of the last event read, byte offset just past its line)`.
+type ReadTo = (u64, u64);
+const READ_POINTS: usize = 4;
+
 fn events_after(state: &AppState, id: &str, after: u64) -> Vec<Value> {
-    // Event n is line n: skip straight to the cursor (a long session has hundreds
-    // of thousands of lines, and this runs about once a second while it works).
-    std::fs::read_to_string(dir(state, id).join("events.jsonl"))
-        .unwrap_or_default()
-        .lines()
-        .skip(after.saturating_sub(1) as usize)
+    let path = dir(state, id).join("events.jsonl");
+    // Carry on from the latest place a read ended at or before `after`.
+    let from = (after > 0)
+        .then(|| READ_TO.lock().expect("code").get(id).and_then(|points| points.iter().filter(|(seq, _)| *seq <= after).max().copied()))
+        .flatten();
+    let read = from.and_then(|(seq, offset)| events_from(&path, seq, offset, after)).or_else(|| events_from(&path, 0, 0, after));
+    let Some((events, end)) = read else { return vec![] };
+    if let Some(end) = end {
+        let mut all = READ_TO.lock().expect("code");
+        let points = all.entry(id.to_string()).or_default();
+        if !points.contains(&end) {
+            points.push(end);
+            points.sort_unstable();
+            if points.len() > READ_POINTS {
+                points.remove(0);
+            }
+        }
+    }
+    events
+}
+
+/// The events after `after` in the session's file, reading from byte `offset`,
+/// where event `seq + 1` begins (event n is line n), plus where this read ended
+/// (`None`: nothing there). Only whole lines are read: one being written is
+/// left for the next read. `None` when the file isn't what the offset expects
+/// (rewritten, say).
+fn events_from(path: &Path, seq: u64, offset: u64, after: u64) -> Option<(Vec<Value>, Option<ReadTo>)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) if offset == 0 => return Some((vec![], None)),
+        Err(_) => return None,
+    };
+    if f.metadata().ok()?.len() < offset {
+        return None;
+    }
+    f.seek(SeekFrom::Start(offset)).ok()?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes).ok()?;
+    let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let text = String::from_utf8_lossy(&bytes[..whole]);
+    let lines: Vec<&str> = text.lines().collect();
+    let seq_of = |l: &str| serde_json::from_str::<Value>(l).ok().and_then(|e| e["seq"].as_u64());
+    if offset > 0 && lines.first().is_some_and(|l| seq_of(l) != Some(seq + 1)) {
+        return None;
+    }
+    let end = lines.last().and_then(|l| seq_of(l)).map(|last| (last, offset + whole as u64));
+    // Lines up to `after` aren't wanted: skip them unread.
+    let events = lines
+        .iter()
+        .skip(after.saturating_sub(seq + 1) as usize)
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .filter(|e| e["seq"].as_u64().unwrap_or(0) > after)
-        .collect()
+        .collect();
+    Some((events, end))
 }
 
 // ---------------------------------------------------------------- the running agent
@@ -1529,6 +1584,43 @@ mod tests {
 
     fn session(folder: &str, sandbox: bool) -> Session {
         Session { id: "t".into(), folder: folder.into(), title: "t".into(), created: 0, sandbox, policy: "ask".into(), claude_session: None, last: 0, always: vec![], think: false }
+    }
+
+    #[test]
+    fn polls_read_only_the_events_added_since_the_last_one() {
+        use std::io::Write;
+        let home = std::env::temp_dir().join(format!("tt-code-events-{}", std::process::id()));
+        let state = AppState::new("t".into(), "1xBH".into(), Arc::new(crate::serving::dstack::DstackBackend)).with_config_dir(home.clone());
+        let id = "ev-poll";
+        std::fs::create_dir_all(dir(&state, id)).unwrap();
+        let seqs = |v: Vec<Value>| v.iter().map(|e| e["seq"].as_u64().unwrap()).collect::<Vec<_>>();
+        assert!(events_after(&state, id, 0).is_empty(), "no file yet");
+        for n in 0..5 {
+            event(&state, id, json!({ "kind": "delta", "text": n.to_string() }));
+        }
+        // No cursor: everything, as before.
+        assert_eq!(seqs(events_after(&state, id, 0)), [1, 2, 3, 4, 5]);
+        assert_eq!(READ_TO.lock().unwrap()[id], [(5, std::fs::metadata(dir(&state, id).join("events.jsonl")).unwrap().len())]);
+        event(&state, id, json!({ "kind": "delta", "text": "5" }));
+        assert_eq!(seqs(events_after(&state, id, 5)), [6]);
+        // An earlier cursor (another app) is served too.
+        assert_eq!(seqs(events_after(&state, id, 3)), [4, 5, 6]);
+        assert!(events_after(&state, id, 6).is_empty());
+        // A line still being written waits for the next poll.
+        let path = dir(&state, id).join("events.jsonl");
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(f, "{{\"kind\":\"delta\",\"seq\":7").unwrap();
+        assert!(events_after(&state, id, 6).is_empty());
+        writeln!(f, "}}").unwrap();
+        assert_eq!(seqs(events_after(&state, id, 6)), [7]);
+        // The file rewritten under it: read from the start again.
+        std::fs::write(&path, "{\"kind\":\"start\",\"seq\":1}\n{\"kind\":\"notice\",\"seq\":2}\n").unwrap();
+        assert_eq!(seqs(events_after(&state, id, 1)), [2]);
+        // Rewritten longer: what was at the old place isn't event 8 any more.
+        let lines: String = (1..=30).map(|n| format!("{{\"kind\":\"notice\",\"seq\":{n}}}\n")).collect();
+        std::fs::write(&path, lines).unwrap();
+        assert_eq!(seqs(events_after(&state, id, 7)), (8..=30).collect::<Vec<u64>>());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
