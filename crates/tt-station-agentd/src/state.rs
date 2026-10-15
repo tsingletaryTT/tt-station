@@ -117,6 +117,7 @@ pub(crate) struct PerAgent {
     pub(crate) bench: crate::bench::PerAgent,
     pub(crate) community: crate::community::PerAgent,
     pub(crate) embeddings: crate::embeddings::PerAgent,
+    pub(crate) evals: crate::evals::PerAgent,
     pub(crate) favorites: crate::favorites::PerAgent,
     pub(crate) idle: crate::idle::PerAgent,
     pub(crate) library: crate::library::PerAgent,

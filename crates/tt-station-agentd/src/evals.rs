@@ -40,7 +40,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path as UrlPath, State};
@@ -140,8 +140,18 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
-static CURRENT: LazyLock<Mutex<Option<Eval>>> = LazyLock::new(|| Mutex::new(None));
-static STOP: AtomicBool = AtomicBool::new(false);
+/// What `crate::evals` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// The evaluation running now, if any.
+    current: Mutex<Option<Eval>>,
+    /// Asked to stop the running evaluation.
+    stop: AtomicBool,
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().evals
+}
 
 fn dir(state: &AppState) -> PathBuf {
     state.config_dir().join("evals")
@@ -192,15 +202,15 @@ pub fn all_in(d: &std::path::Path) -> Vec<Eval> {
     out
 }
 
-fn progress(f: impl FnOnce(&mut Eval)) {
-    if let Some(e) = CURRENT.lock().expect("evals").as_mut() {
+fn progress(state: &AppState, f: impl FnOnce(&mut Eval)) {
+    if let Some(e) = mine(state).current.lock().expect("evals").as_mut() {
         f(e);
     }
 }
 
 /// Save the evaluation in progress as it stands, so a restart can resume it.
 fn checkpoint(state: &AppState) {
-    let current = CURRENT.lock().expect("evals").clone();
+    let current = mine(state).current.lock().expect("evals").clone();
     if let Some(e) = current {
         save(state, &e);
     }
@@ -289,7 +299,7 @@ pub async fn resume_within(state: AppState, wait: Duration) {
     let Some(mut e) = resumable else { return };
     let Some(ep) = serving else { return };
     {
-        let mut cur = CURRENT.lock().expect("evals");
+        let mut cur = mine(&state).current.lock().expect("evals");
         if cur.as_ref().is_some_and(|c| c.status == "running") {
             drop(cur);
             interrupt(&mut e);
@@ -976,7 +986,7 @@ pub async fn run(state: &AppState, agent: bool) -> Result<Eval, String> {
     let context = served_context(state).await;
     let id = new_id();
     {
-        let mut cur = CURRENT.lock().expect("evals");
+        let mut cur = mine(state).current.lock().expect("evals");
         if cur.as_ref().is_some_and(|e| e.status == "running") {
             return Err("An evaluation is already running.".into());
         }
@@ -995,7 +1005,7 @@ pub async fn run(state: &AppState, agent: bool) -> Result<Eval, String> {
     drive(state, &ep.base_url, &ep.model, context, agent).await
 }
 
-/// Run (or carry on) the evaluation in [`CURRENT`] to the end, and save it.
+/// Run (or carry on) the current evaluation to the end, and save it.
 async fn drive(
     state: &AppState,
     base_url: &str,
@@ -1003,7 +1013,7 @@ async fn drive(
     context: Option<u64>,
     agent: bool,
 ) -> Result<Eval, String> {
-    STOP.store(false, Ordering::SeqCst);
+    mine(state).stop.store(false, Ordering::SeqCst);
     let m = Arc::new(Model {
         http: match reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -1012,7 +1022,7 @@ async fn drive(
         {
             Ok(c) => c,
             Err(e) => {
-                if let Some(mut cur) = CURRENT.lock().expect("evals").take() {
+                if let Some(mut cur) = mine(state).current.lock().expect("evals").take() {
                     cur.status = "failed".into();
                     cur.finished = Some(now());
                     cur.error = Some(e.to_string());
@@ -1025,7 +1035,12 @@ async fn drive(
         model: model.to_string(),
     });
     let result = steps(state, &m, base_url, context, agent).await;
-    let mut e = CURRENT.lock().expect("evals").take().unwrap_or_default();
+    let mut e = mine(state)
+        .current
+        .lock()
+        .expect("evals")
+        .take()
+        .unwrap_or_default();
     e.finished = Some(now());
     e.activity = None;
     match result {
@@ -1034,7 +1049,7 @@ async fn drive(
             e.overall = overall(&e.categories);
         }
         Err(why) => {
-            e.status = if STOP.load(Ordering::SeqCst) {
+            e.status = if mine(state).stop.load(Ordering::SeqCst) {
                 "stopped".into()
             } else {
                 "failed".into()
@@ -1062,14 +1077,15 @@ async fn steps(
     agent: bool,
 ) -> Result<(), String> {
     let stop = || {
-        if STOP.load(Ordering::SeqCst) {
+        if mine(state).stop.load(Ordering::SeqCst) {
             Err("Stopped.".to_string())
         } else {
             Ok(())
         }
     };
     // What a resumed evaluation already has.
-    let (measured, done): (bool, Vec<String>) = CURRENT
+    let (measured, done): (bool, Vec<String>) = mine(state)
+        .current
         .lock()
         .expect("evals")
         .as_ref()
@@ -1082,7 +1098,7 @@ async fn steps(
         .unwrap_or_default();
     if !measured {
         match crate::bench::run(state).await {
-            Ok(b) => progress(|e| {
+            Ok(b) => progress(state, |e| {
                 e.speed = Speed {
                     ttft_s: b.ttft_s,
                     single_tps: b.single_tps,
@@ -1103,7 +1119,7 @@ async fn steps(
             continue;
         }
         stop()?;
-        progress(|e| e.activity = Some(label.into()));
+        progress(state, |e| e.activity = Some(label.into()));
         let c = match key {
             "tools" => tool_use(m).await,
             "code" => code(m).await,
@@ -1111,7 +1127,7 @@ async fn steps(
             "instructions" => instructions(m).await,
             _ => long_context(m, context).await,
         };
-        progress(|e| e.categories.push(c));
+        progress(state, |e| e.categories.push(c));
         // Each finished category survives a restart.
         checkpoint(state);
     }
@@ -1119,7 +1135,9 @@ async fn steps(
         return Ok(());
     }
     stop()?;
-    progress(|e| e.activity = Some("Testing agent reliability".into()));
+    progress(state, |e| {
+        e.activity = Some("Testing agent reliability".into())
+    });
     let server = crate::reliability::Server {
         http: m.http.clone(),
         base_url: base_url.to_string(),
@@ -1127,16 +1145,19 @@ async fn steps(
         context,
     };
     let say = |what: String| {
-        progress(|e| e.activity = Some(format!("Testing agent reliability: {what}")))
+        progress(state, |e| {
+            e.activity = Some(format!("Testing agent reliability: {what}"))
+        })
     };
     let (report, trials) = crate::reliability::run(
         &server,
         &crate::reliability::Options::default(),
         &say,
-        &|| STOP.load(Ordering::SeqCst),
+        &|| mine(state).stop.load(Ordering::SeqCst),
     )
     .await?;
-    if let Some(id) = CURRENT
+    if let Some(id) = mine(state)
+        .current
         .lock()
         .expect("evals")
         .as_ref()
@@ -1144,7 +1165,7 @@ async fn steps(
     {
         save_trials(&dir(state), &id, &trials);
     }
-    progress(|e| {
+    progress(state, |e| {
         e.categories.push(agent_category(&report));
         e.reliability = Some(report);
     });
@@ -1403,7 +1424,7 @@ pub fn recommend(evals: &[Eval]) -> Vec<Pick> {
 
 /// `GET /evals`: past evaluations (newest first), the one running, and picks.
 pub(crate) async fn get_evals(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
-    let running = CURRENT.lock().expect("evals").clone();
+    let running = mine(&state).current.lock().expect("evals").clone();
     // The one running is saved as it goes; it's shown as `running`, not twice.
     let evals: Vec<Eval> = all(&state)
         .into_iter()
@@ -1430,7 +1451,8 @@ pub(crate) async fn post_eval(
             "Nothing is serving. Start a chat model, then evaluate it.",
         ));
     }
-    if CURRENT
+    if mine(&state)
+        .current
         .lock()
         .expect("evals")
         .as_ref()
@@ -1450,13 +1472,13 @@ pub(crate) async fn post_eval(
     // Let it register, so the reply carries it.
     tokio::time::sleep(Duration::from_millis(200)).await;
     Ok(Json(
-        json!({ "running": CURRENT.lock().expect("evals").clone() }),
+        json!({ "running": mine(&state).current.lock().expect("evals").clone() }),
     ))
 }
 
 /// `POST /evals/stop`
-pub(crate) async fn post_stop(_auth: BearerAuth) -> Json<Value> {
-    STOP.store(true, Ordering::SeqCst);
+pub(crate) async fn post_stop(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
+    mine(&state).stop.store(true, Ordering::SeqCst);
     Json(json!({ "stopping": true }))
 }
 
