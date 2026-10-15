@@ -5,8 +5,11 @@
 
 import { strToU8, zipSync } from "fflate";
 
+/** A report's file name without its extension: safe characters only, 60 at most. */
+const stem = (title: string) => title.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "report";
+
 /** A report's file name, from its title. */
-export const fileName = (title: string, ext: string) => `${title.replace(/[^\w\- ]+/g, "").trim().slice(0, 60) || "report"}.${ext}`;
+export const fileName = (title: string, ext: string) => `${stem(title)}.${ext}`;
 
 /** A finished report: the title that names its file, and its text (none yet if empty). */
 export interface ReportText { title: string; text: string | null }
@@ -16,8 +19,11 @@ export function reportFiles(reports: ReportText[]): Record<string, Uint8Array> {
   const files: Record<string, Uint8Array> = {};
   for (const r of reports) {
     if (!r.text) continue;
-    let name = fileName(r.title, "md");
-    for (let n = 2; name in files; n++) name = fileName(`${r.title} ${n}`, "md");
+    // The number goes on after the name is cut to length, or a long title's
+    // " 2" would be cut off and the name would never change.
+    const base = stem(r.title);
+    let name = `${base}.md`;
+    for (let n = 2; name in files; n++) name = `${base} ${n}.md`;
     files[name] = strToU8(r.text);
   }
   return files;

@@ -48,6 +48,17 @@ describe("reportFiles", () => {
     expect(text(files)).toEqual({ "Same.md": "one", "Same 2.md": "two", "Same 3.md": "three" });
   });
 
+  it("numbers duplicates of a title cut to length, instead of looping forever", () => {
+    const long = "A".repeat(80);
+    const files = reportFiles([{ title: long, text: "one" }, { title: long, text: "two" }]);
+    expect(text(files)).toEqual({ [`${"A".repeat(60)}.md`]: "one", [`${"A".repeat(60)} 2.md`]: "two" });
+  });
+
+  it("numbers duplicates of an unusable title as more reports", () => {
+    const files = reportFiles([{ title: "???", text: "one" }, { title: "!!!", text: "two" }]);
+    expect(text(files)).toEqual({ "report.md": "one", "report 2.md": "two" });
+  });
+
   it("skips reports with no text", () => {
     const files = reportFiles([{ title: "Empty", text: "" }, { title: "None", text: null }, { title: "Done", text: "ok" }]);
     expect(Object.keys(files)).toEqual(["Done.md"]);
