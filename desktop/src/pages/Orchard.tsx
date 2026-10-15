@@ -55,7 +55,7 @@ export function OrchardBody() {
   return (
     <>
       {!s && <span className="muted">Looking for tt-orchard…</span>}
-      {s && !s.installed && <Admonition variant="info" subtle>tt-orchard isn't on this box yet. Set it up below.</Admonition>}
+      {s && !s.installed && <Admonition variant="info" subtle>Quick port runs on tt-orchard, which isn't on this box yet. Set it up below.</Admonition>}
       {s && !s.ready && <OrchardSetup s={s} onChanged={status.refresh} />}
       {s?.notes?.map((n) => <Admonition key={n.text} variant="info" subtle size="sm">{n.text}{n.command ? <> <code>{n.command}</code></> : null}</Admonition>)}
 
@@ -67,7 +67,7 @@ export function OrchardBody() {
       {runs.length > 0 && (
         <>
           <div className="row-between wrap">
-            <div className="run-chips" role="tablist" aria-label="Orchard runs">
+            <div className="run-chips" role="tablist" aria-label="Quick port runs">
               {runs.map((r) => (
                 <button key={r.run_name} role="tab" aria-selected={pick?.run_name === r.run_name} className={`run-chip ${pick?.run_name === r.run_name ? "on" : ""}`} onClick={() => setSelected(r.run_name)}>
                   <span className={`run-dot ${r.live ? "live" : r.state === "ready-for-operator-review" ? "done" : "stopped"}`} />
@@ -90,7 +90,7 @@ export function OrchardBody() {
 function OrchardSetup({ s, onChanged }: { s: OrchardStatus; onChanged: () => void }) {
   return (
     <Card>
-      <div className="row-between"><b>Orchard needs setting up first</b>
+      <div className="row-between"><b>Quick port needs setting up first</b>
         {s.setup_running ? <Badge variant="info" subtle>Setting up…</Badge>
           : <Button size="sm" onClick={async () => { try { await post("/orchard/setup"); onChanged(); } catch (e) { toastError(e); } }}>Set it up</Button>}
       </div>
@@ -137,7 +137,7 @@ function StartOrchard({ initial, packaging, lab, canClose, onClose, onStarted }:
     if (!pre) return;
     try {
       await post("/orchard/runs", { model: pre.model, stop_serving: stopServing, base: base || undefined, refuse_credentials_visible: refuse });
-      toastOk(`Orchard is bringing up ${short(pre.model)}${lab ? `, testing on ${lab.host}` : ""}. You'll get a notification at each stage.`);
+      toastOk(`Quick port is bringing up ${short(pre.model)}${lab ? `, testing on ${lab.host}` : ""}. You'll get a notification at each stage.`);
       onStarted();
     } catch (e) {
       if (e instanceof ApiError && e.status === 409 && (e.body as { needs_stop?: boolean })?.needs_stop) {
@@ -151,7 +151,7 @@ function StartOrchard({ initial, packaging, lab, canClose, onClose, onStarted }:
   return (
     <Card className="start-card">
       <div className="row-between">
-        <Eyebrow>Bring up a model with Orchard</Eyebrow>
+        <Eyebrow>Bring up a model with a Quick port</Eyebrow>
         {canClose && <Button size="xs" variant="ghost" onClick={onClose}>Close</Button>}
       </div>
       <div className="row">
@@ -200,7 +200,7 @@ function StartOrchard({ initial, packaging, lab, canClose, onClose, onStarted }:
             </div>
           </details>
           <div className="row wrap" style={{ gap: 10 }}>
-            {!pre.blocked && <Button onClick={() => start()}>{pre.resuming ? "Resume with Orchard" : "Bring it up with Orchard"}</Button>}
+            {!pre.blocked && <Button onClick={() => start()}>{pre.resuming ? "Resume the Quick port" : "Start the Quick port"}</Button>}
             <Switch size="sm" label={lab ? "Package it (not with a lab box yet)" : "Package it to serve when it's done"} checked={packaging} disabled={!!lab}
               onChange={async (e) => { try { await post("/orchard/packaging", { enabled: e.target.checked }); onStarted(); } catch (err) { toastError(err); } }} />
             <button className="link-button" onClick={() => setShowChecks((v) => !v)}>{showChecks ? "Hide checks" : "All checks"}</button>
@@ -286,7 +286,7 @@ function LabCard({ lab, packaging, onChanged }: { lab: OrchardLab | null; packag
             <TextInput size="sm" value={form.path} onChange={(e) => setForm({ ...form, path: e.target.value })} placeholder="PATH on the test box (comma-separated)" />
             <TextInput size="sm" value={form.test_python} onChange={(e) => setForm({ ...form, test_python: e.target.value })} placeholder="Test python on the test box (optional)" />
             <TextInput size="sm" value={form.python} onChange={(e) => setForm({ ...form, python: e.target.value })} placeholder="Python for the test box helper (default python3)" />
-            <TextInput size="sm" value={form.gozer} onChange={(e) => setForm({ ...form, gozer: e.target.value })} placeholder="gozer on the test box (default gozer)" />
+            <TextInput size="sm" value={form.gozer} onChange={(e) => setForm({ ...form, gozer: e.target.value })} placeholder="Chip scheduler (gozer) on the test box (default gozer)" />
           </div>
           <span className="muted" style={{ fontSize: 12 }}>
             Before the first run: this box must ssh to the test box with a key (no password prompt), and the root must exist on both boxes, owned by you (<code>sudo mkdir -p /srv/orchard && sudo chown "$USER" /srv/orchard</code>). The run's runs, caches and Hugging Face cache must sit under the root.

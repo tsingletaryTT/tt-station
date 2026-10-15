@@ -18,11 +18,14 @@ import { ThemeSwitcher } from "@tenstorrent/vesper/theme-switcher";
 import { Card, copyText, Empty, Eyebrow, Page, readable, Spark, toastError, toastOk, usePoll } from "../ui";
 import { Speaker, type VoiceStatus } from "../voice";
 import { ask, askText } from "../dialog";
+import { DevToolsSetting } from "../DevToolsSetting";
+import { deleteWithUndo, UNDO_MS } from "../undo";
+import { addToast } from "@tenstorrent/vesper/toast";
 
 type Section = "general" | "tori" | "models" | "power" | "people" | "phone" | "about";
 const SECTIONS: { id: Section; label: string; hint: string }[] = [
   { id: "general", label: "General", hint: "This app, start at login, keys" },
-  { id: "tori", label: "Tori and voice", hint: "Shortcut, voice, speed" },
+  { id: "tori", label: "Assistant (Tori) and voice", hint: "Shortcut, voice, speed" },
   { id: "models", label: "Models", hint: "Which models the box uses" },
   { id: "power", label: "Power and energy", hint: "Power, schedules, energy use" },
   { id: "people", label: "People", hint: "You and your household" },
@@ -89,9 +92,10 @@ function Desktop() {
         <Switch label="Open TT Station when I log in (it waits in the tray)" checked={atLogin}
           onChange={async (e) => setAtLogin(await window.ttDesktop!.startAtLogin(e.target.checked))} />
       )}
+      <DevToolsSetting />
       <TokenStorage />
       <div className="list">
-        {[["Ctrl 1 – 8", "Jump between places"], ["Ctrl Enter", "Make (in Studio)"]].map(([k, v]) => (
+        {[["Ctrl 1 – 9", "Jump between places (in sidebar order)"], ["Ctrl Enter", "Make (in Studio)"]].map(([k, v]) => (
           <div key={k} className="list-row"><span className="kbd">{k}</span><span className="muted">{v}</span></div>
         ))}
       </div>
@@ -378,17 +382,28 @@ function Schedules() {
   const [days, setDays] = useState<number[]>([1, 2, 3, 4, 5]);
   const title = (id: string) => modes.data?.modes.find((m) => m.id === id)?.title ?? id;
   const set = async (fn: () => Promise<{ schedules: Schedule[] }>) => { try { schedules.setData(await fn()); } catch (e) { toastError(e); } };
+  const [gone, setGone] = useState<string[]>([]);
+  const remove = (s: Schedule) => {
+    const undo = deleteWithUndo({
+      hide: () => setGone((g) => [...g, s.id]),
+      show: () => setGone((g) => g.filter((x) => x !== s.id)),
+      remove: async () => schedules.setData(await del<{ schedules: Schedule[] }>(`/schedules/${s.id}`)),
+      removed: () => setGone((g) => g.filter((x) => x !== s.id)),
+      failed: toastError,
+    });
+    addToast({ content: `Schedule for ${s.time} deleted.`, timeout: UNDO_MS, action: { content: "Undo", altText: "Bring the schedule back", handler: undo } });
+  };
   return (
     <Card>
       <Eyebrow>Schedules</Eyebrow>
       <Typography variant="copy-sm" className="muted">Switch the box's mode at set times. Never interrupts a silicon check, a bring-up or a transcription.</Typography>
       <div className="list">
-        {(schedules.data?.schedules ?? []).map((s) => (
+        {(schedules.data?.schedules ?? []).filter((s) => !gone.includes(s.id)).map((s) => (
           <div key={s.id} className="list-row">
             <span className="mono" style={{ fontSize: 18 }}>{s.time}</span>
             <div className="grow"><b>{title(s.mode)}</b><div className="muted" style={{ fontSize: 12 }}>{s.days.map((d) => DAYS[d]).join(" ")}</div></div>
-            <Switch size="sm" aria-label="Enabled" checked={s.enabled} onChange={(e) => set(() => patch(`/schedules/${s.id}`, { enabled: e.target.checked }))} />
-            <Button size="xs" variant="ghost" onClick={() => set(() => del(`/schedules/${s.id}`))}>Delete</Button>
+            <Switch size="sm" aria-label={`${s.time} schedule on`} checked={s.enabled} onChange={(e) => set(() => patch(`/schedules/${s.id}`, { enabled: e.target.checked }))} />
+            <Button size="xs" variant="ghost" aria-label={`Delete the ${s.time} schedule`} onClick={() => remove(s)}>Delete</Button>
           </div>
         ))}
       </div>
@@ -397,7 +412,7 @@ function Schedules() {
         <div style={{ width: 120 }}><TextInput size="sm" type="time" value={time} onChange={(e) => setTime(e.target.value)} /></div>
         <div className="row" style={{ gap: 4 }}>
           {DAYS.map((d, i) => (
-            <button key={d} className={`kbd`} style={{ cursor: "pointer", background: days.includes(i) ? "var(--vesper-teal-400)" : "transparent", color: "var(--vesper-text-primary)" }}
+            <button key={d} className={`kbd`} aria-label={d} aria-pressed={days.includes(i)} style={{ cursor: "pointer", background: days.includes(i) ? "var(--vesper-teal-400)" : "transparent", color: "var(--vesper-text-primary)" }}
               onClick={() => setDays((x) => (x.includes(i) ? x.filter((y) => y !== i) : [...x, i].sort()))}>{d[0]}</button>
           ))}
         </div>

@@ -14,13 +14,7 @@ import { Typography } from "@tenstorrent/vesper/typography";
 import { Admonition } from "@tenstorrent/vesper/admonition";
 import { ago, get } from "../api";
 import { Card, copyText, Empty, Eyebrow, Page, usePoll } from "../ui";
-
-export interface FeedItem {
-  id: string; url: string; kind: "release" | "entry" | "article"; title: string; summary: string; date: string | null;
-  official: boolean; topics: string[]; project: string | null; version: string | null;
-  installed: string | null; update: boolean | null;
-}
-export interface Feed { items: FeedItem[]; updated: number | null; stale: boolean; available: boolean; source: string }
+import { type Feed, type FeedItem, when } from "./WhatsNewCard";
 
 type Kind = "release" | "entry" | "article";
 type Who = "all" | "official" | "community";
@@ -38,12 +32,6 @@ const topicName = (t: string) => t.replace(/-/g, " ").replace(/^ai /, "AI ").rep
 function Summary({ text }: { text: string }) {
   const parts = text.replace(/\*\*/g, "").split("`");
   return <>{parts.map((p, i) => (i % 2 ? <code key={i}>{p}</code> : <Fragment key={i}>{p}</Fragment>))}</>;
-}
-
-function when(date: string | null) {
-  if (!date) return "";
-  const t = Date.parse(date);
-  return Number.isNaN(t) ? "" : ago(Math.floor(t / 1000));
 }
 
 function ItemCard({ it }: { it: FeedItem }) {
@@ -155,27 +143,3 @@ export function Discover() {
   );
 }
 
-/** A small Home card: updates for this box, and the latest releases. */
-export function WhatsNewCard({ onOpen }: { onOpen: () => void }) {
-  const feed = usePoll(() => get<Feed>("/discover"), 30 * 60 * 1000);
-  const items = feed.data?.items ?? [];
-  if (!items.length) return null;
-  const updates = items.filter((i) => i.update === true);
-  const latest = items.filter((i) => i.kind === "release").sort((a, b) => (b.date ?? "").localeCompare(a.date ?? "")).slice(0, 3);
-  return (
-    <Card onClick={onOpen}>
-      <div className="row-between">
-        <Eyebrow>What's new</Eyebrow>
-        {updates.length > 0 && <Badge size="sm" variant="warning" subtle>{updates.length} update{updates.length > 1 ? "s" : ""} for this box</Badge>}
-      </div>
-      <div className="list">
-        {latest.map((it) => (
-          <div key={it.id} className="list-row">
-            <span className="grow" style={{ fontSize: 13 }}>{it.title}</span>
-            <span className="muted" style={{ fontSize: 12 }}>{when(it.date)}</span>
-          </div>
-        ))}
-      </div>
-    </Card>
-  );
-}

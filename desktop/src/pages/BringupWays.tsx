@@ -30,15 +30,15 @@ export type Way = "orchard" | "agent";
 
 const WAYS: { id: Way | "community"; emoji: string; title: string; tag: string; when: string; how: string; takes: string }[] = [
   {
-    id: "orchard", emoji: "🌱", title: "Orchard", tag: "Graft",
+    id: "orchard", emoji: "🌱", title: "Quick port", tag: "Graft",
     when: "Its architecture already runs here: a fine-tune or post-train of a model in Models.",
     how: "Grafts the new weights onto the model that runs, then tests them on 1, 2 and 4 chips against a CPU reference. Its agents run on this box's own models: no account.",
     takes: "A few hours",
   },
   {
-    id: "agent", emoji: "🤖", title: "Agent port", tag: "Codex or Claude Code",
+    id: "agent", emoji: "🤖", title: "Agent port", tag: "Coding agent",
     when: "A new architecture: nothing like it runs here yet.",
-    how: "An agent writes the model code in tt-metal through eleven checked stages, and asks you about risky steps. Needs a Codex or Claude account.",
+    how: "An agent writes the model code in tt-metal through eleven checked stages, and asks you about risky steps. Needs an account with OpenAI (for Codex) or Anthropic (for Claude Code).",
     takes: "Many hours, all four chips",
   },
   {
@@ -168,16 +168,16 @@ function WhichWay({ onPick, compact }: { onPick: (w: Way, model: string) => void
           <div className="row" style={{ gap: 10, alignItems: "flex-start" }}>
             <span style={{ fontSize: 22 }} aria-hidden="true">{way === "orchard" ? "🌱" : way === "codex" ? "🤖" : way === "community" ? "📦" : "✅"}</span>
             <div className="stack grow" style={{ gap: 4 }}>
-              <Typography variant="heading-xs">{way === "orchard" ? "Orchard: graft it" : way === "codex" ? "An agent port" : way === "community" ? "A community package" : "No bring-up needed"}</Typography>
+              <Typography variant="heading-xs">{way === "orchard" ? "Quick port: graft it" : way === "codex" ? "An agent port" : way === "community" ? "A community package" : "No bring-up needed"}</Typography>
               <span style={{ fontSize: 14 }}>{survey.why}</span>
             </div>
           </div>
           <div className="row wrap" style={{ gap: 8 }}>
-            {way === "orchard" && <Button onClick={() => onPick("orchard", survey.model)}>Graft it with Orchard</Button>}
+            {way === "orchard" && <Button onClick={() => onPick("orchard", survey.model)}>Graft it with a Quick port</Button>}
             {way === "codex" && <Button onClick={() => onPick("agent", survey.model)}>Port it with an agent</Button>}
             {way === "community" && survey.community_package && <Button onClick={() => openCommunity(survey.community_package!)}>Open {short(survey.community_package)}</Button>}
             {way === "none" && <Button onClick={() => navigate("models")}>Open Models</Button>}
-            {way !== "orchard" && way !== "none" && survey.same_architecture.length > 0 && <Button variant="ghost" onClick={() => onPick("orchard", survey.model)}>Graft it with Orchard instead</Button>}
+            {way !== "orchard" && way !== "none" && survey.same_architecture.length > 0 && <Button variant="ghost" onClick={() => onPick("orchard", survey.model)}>Graft it with a Quick port instead</Button>}
             {way !== "codex" && way !== "none" && <Button variant="ghost" onClick={() => onPick("agent", survey.model)}>Port it with an agent instead</Button>}
           </div>
         </div>

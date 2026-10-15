@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-// Hardware: the four Blackhole chips, live and over the last hour; the chips
-// as tt-toplike draws them; who holds which board (gozer); the serving log;
-// and the silicon check: gpt-oss straight on the chips with tt-lab.
+// Hardware: the chips, live and over the last hour; the chips as tt-toplike
+// draws them; the serving log; and, with developer tools on, who holds which
+// chips (the chip scheduler, gozer) and the silicon check (gpt-oss straight on
+// the chips with tt-lab).
 
 import { useState } from "react";
 import { Button } from "@tenstorrent/vesper/button";
@@ -13,8 +14,9 @@ import { TextArea } from "@tenstorrent/vesper/text-area";
 import { Switch } from "@tenstorrent/vesper/switch";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { Admonition } from "@tenstorrent/vesper/admonition";
-import { authHeader, type Chip, get, short } from "../api";
-import { Card, Eyebrow, Page, Spark, tempTone, toastError, usePoll, useTelemetry } from "../ui";
+import { authHeader, boxName, type Chip, get, hardwareLabel, short, type Status } from "../api";
+import { Card, Eyebrow, Page, Spark, tempTone, tempWord, toastError, usePoll, useTelemetry } from "../ui";
+import { useDevTools } from "../devtools";
 import { TopTerm } from "../TopTerm";
 import { askToStop } from "../dialog";
 
@@ -27,14 +29,16 @@ const at = (t: number) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-d
 export function Hardware() {
   const { chips, live, error } = useTelemetry(true);
   const history = usePoll(() => get<{ points: HistoryPoint[]; step_s: number }>("/metrics/history?range=1h"), 15000);
-  const leases = usePoll(() => get<{ available: boolean; leases: Lease[] }>("/leases"), 10000);
+  const devTools = useDevTools();
+  const leases = usePoll(() => (devTools ? get<{ available: boolean; leases: Lease[] }>("/leases") : Promise.resolve(null)), devTools ? 10000 : 600000, [devTools]);
+  const status = usePoll(() => get<Status>("/status"), 5 * 60 * 1000);
   const logs = usePoll(() => get<{ lines: string[] }>("/logs?tail=60"), 8000);
   const points = history.data?.points ?? [];
   const times = points.map((p) => at(p.t));
   const watts = chips.reduce((s, c) => s + (c.powerW ?? 0), 0);
 
   return (
-    <Page title="Hardware" subtitle="QuietBox 2 · two p300c boards · four Blackhole chips">
+    <Page title="Hardware" subtitle={[boxName, hardwareLabel(status.data)].filter(Boolean).join(" · ")}>
       {error && <Admonition variant="warning" subtle size="sm">Chip readings aren't live: {error}</Admonition>}
 
       <div className="grid grid-4">
@@ -47,7 +51,7 @@ export function Hardware() {
         <TopTerm />
       </Card>
 
-      <div className="grid grid-2">
+      <div className={devTools ? "grid grid-2" : ""}>
         <Card>
           <Eyebrow>Last hour</Eyebrow>
           <div className="stack" style={{ gap: 18 }}>
@@ -65,8 +69,9 @@ export function Hardware() {
             </div>
           </div>
         </Card>
-        <Card>
-          <div className="row-between"><Eyebrow>Who has the chips</Eyebrow>{leases.data?.available === false && <Badge size="sm" subtle variant="contrast">gozer not installed</Badge>}</div>
+        {devTools && <Card>
+          <div className="row-between"><Eyebrow>Who has the chips</Eyebrow>{leases.data?.available === false && <Badge size="sm" subtle variant="contrast">Chip scheduler not installed</Badge>}</div>
+          <Typography variant="copy-xs" className="muted">The chip scheduler (gozer) hands chips to one job at a time, so two never collide.</Typography>
           <div className="list">
             {(leases.data?.leases ?? []).map((l) => (
               <div key={l.chip} className="list-row">
@@ -76,7 +81,7 @@ export function Hardware() {
               </div>
             ))}
           </div>
-        </Card>
+        </Card>}
       </div>
 
       <div>
@@ -86,7 +91,7 @@ export function Hardware() {
         </Card>
       </div>
 
-      <Lab />
+      {devTools && <Lab />}
     </Page>
   );
 }
@@ -100,6 +105,7 @@ function ChipPanel({ chip: c, live, temps, power, times }: { chip: Chip; live: b
         <div className="chip-temp" style={{ color: tempTone(c.tempC), fontSize: 34 }}>
           {c.tempC != null ? c.tempC.toFixed(0) : "–"}<span className="stat-unit">°C</span>
         </div>
+        <Typography variant="copy-xs" className="muted">{tempWord(c.tempC)}</Typography>
         <div className="bar" style={{ margin: "8px 0" }}>
           <i style={{ width: `${Math.min(100, Math.max(0, (((c.tempC ?? 25) - 25) / (throttle - 25)) * 100))}%`, background: tempTone(c.tempC) }} />
         </div>

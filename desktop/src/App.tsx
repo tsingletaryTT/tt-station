@@ -4,7 +4,7 @@
 // The app's frame: a sidebar of places, the box's live state at the bottom of
 // it, and the current place on the right. Routes live under /app/.
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { type ComponentType, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "@tenstorrent/vesper/icons";
 import type { IconKind } from "@tenstorrent/vesper/icons";
@@ -13,23 +13,31 @@ import { StatusIndicator } from "@tenstorrent/vesper/status-indicator";
 import { Button } from "@tenstorrent/vesper/button";
 import { TextInput } from "@tenstorrent/vesper/text-input";
 import { Typography } from "@tenstorrent/vesper/typography";
-import { boxName, get, onAnotherComputer, openBoxShell, type Serve, setToken, short, signIn } from "./api";
-import { toastError, usePoll, useTelemetry, tempTone, useToriShortcut } from "./ui";
+import { boxName, get, onAnotherComputer, openBoxShell, setToken, short, signIn } from "./api";
+import { pressable, toastError, useServe, useTelemetry, tempTone, tempWord, useToriShortcut } from "./ui";
 import { Home } from "./pages/Home";
-import { Chat } from "./pages/Chat";
-import { Studio } from "./pages/Studio";
-import { Models } from "./pages/Models";
-import { BringupPage } from "./pages/BringupWays";
-import { Research } from "./pages/Research";
-import { Code } from "./pages/Code";
-import { Terminals } from "./pages/Terminals";
-import { Hardware } from "./pages/Hardware";
-import { Connect } from "./pages/Connect";
-import { Discover } from "./pages/Discover";
-import { Settings } from "./pages/Settings";
-import { Routines } from "./pages/Routines";
-import { Library } from "./pages/Library";
-import { ToriWindow } from "./Tori";
+import { adoptFromBox, placeVisible, storedChoice, useDevTools } from "./devtools";
+import { OfflineBanner } from "./OfflineBanner";
+import { useConnectivity } from "./connectivity";
+
+// Every place but Home loads when it's first opened, so the app starts on Home
+// without waiting for screens it may not need.
+const named = <K extends string>(load: () => Promise<Record<K, ComponentType>>, name: K) =>
+  lazy(() => load().then((m) => ({ default: m[name] })));
+const Chat = named(() => import("./pages/Chat"), "Chat");
+const Studio = named(() => import("./pages/Studio"), "Studio");
+const Models = named(() => import("./pages/Models"), "Models");
+const BringupPage = named(() => import("./pages/BringupWays"), "BringupPage");
+const Research = named(() => import("./pages/Research"), "Research");
+const Code = named(() => import("./pages/Code"), "Code");
+const Terminals = named(() => import("./pages/Terminals"), "Terminals");
+const Hardware = named(() => import("./pages/Hardware"), "Hardware");
+const Connect = named(() => import("./pages/Connect"), "Connect");
+const Discover = named(() => import("./pages/Discover"), "Discover");
+const Settings = named(() => import("./pages/Settings"), "Settings");
+const Routines = named(() => import("./pages/Routines"), "Routines");
+const Library = named(() => import("./pages/Library"), "Library");
+const ToriWindow = named(() => import("./Tori"), "ToriWindow");
 
 export type Route = "home" | "chat" | "studio" | "research" | "code" | "terminals" | "models" | "bringup" | "orchard" | "hardware" | "discover" | "connect" | "routines" | "library" | "settings";
 
@@ -43,6 +51,7 @@ const PLACES: { route: Route; label: string; icon: IconKind; group: number }[] =
   { route: "routines", label: "Routines", icon: "clock", group: 0 },
   { route: "models", label: "Models", icon: "ai-model", group: 1 },
   { route: "bringup", label: "Bring-up", icon: "ai-task", group: 1 },
+  { route: "terminals", label: "Terminals", icon: "ai-agent", group: 1 },
   { route: "hardware", label: "Hardware", icon: "blackhole", group: 1 },
   { route: "discover", label: "What's new", icon: "globe", group: 2 },
   { route: "connect", label: "Connect", icon: "link", group: 2 },
@@ -51,9 +60,8 @@ const PLACES: { route: Route; label: string; icon: IconKind; group: number }[] =
 
 function routeFromPath(): Route {
   const r = location.pathname.replace(/^\/app\/?/, "").split("/")[0] as Route;
-  // Orchard is one of Bring-up's ways; its old address still opens it there.
-  // Orchard is under Bring-up; terminal sessions open from Connect.
-  return r === "orchard" ? "bringup" : r === "terminals" ? "terminals" : PLACES.some((p) => p.route === r) ? r : "home";
+  // Orchard (Quick port) is one of Bring-up's ways; its old address still opens it there.
+  return r === "orchard" ? "bringup" : PLACES.some((p) => p.route === r) ? r : "home";
 }
 
 export function navigate(route: Route) {
@@ -69,7 +77,7 @@ export function App() {
   }, []);
   if (ready === "loading") return <div className="boot" />;
   if (ready === "token") return <TokenGate onDone={() => setReady("ok")} />;
-  if (location.pathname.startsWith("/app/tori")) return <ToriWindow />;
+  if (location.pathname.startsWith("/app/tori")) return <Suspense fallback={<div className="boot" />}><ToriWindow /></Suspense>;
   return <Shell />;
 }
 
@@ -118,18 +126,28 @@ function Shell() {
     window.ttDesktop?.onBoxEvent((e) => addToast({ content: <><b>{e.title}</b><br />{e.body}</>, timeout: 6000 }));
     return () => window.removeEventListener("popstate", onPop);
   }, []);
-  // Keyboard: Ctrl+1…8 jumps between places.
+  const devTools = useDevTools();
+  const places = useMemo(() => PLACES.filter((p) => placeVisible(p.route, devTools)), [devTools]);
+  // Keyboard: Ctrl+1…9 jumps to the first nine places shown.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
       const n = Number(e.key);
-      if (n >= 1 && n <= PLACES.length) {
+      if (n >= 1 && n <= Math.min(9, places.length)) {
         e.preventDefault();
-        navigate(PLACES[n - 1].route);
+        navigate(places[n - 1].route);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, [places]);
+  // No choice made about developer tools yet: someone with bring-up runs on the box gets them.
+  useEffect(() => {
+    if (storedChoice()) return;
+    void Promise.all([
+      get<{ runs: unknown[] }>("/orchard").catch(() => null),
+      get<{ runs: unknown[] }>("/bringup/codex/runs").catch(() => null),
+    ]).then(([o, a]) => adoptFromBox((o?.runs?.length ?? 0) + (a?.runs?.length ?? 0) > 0));
   }, []);
 
   let page: ReactNode;
@@ -153,14 +171,17 @@ function Shell() {
 
   return (
     <div className="shell">
-      <Sidebar route={route} />
-      <main className="content" key={route}>{page}</main>
+      <Sidebar route={route} places={places} />
+      <main className="content" key={route}>
+        <OfflineBanner />
+        <Suspense fallback={<div className="page-loading" role="status" aria-label="Loading" />}>{page}</Suspense>
+      </main>
       <Toasts />
     </div>
   );
 }
 
-function Sidebar({ route }: { route: Route }) {
+function Sidebar({ route, places }: { route: Route; places: typeof PLACES }) {
   const shortcut = useToriShortcut();
   return (
     <nav className="sidebar" aria-label="Places">
@@ -172,20 +193,21 @@ function Sidebar({ route }: { route: Route }) {
         </div>
       </div>
       {window.ttDesktop && (
-        <button className="ask-tori" onClick={() => window.ttDesktop!.showTori("talk")} title={`Tori: talk or type, from anywhere (${shortcut})`}>
+        <button className="ask-tori" onClick={() => window.ttDesktop!.showTori("talk")} title={`The assistant, Tori: talk or type, from anywhere (${shortcut})`}
+          aria-label={`Ask Tori, the assistant (${shortcut})`}>
           <span className="ask-tori-orb" aria-hidden />
           <span className="grow">Ask Tori</span>
-          <span className="kbd">{shortcut}</span>
+          <span className="kbd" aria-hidden>{shortcut}</span>
         </button>
       )}
       <BoxTerminalButton />
       <div className="nav">
-        {PLACES.map((p, i) => (
+        {places.map((p, i) => (
           <div key={p.route}>
-            {i > 0 && PLACES[i - 1].group !== p.group && <div className="nav-gap" />}
+            {i > 0 && places[i - 1].group !== p.group && <div className="nav-gap" />}
             <button className={`nav-item ${route === p.route ? "active" : ""}`} onClick={() => navigate(p.route)}
-              aria-current={route === p.route ? "page" : undefined} title={`${p.label} (Ctrl+${i + 1})`}>
-              <Icon kind={p.icon} className="nav-icon" />
+              aria-current={route === p.route ? "page" : undefined} title={i < 9 ? `${p.label} (Ctrl+${i + 1})` : p.label}>
+              <Icon kind={p.icon} className="nav-icon" aria-hidden />
               <span>{p.label}</span>
             </button>
           </div>
@@ -198,21 +220,24 @@ function Sidebar({ route }: { route: Route }) {
 
 /** The bottom of the sidebar: what's serving and the chips, always in view. */
 function BoxFooter() {
-  const { data: serve } = usePoll(() => get<Serve>("/serve"), 4000);
+  const { data: serve } = useServe();
   const { chips, live } = useTelemetry(false);
+  const { online } = useConnectivity();
   const stuck = serve?.phase === "starting" && !!serve.stalled_s;
-  const state = !serve ? "queued" : serve.phase === "serving" ? "ready" : stuck ? "error" : serve.phase === "starting" ? "progress"
+  const state = !online ? "error" : !serve ? "queued" : serve.phase === "serving" ? "ready" : stuck ? "error" : serve.phase === "starting" ? "progress"
     : serve.phase === "failed" ? "error" : "queued";
-  const label = !serve ? "Connecting" : serve.phase === "serving" ? short(serve.served_id ?? serve.model)
+  const label = !online ? "Can't reach the box" : !serve ? "Connecting" : serve.phase === "serving" ? short(serve.served_id ?? serve.model)
     : stuck ? `${short(serve.model)} looks stuck` : serve.phase === "starting" ? `Loading ${short(serve.model)}` : serve.phase === "failed" ? "Didn't start" : "Idle";
   const watts = chips.reduce((s, c) => s + (c.powerW ?? 0), 0);
   return (
-    <div className="box-footer" onClick={() => navigate("hardware")} role="button" tabIndex={0}>
+    <div className="box-footer" {...pressable(() => navigate("hardware"))}
+      aria-label={`${label}. ${chips.length ? `Chips: ${chips.map((c) => c.tempC != null ? `${Math.round(c.tempC)} °C, ${tempWord(c.tempC)}` : "no reading").join("; ")}. ` : ""}Open Hardware`}>
       <StatusIndicator label={label} state={state} animated={state === "progress"} />
-      <div className="chip-dots" title={live ? "Chip temperatures" : "Chip readings aren't live"}>
+      <div className="chip-dots" title={live ? "Chip temperatures" : "Chip readings aren't live"} aria-hidden>
         {chips.map((c) => (
-          <div key={c.index} className="chip-dot" style={{ opacity: live ? 1 : 0.4 }}>
+          <div key={c.index} className="chip-dot" style={{ opacity: live ? 1 : 0.4 }} title={`Chip ${c.index}: ${tempWord(c.tempC)}`}>
             <span style={{ color: tempTone(c.tempC) }}>{c.tempC != null ? Math.round(c.tempC) : "–"}°</span>
+            {c.tempC != null && c.tempC >= 78 && <span className="chip-hot" aria-hidden>{c.tempC >= 88 ? "!!" : "!"}</span>}
           </div>
         ))}
         {chips.length > 0 && <span className="chip-watts">{Math.round(watts)} W</span>}
@@ -239,7 +264,7 @@ function TokenGate({ onDone }: { onDone: () => void }) {
 
 type Boxes = { current: string; boxes: { id: string; name: string; host: string; local: boolean }[] };
 
-/** Which QuietBox this window shows, and pairing another (desktop app only). */
+/** Which box this window shows, and pairing another (desktop app only). */
 function BoxSwitcher() {
   const [open, setOpen] = useState(false);
   const [list, setList] = useState<Boxes | null>(null);
@@ -283,7 +308,7 @@ function BoxSwitcher() {
   const several = (list?.boxes.length ?? 0) > 1;
   return (
     <div className="box-switcher">
-      <button ref={button} className="brand-box box-switcher-button" onClick={() => { setOpen((o) => !o); load(); }} aria-expanded={open} title={several ? "Switch device" : "Add another device"}>
+      <button ref={button} className="brand-box box-switcher-button" onClick={() => { setOpen((o) => !o); load(); }} aria-expanded={open} title={several ? "Switch box" : "Add another box"}>
         <span className="grow" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{boxName}</span>
         <Icon kind="caret-down" style={{ width: 12, height: 12, flex: "none" }} />
       </button>
@@ -298,7 +323,7 @@ function BoxSwitcher() {
           ))}
           {adding ? (
             <div className="stack" style={{ gap: 6, padding: 8 }}>
-              <span className="muted" style={{ fontSize: 12 }}>On the other device: TT Station → Settings → Pairing and security → <b>Pair another computer</b>. Paste its link here.</span>
+              <span className="muted" style={{ fontSize: 12 }}>On the other box: TT Station → Settings → Pairing and security → <b>Pair another computer</b>. Paste its link here.</span>
               <TextInput size="sm" value={link} onChange={(e) => setLink(e.target.value)} placeholder="ttstation://pair?…" autoFocus />
               {error && <span className="box-switcher-error">{error}</span>}
               <div className="row" style={{ gap: 6 }}>
@@ -308,7 +333,7 @@ function BoxSwitcher() {
             </div>
           ) : (
             <button className="box-switcher-item" onClick={() => { if (window.ttDesktop?.showConnect) { setOpen(false); void window.ttDesktop.showConnect(); } else setAdding(true); }}>
-              <Icon kind="add" style={{ width: 14, height: 14 }} /> Add another device…
+              <Icon kind="add" style={{ width: 14, height: 14 }} aria-hidden /> Add another box…
             </button>
           )}
         </div>,
@@ -318,7 +343,7 @@ function BoxSwitcher() {
   );
 }
 
-/** On another computer (a Mac): the device's command line in this computer's Terminal, over SSH. */
+/** On another computer (a Mac): the box's command line in this computer's Terminal, over SSH. */
 function BoxTerminalButton() {
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);

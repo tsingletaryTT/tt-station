@@ -17,7 +17,7 @@ import { Admonition } from "@tenstorrent/vesper/admonition";
 import { ago, ApiError, bytes, del, duration, get, post } from "../api";
 import { ask, askToStop } from "../dialog";
 import { navigate } from "../App";
-import { Card, DownloadProgress, Eyebrow, matches, type Progress, toastError, toastOk, usePoll } from "../ui";
+import { Card, DownloadProgress, Eyebrow, matches, type Progress, toastError, toastOk, usePoll, LinkButton } from "../ui";
 import { FavoriteStar, useFavorites } from "../favorites";
 
 interface Installed {
@@ -70,18 +70,7 @@ function cleanStep(step: string | null): string | null {
   return t ? t[0].toUpperCase() + t.slice(1) : null;
 }
 
-const OPEN_KEY = "tt.models.open";
-
-/** Show a community package in Models (its Community tab, searched to it). */
-export function openCommunity(id: string) {
-  try { localStorage.setItem(OPEN_KEY, JSON.stringify({ filter: "community", query: id })); } catch { /* private */ }
-  navigate("models");
-}
-
-/** What `openCommunity` asked Models to show, once. */
-export function takeOpenRequest(): { filter: string; query: string } | null {
-  try { const v = localStorage.getItem(OPEN_KEY); localStorage.removeItem(OPEN_KEY); return v ? JSON.parse(v) : null; } catch { return null; }
-}
+export { openCommunity, takeOpenRequest } from "../modelsLink";
 
 export function useCommunity() {
   return usePoll(() => get<Community>("/community"), 3000);
@@ -219,13 +208,13 @@ export function CommunityOnBox({ c, query, onServe, onlyFavorites = false }: { c
             {stopping && (
               <div className="stack" style={{ gap: 6 }}>
                 <span className="muted" style={{ fontSize: 12 }}>Shutting down, then resetting its chips · {duration(Math.max(0, Math.floor(Date.now() / 1000) - stopping.since))} so far (a few minutes)</span>
-                <div className="bar"><i style={{ width: "100%", background: "var(--vesper-amber-600, #d97706)", opacity: 0.6, animation: "blink 1.6s ease-in-out infinite" }} /></div>
+                <div className="bar"><i className="bar-blink" style={{ width: "100%", background: "var(--vesper-amber-600)" }} /></div>
               </div>
             )}
             {failed && <Admonition variant="warning" subtle size="sm">It didn't start. {failed}</Admonition>}
             {p.check?.ok === false && (
-              <span style={{ fontSize: 12, color: "var(--vesper-text-warning, var(--vesper-amber-600))" }}>
-                Its replies came back garbled when TT Station tested it, so Chat and Tori may not work with it.
+              <span style={{ fontSize: 12, color: "var(--vesper-text-warning)" }}>
+                Its replies came back garbled when TT Station tested it, so Chat and the assistant (Tori) may not work with it.
               </span>
             )}
             <div className="grow" />
@@ -323,7 +312,7 @@ export function CommunitySection({ c, query, filter, onServe, onBrowse, children
         <Eyebrow>{filter === "community" ? "Community models on this box" : filter === "favorites" ? "Community and your bring-ups" : "Community"}</Eyebrow>
         <span className="muted">
           {count > 0 ? "Downloaded to this box from the community catalog. Packaged by people outside Tenstorrent's testing." : "None downloaded yet."}
-          {onBrowse && <> <span role="button" tabIndex={0} className="link-button" onClick={onBrowse}>Browse the catalog</span></>}
+          {onBrowse && <> <LinkButton onClick={onBrowse}>Browse the catalog</LinkButton></>}
         </span>
       </div>
       <div className="grid grid-3">
@@ -385,7 +374,7 @@ function Details({ id, onGot }: { id: string; onGot: () => void }) {
         {i.built && <div className="list-row"><span className="muted grow">Published</span><span>{new Date(i.built).toLocaleDateString()}</span></div>}
       </div>
       {why && <Admonition variant="warning" subtle size="sm">{why}
-        {i.gated && i.weights_access === false && i.weights && <> <span role="button" tabIndex={0} className="link-button" onClick={() => openHf(i.weights!)}>Open its page</span></>}
+        {i.gated && i.weights_access === false && i.weights && <> <LinkButton onClick={() => openHf(i.weights!)}>Open its page</LinkButton></>}
       </Admonition>}
       <div className="row">
         <Button disabled={!!why} onClick={() => download(id, i, onGot)}>Download</Button>

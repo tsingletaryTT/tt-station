@@ -3,11 +3,13 @@
 
 // Small building blocks shared by every screen, on Vesper's tokens.
 
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import type React from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { Icon } from "@tenstorrent/vesper/icons";
 import { addToast } from "@tenstorrent/vesper/toast";
-import { bytes, duration, type Chip, type FrameExtras, watchTelemetry } from "./api";
+import { bytes, duration, get, type Chip, type FrameExtras, type Serve, watchTelemetry } from "./api";
+import { PollSource, sharedSource } from "./poll";
 
 export function Page({ title, subtitle, actions, children }: {
   title: string; subtitle?: ReactNode; actions?: ReactNode; children: ReactNode;
@@ -26,15 +28,52 @@ export function Page({ title, subtitle, actions, children }: {
   );
 }
 
+/** Props that make a non-button element act like one: focusable, and Enter or
+ *  Space activate it. Keys pressed on a real control inside (a button in a
+ *  clickable card) are that control's, not the container's. */
+export function pressable(onPress: () => void) {
+  return {
+    role: "button" as const,
+    tabIndex: 0,
+    onClick: onPress,
+    onKeyDown: (e: ReactKeyboardEvent<HTMLElement>) => {
+      if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ")) return;
+      e.preventDefault();
+      onPress();
+    },
+  };
+}
+
 export function Card({ children, className = "", onClick, tone }: {
   children: ReactNode; className?: string; onClick?: () => void; tone?: "accent" | "warning" | "danger";
 }) {
   return (
     <section className={`card ${tone ? `card-${tone}` : ""} ${onClick ? "card-click" : ""} ${className}`}
-      onClick={onClick} role={onClick ? "button" : undefined} tabIndex={onClick ? 0 : undefined}>
+      {...(onClick ? pressable(onClick) : {})}>
       {children}
     </section>
   );
+}
+
+/** A button that reads as a link inside a sentence ("Browse the catalog"). */
+export function LinkButton({ onClick, children, className = "", style }: {
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void; children: ReactNode; className?: string; style?: React.CSSProperties;
+}) {
+  return <button type="button" className={`link-button ${className}`} style={style} onClick={onClick}>{children}</button>;
+}
+
+/** Whether the person asked their system for less motion; follows changes. */
+export function useReducedMotion(): boolean {
+  const query = "(prefers-reduced-motion: reduce)";
+  const [reduce, setReduce] = useState(() => typeof window !== "undefined" && !!window.matchMedia?.(query).matches);
+  useEffect(() => {
+    const m = window.matchMedia?.(query);
+    if (!m) return;
+    const on = () => setReduce(m.matches);
+    m.addEventListener?.("change", on);
+    return () => m.removeEventListener?.("change", on);
+  }, []);
+  return reduce;
 }
 
 export function Eyebrow({ children }: { children: ReactNode }) {
@@ -61,35 +100,37 @@ export function Empty({ title, children, action }: { title: string; children?: R
   );
 }
 
-/** Poll an API call every `ms` while mounted. `refresh()` fetches now. */
+/** Poll an API call every `ms` while mounted, resting while the window is hidden.
+ *  `refresh()` fetches now. */
 export function usePoll<T>(fn: () => Promise<T>, ms: number, deps: unknown[] = []) {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const fnRef = useRef(fn);
   fnRef.current = fn;
-  const refresh = useCallback(async () => {
-    try {
-      setData(await fnRef.current());
-      setError(null);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  }, []);
-  useEffect(() => {
-    let alive = true;
-    let timer: number;
-    const tick = async () => {
-      await refresh();
-      if (alive) timer = window.setTimeout(tick, ms);
-    };
-    tick();
-    return () => {
-      alive = false;
-      window.clearTimeout(timer);
-    };
+  const last = useRef<PollSource<T> | null>(null);
+  const source = useMemo(() => {
+    const s = new PollSource<T>(() => fnRef.current());
+    // New deps: keep showing the last answer until the new one arrives.
+    if (last.current) { s.data = last.current.data; s.error = last.current.error; }
+    return s;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ms, refresh, ...deps]);
-  return { data, error, refresh, setData };
+  }, deps);
+  last.current = source;
+  return useSource(source, ms);
+}
+
+/** Like usePoll, but one fetch for everything on screen that polls the same `key`. */
+export function useSharedPoll<T>(key: string, fn: () => Promise<T>, ms: number) {
+  return useSource(sharedSource(key, fn), ms);
+}
+
+/** What's serving, shared by the sidebar, Home, Models and Studio. */
+export const useServe = (ms = 3000) => useSharedPoll("/serve", () => get<Serve>("/serve"), ms);
+
+function useSource<T>(source: PollSource<T>, ms: number) {
+  const [, rerender] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => source.add(ms, rerender), [source, ms]);
+  const refresh = useCallback(() => source.fetch(), [source]);
+  const setData = useCallback((next: T | null | ((cur: T | null) => T | null)) => source.set(next), [source]);
+  return { data: source.data, error: source.error, refresh, setData };
 }
 
 /** Live chips; `live` is false when the box isn't reading them (an error frame, or silence). */
@@ -155,6 +196,15 @@ export function tempTone(c: number | null): string {
   if (c < 78) return "var(--vesper-yellow-600)";
   if (c < 88) return "var(--vesper-amber-600)";
   return "var(--vesper-red-600)";
+}
+
+/** The same scale in words, so the color is never the only cue. */
+export function tempWord(c: number | null): string {
+  if (c == null) return "no reading";
+  if (c < 65) return "cool";
+  if (c < 78) return "warm";
+  if (c < 88) return "hot";
+  return "near its limit";
 }
 
 /** A small line chart of recent values. Pass `labels` (one per value, e.g. a
