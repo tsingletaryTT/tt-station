@@ -249,3 +249,26 @@ async fn expired_pending_pair_is_swept_on_a_later_pair_init() {
         "expired pending pair should have been swept out by the later /pair/init"
     );
 }
+
+/// Each `/pair/init` puts a code in front of the box's owner, so a stranger
+/// on the network gets five a minute, then a 429 with a plain message. The
+/// budget belongs to the agent, not the process: a second agent (here, a
+/// second harness) starts with its own.
+#[tokio::test]
+async fn pair_init_is_rate_limited_per_agent() {
+    let (_state, base) = spawn().await;
+    let client = reqwest::Client::new();
+
+    for _ in 0..5 {
+        let resp = client.post(format!("{base}/pair/init")).send().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    }
+    let resp = client.post(format!("{base}/pair/init")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("Wait a minute"));
+
+    let (_other, other_base) = spawn().await;
+    let resp = client.post(format!("{other_base}/pair/init")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}
