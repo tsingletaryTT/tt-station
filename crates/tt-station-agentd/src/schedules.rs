@@ -202,8 +202,10 @@ impl Schedules {
             .ok_or("No such schedule.")?;
         let mode = patch.mode.clone().unwrap_or_else(|| s.mode.clone());
         let time = patch.time.clone().unwrap_or_else(|| s.time.clone());
-        let days = patch.days.clone().unwrap_or_else(|| s.days.clone());
+        let mut days = patch.days.clone().unwrap_or_else(|| s.days.clone());
         Self::check(&mode, &time, &days)?;
+        days.sort_unstable();
+        days.dedup();
         let (h, m) = parse_time(&time).unwrap_or_default();
         s.mode = mode;
         s.time = format!("{h:02}:{m:02}");
