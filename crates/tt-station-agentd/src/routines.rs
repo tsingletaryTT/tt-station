@@ -82,7 +82,7 @@ pub const QUEUE_TTL: u64 = 24 * 3600;
 
 // ---------------------------------------------------------------- data
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Schedule {
     /// `manual` | `daily` | `weekdays` | `days` | `hourly`
     #[serde(default = "manual")]
@@ -100,6 +100,17 @@ pub struct Schedule {
 
 fn manual() -> String {
     "manual".into()
+}
+
+/// Run by hand: what a routine (or request) with no `schedule` gets.
+impl Default for Schedule {
+    fn default() -> Self {
+        Schedule {
+            kind: manual(),
+            time: None,
+            every_hours: None,
+        }
+    }
 }
 
 /// What a routine may do without asking: the action tools it was given.
@@ -1762,6 +1773,7 @@ pub(crate) async fn delete_routine(
     }
     for run in all_runs(&state).into_iter().filter(|r| r.routine == id) {
         let _ = std::fs::remove_file(run_path(&state, &run.id));
+        LIVE.lock().expect("routines").remove(&run.id);
     }
     Ok(Json(json!({ "deleted": true })))
 }
@@ -1849,7 +1861,7 @@ pub(crate) async fn post_stop(
     _auth: BearerAuth,
     UrlPath(run): UrlPath<String>,
 ) -> Reply {
-    if load_run(&state, &run).is_none_or(|r| r.finished.is_some()) {
+    if !valid_id(&run) || load_run(&state, &run).is_none_or(|r| r.finished.is_some()) {
         return Err(err(StatusCode::CONFLICT, "It isn't running."));
     }
     STOP.lock().expect("routines").insert(run.clone());

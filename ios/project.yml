@@ -78,6 +78,22 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
         SKIP_INSTALL: YES
+  # Unit tests for pure logic (pairing links, certificate pins, addresses).
+  # Hosted in the app, so `@testable import TTStationMobile` reaches its types.
+  TTStationMobileTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: TTStationMobile
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tenstorrent.ttstation.mobile.tests
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
 schemes:
   # The app's own scheme, so Xcode runs the app (running the Live Activity
   # extension's scheme fails with deviceprocesscontrolservice Code=8).
@@ -90,5 +106,9 @@ schemes:
     run:
       config: Debug
       executable: TTStationMobile
+    test:
+      config: Debug
+      targets:
+        - TTStationMobileTests
     archive:
       config: Release

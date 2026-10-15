@@ -89,6 +89,9 @@ def serve_client(conn):
     with lock:
         if client is not None:
             try:
+                # shutdown, not just close: its reader thread's makefile keeps
+                # the socket open, and it would go on sending input.
+                client.shutdown(socket.SHUT_RDWR)
                 client.close()
             except OSError:
                 pass
