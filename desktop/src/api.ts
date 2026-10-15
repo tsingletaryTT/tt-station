@@ -6,6 +6,8 @@
 // (electron/preload.cjs). In a plain browser on the box (development), a
 // token can be pasted once and is kept in localStorage.
 
+import { connectivity } from "./connectivity";
+
 declare global {
   interface Window {
     ttDesktop?: {
@@ -77,15 +79,49 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown, opts: { raw?: boolean } = {}): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    headers: {
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(body !== undefined && !(body instanceof Blob) ? { "content-type": "application/json" } : {}),
-    },
-    body: body === undefined ? undefined : body instanceof Blob ? body : JSON.stringify(body),
-  });
+/** A call that never got an answer: the box is off, restarting, or not on this network. */
+export class NetworkError extends Error {
+  constructor(message: string, public detail: string, public timedOut = false) {
+    super(message);
+  }
+}
+
+/** How long a read waits for the box before giving up (writes can take minutes: a stop resets chips). */
+export const READ_TIMEOUT_MS = 20000;
+
+/** What a failed call says to people: the box's name and what's going on, never "Failed to fetch". */
+export function networkMessage(timedOut: boolean, name = boxName): string {
+  return timedOut
+    ? `${name} took too long to answer. It may be busy; TT Station keeps trying.`
+    : `Can't reach ${name}. Check that it's on and connected; TT Station keeps trying.`;
+}
+
+async function request<T>(method: string, path: string, body?: unknown, opts: { raw?: boolean; timeoutMs?: number } = {}): Promise<T> {
+  const timeoutMs = opts.timeoutMs ?? (method === "GET" ? READ_TIMEOUT_MS : 0);
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: {
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(body !== undefined && !(body instanceof Blob) ? { "content-type": "application/json" } : {}),
+      },
+      body: body === undefined ? undefined : body instanceof Blob ? body : JSON.stringify(body),
+      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
+    });
+  } catch (e) {
+    const timedOut = (e as Error)?.name === "TimeoutError";
+    // A timeout is a slow box, not a missing one: only a call that never got through counts against reaching it.
+    if (!timedOut) connectivity.miss(String((e as Error)?.message ?? e));
+    throw new NetworkError(networkMessage(timedOut), String((e as Error)?.message ?? e), timedOut);
+  }
+  // A gateway between here and the box (a proxy, a tunnel) that couldn't reach it: the same as no answer.
+  if (res.status === 502 || res.status === 504) {
+    const why = `${res.status} ${res.statusText || "Bad Gateway"}`.trim();
+    connectivity.miss(why);
+    throw new NetworkError(networkMessage(false), why);
+  }
+  connectivity.ok();
   if (!res.ok) {
     let message = res.statusText || `Error ${res.status}`;
     let parsed: unknown;
@@ -134,6 +170,16 @@ export interface Status {
   status: string;
   device_mesh: string | null;
   leasing?: { available: boolean; version: string | null; boards: number | null };
+}
+
+const ARCH: Record<string, string> = { BH: "Blackhole", WH: "Wormhole", GS: "Grayskull" };
+
+/** "4 × Blackhole · P300x2" from `/status` ("4xBH", device mesh), as the box reports it. */
+export function hardwareLabel(s: Pick<Status, "chips" | "device_mesh"> | null | undefined): string {
+  if (!s) return "";
+  const m = /^(\d+)\s*x\s*([A-Za-z]+)$/.exec(s.chips?.trim() ?? "");
+  const chips = m ? `${m[1]} × ${ARCH[m[2].toUpperCase()] ?? m[2]}` : s.chips;
+  return [chips, s.device_mesh].filter(Boolean).join(" · ");
 }
 
 export interface Serve {
