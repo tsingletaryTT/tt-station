@@ -1443,7 +1443,7 @@ async fn main() -> Result<()> {
                 );
                 tokio::spawn(async move {
                     if let Err(e) = axum_server::bind_rustls(addr, config)
-                        .serve(tls_app.into_make_service())
+                        .serve(tls_app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                         .await
                     {
                         eprintln!("tt-station-agentd: HTTPS server stopped: {e}");

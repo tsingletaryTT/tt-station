@@ -90,6 +90,11 @@ const PAIR_TTL: Duration = Duration::from_secs(120);
 /// fat-fingers the code a few real chances to correct themselves.
 pub const MAX_PAIR_ATTEMPTS: u32 = 5;
 
+/// `/pair/init` asks one address may make a minute (each one notifies the owner).
+pub const PAIR_INITS_PER_ADDRESS: usize = 5;
+/// `/pair/init` asks a minute from every address together.
+pub const PAIR_INITS_PER_MINUTE: usize = 20;
+
 /// Seam for re-publishing this box's advertised `status` whenever it
 /// changes (`/run` succeeding, `/stop` completing), so the mDNS TXT record
 /// `tt-station discover` reads over the LAN never goes stale the way it did before
@@ -151,6 +156,9 @@ struct Inner {
     /// `wrong_attempts` hit `MAX_PAIR_ATTEMPTS` -- by `complete_pair`, so
     /// this map only ever holds pairing attempts that are still "live".
     pending_pairs: Mutex<HashMap<String, (String, Instant, u32)>>,
+    /// Recent `/pair/init` asks: when, and from which address (`None` when
+    /// the server doesn't know its peers). See `pair_init_allowed`.
+    pair_inits: Mutex<Vec<(u64, Option<std::net::IpAddr>)>>,
     /// Bearer tokens minted by successful `/pair/complete` calls. Task 10's
     /// control routes will check incoming requests against this set; for
     /// now `/pair/complete` is the only thing that populates it.
@@ -527,6 +535,7 @@ impl AppState {
                 endpoint: Mutex::new(None),
                 backend,
                 pending_pairs: Mutex::new(HashMap::new()),
+                pair_inits: Mutex::new(Vec::new()),
                 tokens: Mutex::new(tokens),
                 token_store,
                 write_lock: Mutex::new(()),
@@ -1970,6 +1979,20 @@ impl AppState {
     /// timer/background task) keeps the fix O(n) in the number of currently
     /// pending pairs and needs no extra moving parts: every `/pair/init`
     /// call is already a natural point to tidy up.
+    /// Whether one more `/pair/init` may go ahead now from `peer`, counting
+    /// it if so. Each address gets a few a minute, so one asker can't use up
+    /// pairing for everyone; a ceiling across all addresses keeps the
+    /// owner's notifications bounded however many addresses ask.
+    pub(crate) fn pair_init_allowed(&self, peer: Option<std::net::IpAddr>, now: u64) -> bool {
+        let mut recent = self.inner.pair_inits.lock().expect("pair inits");
+        recent.retain(|(t, _)| now.saturating_sub(*t) < 60);
+        if recent.len() >= PAIR_INITS_PER_MINUTE || recent.iter().filter(|(_, p)| *p == peer).count() >= PAIR_INITS_PER_ADDRESS {
+            return false;
+        }
+        recent.push((now, peer));
+        true
+    }
+
     fn insert_pending_pair(&self, pair_id: String, code: String) {
         let now = Instant::now();
         let expiry = now + PAIR_TTL;
@@ -2472,18 +2495,14 @@ struct PairInitResponse {
 /// `/pair/complete`.
 async fn pair_init(
     axum::extract::State(state): axum::extract::State<AppState>,
+    peer: Option<axum::extract::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     body: axum::body::Bytes,
 ) -> Result<Json<PairInitResponse>, StatusCode> {
-    // Anyone on the network can ask, and each ask notifies the owner: a few a minute at most.
-    static RECENT: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
-    {
-        let now = unix_now();
-        let mut recent = RECENT.lock().expect("pair init");
-        recent.retain(|t| now.saturating_sub(*t) < 60);
-        if recent.len() >= 5 {
-            return Err(StatusCode::TOO_MANY_REQUESTS);
-        }
-        recent.push(now);
+    // Anyone on the network can ask, and each ask notifies the owner: a few a
+    // minute from any one address, and a ceiling for all of them together.
+    let peer = peer.map(|axum::extract::Extension(axum::extract::ConnectInfo(a))| a.ip().to_canonical());
+    if !state.pair_init_allowed(peer, unix_now()) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     let pair_id = pairing::issue_pair_id();
     let code = pairing::issue_code();
@@ -5391,7 +5410,7 @@ mod logs_query_tests {
 
 #[cfg(test)]
 mod local_http_tests {
-    use super::{container_peer, local_peer};
+    use super::{container_peer, local_peer, AppState, PAIR_INITS_PER_ADDRESS, PAIR_INITS_PER_MINUTE};
 
     #[test]
     fn plain_http_is_for_the_box_and_its_containers_get_only_v1() {
@@ -5405,5 +5424,24 @@ mod local_http_tests {
         assert!(!local_peer("172.32.0.1".parse().unwrap()));
         assert!(!local_peer("192.168.1.20".parse().unwrap()));
         assert!(!local_peer("100.100.1.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn pairing_asks_are_limited_per_address_with_a_ceiling() {
+        let state = AppState::new("t".to_string(), "1xBH".to_string(), std::sync::Arc::new(crate::serving::dstack::DstackBackend));
+        let ip = |n: u8| Some(std::net::IpAddr::from([192, 168, 1, n]));
+        for _ in 0..PAIR_INITS_PER_ADDRESS {
+            assert!(state.pair_init_allowed(ip(9), 1000));
+        }
+        assert!(!state.pair_init_allowed(ip(9), 1000), "one address hammering is stopped");
+        assert!(state.pair_init_allowed(ip(2), 1000), "and doesn't lock out the owner's phone");
+        // Many addresses together hit the ceiling.
+        let mut n = 10;
+        while state.pair_init_allowed(ip(n), 1000) {
+            n += 1;
+        }
+        assert_eq!(state.inner.pair_inits.lock().unwrap().len(), PAIR_INITS_PER_MINUTE);
+        // A minute later, everyone may ask again.
+        assert!(state.pair_init_allowed(ip(9), 1061));
     }
 }
