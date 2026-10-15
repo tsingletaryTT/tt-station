@@ -6,6 +6,7 @@ pub mod devices;
 pub mod logs;
 pub mod pairing;
 pub mod power;
+pub mod security;
 pub mod serving;
 pub mod ssh;
 pub mod status;
