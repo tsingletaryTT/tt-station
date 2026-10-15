@@ -91,6 +91,12 @@ screen (the GTK panel or `tt-station console`), lives 120 seconds, and a given a
 box*. The result is a **256-bit random bearer token** — that's the real credential; the
 code is just how you bootstrap it.
 
+**Every pairing is a device you can see and remove.** The box records each one as a device
+(the name and platform the client sends, e.g. "Jane's MacBook · macOS", when it paired, when
+it was last used) and keeps only a SHA-256 of its token, never the token. A device unused for
+**90 days** is signed out automatically; any use restarts the clock. Pairing a new device is
+announced as a box event (desktop notification and phone push).
+
 ---
 
 ## What can someone on my network do?
@@ -150,8 +156,14 @@ and `.ssh`/`authorized_keys` permissions are enforced (`0700`/`0600`). Revoke an
 keys you added by hand.
 
 **Where are the secrets stored?**
-- On the **box**: issued bearer tokens live in `~/.config/tt-station/agentd-tokens.json`,
-  written `0600` (owner-only). No passwords; the tokens are the credentials.
+- On the **box**: paired devices live in `~/.config/tt-station/agentd-tokens.json`, written
+  `0600` (owner-only). It holds a SHA-256 of each token, not the token, so a copy of the file
+  can't be used to sign in. (A file from before device tracking, a plain list of tokens, is
+  converted in place on the agent's first start; those devices show as "Paired before device
+  tracking".)
+- In the **TT Station desktop app**: tokens are encrypted with the operating system's
+  keychain (macOS Keychain; GNOME Keyring/KWallet on Linux). Where Linux has no keyring, the
+  app says so in Settings and keeps the token in an owner-only (`0600`) file instead.
 - On your **Mac**: the `tt-station` CLI stores its token in the macOS Keychain (file store as
   fallback). The app tracks *which* hosts are paired locally.
 
@@ -162,6 +174,9 @@ escalation and no separate service account; the box is assumed to be your single
 machine.
 
 **How do I revoke access or wipe pairings?**
+- **One device**: TT Station → Settings → Pairing and security → **Devices** → Remove (or
+  `DELETE /devices/{id}`; `GET /devices` lists them). It stops working on its next request,
+  and its open terminals close. Removing the computer you're on signs it out.
 - **Reset** (GTK panel button, or clear the box's token store): forgets **all** pairings,
   stops the serving model, resets the board — a clean slate. Clients must pair again.
 - **Revoke SSH**: `tt-station ssh-authorize --revoke` removes the tt-station-added key.
@@ -193,7 +208,8 @@ required for a normal home/lab setup:
       open to the whole LAN.
 - [ ] **Mind the telemetry process list**: don't launch box processes with secrets in their
       argv; the (unauthenticated) `/telemetry` stream exposes command lines.
-- [ ] **Rotate/reset** if you suspect a token leaked: Reset the box (invalidates every token)
+- [ ] **Remove devices you don't recognize** (Settings → Pairing and security → Devices). If
+      you suspect a token leaked and can't tell which, Reset the box (signs out every device)
       and re-pair; revoke any SSH keys you didn't intend to keep.
 - [ ] **Only `--enable-ssh` when you mean it** — it grants a shell. Audit `ttstation:`-tagged
       lines in `~/.ssh/authorized_keys`.
@@ -224,4 +240,4 @@ with you about where the edges are so you can decide what (if anything) to lock 
 
 *Questions this doesn't answer, or something that looks wrong? The source is the truth —
 `crates/tt-station-agentd/src/routes.rs` (the routes + auth), `authkeys.rs` (SSH key
-handling), and `pairing.rs` (codes + tokens).*
+handling), `pairing.rs` (codes + tokens), and `sessions.rs` (paired devices).*
