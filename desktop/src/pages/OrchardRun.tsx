@@ -19,6 +19,7 @@ import { Badge } from "@tenstorrent/vesper/badge";
 import { Typography } from "@tenstorrent/vesper/typography";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { externalLinks } from "../links";
 import { ApiError, del, duration, get, type OrchardRun, post, short, text } from "../api";
 import { Card, Eyebrow, toastError, toastOk, usePoll } from "../ui";
 import { ask, askToStop } from "../dialog";
@@ -229,7 +230,7 @@ export function OrchardRunView({ initial, onChanged, onDeleted }: { initial: Orc
           )}
           {report && (report.title === "publish"
             ? <div className="console">{report.text}</div>
-            : <div className="markdown selectable"><Markdown remarkPlugins={[remarkGfm]}>{report.text}</Markdown></div>)}
+            : <div className="markdown selectable"><Markdown remarkPlugins={[remarkGfm]} components={externalLinks}>{report.text}</Markdown></div>)}
         </Card>
       )}
       {tab === "log" && (

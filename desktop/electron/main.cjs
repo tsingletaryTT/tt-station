@@ -14,6 +14,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { validHost, validUser, cleanName, sameOrigin, webAddress, shq } = require("./validate.cjs");
 
 app.setName("TT Station");
 // The dock groups windows by this id; it matches tt-station.desktop.
@@ -134,7 +135,11 @@ function parsePairLink(link) {
   const q = url.searchParams;
   if (url.protocol !== "ttstation:" || !q.get("pair") || !q.get("code")) throw new Error("That isn't a TT Station pairing link.");
   if (!q.get("tls") || !q.get("fp")) throw new Error("That device's TT Station is too old to pair securely (its link has no certificate). Update it first.");
-  return { name: q.get("name") || q.get("host"), host: q.get("host"), tls: Number(q.get("tls")), fp: q.get("fp").toLowerCase(), pair: q.get("pair"), code: q.get("code") };
+  // The name and address end up in a Terminal script and ~/.ssh/config.
+  if (!validHost(q.get("host"))) throw new Error("That pairing link's device address isn't valid.");
+  const name = cleanName(q.get("name") || q.get("host"));
+  if (!name) throw new Error("That pairing link's device name isn't valid.");
+  return { name, host: q.get("host"), tls: Number(q.get("tls")), fp: q.get("fp").toLowerCase(), pair: q.get("pair"), code: q.get("code") };
 }
 
 async function addBox(link) {
@@ -149,6 +154,8 @@ const hostUrl = (host, port) => `https://${host.includes(":") ? `[${host}]` : ho
 
 /** Completes a pairing ({host, tls, fp, name, pair, code}); saves the box. */
 async function pairFinish(p) {
+  if (!validHost(p.host)) throw new Error("That device address isn't valid.");
+  p = { ...p, name: cleanName(p.name) || p.host };
   const base = hostUrl(p.host, p.tls);
   pairing.set(p.host, p);
   try {
@@ -276,6 +283,7 @@ function discover() {
 
 /** The certificate a box presents (its fingerprint, to show and pin) and its name. */
 async function probe(host, tls) {
+  if (!validHost(host)) throw new Error("That isn't a device address.");
   const fp = await new Promise((resolve, reject) => {
     const sock = require("node:tls").connect({ host, port: tls, rejectUnauthorized: false, timeout: 6000 }, () => {
       const cert = sock.getPeerCertificate();
@@ -325,6 +333,8 @@ print(json.dumps({"name": s.get("name"), "pair_id": offer.get("pair_id"), "code"
 /** SSH to the device and pair there. No password: the person's own keys (or none and it fails fast). */
 function sshPair(host, user, password) {
   return new Promise((resolve, reject) => {
+    if (!validHost(host)) return reject(new Error("That device address isn't valid."));
+    if (!validUser(user)) return reject(Object.assign(new Error("That isn't a username."), { kind: "auth" }));
     const args = ["-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new", "-o", "NumberOfPasswordPrompts=1"];
     const env = { ...process.env };
     let askpass = null;
@@ -372,7 +382,7 @@ async function pairWithAccount(p, user, password) {
     throw new Error("The device's certificate over SSH doesn't match the one on the network, so this wasn't saved. Something between this computer and the device may be pretending to be it.");
   const id = await pairFinish({ host: p.host, tls: Number(r.tls?.port) || p.tls, fp, name: r.name || p.name, pair: r.pair_id, code: String(r.code) });
   const box = boxes.boxes.find((b) => b.id === id);
-  if (box) { box.loginUser = r.user || user; saveBoxes(); }
+  if (box) { box.loginUser = validUser(r.user) ? r.user : user; saveBoxes(); }
   return id;
 }
 
@@ -408,6 +418,8 @@ async function sshReady() {
   if (id === "local") throw new Error("This is the device itself: open a terminal here.");
   const box = boxes.boxes.find((b) => b.id === id);
   if (!box) throw new Error("Pick a device first.");
+  // Saved before addresses were checked, or edited by hand.
+  if (!validHost(box.host)) throw new Error("This device's saved address isn't valid. Remove it and add it again.");
   if (!fs.existsSync(SSH_KEY)) {
     fs.mkdirSync(path.dirname(SSH_KEY), { recursive: true, mode: 0o700 });
     await run("ssh-keygen", ["-t", "ed25519", "-N", "", "-C", `tt-station@${deviceName().replace(/\s+/g, "-")}`, "-f", SSH_KEY]);
@@ -420,11 +432,11 @@ async function sshReady() {
     box.sshUser = r.json?.ssh_user || "ttuser";
     saveBoxes();
   }
+  if (!validUser(box.sshUser)) throw new Error("The device named an account this computer can't use for SSH.");
   return box;
 }
 
 const sshArgs = (box) => ["-i", SSH_KEY, "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new", `${box.sshUser}@${box.host}`];
-const shq = (a) => `'${String(a).replace(/'/g, "'\\''")}'`;
 
 /** "terminal": the box's shell in a new Terminal window; "command": the ssh command; "vscode": the box in VS Code. */
 async function sshAction(what) {
@@ -446,7 +458,7 @@ async function sshAction(what) {
   }
   // A .command file opens in Terminal and runs (no automation permission needed).
   const file = path.join(os.tmpdir(), `tt-station-ssh-${box.id}.command`);
-  fs.writeFileSync(file, `#!/bin/bash\nclear\necho "TT Station → ${box.name} (${box.host})"\nexec ${command}\n`, { mode: 0o700 });
+  fs.writeFileSync(file, `#!/bin/bash\nclear\necho ${shq(`TT Station → ${cleanName(box.name) || box.host} (${box.host})`)}\nexec ${command}\n`, { mode: 0o700 });
   if (IS_MAC) {
     await run("open", ["-a", "Terminal", file]);
   } else {
@@ -636,6 +648,40 @@ app.on("will-quit", () => { for (const t of tunnels.values()) try { t.child.kill
 
 // ---------------------------------------------------------------- window
 
+/** On the box the window shows: the very same origin as its agent, not a prefix of it. */
+function onBox(url) {
+  return !!auth && sameOrigin(url, auth.base);
+}
+
+/** One of this app's own pages (the pairing and offline screens). */
+function ownPage(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "file:" && path.dirname(require("node:url").fileURLToPath(u)) === __dirname;
+  } catch { return false; }
+}
+
+/** A link leaving the app opens in the system browser, and only a web address does. */
+function openOutside(url) {
+  if (!webAddress(url)) return;
+  // A device-only address (127.0.0.1 there) goes through a tunnel from another computer.
+  reachable(url).then((r) => shell.openExternal(r), (e) => notify({ title: "Couldn't open that", body: String(e.message || e) }));
+}
+
+/** A window with the desktop bridge stays on the box's pages and ours: any
+ *  other page, new window or navigation opens outside, in the browser. */
+function keepOnBox(contents) {
+  contents.setWindowOpenHandler(({ url }) => {
+    openOutside(url);
+    return { action: "deny" };
+  });
+  contents.on("will-navigate", (event, url) => {
+    if (onBox(url) || ownPage(url)) return;
+    event.preventDefault();
+    openOutside(url);
+  });
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1360,
@@ -658,11 +704,7 @@ function createWindow() {
   // Looking at the app counts as reading its notifications: clear the dock badge.
   win.on("focus", clearNotifications);
   // Links that leave the app open in the system browser; the app's own routes stay.
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    // A device-only address (127.0.0.1 there) goes through a tunnel from another computer.
-    if (url.startsWith("http")) reachable(url).then((u) => shell.openExternal(u), (e) => notify({ title: "Couldn't open that", body: String(e.message || e) }));
-    return { action: "deny" };
-  });
+  keepOnBox(win.webContents);
   // The device went away while a page was loading (say, a reload during a restart):
   // the "Connecting…" screen, which keeps trying, instead of a blank window.
   win.webContents.on("did-fail-load", (_e, code, _desc, url, isMainFrame) => {
@@ -671,12 +713,6 @@ function createWindow() {
     clearTimeout(retry);
     win.loadFile(path.join(__dirname, "offline.html"), { query: { why: "The device didn't answer.", remote: boxes.current !== "local" ? "1" : "" } }).catch(() => {});
     retry = setTimeout(load, 5000);
-  });
-  win.webContents.on("will-navigate", (event, url) => {
-    if (auth && !url.startsWith(auth.base)) {
-      event.preventDefault();
-      shell.openExternal(url);
-    }
   });
   // Closing hides to the tray, like other always-there apps; Quit is in the tray.
   win.on("close", (event) => {
@@ -768,10 +804,7 @@ function createTori(mode) {
   });
   overlay.setAlwaysOnTop(true, "floating");
   if (mode !== null) overlay.once("ready-to-show", () => { overlay.show(); overlay.focus(); });
-  overlay.webContents.setWindowOpenHandler(({ url: link }) => {
-    if (link.startsWith("http")) shell.openExternal(link);
-    return { action: "deny" };
-  });
+  keepOnBox(overlay.webContents);
   overlay.on("close", (event) => {
     if (!quitting) { event.preventDefault(); overlay.hide(); overlay.webContents.send("tori", "hidden"); }
   });
@@ -904,6 +937,11 @@ function openAppWindow(url, title) {
     autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, sandbox: true },
   });
+  // No bridge in here, but its pop-ups still go to the browser, not bare windows.
+  w.webContents.setWindowOpenHandler(({ url: link }) => {
+    openOutside(link);
+    return { action: "deny" };
+  });
   w.loadURL(url);
   w.on("page-title-updated", (e) => e.preventDefault());
   w.on("closed", () => appWindows.delete(url));
@@ -1035,17 +1073,32 @@ function setStartAtLogin(on) {
 }
 
 // ---------------------------------------------------------------- IPC
+//
+// Only the box's own pages and this app's may use the bridge: a page from
+// anywhere else that found its way into a window gets nothing (the token above all).
 
-ipcMain.handle("auth", async () => {
+function fromUs(event) {
+  const url = event.senderFrame?.url;
+  return !!url && (onBox(url) || ownPage(url));
+}
+
+function handle(channel, fn) {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!fromUs(event)) throw new Error("Not from TT Station.");
+    return fn(event, ...args);
+  });
+}
+
+handle("auth", async () => {
   if (!auth) auth = await signIn();
   return { base: auth.base, token: auth.token, name: auth.name };
 });
-ipcMain.handle("boxes", () => boxList());
-ipcMain.handle("add-box", async (_e, link) => {
+handle("boxes", () => boxList());
+handle("add-box", async (_e, link) => {
   try { const id = await addBox(link); return { ok: true, id }; } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
-ipcMain.handle("switch-box", (_e, id) => { switchBox(String(id)); });
-ipcMain.handle("remove-box", (_e, id) => {
+handle("switch-box", (_e, id) => { switchBox(String(id)); });
+handle("remove-box", (_e, id) => {
   boxes.boxes = boxes.boxes.filter((b) => b.id !== id);
   saveBoxes();
   if (boxes.current === id) {
@@ -1055,52 +1108,52 @@ ipcMain.handle("remove-box", (_e, id) => {
   }
   return boxList();
 });
-ipcMain.handle("show-connect", () => showConnect());
-ipcMain.handle("discover", () => discover());
-ipcMain.handle("probe", async (_e, host, tls) => {
+handle("show-connect", () => showConnect());
+handle("discover", () => discover());
+handle("probe", async (_e, host, tls) => {
   try { return { ok: true, ...(await probe(String(host), Number(tls) || 8766)) }; } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
-ipcMain.handle("pair-account", async (_e, p, user, password) => {
+handle("pair-account", async (_e, p, user, password) => {
   try {
     const id = await pairWithAccount({ host: String(p.host), tls: Number(p.tls), fp: String(p.fp), name: String(p.name) }, String(user || "ttuser"), password ? String(password) : null);
     switchBox(id);
     return { ok: true, id };
   } catch (e) { return { ok: false, error: String(e.message || e), kind: e.kind || null }; }
 });
-ipcMain.handle("pair-start", async (_e, host, tls, fp) => {
+handle("pair-start", async (_e, host, tls, fp) => {
   try { return { ok: true, pairId: await pairStart(String(host), Number(tls), String(fp)) }; } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
-ipcMain.handle("pair-finish", async (_e, p) => {
+handle("pair-finish", async (_e, p) => {
   try {
     const id = await pairFinish({ host: String(p.host), tls: Number(p.tls), fp: String(p.fp), name: String(p.name), pair: String(p.pairId), code: String(p.code).replace(/\D/g, "") });
     switchBox(id);
     return { ok: true, id };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
-ipcMain.handle("ssh", async (_e, what) => {
+handle("ssh", async (_e, what) => {
   try { return { ok: true, ...(await sshAction(String(what))) }; } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
-ipcMain.handle("open-app-window", async (_e, url, title) => {
+handle("open-app-window", async (_e, url, title) => {
   if (typeof url !== "string" || !/^https?:\/\//.test(url)) return;
   try { openAppWindow(await reachable(url), String(title || "TT Station")); }
   catch (e) { notify({ title: "Couldn't open that app", body: String(e.message || e) }); }
 });
-ipcMain.handle("open-external", async (_e, url) => {
+handle("open-external", async (_e, url) => {
   if (typeof url !== "string" || !/^https?:\/\//.test(url)) return;
   try { await shell.openExternal(await reachable(url)); }
   catch (e) { notify({ title: "Couldn't open that", body: String(e.message || e) }); }
 });
-ipcMain.handle("computer", async (_e, tool, args) => {
+handle("computer", async (_e, tool, args) => {
   try { return { ok: true, ...(await computerTool(String(tool), args && typeof args === "object" ? args : {})) }; }
   catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
-ipcMain.handle("start-at-login", (_e, on) => (typeof on === "boolean" ? setStartAtLogin(on) : IS_MAC ? app.getLoginItemSettings().openAtLogin : fs.existsSync(AUTOSTART)));
-ipcMain.handle("notify", (_e, title, body) => {
+handle("start-at-login", (_e, on) => (typeof on === "boolean" ? setStartAtLogin(on) : IS_MAC ? app.getLoginItemSettings().openAtLogin : fs.existsSync(AUTOSTART)));
+handle("notify", (_e, title, body) => {
   if (!win?.isFocused()) notify({ title: String(title), body: String(body ?? "") });
 });
-ipcMain.handle("hide-tori", () => overlay?.hide());
+handle("hide-tori", () => overlay?.hide());
 // tt-toplike's own native window, on this box's live telemetry.
-ipcMain.handle("open-toplike", (_e, view) => {
+handle("open-toplike", (_e, view) => {
   if (!auth) return;
   // tt-toplike's window is a Linux app on the box: elsewhere, the Hardware page.
   if (IS_MAC || boxes.current !== "local") { show(); win?.webContents.send("navigate", "/hardware"); return; }
@@ -1112,13 +1165,13 @@ ipcMain.handle("open-toplike", (_e, view) => {
   child.on("error", () => notify({ title: "tt-toplike isn't installed", body: "Install tt-toplike-app to open it in its own window." }));
   child.unref();
 });
-ipcMain.handle("show-tori", (_e, mode) => showTori(mode === "type" ? "type" : "talk"));
-ipcMain.handle("show-main", (_e, route) => {
+handle("show-tori", (_e, mode) => showTori(mode === "type" ? "type" : "talk"));
+handle("show-main", (_e, route) => {
   show();
   if (typeof route === "string") win?.webContents.send("navigate", route);
 });
-ipcMain.handle("shortcuts", (_e, on) => (typeof on === "boolean" ? setShortcuts(on) : shortcutsInstalled()));
-ipcMain.handle("tori-shortcut", (_e, binding) => {
+handle("shortcuts", (_e, on) => (typeof on === "boolean" ? setShortcuts(on) : shortcutsInstalled()));
+handle("tori-shortcut", (_e, binding) => {
   if (typeof binding === "string") {
     if (!/^(<(Control|Alt|Shift|Super|Primary)>)*[A-Za-z0-9_]+$/.test(binding) || binding.length > 60) throw new Error("That isn't a shortcut.");
     if (!/<(Control|Alt|Super|Primary)>/.test(binding) && !/^F\d{1,2}$/.test(binding.replace(/<\w+>/g, "")))

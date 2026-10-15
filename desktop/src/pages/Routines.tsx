@@ -18,6 +18,7 @@ import { Typography } from "@tenstorrent/vesper/typography";
 import { Sheet, useSheet } from "@tenstorrent/vesper/sheet";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { externalLinks } from "../links";
 import { ago, ApiError, del, get, post, put } from "../api";
 import { Card, Empty, Eyebrow, Page, toastError, toastOk, usePoll } from "../ui";
 import { ask } from "../dialog";
@@ -399,7 +400,7 @@ function RunView({ id, onBack }: { id: string; onBack: () => void }) {
       {run.report && (
         <div className={`routine-report ${run.status}`}>
           <Eyebrow>{run.status === "done" ? "Report" : "Why it stopped"}</Eyebrow>
-          <div className="markdown selectable"><Markdown remarkPlugins={[remarkGfm]}>{run.report}</Markdown></div>
+          <div className="markdown selectable"><Markdown remarkPlugins={[remarkGfm]} components={externalLinks}>{run.report}</Markdown></div>
         </div>
       )}
       {live && <div><Button size="sm" variant="ghost" onClick={async () => { try { await post(`/routines/runs/${run.id}/stop`); void r.refresh(); } catch (e) { toastError(e); } }}>Stop this run</Button></div>}

@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { externalLinks } from "./links";
 import { Button } from "@tenstorrent/vesper/button";
 import { IconButton } from "@tenstorrent/vesper/icon-button";
 import { Icon } from "@tenstorrent/vesper/icons";
@@ -289,7 +290,7 @@ export function ToriWindow() {
                 <span key={a.id} className="action"><Icon kind={a.status === "error" ? "warning" : a.status === "on_client" ? "spinner" : "checkmark"} width={12} height={12} />{a.summary}</span>
               ))}
               <div className="markdown selectable">
-                {t.content ? <Markdown remarkPlugins={[remarkGfm]}>{t.content}</Markdown>
+                {t.content ? <Markdown remarkPlugins={[remarkGfm]} components={externalLinks}>{t.content}</Markdown>
                   : busy && i === recent.length - 1 ? <span className="muted cursor" /> : null}
               </div>
               {(t.actions ?? []).filter((a) => a.status === "needs_confirmation").map((a) => (

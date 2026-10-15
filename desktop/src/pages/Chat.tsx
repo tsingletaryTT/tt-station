@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { externalLinks } from "../links";
 import { Button } from "@tenstorrent/vesper/button";
 import { IconButton } from "@tenstorrent/vesper/icon-button";
 import { Icon } from "@tenstorrent/vesper/icons";
@@ -324,7 +325,7 @@ function AssistantMessage({ m, streaming, onConfirm }: {
         ))}
         {(m.actions ?? []).flatMap((a) => a.images ?? []).map((id) => <CreationImage key={id} id={id} />)}
         <div className="markdown selectable">
-          {m.content ? <Markdown remarkPlugins={[remarkGfm]}>{m.content}</Markdown>
+          {m.content ? <Markdown remarkPlugins={[remarkGfm]} components={externalLinks}>{m.content}</Markdown>
             : streaming ? <span className="muted cursor">{m.reasoning ? "Thinking" : ""}</span> : null}
           {streaming && m.content && <span className="cursor" />}
         </div>
