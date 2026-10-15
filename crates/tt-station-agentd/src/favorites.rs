@@ -40,7 +40,16 @@ pub struct FavoriteBody {
     pub on: bool,
 }
 
-static LOCK: Mutex<()> = Mutex::new(());
+/// What `crate::favorites` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// One read-modify-write of favorites.json at a time.
+    lock: Mutex<()>,
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().favorites
+}
 
 fn file(state: &AppState) -> PathBuf {
     state.config_dir().join("favorites.json")
@@ -104,7 +113,7 @@ pub(crate) async fn put_favorite(
             Json(json!({ "error": "That isn't a model to favorite." })),
         ));
     }
-    let _guard = LOCK.lock().expect("favorites");
+    let _guard = mine(&state).lock.lock().expect("favorites");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

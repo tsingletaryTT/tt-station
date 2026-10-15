@@ -116,6 +116,7 @@ pub(crate) struct PerAgent {
     pub(crate) apps: crate::apps::PerAgent,
     pub(crate) bench: crate::bench::PerAgent,
     pub(crate) embeddings: crate::embeddings::PerAgent,
+    pub(crate) favorites: crate::favorites::PerAgent,
     pub(crate) idle: crate::idle::PerAgent,
     pub(crate) library: crate::library::PerAgent,
     pub(crate) native_vllm: crate::native_vllm::PerAgent,
