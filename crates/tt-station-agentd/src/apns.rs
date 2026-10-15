@@ -18,6 +18,10 @@
 //!
 //! For a shipped product the key would stay on a vendor relay rather than on
 //! every box; the app side is the same either way.
+//!
+//! What goes through Apple is generic text and an event id, never the event
+//! itself (see `crate::notify::push_payload`): the app's notification service
+//! extension fetches the event from the box and shows it.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -154,17 +158,9 @@ impl Apns {
         Ok(token)
     }
 
-    /// Send one alert to one device token.
-    pub async fn send(
-        &self,
-        device_token: &str,
-        sandbox: bool,
-        title: &str,
-        subtitle: &str,
-        body: &str,
-        kind: &str,
-        data: Option<&serde_json::Value>,
-    ) -> Delivery {
+    /// Send one alert (`payload`, from `crate::notify::push_payload`) to one
+    /// device token.
+    pub async fn send(&self, device_token: &str, sandbox: bool, payload: &serde_json::Value) -> Delivery {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -178,24 +174,6 @@ impl Apns {
             .endpoint
             .clone()
             .unwrap_or_else(|| if sandbox { SANDBOX } else { PRODUCTION }.to_string());
-        let urgent = kind.contains("failed") || kind == "chips_hot";
-        let approval = data.is_some_and(|d| d.get("approval").is_some());
-        let mut payload = json!({
-            "aps": {
-                "alert": { "title": title, "subtitle": subtitle, "body": body },
-                "sound": "default",
-                "interruption-level": if urgent || approval { "time-sensitive" } else { "active" },
-                "thread-id": subtitle,
-            },
-            "kind": kind,
-        });
-        if let Some(d) = data {
-            payload["data"] = d.clone();
-        }
-        if approval {
-            // The phone shows Allow / Don't allow right on the notification.
-            payload["aps"]["category"] = json!("TT_APPROVAL");
-        }
         let response = self
             .client
             .post(format!("{base}/3/device/{device_token}"))
@@ -203,7 +181,7 @@ impl Apns {
             .header("apns-topic", &self.config.topic)
             .header("apns-push-type", "alert")
             .header("apns-priority", "10")
-            .json(&payload)
+            .json(payload)
             .send()
             .await;
         let response = match response {

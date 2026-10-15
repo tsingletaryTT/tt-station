@@ -24,9 +24,20 @@ registers with iOS for remote notifications, and gives the box its device token.
 event then goes from the box to Apple's push service (`crate::apns`): HTTP/2 to
 `api.push.apple.com` (or `api.sandbox…` for Xcode builds), an ES256 provider token signed
 with the app's APNs key, `apns-topic` = the bundle id, payload `{aps: {alert: {title,
-subtitle: <box>, body}, sound, interruption-level}, kind}`. Tokens Apple reports dead
-(`410`/`Unregistered`) are dropped; a token from the other environment (`BadDeviceToken`) is
-retried there and remembered. Messages carry model names and events, never chat content.
+subtitle: <box>, body}, sound, interruption-level, thread-id, mutable-content: 1}, event:
+<seq>}`. Tokens Apple reports dead (`410`/`Unregistered`) are dropped; a token from the other
+environment (`BadDeviceToken`) is retried there and remembered.
+
+What passes through Apple is generic words per kind of event ("Your research has news", "A
+meeting transcript is ready", "Code needs your OK", "A routine has news"; see
+`notify::push_alert`) and the event's id, never the event's own title or text: not a
+report's question, a transcript's title, a command waiting for an OK, a model's error, or a
+pairing code. The app's notification service extension (`ios/NotificationService`) fetches
+the event by id (`GET /events?since=<id-1>`) over the app's pinned HTTPS with the token the
+app shares through a Keychain group, and shows the real title and text (with Allow / Don't
+allow for an approval). When it can't (the phone is away from the box, or it takes longer than
+iOS allows) the generic words stay. Every registered phone gets each push, as before;
+routing per person is a follow-up.
 
 **Setting up the key (once per box, for this prototype).** In the Apple Developer account
 that signs the app: Certificates, IDs & Profiles → Keys → + → Apple Push Notifications

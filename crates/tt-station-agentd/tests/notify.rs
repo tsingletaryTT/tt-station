@@ -182,9 +182,12 @@ async fn alerts_are_pushed_to_registered_phones() {
         let live = pushes.iter().find(|p| p.0 == LIVE).unwrap();
         assert!(live.1.starts_with("bearer ey") || live.1.starts_with("Bearer ey"));
         assert_eq!(live.2, "com.tenstorrent.ttstation.mobile");
-        assert_eq!(live.3["aps"]["alert"]["title"], "Hello from qb2-lab");
+        // Generic words and the event's id; the app fetches the rest.
+        assert_eq!(live.3["aps"]["alert"]["title"], "Notifications are working");
         assert_eq!(live.3["aps"]["alert"]["subtitle"], "qb2-lab");
-        assert_eq!(live.3["kind"], "test");
+        assert_eq!(live.3["aps"]["mutable-content"], 1);
+        assert!(live.3["event"].as_u64().is_some());
+        assert!(live.3.get("kind").is_none() && live.3.get("data").is_none());
     }
     let settings: Value = client
         .get(format!("{base}/notify"))
@@ -199,7 +202,7 @@ async fn alerts_are_pushed_to_registered_phones() {
     assert_eq!(settings["push"]["devices"].as_array().unwrap().len(), 1);
 
     // Watcher events reach the feed and the phone.
-    state.notifier().emit(Draft {
+    let emitted = state.notifier().emit(Draft {
         kind: "download_done",
         title: "FLUX.1-dev downloaded".to_string(),
         body: "Ready to start in TT Station.".to_string(),
@@ -228,7 +231,7 @@ async fn alerts_are_pushed_to_registered_phones() {
             .lock()
             .unwrap()
             .iter()
-            .any(|p| p.3["kind"] == "download_done")
+            .any(|p| p.3["event"] == emitted.seq)
         {
             break;
         }
@@ -238,7 +241,10 @@ async fn alerts_are_pushed_to_registered_phones() {
         .lock()
         .unwrap()
         .iter()
-        .any(|p| p.0 == LIVE && p.3["aps"]["alert"]["title"] == "FLUX.1-dev downloaded"));
+        .any(|p| p.0 == LIVE
+            && p.3["event"] == emitted.seq
+            && p.3["aps"]["alert"]["title"] == "A download finished"
+            && !p.3.to_string().contains("FLUX")));
 
     let power: Value = client
         .get(format!("{base}/power/info"))
@@ -298,7 +304,7 @@ async fn a_pairing_push_never_carries_the_code() {
     let spaced = format!("{} {}", &code[..3], &code[3..]);
     let mut pushed = None;
     for _ in 0..100 {
-        pushed = pushes.lock().unwrap().iter().find(|p| p.0 == LIVE && p.3["kind"] == "pairing").map(|p| p.3.clone());
+        pushed = pushes.lock().unwrap().iter().find(|p| p.0 == LIVE && p.3["aps"]["alert"]["title"] == "A computer is asking to pair").map(|p| p.3.clone());
         if pushed.is_some() {
             break;
         }
@@ -307,6 +313,7 @@ async fn a_pairing_push_never_carries_the_code() {
     let pushed = pushed.expect("the phone is told someone is asking");
     let text = pushed.to_string();
     assert!(!text.contains(&code) && !text.contains(&spaced), "no code through Apple: {text}");
+    assert!(!text.contains("Sam"), "nor who is asking: {text}");
     assert_eq!(pushed["aps"]["alert"]["title"], "A computer is asking to pair");
     assert!(pushed["aps"]["alert"]["body"].as_str().unwrap().contains("Open TT Station to see the code"));
     assert!(pushed.get("data").is_none());
