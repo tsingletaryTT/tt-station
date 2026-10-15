@@ -656,7 +656,7 @@ async fn ask_model(state: &AppState, args: &Value) -> (bool, String) {
         "chat_template_kwargs": { "enable_thinking": false },
     });
     let started = Instant::now();
-    let resp = reqwest::Client::new()
+    let resp = crate::localhttp::local()
         .post(crate::assistant::chat_completions_url(&ep.base_url))
         .json(&body)
         .timeout(Duration::from_secs(600))
@@ -943,7 +943,7 @@ async fn execute(state: &AppState, r: &Routine, run_id: &str) -> Result<String, 
     let mut turn = crate::urltrust::Turn::default();
     turn.person_said(&r.goal);
     let tools = tools();
-    let client = reqwest::Client::new();
+    let client = crate::localhttp::local();
     for round in 0..=MAX_ROUNDS {
         if stopping(state, run_id) {
             return Err("Stopped by you.".into());

@@ -1906,7 +1906,7 @@ pub(crate) fn adopt_when_serving(state: &AppState, port: u16, model: String) {
     let bg = state.clone();
     tokio::spawn(async move {
         let base = format!("http://127.0.0.1:{port}/v1");
-        let client = reqwest::Client::new();
+        let client = crate::localhttp::local();
         let deadline = Instant::now() + Duration::from_secs(3600);
         while Instant::now() < deadline {
             tokio::time::sleep(Duration::from_secs(10)).await;

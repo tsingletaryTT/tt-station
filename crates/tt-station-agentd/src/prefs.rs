@@ -73,7 +73,7 @@ pub fn kind_of(model_type: &str, name: &str) -> &'static str {
 }
 
 async fn ollama_models() -> Vec<String> {
-    let Ok(res) = reqwest::Client::new()
+    let Ok(res) = crate::localhttp::local()
         .get("http://127.0.0.1:11434/api/tags")
         .timeout(std::time::Duration::from_secs(2))
         .send()

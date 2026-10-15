@@ -2160,7 +2160,7 @@ pub async fn cpu_brain(state: &AppState) -> Option<libttstation::model::Endpoint
     if model.is_empty() || model == "off" {
         return None;
     }
-    let tags: Value = reqwest::Client::new()
+    let tags: Value = crate::localhttp::local()
         .get(format!("{OLLAMA}/api/tags"))
         .timeout(Duration::from_secs(2))
         .send()
@@ -2176,7 +2176,7 @@ pub async fn cpu_brain(state: &AppState) -> Option<libttstation::model::Endpoint
         // Keep it loaded for a while, so the next question doesn't wait for a load.
         let warm = model.clone();
         tokio::spawn(async move {
-            let _ = reqwest::Client::new()
+            let _ = crate::localhttp::local()
                 .post(format!("{OLLAMA}/api/generate"))
                 .json(&json!({ "model": warm, "keep_alive": "2h" }))
                 .timeout(Duration::from_secs(120))
@@ -3045,7 +3045,7 @@ async fn create_image(state: &AppState, args: &Value) -> Result<(Value, String),
     let api_key =
         std::env::var("TT_MEDIA_API_KEY").unwrap_or_else(|_| "your-secret-key".to_string());
     let started = Instant::now();
-    let response = reqwest::Client::new()
+    let response = crate::localhttp::local()
         .post(format!("{base}/v1/images/generations"))
         .bearer_auth(api_key)
         .timeout(Duration::from_secs(600))

@@ -238,7 +238,7 @@ const SEARXNG: &str = "http://127.0.0.1:3024";
 /// SearXNG answering on the box; started first if it's installed but stopped.
 async fn searxng_up() -> bool {
     let probe = || async {
-        reqwest::Client::new()
+        crate::localhttp::local()
             .get(format!("{SEARXNG}/config"))
             .timeout(Duration::from_secs(3))
             .send()
@@ -271,7 +271,7 @@ struct Hit {
 
 /// Search: SearXNG on the box when it answers, else the assistant's web search.
 async fn search(query: &str, n: usize) -> (Vec<Hit>, &'static str) {
-    if let Ok(r) = reqwest::Client::new()
+    if let Ok(r) = crate::localhttp::local()
         .get(format!("{SEARXNG}/search"))
         .query(&[("q", query), ("format", "json")])
         .timeout(Duration::from_secs(25))
