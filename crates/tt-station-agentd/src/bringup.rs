@@ -45,26 +45,39 @@ const DRIVER: &str = include_str!("codex_bringup.py");
 const CLAUDE_DRIVER: &str = include_str!("claude_bringup.py");
 const PERMISSION_MCP: &str = include_str!("permission_mcp.py");
 const LEASE_RUN: &str = include_str!("lease_run.py");
-/// One start at a time (a double click must not start two runs).
-static STARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Runs being paused and relaunched (resume, "make the chips available"): the
-/// unit is briefly down while the chips reset, which the watcher mustn't take
-/// for the run ending.
-static RESTARTING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// What `crate::bringup` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// One start at a time (a double click must not start two runs).
+    starting: std::sync::atomic::AtomicBool,
+    /// Runs being paused and relaunched (resume, "make the chips available"): the
+    /// unit is briefly down while the chips reset, which the watcher mustn't take
+    /// for the run ending.
+    restarting: Mutex<Vec<String>>,
+}
 
-struct Restarting(String);
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().bringup
+}
+
+struct Restarting(AppState, String);
 impl Restarting {
-    fn new(id: &str) -> Self {
-        RESTARTING.lock().expect("restarting").push(id.to_string());
-        Self(id.to_string())
+    fn new(state: &AppState, id: &str) -> Self {
+        mine(state)
+            .restarting
+            .lock()
+            .expect("restarting")
+            .push(id.to_string());
+        Self(state.clone(), id.to_string())
     }
 }
 impl Drop for Restarting {
     fn drop(&mut self) {
-        RESTARTING
+        mine(&self.0)
+            .restarting
             .lock()
             .expect("restarting")
-            .retain(|r| r != &self.0);
+            .retain(|r| r != &self.1);
     }
 }
 /// The finish line's stage number (after fast-models-fast's eleven).
@@ -1698,16 +1711,21 @@ pub(crate) async fn post_run(
             ))
         }
     };
-    if STARTING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if mine(&state)
+        .starting
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
         return Err(err(StatusCode::CONFLICT, "A bring-up is already starting."));
     }
-    struct Release;
+    struct Release(AppState);
     impl Drop for Release {
         fn drop(&mut self) {
-            STARTING.store(false, std::sync::atomic::Ordering::SeqCst);
+            mine(&self.0)
+                .starting
+                .store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
-    let _release = Release;
+    let _release = Release(state.clone());
     let engine = match body.engine.as_deref().unwrap_or("codex") {
         e @ ("codex" | "claude") => e.to_string(),
         _ => {
@@ -1855,7 +1873,7 @@ pub(crate) async fn post_action(
                 .map(str::trim)
                 .unwrap_or("")
                 .to_string();
-            let _restarting = Restarting::new(&id);
+            let _restarting = Restarting::new(&state, &id);
             let probe = state.clone();
             let live = tokio::task::spawn_blocking(move || live_ids(&load_runs(&probe)))
                 .await
@@ -2541,7 +2559,7 @@ pub async fn watch_forever(state: AppState) {
         state.set_bringup_busy(!live.is_empty());
         let mut changed = false;
         let mut restore = None;
-        let restarting = RESTARTING.lock().expect("restarting").clone();
+        let restarting = mine(&state).restarting.lock().expect("restarting").clone();
         for run in runs.iter_mut().filter(|r| r.finished.is_none()) {
             // Stage changes → a notification.
             let pkg = package_dir(run);
