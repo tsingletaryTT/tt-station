@@ -124,6 +124,10 @@ pub(crate) fn exists(state: &AppState, id: &str) -> bool {
 }
 
 fn load(state: &AppState, id: &str) -> Option<Session> {
+    // The sessions folder also holds the holder's scripts; those aren't sessions.
+    if !valid_id(id) || !dir(state, id).is_dir() {
+        return None;
+    }
     crate::fsio::read_json_or_backup(&dir(state, id).join("session.json"))
 }
 
