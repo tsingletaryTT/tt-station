@@ -33,7 +33,11 @@ use tt_station_agentd::serving::dstack::DstackBackend;
 /// A bare `sh` script, not a Rust helper binary: cheap to write per test,
 /// and the counter file is plain-text so a failing test's on-disk state is
 /// trivial to inspect by hand.
-fn write_stub_gozer(dir: &std::path::Path, status_json: &str, counter_path: &std::path::Path) -> std::path::PathBuf {
+fn write_stub_gozer(
+    dir: &std::path::Path,
+    status_json: &str,
+    counter_path: &std::path::Path,
+) -> std::path::PathBuf {
     let script_path = dir.join("gozer-stub.sh");
     let script = format!(
         "#!/bin/sh\necho invoked >> \"{counter}\"\nif [ \"$1\" = \"status\" ]; then\n  cat <<'STUBEOF'\n{json}\nSTUBEOF\nfi\n",

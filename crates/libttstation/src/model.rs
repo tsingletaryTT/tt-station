@@ -482,6 +482,55 @@ pub fn txt_decode(
     })
 }
 
+/// One turn of an assistant chat, as sent in `POST /assistant`'s
+/// `messages` array. `role` is `"user"` or `"assistant"` -- the agent
+/// rejects anything else with `400` (the system prompt is the box's alone).
+/// Mirrors `tt-station-agentd::assistant::ChatTurn`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantTurn {
+    pub role: String,
+    pub content: String,
+}
+
+/// `POST /assistant`'s response body, mirroring
+/// `tt-station-agentd::assistant::AssistantResponse` field-for-field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantReply {
+    /// Plain text (no markdown), meant to be shown and/or spoken.
+    pub reply: String,
+    pub actions: Vec<AssistantAction>,
+    /// The served model id that produced `reply`.
+    pub model: String,
+}
+
+/// One tool the box's assistant acted on, as reported in
+/// [`AssistantReply::actions`].
+///
+/// `status` is a plain string rather than an enum so a client built today
+/// keeps decoding if the agent grows a status later: `"done"` (a read-only
+/// tool ran), `"needs_confirmation"` (a disruptive tool is parked -- pass
+/// `id` to `POST /assistant/confirm`), or `"error"` (a read-only tool failed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantAction {
+    pub id: String,
+    pub tool: String,
+    pub args: serde_json::Value,
+    pub status: String,
+    pub summary: String,
+}
+
+/// `POST /assistant/confirm`'s response body, mirroring
+/// `tt-station-agentd::assistant::ConfirmResponse`. `status` is
+/// `"cancelled"`, `"started"` (a `run_model` now loading in the background),
+/// or `"done"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantConfirmation {
+    pub action_id: String,
+    pub tool: String,
+    pub status: String,
+    pub summary: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

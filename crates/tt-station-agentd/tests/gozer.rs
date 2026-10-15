@@ -338,12 +338,11 @@ fn snapshot_leases_preserves_every_state_string_verbatim() {
     };
 
     let snapshot = gozer::snapshot_leases(&runner, &capability).expect("must parse");
-    let states: Vec<&str> = snapshot
-        .leases
-        .iter()
-        .map(|l| l.state.as_str())
-        .collect();
-    assert_eq!(states, vec!["HELD", "HELD-FOREIGN", "STALE", "BUSY-UNTRACKED"]);
+    let states: Vec<&str> = snapshot.leases.iter().map(|l| l.state.as_str()).collect();
+    assert_eq!(
+        states,
+        vec!["HELD", "HELD-FOREIGN", "STALE", "BUSY-UNTRACKED"]
+    );
 }
 
 /// When gozer's grain is `"chip"` (not this box's `"board"`), each chip is
@@ -448,7 +447,8 @@ const HISTORY_JSON_OPEN_TT_STATION_LEASE: &str = r#"{"history":[
 
 /// `docker ps` output (the `discover_serving` format: id/image/ports/name)
 /// with a container publishing host port 8080.
-const DOCKER_PS_SERVING_8080: &str = "c1\tghcr.io/tenstorrent/tt-inference-server:rel\t0.0.0.0:8080->8000/tcp\ttt-agent-llama";
+const DOCKER_PS_SERVING_8080: &str =
+    "c1\tghcr.io/tenstorrent/tt-inference-server:rel\t0.0.0.0:8080->8000/tcp\ttt-agent-llama";
 
 /// The serving port this agent is configured for in the sweep tests -- the
 /// same one `STATUS_JSON_TT_STATION_HELD`'s `who` names, so a KEPT lease
@@ -742,7 +742,10 @@ fn startup_sweep_reports_but_never_releases_a_who_with_no_parseable_port() {
 /// "everything after the last colon".
 #[test]
 fn service_port_is_parsed_from_the_second_who_field() {
-    assert_eq!(gozer::who_service_port("tt-station:8080:llama3"), Some(8080));
+    assert_eq!(
+        gozer::who_service_port("tt-station:8080:llama3"),
+        Some(8080)
+    );
     assert_eq!(
         gozer::who_service_port("tt-station:8003:ghcr.io/org/model:0.14"),
         Some(8003)
@@ -791,8 +794,7 @@ fn foreign_leases_names_everyone_but_our_own_service_port() {
         panic!("a foreign lease is held");
     };
     assert_eq!(
-        holders,
-        "board board-b is held by claude:ttm-optimize (CLAIMED)",
+        holders, "board board-b is held by claude:ttm-optimize (CLAIMED)",
         "our own lease and the FREE board must not appear, one board must \
          yield one clause however many of its chips are held, and the STATE \
          must be carried verbatim -- `refusal_reason` needs the operator to \

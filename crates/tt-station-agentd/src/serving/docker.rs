@@ -287,17 +287,51 @@ fn probe_client() -> reqwest::Result<reqwest::blocking::Client> {
 /// wait for it, and turn a non-zero exit into an `Err` that names the full
 /// argv (`display_args`, kept separate from `cmd` since `Command` doesn't
 /// expose its own argv back out) and stderr for debugging.
+/// Detach a child from whatever terminal the agent was started in: stdin from
+/// `/dev/null` and a new session (`setsid`), so it has no controlling terminal.
+///
+/// Why both: tt-inference-server's run.py, on a model's first setup, asks for
+/// `JWT_SECRET`/`HF_TOKEN` through Python's `getpass`, which opens `/dev/tty`
+/// directly rather than reading stdin. Under an agent started from a shell, that
+/// prompt appeared on the box's console and the launch hung until someone typed
+/// there -- the very thing a phone user can't do. With no controlling terminal,
+/// `getpass` falls back to stdin, hits EOF, and the launch fails fast with an
+/// error instead. (The launch environment also answers those prompts up front --
+/// see `RunPyConfig::launch_env` -- so this is the backstop, not the fix.)
+pub(crate) fn detach_from_terminal(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: `setsid` is async-signal-safe and touches no Rust state; this is
+    // the documented use of `pre_exec`.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    cmd.stdin(std::process::Stdio::null())
+}
+
 fn run_and_capture(cmd: &mut std::process::Command, display_args: &[&str]) -> Result<String> {
-    let output = cmd
+    let output = detach_from_terminal(cmd)
         .output()
         .with_context(|| format!("failed to spawn {}", display_args.join(" ")))?;
 
     if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "{} failed: {}",
-            display_args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        // Some tools (tt-smi) print their errors on stdout: say what they said,
+        // or at least how they exited, never just "failed:".
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let why = if !stderr.is_empty() {
+            stderr
+        } else {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .last()
+                .map(str::to_string)
+                .unwrap_or_else(|| output.status.to_string())
+        };
+        return Err(anyhow::anyhow!("{} failed: {why}", display_args.join(" ")));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -858,13 +892,14 @@ impl DockerBackend {
             return Ok(());
         };
 
-        self.stop_container(&observed.container_name).with_context(|| {
-            format!(
+        self.stop_container(&observed.container_name)
+            .with_context(|| {
+                format!(
                 "refusing to release the previous serve's lease: its container {} could not be \
                  stopped, and the release would reset chips it may still be driving",
                 observed.container_name
             )
-        })?;
+            })?;
         self.release_observed_lease(&observed)
     }
 

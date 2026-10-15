@@ -775,8 +775,8 @@ fn docker_start_stops_the_container_before_releasing_on_health_timeout() {
         "the container stop ({stop_index}) must precede the release \
          ({release_index}), which resets the chips: {commands:?}"
     );
-    let probe_index = docker_ps_name_probe_index(&commands, "tt-inference-llama3")
-        .unwrap_or_else(|| {
+    let probe_index =
+        docker_ps_name_probe_index(&commands, "tt-inference-llama3").unwrap_or_else(|| {
             panic!("the stop must be aimed at the container this start launched: {commands:?}")
         });
     assert!(
@@ -937,8 +937,8 @@ fn docker_stop_stops_the_leases_own_container_even_when_given_no_model() {
     let commands = runner.commands();
     // The lease's own container is named in the anchored `docker ps` probe;
     // the stop that follows acts on the id docker reported for it.
-    let probe_index = docker_ps_name_probe_index(&commands, "tt-inference-llama3")
-        .unwrap_or_else(|| {
+    let probe_index =
+        docker_ps_name_probe_index(&commands, "tt-inference-llama3").unwrap_or_else(|| {
             panic!(
                 "stop must aim at the container the lease belongs to \
                  (tt-inference-llama3), whatever model argument it was given: {commands:?}"
@@ -1217,7 +1217,9 @@ fn docker_start_twice_releases_the_first_lease_before_acquiring_again() {
     )
     .with_gozer(Some(gozer_capability()));
 
-    backend.start("model-a").expect("the first start should succeed");
+    backend
+        .start("model-a")
+        .expect("the first start should succeed");
     assert_eq!(gozer.held_lease_ids(), vec!["lease-1".to_string()]);
 
     backend
@@ -1235,7 +1237,11 @@ fn docker_start_twice_releases_the_first_lease_before_acquiring_again() {
     let acquires = gozer_indices(&commands, "acquire");
     let releases = gozer_indices(&commands, "release");
     assert_eq!(acquires.len(), 2, "one acquire per start: {commands:?}");
-    assert_eq!(releases.len(), 1, "one release, of the old lease: {commands:?}");
+    assert_eq!(
+        releases.len(),
+        1,
+        "one release, of the old lease: {commands:?}"
+    );
     assert!(
         commands[releases[0]].iter().any(|a| a == "lease-1"),
         "the release must name the FIRST lease: {:?}",
@@ -1445,7 +1451,9 @@ fn docker_swap_never_releases_a_lease_recorded_by_a_concurrent_serve() {
         .with_gozer(Some(gozer_capability())),
     );
 
-    backend.start("model-a").expect("the first start should succeed");
+    backend
+        .start("model-a")
+        .expect("the first start should succeed");
     assert_eq!(gozer.held_lease_ids(), vec!["lease-1".to_string()]);
 
     let concurrent = gozer.preexisting_lease("tt-station:8080:model-c");

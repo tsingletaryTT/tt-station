@@ -17,6 +17,15 @@ pub mod runpy;
 
 use std::time::Duration;
 
+/// Where on the box a serve runs when the box is split between models: the
+/// device config for that slice (`p300` = one P300 card, two chips) and the
+/// chips (`/dev/tenstorrent/<n>` indices, e.g. `0,1`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Placement {
+    pub device: String,
+    pub device_ids: String,
+}
+
 use anyhow::Result;
 use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 
@@ -134,6 +143,18 @@ pub trait ServingBackend: Send + Sync {
     /// downstream integration tests via the `test-hooks` feature).
     #[cfg(any(test, feature = "test-hooks"))]
     fn gozer_capability(&self) -> Option<&crate::gozer::Capability> {
+        None
+    }
+
+    /// Pin every following `start` to a slice of the box (co-serving: chat on
+    /// one card, images on the other), or `None` for the whole box. Returns
+    /// whether this backend can honour it; the default can't.
+    fn set_placement(&self, placement: Option<Placement>) -> bool {
+        placement.is_none()
+    }
+
+    /// The current pin, if any.
+    fn placement(&self) -> Option<Placement> {
         None
     }
 

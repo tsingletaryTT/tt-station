@@ -12,6 +12,11 @@ ExecStart={{AGENT_BIN}}
 Environment=PATH={{PATH_ENV}}
 Restart=on-failure
 RestartSec=2
+# Stop/restart only the agent itself, not everything it spawned: a model
+# download (`tt model pull`) or an in-flight `tt serve` keeps going across an
+# agent restart (the agent re-adopts running pulls and the serving container at
+# startup). The default, control-group, killed a 17 GB-in download on restart.
+KillMode=process
 
 [Install]
 WantedBy=default.target

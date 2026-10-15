@@ -207,7 +207,11 @@ pub async fn reset(base: &str, token: &str, force: bool) -> anyhow::Result<()> {
     let resp = request.send().await?;
 
     if resp.status() == reqwest::StatusCode::CONFLICT {
-        anyhow::bail!("the box refused the reset {}: {}", REFUSAL_MARKER, refusal_detail(resp).await);
+        anyhow::bail!(
+            "the box refused the reset {}: {}",
+            REFUSAL_MARKER,
+            refusal_detail(resp).await
+        );
     }
 
     resp.error_for_status()
@@ -460,6 +464,74 @@ impl AgentClient {
             .map_err(|e| anyhow::anyhow!("request to {url} failed: {e}"))?;
 
         Ok(resp.json().await?)
+    }
+
+    /// `POST /assistant { "messages": [...] }`: chat with the box's
+    /// assistant, which answers using the model the box is serving (see the
+    /// agent's `assistant` module / `docs/reference/assistant.md`).
+    ///
+    /// Non-2xx answers carry `{ "error": "..." }`, and that message is what
+    /// a person can act on -- most commonly the `409` "No model is serving —
+    /// start one first" -- so it's surfaced verbatim (with the status code as
+    /// a stable marker), not replaced by reqwest's generic status error.
+    pub async fn assistant(
+        &self,
+        messages: &[crate::model::AssistantTurn],
+    ) -> anyhow::Result<crate::model::AssistantReply> {
+        let url = join(&self.base, "assistant");
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "messages": messages }))
+            .send()
+            .await?;
+        Self::json_or_agent_error(resp, &url).await
+    }
+
+    /// `POST /assistant/confirm { "action_id": "...", "approve": <bool> }`:
+    /// approve or deny an action the assistant parked as
+    /// `needs_confirmation`. Errors surface the agent's message the same way
+    /// [`AgentClient::assistant`] does (a `404` means the id is unknown or
+    /// expired).
+    pub async fn assistant_confirm(
+        &self,
+        action_id: &str,
+        approve: bool,
+    ) -> anyhow::Result<crate::model::AssistantConfirmation> {
+        let url = join(&self.base, "assistant/confirm");
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&serde_json::json!({ "action_id": action_id, "approve": approve }))
+            .send()
+            .await?;
+        Self::json_or_agent_error(resp, &url).await
+    }
+
+    /// Decode a 2xx body as `T`, or turn a non-2xx into an error carrying the
+    /// agent's own `{ "error": .. }` message plus the status code (falling
+    /// back to the bare status when the body has no message, e.g. a `401`).
+    async fn json_or_agent_error<T: serde::de::DeserializeOwned>(
+        resp: reqwest::Response,
+        url: &str,
+    ) -> anyhow::Result<T> {
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(resp.json().await?);
+        }
+        let detail = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|body| {
+                body.get("error")
+                    .and_then(|e| e.as_str())
+                    .map(str::to_string)
+            });
+        match detail {
+            Some(msg) => anyhow::bail!("{msg} ({})", status.as_u16()),
+            None => anyhow::bail!("request to {url} failed: {status}"),
+        }
     }
 
     /// `GET /leases` (bearer-guarded, per `tt-station-agentd::routes::get_leases`

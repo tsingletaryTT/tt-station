@@ -292,7 +292,10 @@ pub fn parse_media_metrics(text: &str) -> Option<MediaCounters> {
             c.post_count += v.max(0.0) as u64;
         } else if is_metric(line, "tt_media_server_pre_processing_duration_seconds_sum") {
             c.pre_sum += v.max(0.0);
-        } else if is_metric(line, "tt_media_server_pre_processing_duration_seconds_count") {
+        } else if is_metric(
+            line,
+            "tt_media_server_pre_processing_duration_seconds_count",
+        ) {
             c.pre_count += v.max(0.0) as u64;
         } else if is_metric(line, "tt_media_server_model_inference_duration_seconds_sum") {
             c.inference_sum += v.max(0.0);
@@ -530,7 +533,9 @@ impl MediaInfo {
                    cur_count: u64,
                    ps: fn(&MediaCounters) -> f64,
                    pc: fn(&MediaCounters) -> u64|
-         -> f32 { wavg(cur_sum, cur_count, prev.map_or(0.0, ps), prev.map_or(0, pc)) };
+         -> f32 {
+            wavg(cur_sum, cur_count, prev.map_or(0.0, ps), prev.map_or(0, pc))
+        };
         MediaInfo {
             generations_per_min: gen_per_min.max(0.0),
             jobs_in_progress: cur.jobs_in_progress,
@@ -544,7 +549,12 @@ impl MediaInfo {
                 |c| c.duration_sum,
                 |c| c.duration_count,
             ),
-            post_avg_s: avg(cur.post_sum, cur.post_count, |c| c.post_sum, |c| c.post_count),
+            post_avg_s: avg(
+                cur.post_sum,
+                cur.post_count,
+                |c| c.post_sum,
+                |c| c.post_count,
+            ),
             pre_avg_s: avg(cur.pre_sum, cur.pre_count, |c| c.pre_sum, |c| c.pre_count),
             inference_avg_s: avg(
                 cur.inference_sum,
@@ -651,9 +661,7 @@ pub fn build_inference(
             // Exactly one of `serving`/`media` is populated, per the flavor
             // the scrape identified.
             let (serving, media) = match counters {
-                ScrapeCounters::Vllm(c) => {
-                    (Some(ServingInfo::fold(prev, &c, elapsed_secs)), None)
-                }
+                ScrapeCounters::Vllm(c) => (Some(ServingInfo::fold(prev, &c, elapsed_secs)), None),
                 ScrapeCounters::Media(c) => {
                     (None, Some(MediaInfo::fold(prev_media, &c, elapsed_secs)))
                 }
@@ -798,7 +806,10 @@ vllm:num_preemptions_total{engine=\"0\",model_name=\"M\"} 3.0
     fn kv_cache_usage_nan_is_sanitized() {
         let sample = "vllm:kv_cache_usage_perc{engine=\"0\",model_name=\"M\"} NaN\n";
         let c = parse_vllm_metrics(sample).expect("has vllm metrics");
-        assert!(c.kv_cache_usage.is_finite(), "kv_cache_usage must not be NaN");
+        assert!(
+            c.kv_cache_usage.is_finite(),
+            "kv_cache_usage must not be NaN"
+        );
         assert!((0.0..=1.0).contains(&c.kv_cache_usage));
     }
 
@@ -1240,7 +1251,7 @@ tt_media_server_requests_base_total{model_type=\"skyreels\",status=\"failed\"} 2
         let m = MediaInfo::fold(Some(&prev), &cur, 2.0);
         assert_eq!(m.duration_avg_s, 20.0); // 240/12
         assert_eq!(m.post_avg_s, 0.5); // 6/12
-        // Never-observed stages stay 0 (callers hide a zero stage row).
+                                       // Never-observed stages stay 0 (callers hide a zero stage row).
         assert_eq!(m.pre_avg_s, 0.0);
         assert_eq!(m.inference_avg_s, 0.0);
         assert_eq!(m.warmup_avg_s, 0.0);

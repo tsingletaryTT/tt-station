@@ -41,6 +41,16 @@ enum Backend {
     Dstack,
 }
 
+/// How the `runpy` backend launches a serve (`--serve-with`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ServeWith {
+    /// `python3 run.py` from `--tt-inference-repo` (the long-standing default).
+    Runpy,
+    /// The official Tenstorrent CLI: `tt serve <model>`, from its own managed
+    /// tt-inference-server checkout with its curated images and parsers.
+    Tt,
+}
+
 impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -49,6 +59,13 @@ impl std::fmt::Display for Backend {
             Backend::Dstack => write!(f, "dstack"),
         }
     }
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Show a QR code that pairs a phone with this box: scan it with the
+    /// iPhone Camera app. Talks to the agent already running on this box.
+    Pair,
 }
 
 #[derive(Parser)]
@@ -242,6 +259,22 @@ struct Cli {
     #[arg(long = "engine")]
     engine: Option<String>,
 
+    /// How the `runpy` backend launches a serve: `runpy` (default) runs
+    /// `python3 run.py` from `--tt-inference-repo`; `tt` runs the official
+    /// Tenstorrent CLI's `tt serve <model>` instead (its managed
+    /// tt-inference-server, images and tool-call parsers). With `tt`, the
+    /// log routes default to tt's managed checkout unless
+    /// `--tt-inference-repo` says otherwise. Only meaningful for `runpy`.
+    #[arg(long = "serve-with", value_enum)]
+    serve_with: Option<ServeWith>,
+
+    /// Path to the official Tenstorrent CLI (`tt`). Optional: found on `$PATH`
+    /// or at `~/.tenstorrent-venv/bin/tt` when omitted. When found, the
+    /// `/tt/models` catalog and `/tt/pull` download routes are enabled; it is
+    /// required for `--serve-with tt`.
+    #[arg(long = "tt-cli")]
+    tt_cli: Option<String>,
+
     /// `run.py`'s `--impl` flag, e.g. `tt-transformers`. Only meaningful for
     /// the `runpy` backend.
     ///
@@ -351,6 +384,9 @@ struct Cli {
     /// An explicit path that is missing/unreadable is a hard error.
     #[arg(long)]
     config: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
 
     /// Name of the `[profile.<name>]` in the config file to activate.
     /// Overrides `default_profile`. Errors if the named profile is absent.
@@ -627,7 +663,22 @@ async fn sweep_stale_leases_at_startup(
             // silicon with wedged ethernet cores. See
             // `ServingBackend::adopt_lease`.
             let mut adopted = 0usize;
+            // A community package's leases are released by the package's own
+            // stop (`community::stop_package`), not the serving backend's.
+            let community: Vec<String> = std::fs::read(config_dir().join("community/leases.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or_default();
+            let mut theirs = 0usize;
             for lease in &report.adoptable {
+                if community.contains(&lease.lease_id) {
+                    theirs += 1;
+                    eprintln!(
+                        "tt-station-agentd: lease '{}' ({}) is the community model's; its stop releases it",
+                        lease.lease_id, lease.who
+                    );
+                    continue;
+                }
                 if backend.adopt_lease(&lease.lease_id, &lease.who) {
                     adopted += 1;
                     eprintln!(
@@ -668,7 +719,7 @@ async fn sweep_stale_leases_at_startup(
                     report.released.len(),
                     report.kept.len(),
                     report.adoptable.len(),
-                    report.adoptable.len() - adopted,
+                    report.adoptable.len() - adopted - theirs,
                     report.unresolved.len()
                 );
             }
@@ -794,6 +845,9 @@ fn resolve_ssh_target(ssh_user_override: Option<String>) -> (String, std::path::
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(Command::Pair) = cli.command {
+        return pair_command().await;
+    }
 
     // Config file path: explicit --config wins; else $TT_CONFIG_DIR/agentd.toml
     // if set; else $HOME/.config/tt-station/agentd.toml.
@@ -835,6 +889,10 @@ async fn main() -> Result<()> {
         gozer_path: cli.gozer_path.clone(),
         backend: cli.backend.map(|b| b.to_string()),
         tt_inference_repo: cli.tt_inference_repo.clone(),
+        serve_with: cli.serve_with.map(|s| match s {
+            ServeWith::Runpy => "runpy".to_string(),
+            ServeWith::Tt => "tt".to_string(),
+        }),
         serving_image: cli.serving_image.clone(),
         auto_image: cli.auto_image,
         tt_device: cli.tt_device.clone(),
@@ -855,6 +913,11 @@ async fn main() -> Result<()> {
     };
     let rc = config::resolve(overrides, env_hf_token, file, cli.profile.as_deref())
         .context("failed to resolve configuration")?;
+    let serve_with = if rc.serve_with == "tt" {
+        ServeWith::Tt
+    } else {
+        ServeWith::Runpy
+    };
 
     // `--print-config` is purely diagnostic: resolve, print the redacted
     // summary, exit -- WITHOUT binding the control port or touching mDNS.
@@ -897,6 +960,39 @@ async fn main() -> Result<()> {
         hugepages_src: rc.hugepages_src.clone(),
     };
 
+    // The official tt CLI: the box's model catalog and downloads (`/tt/*`), and
+    // the launcher for `--serve-with tt`. Optional unless serving through it.
+    let tt_cli = tt_station_agentd::ttcli::locate(cli.tt_cli.as_deref()).map(|found| {
+        let env = rc
+            .hf_token
+            .as_ref()
+            .map(|t| vec![("HF_TOKEN".to_string(), t.clone())])
+            .unwrap_or_default();
+        Arc::new(
+            tt_station_agentd::ttcli::TtCli::new(found.argv().to_vec(), rc.host_hf_cache.clone())
+                .with_pull_env(env),
+        )
+    });
+    match (&tt_cli, serve_with) {
+        (Some(tt), _) => eprintln!(
+            "tt-station-agentd: model manager: {} ({}); serving with {}",
+            tt.version().unwrap_or_else(|| "tt".to_string()),
+            tt.argv()[0],
+            if serve_with == ServeWith::Tt {
+                "tt serve"
+            } else {
+                "run.py"
+            }
+        ),
+        (None, ServeWith::Tt) => anyhow::bail!(
+            "--serve-with tt needs the official Tenstorrent CLI, but no working `tt` was found \
+             (pass --tt-cli <path>)"
+        ),
+        (None, ServeWith::Runpy) => eprintln!(
+            "tt-station-agentd: official tt CLI not found; /tt/models and /tt/pull are disabled"
+        ),
+    }
+
     let runpy_config = RunPyConfig {
         repo_dir: rc.tt_inference_repo.clone(),
         host: rc.serving_host.clone(),
@@ -934,7 +1030,10 @@ async fn main() -> Result<()> {
         // `RunPyConfig::reset_before_serve`'s doc comment for why resetting
         // before every serve is the robust default.
         reset_before_serve: !rc.no_device_reset,
-        reset_cmd: vec!["tt-smi".to_string(), "-r".to_string()],
+        // The configured tt-smi, not whichever is first on PATH: resets
+        // under a gozer lease name chips by PCI address, which tt-smi 3.x
+        // (bundled with tt-inference-server) rejects.
+        reset_cmd: vec![rc.tt_smi_bin.clone(), "-r".to_string()],
         // Default-on: enable OpenAI-style tool calling for families we know
         // the vLLM parser for (see `RunPyConfig::enable_tool_calling`). This
         // is what lets a served instruct model (e.g. Llama-3.3-70B-Instruct)
@@ -942,12 +1041,25 @@ async fn main() -> Result<()> {
         // NOT wire this up on its own. No CLI opt-out yet; the field stays
         // configurable for tests and a future flag.
         enable_tool_calling: true,
+        launch_env: launch_env(rc.hf_token.as_deref()),
+        tt_cli_serve: match (&tt_cli, serve_with) {
+            (Some(tt), ServeWith::Tt) => Some(tt.argv().to_vec()),
+            _ => None,
+        },
     };
 
     // Probe for gozer and build the backend TOGETHER, in that order -- see
     // `build_serving_backend`'s doc comment for why the ordering is the
     // point. `gozer_capability` is carried down to `AppState::with_gozer`
     // below rather than re-probed there.
+    // Co-serving's second slot (chat + images on separate cards): the same
+    // run.py launch on the next port up. Not with gozer -- a split box can't
+    // also lease chips.
+    let companion_config = (rc.backend == "runpy").then(|| {
+        let mut cfg = runpy_config.clone();
+        cfg.service_port = rc.serving_port + 1;
+        cfg
+    });
     let (backend, gozer_capability) = build_serving_backend(
         &rc.backend,
         rc.gozer_path.as_deref(),
@@ -955,6 +1067,7 @@ async fn main() -> Result<()> {
         runpy_config,
     )
     .await?;
+    let companion_config = companion_config.filter(|_| gozer_capability.is_none());
 
     // Reconcile gozer's lease state against what is actually running, ONCE,
     // right after the probe that produced `gozer_capability` -- before the
@@ -1017,6 +1130,120 @@ async fn main() -> Result<()> {
         state
     };
 
+    // Dashboard history: loaded from disk so a restart doesn't blank the charts,
+    // recorded every few seconds in the background, saved every minute.
+    let history_path =
+        std::path::PathBuf::from(std::env::var("TT_CONFIG_DIR").unwrap_or_else(|_| {
+            format!(
+                "{}/.config/tt-station",
+                std::env::var("HOME").unwrap_or_default()
+            )
+        }))
+        .join("metrics-history.json");
+    let state = state.with_history(tt_station_agentd::history::History::load(&history_path));
+
+    let state = match companion_config.clone() {
+        Some(cfg) => state.with_companion(tt_station_agentd::coserve::Companion::new(Arc::new(
+            tt_station_agentd::serving::runpy::RunPyBackend::new(cfg, Box::new(RealCommandRunner)),
+        ))),
+        None => state,
+    };
+
+    let state = state.with_config_dir(config_dir()).managing_units();
+    let state = state.with_load_times(tt_station_agentd::modes::LoadTimes::open(
+        config_dir().join("load-times.json"),
+    ));
+    // Long jobs (transcription), queued on the box.
+    let state = state.with_jobs(tt_station_agentd::jobs::Jobs::open(
+        config_dir().join("jobs"),
+    ));
+
+    // Lab mode: tt-lab, when it's built here (see `lab`).
+    let state = state.with_lab(tt_station_agentd::lab::Lab::from_env());
+
+    // Who's who in the household (see `people`).
+    let state = state.with_cpu_brain(true);
+    let state = state.with_people(tt_station_agentd::people::People::open(
+        config_dir().join("people.json"),
+    ));
+    // Scheduled modes (see `schedules`).
+    let state = state.with_schedules(tt_station_agentd::schedules::Schedules::open(
+        config_dir().join("schedules.json"),
+    ));
+
+    // Orchard: model bring-ups with tt-orchard (see `orchard`).
+    let state = state.with_orchard(
+        tt_station_agentd::orchard::Orchard::from_env(&config_dir()).with_tt_smi(&rc.tt_smi_bin),
+    );
+
+    // HTTPS beside HTTP: a certificate the phone pins at pairing (see `tls`).
+    let tls_identity = match tt_station_agentd::tls::identity(
+        &config_dir(),
+        tt_station_agentd::tls::names(&rc.name),
+    ) {
+        Ok(identity) => Some(identity),
+        Err(e) => {
+            eprintln!("tt-station-agentd: HTTPS disabled: {e}");
+            None
+        }
+    };
+    let state = match &tls_identity {
+        Some(identity) => state.with_tls(tt_station_agentd::tls::TlsInfo {
+            port: rc.ctrl_port + 1,
+            sha256: identity.sha256.clone(),
+        }),
+        None => state,
+    };
+
+    // Alerts for the owner (downloads, model readiness, power-on).
+    let state = state.with_notifier(tt_station_agentd::notify::Notifier::open(
+        config_dir().join("notify.json"),
+    ));
+
+    // What the assistant remembers about its owner.
+    let state = state.with_memories(tt_station_agentd::memory::Memories::open(
+        config_dir().join("memories.json"),
+    ));
+
+    // Images the assistant makes in chat.
+    let state = state.with_creations(tt_station_agentd::creations::Creations::new(
+        config_dir().join("creations"),
+    ));
+
+    // The OpenAI-compatible `/v1` gateway's app keys.
+    let state = state.with_gateway(
+        tt_station_agentd::gateway::AppKeys::open(config_dir().join("app-keys.json")),
+        rc.ctrl_port,
+    );
+
+    // The secret `tt-station-agentd pair` presents to mint a QR pairing code.
+    let state = match tt_station_agentd::pairqr::write_secret(&config_dir(), rc.ctrl_port, &rc.name)
+    {
+        Ok(local) => state.with_local_secret(local.secret),
+        Err(e) => {
+            eprintln!("tt-station-agentd: QR pairing disabled (couldn't write local secret: {e})");
+            state
+        }
+    };
+    // The user's documents for the assistant's `search_documents` tool.
+    let docs_dir = history_path
+        .parent()
+        .map(|p| p.join("documents"))
+        .unwrap_or_else(|| std::path::PathBuf::from("documents"));
+    let state = state.with_docs(tt_station_agentd::docs::DocStore::open(docs_dir));
+
+    // Downloads a previous agent left running (e.g. it was restarted mid-pull).
+    if let Some(tt) = &tt_cli {
+        let tt = Arc::clone(tt);
+        tokio::task::spawn_blocking(move || tt.adopt_running_pulls());
+    }
+
+    // The `/tt/*` model-manager routes (catalog + downloads), when tt was found.
+    let state = match &tt_cli {
+        Some(tt) => state.with_tt_cli(Arc::clone(tt)),
+        None => state,
+    };
+
     // Configure the additive `POST`/`DELETE /ssh/authorize` routes (Task 2,
     // see routes.rs): which account's `authorized_keys` a paired client's
     // key lands in. Applied here, before any clone of `state` exists, for
@@ -1039,11 +1266,12 @@ async fn main() -> Result<()> {
         || cli.power_suspend_cmd.is_some()
         || cli.power_reboot_cmd.is_some()
         || cli.power_shutdown_cmd.is_some()
+        || rc.tt_smi_bin != "tt-smi"
     {
         let reset_chips = cli
             .power_reset_chips_cmd
             .clone()
-            .unwrap_or_else(|| vec!["tt-smi".to_string(), "-r".to_string()]);
+            .unwrap_or_else(|| vec![rc.tt_smi_bin.clone(), "-r".to_string()]);
         let suspend = cli
             .power_suspend_cmd
             .clone()
@@ -1132,7 +1360,104 @@ async fn main() -> Result<()> {
     // the usual way to stop a daemon (SIGINT/SIGTERM) would kill the
     // process before Rust destructors run, leaving the box falsely
     // advertised until the mDNS TTL expires.
-    axum::serve(listener, app(state))
+    // Adopt a model already serving on our port (e.g. this agent was restarted
+    // under a loaded model): without this the box reads `idle` until someone
+    // reloads it, which costs minutes. Backgrounded -- discovery probes docker.
+    {
+        let adopt = state.clone();
+        let host = rc.serving_host.clone();
+        let port = rc.serving_port;
+        tokio::spawn(async move {
+            let found = tokio::task::spawn_blocking(move || {
+                let runner = tt_station_agentd::serving::docker::RealCommandRunner;
+                tt_station_agentd::serving::discovery::discover_serving(
+                    &runner,
+                    &host,
+                    port,
+                    &libttstation::model::ServingStatus::Idle,
+                )
+            })
+            .await
+            .unwrap_or_default();
+            let companion_port = port + 1;
+            let companion = found
+                .iter()
+                .find(|e| e.host_port == companion_port)
+                .map(|e| libttstation::model::Endpoint {
+                    base_url: e.base_url.clone(),
+                    model: e.model.clone(),
+                    requires_key: false,
+                });
+            tt_station_agentd::coserve::adopt_at_startup(&adopt, companion);
+            if let Some(entry) = found.into_iter().find(|e| e.host_port == port) {
+                if matches!(adopt.status(), libttstation::model::ServingStatus::Idle) {
+                    adopt.adopt_serving(libttstation::model::Endpoint {
+                        base_url: entry.base_url,
+                        model: entry.model,
+                        requires_key: false,
+                    });
+                }
+            }
+        });
+    }
+
+    state.notifier().set_box_name(&rc.name);
+    tokio::spawn(tt_station_agentd::notify::watch_forever(state.clone()));
+    tokio::spawn(tt_station_agentd::doctor::nightly_forever(state.clone()));
+    tokio::spawn(tt_station_agentd::jobs::run_forever(state.clone()));
+    tokio::spawn(tt_station_agentd::orchard::watch_forever(state.clone()));
+    tokio::spawn(tt_station_agentd::bringup::watch_forever(state.clone()));
+    tokio::spawn(tt_station_agentd::community::readopt(state.clone()));
+    tt_station_agentd::research::resume(&state);
+    tokio::spawn(tt_station_agentd::coding::watch_forever(state.clone()));
+    // Puts the last good model back after a stuck start is stopped.
+    tokio::spawn(tt_station_agentd::community::restarter(state.clone()));
+    // Routines that run on a schedule.
+    tokio::spawn(tt_station_agentd::routines::schedule_forever(state.clone()));
+    tokio::spawn(tt_station_agentd::library::index_forever(state.clone()));
+    tt_station_agentd::updates::settle();
+    tokio::spawn(tt_station_agentd::idle::watch_forever(state.clone()));
+    // Code sessions still running in their holders: picked back up.
+    tokio::spawn(tt_station_agentd::workspace::resume(state.clone()));
+    tokio::spawn(tt_station_agentd::schedules::run_forever(state.clone()));
+    tokio::spawn(tt_station_agentd::routes::record_metrics_forever(
+        state.clone(),
+        Some(history_path),
+    ));
+
+    if let Some(identity) = tls_identity {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        match axum_server::tls_rustls::RustlsConfig::from_pem(
+            identity.cert_pem.into_bytes(),
+            identity.key_pem.into_bytes(),
+        )
+        .await
+        {
+            Ok(config) => {
+                let addr = std::net::SocketAddr::from(([0, 0, 0, 0], rc.ctrl_port + 1));
+                let tls_app = app(state.clone());
+                println!(
+                    "tt-station-agentd: HTTPS on port {} (certificate sha256 {})",
+                    rc.ctrl_port + 1,
+                    identity.sha256
+                );
+                tokio::spawn(async move {
+                    if let Err(e) = axum_server::bind_rustls(addr, config)
+                        .serve(tls_app.into_make_service())
+                        .await
+                    {
+                        eprintln!("tt-station-agentd: HTTPS server stopped: {e}");
+                    }
+                });
+            }
+            Err(e) => eprintln!("tt-station-agentd: HTTPS disabled: {e}"),
+        }
+    }
+
+    // Plain HTTP is for the box itself (the desktop app) and its own Docker
+    // apps; anything else on the network is sent to HTTPS (`local_http`).
+    let http_app = tt_station_agentd::routes::local_http_app(state);
+    axum::serve(listener, http_app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("agent HTTP server failed")?;
@@ -1246,7 +1571,9 @@ impl StatusAdvertiser for MdnsStatusAdvertiser {
             mac: self.mac.clone(),
         };
 
-        let txt_pairs = txt_encode(&record);
+        let mut txt_pairs = txt_encode(&record);
+        // Where the encrypted API is (phones connect only there).
+        txt_pairs.push(("tls".to_string(), (self.ctrl_port + 1).to_string()));
         let txt_refs: Vec<(&str, &str)> = txt_pairs
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -1324,7 +1651,8 @@ fn advertise(
         mac: mac.clone(),
     };
 
-    let txt_pairs = txt_encode(&record);
+    let mut txt_pairs = txt_encode(&record);
+    txt_pairs.push(("tls".to_string(), (rc.ctrl_port + 1).to_string()));
     let txt_refs: Vec<(&str, &str)> = txt_pairs
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -1366,6 +1694,100 @@ fn advertise(
     };
 
     Ok((guard, status_advertiser))
+}
+
+/// The environment every model launch gets, so run.py's first-run setup never
+/// stops to ask a human (it reads prompts from the box's console, which a phone
+/// user can't reach): `AUTOMATIC_HOST_SETUP=1` turns its prompts into errors,
+/// `JWT_SECRET` satisfies a check it makes even when serving with `--no-auth`
+/// (`$JWT_SECRET` if the operator set one, else a random per-process value, which
+/// is fine precisely because the server runs without auth), and `HF_TOKEN` is
+/// passed when known so gated repos can download.
+fn launch_env(hf_token: Option<&str>) -> Vec<(String, String)> {
+    let jwt = std::env::var("JWT_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            use rand::Rng;
+            let bytes: [u8; 24] = rand::rng().random();
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        });
+    let mut env = vec![
+        ("AUTOMATIC_HOST_SETUP".to_string(), "1".to_string()),
+        ("JWT_SECRET".to_string(), jwt),
+    ];
+    if let Some(token) = hf_token.filter(|t| !t.is_empty()) {
+        env.push(("HF_TOKEN".to_string(), token.to_string()));
+    }
+    env
+}
+
+/// `$TT_CONFIG_DIR`, else `$HOME/.config/tt-station`.
+fn config_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("TT_CONFIG_DIR").unwrap_or_else(|_| {
+        format!(
+            "{}/.config/tt-station",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    }))
+}
+
+/// `tt-station-agentd pair`: ask the running agent for a pairing code and show
+/// it as a QR (plus the plain details, for typing).
+async fn pair_command() -> Result<()> {
+    use tt_station_agentd::pairqr;
+
+    let local = pairqr::read_secret(&config_dir()).context(
+        "no running agent found for this user (start tt-station-agentd first, as this user)",
+    )?;
+    let offer: serde_json::Value = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{}/pair/offer", local.port))
+        .header(pairqr::SECRET_HEADER, &local.secret)
+        .send()
+        .await
+        .context("couldn't reach the agent on this box")?
+        .error_for_status()
+        .context("the agent refused (restart it so it rewrites its local secret)")?
+        .json()
+        .await?;
+    let field = |k: &str| offer[k].as_str().unwrap_or_default().to_string();
+    let host = pairqr::lan_ipv4()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| format!("{}.local", local.name));
+    // Home network only: no away-from-home address in the link.
+    let remote: Option<String> = None;
+    let link = pairqr::PairLink {
+        name: field("name"),
+        host: host.clone(),
+        port: local.port,
+        pair_id: field("pair_id"),
+        code: field("code"),
+        remote_host: remote.clone(),
+        tls_port: offer["tls"]["port"].as_u64().map(|p| p as u16),
+        cert_sha256: offer["tls"]["sha256"].as_str().map(str::to_string),
+    };
+    println!();
+    print!(
+        "{}",
+        pairqr::render_qr(&link.url()).context("QR encoding failed")?
+    );
+    println!();
+    println!(
+        "  Scan with your iPhone's Camera to pair with {}.",
+        link.name
+    );
+    println!(
+        "  Or in TT Station, add {}:{} and enter code {}.",
+        host, local.port, link.code
+    );
+    if let Some(remote) = remote {
+        println!("  Includes Tailscale address {remote} for use away from home.");
+    }
+    println!(
+        "  Expires in {} seconds; run again for a new one.",
+        offer["expires_in_s"].as_u64().unwrap_or(120)
+    );
+    Ok(())
 }
 
 #[cfg(test)]

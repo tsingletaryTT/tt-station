@@ -481,11 +481,9 @@ impl FakeGozerBox {
                 {
                     Some(board) => {
                         let who = board.holder.take().map(|(_, who)| who).unwrap_or_default();
-                        state.history.push((
-                            "released".to_string(),
-                            lease_id.to_string(),
-                            who,
-                        ));
+                        state
+                            .history
+                            .push(("released".to_string(), lease_id.to_string(), who));
                         ok(r#"{"released":true,"message":"released"}"#.to_string())
                     }
                     // Exit 13: "no such lease" -- release's idempotent case.
@@ -501,8 +499,11 @@ impl FakeGozerBox {
                     .boards
                     .iter()
                     .flat_map(|board| {
-                        board.chips.iter().zip(&board.dev_indices).map(move |(bdf, index)| {
-                            match &board.holder {
+                        board
+                            .chips
+                            .iter()
+                            .zip(&board.dev_indices)
+                            .map(move |(bdf, index)| match &board.holder {
                                 Some((_, who)) => serde_json::json!({
                                     "dev_index": index, "bdf": bdf, "board": board.serial,
                                     "state": "CLAIMED", "who": who, "reason": "serving",
@@ -511,8 +512,7 @@ impl FakeGozerBox {
                                     "dev_index": index, "bdf": bdf, "board": board.serial,
                                     "state": "FREE",
                                 }),
-                            }
-                        })
+                            })
                     })
                     .collect();
                 ok(serde_json::json!({"grain": "board", "chips": chips, "queue": []}).to_string())

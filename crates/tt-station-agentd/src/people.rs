@@ -1,0 +1,344 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+//! People: one box, a household. Each paired phone says who it belongs to,
+//! and the assistant then knows who it's talking with and keeps each person's
+//! memories to themselves (memories saved by no one in particular stay
+//! shared). Nobody signs up for anything: a person is a name on the box.
+//!
+//! - `GET /people`: everyone, and who this phone is (`me`).
+//! - `POST /people {name, me}`: add someone; `me: true` also makes this phone theirs.
+//! - `PUT /people/me {person}`: this phone is that person's (or `null`: no one in particular).
+//! - `PATCH /people/{id} {name}`, `DELETE /people/{id}` (their memories go with them).
+//!
+//! Phones are told apart by their pairing token, stored here only as a
+//! SHA-256 digest.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use axum::extract::FromRequestParts;
+use axum::http::{request::Parts, StatusCode};
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::routes::AppState;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Person {
+    pub id: String,
+    pub name: String,
+    /// Unix seconds.
+    pub added: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Book {
+    people: Vec<Person>,
+    /// SHA-256 of a pairing token → person id.
+    phones: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+pub struct People {
+    path: Option<PathBuf>,
+    book: Mutex<Book>,
+}
+
+pub const MAX_PEOPLE: usize = 12;
+const MAX_NAME: usize = 40;
+
+fn digest(token: &str) -> String {
+    ring::digest::digest(&ring::digest::SHA256, token.as_bytes())
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+impl People {
+    pub fn in_memory() -> Self {
+        People {
+            path: None,
+            book: Mutex::new(Book::default()),
+        }
+    }
+
+    pub fn open(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let book = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        People {
+            path: Some(path),
+            book: Mutex::new(book),
+        }
+    }
+
+    fn save(&self, book: &Book) {
+        let Some(path) = &self.path else { return };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(book) {
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, bytes).is_ok() {
+                let _ = std::fs::rename(tmp, path);
+            }
+        }
+    }
+
+    pub fn list(&self) -> Vec<Person> {
+        self.book.lock().expect("people mutex").people.clone()
+    }
+
+    pub fn get(&self, id: &str) -> Option<Person> {
+        self.list().into_iter().find(|p| p.id == id)
+    }
+
+    /// Who the phone with this token belongs to.
+    pub fn for_token(&self, token: &str) -> Option<Person> {
+        let book = self.book.lock().expect("people mutex");
+        let id = book.phones.get(&digest(token))?;
+        book.people.iter().find(|p| &p.id == id).cloned()
+    }
+
+    pub fn add(&self, name: &str) -> Result<Person, String> {
+        let name: String = name.trim().chars().take(MAX_NAME).collect();
+        if name.is_empty() {
+            return Err("Give them a name.".into());
+        }
+        let mut book = self.book.lock().expect("people mutex");
+        if let Some(p) = book
+            .people
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(&name))
+        {
+            return Ok(p.clone());
+        }
+        if book.people.len() >= MAX_PEOPLE {
+            return Err(format!("A box keeps up to {MAX_PEOPLE} people."));
+        }
+        let person = Person {
+            id: crate::pairing::issue_pair_id()[..10].to_string(),
+            name,
+            added: now(),
+        };
+        book.people.push(person.clone());
+        self.save(&book);
+        Ok(person)
+    }
+
+    pub fn rename(&self, id: &str, name: &str) -> Result<Person, String> {
+        let name: String = name.trim().chars().take(MAX_NAME).collect();
+        if name.is_empty() {
+            return Err("Give them a name.".into());
+        }
+        let mut book = self.book.lock().expect("people mutex");
+        let person = book
+            .people
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or("No such person.")?;
+        person.name = name;
+        let person = person.clone();
+        self.save(&book);
+        Ok(person)
+    }
+
+    pub fn remove(&self, id: &str) -> bool {
+        let mut book = self.book.lock().expect("people mutex");
+        let before = book.people.len();
+        book.people.retain(|p| p.id != id);
+        book.phones.retain(|_, p| p != id);
+        let removed = book.people.len() != before;
+        if removed {
+            self.save(&book);
+        }
+        removed
+    }
+
+    /// Make the phone with this token someone's (or no one's).
+    pub fn assign(&self, token: &str, person: Option<&str>) -> Result<(), String> {
+        let mut book = self.book.lock().expect("people mutex");
+        match person {
+            Some(id) => {
+                if !book.people.iter().any(|p| p.id == id) {
+                    return Err("No such person.".into());
+                }
+                book.phones.insert(digest(token), id.to_string());
+            }
+            None => {
+                book.phones.remove(&digest(token));
+            }
+        }
+        self.save(&book);
+        Ok(())
+    }
+}
+
+tokio::task_local! {
+    /// Who the assistant is talking with in this request, if anyone in particular.
+    pub static CALLER: Option<Person>;
+}
+
+/// The person behind the current assistant request.
+pub fn current() -> Option<Person> {
+    CALLER.try_with(Clone::clone).ok().flatten()
+}
+
+/// An authenticated request, with its token and the person it belongs to.
+pub struct Who {
+    pub token: String,
+    pub person: Option<Person>,
+}
+
+impl FromRequestParts<AppState> for Who {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, StatusCode> {
+        let token = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .filter(|t| state.is_valid_token(t))
+            .ok_or(StatusCode::UNAUTHORIZED)?
+            .to_string();
+        let person = state.people().for_token(&token);
+        Ok(Who { token, person })
+    }
+}
+
+// ---------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------
+
+type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
+
+fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({ "error": msg.into() })))
+}
+
+fn listing(state: &AppState, me: Option<&Person>) -> Value {
+    json!({ "people": state.people().list(), "me": me.map(|p| p.id.clone()) })
+}
+
+pub(crate) async fn get_people(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    who: Who,
+) -> Json<Value> {
+    Json(listing(&state, who.person.as_ref()))
+}
+
+#[derive(Deserialize)]
+pub struct NewPerson {
+    pub name: String,
+    #[serde(default)]
+    pub me: bool,
+}
+
+pub(crate) async fn post_person(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    who: Who,
+    Json(req): Json<NewPerson>,
+) -> Reply {
+    let person = state
+        .people()
+        .add(&req.name)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let me = if req.me {
+        state
+            .people()
+            .assign(&who.token, Some(&person.id))
+            .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+        Some(person.clone())
+    } else {
+        who.person
+    };
+    Ok(Json(listing(&state, me.as_ref())))
+}
+
+#[derive(Deserialize)]
+pub struct MeRequest {
+    pub person: Option<String>,
+}
+
+pub(crate) async fn put_me(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    who: Who,
+    Json(req): Json<MeRequest>,
+) -> Reply {
+    state
+        .people()
+        .assign(&who.token, req.person.as_deref())
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let me = req.person.as_deref().and_then(|id| state.people().get(id));
+    Ok(Json(listing(&state, me.as_ref())))
+}
+
+#[derive(Deserialize)]
+pub struct Rename {
+    pub name: String,
+}
+
+pub(crate) async fn patch_person(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    who: Who,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<Rename>,
+) -> Reply {
+    state
+        .people()
+        .rename(&id, &req.name)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    let me = who.person.and_then(|p| state.people().get(&p.id));
+    Ok(Json(listing(&state, me.as_ref())))
+}
+
+pub(crate) async fn delete_person(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    who: Who,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Reply {
+    if !state.people().remove(&id) {
+        return Err(err(StatusCode::NOT_FOUND, "No such person."));
+    }
+    state.memories().forget_person(&id);
+    let me = who.person.filter(|p| p.id != id);
+    Ok(Json(listing(&state, me.as_ref())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phones_belong_to_people_by_digest() {
+        let people = People::in_memory();
+        let ana = people.add("Ana").unwrap();
+        assert_eq!(people.add(" ana ").unwrap(), ana, "same name, same person");
+        assert!(people.add("  ").is_err());
+        people.assign("token-1", Some(&ana.id)).unwrap();
+        assert_eq!(people.for_token("token-1"), Some(ana.clone()));
+        assert_eq!(people.for_token("token-2"), None);
+        assert!(
+            !people.book.lock().unwrap().phones.contains_key("token-1"),
+            "tokens are stored hashed"
+        );
+        people.rename(&ana.id, "Ana B").unwrap();
+        assert_eq!(people.for_token("token-1").unwrap().name, "Ana B");
+        assert!(people.remove(&ana.id));
+        assert_eq!(people.for_token("token-1"), None);
+    }
+}

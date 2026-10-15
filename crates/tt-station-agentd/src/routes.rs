@@ -298,6 +298,179 @@ struct Inner {
     /// polled far more casually) spawn a `gozer status` subprocess on every
     /// single request." `None` until the first call populates it.
     gozer_leases_cache: tokio::sync::Mutex<Option<(Instant, crate::gozer::LeaseSnapshot)>>,
+    /// Disruptive actions the `POST /assistant` chat proposed but did NOT
+    /// run, waiting for the human to approve or deny them via
+    /// `POST /assistant/confirm`: `action_id -> PendingAction`. Same
+    /// "only ever holds live entries" discipline as `pending_pairs`: expired
+    /// entries (older than `assistant::PENDING_TTL`) are swept on every insert
+    /// and every lookup, and the map is capped at `assistant::MAX_PENDING` by
+    /// evicting the oldest -- an authed client that chats endlessly without
+    /// ever confirming can't grow it without bound. An entry is removed the
+    /// moment it's looked up, approved or not, so an action can run at most
+    /// once. See `crate::assistant` for the confirmation model.
+    pending_actions: Mutex<HashMap<String, crate::assistant::PendingAction>>,
+    /// The official Tenstorrent CLI as this box's model manager (`/tt/*`
+    /// routes: catalog + downloads), when `main` found one. `None` makes those
+    /// routes answer 409. See `crate::ttcli`.
+    tt_cli: Option<Arc<crate::ttcli::TtCli>>,
+    /// What the agent is doing with the chips, for clients that can't keep a
+    /// request open for the minutes a bring-up takes (a phone): see
+    /// [`Lifecycle`] and `GET /serve`.
+    lifecycle: Mutex<Lifecycle>,
+    /// Telemetry and inference over time, for dashboards (`/metrics/*`).
+    history: Arc<crate::history::History>,
+    /// The user's uploaded documents, searched by the assistant (`/docs`).
+    /// `None` until `main` attaches one; the routes then answer 409.
+    docs: Option<Arc<crate::docs::DocStore>>,
+    /// The same-user secret that lets `tt-station-agentd pair` mint a pairing
+    /// code for a QR (`POST /pair/offer`). `None` disables that route.
+    local_secret: Option<String>,
+    /// The second serving slot for co-serving (chat + images on separate
+    /// cards), when the box can split. See `crate::coserve`.
+    companion: Option<Arc<crate::coserve::Companion>>,
+    /// Keys for the OpenAI-compatible `/v1` gateway (`crate::gateway`).
+    app_keys: Arc<crate::gateway::AppKeys>,
+    /// The control port this agent listens on, for URLs it hands out.
+    ctrl_port: u16,
+    /// Images the assistant made in chat (`GET /creations/{id}`).
+    creations: crate::creations::Creations,
+    /// What the assistant remembers about its owner (`/memories`).
+    memories: Arc<crate::memory::Memories>,
+    /// Alerts for the owner (`crate::notify`).
+    notifier: Arc<crate::notify::Notifier>,
+    /// The agent's config directory (`$TT_CONFIG_DIR` or `~/.config/tt-station`).
+    config_dir: PathBuf,
+    /// Whether this is the box's own agent, which may stop the box's user services
+    /// (the serving unit). Off by default, so tests and mock-box never touch them:
+    /// a test's "stop serving" once stopped a real model mid-boot.
+    manages_units: bool,
+    /// How long each model took to load here (`crate::modes`).
+    load_times: Arc<crate::modes::LoadTimes>,
+    /// HTTPS, when the agent serves it (`crate::tls`).
+    tls: Option<crate::tls::TlsInfo>,
+    /// Lab mode (`crate::lab`), when tt-lab is set up.
+    lab: Option<Arc<crate::lab::Lab>>,
+    /// A tt-lab run owns the chips: no tt-smi, no model starts, no resets.
+    lab_busy: std::sync::atomic::AtomicBool,
+    /// Long jobs (`crate::jobs`).
+    jobs: Option<Arc<crate::jobs::Jobs>>,
+    /// Let the assistant think on the CPU (Ollama) when the chips aren't chatting.
+    cpu_brain: bool,
+    /// Who's who on this box (`crate::people`).
+    people: Arc<crate::people::People>,
+    /// Scheduled modes (`crate::schedules`).
+    schedules: Arc<crate::schedules::Schedules>,
+    /// Model bring-ups with tt-orchard (`crate::orchard`), when it's checked out.
+    orchard: Option<Arc<crate::orchard::Orchard>>,
+    /// A tt-orchard run has the box: no model starts, no resets.
+    orchard_busy: std::sync::atomic::AtomicBool,
+    /// Its supervisor is live and may be using the chips: no tt-smi either
+    /// (it would keep the chips looking busy to gozer's quiet checks).
+    orchard_chips: std::sync::atomic::AtomicBool,
+    /// Chip resets running (`tt-smi -r`, or gozer resetting a board as it
+    /// releases a lease): `tt-smi -s` against chips mid-reset only fails, and
+    /// slows the reset down, so readings pause while this is above zero.
+    chips_resetting: Arc<std::sync::atomic::AtomicUsize>,
+    /// An agent-driven bring-up (Codex, fast-models-fast) holds the whole box.
+    bringup_busy: std::sync::atomic::AtomicBool,
+}
+
+/// The serving lifecycle `GET /serve` reports. `/status` only ever says `idle`
+/// or `serving:<id>`; this adds the in-between states a client needs to show
+/// ("starting Qwen3-32B for 1m40s", "stopping") and why a start failed.
+#[derive(Debug, Clone, Serialize)]
+pub struct Lifecycle {
+    pub phase: Phase,
+    /// The model as it was asked for (the tt catalog name, e.g. `FLUX.1-schnell`),
+    /// which for media servers differs from what `/v1/models` reports.
+    pub model: Option<String>,
+    /// What the server reports in `/v1/models` once up.
+    pub served_id: Option<String>,
+    /// Unix seconds this phase began.
+    pub since: u64,
+    /// Why the last start failed (`phase == failed`).
+    pub error: Option<String>,
+    /// This serve was already running when the agent started and was adopted
+    /// rather than launched (see `AppState::adopt_serving`).
+    pub adopted: bool,
+}
+
+/// From [`AppState::pause_readings`]: chip readings resume when it drops.
+pub struct ReadingsPause(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for ReadingsPause {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Idle,
+    Starting,
+    Serving,
+    Stopping,
+    Failed,
+}
+
+impl Default for Lifecycle {
+    fn default() -> Self {
+        Lifecycle {
+            phase: Phase::Idle,
+            model: None,
+            served_id: None,
+            since: unix_now(),
+            error: None,
+            adopted: false,
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// What kind of experience a served model is: drives which UI a client shows
+/// and which proxy routes (`/generate/*`, `/assistant`) apply.
+pub fn model_kind(model_type: Option<&str>, served_id: Option<&str>) -> &'static str {
+    match model_type {
+        Some("llm") | Some("vlm") => return "chat",
+        Some("image") => return "image",
+        Some("video") => return "video",
+        Some("audio") => return "speech",
+        Some("text_to_speech") => return "tts",
+        Some(_) => return "other",
+        None => {}
+    }
+    // No catalog entry (an adopted or external serve): guess from the id the
+    // server reports. Media servers report their runner (`tt-flux.1-schnell`,
+    // `tt-sdxl-...`) or a weights path; vLLM reports the HF repo.
+    let id = served_id.unwrap_or_default().to_lowercase();
+    if id.contains("flux")
+        || id.contains("sdxl")
+        || id.contains("stable-diffusion")
+        || id.contains("sd3")
+    {
+        "image"
+    } else if id.contains("wan")
+        || id.contains("mochi")
+        || id.contains("t2v")
+        || id.contains("skyreels")
+    {
+        "video"
+    } else if id.contains("whisper") {
+        "speech"
+    } else if id.contains("speecht5") || id.contains("tts") {
+        "tts"
+    } else if id.is_empty() {
+        "other"
+    } else {
+        "chat"
+    }
 }
 
 impl AppState {
@@ -384,6 +557,36 @@ impl AppState {
                 power_shutdown_cmd: vec!["systemctl".to_string(), "poweroff".to_string()],
                 gozer: None,
                 gozer_leases_cache: tokio::sync::Mutex::new(None),
+                pending_actions: Mutex::new(HashMap::new()),
+                tt_cli: None,
+                lifecycle: Mutex::new(Lifecycle::default()),
+                history: Arc::new(crate::history::History::new()),
+                docs: None,
+                local_secret: None,
+                companion: None,
+                app_keys: Arc::new(crate::gateway::AppKeys::in_memory()),
+                ctrl_port: 8765,
+                memories: Arc::new(crate::memory::Memories::in_memory()),
+                notifier: Arc::new(crate::notify::Notifier::in_memory()),
+                config_dir: std::env::temp_dir().join("tt-station"),
+                manages_units: false,
+                load_times: Arc::new(crate::modes::LoadTimes::in_memory()),
+                tls: None,
+                lab: None,
+                lab_busy: std::sync::atomic::AtomicBool::new(false),
+                jobs: None,
+                cpu_brain: false,
+                orchard: None,
+                people: Arc::new(crate::people::People::in_memory()),
+                schedules: Arc::new(crate::schedules::Schedules::in_memory()),
+                orchard_busy: std::sync::atomic::AtomicBool::new(false),
+                orchard_chips: std::sync::atomic::AtomicBool::new(false),
+                chips_resetting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                bringup_busy: std::sync::atomic::AtomicBool::new(false),
+                creations: crate::creations::Creations::new(
+                    std::env::temp_dir()
+                        .join(format!("tt-station-creations-{}", std::process::id())),
+                ),
             }),
         }
     }
@@ -466,6 +669,365 @@ impl AppState {
     /// Optional: an `AppState` never given this (e.g. the dstack backend,
     /// which has no `workflow_logs` dir) still answers `/logs` -- with a 409
     /// rather than a fabricated path.
+    /// Enable the `/tt/*` model-manager routes with the official tt CLI. Same
+    /// "call right after construction, while this is the sole owner of its
+    /// `Arc<Inner>`" contract as the other `with_*` builders.
+    pub fn with_tt_cli(mut self, tt: Arc<crate::ttcli::TtCli>) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.tt_cli = Some(tt),
+            None => eprintln!(
+                "tt-station-agentd: with_tt_cli called on an already-shared AppState; tt CLI not applied"
+            ),
+        }
+        self
+    }
+
+    /// Replace the (empty) history with one loaded from disk. Same "call right
+    /// after construction" contract as the other `with_*` builders.
+    pub fn with_history(mut self, history: crate::history::History) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.history = Arc::new(history),
+            None => {
+                eprintln!("tt-station-agentd: with_history called on a shared AppState; ignored")
+            }
+        }
+        self
+    }
+
+    /// Attach the document store. Same contract as the other `with_*` builders.
+    pub fn with_docs(mut self, docs: crate::docs::DocStore) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.docs = Some(Arc::new(docs)),
+            None => eprintln!("tt-station-agentd: with_docs called on a shared AppState; ignored"),
+        }
+        self
+    }
+
+    /// Enable `POST /pair/offer` for holders of `secret` (see `crate::pairqr`).
+    pub fn with_local_secret(mut self, secret: String) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.local_secret = Some(secret),
+            None => eprintln!(
+                "tt-station-agentd: with_local_secret called on a shared AppState; ignored"
+            ),
+        }
+        self
+    }
+
+    /// Attach the co-serving companion slot. Same contract as the other `with_*`.
+    pub fn with_companion(mut self, companion: crate::coserve::Companion) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.companion = Some(Arc::new(companion)),
+            None => {
+                eprintln!("tt-station-agentd: with_companion called on a shared AppState; ignored")
+            }
+        }
+        self
+    }
+
+    /// Load the `/v1` gateway's app keys and record the control port. Same
+    /// contract as the other `with_*` builders.
+    pub fn with_gateway(mut self, keys: crate::gateway::AppKeys, ctrl_port: u16) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => {
+                inner.app_keys = Arc::new(keys);
+                inner.ctrl_port = ctrl_port;
+            }
+            None => {
+                eprintln!("tt-station-agentd: with_gateway called on a shared AppState; ignored")
+            }
+        }
+        self
+    }
+
+    /// Where chat-made images are kept. Same contract as the other `with_*`.
+    pub fn with_creations(mut self, creations: crate::creations::Creations) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.creations = creations,
+            None => {
+                eprintln!("tt-station-agentd: with_creations called on a shared AppState; ignored")
+            }
+        }
+        self
+    }
+
+    /// Load the assistant's memories. Same contract as the other `with_*`.
+    pub fn with_memories(mut self, memories: crate::memory::Memories) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.memories = Arc::new(memories),
+            None => {
+                eprintln!("tt-station-agentd: with_memories called on a shared AppState; ignored")
+            }
+        }
+        self
+    }
+
+    /// Load alert settings. Same contract as the other `with_*` builders.
+    pub fn with_notifier(mut self, notifier: crate::notify::Notifier) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.notifier = Arc::new(notifier),
+            None => {
+                eprintln!("tt-station-agentd: with_notifier called on a shared AppState; ignored")
+            }
+        }
+        self
+    }
+
+    /// Record the config directory. Same contract as the other `with_*`.
+    pub fn with_config_dir(mut self, dir: PathBuf) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.config_dir = dir,
+            None => {
+                eprintln!("tt-station-agentd: with_config_dir called on a shared AppState; ignored")
+            }
+        }
+        self
+    }
+
+    /// This is the box's own agent: it may stop the box's user services. Same
+    /// contract as the other `with_*`.
+    pub fn managing_units(mut self) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.manages_units = true,
+            None => eprintln!("tt-station-agentd: managing_units called on a shared AppState; ignored"),
+        }
+        self
+    }
+
+    /// Whether this agent may stop the box's user services (see `managing_units`).
+    pub fn manages_units(&self) -> bool {
+        self.inner.manages_units
+    }
+
+    /// Load learned load times. Same contract as the other `with_*` builders.
+    pub fn with_load_times(mut self, times: crate::modes::LoadTimes) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.load_times = Arc::new(times),
+            None => {
+                eprintln!("tt-station-agentd: with_load_times called on a shared AppState; ignored")
+            }
+        }
+        self
+    }
+
+    /// Record that HTTPS is served. Same contract as the other `with_*`.
+    pub fn with_tls(mut self, tls: crate::tls::TlsInfo) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.tls = Some(tls),
+            None => eprintln!("tt-station-agentd: with_tls called on a shared AppState; ignored"),
+        }
+        self
+    }
+
+    /// Enable Lab mode. Same contract as the other `with_*` builders.
+    pub fn with_lab(mut self, lab: crate::lab::Lab) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.lab = Some(Arc::new(lab)),
+            None => eprintln!("tt-station-agentd: with_lab called on a shared AppState; ignored"),
+        }
+        self
+    }
+
+    /// Enable the job queue. Same contract as the other `with_*` builders.
+    pub fn with_jobs(mut self, jobs: crate::jobs::Jobs) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.jobs = Some(Arc::new(jobs)),
+            None => eprintln!("tt-station-agentd: with_jobs called on a shared AppState; ignored"),
+        }
+        self
+    }
+
+    pub fn jobs(&self) -> Option<Arc<crate::jobs::Jobs>> {
+        self.inner.jobs.clone()
+    }
+
+    /// Enable tt-orchard bring-ups. Same contract as the other `with_*` builders.
+    pub fn with_orchard(mut self, orchard: crate::orchard::Orchard) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.orchard = Some(Arc::new(orchard)),
+            None => {
+                eprintln!("tt-station-agentd: with_orchard called on a shared AppState; ignored")
+            }
+        }
+        self
+    }
+
+    pub fn with_cpu_brain(mut self, on: bool) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.cpu_brain = on,
+            None => {
+                eprintln!("tt-station-agentd: with_cpu_brain called on a shared AppState; ignored")
+            }
+        }
+        self
+    }
+
+    pub fn cpu_brain_enabled(&self) -> bool {
+        self.inner.cpu_brain
+    }
+
+    pub fn with_people(mut self, people: crate::people::People) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.people = Arc::new(people),
+            None => {
+                eprintln!("tt-station-agentd: with_people called on a shared AppState; ignored")
+            }
+        }
+        self
+    }
+
+    pub fn with_schedules(mut self, schedules: crate::schedules::Schedules) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.schedules = Arc::new(schedules),
+            None => {
+                eprintln!("tt-station-agentd: with_schedules called on a shared AppState; ignored")
+            }
+        }
+        self
+    }
+
+    pub fn schedules(&self) -> Arc<crate::schedules::Schedules> {
+        Arc::clone(&self.inner.schedules)
+    }
+
+    pub fn people(&self) -> Arc<crate::people::People> {
+        Arc::clone(&self.inner.people)
+    }
+
+    pub fn orchard(&self) -> Option<Arc<crate::orchard::Orchard>> {
+        self.inner.orchard.clone()
+    }
+
+    pub fn orchard_busy(&self) -> bool {
+        self.inner
+            .orchard_busy
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_orchard_busy(&self, busy: bool) {
+        self.inner
+            .orchard_busy
+            .store(busy, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn bringup_busy(&self) -> bool {
+        self.inner.bringup_busy.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_bringup_busy(&self, busy: bool) {
+        self.inner.bringup_busy.store(busy, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn chips_resetting(&self) -> bool {
+        self.inner.chips_resetting.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+
+    /// Pause chip readings until the guard drops (a reset is under way).
+    pub fn pause_readings(&self) -> ReadingsPause {
+        self.inner.chips_resetting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ReadingsPause(Arc::clone(&self.inner.chips_resetting))
+    }
+
+    pub fn set_orchard_chips(&self, in_use: bool) {
+        self.inner
+            .orchard_chips
+            .store(in_use, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Who has the chips when it isn't this agent's serving: a Lab run or a
+    /// tt-orchard bring-up. Model starts, chip resets, power actions and
+    /// tt-smi all wait while this is `Some` -- it's the message to show.
+    pub fn chips_holder(&self) -> Option<&'static str> {
+        if self.lab_busy() {
+            Some("A silicon check is using the chips. Wait for it to finish.")
+        } else if self.orchard_busy() {
+            Some(
+                "A model bring-up (Orchard) is using the chips. Pause or stop it in Orchard first.",
+            )
+        } else if self.bringup_busy() {
+            Some("A model bring-up is using the chips. Stop it in Bring-up first.")
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn lab(&self) -> Option<Arc<crate::lab::Lab>> {
+        self.inner.lab.clone()
+    }
+
+    pub fn lab_busy(&self) -> bool {
+        self.inner
+            .lab_busy
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Claim the chips for a lab run; false if one already has them.
+    pub(crate) fn try_set_lab_busy(&self) -> bool {
+        self.inner
+            .lab_busy
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn set_lab_busy(&self, busy: bool) {
+        self.inner
+            .lab_busy
+            .store(busy, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn tls(&self) -> Option<crate::tls::TlsInfo> {
+        self.inner.tls.clone()
+    }
+
+    pub fn load_times(&self) -> Arc<crate::modes::LoadTimes> {
+        Arc::clone(&self.inner.load_times)
+    }
+
+    pub(crate) fn config_dir(&self) -> PathBuf {
+        self.inner.config_dir.clone()
+    }
+
+    pub fn notifier(&self) -> Arc<crate::notify::Notifier> {
+        Arc::clone(&self.inner.notifier)
+    }
+
+    pub fn memories(&self) -> Arc<crate::memory::Memories> {
+        Arc::clone(&self.inner.memories)
+    }
+
+    pub(crate) fn creations(&self) -> &crate::creations::Creations {
+        &self.inner.creations
+    }
+
+    pub(crate) fn app_keys(&self) -> Arc<crate::gateway::AppKeys> {
+        Arc::clone(&self.inner.app_keys)
+    }
+
+    pub(crate) fn ctrl_port(&self) -> u16 {
+        self.inner.ctrl_port
+    }
+
+    pub fn companion(&self) -> Option<Arc<crate::coserve::Companion>> {
+        self.inner.companion.clone()
+    }
+
+    pub(crate) fn docs(&self) -> Option<Arc<crate::docs::DocStore>> {
+        self.inner.docs.clone()
+    }
+
+    pub fn history(&self) -> Arc<crate::history::History> {
+        Arc::clone(&self.inner.history)
+    }
+
+    pub(crate) fn tt_cli(&self) -> Option<Arc<crate::ttcli::TtCli>> {
+        self.inner.tt_cli.clone()
+    }
+
     pub fn with_log_source(mut self, repo_dir: impl Into<std::path::PathBuf>) -> Self {
         match Arc::get_mut(&mut self.inner) {
             Some(inner) => inner.tt_inference_repo = Some(repo_dir.into()),
@@ -663,7 +1225,32 @@ impl AppState {
     /// only one `tt-smi` actually runs. Errors are NOT cached — the next tick
     /// retries — and while an entry is stale the previous frame is replaced, never
     /// served past its interval.
-    async fn cached_snapshot(&self) -> anyhow::Result<String> {
+    pub(crate) async fn cached_snapshot(&self) -> anyhow::Result<String> {
+        // tt-lab and tt-orchard's supervisor own the chips while they run;
+        // tt-smi opening them could break a run (and would show up as a user
+        // in gozer). An Orchard run that is still checking and downloading
+        // doesn't use them yet, so readings go on until it does.
+        if self.lab_busy() {
+            anyhow::bail!(
+                "A silicon check is using the chips, so the box isn't reading them until it finishes."
+            );
+        }
+        if self
+            .inner
+            .orchard_chips
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("A model bring-up (Orchard) is using the chips, so the box isn't reading them until the run ends.");
+        }
+        if self.bringup_busy() {
+            anyhow::bail!("A model bring-up (Codex) is using the chips, so the box isn't reading them until the run ends.");
+        }
+        if self.chips_resetting() {
+            anyhow::bail!("The chips are being reset; readings come back in a minute.");
+        }
+        if matches!(self.lifecycle().phase, Phase::Stopping) {
+            anyhow::bail!("A model is stopping and its chips are being reset; readings come back in a minute.");
+        }
         let ttl = Duration::from_millis(self.telemetry_interval_ms().max(1));
         let mut cache = self.inner.tt_smi_cache.lock().await;
         if let Some((at, json)) = cache.as_ref() {
@@ -671,9 +1258,38 @@ impl AppState {
                 return Ok(json.clone());
             }
         }
-        let json = collect_snapshot(self.tt_smi_bin().to_string()).await?;
+        let json = match collect_snapshot(self.tt_smi_bin().to_string()).await {
+            Ok(json) => json,
+            // A model start resets and opens the chips; a reading that fails
+            // meanwhile is that, not a broken tt-smi.
+            Err(e) if matches!(self.lifecycle().phase, Phase::Starting) || self.chips_resetting() => {
+                eprintln!("tt-station-agentd: tt-smi -s during a model start: {e:#}");
+                anyhow::bail!("A model is starting on the chips; readings come back in a minute.");
+            }
+            Err(e) => return Err(e),
+        };
         *cache = Some((Instant::now(), json.clone()));
         Ok(json)
+    }
+
+    /// The last raw `tt-smi -s` snapshot `cached_snapshot` stored, IF it is
+    /// younger than `max_age` -- and never anything more. Unlike
+    /// `cached_snapshot`, this NEVER shells out, so the assistant's
+    /// `box_status` tool tries it first: when a `/telemetry` client (the Mac's
+    /// device strip, tt-toplike) has already paid for a recent snapshot, a chat
+    /// question reuses it for free. Only on a miss does `box_status` fall back
+    /// to `cached_snapshot` (one deduplicated `tt-smi -s`, ~0.2s on a P300x2
+    /// box with a model serving -- the same call `/telemetry` makes every
+    /// interval while a viewer is connected).
+    ///
+    /// `try_lock` rather than `lock().await`: if a `/telemetry` tick is
+    /// mid-shell-out holding the lock, treating "busy" as a miss lets the
+    /// caller decide whether to wait (via `cached_snapshot`) instead of
+    /// blocking here.
+    pub(crate) fn peek_snapshot(&self, max_age: Duration) -> Option<String> {
+        let cache = self.inner.tt_smi_cache.try_lock().ok()?;
+        let (at, json) = cache.as_ref()?;
+        (at.elapsed() < max_age).then(|| json.clone())
     }
 
     /// The cached [`crate::gozer::LeaseSnapshot`] behind `GET /leases` and
@@ -721,7 +1337,7 @@ impl AppState {
 
     /// The agent's own serving port, for `GET /serving`'s agent/external
     /// classification (see `with_serving_config`).
-    fn serving_port(&self) -> u16 {
+    pub(crate) fn serving_port(&self) -> u16 {
         self.inner.serving_port
     }
 
@@ -745,7 +1361,7 @@ impl AppState {
 
     /// The tt-inference-server checkout `GET /logs` tails workflow logs
     /// from, if the runpy backend is active (see `with_log_source`).
-    fn tt_inference_repo(&self) -> Option<&std::path::Path> {
+    pub(crate) fn tt_inference_repo(&self) -> Option<&std::path::Path> {
         self.inner.tt_inference_repo.as_deref()
     }
 
@@ -791,9 +1407,24 @@ impl AppState {
     ) -> anyhow::Result<()> {
         use crate::power::PowerAction;
 
+        if let Some(holder) = self.chips_holder() {
+            anyhow::bail!("{holder}");
+        }
         if matches!(action, PowerAction::ResetChips) {
             if let Some(capability) = &self.inner.gozer {
                 let runner = RealCommandRunner;
+                // A lease whose owner is gone (a bring-up that was stopped or
+                // deleted mid-run) is STALE: gozer itself says to clear it with
+                // `gozer reconcile`, which only drops dead tenants. Do that
+                // first, so a leftover can't block every later start.
+                let stale = crate::gozer::snapshot_leases(&runner, capability)
+                    .is_some_and(|s| s.leases.iter().any(|l| l.state == "STALE"));
+                if stale {
+                    match runner.run(&[capability.path.as_str(), "reconcile"]) {
+                        Ok(_) => eprintln!("tt-station-agentd: reset-chips: cleared stale chip leases (gozer reconcile)"),
+                        Err(e) => eprintln!("tt-station-agentd: reset-chips: gozer reconcile failed: {e}"),
+                    }
+                }
                 let verdict =
                     crate::gozer::foreign_leases(&runner, capability, self.inner.serving_port);
                 // The SAME decision `RunPyBackend::reset_forcing` makes, made
@@ -835,6 +1466,8 @@ impl AppState {
         let (bin, args) = cmd
             .split_first()
             .ok_or_else(|| anyhow::anyhow!("empty power command configured for {action:?}"))?;
+        // Pause tt-smi readings for the length of a reset (resumed on every way out).
+        let _paused = matches!(action, PowerAction::ResetChips).then(|| self.pause_readings());
         let status = std::process::Command::new(bin)
             .args(args)
             .status()
@@ -849,8 +1482,316 @@ impl AppState {
     /// `tokio::task::spawn_blocking` -- `ServingBackend::start`/`stop` are
     /// sync and must never be called directly from an async fn (see
     /// `serving/mod.rs`).
-    fn backend(&self) -> Arc<dyn ServingBackend> {
+    pub(crate) fn backend(&self) -> Arc<dyn ServingBackend> {
         Arc::clone(&self.inner.backend)
+    }
+
+    /// The shared body of `POST /run`, factored out so the assistant's
+    /// confirmed `run_model` action (see `crate::assistant::confirm`) brings a
+    /// model up through EXACTLY the same steps and leaves `status`/`endpoint`/
+    /// the mDNS advertisement in exactly the same state `/run` would.
+    ///
+    /// `backend.start` is sync and, for the real backends, blocks on a
+    /// `reqwest::blocking` readiness poll for up to tens of minutes -- calling
+    /// it directly on the async runtime would panic (blocking calls are
+    /// forbidden inside a Tokio worker thread). It runs via
+    /// `tokio::task::spawn_blocking` on a cloned `Arc<dyn ServingBackend>`
+    /// handle, and `set_serving` happens only *after* it returns -- no mutex
+    /// guard is ever held across the `.await`.
+    ///
+    /// A `spawn_blocking` join failure (the start task panicked) is folded
+    /// into the returned `anyhow::Error`; callers that care about contention
+    /// pass the error through `contention_aware_error`, which still finds a
+    /// `gozer::Contention` anywhere in the chain.
+    pub(crate) async fn start_serving(&self, model: &str, force: bool) -> anyhow::Result<Endpoint> {
+        // Run the bring-up on its own task so it finishes -- and records its
+        // outcome -- even when the caller goes away. A phone's `POST /run` dies
+        // when the app is backgrounded minutes into a load; if this future were
+        // dropped with it, the model would come up while the agent still said
+        // `idle`, and a failure would be visible nowhere but the log.
+        let me = self.clone();
+        let model = model.to_string();
+        tokio::spawn(async move {
+            // An ordinary start takes the whole box: leave co-serving first.
+            crate::coserve::leave_split(&me).await;
+            me.start_serving_tracked(&model, force).await
+        })
+        .await
+        .map_err(|join_err| anyhow::anyhow!("run task panicked: {join_err}"))?
+    }
+
+    /// Start `model` on the main backend WITHOUT leaving split mode -- the
+    /// chat half of a co-serve (`crate::coserve`), pinned by the caller.
+    pub(crate) async fn start_serving_placed(&self, model: &str) -> anyhow::Result<Endpoint> {
+        let me = self.clone();
+        let model = model.to_string();
+        tokio::spawn(async move { me.start_serving_tracked(&model, false).await })
+            .await
+            .map_err(|join_err| anyhow::anyhow!("run task panicked: {join_err}"))?
+    }
+
+    async fn start_serving_tracked(&self, model: &str, force: bool) -> anyhow::Result<Endpoint> {
+        if let Some(holder) = self.chips_holder() {
+            anyhow::bail!("{holder}");
+        }
+        self.set_lifecycle(Phase::Starting, Some(model.to_string()), None, None);
+        let started = Instant::now();
+        let result = self.start_serving_inner(model, force).await;
+        if result.is_ok() {
+            self.load_times().record(model, started.elapsed().as_secs());
+        }
+        match &result {
+            Ok(endpoint) => self.set_lifecycle(
+                Phase::Serving,
+                Some(model.to_string()),
+                Some(endpoint.model.clone()),
+                None,
+            ),
+            Err(e) => {
+                // A start that failed because someone stopped it is a stop, not
+                // a failure worth showing.
+                let stopping = self.lifecycle().phase == Phase::Stopping;
+                if !stopping {
+                    eprintln!("tt-station-agentd: start of {model} failed: {e:#}");
+                    self.set_lifecycle(
+                        Phase::Failed,
+                        Some(model.to_string()),
+                        None,
+                        Some(format!("{e:#}")),
+                    );
+                }
+            }
+        }
+        result
+    }
+
+    async fn start_serving_inner(&self, model: &str, force: bool) -> anyhow::Result<Endpoint> {
+        let backend = self.backend();
+        let model = model.to_string();
+
+        // `start`/`start_forced` rather than one call with a bool, so the
+        // unforced path is exactly the call every pre-`--force` caller (and
+        // every argv pin) already makes.
+        let endpoint = tokio::task::spawn_blocking(move || {
+            if force {
+                backend.start_forced(&model)
+            } else {
+                backend.start(&model)
+            }
+        })
+        .await
+        .map_err(|join_err| anyhow::anyhow!("run task panicked: {join_err}"))??;
+
+        self.set_serving(endpoint.clone());
+        Ok(endpoint)
+    }
+
+    /// The shared body of `POST /stop`, factored out for the same reason as
+    /// [`AppState::start_serving`]: the assistant's confirmed `stop_model`
+    /// (and `reset_chips`, which stops first) must stop serving exactly the
+    /// way `/stop` does.
+    ///
+    /// This ALWAYS calls `backend.stop()`, even when `current_model()` is
+    /// `None`. A `/run` brings a model up on a `spawn_blocking` thread and
+    /// `AppState`'s status stays `Idle` until `start` returns -- so a stop
+    /// that arrives mid-bring-up sees `None` here, yet must still reach the
+    /// backend to trip its cancel flag (`RunPyBackend::stop`) and abort the
+    /// in-flight serve rather than leaving it grinding to the health-poll
+    /// ceiling. Every `ServingBackend` is contractually idempotent here (see
+    /// the doc on `ServingBackend::stop`), so calling it while genuinely idle
+    /// is harmless.
+    pub(crate) async fn stop_serving(&self) -> anyhow::Result<()> {
+        // Breadcrumb before we stop -- distinguishes stopping a live model
+        // from a mid-bring-up abort (status is still `Idle` in the latter).
+        eprintln!(
+            "tt-station-agentd: stop requested (was {})",
+            match self.current_model() {
+                Some(m) => format!("serving {m}"),
+                None => "idle/starting".to_string(),
+            }
+        );
+
+        // Model name is only used for logging by backends that track one;
+        // `RunPyBackend::stop` ignores the argument entirely. When nothing is
+        // serving there's no name to pass, so hand it an empty placeholder.
+        // Stopping takes the whole box back: the companion goes too.
+        crate::coserve::leave_split(self).await;
+        // A model Orchard brought up and the owner tapped Serve on.
+        crate::orchard::stop_harvest(self).await;
+        // Stopping from here on (a community package's stop alone can take minutes).
+        let was = self.lifecycle().model;
+        self.set_lifecycle(Phase::Stopping, was, None, None);
+        // A community package: its container outlives `tt-model serve`.
+        crate::community::stop_package(self).await;
+
+        let model = self.current_model().unwrap_or_default();
+        let backend = self.backend();
+
+        let stopped: anyhow::Result<()> =
+            match tokio::task::spawn_blocking(move || backend.stop(&model)).await {
+                Ok(result) => result,
+                Err(join_err) => Err(anyhow::anyhow!("stop task panicked: {join_err}")),
+            };
+        if let Err(e) = &stopped {
+            // Leave the lifecycle saying what's true: we tried and it didn't stop.
+            let model = self.lifecycle().model;
+            self.set_lifecycle(
+                Phase::Failed,
+                model,
+                None,
+                Some(format!("stop failed: {e:#}")),
+            );
+        }
+        stopped?;
+
+        self.set_idle();
+        self.set_lifecycle(Phase::Idle, None, None, None);
+        Ok(())
+    }
+
+    /// The current [`Lifecycle`].
+    pub fn lifecycle(&self) -> Lifecycle {
+        self.inner
+            .lifecycle
+            .lock()
+            .expect("lifecycle mutex poisoned")
+            .clone()
+    }
+
+    pub(crate) fn set_lifecycle(
+        &self,
+        phase: Phase,
+        model: Option<String>,
+        served_id: Option<String>,
+        error: Option<String>,
+    ) {
+        *self
+            .inner
+            .lifecycle
+            .lock()
+            .expect("lifecycle mutex poisoned") = Lifecycle {
+            phase,
+            model,
+            served_id,
+            since: unix_now(),
+            error,
+            adopted: false,
+        };
+    }
+
+    /// Why `model` can't be started right now from the tt catalog's view (not
+    /// downloaded, partly downloaded, not for this mesh), or `None` if it can --
+    /// including when there's no tt CLI or tt doesn't know the model. Blocking.
+    pub(crate) fn not_servable_reason_blocking(&self, model: &str) -> Option<String> {
+        let tt = self.tt_cli()?;
+        let m = tt
+            .catalog(self.device_mesh(), false)
+            .ok()?
+            .find(model)?
+            .clone();
+        if !m.supported {
+            return Some(format!("{} doesn't run on this box.", m.name));
+        }
+        match m.weights {
+            crate::ttcli::Weights::Complete | crate::ttcli::Weights::Container => None,
+            crate::ttcli::Weights::Partial => Some(format!(
+                "{} is only partly downloaded; finish the download (Models tab) before starting it.",
+                m.name
+            )),
+            crate::ttcli::Weights::Missing => Some(format!(
+                "{} isn't downloaded yet; download it (Models tab) before starting it.",
+                m.name
+            )),
+        }
+    }
+
+    /// Adopt a serve this agent didn't start (one already up on its serving port
+    /// at startup -- e.g. the agent was restarted under a loaded model), so a
+    /// restart doesn't cost a multi-minute reload.
+    pub fn adopt_serving(&self, endpoint: Endpoint) {
+        eprintln!(
+            "tt-station-agentd: adopting {} already serving at {}",
+            endpoint.model, endpoint.base_url
+        );
+        let id = endpoint.model.clone();
+        self.set_serving(endpoint);
+        self.set_lifecycle(Phase::Serving, None, Some(id), None);
+        self.inner
+            .lifecycle
+            .lock()
+            .expect("lifecycle mutex poisoned")
+            .adopted = true;
+    }
+
+    /// The served model's catalog type (`llm`, `image`, ...) when the tt CLI
+    /// knows it, for [`model_kind`].
+    pub(crate) fn served_kind_blocking(&self) -> &'static str {
+        let life = self.lifecycle();
+        let model_type = match (&life.model, self.tt_cli()) {
+            (Some(name), Some(tt)) => tt
+                .catalog(self.device_mesh(), false)
+                .ok()
+                .and_then(|c| c.find(name).map(|m| m.model_type.clone())),
+            _ => None,
+        };
+        let served = life.served_id.or_else(|| self.current_model());
+        model_kind(model_type.as_deref(), served.as_deref())
+    }
+
+    /// Park a disruptive action the assistant proposed, returning the fresh
+    /// random id `POST /assistant/confirm` will need to approve or deny it.
+    ///
+    /// Sweeps expired entries first and then, if the map is still at
+    /// `assistant::MAX_PENDING`, evicts the OLDEST entry -- see
+    /// `Inner::pending_actions` for why the map must stay bounded. The id is
+    /// 128 random bits (same generator as `pair_id`), so it can't be guessed
+    /// -- though guessing one would only let an already-authed caller confirm
+    /// an action another authed caller proposed, since the confirm route is
+    /// bearer-guarded too.
+    /// The newest pending action proposed within `within`, for "yes, do it".
+    pub(crate) fn latest_pending_action(&self, within: std::time::Duration) -> Option<String> {
+        let pending = self.inner.pending_actions.lock().expect("pending_actions mutex poisoned");
+        pending
+            .iter()
+            .filter(|(_, a)| a.created.elapsed() < within.min(crate::assistant::PENDING_TTL))
+            .max_by_key(|(_, a)| a.created)
+            .map(|(k, _)| k.clone())
+    }
+
+    pub(crate) fn insert_pending_action(&self, action: crate::assistant::PendingAction) -> String {
+        let id = pairing::issue_pair_id();
+        let mut pending = self
+            .inner
+            .pending_actions
+            .lock()
+            .expect("pending_actions mutex poisoned");
+        pending.retain(|_, a| a.created.elapsed() < crate::assistant::PENDING_TTL);
+        while pending.len() >= crate::assistant::MAX_PENDING {
+            let Some(oldest) = pending
+                .iter()
+                .min_by_key(|(_, a)| a.created)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            pending.remove(&oldest);
+        }
+        pending.insert(id.clone(), action);
+        id
+    }
+
+    /// Remove and return the pending action `id`, or `None` if it's unknown
+    /// or has outlived `assistant::PENDING_TTL`. Always a REMOVE, never a
+    /// peek: whatever the caller decides (approve or deny), the action is
+    /// consumed so the same id can never run twice.
+    pub(crate) fn take_pending_action(&self, id: &str) -> Option<crate::assistant::PendingAction> {
+        let mut pending = self
+            .inner
+            .pending_actions
+            .lock()
+            .expect("pending_actions mutex poisoned");
+        pending.retain(|_, a| a.created.elapsed() < crate::assistant::PENDING_TTL);
+        pending.remove(id)
     }
 
     /// Snapshot the current serving status (locks briefly, then clones out).
@@ -880,29 +1821,69 @@ impl AppState {
     /// `Idle` status returns immediately without touching the backend, keeping
     /// the common idle poll cheap. The probe is blocking I/O, so it runs on
     /// `spawn_blocking` (like `/serving`).
-    async fn reconciled_status(&self) -> ServingStatus {
+    pub(crate) async fn reconciled_status(&self) -> ServingStatus {
         let stored = self.status();
         if !matches!(stored, ServingStatus::Serving(_)) {
             return stored;
         }
-        let backend = self.backend();
-        let reconciled = tokio::task::spawn_blocking(move || backend.reconciled_status())
+        let reconciled = if self.lifecycle().adopted {
+            // An adopted serve was never started by the backend, so the
+            // backend's own record says idle; believe the serving port instead.
+            let (host, port, probe) = (
+                self.serving_host().to_string(),
+                self.serving_port(),
+                stored.clone(),
+            );
+            let alive = tokio::task::spawn_blocking(move || {
+                let runner = RealCommandRunner;
+                discover_serving(&runner, &host, port, &probe)
+                    .iter()
+                    .any(|e| e.host_port == port)
+            })
             .await
-            .ok()
-            .and_then(Result::ok)
-            // A join panic or backend error leaves the stored status as-is
-            // (never worse than today's behavior).
-            .unwrap_or_else(|| stored.clone());
+            .unwrap_or(true);
+            // Not one of the container images discovery knows (a community
+            // tt-model package, Orchard's package, native vLLM with no
+            // container): the port answering with a model is enough.
+            let answering = alive || {
+                let url = format!("http://127.0.0.1:{}/v1/models", self.serving_port());
+                match reqwest::Client::new().get(url).timeout(std::time::Duration::from_secs(3)).send().await {
+                    Ok(r) if r.status().is_success() => r
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()
+                        .is_some_and(|v| v["data"].as_array().is_some_and(|d| !d.is_empty())),
+                    _ => false,
+                }
+            };
+            if answering {
+                stored.clone()
+            } else {
+                ServingStatus::Idle
+            }
+        } else {
+            let backend = self.backend();
+            tokio::task::spawn_blocking(move || backend.reconciled_status())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                // A join panic or backend error leaves the stored status as-is
+                // (never worse than today's behavior).
+                .unwrap_or_else(|| stored.clone())
+        };
         if matches!(reconciled, ServingStatus::Idle) {
-            // Stale-positive: the backend's serve is gone. Heal the stored
-            // state (clears the endpoint + re-advertises Idle over mDNS).
+            // Stale-positive: the serve is gone. Heal the stored state
+            // (clears the endpoint + re-advertises Idle over mDNS).
             self.set_idle();
+            if self.lifecycle().phase == Phase::Serving {
+                self.set_lifecycle(Phase::Idle, None, None, None);
+            }
         }
         reconciled
     }
 
     /// Snapshot the currently-serving `Endpoint`, or `None` if idle.
-    fn endpoint(&self) -> Option<Endpoint> {
+    pub(crate) fn endpoint(&self) -> Option<Endpoint> {
         self.inner
             .endpoint
             .lock()
@@ -914,7 +1895,7 @@ impl AppState {
     /// idle. Used by `/stop` to know which model to tell the backend to
     /// stop, without needing a separate "current model" field that could
     /// drift from `status`.
-    fn current_model(&self) -> Option<String> {
+    pub(crate) fn current_model(&self) -> Option<String> {
         match &*self.inner.status.lock().expect("status mutex poisoned") {
             ServingStatus::Serving(model) => Some(model.clone()),
             ServingStatus::Idle => None,
@@ -968,7 +1949,7 @@ impl AppState {
 
     /// Check a bearer token against the valid-token set minted by
     /// `/pair/complete`.
-    fn is_valid_token(&self, token: &str) -> bool {
+    pub(crate) fn is_valid_token(&self, token: &str) -> bool {
         self.inner
             .tokens
             .lock()
@@ -1491,18 +2472,78 @@ struct PairInitResponse {
 /// `/pair/complete`.
 async fn pair_init(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> Json<PairInitResponse> {
+    body: axum::body::Bytes,
+) -> Result<Json<PairInitResponse>, StatusCode> {
+    // Anyone on the network can ask, and each ask notifies the owner: a few a minute at most.
+    static RECENT: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+    {
+        let now = unix_now();
+        let mut recent = RECENT.lock().expect("pair init");
+        recent.retain(|t| now.saturating_sub(*t) < 60);
+        if recent.len() >= 5 {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+        recent.push(now);
+    }
     let pair_id = pairing::issue_pair_id();
     let code = pairing::issue_code();
+    // `{"device": "Jane's MacBook"}`: who's asking, for the person reading the code.
+    let device: String = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v["device"].as_str().map(|d| d.chars().filter(|c| !c.is_control()).take(60).collect()))
+        .unwrap_or_else(|| "a device".to_string());
 
-    // Stand-in for the box's physical display: this is the one place a
-    // human ever sees the code, so it must go somewhere they can read it --
-    // stdout, which journald/systemd captures on a real box.
+    // The box has no screen of its own: the code goes where its owner reads
+    // things -- the desktop app and the phone (as an event) -- and the journal.
     println!("tt-station-agentd: pairing code: {code}");
+    let fp = state.tls().map(|t| t.sha256.chars().take(8).collect::<String>()).unwrap_or_default();
+    state.notifier().emit(crate::notify::Draft {
+        kind: "pairing",
+        title: format!("Pairing code for {device}: {} {}", &code[..3.min(code.len())], &code[3.min(code.len())..]),
+        body: if fp.is_empty() {
+            "Type it on that device. If you didn't start pairing, ignore this.".to_string()
+        } else {
+            format!("Type it on that device; it should show this box as {} {}. If you didn't start pairing, ignore this.", &fp[..4], &fp[4..])
+        },
+    });
 
     state.insert_pending_pair(pair_id.clone(), code);
 
-    Json(PairInitResponse { pair_id })
+    Ok(Json(PairInitResponse { pair_id }))
+}
+
+/// `POST /pair/offer`: like `/pair/init`, but hands the code back too -- for
+/// `tt-station-agentd pair`, which shows it as a QR. Only for callers holding
+/// the box user's local secret (`crate::pairqr`); anyone else gets 403.
+async fn pair_offer(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let presented = headers
+        .get(crate::pairqr::SECRET_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let allowed = state
+        .inner
+        .local_secret
+        .as_deref()
+        .is_some_and(|secret| crate::pairqr::secrets_match(secret, presented));
+    if !allowed {
+        return Err(tt_error(
+            StatusCode::FORBIDDEN,
+            "Run `tt-station-agentd pair` on the box, as the user the agent runs as.",
+        ));
+    }
+    let pair_id = pairing::issue_pair_id();
+    let code = pairing::issue_code();
+    state.insert_pending_pair(pair_id.clone(), code.clone());
+    Ok(Json(serde_json::json!({
+        "pair_id": pair_id,
+        "code": code,
+        "expires_in_s": PAIR_TTL.as_secs(),
+        "tls": state.tls(),
+        "name": state.name(),
+    })))
 }
 
 /// JSON body accepted by `POST /pair/complete`.
@@ -1516,6 +2557,9 @@ struct PairCompleteRequest {
 #[derive(Serialize)]
 struct PairCompleteResponse {
     token: String,
+    /// Where this box serves HTTPS and the certificate to pin (`crate::tls`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tls: Option<crate::tls::TlsInfo>,
 }
 
 /// `POST /pair/complete` finishes a pairing attempt: if `code` matches the
@@ -1535,7 +2579,10 @@ async fn pair_complete(
     let token = pairing::issue_token();
     state.insert_token(token.clone());
 
-    Ok(Json(PairCompleteResponse { token }))
+    Ok(Json(PairCompleteResponse {
+        token,
+        tls: state.tls(),
+    }))
 }
 
 /// Extractor guarding the control routes (`/run`, `/stop`, `/endpoint`):
@@ -1550,7 +2597,7 @@ async fn pair_complete(
 /// handler's argument list, and so it composes with axum's normal extractor
 /// ordering instead of needing a separate middleware layer wired up per
 /// route.
-struct BearerAuth;
+pub(crate) struct BearerAuth;
 
 impl FromRequestParts<AppState> for BearerAuth {
     type Rejection = StatusCode;
@@ -1596,8 +2643,8 @@ struct RunResponse {
 /// (Task 11's `AgentClient`) and it doesn't need anything richer than a
 /// human-readable reason to log/surface.
 #[derive(Serialize)]
-struct ErrorResponse {
-    error: String,
+pub(crate) struct ErrorResponse {
+    pub(crate) error: String,
 }
 
 fn backend_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
@@ -1626,7 +2673,10 @@ fn backend_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
 /// no duration, since gozer exposes none. Used by the three routes that can
 /// contend; every other route keeps `backend_error`.
 fn contention_aware_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
-    if err.chain().any(|cause| cause.is::<crate::gozer::Contention>()) {
+    if err
+        .chain()
+        .any(|cause| cause.is::<crate::gozer::Contention>())
+    {
         return (
             StatusCode::CONFLICT,
             Json(ErrorResponse {
@@ -1647,83 +2697,38 @@ fn contention_aware_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse
 /// section for what it does (serve unleased) and does not (take the holder's
 /// lease away) do.
 ///
-/// `backend.start` is sync and, for the real Docker backend, blocks on a
-/// `reqwest::blocking` health probe -- calling it directly here would panic
-/// (blocking calls are forbidden inside a Tokio worker thread). It's run via
-/// `tokio::task::spawn_blocking` instead, on a cloned `Arc<dyn
-/// ServingBackend>` handle so the closure doesn't need to borrow `state`
-/// across the `.await`. On success, `status`/`endpoint` are updated only
-/// *after* the blocking call returns -- no mutex guard is ever held across
-/// the `.await`.
+/// The whole body lives in [`AppState::start_serving`] (shared with the
+/// assistant's confirmed `run_model` action, which runs it in the
+/// background): `backend.start` on `spawn_blocking`, then `set_serving` only
+/// after it returns, with no mutex held across the `.await`.
 async fn run_model(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<RunResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let backend = state.backend();
-    let model = req.model;
-    let force = req.force;
-
-    // `start`/`start_forced` rather than one call with a bool, so the
-    // unforced path through this route is exactly the call every pre-`--force`
-    // caller (and every argv pin) already makes.
-    let result = tokio::task::spawn_blocking(move || {
-        if force {
-            backend.start_forced(&model)
-        } else {
-            backend.start(&model)
-        }
-    })
-    .await
-    .map_err(|join_err| backend_error(anyhow::anyhow!("run task panicked: {join_err}")))?;
-
+    check_servable(&state, &req.model).await?;
     // A contended box answers 409 (naming the board and the holder), not
     // 500 -- see `contention_aware_error`.
-    let endpoint = result.map_err(contention_aware_error)?;
-    state.set_serving(endpoint.clone());
+    let endpoint = state
+        .start_serving(&req.model, req.force)
+        .await
+        .map_err(contention_aware_error)?;
 
     Ok(Json(RunResponse { endpoint }))
 }
 
 /// `POST /stop` (bearer-guarded): ask the backend to stop serving.
 ///
-/// This ALWAYS calls `backend.stop()`, even when `current_model()` is `None`.
-/// A `/run` brings a model up on a `spawn_blocking` thread and `AppState`'s
-/// status stays `Idle` until `start` returns -- so a `/stop` that arrives
-/// mid-bring-up sees `None` here, yet must still reach the backend to trip its
-/// cancel flag (`RunPyBackend::stop`) and abort the in-flight serve rather than
-/// leaving it grinding to the health-poll ceiling. Every `ServingBackend` is
-/// contractually idempotent here (see the doc on `ServingBackend::stop`) -- a
-/// `docker stop`/equivalent on nothing running must be a no-op, not an error --
-/// so calling `backend.stop` while genuinely idle is harmless. The same
-/// `spawn_blocking` treatment as `/run` applies: the sync `backend.stop` call
-/// must never run directly on the async runtime.
+/// The whole body lives in [`AppState::stop_serving`] (shared with the
+/// assistant's confirmed `stop_model`/`reset_chips` actions) -- see its doc
+/// for why `backend.stop()` is ALWAYS called, even when nothing is recorded
+/// as serving (a mid-bring-up `/stop` must still trip the backend's cancel
+/// flag).
 async fn stop_model(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    // Breadcrumb before we stop -- distinguishes stopping a live model from a
-    // mid-bring-up abort (status is still `Idle` in the latter case).
-    eprintln!(
-        "tt-station-agentd: stop requested (was {})",
-        match state.current_model() {
-            Some(m) => format!("serving {m}"),
-            None => "idle/starting".to_string(),
-        }
-    );
-
-    // Model name is only used for logging by backends that track one;
-    // `RunPyBackend::stop` ignores the argument entirely. When nothing is
-    // serving there's no name to pass, so hand it an empty placeholder.
-    let model = state.current_model().unwrap_or_default();
-    let backend = state.backend();
-
-    tokio::task::spawn_blocking(move || backend.stop(&model))
-        .await
-        .map_err(|join_err| backend_error(anyhow::anyhow!("stop task panicked: {join_err}")))?
-        .map_err(backend_error)?;
-
-    state.set_idle();
+    state.stop_serving().await.map_err(backend_error)?;
     Ok(Json(serde_json::json!({})))
 }
 
@@ -1778,10 +2783,10 @@ async fn reset(
     })
     .await
     .map_err(|join_err| backend_error(anyhow::anyhow!("reset task panicked: {join_err}")))?
-        // A reset REFUSED because another tenant holds chips is a 409, and
-        // (note the `?`) it aborts the route before the token clearing
-        // below: a refusal must leave the box, and the pairing, untouched.
-        .map_err(contention_aware_error)?;
+    // A reset REFUSED because another tenant holds chips is a 409, and
+    // (note the `?`) it aborts the route before the token clearing
+    // below: a refusal must leave the box, and the pairing, untouched.
+    .map_err(contention_aware_error)?;
 
     // Forget every issued token (invalidates the caller's own -- expected).
     state.clear_tokens();
@@ -1869,6 +2874,34 @@ async fn power(
         )
     })?;
 
+    if let Some(holder) = state.chips_holder() {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: holder.to_string(),
+            }),
+        ));
+    }
+    if action.is_machine_op() {
+        let (what, body) = match action {
+            crate::power::PowerAction::Suspend => (
+                "going to sleep",
+                "Wake it from TT Station when you need it.",
+            ),
+            crate::power::PowerAction::Reboot => {
+                ("restarting", "You'll hear when it's back online.")
+            }
+            _ => ("shutting down", "Turn it back on to use it again."),
+        };
+        state
+            .notifier()
+            .emit_and_wait(crate::notify::Draft {
+                kind: "power",
+                title: format!("{} is {what}", state.name()),
+                body: body.to_string(),
+            })
+            .await;
+    }
     let s = state.clone();
     let force = req.force;
     tokio::task::spawn_blocking(move || s.run_power_command(action, force))
@@ -1906,6 +2939,21 @@ async fn power(
     Ok((power_success_status(action), Json(body)))
 }
 
+/// `GET /power/info` (authed): what the phone can do with the machine's power
+/// and the one-time setup for the rest. See `crate::power::readiness_blocking`.
+async fn power_info(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Json<crate::power::PowerReadiness> {
+    let config_dir = state.config_dir();
+    let user = std::env::var("USER").unwrap_or_else(|_| "ttuser".to_string());
+    Json(
+        tokio::task::spawn_blocking(move || crate::power::readiness_blocking(&user, &config_dir))
+            .await
+            .unwrap_or_else(|_| crate::power::readiness_blocking("ttuser", &std::env::temp_dir())),
+    )
+}
+
 /// `GET /endpoint` (bearer-guarded): the `Endpoint` of whatever's currently
 /// serving, or `409 Conflict` if the box is idle. `409` rather than `404`
 /// because the route itself exists and is reachable -- what's missing is a
@@ -1935,6 +2983,15 @@ async fn get_endpoint(
 ///
 /// The handshake itself does no I/O -- it just hands the upgraded socket to
 /// [`telemetry_stream`], which owns the collect-and-push loop.
+/// `GET /energy`: kWh, tokens and requests per month and for the last 31
+/// days, from the recorded history (`history::energy_report`).
+async fn get_energy(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Json<serde_json::Value> {
+    Json(crate::history::energy_report(&state.history().days()))
+}
+
 async fn telemetry_ws(
     ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -1993,6 +3050,9 @@ async fn telemetry_stream(mut socket: WebSocket, state: AppState, lite: bool) {
     // tick's scrape -- see `inference::InferenceSampler`. Also skipped in
     // `lite` mode.
     let mut inference_sampler = (!lite).then(crate::inference::InferenceSampler::new);
+    // Log a failure once per reason, not once a second for hours (an Orchard
+    // run pauses readings for its whole length).
+    let mut last_error: Option<String> = None;
 
     loop {
         tokio::select! {
@@ -2049,7 +3109,11 @@ async fn telemetry_stream(mut socket: WebSocket, state: AppState, lite: bool) {
                         // Log and send an error frame rather than dropping the
                         // connection -- a transient `tt-smi` failure shouldn't
                         // end the stream.
-                        eprintln!("tt-station-agentd: telemetry snapshot failed: {err:#}");
+                        let text = format!("{err:#}");
+                        if last_error.as_deref() != Some(text.as_str()) {
+                            eprintln!("tt-station-agentd: telemetry snapshot failed: {text}");
+                            last_error = Some(text);
+                        }
                         telemetry_error_frame(&err)
                     }
                 };
@@ -2246,18 +3310,7 @@ async fn get_logs(
     };
 
     let resp = tokio::task::spawn_blocking(move || {
-        let dir = crate::logs::logs_dir(&repo, source);
-        let file = crate::logs::newest_log_file(&dir)?;
-        let (origin, lines) = match file {
-            Some(path) => {
-                let lines = crate::logs::tail_lines(&path, tail)?
-                    .iter()
-                    .map(|l| crate::logs::redact_line(l))
-                    .collect();
-                (Some(path.display().to_string()), lines)
-            }
-            None => (None, Vec::new()),
-        };
+        let (origin, lines) = read_log_tail(&repo, source, tail)?;
         Ok::<_, std::io::Error>(LogsResponse {
             source: source_str,
             origin,
@@ -2272,6 +3325,33 @@ async fn get_logs(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "failed to read logs" })),
         ),
+    }
+}
+
+/// The body of `GET /logs`, shared with the assistant's `recent_logs` tool so
+/// both read the SAME file the same way: resolve the newest `*.log` for
+/// `source` under `repo`'s `workflow_logs/`, take its last `tail` lines, and
+/// pass every one through [`crate::logs::redact_line`] (an `hf_…` token in a
+/// container log must not reach a chat transcript any more than an HTTP
+/// response). Returns `(origin, lines)`: `origin` is the file's path, or
+/// `None` -- with no lines -- when nothing has been logged yet.
+///
+/// Blocking file I/O: call it under `spawn_blocking`.
+pub(crate) fn read_log_tail(
+    repo: &Path,
+    source: crate::logs::LogSource,
+    tail: usize,
+) -> std::io::Result<(Option<String>, Vec<String>)> {
+    let dir = crate::logs::logs_dir(repo, source);
+    match crate::logs::newest_log_file(&dir)? {
+        Some(path) => {
+            let lines = crate::logs::tail_lines(&path, tail)?
+                .iter()
+                .map(|l| crate::logs::redact_line(l))
+                .collect();
+            Ok((Some(path.display().to_string()), lines))
+        }
+        None => Ok((None, Vec::new())),
     }
 }
 
@@ -2506,6 +3586,74 @@ async fn ssh_authorize(
     }))
 }
 
+/// `text` as a QR code, an SVG of dark squares on white (with a quiet zone).
+fn qr_svg(text: &str) -> Option<String> {
+    let code = qrcode::QrCode::new(text.as_bytes()).ok()?;
+    let w = code.width();
+    let colors = code.to_colors();
+    let q = 4; // quiet zone, in modules
+    let size = w + 2 * q;
+    let mut path = String::new();
+    for (i, c) in colors.iter().enumerate() {
+        if *c == qrcode::Color::Dark {
+            path.push_str(&format!("M{} {}h1v1h-1z", i % w + q, i / w + q));
+        }
+    }
+    Some(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {size} {size}\" shape-rendering=\"crispEdges\"><rect width=\"{size}\" height=\"{size}\" fill=\"#fff\"/><path d=\"{path}\" fill=\"#000\"/></svg>"
+    ))
+}
+
+/// `GET /ssh/info` (authed): how an SSH app (Termius, a terminal) reaches this
+/// box -- the account, port, addresses, whether the SSH server is listening,
+/// the keys TT Station has added, and the standard `~/.ssh/config` block that
+/// SSH apps import (Termius imports `~/.ssh` on the desktop).
+async fn ssh_info(axum::extract::State(state): axum::extract::State<AppState>, _auth: BearerAuth) -> Json<serde_json::Value> {
+    let user = state.ssh_user().to_string();
+    let name = state.name().to_string();
+    let path = state.ssh_path().to_path_buf();
+    let (lan, listening, keys) = tokio::task::spawn_blocking(move || {
+        let listening = std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], 22)), std::time::Duration::from_millis(500)).is_ok();
+        // Keys TT Station added carry a `ttstation:<label>` marker.
+        let keys: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let raw = l.split_whitespace().find_map(|w| w.strip_prefix("ttstation:"))?;
+                let mut label = raw;
+                // Phones label their keys `ttstation:<device>:<date>`: show the device.
+                while let Some(rest) = label.strip_prefix("ttstation:") {
+                    label = rest;
+                }
+                let (label, added) = match label.rsplit_once(':') {
+                    Some((name, date)) if date.len() == 10 && date.chars().filter(|c| *c == '-').count() == 2 => (name, Some(date)),
+                    _ => (label, None),
+                };
+                let kind = l.split_whitespace().next().unwrap_or("").trim_start_matches("ssh-");
+                // `raw` is the stored label, what `DELETE /ssh/authorize` takes.
+                Some(serde_json::json!({ "label": label, "type": kind, "added": added, "raw": raw }))
+            })
+            .collect();
+        (crate::pairqr::lan_ipv4(), listening, keys)
+    })
+    .await
+    .unwrap_or((None, false, Vec::new()));
+    let mut hosts = vec![serde_json::json!({ "label": "On your network, by name", "host": format!("{name}.local") })];
+    if let Some(ip) = lan {
+        hosts.push(serde_json::json!({ "label": "On your network, by address", "host": ip.to_string() }));
+    }
+    let primary = format!("{name}.local");
+    let link = format!("ssh://{user}@{primary}:22");
+    Json(serde_json::json!({
+        "listening": listening, "user": user, "port": 22, "name": name, "hosts": hosts, "keys": keys,
+        // For a phone to scan: its camera opens the link in an SSH app that handles `ssh://`.
+        "qr_svg": qr_svg(&link),
+        "command": format!("ssh {user}@{primary}"),
+        "link": link,
+        "config": format!("Host {name}\n  HostName {primary}\n  User {user}\n  Port 22\n"),
+    }))
+}
+
 /// JSON body accepted by `DELETE /ssh/authorize`. Exactly one of `label`/
 /// `public_key` is expected -- `label` takes priority if both are somehow
 /// given (matches `authorize`'s own append-by-label convention).
@@ -2555,8 +3703,309 @@ async fn ssh_revoke(
     Ok(Json(SshRevokeResponse { revoked: true }))
 }
 
+/// Map an [`crate::assistant::AssistantError`] onto this crate's
+/// `{ "error": "..." }` contract:
+///
+/// | Variant | Status | Why |
+/// |---|---|---|
+/// | `NotServing` | `409` | Same "well-formed, wrong box state" code `GET /endpoint` uses when idle. The message is written to be shown to a person as-is. |
+/// | `BadRequest` | `400` | The client's history was unusable (see `assistant::prepare_history`). |
+/// | `UnknownAction` | `404` | No such pending action -- never existed, already confirmed/denied, or expired. |
+/// | `Upstream` | `502` | The served model couldn't be reached or answered garbage: the agent is a gateway here, and the failure is upstream of it. |
+/// | `Backend` | `409`/`500` | A confirmed action failed -- `contention_aware_error`, exactly like `/run`/`/stop`/`/power`. |
+fn assistant_error(err: crate::assistant::AssistantError) -> (StatusCode, Json<ErrorResponse>) {
+    use crate::assistant::{AssistantError, PENDING_TTL};
+    let (status, error) = match err {
+        AssistantError::NotServing => (
+            StatusCode::CONFLICT,
+            "No model is serving — start one first".to_string(),
+        ),
+        AssistantError::NotChat(msg) => (StatusCode::CONFLICT, msg),
+        AssistantError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+        AssistantError::UnknownAction => (
+            StatusCode::NOT_FOUND,
+            format!(
+                "No pending action with that id — it was already answered or expired (actions expire after {} minutes)",
+                PENDING_TTL.as_secs() / 60
+            ),
+        ),
+        AssistantError::Upstream(msg) => (StatusCode::BAD_GATEWAY, msg),
+        AssistantError::Backend(e) => return contention_aware_error(e),
+    };
+    (status, Json(ErrorResponse { error }))
+}
+
+/// `POST /assistant { "messages": [...] }` (bearer-guarded): chat with the
+/// box, using the model it is currently serving as the brain. Read-only
+/// tools run immediately; disruptive ones come back as
+/// `needs_confirmation` actions for `POST /assistant/confirm`. `409` when
+/// nothing is serving. The whole loop lives in [`crate::assistant::converse`]
+/// -- see that module's doc for the confirmation model.
+///
+/// `BearerAuth` is listed before the `Json` body extractor so an
+/// unauthenticated request is a `401` regardless of what its body looks like.
+async fn assistant_chat(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    who: crate::people::Who,
+    Json(req): Json<crate::assistant::AssistantRequest>,
+) -> Result<Json<crate::assistant::AssistantResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let opts = req.options(false);
+    if let Some(done) = crate::assistant::quick(&state, &req.messages, opts).await {
+        return Ok(Json(done));
+    }
+    crate::people::CALLER
+        .scope(
+            who.person,
+            crate::assistant::converse(&state, req.messages, opts),
+        )
+        .await
+        .map(Json)
+        .map_err(assistant_error)
+}
+
+/// `POST /assistant/stream` (bearer-guarded): `/assistant`, streamed as
+/// server-sent events -- one `data: {"type": ...}` line per
+/// [`crate::assistant::StreamEvent`]: `delta`/`reasoning` text as the model
+/// writes it, `action`s as tools run, then `done` with the authoritative reply
+/// (or `error`). Defaults to the `detailed` (Markdown) style. Problems known
+/// before the model is asked (nothing serving, a non-chat model, a bad history)
+/// are ordinary HTTP errors, like `/assistant`'s.
+async fn assistant_stream(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    who: crate::people::Who,
+    Json(req): Json<crate::assistant::AssistantRequest>,
+) -> Result<
+    axum::response::sse::Sse<
+        impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    (StatusCode, Json<ErrorResponse>),
+> {
+    let opts = req.options(true);
+    let person = who.person;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    if let Some(done) = crate::assistant::quick(&state, &req.messages, opts).await {
+        // An instant command: already done; tell it like a stream.
+        for action in done.actions {
+            let _ = tx.send(crate::assistant::StreamEvent::Action { action });
+        }
+        let _ = tx.send(crate::assistant::StreamEvent::Delta {
+            text: done.reply.clone(),
+        });
+        let _ = tx.send(crate::assistant::StreamEvent::Done {
+            reply: done.reply,
+            model: done.model,
+        });
+    } else {
+        let chat = crate::people::CALLER
+            .scope(
+                person.clone(),
+                crate::assistant::prepare_stream(&state, req.messages, opts),
+            )
+            .await
+            .map_err(assistant_error)?;
+        tokio::spawn(
+            crate::people::CALLER.scope(person, crate::assistant::converse_stream(state, chat, tx)),
+        );
+    }
+    let events = futures_util::stream::unfold(rx, |mut rx| async move {
+        let event = rx.recv().await?;
+        let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
+        Some((Ok(axum::response::sse::Event::default().data(data)), rx))
+    });
+    Ok(axum::response::sse::Sse::new(events).keep_alive(axum::response::sse::KeepAlive::default()))
+}
+
+/// `POST /assistant/confirm { "action_id": "...", "approve": <bool> }`
+/// (bearer-guarded): approve or deny a pending action from
+/// `POST /assistant`. Consumes the action either way; `404` if it's unknown
+/// or expired. An approved `run_model` returns `"started"` immediately and
+/// serves in the background (exactly `/run`'s body, just not awaited);
+/// `stop_model`/`reset_chips` run inline and return `"done"`. See
+/// [`crate::assistant::confirm`].
+async fn assistant_confirm(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(req): Json<crate::assistant::ConfirmRequest>,
+) -> Result<Json<crate::assistant::ConfirmResponse>, (StatusCode, Json<ErrorResponse>)> {
+    crate::assistant::confirm(&state, req)
+        .await
+        .map(Json)
+        .map_err(assistant_error)
+}
+
 /// Build the router for a given `AppState`. Side-effect-free: no sockets,
 /// no mDNS -- safe to call directly from tests.
+/// A caller on the box itself (or one of its Docker apps), reaching plain HTTP.
+#[derive(Clone, Copy, Debug)]
+pub struct LocalCaller;
+
+/// Callers plain HTTP serves: the box itself and its Docker apps (bridge
+/// networks are in 172.16.0.0/12). Everyone else -- phones, other computers --
+/// must use HTTPS, where the box's certificate is pinned.
+pub fn local_peer(ip: std::net::IpAddr) -> bool {
+    if own_addresses().contains(&ip) {
+        return true; // the box calling its own network address
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| local_peer(std::net::IpAddr::V4(v4))),
+    }
+}
+
+/// A Docker container on this box (its networks are in 172.16.0.0/12). Apps
+/// in containers may use the model API (`/v1`) over plain HTTP and nothing
+/// else: code running in a container (an agent's sandbox, an app that runs
+/// code) must never pair itself or control the box.
+pub fn container_peer(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.octets()[0] == 172 && (16..32).contains(&v4.octets()[1]),
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some_and(|v4| container_peer(std::net::IpAddr::V4(v4))),
+    }
+}
+
+/// This box's own addresses (refreshed every minute: DHCP can change them).
+fn own_addresses() -> Vec<std::net::IpAddr> {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<std::net::IpAddr>)>> = std::sync::Mutex::new(None);
+    let mut c = CACHE.lock().expect("own addresses");
+    if let Some((at, ips)) = c.as_ref() {
+        if at.elapsed() < std::time::Duration::from_secs(60) {
+            return ips.clone();
+        }
+    }
+    let out = std::process::Command::new("hostname").arg("-I").output();
+    let ips: Vec<std::net::IpAddr> = out
+        .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().filter_map(|w| w.parse().ok()).collect())
+        .unwrap_or_default();
+    *c = Some((std::time::Instant::now(), ips.clone()));
+    ips
+}
+
+/// Whether the owner turned on plain HTTP for other computers on the network
+/// (for apps that can't use the box's own certificate). Off by default.
+pub fn lan_http_allowed(state: &AppState) -> bool {
+    state.config_dir().join("allow-lan-http").exists()
+}
+
+async fn only_local(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if local_peer(peer.ip()) {
+        req.extensions_mut().insert(LocalCaller);
+        return next.run(req).await;
+    }
+    if container_peer(peer.ip()) && req.uri().path().starts_with("/v1/") {
+        return next.run(req).await;
+    }
+    // Phones never get plain HTTP; other computers only if the owner allowed it.
+    if lan_http_allowed(&state) && req.uri().path().starts_with("/v1/") {
+        return next.run(req).await;
+    }
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": format!(
+                "This box only takes encrypted connections from the network. Use https on port {} (pair your phone again from TT Station on the box).",
+                state.ctrl_port() + 1
+            ),
+            "https_port": state.ctrl_port() + 1,
+        })),
+    )
+        .into_response()
+}
+
+/// The plain-HTTP app: the full API for local callers only, plus the routes
+/// that only the box itself may use (pairing a phone from the desktop app).
+pub fn local_http_app(state: AppState) -> Router {
+    let local_only = Router::new()
+        .route("/pair/qr", post(pair_qr))
+        .route("/security", get(get_security).post(post_security))
+        .with_state(state.clone());
+    app(state.clone())
+        .merge(local_only)
+        .layer(axum::middleware::from_fn_with_state(state, only_local))
+}
+
+/// `POST /pair/qr` (the box itself): a one-time pairing link and its QR, for
+/// an iPhone's camera. It carries the box's address on the home network, the
+/// HTTPS port and the certificate fingerprint the phone pins, and the account
+/// the phone's SSH key is added to. Nothing in it is a credential that lasts:
+/// the code expires and works once.
+async fn pair_qr(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    caller: Option<axum::extract::Extension<LocalCaller>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if caller.is_none() {
+        return Err(tt_error(StatusCode::FORBIDDEN, "Pair a phone from TT Station on the box itself."));
+    }
+    let Some(tls) = state.tls() else {
+        return Err(tt_error(StatusCode::CONFLICT, "HTTPS isn't running on this box, so a phone can't connect securely."));
+    };
+    let (port, sha) = (tls.port, tls.sha256.as_str());
+    let pair_id = pairing::issue_pair_id();
+    let code = pairing::issue_code();
+    state.insert_pending_pair(pair_id.clone(), code.clone());
+    let name = state.name().to_string();
+    let host = tokio::task::spawn_blocking(crate::pairqr::lan_ipv4)
+        .await
+        .ok()
+        .flatten()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| format!("{name}.local"));
+    let link = crate::pairqr::PairLink {
+        name: name.clone(),
+        host: host.clone(),
+        port: state.ctrl_port(),
+        pair_id,
+        code,
+        remote_host: None,
+        tls_port: Some(port as u16),
+        cert_sha256: Some(sha.to_string()),
+    };
+    let url = format!("{}&ssh={}", link.url(), crate::pairqr::encode_component(state.ssh_user()));
+    Ok(Json(serde_json::json!({
+        "link": url,
+        "qr_svg": qr_svg(&url),
+        "expires_in_s": PAIR_TTL.as_secs(),
+        "host": host, "https_port": port,
+        // The first 16 hex digits, to compare by eye on the phone if asked.
+        "fingerprint": sha.chars().take(16).collect::<String>(),
+    })))
+}
+
+/// `GET /security` (the box itself): how the box is reachable.
+async fn get_security(axum::extract::State(state): axum::extract::State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "lan_http": lan_http_allowed(&state),
+        "https_port": state.ctrl_port() + 1,
+        "tls": state.tls(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct SecurityBody {
+    lan_http: bool,
+}
+
+/// `POST /security` (the box itself): allow or forbid plain HTTP for other
+/// computers' apps on `/v1` (phones always use HTTPS).
+async fn post_security(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    caller: Option<axum::extract::Extension<LocalCaller>>,
+    Json(body): Json<SecurityBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if caller.is_none() {
+        return Err(tt_error(StatusCode::FORBIDDEN, "Change this from TT Station on the box itself."));
+    }
+    let flag = state.config_dir().join("allow-lan-http");
+    let done = if body.lan_http { std::fs::write(&flag, "") } else { std::fs::remove_file(&flag).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) };
+    done.map_err(|e| tt_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    Ok(Json(serde_json::json!({ "lan_http": body.lan_http })))
+}
+
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/status", get(get_status))
@@ -2568,6 +4017,7 @@ pub fn app(state: AppState) -> Router {
         .route("/telemetry", get(telemetry_ws))
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
+        .route("/pair/offer", post(pair_offer))
         .route("/run", post(run_model))
         .route("/stop", post(stop_model))
         .route("/reset", post(reset))
@@ -2575,7 +4025,1141 @@ pub fn app(state: AppState) -> Router {
         .route("/endpoint", get(get_endpoint))
         .route("/leases", get(get_leases))
         .route("/ssh/authorize", post(ssh_authorize).delete(ssh_revoke))
+        .route("/ssh/info", get(ssh_info))
+        .route("/discover", get(crate::discover::get_discover))
+        .route("/assistant", post(assistant_chat))
+        .route("/assistant/confirm", post(assistant_confirm))
+        .route("/assistant/client-result", post(crate::assistant::post_client_result))
+        .route("/assistant/stream", post(assistant_stream))
+        .route("/tt/models", get(tt_models))
+        .route("/tt/pulls", get(tt_pulls))
+        .route("/tt/pull", post(tt_pull))
+        .route("/tt/pull/cancel", post(tt_pull_cancel))
+        .route("/serve", get(get_serve).post(post_serve))
+        .route(
+            "/keys",
+            get(crate::gateway::list_keys).post(crate::gateway::create_key),
+        )
+        .route(
+            "/keys/{id}",
+            axum::routing::delete(crate::gateway::revoke_key).patch(crate::gateway::change_key),
+        )
+        .route("/connect", get(crate::gateway::connect_info))
+        .route("/bench", post(crate::bench::post_bench))
+        .route("/creations/{id}", get(get_creation))
+        .route("/memories", get(list_memories).delete(clear_memories))
+        .route("/power/info", get(power_info))
+        .route("/tls", get(crate::tls::get_tls))
+        .route("/jobs", get(crate::jobs::get_jobs))
+        .route(
+            "/jobs/transcribe",
+            post(crate::jobs::post_transcribe).layer(axum::extract::DefaultBodyLimit::max(
+                crate::jobs::MAX_UPLOAD_BYTES,
+            )),
+        )
+        .route("/jobs/{id}", axum::routing::delete(crate::jobs::delete_job))
+        .route("/jobs/{id}/run", post(crate::jobs::post_run_now))
+        .route("/jobs/{id}/result", get(crate::jobs::get_result))
+        .route("/app", get(crate::app_ui::get_app_root))
+        .route("/app/", get(crate::app_ui::get_app_root))
+        .route("/app/{*rel}", get(crate::app_ui::get_app_path))
+        .route("/apps", get(crate::apps::get_apps))
+        .route("/apps/{id}/start", post(crate::apps::post_start))
+        .route("/apps/{id}/stop", post(crate::apps::post_stop))
+        .route("/apps/{id}", axum::routing::delete(crate::apps::delete_app))
+        .route("/energy", get(get_energy))
+        .route("/record", get(crate::recorder::get_record))
+        .route("/assistant/brain", get(crate::assistant::get_brain))
+        .route("/bringup/engines", get(crate::bringup::get_engines))
+        .route("/community", get(crate::community::get_community))
+        .route("/community/catalog", get(crate::community::get_catalog))
+        .route("/community/info/{ns}/{name}", get(crate::community::get_info))
+        .route("/community/pull", post(crate::community::post_pull))
+        .route("/community/pull/pause", post(crate::community::post_pause))
+        .route("/community/pull/cancel", post(crate::community::post_cancel))
+        .route("/community/serve", post(crate::community::post_serve))
+        .route("/community/{ns}/{name}", axum::routing::delete(crate::community::delete_package))
+        .route("/hermes", get(crate::hermes::get_hermes))
+        .route("/hermes/install", post(crate::hermes::post_install))
+        .route("/hermes/open", post(crate::hermes::post_open))
+        .route("/hermes/key", post(crate::hermes::post_key))
+        .route("/vllm/native", get(crate::native_vllm::get_native))
+        .route("/vllm/native/setup", post(crate::native_vllm::post_setup))
+        .route("/vllm/native/serve", post(crate::native_vllm::post_serve))
+        .route("/bringup/survey", post(crate::bringup::post_survey))
+        .route("/bringup/claude/login", post(crate::bringup::post_claude_login))
+        .route(
+            "/bringup/codex/runs",
+            get(crate::bringup::get_runs).post(crate::bringup::post_run),
+        )
+        .route(
+            "/bringup/codex/runs/{id}",
+            get(crate::bringup::get_run).delete(crate::bringup::delete_run),
+        )
+        .route("/bringup/codex/runs/{id}/approvals", post(crate::bringup::post_approval))
+        .route(
+            "/bringup/codex/runs/{id}/approvals/{aid}/wait",
+            post(crate::bringup::post_wait),
+        )
+        .route(
+            "/bringup/codex/runs/{id}/approvals/{aid}",
+            post(crate::bringup::post_decide),
+        )
+        .route("/bringup/codex/runs/{id}/{action}", post(crate::bringup::post_action))
+        .route("/toplike", get(crate::toplike_term::get_toplike))
+        .route("/toplike/term", get(crate::toplike_term::term_ws))
+        .route("/coding/term", get(crate::coding::term_ws))
+        .route(
+            "/preferences/models",
+            get(crate::prefs::get_prefs).put(crate::prefs::put_prefs),
+        )
+        .route("/desktop/apps", get(crate::desktop::get_apps))
+        .route("/desktop/open", post(crate::desktop::post_open))
+        .route(
+            "/voice",
+            get(crate::voice::get_voice)
+                .put(crate::voice::put_voice)
+                .delete(crate::voice::delete_voice),
+        )
+        .route("/voice/setup", post(crate::voice::post_setup))
+        .route("/voice/speak", post(crate::voice::post_speak))
+        .route(
+            "/voice/hear",
+            get(crate::voice::get_hear)
+                .post(crate::voice::post_hear)
+                .delete(crate::voice::delete_hear),
+        )
+        .route("/voice/say", post(crate::voice::post_say))
+        .route("/voice/hear/finish", post(crate::voice::post_hear_finish))
+        .route(
+            "/voice/listen",
+            post(crate::voice::post_listen)
+                .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
+        .route("/record/start", post(crate::recorder::post_start))
+        .route("/record/stop", post(crate::recorder::post_stop))
+        .route(
+            "/schedules",
+            get(crate::schedules::get_schedules).post(crate::schedules::post_schedule),
+        )
+        .route(
+            "/schedules/{id}",
+            axum::routing::patch(crate::schedules::patch_schedule)
+                .delete(crate::schedules::delete_schedule),
+        )
+        .route(
+            "/people",
+            get(crate::people::get_people).post(crate::people::post_person),
+        )
+        .route("/people/me", axum::routing::put(crate::people::put_me))
+        .route(
+            "/people/{id}",
+            axum::routing::patch(crate::people::patch_person).delete(crate::people::delete_person),
+        )
+        .route("/orchard", get(crate::orchard::get_orchard))
+        .route("/orchard/setup", post(crate::orchard::post_setup))
+        .route("/orchard/preflight", post(crate::orchard::post_preflight))
+        .route("/orchard/runs", post(crate::orchard::post_run))
+        .route(
+            "/orchard/runs/{name}",
+            get(crate::orchard::get_run).delete(crate::orchard::delete_run),
+        )
+        .route(
+            "/orchard/runs/{name}/serve",
+            post(crate::orchard::post_serve),
+        )
+        .route("/orchard/packaging", post(crate::orchard::post_packaging))
+        .route("/orchard/lab", get(crate::orchard_lab::get_lab).put(crate::orchard_lab::put_lab))
+        .route("/orchard/lab/check", post(crate::orchard_lab::post_check))
+        .route("/orchard/lab/setup", post(crate::orchard_lab::post_setup))
+        .route(
+            "/orchard/runs/{name}/{action}",
+            post(crate::orchard::post_control),
+        )
+        .route(
+            "/orchard/runs/{name}/report/{which}",
+            get(crate::orchard::get_report),
+        )
+        .route("/orchard/runs/{name}/story", get(crate::orchard::get_story))
+        .route("/favorites", get(crate::favorites::get_favorites).put(crate::favorites::put_favorite))
+        .route("/research", get(crate::research::get_research).post(crate::research::post_research))
+        .route("/research/{id}", get(crate::research::get_job).delete(crate::research::delete_job))
+        .route("/research/{id}/stop", post(crate::research::post_stop))
+        .route("/research/{id}/rename", post(crate::research::post_rename))
+        .route("/skills", get(crate::skills::get_skills))
+        .route("/embeddings", get(crate::embeddings::get_embeddings).put(crate::embeddings::put_embeddings))
+        .route("/code", get(crate::workspace::get_code))
+        .route("/code/setup", post(crate::workspace::post_setup))
+        .route("/code/sessions", post(crate::workspace::post_session))
+        .route("/code/sessions/{id}", get(crate::workspace::get_session).delete(crate::workspace::delete_session))
+        .route("/code/sessions/{id}/message", post(crate::workspace::post_message))
+        .route("/code/sessions/{id}/approve", post(crate::workspace::post_approve))
+        .route("/code/sessions/{id}/interrupt", post(crate::workspace::post_interrupt))
+        .route("/code/sessions/{id}/stop", post(crate::workspace::post_stop))
+        .route("/code/sessions/{id}/changes", get(crate::workspace::get_changes))
+        .route("/code/sessions/{id}/commit", post(crate::workspace::post_commit))
+        .route("/code/sessions/{id}/discard", post(crate::workspace::post_discard))
+        .route("/code/sessions/{id}/forget", post(crate::workspace::post_forget))
+        .route("/code/sessions/{id}/settings", post(crate::workspace::post_settings))
+        .route("/code/sessions/{id}/rename", post(crate::workspace::post_rename))
+        .route("/coding", get(crate::coding::get_coding))
+        .route("/coding/sessions", post(crate::coding::post_session))
+        .route("/coding/sessions/{id}", axum::routing::delete(crate::coding::delete_session))
+        .route("/coding/sessions/{id}/stop", post(crate::coding::post_stop))
+        .route("/coding/sessions/{id}/changes", get(crate::coding::get_changes))
+        .route("/coding/folders", get(crate::coding::get_folders).post(crate::coding::post_folder))
+        .route("/skills/{id}/hermes", post(crate::skills::post_hermes))
+        .route("/idle", get(crate::idle::get_idle).put(crate::idle::put_idle))
+        .route("/idle/wake", post(crate::idle::post_wake))
+        .route("/updates", get(crate::updates::get_updates))
+        .route("/updates/install", post(crate::updates::post_install))
+        .route("/updates/undo", post(crate::updates::post_undo))
+        .route("/approvals", get(crate::approvals::get_approvals))
+        .route("/approvals/answer", post(crate::approvals::post_answer))
+        .route("/evals", get(crate::evals::get_evals).post(crate::evals::post_eval))
+        .route("/evals/stop", post(crate::evals::post_stop))
+        .route("/evals/{id}", get(crate::evals::get_eval).delete(crate::evals::delete_eval))
+        .route("/library", get(crate::library::get_library))
+        .route("/library/sources", post(crate::library::post_source))
+        .route("/library/sources/{id}", axum::routing::delete(crate::library::delete_source))
+        .route("/library/sources/{id}/reindex", post(crate::library::post_reindex))
+        .route("/library/search", post(crate::library::post_search))
+        .route("/routines", get(crate::routines::get_routines).post(crate::routines::post_routine))
+        .route("/routines/{id}", axum::routing::put(crate::routines::put_routine).delete(crate::routines::delete_routine))
+        .route("/routines/{id}/run", post(crate::routines::post_run))
+        .route("/routines/{id}/runs", get(crate::routines::get_runs))
+        .route("/routines/runs/{run}", get(crate::routines::get_run))
+        .route("/routines/runs/{run}/approve", post(crate::routines::post_approve))
+        .route("/routines/runs/{run}/stop", post(crate::routines::post_stop))
+        .route("/lab", get(crate::lab::get_lab))
+        .route("/lab/prepare", post(crate::lab::post_prepare))
+        .route("/lab/run", post(crate::lab::post_run))
+        .route("/modes", get(crate::modes::get_modes))
+        .route("/modes/{id}", post(crate::modes::post_mode))
+        .route("/software", get(crate::tttools::get_software))
+        .route(
+            "/software/cli-update",
+            post(crate::tttools::post_cli_update),
+        )
+        .route(
+            "/tt/models/{name}",
+            axum::routing::delete(crate::tttools::delete_model),
+        )
+        .route("/clients", get(crate::tttools::get_clients))
+        .route("/clients/{tool}/start", post(crate::tttools::start_client))
+        .route("/clients/{tool}/stop", post(crate::tttools::stop_client))
+        .route("/doctor", get(crate::doctor::get_doctor))
+        .route("/doctor/fix/{fix}", post(crate::doctor::post_fix))
+        .route("/diagnostics", post(crate::doctor::post_diagnostics))
+        .route("/diagnostics/{id}", get(crate::doctor::get_diagnostics))
+        .route("/notify", get(crate::notify::get_notify))
+        .route("/notify/devices", post(crate::notify::register_device))
+        .route(
+            "/notify/devices/{token}",
+            axum::routing::delete(crate::notify::unregister_device),
+        )
+        .route("/notify/test", post(crate::notify::test_notify))
+        .route("/events", get(crate::notify::get_events))
+        .route("/memories/{id}", axum::routing::delete(delete_memory))
+        .route("/v1/models", get(crate::gateway::v1_models))
+        .route("/v1/chat/completions", post(crate::gateway::v1_text))
+        .route("/v1/completions", post(crate::gateway::v1_text))
+        .route("/v1/embeddings", post(crate::gateway::v1_embeddings))
+        .route("/v1/rerank", post(crate::gateway::v1_rerank))
+        .route("/v1/messages", post(crate::anthropic::v1_messages))
+        .route("/v1/messages/count_tokens", post(crate::anthropic::count_tokens))
+        .route("/v1/images/generations", post(crate::gateway::v1_images))
+        .route(
+            "/coserve",
+            get(crate::coserve::get_coserve).post(crate::coserve::post_coserve),
+        )
+        .route("/metrics/history", get(metrics_history))
+        .route("/metrics/now", get(metrics_now))
+        .route(
+            "/docs",
+            get(list_docs)
+                .post(add_doc)
+                .layer(axum::extract::DefaultBodyLimit::max(DOC_BODY_LIMIT)),
+        )
+        .route("/docs/search", post(search_docs))
+        .route("/docs/{id}", axum::routing::delete(delete_doc))
+        .route("/generate/image", post(generate_image))
+        .route("/generate/video", post(generate_video))
+        .route("/generate/videos", get(list_videos))
+        .route("/generate/video/{id}", get(get_video))
+        .route("/generate/video/{id}/download", get(download_video))
+        .route("/generate/video/{id}/cancel", post(cancel_video))
         .with_state(state)
+}
+
+// ---------------------------------------------------------------------
+// Dashboards: `/metrics/*` and the recorder behind them
+// ---------------------------------------------------------------------
+
+/// How often the recorder samples the box.
+pub const METRICS_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Sample the box every [`METRICS_INTERVAL`] for as long as the agent runs:
+/// chip telemetry (the same deduplicated `tt-smi -s` `/telemetry` uses) and the
+/// served model's metrics (the same scrape tt-toplike's view uses), into
+/// [`crate::history::History`]. Saves to `save_to` every minute.
+pub async fn record_metrics_forever(state: AppState, save_to: Option<PathBuf>) {
+    let history = state.history();
+    let mut sampler = crate::inference::InferenceSampler::new();
+    let mut ticker = tokio::time::interval(METRICS_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut ticks: u64 = 0;
+    loop {
+        ticker.tick().await;
+        ticks += 1;
+        let now = unix_now();
+        let chips = state
+            .cached_snapshot()
+            .await
+            .map(|json| crate::history::chips_from_snapshot(&json))
+            .unwrap_or_default();
+        let scrape = scrape_vllm_metrics(resolve_metrics_port(&state)).await;
+        let info = sampler.tick(&state.status(), scrape.as_deref());
+        let serving = info.as_ref().and_then(|i| i.serving);
+        let point = crate::history::Point {
+            t: now,
+            chips,
+            gen_tps: serving.as_ref().map(|s| s.generation_tps),
+            prompt_tps: serving.as_ref().map(|s| s.prompt_tps),
+            running: serving.as_ref().map(|s| s.requests_running),
+            waiting: serving.as_ref().map(|s| s.requests_waiting),
+            kv_cache: serving.as_ref().map(|s| s.kv_cache_usage),
+            ttft_s: serving.as_ref().map(|s| s.ttft_avg_s).filter(|v| *v > 0.0),
+            tpot_s: serving.as_ref().map(|s| s.tpot_avg_s).filter(|v| *v > 0.0),
+        };
+        let completed = serving.as_ref().map(|s| s.completed_delta).unwrap_or(0);
+        history.record(point, completed, &crate::history::local_day(now));
+        history.set_inference(info.and_then(|i| serde_json::to_value(i).ok()));
+        if ticks.is_multiple_of(12) {
+            if let Some(path) = &save_to {
+                let (h, p) = (Arc::clone(&history), path.clone());
+                let _ = tokio::task::spawn_blocking(move || h.save(&p)).await;
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    range: Option<String>,
+}
+
+/// `GET /metrics/history?range=5m|1h|24h` (unauthed, like `/telemetry`):
+/// `{range, step_s, points: [{t, chips: [{temp_c, power_w, aiclk_mhz}], gen_tps,
+/// prompt_tps, running, waiting, kv_cache, ttft_s, tpot_s}], totals}`.
+async fn metrics_history(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let label = q.range.unwrap_or_else(|| "1h".to_string());
+    let range = crate::history::Range::parse(&label)
+        .ok_or_else(|| tt_error(StatusCode::BAD_REQUEST, "range must be 5m, 1h or 24h"))?;
+    let history = state.history();
+    let (step, points) = history.range(range, unix_now());
+    Ok(Json(serde_json::json!({
+        "range": label,
+        "step_s": step,
+        "points": points,
+        "totals": history.totals(),
+    })))
+}
+
+/// `GET /metrics/now` (unauthed): the latest sample, the live inference view
+/// (phase, throughput, latency, media counters) and the energy/token totals.
+async fn metrics_now(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Json<serde_json::Value> {
+    let history = state.history();
+    Json(serde_json::json!({
+        "point": history.latest(),
+        "inference": history.inference(),
+        "totals": history.totals(),
+    }))
+}
+
+// ---------------------------------------------------------------------
+// Serving lifecycle for clients that can't hold a request open: `/serve`
+// ---------------------------------------------------------------------
+
+/// Refuse to start a model whose weights aren't all on the box when the tt
+/// catalog knows it: run.py would otherwise download them *inside* the launch,
+/// silently, for as long as that takes (tens of GB), past the readiness ceiling.
+/// Models tt doesn't know (an agent without tt, or a bundle id) pass through.
+async fn check_servable(
+    state: &AppState,
+    model: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let Some(tt) = state.tt_cli() else {
+        return Ok(());
+    };
+    let device = state.device_mesh().map(str::to_string);
+    let wanted = model.to_string();
+    let found = tokio::task::spawn_blocking(move || {
+        tt.catalog(device.as_deref(), false)
+            .ok()
+            .and_then(|c| c.find(&wanted).cloned())
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(m) = found else { return Ok(()) };
+    if !m.supported {
+        return Err(tt_error(
+            StatusCode::BAD_REQUEST,
+            format!("{} doesn't run on this box.", m.name),
+        ));
+    }
+    match m.weights {
+        crate::ttcli::Weights::Complete | crate::ttcli::Weights::Container => Ok(()),
+        crate::ttcli::Weights::Partial => Err(tt_error(
+            StatusCode::CONFLICT,
+            format!(
+                "{} is only partly downloaded. Finish the download before starting it.",
+                m.name
+            ),
+        )),
+        crate::ttcli::Weights::Missing => Err(tt_error(
+            StatusCode::CONFLICT,
+            format!(
+                "{} isn't downloaded yet. Download it before starting it.",
+                m.name
+            ),
+        )),
+    }
+}
+
+/// `GET /serve` (unauthed, like `/status`): the [`Lifecycle`] plus the kind of
+/// experience the served model is (`chat`, `image`, `video`, `speech`, `tts`).
+async fn get_serve(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Json<serde_json::Value> {
+    let life = state.lifecycle();
+    let probe = state.clone();
+    let kind = tokio::task::spawn_blocking(move || probe.served_kind_blocking())
+        .await
+        .unwrap_or("other");
+    // How long this model usually takes to load here, while it's loading.
+    let life_model_eta = (life.phase == Phase::Starting)
+        .then(|| {
+            life.model
+                .as_deref()
+                .and_then(|m| state.load_times().estimate(m))
+        })
+        .flatten();
+    Json(serde_json::json!({
+        "phase": life.phase,
+        "model": life.model,
+        // Only while something serves: during a switch the old model's name
+        // would read as if it were the one loading.
+        "served_id": life.served_id.or_else(|| (life.phase == Phase::Serving).then(|| state.current_model()).flatten()),
+        "since": life.since,
+        "error": life.error,
+        "kind": kind,
+        "split": crate::coserve::is_split(&state),
+        "eta_s": life_model_eta,
+        // A start that has shown no progress for a while (community packages): seconds.
+        "stalled_s": (life.phase == Phase::Starting).then(crate::community::stalled_s).flatten(),
+        "companion": state.companion().map(|c| {
+            let life = c.lifecycle();
+            serde_json::json!({
+                "phase": life.phase,
+                "model": life.model,
+                "served_id": life.served_id,
+                "since": life.since,
+                "error": life.error,
+                "eta_s": (life.phase == Phase::Starting)
+                    .then(|| life.model.as_deref().and_then(|m| state.load_times().estimate(m)))
+                    .flatten(),
+                "kind": "image",
+            })
+        }),
+    }))
+}
+
+/// `POST /serve` (authed) `{model}`: like `/run`, but answers `202` at once and
+/// brings the model up in the background; poll `GET /serve` for the outcome.
+/// `409` while another start is in flight or the weights aren't downloaded.
+async fn post_serve(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(req): Json<RunRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    begin_serve(&state, &req.model, req.force).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "starting", "model": req.model })),
+    ))
+}
+
+/// Start `model` on the whole box in the background, after the same checks as
+/// `POST /serve` (nothing else starting; weights downloaded). Shared with
+/// `crate::modes`.
+pub(crate) async fn begin_serve(
+    state: &AppState,
+    model: &str,
+    force: bool,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if let Some(holder) = state.chips_holder() {
+        return Err(tt_error(StatusCode::CONFLICT, holder));
+    }
+    let life = state.lifecycle();
+    if matches!(life.phase, Phase::Starting | Phase::Stopping) {
+        return Err(tt_error(
+            StatusCode::CONFLICT,
+            match life.phase {
+                Phase::Starting => format!(
+                    "{} is already starting. Wait for it, or stop it first.",
+                    life.model.unwrap_or_else(|| "A model".to_string())
+                ),
+                _ => "The box is stopping a model. Try again in a moment.".to_string(),
+            },
+        ));
+    }
+    check_servable(state, model).await?;
+    let model = model.to_string();
+    let bg = state.clone();
+    tokio::spawn(async move {
+        let _ = bg.start_serving(&model, force).await;
+    });
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// Image and video generation, proxied to the served media server
+// ---------------------------------------------------------------------
+
+/// The served media server's root URL (the endpoint without its `/v1`), after
+/// checking the served model is of `kind`.
+async fn media_base(
+    state: &AppState,
+    kind: &'static str,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    // Co-serving: the companion slot answers image requests.
+    if let Some(base) = state.companion().and_then(|c| c.media_base(kind)) {
+        return Ok(base);
+    }
+    let _ = state.reconciled_status().await;
+    let endpoint = state.endpoint().ok_or_else(|| {
+        tt_error(
+            StatusCode::CONFLICT,
+            format!(
+                "Nothing is serving. Start a{} model first.",
+                if kind == "image" { "n image" } else { " video" }
+            ),
+        )
+    })?;
+    let probe = state.clone();
+    let served = tokio::task::spawn_blocking(move || probe.served_kind_blocking())
+        .await
+        .unwrap_or("other");
+    if served != kind {
+        return Err(tt_error(
+            StatusCode::CONFLICT,
+            format!(
+                "The box is serving {} ({served}), not {} generation. Start a{} model first.",
+                endpoint.model,
+                kind,
+                if kind == "image" { "n image" } else { " video" }
+            ),
+        ));
+    }
+    Ok(endpoint
+        .base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/v1")
+        .to_string())
+}
+
+/// Forward one request to the media server and hand its status + body back.
+async fn media_proxy(
+    method: reqwest::Method,
+    url: String,
+    body: Option<serde_json::Value>,
+    timeout: Duration,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let client = match reqwest::Client::builder().timeout(timeout).build() {
+        Ok(c) => c,
+        Err(e) => {
+            return tt_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    };
+    // tt-media-server 0.10 images check `Authorization: Bearer $API_KEY` even
+    // when launched with NO_AUTH (only newer servers honour it), and the box
+    // never sets API_KEY, so the server's default applies. Newer servers with
+    // NO_AUTH ignore the header.
+    let api_key =
+        std::env::var("TT_MEDIA_API_KEY").unwrap_or_else(|_| "your-secret-key".to_string());
+    let mut req = client.request(method, &url).bearer_auth(api_key);
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) if e.is_timeout() => {
+            return tt_error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "The model took too long to answer.",
+            )
+            .into_response()
+        }
+        Err(e) => {
+            return tt_error(
+                StatusCode::BAD_GATEWAY,
+                format!("Couldn't reach the model server: {e}"),
+            )
+            .into_response()
+        }
+    };
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return tt_error(
+                StatusCode::BAD_GATEWAY,
+                format!("Reading the model's answer failed: {e}"),
+            )
+            .into_response()
+        }
+    };
+    if !status.is_success() && content_type.starts_with("application/json") {
+        // FastAPI's `{"detail": ...}` -> this API's `{"error": ...}`.
+        let detail = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| {
+                v.get("detail").map(|d| {
+                    d.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| d.to_string())
+                })
+            });
+        if let Some(detail) = detail {
+            return tt_error(status, detail).into_response();
+        }
+    }
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, content_type)],
+        bytes,
+    )
+        .into_response()
+}
+
+/// `POST /generate/image` (authed): tt-media-server's `/v1/images/generations`
+/// body (`prompt`, `negative_prompt`, `num_inference_steps`, `seed`,
+/// `number_of_images`, `guidance_scale`, `image_return_format`) passed through;
+/// answers `{images: [base64...], generation_time}`.
+async fn generate_image(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(mut body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // Media servers (0.10) require `guidance_scale` (>= 1); FLUX schnell is
+    // guidance-distilled, so the usual 3.5 is a safe default for clients that
+    // don't set it.
+    if let Some(obj) = body.as_object_mut() {
+        obj.entry("guidance_scale")
+            .or_insert(serde_json::json!(3.5));
+    }
+    match media_base(&state, "image").await {
+        Ok(base) => {
+            media_proxy(
+                reqwest::Method::POST,
+                format!("{base}/v1/images/generations"),
+                Some(body),
+                Duration::from_secs(600),
+            )
+            .await
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `POST /generate/video` (authed): submit a text-to-video job (`prompt`,
+/// `negative_prompt`, `num_inference_steps`, `seed`); answers the job object.
+async fn generate_video(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match media_base(&state, "video").await {
+        Ok(base) => {
+            media_proxy(
+                reqwest::Method::POST,
+                format!("{base}/v1/videos/generations"),
+                Some(body),
+                Duration::from_secs(120),
+            )
+            .await
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `GET /generate/videos` (authed): every video job the server knows.
+async fn list_videos(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match media_base(&state, "video").await {
+        Ok(base) => {
+            media_proxy(
+                reqwest::Method::GET,
+                format!("{base}/v1/videos/jobs"),
+                None,
+                Duration::from_secs(30),
+            )
+            .await
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `GET /generate/video/{id}` (authed): a job's status.
+async fn get_video(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match media_base(&state, "video").await {
+        Ok(base) => {
+            media_proxy(
+                reqwest::Method::GET,
+                format!("{base}/v1/videos/generations/{id}"),
+                None,
+                Duration::from_secs(30),
+            )
+            .await
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `GET /generate/video/{id}/download` (authed): the finished MP4.
+async fn download_video(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match media_base(&state, "video").await {
+        Ok(base) => {
+            media_proxy(
+                reqwest::Method::GET,
+                format!("{base}/v1/videos/generations/{id}/download"),
+                None,
+                Duration::from_secs(600),
+            )
+            .await
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+/// `POST /generate/video/{id}/cancel` (authed).
+async fn cancel_video(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match media_base(&state, "video").await {
+        Ok(base) => {
+            media_proxy(
+                reqwest::Method::POST,
+                format!("{base}/v1/videos/generations/{id}/cancel"),
+                None,
+                Duration::from_secs(30),
+            )
+            .await
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------
+// The tt CLI as model manager: `/tt/models`, `/tt/pulls`, `/tt/pull`
+// ---------------------------------------------------------------------
+
+/// `POST /tt/pull` / `POST /tt/pull/cancel` body.
+#[derive(Deserialize)]
+struct PullRequest {
+    /// tt catalog name (`Qwen3-32B`) or HF repo id (`Qwen/Qwen3-32B`).
+    model: String,
+}
+
+fn tt_unavailable() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::CONFLICT,
+        Json(ErrorResponse {
+            error: "The official Tenstorrent CLI (tt) isn't installed on this box, so models \
+                    can't be listed or downloaded from here."
+                .to_string(),
+        }),
+    )
+}
+
+fn tt_error(status: StatusCode, error: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        status,
+        Json(ErrorResponse {
+            error: error.into(),
+        }),
+    )
+}
+
+/// `GET /tt/models` (unauthed, like `/models`): this mesh's catalog from
+/// `tt model list` -- support status, tool-call parser, whether the weights are
+/// downloaded and their size -- plus this agent's pulls and the free disk where
+/// weights land.
+async fn tt_models(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let tt = state.tt_cli().ok_or_else(tt_unavailable)?;
+    let device = state.device_mesh().map(str::to_string);
+    let (catalog, pulls, free) = tokio::task::spawn_blocking(move || {
+        (
+            tt.catalog(device.as_deref(), false),
+            tt.pulls(),
+            crate::ttcli::disk_free_bytes(tt.hf_cache()),
+        )
+    })
+    .await
+    .map_err(|e| {
+        tt_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("catalog task panicked: {e}"),
+        )
+    })?;
+    let catalog = catalog.map_err(backend_error)?;
+    Ok(Json(serde_json::json!({
+        "device": catalog.device,
+        "disk_free_bytes": free,
+        "models": catalog.models,
+        "pulls": pulls,
+    })))
+}
+
+/// `GET /tt/pulls` (unauthed): just the pulls and free disk -- cheap enough to
+/// poll every couple of seconds while a download runs.
+async fn tt_pulls(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let tt = state.tt_cli().ok_or_else(tt_unavailable)?;
+    let (pulls, free) = tokio::task::spawn_blocking(move || {
+        (tt.pulls(), crate::ttcli::disk_free_bytes(tt.hf_cache()))
+    })
+    .await
+    .map_err(|e| {
+        tt_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("pulls task panicked: {e}"),
+        )
+    })?;
+    Ok(Json(
+        serde_json::json!({ "pulls": pulls, "disk_free_bytes": free }),
+    ))
+}
+
+/// `POST /tt/pull` (authed): start downloading a catalog model with
+/// `tt model pull`, in the background. `202 {"status":"started"}`, or `200
+/// {"status":"already_downloaded"}`. Refuses a model this mesh can't run
+/// (`400`), one not in the catalog (`404`), a pull already running or too
+/// little free disk for tt's stated requirement (`409`).
+async fn tt_pull(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(req): Json<PullRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let tt = state.tt_cli().ok_or_else(tt_unavailable)?;
+    let device = state.device_mesh().map(str::to_string);
+    tokio::task::spawn_blocking(move || {
+        let catalog = tt.catalog(device.as_deref(), true).map_err(backend_error)?;
+        let mesh = catalog
+            .device
+            .clone()
+            .unwrap_or_else(|| "this box".to_string());
+        let model = catalog.find(&req.model).cloned().ok_or_else(|| {
+            tt_error(
+                StatusCode::NOT_FOUND,
+                format!(
+                    "There's no model called {} in this box's catalog.",
+                    req.model
+                ),
+            )
+        })?;
+        if model.weights == crate::ttcli::Weights::Container {
+            // The serving container fetches these itself; pulling to the host
+            // cache would download gigabytes nothing reads.
+            return Ok((
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "not_needed", "model": model.name })),
+            ));
+        }
+        if model.weights == crate::ttcli::Weights::Complete && !tt.is_pulling(&model.name) {
+            return Ok((
+                StatusCode::OK,
+                Json(serde_json::json!({ "status": "already_downloaded", "model": model.name })),
+            ));
+        }
+        if !model.supported {
+            return Err(tt_error(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "{} doesn't run on {mesh}, so there's no point downloading it here.",
+                    model.name
+                ),
+            ));
+        }
+        if let (Some(free), Some(need_gb)) = (
+            crate::ttcli::disk_free_bytes(tt.hf_cache()),
+            model.min_disk_gb,
+        ) {
+            if (free as f64) < need_gb * 1e9 {
+                return Err(tt_error(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "{} needs about {need_gb:.0} GB of free disk; the box has {:.0} GB.",
+                        model.name,
+                        free as f64 / 1e9
+                    ),
+                ));
+            }
+        }
+        match tt.start_pull(&model) {
+            Ok(()) => Ok((
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({ "status": "started", "model": model.name })),
+            )),
+            Err(crate::ttcli::PullRefusal::AlreadyRunning) => Err(tt_error(
+                StatusCode::CONFLICT,
+                format!("{} is already downloading.", model.name),
+            )),
+            Err(crate::ttcli::PullRefusal::Spawn(e)) => {
+                Err(tt_error(StatusCode::INTERNAL_SERVER_ERROR, e))
+            }
+        }
+    })
+    .await
+    .map_err(|e| {
+        tt_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("pull task panicked: {e}"),
+        )
+    })?
+}
+
+/// `POST /tt/pull/cancel` (authed): kill a running pull. `404` if none.
+async fn tt_pull_cancel(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(req): Json<PullRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let tt = state.tt_cli().ok_or_else(tt_unavailable)?;
+    let device = state.device_mesh().map(str::to_string);
+    tokio::task::spawn_blocking(move || {
+        // Accept the HF repo id too: resolve it to the tt name the job is keyed by.
+        let name = tt
+            .catalog(device.as_deref(), false)
+            .ok()
+            .and_then(|c| c.find(&req.model).map(|m| m.name.clone()))
+            .unwrap_or(req.model);
+        if tt.cancel_pull(&name) {
+            Ok(Json(
+                serde_json::json!({ "status": "cancelled", "model": name }),
+            ))
+        } else {
+            Err(tt_error(
+                StatusCode::NOT_FOUND,
+                format!("{name} isn't downloading."),
+            ))
+        }
+    })
+    .await
+    .map_err(|e| {
+        tt_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cancel task panicked: {e}"),
+        )
+    })?
+}
+
+/// `GET /memories` (authed): what the assistant remembers, oldest first.
+async fn list_memories(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    who: crate::people::Who,
+) -> Json<serde_json::Value> {
+    let person = who.person.map(|p| p.id);
+    Json(serde_json::json!({ "memories": state.memories().list_for(person.as_deref()) }))
+}
+
+/// `DELETE /memories` (authed): forget everything.
+async fn clear_memories(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    who: crate::people::Who,
+) -> StatusCode {
+    state.memories().clear(who.person.map(|p| p.id).as_deref());
+    StatusCode::NO_CONTENT
+}
+
+/// `DELETE /memories/{id}` (authed).
+async fn delete_memory(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    who: crate::people::Who,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> StatusCode {
+    let gone = state
+        .memories()
+        .forget(&id, who.person.map(|p| p.id).as_deref());
+    if gone.iter().any(|m| m.id == id) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+/// `GET /creations/{id}` (authed): a JPEG the assistant made in chat.
+async fn get_creation(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match state.creations().get(&id) {
+        Some(bytes) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "image/jpeg"),
+                (
+                    axum::http::header::CACHE_CONTROL,
+                    "private, max-age=31536000, immutable",
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => tt_error(StatusCode::NOT_FOUND, "No such image.").into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Documents (`/docs`): private Q&A over the user's own files. See `crate::docs`.
+// ---------------------------------------------------------------------
+
+/// Upload body ceiling: [`crate::docs::MAX_DOC_CHARS`] of multi-byte text.
+const DOC_BODY_LIMIT: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+struct AddDocRequest {
+    name: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchDocsRequest {
+    query: String,
+    #[serde(default)]
+    document: Option<String>,
+    #[serde(default)]
+    top_k: Option<usize>,
+}
+
+fn docs_unavailable() -> (StatusCode, Json<ErrorResponse>) {
+    tt_error(StatusCode::CONFLICT, "This agent has no document store.")
+}
+
+/// `GET /docs` (authed): the uploaded documents, newest first.
+async fn list_docs(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let docs = state.docs().ok_or_else(docs_unavailable)?;
+    Ok(Json(serde_json::json!({ "documents": docs.list() })))
+}
+
+/// `POST /docs` (authed) `{name, text}`: add a document (the client extracts the
+/// text), replacing any with the same name. `201` with its summary.
+async fn add_doc(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(req): Json<AddDocRequest>,
+) -> Result<(StatusCode, Json<crate::docs::DocSummary>), (StatusCode, Json<ErrorResponse>)> {
+    let docs = state.docs().ok_or_else(docs_unavailable)?;
+    if req.name.trim().is_empty() {
+        return Err(tt_error(
+            StatusCode::BAD_REQUEST,
+            "The document needs a name.",
+        ));
+    }
+    if req.text.trim().is_empty() {
+        return Err(tt_error(
+            StatusCode::BAD_REQUEST,
+            "No text found in that document (a scanned PDF has none to read).",
+        ));
+    }
+    if req.text.chars().count() > crate::docs::MAX_DOC_CHARS {
+        return Err(tt_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "That document is too long (2 million characters at most).",
+        ));
+    }
+    let now = unix_now();
+    tokio::task::spawn_blocking(move || docs.add(&req.name, &req.text, now))
+        .await
+        .map_err(|e| tt_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(|summary| (StatusCode::CREATED, Json(summary)))
+        .map_err(|e| {
+            tt_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("couldn't save: {e}"),
+            )
+        })
+}
+
+/// `DELETE /docs/{id}` (authed).
+async fn delete_doc(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let docs = state.docs().ok_or_else(docs_unavailable)?;
+    if docs.delete(&id) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(tt_error(StatusCode::NOT_FOUND, "No such document."))
+    }
+}
+
+/// `POST /docs/search` (authed) `{query, document?, top_k?}`: the matching
+/// passages, best first -- what the assistant's `search_documents` tool sees.
+async fn search_docs(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+    Json(req): Json<SearchDocsRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    state.docs().ok_or_else(docs_unavailable)?;
+    let hits = crate::library::search(
+        &state,
+        &req.query,
+        req.top_k.unwrap_or(5).clamp(1, 20),
+        req.document.as_deref(),
+    )
+    .await;
+    Ok(Json(serde_json::json!({ "hits": hits })))
 }
 
 #[cfg(test)]
@@ -2688,13 +5272,75 @@ mod telemetry_inference_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn pending(tool: &str, age: Duration) -> crate::assistant::PendingAction {
+        crate::assistant::PendingAction {
+            tool: tool.to_string(),
+            args: serde_json::json!({}),
+            summary: String::new(),
+            created: Instant::now() - age,
+        }
+    }
+
+    fn bare_state() -> AppState {
+        AppState::new(
+            "t".to_string(),
+            "1xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+    }
+
+    #[test]
+    fn pending_actions_are_taken_once_and_expire_after_the_ttl() {
+        let state = bare_state();
+        let fresh = state.insert_pending_action(pending("stop_model", Duration::ZERO));
+        let stale = state.insert_pending_action(pending(
+            "stop_model",
+            crate::assistant::PENDING_TTL + Duration::from_secs(1),
+        ));
+        assert!(state.take_pending_action(&stale).is_none(), "expired");
+        assert_eq!(
+            state.take_pending_action(&fresh).unwrap().tool,
+            "stop_model"
+        );
+        assert!(state.take_pending_action(&fresh).is_none(), "consumed");
+    }
+
+    #[test]
+    fn pending_actions_are_capped_by_evicting_the_oldest() {
+        let state = bare_state();
+        let oldest = state.insert_pending_action(pending("run_model", Duration::from_secs(60)));
+        let mut rest = Vec::new();
+        for _ in 0..crate::assistant::MAX_PENDING {
+            rest.push(state.insert_pending_action(pending("stop_model", Duration::ZERO)));
+        }
+        assert!(
+            state.take_pending_action(&oldest).is_none(),
+            "oldest evicted"
+        );
+        for id in rest {
+            assert!(state.take_pending_action(&id).is_some());
+        }
+    }
+
     #[test]
     fn power_success_status_is_202_for_machine_ops_200_for_reset_chips() {
         use crate::power::PowerAction;
-        assert_eq!(power_success_status(PowerAction::ResetChips), StatusCode::OK);
-        assert_eq!(power_success_status(PowerAction::Suspend), StatusCode::ACCEPTED);
-        assert_eq!(power_success_status(PowerAction::Reboot), StatusCode::ACCEPTED);
-        assert_eq!(power_success_status(PowerAction::Shutdown), StatusCode::ACCEPTED);
+        assert_eq!(
+            power_success_status(PowerAction::ResetChips),
+            StatusCode::OK
+        );
+        assert_eq!(
+            power_success_status(PowerAction::Suspend),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            power_success_status(PowerAction::Reboot),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            power_success_status(PowerAction::Shutdown),
+            StatusCode::ACCEPTED
+        );
     }
 }
 
@@ -2740,5 +5386,24 @@ mod logs_query_tests {
             parse_logs_query(Some("tail=notanumber")),
             ("container".to_string(), crate::logs::DEFAULT_TAIL)
         );
+    }
+}
+
+#[cfg(test)]
+mod local_http_tests {
+    use super::{container_peer, local_peer};
+
+    #[test]
+    fn plain_http_is_for_the_box_and_its_containers_get_only_v1() {
+        assert!(local_peer("127.0.0.1".parse().unwrap()));
+        assert!(local_peer("::1".parse().unwrap()));
+        // Containers are not the box: they get the model API only (see `container_peer`).
+        assert!(!local_peer("172.17.0.5".parse().unwrap()));
+        assert!(container_peer("172.17.0.5".parse().unwrap()));
+        assert!(container_peer("172.31.255.1".parse().unwrap()));
+        assert!(!container_peer("172.32.0.1".parse().unwrap()));
+        assert!(!local_peer("172.32.0.1".parse().unwrap()));
+        assert!(!local_peer("192.168.1.20".parse().unwrap()));
+        assert!(!local_peer("100.100.1.2".parse().unwrap()));
     }
 }

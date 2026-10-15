@@ -69,10 +69,15 @@ struct TempConfigDir(std::path::PathBuf);
 
 impl TempConfigDir {
     fn new() -> Self {
+        // A per-process counter, not a clock: these tests run in parallel
+        // threads of ONE process, and the old `Instant::now().elapsed()` salt
+        // was ~0 for all of them -- so two tests could share a dir, and the
+        // first to finish deleted the other's pairing token mid-run.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
             "tt-e2e-config-{}-{}",
             std::process::id(),
-            Instant::now().elapsed().as_nanos() // cheap uniqueness salt
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).expect("create TT_CONFIG_DIR scratch dir");
         Self(dir)
@@ -600,4 +605,87 @@ fn tt_catalog_without_catalog_file_does_not_panic_in_nested_runtime() {
         bc["runs_here"].is_array(),
         "expected a runs_here array in BoxCatalog JSON, got: {bc}"
     );
+}
+
+/// `tt-station ask` end to end against mock-box's canned `/assistant` and
+/// `/assistant/confirm` routes (see `mock-box/src/main.rs`'s `assistant_mock`):
+/// refused while idle, a read-only answer once serving, a disruptive request
+/// parked for confirmation, then approved -- and a second confirm of the same
+/// id refused, because pending actions are consumed by their first answer.
+#[test]
+#[ignore] // hardware-free but network/process -- run with --ignored like the others
+fn tt_ask_and_confirm_round_trip_against_mock_box() {
+    let port: u16 = 18906;
+    let host = format!("127.0.0.1:{port}");
+
+    let _mock_box = spawn_mock_box(port);
+    wait_for_port(port);
+
+    let config_dir = TempConfigDir::new();
+    let tt = || {
+        let mut cmd = AssertCommand::cargo_bin("tt-station").unwrap();
+        cmd.env("TT_CONFIG_DIR", &config_dir.0);
+        cmd
+    };
+    let json_of = |out: &[u8]| -> serde_json::Value {
+        serde_json::from_slice(out).expect("ask output is valid JSON")
+    };
+
+    tt().args(["--json", "pair", &host, "--code", "000000"])
+        .assert()
+        .success();
+
+    // Idle box: the assistant has no brain, and the CLI says so instead of
+    // pretending to answer.
+    tt().args(["--json", "ask", "--host", &host, "what's running?"])
+        .assert()
+        .failure();
+
+    tt().args(["--json", "run", "llama3", "--host", &host])
+        .assert()
+        .success();
+
+    // A read-only question answers directly, with a `done` action.
+    let out = tt()
+        .args(["--json", "ask", "--host", &host, "what's running?"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let reply = json_of(&out);
+    assert!(
+        reply["reply"].as_str().unwrap().contains("llama3"),
+        "{reply}"
+    );
+    assert_eq!(reply["actions"][0]["status"], "done");
+
+    // A disruptive request is parked, not done.
+    let out = tt()
+        .args(["--json", "ask", "--host", &host, "please stop the model"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let reply = json_of(&out);
+    let action = &reply["actions"][0];
+    assert_eq!(action["status"], "needs_confirmation", "{reply}");
+    assert_eq!(action["tool"], "stop_model");
+    let id = action["id"].as_str().unwrap().to_string();
+
+    // Approving runs it ...
+    let out = tt()
+        .args(["--json", "ask", "--host", &host, "--confirm", &id])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(json_of(&out)["status"], "done");
+
+    // ... and consumes it: a second answer to the same id is refused.
+    tt().args(["--json", "ask", "--host", &host, "--confirm", &id, "--deny"])
+        .assert()
+        .failure();
 }

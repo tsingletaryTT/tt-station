@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+//! Everything waiting for the person's OK, in one place -- Code sessions'
+//! questions and routines' actions -- so a phone can list and answer them
+//! (from the app or straight from the notification) without knowing how
+//! each feature asks.
+//!
+//! - `GET /approvals`: `{approvals: [{id, kind, where, summary, can_always, ...}]}`
+//! - `POST /approvals/answer {id, allow, always?}`
+//!
+//! Ids: `code:<session>:<request>` and `routine:<run>`. The same objects ride
+//! along on the box's events (`data.approval`), so a notification can answer.
+
+use axum::extract::{Path as UrlPath, State};
+use axum::http::StatusCode;
+use axum::Json;
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::routes::{AppState, BearerAuth};
+
+type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
+
+/// `GET /approvals`
+pub(crate) async fn get_approvals(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
+    let mut all = crate::workspace::pending_approvals(&state);
+    all.extend(crate::routines::pending_approval(&state));
+    Json(json!({ "approvals": all }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Answer {
+    pub id: String,
+    pub allow: bool,
+    #[serde(default)]
+    pub always: bool,
+}
+
+/// `POST /approvals/answer {id, allow, always?}`
+pub(crate) async fn post_answer(State(state): State<AppState>, auth: BearerAuth, Json(a): Json<Answer>) -> Reply {
+    let mut parts = a.id.splitn(3, ':');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("code"), Some(session), Some(request_id)) => {
+            let body = crate::workspace::Approve { request_id: request_id.to_string(), allow: a.allow, always: a.always };
+            crate::workspace::post_approve(State(state), auth, UrlPath(session.to_string()), Json(body)).await
+        }
+        (Some("routine"), Some(run), None) => {
+            crate::routines::post_approve(State(state), auth, UrlPath(run.to_string()), Json(crate::routines::Decision { allow: a.allow })).await
+        }
+        _ => Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "Unknown approval." })))),
+    }
+}

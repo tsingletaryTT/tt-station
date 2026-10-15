@@ -35,7 +35,10 @@ fn fresh_state_with(runner: FakeRunner) -> AppState {
 /// `tests/ssh_authorize.rs`'s `temp_authorized_keys` helper so this test
 /// never touches a real `~/.ssh`.
 fn temp_authorized_keys(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("tt-station-reset-ssh-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "tt-station-reset-ssh-{name}-{}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir for authorized_keys fixture");
     dir.join("authorized_keys")

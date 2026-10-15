@@ -7,7 +7,8 @@
 //!   without hardware.
 //! - `serve` (Task 12): a small HTTP server that fakes the *whole* agent
 //!   control API (`/status`, `/models`, `/config`, `/pair/*`, `/run`,
-//!   `/stop`, `/endpoint`, `/power`) plus a fake vLLM-style OpenAI endpoint
+//!   `/stop`, `/endpoint`, `/power`, and a canned, LLM-free `/assistant` +
+//!   `/assistant/confirm`) plus a fake vLLM-style OpenAI endpoint
 //!   (`/v1/chat/completions`, `/v1/models`),
 //!   so the `tt-station` CLI's discover -> pair -> run -> endpoint -> completion flow
 //!   can be end-to-end tested with no real agent or hardware involved.
@@ -204,6 +205,10 @@ struct Inner {
     ctrl_port: u16,
     status: ServingStatus,
     endpoint: Option<Endpoint>,
+    /// Whether `MOCK_ACTION_ID` is currently parked by `/assistant`. Like the
+    /// real agent, the first `/assistant/confirm` consumes it, so a second
+    /// answer to the same id gets `404`.
+    pending_stop: bool,
 }
 
 #[derive(Clone)]
@@ -217,6 +222,7 @@ impl MockState {
             ctrl_port,
             status: ServingStatus::Idle,
             endpoint: None,
+            pending_stop: false,
         })))
     }
 
@@ -484,6 +490,119 @@ async fn chat_completions(
     }))
 }
 
+/// The one action id mock-box's `/assistant` ever parks, so a CLI/app test
+/// can confirm it without parsing anything.
+const MOCK_ACTION_ID: &str = "mock-action-1";
+
+/// JSON body accepted by `POST /assistant` -- same shape as the real agent's
+/// `assistant::AssistantRequest`.
+#[derive(Deserialize)]
+struct MockAssistantRequest {
+    messages: Vec<libttstation::model::AssistantTurn>,
+}
+
+/// `POST /assistant`: a canned stand-in for the real agent's chat assistant
+/// (`tt-station-agentd/src/assistant.rs`), with no LLM behind it -- just
+/// enough to drive `tt-station ask` and the phone app's UI states end to
+/// end with no hardware:
+///
+/// * idle -> `409 {"error": "No model is serving — start one first"}`,
+///   the real agent's exact message;
+/// * a last user turn mentioning "stop" -> a `needs_confirmation`
+///   `stop_model` action with the fixed id [`MOCK_ACTION_ID`];
+/// * anything else -> a `done` `box_status` action and a canned reply.
+///
+/// No auth check, like every other authed-in-reality route on this mock.
+async fn assistant_mock(
+    State(state): State<MockState>,
+    Json(req): Json<MockAssistantRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let ServingStatus::Serving(model) = state.lock().status.clone() else {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "No model is serving — start one first" })),
+        ));
+    };
+    let asked_to_stop = req
+        .messages
+        .iter()
+        .rev()
+        .find(|t| t.role == "user")
+        .is_some_and(|t| t.content.to_lowercase().contains("stop"));
+    let body = if asked_to_stop {
+        state.lock().pending_stop = true;
+        serde_json::json!({
+            "reply": "I can stop the current model — I'll be offline until another one is started. Confirm?",
+            "actions": [{
+                "id": MOCK_ACTION_ID,
+                "tool": "stop_model",
+                "args": {},
+                "status": "needs_confirmation",
+                "summary": format!("Stop serving {model} — I run on it, so I'll be offline until a model is started again."),
+            }],
+            "model": model,
+        })
+    } else {
+        serde_json::json!({
+            "reply": format!("mock-box is serving {model}."),
+            "actions": [{
+                "id": "mock-done-1",
+                "tool": "box_status",
+                "args": {},
+                "status": "done",
+                "summary": "Checked the box status",
+            }],
+            "model": model,
+        })
+    };
+    Ok(Json(body))
+}
+
+/// JSON body accepted by `POST /assistant/confirm` -- same shape as the real
+/// agent's `assistant::ConfirmRequest`.
+#[derive(Deserialize)]
+struct MockConfirmRequest {
+    action_id: String,
+    approve: bool,
+}
+
+/// `POST /assistant/confirm`: only [`MOCK_ACTION_ID`] exists (else `404`,
+/// like the real agent). Approving it really does stop the mock's "serving"
+/// state, so a follow-up `/status` or `/assistant` (now `409`) reflects it.
+/// Unlike the real agent the id isn't consumed -- this mock keeps no
+/// per-action bookkeeping, same simplification as its pairing.
+async fn assistant_confirm_mock(
+    State(state): State<MockState>,
+    Json(req): Json<MockConfirmRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let parked = std::mem::take(&mut state.lock().pending_stop);
+    if req.action_id != MOCK_ACTION_ID || !parked {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(
+                serde_json::json!({ "error": "No pending action with that id — it was already answered or expired (actions expire after 5 minutes)" }),
+            ),
+        ));
+    }
+    let (status, summary) = if req.approve {
+        let mut inner = state.lock();
+        inner.status = ServingStatus::Idle;
+        inner.endpoint = None;
+        ("done", "Stopped serving.".to_string())
+    } else {
+        (
+            "cancelled",
+            "Cancelled: stop the current model.".to_string(),
+        )
+    };
+    Ok(Json(serde_json::json!({
+        "action_id": req.action_id,
+        "tool": "stop_model",
+        "status": status,
+        "summary": summary,
+    })))
+}
+
 /// `GET /v1/models`: minimal OpenAI-style model list.
 async fn list_models(State(state): State<MockState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
@@ -708,6 +827,8 @@ fn app(state: MockState) -> Router {
             post(ssh_authorize_mock).delete(ssh_revoke_mock),
         )
         .route("/telemetry", get(telemetry_ws))
+        .route("/assistant", post(assistant_mock))
+        .route("/assistant/confirm", post(assistant_confirm_mock))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/models", get(list_models))
         .with_state(state)

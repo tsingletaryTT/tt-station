@@ -5,6 +5,12 @@ edition.workspace = true
 
 [dependencies]
 libttstation = { path = "../libttstation" }
+# `setsid()` for model launches: run.py's first-run setup prompts through
+# `getpass`, which opens /dev/tty directly, so a launch must have no
+# controlling terminal to fail fast instead of hanging on the agent's console.
+libc = "0.2"
+# `Stream` combinators for `POST /assistant/stream`'s server-sent events.
+futures-util = "0.3"
 # `ws` on top of the workspace base so `GET /telemetry` can upgrade to a
 # WebSocket and stream `tt-smi -s` snapshots (see src/telemetry.rs). Additive:
 # every existing (plain HTTP) route is unaffected by enabling this feature.
@@ -22,12 +28,30 @@ rand = { workspace = true }
 # to await a request against, so it uses `reqwest::blocking` rather than the
 # async client `tests/status.rs` uses elsewhere in this crate. Both APIs
 # coexist fine in the same dependency -- `blocking` just adds the extra
-# module, it doesn't change how the async client behaves.
-reqwest = { workspace = true, features = ["blocking"] }
+# module, it doesn't change how the async client behaves. `stream` lets the
+# `/v1` gateway (src/gateway.rs) pass a model's streamed answer straight through.
+# `http2` for Apple's push service (src/apns.rs); `multipart` for Whisper uploads
+# (src/jobs.rs).
+reqwest = { workspace = true, features = ["blocking", "stream", "http2", "multipart"] }
+# ES256 signing of APNs provider tokens (src/apns.rs); already in the tree via rustls.
+ring = "0.17"
+# HTTPS for the control plane (src/tls.rs): a self-signed certificate the phone
+# pins at pairing, served next to plain HTTP. Ring as the crypto provider, like
+# the rest of the tree (no aws-lc build).
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 toml = { workspace = true }
 # Box-side process listing/CPU%/mem for the `tt_toplike` telemetry
 # enrichment (src/procscan.rs).
 sysinfo = { workspace = true }
+# Terminal QR codes for `tt-station-agentd pair` (src/pairqr.rs).
+qrcode = { version = "0.14", default-features = false }
+# Parsing search results and web pages for the assistant (src/web.rs).
+regex = "1.12"
+# Decoding images the assistant makes in chat (src/creations.rs).
+base64 = "0.22"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [features]
 # Compiled in for `cargo test` (see the self-dependency below) so
@@ -48,6 +72,8 @@ test-hooks = []
 # target in this crate, so `tests/pairing.rs` can call `AppState::last_code`
 # without agentd ever exposing it in a real build.
 tt-station-agentd = { path = ".", features = ["test-hooks"] }
+# Multipart parsing for the stub Whisper server in tests/jobs.rs.
+axum = { workspace = true, features = ["ws", "multipart"] }
 # WebSocket client for the `GET /telemetry` integration test
 # (tests/telemetry.rs): connect to the streamed route and assert on the
 # frames it pushes. `futures-util` provides the `StreamExt`/`SinkExt` the

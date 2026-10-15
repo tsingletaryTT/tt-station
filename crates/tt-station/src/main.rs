@@ -58,8 +58,8 @@ use libttstation::discovery::{
     aggregate, manual::ManualProvider, mdns::MdnsProvider, DiscoveryProvider,
 };
 use libttstation::model::{
-    BoxRecord, ConfigSummary, Endpoint, LeaseList, LogsInfo, ModelsResponse, ServingList,
-    ServingStatus, StatusInfo,
+    AssistantConfirmation, AssistantReply, AssistantTurn, BoxRecord, ConfigSummary, Endpoint,
+    LeaseList, LogsInfo, ModelsResponse, ServingList, ServingStatus, StatusInfo,
 };
 use libttstation::pairing::{pair_complete, pair_init};
 use libttstation::secrets::{default_store, FileStore, SecretStore};
@@ -368,6 +368,32 @@ enum Command {
         force: bool,
     },
 
+    /// Ask the box's assistant something in plain language ("what's
+    /// running?", "switch to Llama 70B"), answered by the model the box is
+    /// serving. Single-turn: no history is kept between invocations. Actions
+    /// that would disrupt serving (run/stop a model, reset chips) are never
+    /// run from the chat -- they come back with an id to approve with
+    /// `--confirm <id>` (or refuse with `--confirm <id> --deny`). Authed --
+    /// the box must be paired. See docs/reference/assistant.md.
+    Ask {
+        /// What to ask. Omit when using `--confirm`.
+        #[arg(required_unless_present = "confirm", conflicts_with = "confirm")]
+        message: Option<String>,
+
+        /// The box's control-plane address, as `host:port`. Must already be
+        /// paired (see `tt-station pair`).
+        #[arg(long)]
+        host: String,
+
+        /// Approve the pending action with this id (from an earlier `ask`).
+        #[arg(long, value_name = "ACTION_ID")]
+        confirm: Option<String>,
+
+        /// With `--confirm`: refuse the action instead of approving it.
+        #[arg(long, requires = "confirm")]
+        deny: bool,
+    },
+
     /// Wake a suspended/powered-off box by broadcasting a Wake-on-LAN magic
     /// packet from this machine. Uses the box's MAC learned at discovery, or
     /// --mac. Requires WoL enabled in the box's BIOS/NIC.
@@ -555,6 +581,23 @@ fn main() -> Result<()> {
             run_async(cmd_power(host, action, *force))?;
             print_power(action, cli.json);
         }
+        Command::Ask {
+            message,
+            host,
+            confirm,
+            deny,
+        } => match (confirm, message) {
+            (Some(action_id), _) => {
+                let c = run_async(cmd_ask_confirm(host, action_id, !*deny))?;
+                println!("{}", format_ask_confirmation(&c, cli.json));
+            }
+            (None, Some(message)) => {
+                let reply = run_async(cmd_ask(host, message))?;
+                println!("{}", format_ask_reply(&reply, host, cli.json));
+            }
+            // Unreachable: clap's `required_unless_present` guarantees one.
+            (None, None) => anyhow::bail!("tt-station ask needs a message or --confirm <id>"),
+        },
         Command::Wake { mac, host } => {
             let mac_str = mac.clone().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1204,10 +1247,33 @@ fn confirm_reset(host: Option<&str>) -> Result<bool> {
 
 /// Build an `AgentClient` for `host`, using the token stored by a prior
 /// `tt-station pair`. Shared by every command that needs an authenticated call.
+/// `tt-station ask --host <host:port> "<message>"`: one single-turn
+/// `POST /assistant`. Single-turn on purpose -- the CLI has nowhere it keeps
+/// a conversation, and the phone app (which does) is the multi-turn client.
+async fn cmd_ask(host: &str, message: &str) -> Result<AssistantReply> {
+    let turn = AssistantTurn {
+        role: "user".to_string(),
+        content: message.to_string(),
+    };
+    authed_client(host)?.assistant(&[turn]).await
+}
+
+/// `tt-station ask --host <host:port> --confirm <id> [--deny]`: answer a
+/// pending action from an earlier `ask`.
+async fn cmd_ask_confirm(
+    host: &str,
+    action_id: &str,
+    approve: bool,
+) -> Result<AssistantConfirmation> {
+    authed_client(host)?
+        .assistant_confirm(action_id, approve)
+        .await
+}
+
 fn authed_client(host: &str) -> Result<AgentClient> {
-    let token = build_store()?
-        .get(host)?
-        .ok_or_else(|| anyhow::anyhow!("no token stored for {host}; run `tt-station pair {host}` first"))?;
+    let token = build_store()?.get(host)?.ok_or_else(|| {
+        anyhow::anyhow!("no token stored for {host}; run `tt-station pair {host}` first")
+    })?;
     Ok(AgentClient::new(format!("http://{host}"), token))
 }
 
@@ -1658,6 +1724,44 @@ fn format_logs(logs: &LogsInfo, json: bool) -> String {
     }
 }
 
+/// Format a `tt-station ask` reply. JSON mode: the agent's response object
+/// verbatim (single line). Human mode: the reply, then one indented line per
+/// action (`[status] tool — summary`), and for every action awaiting
+/// confirmation the exact commands that approve or refuse it -- the id is
+/// useless unless the operator knows what to do with it.
+fn format_ask_reply(reply: &AssistantReply, host: &str, json: bool) -> String {
+    if json {
+        return serde_json::to_string(reply).expect("AssistantReply always serializes");
+    }
+    let mut out = reply.reply.clone();
+    for action in &reply.actions {
+        out.push_str(&format!(
+            "\n  [{}] {} — {}",
+            action.status.replace('_', " "),
+            action.tool,
+            action.summary
+        ));
+        if action.status == "needs_confirmation" {
+            out.push_str(&format!(
+                "\n      approve: tt-station ask --host {host} --confirm {id}\
+                 \n      refuse:  tt-station ask --host {host} --confirm {id} --deny",
+                id = action.id
+            ));
+        }
+    }
+    out
+}
+
+/// Format a `tt-station ask --confirm` result. JSON mode: the agent's object
+/// verbatim. Human mode: `[status] summary`.
+fn format_ask_confirmation(c: &AssistantConfirmation, json: bool) -> String {
+    if json {
+        serde_json::to_string(c).expect("AssistantConfirmation always serializes")
+    } else {
+        format!("[{}] {}", c.status, c.summary)
+    }
+}
+
 /// `tt-station catalog`'s output: JSON prints the whole `BoxCatalog` object (the
 /// exact shape the macOS app's model picker decodes); human mode prints the
 /// three tiers as sections -- "Runs on this box" / "Experimental" / "Needs
@@ -1772,6 +1876,65 @@ fn print_ssh_revoke(key_path: &std::path::Path, json: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_reply() -> AssistantReply {
+        AssistantReply {
+            reply: "I can start X. Confirm?".to_string(),
+            actions: vec![
+                libttstation::model::AssistantAction {
+                    id: "a1".to_string(),
+                    tool: "box_status".to_string(),
+                    args: serde_json::json!({}),
+                    status: "done".to_string(),
+                    summary: "Checked the box status".to_string(),
+                },
+                libttstation::model::AssistantAction {
+                    id: "p9".to_string(),
+                    tool: "run_model".to_string(),
+                    args: serde_json::json!({ "model": "X" }),
+                    status: "needs_confirmation".to_string(),
+                    summary: "Start serving X".to_string(),
+                },
+            ],
+            model: "M".to_string(),
+        }
+    }
+
+    #[test]
+    fn format_ask_reply_human_lists_actions_and_how_to_confirm() {
+        let out = format_ask_reply(&sample_reply(), "box:8765", false);
+        assert_eq!(
+            out,
+            "I can start X. Confirm?\
+             \n  [done] box_status — Checked the box status\
+             \n  [needs confirmation] run_model — Start serving X\
+             \n      approve: tt-station ask --host box:8765 --confirm p9\
+             \n      refuse:  tt-station ask --host box:8765 --confirm p9 --deny"
+        );
+    }
+
+    #[test]
+    fn format_ask_reply_json_round_trips() {
+        let reply = sample_reply();
+        let out = format_ask_reply(&reply, "box:8765", true);
+        let back: AssistantReply = serde_json::from_str(&out).unwrap();
+        assert_eq!(back, reply);
+    }
+
+    #[test]
+    fn format_ask_confirmation_both_modes() {
+        let c = AssistantConfirmation {
+            action_id: "p9".to_string(),
+            tool: "run_model".to_string(),
+            status: "started".to_string(),
+            summary: "Starting X".to_string(),
+        };
+        assert_eq!(format_ask_confirmation(&c, false), "[started] Starting X");
+        let v: serde_json::Value =
+            serde_json::from_str(&format_ask_confirmation(&c, true)).unwrap();
+        assert_eq!(v["status"], "started");
+        assert_eq!(v["action_id"], "p9");
+    }
 
     #[test]
     fn parse_host_port_splits_on_last_colon() {

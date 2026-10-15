@@ -717,7 +717,10 @@ pub struct LeaseSnapshot {
 /// inventing one here would be exactly the fabricated-duration hazard the
 /// design doc calls out. Every `LeaseEntry` this function builds carries
 /// `since: None`.
-pub fn snapshot_leases(runner: &dyn CommandRunner, capability: &Capability) -> Option<LeaseSnapshot> {
+pub fn snapshot_leases(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+) -> Option<LeaseSnapshot> {
     let captured = runner
         .run_capturing(&[capability.path.as_str(), "status", "--json"])
         .ok()?;

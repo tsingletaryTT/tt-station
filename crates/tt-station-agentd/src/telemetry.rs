@@ -61,9 +61,12 @@ pub fn enrich_frame(frame: &str, toplike: Option<&crate::procscan::TtToplike>) -
     serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| frame.to_string())
 }
 
-/// Trim a `tt-smi -s` JSON snapshot down to just the fields the macOS
-/// dashboard renders: per-device `board_info.board_type` and
-/// `telemetry.{asic_temperature,power,aiclk}`. This is the mirror image of
+/// Trim a `tt-smi -s` JSON snapshot down to just the fields the dashboards
+/// render: per-device `board_info.board_type`,
+/// `telemetry.{asic_temperature,power,aiclk}`, the thermal limits
+/// `limits.{therm_trip_l1_limit,thm_limit}` (throttle and shutdown, °C) and
+/// `smbus_telem.MAX_GDDR_TEMP` (the hottest memory channel, a second sensor
+/// to read the ASIC temperature against). This is the mirror image of
 /// [`enrich_frame`]: instead of *adding* an optional key, it *drops*
 /// everything the dashboard doesn't need (smbus_telem, firmwares, limits,
 /// and any other telemetry field) so the lite frame is cheap to send on a
@@ -104,6 +107,23 @@ pub fn lite_frame(tt_smi_json: &str) -> String {
                 );
             }
 
+            // Thermal context: where the chip throttles and shuts down, and
+            // its memory's temperature.
+            for (section, keys) in [
+                ("limits", &["therm_trip_l1_limit", "thm_limit"][..]),
+                ("smbus_telem", &["MAX_GDDR_TEMP"][..]),
+            ] {
+                if let Some(src) = dev.get(section).and_then(|t| t.as_object()) {
+                    let picked: serde_json::Map<String, serde_json::Value> = keys
+                        .iter()
+                        .filter_map(|k| src.get(*k).map(|v| (k.to_string(), v.clone())))
+                        .collect();
+                    if !picked.is_empty() {
+                        out.insert(section.to_string(), serde_json::Value::Object(picked));
+                    }
+                }
+            }
+
             if let Some(telemetry) = dev.get("telemetry").and_then(|t| t.as_object()) {
                 let mut lite_telemetry = serde_json::Map::new();
                 for key in ["asic_temperature", "power", "aiclk"] {
@@ -122,10 +142,7 @@ pub fn lite_frame(tt_smi_json: &str) -> String {
         .collect();
 
     let mut root = serde_json::Map::new();
-    root.insert(
-        "device_info".to_string(),
-        serde_json::Value::Array(trimmed),
-    );
+    root.insert("device_info".to_string(), serde_json::Value::Array(trimmed));
     serde_json::to_string(&serde_json::Value::Object(root)).unwrap_or_else(|_| EMPTY.to_string())
 }
 
@@ -290,7 +307,7 @@ mod tests {
 
     #[test]
     fn lite_frame_trims_to_dashboard_fields() {
-        let full = r#"{"device_info":[{"smbus_telem":{"x":1},"board_info":{"board_type":"p300c","other":"drop"},"telemetry":{"asic_temperature":"61.4","power":"85.2","aiclk":"1000","voltage":"0.8","fan_speed":"30"},"firmwares":{"a":"b"},"limits":{"c":"d"}}]}"#;
+        let full = r#"{"device_info":[{"smbus_telem":{"x":1,"MAX_GDDR_TEMP":"0x26"},"board_info":{"board_type":"p300c","other":"drop"},"telemetry":{"asic_temperature":"61.4","power":"85.2","aiclk":"1000","voltage":"0.8","fan_speed":"30"},"firmwares":{"a":"b"},"limits":{"c":"d","therm_trip_l1_limit":"90","thm_limit":"110"}}]}"#;
         let out = lite_frame(full);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let dev = &v["device_info"][0];
@@ -302,9 +319,16 @@ mod tests {
         assert!(dev["telemetry"].get("voltage").is_none());
         assert!(dev["telemetry"].get("fan_speed").is_none());
         assert!(dev["board_info"].get("other").is_none());
-        assert!(dev.get("smbus_telem").is_none());
         assert!(dev.get("firmwares").is_none());
-        assert!(dev.get("limits").is_none());
+        // Thermal context only.
+        assert_eq!(
+            dev["limits"],
+            serde_json::json!({ "therm_trip_l1_limit": "90", "thm_limit": "110" })
+        );
+        assert_eq!(
+            dev["smbus_telem"],
+            serde_json::json!({ "MAX_GDDR_TEMP": "0x26" })
+        );
         assert!(v.get("tt_toplike").is_none());
     }
 

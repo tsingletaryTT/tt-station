@@ -62,13 +62,13 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 
-use super::ServingBackend;
 use super::docker::CommandRunner;
+use super::ServingBackend;
 
 /// How many times `start` polls the health endpoint before giving up.
 ///
@@ -86,6 +86,82 @@ const DEFAULT_HEALTH_POLL_ATTEMPTS: u32 = 1200;
 /// 2s keeps the probe rate gentle over a multi-minute bring-up.
 const DEFAULT_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How long a tt-media-server container may sit without its workers doing any
+/// work before the stall watchdog restarts it (see [`media_workers_stalled`]).
+const DEFAULT_STALL_AFTER: Duration = Duration::from_secs(6 * 60);
+/// Restart a stalled container at most this many times per start.
+const MAX_STALL_RESTARTS: u32 = 5;
+/// A worker that has used less CPU than this has not started loading a model.
+const STALL_CPU_SECONDS: u64 = 20;
+/// ...nor one this small (a deadlocked FLUX worker sits at ~460 MB; a loading
+/// one passes 20 GB).
+const STALL_RSS_KB: u64 = 2 * 1024 * 1024;
+
+/// Whether a tt-media-server container's workers are deadlocked at startup,
+/// from `docker top <id> -eo pid,ppid,time,rss,args`.
+///
+/// Seen live on tt-media-inference-server 0.10.0 (FLUX), in 2 of 3 starts: the
+/// server queues a warm-up PIL image -- whose pickling, on the queue's feeder
+/// thread, imports a PIL plugin under the import lock -- milliseconds before
+/// forking the device worker, which inherits the held lock and blocks forever
+/// on its own PIL import ("Model is not ready" for good, ~1 s of CPU). A
+/// healthy worker burns minutes of CPU loading weights by the same time, so:
+/// stalled = a media server (`uvicorn ... main:app`) whose busiest child process
+/// has used under [`STALL_CPU_SECONDS`]. Anything else (vLLM, unparseable
+/// output) is never "stalled".
+pub fn media_workers_stalled(docker_top: &str) -> bool {
+    struct Proc {
+        pid: u64,
+        ppid: u64,
+        cpu: u64,
+        rss_kb: u64,
+        args: String,
+    }
+    fn cpu_seconds(t: &str) -> Option<u64> {
+        // [[dd-]hh:]mm:ss
+        let (days, rest) = match t.split_once('-') {
+            Some((d, r)) => (d.parse::<u64>().ok()?, r),
+            None => (0, t),
+        };
+        let parts: Vec<u64> = rest
+            .split(':')
+            .map(|p| p.parse().ok())
+            .collect::<Option<_>>()?;
+        let secs = parts.iter().fold(0, |acc, p| acc * 60 + p);
+        Some(days * 86_400 + secs)
+    }
+    let procs: Vec<Proc> = docker_top
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let ppid = fields.next()?.parse().ok()?;
+            let cpu = cpu_seconds(fields.next()?)?;
+            let rss_kb = fields.next()?.parse().ok()?;
+            Some(Proc {
+                pid,
+                ppid,
+                cpu,
+                rss_kb,
+                args: fields.collect::<Vec<_>>().join(" "),
+            })
+        })
+        .collect();
+    let Some(server) = procs
+        .iter()
+        .filter(|p| p.args.contains("uvicorn") && p.args.contains("main:app"))
+        .min_by_key(|p| p.pid)
+    else {
+        return false;
+    };
+    let children: Vec<&Proc> = procs.iter().filter(|p| p.ppid == server.pid).collect();
+    !children.is_empty()
+        && children
+            .iter()
+            .all(|p| p.cpu < STALL_CPU_SECONDS && p.rss_kb < STALL_RSS_KB)
+}
+
 /// The repository name (no registry host, no tag) of the RELEASE serving
 /// image `resolve_image` looks for -- as opposed to the `-dev-` variant
 /// (`vllm-tt-metal-src-dev-ubuntu-22.04-amd64`), which is a development
@@ -94,6 +170,35 @@ const DEFAULT_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// the full repo also carries a registry/org prefix (e.g.
 /// `ghcr.io/tenstorrent/tt-inference-server/`) that varies by mirror.
 const RELEASE_IMAGE_REPO_SUFFIX: &str = "vllm-tt-metal-src-release-ubuntu-22.04-amd64";
+
+/// Tenstorrent chips on this box: the numbered entries in `/dev/tenstorrent`.
+fn box_chip_count() -> Option<usize> {
+    let n = std::fs::read_dir("/dev/tenstorrent")
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().parse::<u32>().is_ok())
+        .count();
+    (n > 0).then_some(n)
+}
+
+/// The `tt serve` argv for `--serve-with tt`: `<tt...> serve <model> --port
+/// <port>`, plus `--device <device>` when the backend resolved one (tt's own
+/// auto-detection needs a `tt-smi` it manages, which a box may not have).
+/// `model` must be the tt catalog name (org-stripped), not an HF repo id.
+pub fn tt_serve_argv(tt: &[String], model: &str, port: u16, device: Option<&str>) -> Vec<String> {
+    let mut argv: Vec<String> = tt.to_vec();
+    argv.extend([
+        "serve".to_string(),
+        model.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+    ]);
+    if let Some(device) = device {
+        argv.push("--device".to_string());
+        argv.push(device.to_string());
+    }
+    argv
+}
 
 /// The vLLM `--tool-call-parser` value for a model, or `None` if we don't
 /// know a safe one (in which case tool calling is NOT enabled -- a wrong
@@ -286,6 +391,18 @@ pub struct RunPyConfig {
     /// Set to `false` to suppress the injection entirely (e.g. to pass tool
     /// args by hand via a future override, or to debug a startup issue).
     pub enable_tool_calling: bool,
+    /// `Some(argv)` launches through the official Tenstorrent CLI instead of
+    /// `python3 run.py`: `<argv...> serve <model> --port <service_port>
+    /// [--device <tt_device>]` (see [`tt_serve_argv`]). `argv` is how to invoke
+    /// `tt` -- normally just its path. `None` (the default) keeps the run.py
+    /// launch this backend has always used. Set by `--serve-with tt`.
+    pub tt_cli_serve: Option<Vec<String>>,
+    /// Extra environment for the launch (run.py directly or via `tt serve`).
+    /// `main` uses it to make launches non-interactive: run.py's first-run
+    /// setup otherwise prompts for `JWT_SECRET` (asserted non-empty even with
+    /// `--no-auth`) and `HF_TOKEN` on the agent's console, so `main` sets
+    /// `AUTOMATIC_HOST_SETUP=1`, a `JWT_SECRET`, and `HF_TOKEN` when known.
+    pub launch_env: Vec<(String, String)>,
 }
 
 impl Default for RunPyConfig {
@@ -329,6 +446,8 @@ impl Default for RunPyConfig {
             reset_before_serve: true,
             reset_cmd: vec!["tt-smi".to_string(), "-r".to_string()],
             enable_tool_calling: true,
+            tt_cli_serve: None,
+            launch_env: Vec::new(),
         }
     }
 }
@@ -347,6 +466,8 @@ pub struct RunPyBackend {
     /// `DockerBackend::status` -- see that field's doc comment.
     status: Arc<Mutex<ServingStatus>>,
     health_poll_attempts: u32,
+    /// See [`DEFAULT_STALL_AFTER`].
+    stall_after: Duration,
     health_poll_interval: Duration,
     /// Cooperative cancel flag for an in-flight `start`. A `/run` brings a
     /// model up on a `spawn_blocking` thread and, until `start` returns,
@@ -382,7 +503,17 @@ pub struct RunPyBackend {
     /// `stop` take `&self` and are reachable concurrently from
     /// `spawn_blocking` tasks.
     lease: Arc<Mutex<Option<String>>>,
+    /// The slice of the box `start` serves on, when the box is split between
+    /// models (`ServingBackend::set_placement`); `None` = the whole box.
+    placement: Arc<Mutex<Option<super::Placement>>>,
 }
+
+/// Serializes the launch window -- board reset through run.py's return (its
+/// system checks and `docker run`) -- across a split box's two slots, which
+/// start at once. Without it, one slot's `tt-smi -r 2,3` lands while the other's
+/// run.py is reading every board with `tt-smi -s`, which then fails ("devices
+/// must be reset") -- seen live on a P300x2.
+static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
 
 impl RunPyBackend {
     /// Build a `RunPyBackend` with production health-poll defaults. Starts
@@ -394,6 +525,7 @@ impl RunPyBackend {
             runner,
             status: Arc::new(Mutex::new(ServingStatus::Idle)),
             health_poll_attempts: DEFAULT_HEALTH_POLL_ATTEMPTS,
+            stall_after: DEFAULT_STALL_AFTER,
             health_poll_interval: DEFAULT_HEALTH_POLL_INTERVAL,
             cancel: Arc::new(AtomicBool::new(false)),
             // Leasing OFF by default -- a backend built without an explicit
@@ -401,6 +533,7 @@ impl RunPyBackend {
             // existed. See the `gozer` field's doc comment.
             gozer: None,
             lease: Arc::new(Mutex::new(None)),
+            placement: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -453,6 +586,13 @@ impl RunPyBackend {
     pub fn with_health_poll(mut self, attempts: u32, interval: Duration) -> Self {
         self.health_poll_attempts = attempts;
         self.health_poll_interval = interval;
+        self
+    }
+
+    /// Test hook: how long before the media-server stall watchdog acts.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn with_stall_after(mut self, after: Duration) -> Self {
+        self.stall_after = after;
         self
     }
 
@@ -539,9 +679,7 @@ impl RunPyBackend {
                 // rather than as a stranger's -- see `gozer::own_lease_clause`.
                 let port = self.config.service_port;
                 let detail = holder
-                    .map(|who| {
-                        crate::gozer::own_lease_clause(&who, port).unwrap_or(who)
-                    })
+                    .map(|who| crate::gozer::own_lease_clause(&who, port).unwrap_or(who))
                     .or_else(|| {
                         crate::gozer::contention_detail(self.runner.as_ref(), capability, port)
                     })
@@ -1040,6 +1178,18 @@ impl RunPyBackend {
 }
 
 impl ServingBackend for RunPyBackend {
+    fn set_placement(&self, placement: Option<super::Placement>) -> bool {
+        *self.placement.lock().expect("placement mutex poisoned") = placement;
+        true
+    }
+
+    fn placement(&self) -> Option<super::Placement> {
+        self.placement
+            .lock()
+            .expect("placement mutex poisoned")
+            .clone()
+    }
+
     /// See `ServingBackend::start_forcing`. `force` reaches exactly one
     /// decision in this whole function -- `acquire_lease`'s -- and that
     /// method's doc explains what it licenses. Every other guard below
@@ -1130,6 +1280,16 @@ impl ServingBackend for RunPyBackend {
         // lease to `self.lease` for `stop` to release -- see the very end of
         // this function.
         let lease = self.acquire_lease(model, force)?;
+        let placement = self
+            .placement
+            .lock()
+            .expect("placement mutex poisoned")
+            .clone();
+        if placement.is_some() && lease.is_some() {
+            anyhow::bail!(
+                "this box is split between models, which can't be combined with a chip lease"
+            );
+        }
 
         // Reset the board next -- validated on real hardware: stopping a
         // serving container leaves the p300x2 mesh's ethernet cores wedged,
@@ -1152,6 +1312,9 @@ impl ServingBackend for RunPyBackend {
         // a lease the command is byte-for-byte what it always was, because
         // the wedged-ethernet-core protection above was validated on real
         // hardware and single-tenant boxes still need it.
+        let launch_window = placement
+            .is_some()
+            .then(|| LAUNCH_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
         if self.config.reset_before_serve {
             let mut reset_args = self.config.reset_cmd.clone();
             if let Some(guard) = &lease {
@@ -1160,6 +1323,10 @@ impl ServingBackend for RunPyBackend {
                 // `gozer::Grant::reset_target`. `?` here drops `lease`,
                 // handing the unusable lease straight back.
                 reset_args.push(guard.grant().reset_target()?);
+            } else if let Some(placement) = &placement {
+                // Split box: reset only this slot's chips, never the other
+                // model's (`tt-smi -r 0,1`).
+                reset_args.push(placement.device_ids.clone());
             }
             let reset_cmd_str = reset_args.join(" ");
             eprintln!("resetting board before serving: {reset_cmd_str}");
@@ -1195,9 +1362,10 @@ impl ServingBackend for RunPyBackend {
         // `resolve_tt_device` describes the whole box, which is a wider mesh
         // than the lease covers. Fails closed rather than falling back; see
         // `leased_tt_device`. `?` drops `lease`, handing it straight back.
-        let device = match &lease {
-            Some(guard) => Some(self.leased_tt_device(guard.grant())?),
-            None => self.resolve_tt_device(),
+        let device = match (&lease, &placement) {
+            (Some(guard), _) => Some(self.leased_tt_device(guard.grant())?),
+            (None, Some(placement)) => Some(placement.device.clone()),
+            (None, None) => self.resolve_tt_device(),
         };
         let image = self.resolve_image();
 
@@ -1303,7 +1471,10 @@ impl ServingBackend for RunPyBackend {
                     .collect::<Vec<_>>()
                     .join(","),
             ),
-            None => self.config.device_id.clone(),
+            None => placement
+                .as_ref()
+                .map(|p| p.device_ids.clone())
+                .or_else(|| self.config.device_id.clone()),
         };
         if lease.is_some() {
             if let Some(configured) = self.config.device_id.as_deref() {
@@ -1327,6 +1498,56 @@ impl ServingBackend for RunPyBackend {
                 args.push("--vllm-override-args".to_string());
                 args.push(tool_calling_override_args(parser));
             }
+        }
+
+        // `--serve-with tt`: hand the launch to the official Tenstorrent CLI
+        // (`tt serve`). It builds the very same `run.py --docker-server`
+        // invocation itself -- from its own managed tt-inference-server
+        // checkout, with the serving image and the per-model tool-call and
+        // reasoning parsers taken from its curated catalog -- so the run.py
+        // argv above is replaced wholesale rather than translated flag by
+        // flag. Everything around the launch is unchanged: the stale-container
+        // sweep and board reset above, and the `/v1/models` readiness gate
+        // below (`tt serve` streams run.py's stdout through, so
+        // `parse_run_artifacts` still finds the container and its logs).
+        // `run_model` is already the org-stripped short name, which is also
+        // the tt catalog's name ("Qwen/Qwen3-32B" -> "Qwen3-32B"); passing the
+        // org-qualified form would make `tt serve` treat it as a tt-model
+        // bundle id instead.
+        // A split box can't go through `tt serve` (no chip selector): run tt's
+        // own managed checkout's run.py directly, with tt's venv Python -- the
+        // command `tt serve --dry-run` prints, plus `--device-id`.
+        if self.config.tt_cli_serve.is_some() && placement.is_some() {
+            let venv_python =
+                std::path::Path::new(&self.config.repo_dir).join("../venv/bin/python");
+            if venv_python.exists() {
+                args[0] = venv_python.to_string_lossy().into_owned();
+            }
+            // What `tt serve` always passes: no auth on the box-local API, and
+            // the host's Hugging Face cache (where `tt model pull` put weights).
+            if !self.config.no_auth {
+                args.push("--no-auth".to_string());
+            }
+            if self.config.host_hf_cache.is_none() {
+                if let Ok(home) = std::env::var("HOME") {
+                    args.push("--host-hf-cache".to_string());
+                    args.push(format!("{home}/.cache/huggingface"));
+                }
+            }
+        } else if let Some(tt) = &self.config.tt_cli_serve {
+            // A lease on every chip is the whole box, which is what `tt
+            // serve` opens anyway; only a partial lease can't be honoured.
+            let partial = lease.as_ref().is_some_and(|guard| {
+                box_chip_count().is_none_or(|all| guard.grant().chips.len() < all)
+            });
+            if partial {
+                anyhow::bail!(
+                    "serving through the tt CLI can't honour a chip lease: `tt serve` has no \
+                     device selector, so it would open chips the lease doesn't cover; serve \
+                     with run.py (the default) on a leasing box"
+                );
+            }
+            args = tt_serve_argv(tt, run_model, self.config.service_port, device.as_deref());
         }
 
         // `run.py` reads `MODEL_SOURCE` from its environment, not from an
@@ -1364,7 +1585,21 @@ impl ServingBackend for RunPyBackend {
                 .collect(),
             None => Vec::new(),
         };
-        child_env.push(("MODEL_SOURCE", self.config.model_source.as_str()));
+        // Through `tt serve`, MODEL_SOURCE is tt's call per model: `noaction` for
+        // STT/TTS/forge containers that bring their own weights, which forcing
+        // `huggingface` here would override (making the host download a whole
+        // repo the container then ignores).
+        if self.config.tt_cli_serve.is_none() {
+            child_env.push(("MODEL_SOURCE", self.config.model_source.as_str()));
+        }
+        // (A split launch on a tt box leaves MODEL_SOURCE to run.py too, as
+        // `tt serve` would: the media server brings its own loader.)
+        child_env.extend(
+            self.config
+                .launch_env
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
 
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let run_stdout = self
@@ -1389,6 +1624,9 @@ impl ServingBackend for RunPyBackend {
                     self.stop_launched_container(None);
                 }
             })?;
+        // run.py has validated the box and launched its container: the other
+        // slot may reset its chips now.
+        drop(launch_window);
 
         // `run.py`'s captured stdout carries the underlying container id and
         // both log file paths on a successful launch (see
@@ -1463,7 +1701,39 @@ impl ServingBackend for RunPyBackend {
         };
 
         let mut served_model: Option<String> = None;
+        let mut launched = Instant::now();
+        let mut stall_checked = Instant::now();
+        let mut stall_restarts = 0;
         for _ in 0..self.health_poll_attempts {
+            // (0) Stall watchdog (see `media_workers_stalled`): a media server
+            //     whose workers deadlocked at startup never becomes ready, so
+            //     restart its container rather than wait out the ~40 min ceiling.
+            //     Checked at most once a minute once it's had `stall_after`.
+            if let Some(id) = artifacts.container_id.as_deref() {
+                let due = launched.elapsed() >= self.stall_after
+                    && (stall_checked.elapsed() >= Duration::from_secs(60)
+                        || self.stall_after.is_zero());
+                if due && stall_restarts < MAX_STALL_RESTARTS {
+                    stall_checked = Instant::now();
+                    let top = self
+                        .runner
+                        .run(&["docker", "top", id, "-eo", "pid,ppid,time,rss,args"])
+                        .unwrap_or_default();
+                    if media_workers_stalled(&top) {
+                        stall_restarts += 1;
+                        eprintln!(
+                            "tt-station-agentd: {model}'s server workers are stuck at startup \
+                             (a known tt-media-server race); restarting container {id} \
+                             ({stall_restarts}/{MAX_STALL_RESTARTS})"
+                        );
+                        if let Err(e) = self.runner.run(&["docker", "restart", id]) {
+                            eprintln!("tt-station-agentd: restarting {id} failed: {e:#}");
+                        }
+                        launched = Instant::now();
+                    }
+                }
+            }
+
             // (1) Cancelled by a concurrent `/stop` (see `stop` + the `cancel`
             //     field): abort this bring-up promptly rather than polling a
             //     doomed launch to the ceiling. Best-effort stop the container
@@ -1552,6 +1822,25 @@ impl ServingBackend for RunPyBackend {
                                 .map(str::to_string)
                                 .unwrap_or_else(|| model.to_string()),
                         )
+                    })
+                {
+                    served_model = Some(id);
+                    break;
+                }
+                // tt-media-server (images, video, speech) has no `/v1/models`;
+                // it says it's ready on `/tt-liveness` (`model_ready`) and names
+                // its runner (`tt-flux.1-schnell`), which is the served id.
+                if let Some(id) = self
+                    .runner
+                    .http_get(&health_url.replace("/health", "/tt-liveness"))
+                    .ok()
+                    .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                    .filter(|v| v.get("model_ready").and_then(|r| r.as_bool()) == Some(true))
+                    .map(|v| {
+                        v.get("runner_in_use")
+                            .and_then(|r| r.as_str())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| model.to_string())
                     })
                 {
                     served_model = Some(id);

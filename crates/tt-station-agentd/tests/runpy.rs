@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use libttstation::model::ServingStatus;
-use tt_station_agentd::serving::runpy::{RunPyBackend, RunPyConfig, tool_call_parser_for};
+use tt_station_agentd::serving::runpy::{tool_call_parser_for, RunPyBackend, RunPyConfig};
 use tt_station_agentd::serving::ServingBackend;
 
 mod support;
@@ -1215,7 +1215,7 @@ fn start_aborts_promptly_when_cancel_set() {
 #[test]
 fn start_bails_when_container_dies() {
     let runner = FakeRunner::new(u32::MAX); // /health never comes up...
-    // run.py stdout carries the launched container id (parsed into artifacts).
+                                            // run.py stdout carries the launched container id (parsed into artifacts).
     runner.set_run_output("run.py", "INFO: Created Docker container ID: deadbeef\n");
     // ...and the liveness probe reports the container is NOT running.
     runner.set_run_output("docker inspect", "false\n");
@@ -1679,14 +1679,18 @@ fn runpy_start_forced_serves_without_a_lease_when_chips_are_unavailable() {
     let commands = runner.commands();
     let run_cmd = find_runpy_cmd(&commands);
     assert!(
-        run_cmd.windows(2).any(|w| w[0] == "--model" && w[1] == "llama3"),
+        run_cmd
+            .windows(2)
+            .any(|w| w[0] == "--model" && w[1] == "llama3"),
         "the forced serve must actually launch run.py for the model: {run_cmd:?}"
     );
     // Unleased means the pre-gozer path: config's own `--device-id`, and the
     // whole-box `tt-smi -r`. That is what taking the box over looks like, and
     // it is the point of `--force`.
     assert!(
-        run_cmd.windows(2).any(|w| w[0] == "--device-id" && w[1] == "0,1"),
+        run_cmd
+            .windows(2)
+            .any(|w| w[0] == "--device-id" && w[1] == "0,1"),
         "a forced (unleased) serve pins from config, not from a grant that \
          never happened: {run_cmd:?}"
     );
@@ -2281,7 +2285,9 @@ fn runpy_leased_whole_box_serve_passes_the_same_tt_device_as_an_unleased_one() {
     let acquire = find_gozer_cmd(&commands, "acquire")
         .unwrap_or_else(|| panic!("expected a gozer acquire: {commands:?}"));
     assert!(
-        acquire.windows(2).any(|w| w[0] == "--chips" && w[1] == "all"),
+        acquire
+            .windows(2)
+            .any(|w| w[0] == "--chips" && w[1] == "all"),
         "the default request is the whole box: {acquire:?}"
     );
     // Still SCOPED, not a bare whole-box reset: the grant's BDFs are named
@@ -2693,7 +2699,9 @@ fn runpy_reset_proceeds_when_the_only_lease_is_its_own() {
     let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
         .with_gozer(Some(gozer_capability()));
 
-    backend.reset().expect("reset must proceed on our own lease");
+    backend
+        .reset()
+        .expect("reset must proceed on our own lease");
 
     let commands = runner.commands();
     assert!(
@@ -2722,7 +2730,9 @@ fn runpy_reset_proceeds_when_a_chip_is_busy_untracked() {
     let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(runner.clone()))
         .with_gozer(Some(gozer_capability()));
 
-    backend.reset().expect("an untracked chip must not block /reset");
+    backend
+        .reset()
+        .expect("an untracked chip must not block /reset");
     assert!(
         runner
             .commands()
@@ -2898,11 +2908,15 @@ fn gozer_indices(commands: &[Vec<String>], verb: &str) -> Vec<usize> {
 #[test]
 fn runpy_start_twice_releases_the_first_lease_before_acquiring_again() {
     let gozer = FakeGozerBox::with_boards(2, 0);
-    gozer.runner().set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    gozer
+        .runner()
+        .set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
     let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
         .with_gozer(Some(gozer_capability()));
 
-    backend.start("model-a").expect("the first start should succeed");
+    backend
+        .start("model-a")
+        .expect("the first start should succeed");
     assert_eq!(
         gozer.held_lease_ids(),
         vec!["lease-1".to_string()],
@@ -2959,7 +2973,9 @@ fn runpy_start_twice_on_a_single_board_box_swaps_instead_of_self_contending() {
     let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
         .with_gozer(Some(gozer_capability()));
 
-    backend.start("model-a").expect("the first start should succeed");
+    backend
+        .start("model-a")
+        .expect("the first start should succeed");
     backend.start("model-b").expect(
         "a second start on a one-board box must SWAP -- releasing our own \
          lease first -- not report the box as contended against itself",
@@ -2981,7 +2997,9 @@ fn runpy_start_twice_on_a_single_board_box_swaps_instead_of_self_contending() {
 #[test]
 fn runpy_start_sweeps_stale_containers_before_taking_a_lease() {
     let gozer = FakeGozerBox::with_boards(2, 0);
-    gozer.runner().set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    gozer
+        .runner()
+        .set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
     let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
         .with_gozer(Some(gozer_capability()));
 
@@ -3111,7 +3129,9 @@ fn runpy_stop_releases_a_lease_adopted_from_a_previous_process() {
 #[test]
 fn runpy_adopt_lease_refuses_to_overwrite_a_live_lease() {
     let gozer = FakeGozerBox::with_boards(2, 0);
-    gozer.runner().set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
+    gozer
+        .runner()
+        .set_run_output("tt-smi -s", TT_SMI_FOUR_P300C);
     let backend = RunPyBackend::new(config("127.0.0.1", 8080), Box::new(gozer.clone()))
         .with_gozer(Some(gozer_capability()));
 
@@ -3195,7 +3215,10 @@ fn runpy_start_without_gozer_passes_only_model_source() {
 
     assert_eq!(
         runner.child_envs(),
-        vec![vec![("MODEL_SOURCE".to_string(), "huggingface".to_string())]],
+        vec![vec![(
+            "MODEL_SOURCE".to_string(),
+            "huggingface".to_string()
+        )]],
         "an unleased serve's child environment must not change"
     );
 }
@@ -3237,7 +3260,9 @@ fn runpy_swap_never_releases_a_lease_recorded_by_a_concurrent_serve() {
             .with_gozer(Some(gozer_capability())),
     );
 
-    backend.start("model-a").expect("the first start should succeed");
+    backend
+        .start("model-a")
+        .expect("the first start should succeed");
     assert_eq!(gozer.held_lease_ids(), vec!["lease-1".to_string()]);
 
     // A genuinely-held second lease, as a concurrent serve would have taken.
@@ -3286,4 +3311,223 @@ fn runpy_swap_never_releases_a_lease_recorded_by_a_concurrent_serve() {
         "the concurrent serve's lease must still be held afterwards: {:?}",
         gozer.held_lease_ids()
     );
+}
+
+/// `--serve-with tt`: the launch is the official CLI's `tt serve`, with the
+/// org-stripped catalog name (an org-qualified one would read as a tt-model
+/// bundle id), the serving port, and the resolved device -- and none of the
+/// run.py flags, which `tt serve` derives from its own catalog. The board
+/// reset before it is unchanged.
+#[test]
+fn runpy_start_with_tt_cli_launches_tt_serve() {
+    let runner = FakeRunner::new(0);
+    let mut cfg = config("127.0.0.1", 8080);
+    cfg.tt_device = Some("p300x2".to_string());
+    cfg.tt_cli_serve = Some(vec!["/opt/tt/bin/tt".to_string()]);
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
+
+    backend
+        .start("Qwen/Qwen3-32B")
+        .expect("start should succeed");
+
+    let commands = runner.commands();
+    assert!(
+        commands
+            .iter()
+            .all(|c| c.first().map(String::as_str) != Some("python3")),
+        "no run.py launch when serving through tt: {commands:?}"
+    );
+    let tt = commands
+        .iter()
+        .find(|c| c.first().map(String::as_str) == Some("/opt/tt/bin/tt"))
+        .expect("a tt invocation");
+    assert_eq!(
+        tt,
+        &[
+            "/opt/tt/bin/tt",
+            "serve",
+            "Qwen3-32B",
+            "--port",
+            "8080",
+            "--device",
+            "p300x2"
+        ]
+        .map(String::from)
+        .to_vec()
+    );
+    let reset = commands
+        .iter()
+        .position(|c| c.first().map(String::as_str) == Some("tt-smi"));
+    let launch = commands.iter().position(|c| c == tt);
+    assert!(
+        reset < launch,
+        "board reset still precedes the launch: {commands:?}"
+    );
+}
+
+#[test]
+fn tt_serve_argv_omits_device_when_unresolved() {
+    use tt_station_agentd::serving::runpy::tt_serve_argv;
+    assert_eq!(
+        tt_serve_argv(
+            &["sh".to_string(), "tt.sh".to_string()],
+            "Llama-3.1-8B-Instruct",
+            8003,
+            None
+        ),
+        [
+            "sh",
+            "tt.sh",
+            "serve",
+            "Llama-3.1-8B-Instruct",
+            "--port",
+            "8003"
+        ]
+        .map(String::from)
+        .to_vec()
+    );
+}
+
+/// A split box (co-serving): the serve is pinned to one card -- `tt-smi -r`
+/// names only its chips, run.py gets `--device p300`-equivalent and
+/// `--device-id`, and even with `--serve-with tt` the launch is run.py (tt
+/// serve can't pin chips), with the flags `tt serve` would have added.
+#[test]
+fn runpy_start_with_placement_pins_one_card() {
+    use tt_station_agentd::serving::{Placement, ServingBackend};
+    let runner = FakeRunner::new(0);
+    let mut cfg = config("127.0.0.1", 8004);
+    cfg.tt_device = Some("p300x2".to_string());
+    cfg.tt_cli_serve = Some(vec!["/opt/tt/bin/tt".to_string()]);
+    let backend = RunPyBackend::new(cfg, Box::new(runner.clone()));
+    assert!(backend.set_placement(Some(Placement {
+        device: "p300".to_string(),
+        device_ids: "2,3".to_string(),
+    })));
+    assert_eq!(backend.placement().unwrap().device_ids, "2,3");
+
+    backend
+        .start("FLUX.1-schnell")
+        .expect("start should succeed");
+
+    let commands = runner.commands();
+    assert!(
+        commands.iter().any(|c| c == &["tt-smi", "-r", "2,3"]),
+        "reset only this card: {commands:?}"
+    );
+    assert!(
+        commands.iter().all(|c| c != &["tt-smi", "-r"]),
+        "never a whole-box reset: {commands:?}"
+    );
+    assert!(
+        commands
+            .iter()
+            .all(|c| c.first().map(String::as_str) != Some("/opt/tt/bin/tt")),
+        "no tt serve on a split box: {commands:?}"
+    );
+    let launch = commands
+        .iter()
+        .find(|c| c.iter().any(|a| a == "run.py"))
+        .expect("a run.py launch");
+    let after = |flag: &str| {
+        launch
+            .iter()
+            .position(|a| a == flag)
+            .and_then(|i| launch.get(i + 1))
+            .cloned()
+    };
+    assert_eq!(after("--tt-device").as_deref(), Some("p300"));
+    assert_eq!(after("--device-id").as_deref(), Some("2,3"));
+    assert_eq!(after("--service-port").as_deref(), Some("8004"));
+    assert!(launch.iter().any(|a| a == "--no-auth"), "{launch:?}");
+
+    // Back to the whole box: the next start is tt serve again.
+    assert!(backend.set_placement(None));
+    backend
+        .start("Qwen/Qwen3-32B")
+        .expect("start should succeed");
+    assert!(runner
+        .commands()
+        .iter()
+        .any(|c| c.first().map(String::as_str) == Some("/opt/tt/bin/tt")));
+}
+
+/// tt-media-server has no `/v1/models`: readiness comes from `/tt-liveness`
+/// (`model_ready`), and its runner name is the served id.
+#[test]
+fn runpy_start_accepts_a_media_server_ready_on_tt_liveness() {
+    let runner = FakeRunner::new(0);
+    runner.set_http_get_sequence(&[
+        None,
+        Some(r#"{"status":"alive","model_ready":false}"#),
+        None,
+        Some(r#"{"status":"alive","model_ready":true,"runner_in_use":"tt-flux.1-schnell"}"#),
+    ]);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8004), Box::new(runner.clone()))
+        .with_health_poll(10, std::time::Duration::from_millis(1));
+    let endpoint = backend
+        .start("FLUX.1-schnell")
+        .expect("ready via tt-liveness");
+    assert_eq!(endpoint.model, "tt-flux.1-schnell");
+}
+
+/// The live `docker top` of a FLUX server whose device worker deadlocked at
+/// startup (1 s of CPU after 6 minutes), and of a healthy one loading.
+const STALLED_TOP: &str = "\
+PID                 PPID                TIME                RSS                 COMMAND
+626614              626590              00:00:00            3268                /bin/bash -c source ${PYTHON_ENV_DIR}/bin/activate
+626703              626614              00:00:13            728096              python3 uvicorn --host 0.0.0.0 main:app --lifespan on --port 8000
+626767              626703              00:00:00            423900              python3 uvicorn --host 0.0.0.0 main:app --lifespan on --port 8000
+626773              626703              00:00:01            462728              python3 uvicorn --host 0.0.0.0 main:app --lifespan on --port 8000";
+
+#[test]
+fn media_stall_detection_reads_docker_top() {
+    use tt_station_agentd::serving::runpy::media_workers_stalled;
+    assert!(media_workers_stalled(STALLED_TOP));
+    let busy = STALLED_TOP.replace("00:00:01            462728", "00:01:39            462728");
+    assert!(!media_workers_stalled(&busy), "CPU says loading");
+    // Seen live: a healthy worker at 4.5 min had only 33 s of CPU but 23 GB.
+    let big = STALLED_TOP.replace("00:00:01            462728", "00:00:15            23357788");
+    assert!(!media_workers_stalled(&big), "memory says loading");
+    let vllm =
+        "PID PPID TIME RSS COMMAND\n1 0 00:00:01 1000 python -m vllm.entrypoints.openai.api_server";
+    assert!(!media_workers_stalled(vllm), "only media servers");
+    assert!(!media_workers_stalled(""));
+    let days = STALLED_TOP.replace("00:00:01            462728", "1-00:00:01          462728");
+    assert!(!media_workers_stalled(&days));
+}
+
+/// A stalled media server is restarted (bounded), then becomes ready.
+#[test]
+fn runpy_start_restarts_a_stalled_media_server() {
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker top", STALLED_TOP);
+    runner.set_run_output("run.py", "INFO: Created Docker container ID: f1ux\n");
+    runner.set_run_output("docker inspect", "true");
+    runner.set_http_get_sequence(&[
+        None,
+        Some(r#"{"model_ready":false}"#),
+        None,
+        Some(r#"{"model_ready":false}"#),
+        None,
+        Some(r#"{"model_ready":false}"#),
+        None,
+        Some(r#"{"model_ready":true,"runner_in_use":"tt-flux.1-schnell"}"#),
+    ]);
+    let backend = RunPyBackend::new(config("127.0.0.1", 8004), Box::new(runner.clone()))
+        .with_health_poll(10, std::time::Duration::from_millis(1))
+        .with_stall_after(std::time::Duration::ZERO);
+    let endpoint = backend
+        .start("FLUX.1-schnell")
+        .expect("ready after restarts");
+    assert_eq!(endpoint.model, "tt-flux.1-schnell");
+    let restarts = runner
+        .commands()
+        .iter()
+        .filter(|c| {
+            c.first().map(String::as_str) == Some("docker")
+                && c.get(1).map(String::as_str) == Some("restart")
+        })
+        .count();
+    assert!(restarts >= 2, "restarted until ready: {restarts}");
 }

@@ -57,6 +57,9 @@ pub struct ProfileSection {
     pub host_hf_cache: Option<String>,
     pub hf_token: Option<String>,
     pub no_device_reset: Option<bool>,
+    /// `runpy` backend launcher: `"runpy"` (python3 run.py) or `"tt"` (the
+    /// official CLI's `tt serve`). Same as `--serve-with`.
+    pub serve_with: Option<String>,
 }
 
 /// Every overridable flag as an Option — `None` means "not set on the CLI",
@@ -74,6 +77,7 @@ pub struct CliOverrides {
     pub tt_smi_bin: Option<String>,
     pub gozer_path: Option<String>,
     // serving-scoped
+    pub serve_with: Option<String>,
     pub backend: Option<String>,
     pub tt_inference_repo: Option<String>,
     pub serving_image: Option<String>,
@@ -120,6 +124,7 @@ pub struct ResolvedConfig {
     pub active_profile: Option<String>, // None = implicit default profile
     pub available_profiles: Vec<String>, // sorted; empty when no [profile.*]
     pub backend: String,                // "runpy" | "docker" | "dstack"
+    pub serve_with: String,             // "runpy" | "tt" (runpy backend's launcher)
     pub serving_host: String,
     pub serving_port: u16,
     pub serving_image: Option<String>,
@@ -284,14 +289,27 @@ pub fn resolve(
 
     // --- serving-scoped (profile layer instead of global) ---
     let backend = pick([&cli.backend, &prof.backend, &None]).unwrap_or_else(|| "runpy".into());
+    let serve_with =
+        pick([&cli.serve_with, &prof.serve_with, &None]).unwrap_or_else(|| "runpy".into());
+    if serve_with != "runpy" && serve_with != "tt" {
+        anyhow::bail!("serve_with must be \"runpy\" or \"tt\", got {serve_with:?}");
+    }
     let serving_host =
         pick([&cli.serving_host, &prof.serving_host, &None]).unwrap_or_else(|| "127.0.0.1".into());
     let serving_port = pick([&cli.serving_port, &prof.serving_port, &None]).unwrap_or(8000);
     let serving_image = pick([&cli.serving_image, &prof.serving_image, &None]);
     let auto_image = cli.auto_image || prof.auto_image.unwrap_or(false);
     let tt_device = pick([&cli.tt_device, &prof.tt_device, &None]);
+    // Serving through `tt serve` runs run.py from tt's own managed checkout,
+    // which is where `workflow_logs/` land: default the log source there.
     let tt_inference_repo = expand_tilde(
         &pick([&cli.tt_inference_repo, &prof.tt_inference_repo, &None])
+            .or_else(|| {
+                (serve_with == "tt")
+                    .then(crate::ttcli::managed_inference_checkout)
+                    .flatten()
+                    .map(|p| p.display().to_string())
+            })
             .unwrap_or_else(default_tt_inference_repo),
     );
     let host_hf_cache = expand_tilde(
@@ -323,6 +341,7 @@ pub fn resolve(
         active_profile,
         available_profiles,
         backend,
+        serve_with,
         serving_host,
         serving_port,
         serving_image,
@@ -357,6 +376,7 @@ static EMPTY_PROFILE: ProfileSection = ProfileSection {
     host_hf_cache: None,
     hf_token: None,
     no_device_reset: None,
+    serve_with: None,
 };
 
 #[cfg(test)]
@@ -457,6 +477,30 @@ mod resolve_tests {
 
     fn file_with(body: &str) -> AgentConfigFile {
         toml::from_str(body).unwrap()
+    }
+
+    #[test]
+    fn serve_with_comes_from_the_profile_and_the_cli_wins() {
+        let file = file_with("[profile.p]\nserve_with = \"tt\"\n");
+        let r = resolve(base_cli(), None, Some(file), None).unwrap();
+        assert_eq!(r.serve_with, "tt");
+
+        let file = file_with("[profile.p]\nserve_with = \"tt\"\n");
+        let cli = CliOverrides {
+            serve_with: Some("runpy".into()),
+            ..base_cli()
+        };
+        assert_eq!(
+            resolve(cli, None, Some(file), None).unwrap().serve_with,
+            "runpy"
+        );
+
+        assert_eq!(
+            resolve(base_cli(), None, None, None).unwrap().serve_with,
+            "runpy"
+        );
+        let bad = file_with("[profile.p]\nserve_with = \"docker\"\n");
+        assert!(resolve(base_cli(), None, Some(bad), None).is_err());
     }
 
     #[test]

@@ -26,6 +26,11 @@ use super::docker::CommandRunner;
 /// tag, whether launched by the agent, tt-studio, or by hand.
 const IMAGE_MARKER: &str = "tt-inference-server";
 
+/// The media server's images (`tt-media-inference-server`: image, video,
+/// speech, TTS) don't contain [`IMAGE_MARKER`] as a substring, so they are
+/// matched separately -- otherwise a served FLUX or Wan model was invisible here.
+const MEDIA_IMAGE_MARKER: &str = "tt-media-inference-server";
+
 /// The `docker ps` format string used to enumerate candidate containers:
 /// tab-separated id, image, ports, and name. Tab-separated (not the default
 /// table layout) so [`discover_serving`] can split each row deterministically
@@ -85,7 +90,8 @@ pub fn discover_serving(
 
         // Fast image filter first, then require a published host port --
         // a container with nothing published has no `/v1` to probe.
-        if !image.to_lowercase().contains(IMAGE_MARKER) {
+        let image_lower = image.to_lowercase();
+        if !image_lower.contains(IMAGE_MARKER) && !image_lower.contains(MEDIA_IMAGE_MARKER) {
             continue;
         }
         let Some(host_port) = parse_published_host_port(ports) else {
@@ -95,7 +101,14 @@ pub fn discover_serving(
         // Authoritative liveness gate: a non-empty `/v1/models` `data[]`
         // means the server has a model loaded and is answering.
         let probe_url = format!("http://127.0.0.1:{host_port}/v1/models");
-        let Some(model) = probe_served_model(runner, &probe_url) else {
+        let model = probe_served_model(runner, &probe_url).or_else(|| {
+            // tt-media-server has no `/v1/models`: it reports readiness and
+            // its runner on `/tt-liveness`.
+            image_lower.contains(MEDIA_IMAGE_MARKER).then(|| {
+                probe_media_runner(runner, &format!("http://127.0.0.1:{host_port}/tt-liveness"))
+            })?
+        });
+        let Some(model) = model else {
             continue;
         };
 
@@ -147,7 +160,9 @@ pub fn discover_serving(
 /// `discover_serving` rather than shelling out in a second format -- one
 /// parser for the `Ports` column, one place to fix if docker's spelling
 /// ever changes.
-pub fn running_published_ports(runner: &dyn CommandRunner) -> Option<std::collections::BTreeSet<u16>> {
+pub fn running_published_ports(
+    runner: &dyn CommandRunner,
+) -> Option<std::collections::BTreeSet<u16>> {
     let ps_output = runner
         .run(&["docker", "ps", "--format", DOCKER_PS_FORMAT])
         .ok()?;
@@ -206,6 +221,21 @@ fn probe_served_model(runner: &dyn CommandRunner, url: &str) -> Option<String> {
         return None;
     }
     data[0].get("id")?.as_str().map(str::to_string)
+}
+
+/// Probe a tt-media-server's `/tt-liveness`: its runner (`tt-flux.1-schnell`)
+/// once `model_ready`, else `None` (still loading, or not a media server).
+fn probe_media_runner(runner: &dyn CommandRunner, url: &str) -> Option<String> {
+    let body = runner.http_get(url).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+    if value.get("model_ready")?.as_bool()? {
+        value
+            .get("runner_in_use")
+            .and_then(|r| r.as_str())
+            .map(str::to_string)
+    } else {
+        None
+    }
 }
 
 /// Parse the published HOST port out of a `docker ps` `Ports` column, or
@@ -500,7 +530,11 @@ c3\tghcr.io/tenstorrent/tt-inference-server:rel\t8000/tcp\ttt-exposed-only";
 
         assert_eq!(ports, [8003u16, 9999].into_iter().collect());
         assert!(
-            runner.probed.lock().expect("probed mutex poisoned").is_empty(),
+            runner
+                .probed
+                .lock()
+                .expect("probed mutex poisoned")
+                .is_empty(),
             "this must not probe /v1/models at all -- readiness is not the question"
         );
     }
@@ -556,5 +590,28 @@ c3\tghcr.io/tenstorrent/tt-inference-server:rel\t8000/tcp\ttt-exposed-only";
             parse_published_host_port("0.0.0.0:7000->8000/tcp, :::7000->8000/tcp"),
             Some(7000)
         );
+    }
+
+    /// A tt-media-server (no `/v1/models`) is found through `/tt-liveness` once
+    /// its model is ready, named by its runner; still loading, it's skipped.
+    #[test]
+    fn discovers_a_ready_media_server_by_its_runner() {
+        let ps = "\
+m1\tghcr.io/tenstorrent/tt-media-inference-server:0.10.0\t0.0.0.0:8004->8000/tcp\tflux
+m2\tghcr.io/tenstorrent/tt-media-inference-server:0.10.0\t0.0.0.0:8006->8000/tcp\twarming";
+        let runner = FakeProbe::new(
+            Some(ps),
+            &[
+                (
+                    8004,
+                    r#"{"status":"alive","model_ready":true,"runner_in_use":"tt-flux.1-schnell"}"#,
+                ),
+                (8006, r#"{"status":"alive","model_ready":false}"#),
+            ],
+        );
+        let entries = discover_serving(&runner, "127.0.0.1", 8003, &ServingStatus::Idle);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].host_port, 8004);
+        assert_eq!(entries[0].model, "tt-flux.1-schnell");
     }
 }
