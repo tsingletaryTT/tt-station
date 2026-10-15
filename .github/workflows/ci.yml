@@ -82,10 +82,43 @@ jobs:
           done
       - name: Test (hardware stubbed)
         run: PATH="$RUNNER_TEMP/hw-stubs:$PATH" cargo test --workspace --locked
+      # Start the agent the Build step made and probe it: a router that panics
+      # at start (axum's "Overlapping method route") passes every unit test
+      # and still crash-loops on a box. The script stubs the hardware itself.
+      - name: Smoke test the agent (start, GET /healthz + /status, stop)
+        run: scripts/smoke-agent.sh target/debug/tt-station-agentd
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Rustfmt
         run: cargo fmt --all --check
+
+  package:
+    name: Package (.deb build, install, smoke)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packaging prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends devscripts debhelper
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install || rustup show
+          rustup show active-toolchain
+      # The same script the Release workflow builds with.
+      - name: Build .deb packages
+        run: ./build-deb.sh
+      - name: Stage packages
+        run: |
+          mkdir -p dist
+          cp ../tt-station_*_amd64.deb ../tt-station-panel_*_amd64.deb dist/
+          ls -lh dist/
+      # Installs the .deb with apt in a clean ubuntu:24.04, checks the files the
+      # updater and systemd rely on, starts the installed agent with stubbed
+      # hardware and a throwaway config dir, waits for GET /healthz and
+      # GET /status to answer 200, stops it, and purges the package.
+      - name: Install in a clean container and smoke test
+        run: scripts/smoke-deb.sh ubuntu:24.04 dist
 
   cargo-deny:
     name: Dependencies (cargo-deny)
