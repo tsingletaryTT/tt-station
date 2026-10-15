@@ -31,8 +31,13 @@ struct Box_ {
 
 impl Box_ {
     async fn new(file: &PathBuf) -> Self {
+        // Schedules are kept as routines in the config folder: each box its own,
+        // or they'd pile up across runs in the shared default.
+        let config = file.parent().unwrap().join("config");
+        std::fs::create_dir_all(&config).unwrap();
         let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
             .with_telemetry_config("/nonexistent/tt-smi".to_string(), 1000)
+            .with_config_dir(config)
             .with_schedules(Schedules::open(file));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
