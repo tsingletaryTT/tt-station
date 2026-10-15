@@ -51,6 +51,16 @@ fn content_type(path: &Path) -> &'static str {
     }
 }
 
+/// What the app's pages may load and talk to: its own files and the box's
+/// API (same origin, WebSockets included), images, sound and video it made
+/// itself (`blob:`, `data:`), and nothing from elsewhere -- an image or a
+/// script from a web address in a model's reply doesn't load. Styles may be
+/// inline: React's `style` props, highlighted code and the terminal (xterm)
+/// set them. No `eval`, no frames, no plugins, and no one may frame the app.
+pub const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
+font-src 'self' data:; media-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; frame-src 'none'; \
+object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+
 /// A request path as a file under `root`, refusing anything that leaves it.
 pub fn resolve(root: &Path, rel: &str) -> Option<PathBuf> {
     let rel = Path::new(rel.trim_start_matches('/'));
@@ -85,6 +95,7 @@ async fn serve(rel: &str) -> Response {
                 [
                     (header::CONTENT_TYPE, content_type(&file)),
                     (header::CACHE_CONTROL, cache),
+                    (header::CONTENT_SECURITY_POLICY, CSP),
                 ],
                 bytes,
             )
@@ -122,5 +133,20 @@ mod tests {
         assert_eq!(resolve(root, "../etc/passwd"), None);
         assert_eq!(resolve(root, "assets/../../x"), None);
         assert_eq!(content_type(Path::new("a.woff2")), "font/woff2");
+    }
+
+    /// The app's pages load nothing from elsewhere and run no inline or
+    /// eval'd script; what the built app needs stays allowed (checked against
+    /// the built bundle in a browser: fonts, styles, blob:/data: images, the
+    /// same-origin API and WebSockets).
+    #[test]
+    fn the_app_runs_only_its_own_script() {
+        let dir = |d: &str| CSP.split(';').map(str::trim).find(|x| x.starts_with(&format!("{d} "))).unwrap_or_else(|| panic!("{d}")).to_string();
+        assert_eq!(dir("script-src"), "script-src 'self'");
+        assert_eq!(dir("connect-src"), "connect-src 'self'");
+        assert_eq!(dir("object-src"), "object-src 'none'");
+        assert_eq!(dir("frame-ancestors"), "frame-ancestors 'none'");
+        assert!(dir("img-src").contains("blob:") && dir("img-src").contains("data:") && !dir("img-src").contains("https:"));
+        assert!(!CSP.contains("unsafe-eval") && !CSP.contains('*'));
     }
 }
