@@ -277,11 +277,7 @@ pub fn reconcile_status(status: &ServingStatus, entries: &[ServingEntry]) -> Ser
 fn probe_served_model(runner: &dyn CommandRunner, url: &str) -> Option<String> {
     let body = runner.http_get(url).ok()?;
     let value: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let data = value.get("data")?.as_array()?;
-    if data.is_empty() {
-        return None;
-    }
-    data[0].get("id")?.as_str().map(str::to_string)
+    crate::served::first(url, &value).model
 }
 
 /// Probe a tt-media-server's `/tt-liveness`: its runner (`tt-flux.1-schnell`)

@@ -1625,15 +1625,11 @@ pub async fn readopt(state: AppState) {
         return;
     }
     let base = format!("http://127.0.0.1:{}/v1", state.serving_port());
-    let answered: Option<Value> = match reqwest::Client::new()
-        .get(format!("{base}/models"))
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r.json().await.ok(),
-        _ => None,
-    };
+    let answered: Option<Value> =
+        crate::served::list(&crate::served::local_root(&state), Duration::from_secs(5))
+            .await
+            .filter(|listing| listing.success)
+            .map(|listing| listing.body);
     // Something else on the port (another model started since) isn't ours.
     let served_id = answered
         .as_ref()
@@ -1907,21 +1903,10 @@ async fn check_replies(state: AppState, id: String) {
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
     let base = format!("http://127.0.0.1:{}/v1", state.serving_port());
-    let client = reqwest::Client::new();
-    let model = client
-        .get(format!("{base}/models"))
-        .timeout(Duration::from_secs(10))
-        .send()
+    let client = crate::localhttp::local();
+    let model = crate::served::local(&state, Duration::from_secs(10))
         .await
-        .ok();
-    let model = match model {
-        Some(r) => r
-            .json::<Value>()
-            .await
-            .ok()
-            .and_then(|v| v["data"][0]["id"].as_str().map(str::to_string)),
-        None => None,
-    };
+        .and_then(|served| served.model);
     let Some(model) = model else { return };
     let reply = client
         .post(format!("{base}/chat/completions"))

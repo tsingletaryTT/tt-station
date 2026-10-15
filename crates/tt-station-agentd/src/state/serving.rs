@@ -399,22 +399,18 @@ impl AppState {
             // Not one of the container images discovery knows (a community
             // tt-model package, Orchard's package, native vLLM with no
             // container): the port answering with a model is enough.
-            let answering = alive || {
-                let url = format!("http://127.0.0.1:{}/v1/models", self.serving_port());
-                match reqwest::Client::new()
-                    .get(url)
-                    .timeout(std::time::Duration::from_secs(3))
-                    .send()
-                    .await
-                {
-                    Ok(r) if r.status().is_success() => r
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()
-                        .is_some_and(|v| v["data"].as_array().is_some_and(|d| !d.is_empty())),
-                    _ => false,
-                }
-            };
+            let answering = alive
+                || crate::served::list(
+                    &crate::served::local_root(self),
+                    std::time::Duration::from_secs(3),
+                )
+                .await
+                .is_some_and(|listing| {
+                    listing.success
+                        && listing.body["data"]
+                            .as_array()
+                            .is_some_and(|d| !d.is_empty())
+                });
             if answering {
                 stored.clone()
             } else {

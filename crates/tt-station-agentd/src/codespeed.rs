@@ -518,22 +518,15 @@ async fn served_context(model: &str, base_url: &str) -> Option<u64> {
             return *c;
         }
     }
-    let url = format!("{}/v1/models", root(base_url));
-    let c = match crate::localhttp::local()
-        .get(url)
-        .timeout(Duration::from_secs(3))
-        .send()
+    let c = crate::served::list(&root(base_url), Duration::from_secs(3))
         .await
-    {
-        Ok(r) => r.json::<Value>().await.ok().and_then(|v| {
-            let data = v["data"].as_array()?;
+        .and_then(|listing| {
+            let data = listing.body["data"].as_array()?;
             data.iter()
                 .find(|d| d["id"].as_str().is_some_and(|id| same_model(id, model)))
                 .or(data.first())?["max_model_len"]
                 .as_u64()
-        }),
-        Err(_) => None,
-    };
+        });
     CONTEXT
         .lock()
         .expect("context")
