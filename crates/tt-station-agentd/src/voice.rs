@@ -85,7 +85,16 @@ const FAVOURITES: &[&str] = &[
     "am_puck",
 ];
 
-static SETUP: Mutex<Option<(String, Option<String>)>> = Mutex::new(None);
+/// What `crate::voice` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// Setting voice up: its step, or why it failed.
+    setup: Mutex<Option<(String, Option<String>)>>,
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().voice
+}
 
 fn err(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
     (status, Json(ErrorResponse { error: msg.into() }))
@@ -232,7 +241,7 @@ pub(crate) async fn get_voice(
     .await
     .unwrap_or_default();
     let (speak_up, listen_up) = tokio::join!(up(&SPEAK, "/health"), up(&LISTEN, "/health"));
-    let setup = SETUP.lock().expect("voice setup").clone();
+    let setup = mine(&state).setup.lock().expect("voice setup").clone();
     let installed = speak_docker != "missing" || listen_docker != "missing";
     let state_word = match (&setup, speak_up && listen_up) {
         (Some((_, Some(_))), _) => "failed",
@@ -331,8 +340,9 @@ async fn wait_up(s: &Service, path: &str, secs: u64) -> bool {
     false
 }
 
-async fn setup() -> Result<(), String> {
-    let set = |step: &str| *SETUP.lock().expect("voice setup") = Some((step.into(), None));
+async fn setup(state: &AppState) -> Result<(), String> {
+    let set =
+        |step: &str| *mine(state).setup.lock().expect("voice setup") = Some((step.into(), None));
     set("Downloading the voice");
     tokio::task::spawn_blocking(|| run_container(&SPEAK))
         .await
@@ -377,17 +387,20 @@ async fn setup() -> Result<(), String> {
 }
 
 /// `POST /voice/setup` (authed): 202 while it installs; poll `GET /voice`.
-pub(crate) async fn post_setup(_auth: BearerAuth) -> Reply<(StatusCode, Json<Value>)> {
+pub(crate) async fn post_setup(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Reply<(StatusCode, Json<Value>)> {
     {
-        let mut guard = SETUP.lock().expect("voice setup");
+        let mut guard = mine(&state).setup.lock().expect("voice setup");
         if guard.as_ref().is_some_and(|(_, e)| e.is_none()) {
             return Ok((StatusCode::ACCEPTED, Json(json!({ "state": "installing" }))));
         }
         *guard = Some(("Starting".into(), None));
     }
-    tokio::spawn(async {
-        let result = setup().await;
-        let mut guard = SETUP.lock().expect("voice setup");
+    tokio::spawn(async move {
+        let result = setup(&state).await;
+        let mut guard = mine(&state).setup.lock().expect("voice setup");
         *guard = match result {
             Ok(()) => None,
             Err(e) => Some(("Failed".into(), Some(e))),
@@ -572,7 +585,10 @@ pub(crate) async fn post_listen(
 }
 
 /// `DELETE /voice` (authed): remove both containers.
-pub(crate) async fn delete_voice(_auth: BearerAuth) -> Json<Value> {
+pub(crate) async fn delete_voice(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _auth: BearerAuth,
+) -> Json<Value> {
     tokio::task::spawn_blocking(|| {
         for s in [&SPEAK, &LISTEN] {
             let _ = Command::new("docker")
@@ -583,7 +599,7 @@ pub(crate) async fn delete_voice(_auth: BearerAuth) -> Json<Value> {
     })
     .await
     .ok();
-    *SETUP.lock().expect("voice setup") = None;
+    *mine(&state).setup.lock().expect("voice setup") = None;
     Json(json!({ "state": "not_installed" }))
 }
 
