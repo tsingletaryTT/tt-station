@@ -4186,6 +4186,7 @@ pub fn app(state: AppState) -> Router {
         .route("/research/{id}", get(crate::research::get_job).delete(crate::research::delete_job))
         .route("/research/{id}/stop", post(crate::research::post_stop))
         .route("/research/{id}/rename", post(crate::research::post_rename))
+        .route("/research/{id}/explain", post(crate::research::post_explain))
         .route("/skills", get(crate::skills::get_skills))
         .route("/embeddings", get(crate::embeddings::get_embeddings).put(crate::embeddings::put_embeddings))
         .route("/code", get(crate::workspace::get_code))
