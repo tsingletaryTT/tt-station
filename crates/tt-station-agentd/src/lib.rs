@@ -35,6 +35,7 @@ pub mod favorites;
 pub mod fsio;
 pub mod gateway;
 pub mod gozer;
+pub mod handlers;
 pub mod health;
 pub mod hermes;
 pub mod history;
