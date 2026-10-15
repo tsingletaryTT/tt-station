@@ -5277,7 +5277,9 @@ mod telemetry_inference_tests {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let cmd = vec![script.to_string_lossy().into_owned()];
+        // Through sh, not exec'd directly: another test forking while this
+        // file is still open for writing makes exec fail with "Text file busy".
+        let cmd = vec!["/bin/sh".to_string(), script.to_string_lossy().into_owned()];
 
         let state = AppState::new(
             "t".to_string(),
