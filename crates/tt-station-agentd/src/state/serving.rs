@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! What the box is serving: starting and stopping the model through the
 //! backend, the lifecycle (`Phase`) every route reads, and reconciling the
 //! stored status with what is actually running.

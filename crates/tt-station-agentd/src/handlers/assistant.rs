@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! The assistant's HTTP surface: `POST /assistant`, `/assistant/stream` and
 //! `/assistant/confirm`. The assistant itself lives in `crate::assistant`.
 

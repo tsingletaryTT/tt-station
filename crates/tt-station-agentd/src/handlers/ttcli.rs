@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Models from the official Tenstorrent CLI (`tt`): `GET /tt/models`,
 //! `/tt/pulls`, and `POST /tt/pull` / `/tt/pull/cancel`.
 

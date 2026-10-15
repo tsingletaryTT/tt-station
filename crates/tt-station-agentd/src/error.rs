@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! The `{ "error": "<message>" }` body the agent's routes answer with when
 //! a request fails, and the helpers that build it.
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Starting and stopping the served model: `POST /run`, `/stop`, and
 //! `GET`/`POST /serve`.
 

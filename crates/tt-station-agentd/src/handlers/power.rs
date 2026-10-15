@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Chip resets and machine power: `POST /reset`, `POST /power` and
 //! `GET /power/info`.
 

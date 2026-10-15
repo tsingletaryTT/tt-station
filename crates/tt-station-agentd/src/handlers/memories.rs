@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! The assistant's memories and creations: `GET`/`DELETE /memories`,
 //! `DELETE /memories/{id}` and `GET /creations/{id}`.
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! `AppState`: the one piece of shared state every handler reaches through.
 //!
 //! It's deliberately built as a cheap-to-`Clone` handle (`Arc<Inner>`) around

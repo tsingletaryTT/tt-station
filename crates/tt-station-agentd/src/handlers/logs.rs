@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Agent and serving logs: `GET /logs` and the `GET /logs/stream` WebSocket.
 
 use std::path::Path;

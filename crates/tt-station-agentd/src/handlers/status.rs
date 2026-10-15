@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Read-only views of the box: `GET /status`, `/config`, `/models`, `/serving`,
 //! `/endpoint` and `/leases`.
 

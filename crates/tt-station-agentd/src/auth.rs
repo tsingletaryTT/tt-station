@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Who may call what: the bearer-token extractors (`BearerAuth`,
 //! `OwnerAuth`, `CallerAuth`, `Who`, `LocalOrPaired`, `ThisDevice`, `PlainHttp`),
 //! the route allow-lists (`PUBLIC_ROUTES`, `HANDLER_AUTHED_ROUTES`) and the

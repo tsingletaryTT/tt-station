@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! The route table: which path and method reach which handler, behind which
 //! auth layer. `app()` builds the `Router` from an `AppState` with no side
 //! effects (no mDNS registration, no socket binding), so tests can spin up

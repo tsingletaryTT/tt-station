@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Whether plain HTTP from the LAN is allowed: `GET`/`POST /security`.
 
 use crate::auth::{lan_http_allowed, LocalCaller, OwnerAuth};

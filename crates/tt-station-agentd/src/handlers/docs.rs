@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! The document store behind the assistant's file search: `GET`/`POST /docs`,
 //! `DELETE /docs/{id}` and `POST /docs/search`.
 

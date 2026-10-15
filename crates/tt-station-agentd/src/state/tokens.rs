@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Paired devices and their tokens: checking a bearer token, closing a
 //! socket when its device signs out, and the pending pair codes behind
 //! `/pair/init` and `/pair/complete`.

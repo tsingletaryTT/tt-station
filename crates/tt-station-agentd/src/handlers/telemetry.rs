@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Live and recorded readings: the `GET /telemetry` WebSocket, `GET /energy`,
 //! `GET /metrics/history` and `/metrics/now`, and the recorder that keeps the
 //! history (`record_metrics_forever`).

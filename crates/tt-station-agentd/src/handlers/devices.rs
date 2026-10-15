@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Paired devices: `GET /devices`, `DELETE /devices/{id}`, and changing a
 //! device's owner flag or person.
 

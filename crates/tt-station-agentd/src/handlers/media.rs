@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Image and video generation, proxied to the served media model:
 //! `POST /generate/image`, `/generate/video` and the `/generate/video/{id}` views.
 

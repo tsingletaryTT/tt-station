@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Pairing a phone or Mac with the box: `POST /pair/init`, `/pair/offer`,
 //! `/pair/complete`, and the `POST /pair/qr` code the box shows.
 

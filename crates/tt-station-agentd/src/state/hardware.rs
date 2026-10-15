@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! The box's hardware: the shared `tt-smi` snapshot behind `/telemetry`,
 //! gozer's lease view, and the configured power commands.
 

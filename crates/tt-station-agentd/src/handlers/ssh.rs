@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! SSH access to the box: `POST`/`DELETE /ssh/authorize` and `GET /ssh/info`.
 
 use axum::{http::StatusCode, Json};
