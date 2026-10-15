@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>TT Station</string>
+    <key>CFBundleDisplayName</key><string>TT Station</string>
+    <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>UILaunchScreen</key>
+    <dict>
+        <key>UIColorName</key><string>LaunchBackground</string>
+    </dict>
+    <key>UIUserInterfaceStyle</key><string>Dark</string>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key><false/>
+    </dict>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>TT Station saves the images and videos your box makes to Photos.</string>
+    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <array>
+        <string>com.tenstorrent.ttstation.mobile.refresh</string>
+    </array>
+    <key>NSSupportsLiveActivities</key>
+    <true/>
+    <key>UIAppFonts</key>
+    <array>
+        <string>InterTight-Regular.ttf</string>
+        <string>InterTight-Medium.ttf</string>
+        <string>InterTight-SemiBold.ttf</string>
+        <string>InterTight-Bold.ttf</string>
+        <string>IBMPlexMono-Regular.ttf</string>
+        <string>IBMPlexMono-Medium.ttf</string>
+        <string>IBMPlexMono-SemiBold.ttf</string>
+    </array>
+    <!-- Recordings and videos open in TT Station from Files, Voice Memos and the share sheet: they go to Transcribe. -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Recording</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.audio</string>
+                <string>public.movie</string>
+                <string>com.apple.m4a-audio</string>
+                <string>public.mpeg-4-audio</string>
+            </array>
+        </dict>
+    </array>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <false/>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>fetch</string>
+        <string>audio</string>
+    </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.tenstorrent.ttstation.mobile.pair</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>ttstation</string>
+            </array>
+        </dict>
+    </array>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Talk to your Tenstorrent box, and record meetings or notes for it to transcribe.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Your speech is turned into text on this iPhone (on-device where supported); only the text is sent to your box.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>TT Station finds and talks to your Tenstorrent box on your local network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_tenstorrent._tcp</string>
+    </array>
+    <!-- The app talks to the box only over HTTPS/WSS on the home network, pinned to the
+         box's self-signed certificate (SHA-256 from the pairing QR). Local networking is
+         allowed so ATS doesn't reject that certificate; no arbitrary loads. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key><true/>
+    </dict>
+</dict>
+</plist>

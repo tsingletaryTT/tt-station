@@ -1,0 +1,72 @@
+name: TTStationMobile
+options:
+  bundleIdPrefix: com.tenstorrent
+packages:
+  # A terminal emulator (MIT), to draw the real tt-toplike streamed from the box.
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    from: 1.2.0
+  deploymentTarget:
+    iOS: "26.0"
+targets:
+  TTStationMobile:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - Shared
+      - Assets.xcassets
+      # Vesper's typefaces (OFL), copied to the bundle root for UIAppFonts.
+      - Resources/Fonts
+    dependencies:
+      # The Lock Screen / Dynamic Island Live Activity.
+      - target: TTStationActivity
+      - package: SwiftTerm
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tenstorrent.ttstation.mobile
+        SWIFT_VERSION: "5.0"
+        INFOPLIST_FILE: Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        # iPhone and iPad (the tab bar becomes a sidebar on iPad).
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        # Set your own team in Xcode (Signing & Capabilities) to run on a device.
+        CODE_SIGN_STYLE: Automatic
+        # Push notifications are off for now: a personal (free) team can't sign
+        # the capability. To turn them on with a paid team, add back
+        # `CODE_SIGN_ENTITLEMENTS: TTStationMobile.entitlements` and set
+        # `AlertCenter.remotePush` to true.
+  TTStationActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ActivityExtension
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tenstorrent.ttstation.mobile.activity
+        SWIFT_VERSION: "5.0"
+        INFOPLIST_FILE: ActivityExtension/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        SKIP_INSTALL: YES
+schemes:
+  # The app's own scheme, so Xcode runs the app (running the Live Activity
+  # extension's scheme fails with deviceprocesscontrolservice Code=8).
+  TTStationMobile:
+    build:
+      targets:
+        TTStationMobile: all
+        TTStationActivity: all
+    run:
+      config: Debug
+      executable: TTStationMobile
+    archive:
+      config: Release
