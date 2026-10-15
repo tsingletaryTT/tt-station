@@ -109,6 +109,7 @@ impl Default for Schedule {
             kind: manual(),
             time: None,
             every_hours: None,
+            days: None,
         }
     }
 }
