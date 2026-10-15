@@ -168,6 +168,51 @@ of it. #23 also reads tt-smi **6.x**'s top-level `processes[]`; this box is on t
   `suspend`/`reboot`/`shutdown` → 202 (box disconnects shortly after); polkit denial → 403.
   The primary-NIC MAC is advertised in `/status` + the mDNS TXT record so a Mac can Wake-on-LAN
   a powered-down box. Command executor is configurable; see `docs/reference/power-controls.md`.
+  **`POST /assistant` + `POST /assistant/confirm` (authed, local branch `jberkowitz/mobile-voice`,
+  uncommitted)** — natural-language chat whose brain is the box's own served model via OpenAI
+  tool calls: read-only tools (`box_status` incl. a fresh deduped `tt-smi -s`, `list_models`,
+  `recent_logs`) run immediately; disruptive ones (`run_model`, `stop_model`, `reset_chips`) are
+  parked as 5-minute pending actions and only run on confirm (a confirmed `run_model` is
+  backgrounded, since `/run` blocks). The assistant runs on the model it controls, so every
+  disruptive action takes it offline. Qwen3-32B: 10/10 on the command test; Llama-3.1-8B was not
+  reliable. CLI: `tt-station ask`. First client: `ios/`. See `docs/reference/assistant.md`.
+  **Model manager via the official `tt` CLI (same branch, uncommitted)** — `GET /tt/models`
+  (`tt model list --hw <mesh>`: support, tool parser, downloaded, size, free disk), `GET /tt/pulls`,
+  `POST /tt/pull` / `POST /tt/pull/cancel` (authed; background `tt model pull` jobs with progress
+  = HF cache dir size), and `--serve-with tt` (runpy backend launches `tt serve` instead of
+  `python3 run.py`; logs default to tt's managed checkout). `tt` is auto-found (`--tt-cli`).
+  Verified live: Qwen3-32B via `tt serve`. See `docs/reference/tt-cli.md`.
+  **Phone-proofing (same branch):** launches are non-interactive (`AUTOMATIC_HOST_SETUP`,
+  `JWT_SECRET`, `HF_TOKEN`; subprocesses `setsid` + null stdin — run.py's `getpass` prompt used
+  to hang on the box console); catalog `weights` = agent-measured completeness (tt's `cached`
+  lies for partial repos) and starts of non-downloaded models are refused; serving lifecycle
+  `GET/POST /serve` (starts survive client disconnect, failures keep their reason, startup
+  adopts an already-serving model); `/generate/image` + `/generate/video*` proxy the media
+  server; discovery now matches `tt-media-inference-server` images.
+  **Beyond chat (same branch):** `/assistant/stream` (SSE, think/reasoning, Markdown);
+  `/metrics/history|now` (recorded telemetry + inference + energy); `/docs` + `search_documents`
+  (BM25 over uploaded text); `web_search`/`read_webpage` (DuckDuckGo HTML; private networks
+  refused); `remember`/`forget` + `/memories`; `create_image` + `/creations/{id}`; tools offered
+  only when usable (small models loop otherwise). **Co-serving** `/coserve`: chat on chips 0,1 +
+  image model on 2,3 via `ServingBackend::set_placement` and a companion runpy backend (port +1);
+  any ordinary start/stop leaves split mode. **OpenAI gateway** `/v1/*` (app keys via `/keys`,
+  `/connect`; follows whatever serves, images translated). `/bench`. QR pairing
+  (`tt-station-agentd pair`, `/pair/offer` + 0600 `local-secret`). Media-server readiness via
+  `/tt-liveness` (0.10 has no `/v1/models`) and a stall watchdog for its startup deadlock. See
+  `docs/reference/{assistant,gateway,tt-cli}.md`.
+- **Orchard** `/orchard*`: model bring-ups with tt-orchard (`~/code/tt-orchard`, python3.12):
+  setup and preflight through `src/orchard_bridge.py`, status via `tt-orchard status --json`, runs as
+  `tt-orchard-<slug>` systemd user units, a watcher that notifies per stage and restores the old
+  model. While a run is live `AppState::chips_holder` (also Lab) blocks starts, resets, power,
+  co-serve, doctor fixes and tt-smi. See `docs/reference/orchard.md`.
+- **Desktop app** (`desktop/`, Electron + React + Vesper): the agent serves the built screens at `/app`
+  (`app_ui.rs`); the shell signs in via `local-secret`, adds tray/notifications/hotkey/autostart; app
+  catalogue `/apps` (`apps.rs`: LobeChat, Jupyter, n8n, Flowise in Docker, each with its own app key).
+  Build with Node 22 (`~/.local/share/node/current/bin`). See `desktop/README.md`.
+- **People / schedules / energy / remote access** (no accounts): `/people` (per-person memories,
+  assistant knows who it's talking with), `/schedules` (switch modes at set times), `/energy`
+  (per-day kWh), `/remote/wireguard` (agent-made WireGuard keys, one sudo script, 8 phone slots),
+  and `/orchard/runs/{name}/serve`. See `docs/reference/household-schedules-remote.md`.
 - mDNS `_tenstorrent._tcp` status re-published on run/stop; graceful shutdown unregisters.
 - **Config file + named profiles:** optionally reads `agentd.toml` (default
   `$TT_CONFIG_DIR/agentd.toml` or `~/.config/tt-station/agentd.toml`, override with
