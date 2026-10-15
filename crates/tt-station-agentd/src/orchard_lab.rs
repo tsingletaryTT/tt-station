@@ -13,6 +13,9 @@
 //! - `PUT /orchard/lab`: set it (`{host, root, path, python, test_python, gozer}`) or `{remove: true}`.
 //! - `POST /orchard/lab/check`: `tt-orchard lab setup --check`, as JSON.
 //! - `POST /orchard/lab/setup`: `tt-orchard lab setup --yes` in the background.
+//!
+//! Setting the lab, its checks and its setup are an owner's: they run
+//! tt-orchard (and ssh) as the box's own account.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -191,7 +194,7 @@ pub(crate) async fn get_lab(
 /// `PUT /orchard/lab`.
 pub(crate) async fn put_lab(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     Json(body): Json<LabBody>,
 ) -> Reply {
     if !body.remove {
@@ -223,7 +226,7 @@ pub(crate) async fn put_lab(
 /// `POST /orchard/lab/check`: every check `tt-orchard lab setup --check` makes.
 pub(crate) async fn post_check(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
 ) -> Reply {
     let o = need(&state)?;
     let v = tokio::time::timeout(
@@ -248,7 +251,7 @@ pub(crate) async fn post_check(
 /// and never touches a lease; what it can't fix, it says how to).
 pub(crate) async fn post_setup(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
 ) -> Reply {
     if unit_active(SETUP_UNIT) {
         return Ok((StatusCode::OK, Json(json!({ "running": true }))));

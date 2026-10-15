@@ -31,6 +31,10 @@
 //! Status comes from tt-orchard itself (`tt-orchard status --json`, a
 //! read-only view of the run's ledger), and setup and preflight from its own
 //! Python (`orchard_bridge.py`), so this module never re-implements its rules.
+//!
+//! Everything here that runs something (setup, preflight, runs and their
+//! controls, serving a harvest, packaging) is an owner's (`routes::OwnerAuth`):
+//! tt-orchard and its agents run as the box's own account, outside any sandbox.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1137,7 +1141,7 @@ pub(crate) async fn get_orchard(
 
 pub(crate) async fn post_setup(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
 ) -> Reply {
     let o = state.orchard().ok_or_else(|| {
         err(
@@ -1154,6 +1158,7 @@ pub(crate) async fn post_setup(
     blocking(move || o2.setup_blocking())
         .await?
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    crate::audit::record(&state, "host_run", "Orchard setup", "ok");
     Ok((StatusCode::ACCEPTED, Json(json!({ "started": true }))))
 }
 
@@ -1207,7 +1212,7 @@ impl RunOptions {
 
 pub(crate) async fn post_preflight(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     Json(req): Json<ModelRequest>,
 ) -> Reply {
     let o = need(&state)?;
@@ -1340,7 +1345,7 @@ async fn start(
 
 pub(crate) async fn post_run(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     Json(req): Json<ModelRequest>,
 ) -> Reply {
     let o = need(&state)?;
@@ -1352,7 +1357,16 @@ pub(crate) async fn post_run(
         ));
     }
     let opts = RunOptions::from_request(req.refuse_credentials_visible, req.base.as_deref())?;
-    start(&state, o, model, req.stop_serving, opts).await
+    let r = start(&state, o, model.clone(), req.stop_serving, opts).await;
+    if r.is_ok() {
+        crate::audit::record(
+            &state,
+            "host_run",
+            &format!("Orchard bring-up of {model}"),
+            "ok",
+        );
+    }
+    r
 }
 
 fn run_dir(o: &Orchard, name: &str) -> Result<PathBuf, (StatusCode, Json<Value>)> {
@@ -1368,11 +1382,11 @@ fn run_dir(o: &Orchard, name: &str) -> Result<PathBuf, (StatusCode, Json<Value>)
     Ok(root.join(name))
 }
 
-/// `DELETE /orchard/runs/{name}` (authed): remove a finished or stopped run's
+/// `DELETE /orchard/runs/{name}` (owners): remove a finished or stopped run's
 /// folder (its stages, logs, and any harvest), and forget its launch.
 pub(crate) async fn delete_run(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Reply {
     let o = need(&state)?;
@@ -1545,7 +1559,7 @@ pub struct ControlRequest {
 
 pub(crate) async fn post_control(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     axum::extract::Path((name, action)): axum::extract::Path<(String, String)>,
     body: Option<Json<ControlRequest>>,
 ) -> Reply {
@@ -1781,7 +1795,7 @@ pub async fn stop_harvest(state: &AppState) {
 
 pub(crate) async fn post_serve(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     axum::extract::Path(name): axum::extract::Path<String>,
     body: Option<Json<ControlRequest>>,
 ) -> Reply {
@@ -1970,7 +1984,7 @@ pub fn set_packaging(config: &str, enabled: bool, namespace: &str) -> String {
 
 pub(crate) async fn post_packaging(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     Json(req): Json<Packaging>,
 ) -> Reply {
     let o = need(&state)?;

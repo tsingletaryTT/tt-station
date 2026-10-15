@@ -4400,16 +4400,28 @@ fn assistant_error(err: crate::assistant::AssistantError) -> (StatusCode, Json<E
 async fn assistant_chat(
     axum::extract::State(state): axum::extract::State<AppState>,
     who: crate::people::Who,
+    CallerAuth(caller): CallerAuth,
     Json(req): Json<crate::assistant::AssistantRequest>,
 ) -> Result<Json<crate::assistant::AssistantResponse>, (StatusCode, Json<ErrorResponse>)> {
     let opts = req.options(false);
-    if let Some(done) = crate::assistant::quick(&state, &req.messages, opts).await {
+    // The tools that act on the box's own computer are an owner's.
+    let host_ok = caller.owner();
+    if let Some(done) = crate::assistant::HOST_OK
+        .scope(
+            host_ok,
+            crate::assistant::quick(&state, &req.messages, opts),
+        )
+        .await
+    {
         return Ok(Json(done));
     }
     crate::people::CALLER
         .scope(
             who.person,
-            crate::assistant::converse(&state, req.messages, opts),
+            crate::assistant::HOST_OK.scope(
+                host_ok,
+                crate::assistant::converse(&state, req.messages, opts),
+            ),
         )
         .await
         .map(Json)
@@ -4426,6 +4438,7 @@ async fn assistant_chat(
 async fn assistant_stream(
     axum::extract::State(state): axum::extract::State<AppState>,
     who: crate::people::Who,
+    CallerAuth(caller): CallerAuth,
     Json(req): Json<crate::assistant::AssistantRequest>,
 ) -> Result<
     axum::response::sse::Sse<
@@ -4437,7 +4450,15 @@ async fn assistant_stream(
     let person = who.person;
     let signed_out = state.signed_out(who.token);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    if let Some(done) = crate::assistant::quick(&state, &req.messages, opts).await {
+    // The tools that act on the box's own computer are an owner's.
+    let host_ok = caller.owner();
+    if let Some(done) = crate::assistant::HOST_OK
+        .scope(
+            host_ok,
+            crate::assistant::quick(&state, &req.messages, opts),
+        )
+        .await
+    {
         // An instant command: already done; tell it like a stream.
         for action in done.actions {
             let _ = tx.send(crate::assistant::StreamEvent::Action { action });
@@ -4458,7 +4479,11 @@ async fn assistant_stream(
             .await
             .map_err(assistant_error)?;
         tokio::spawn(
-            crate::people::CALLER.scope(person, crate::assistant::converse_stream(state, chat, tx)),
+            crate::people::CALLER.scope(
+                person,
+                crate::assistant::HOST_OK
+                    .scope(host_ok, crate::assistant::converse_stream(state, chat, tx)),
+            ),
         );
     }
     let events = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -4491,7 +4516,9 @@ async fn assistant_confirm(
         return Err(tt_error(StatusCode::FORBIDDEN, OWNER_ONLY));
     }
     let approve = req.approve;
-    let done = crate::assistant::confirm(&state, req).await;
+    let done = crate::assistant::HOST_OK
+        .scope(caller.owner(), crate::assistant::confirm(&state, req))
+        .await;
     let what = tool.unwrap_or_else(|| "unknown action".to_string());
     crate::audit::record(
         &state,

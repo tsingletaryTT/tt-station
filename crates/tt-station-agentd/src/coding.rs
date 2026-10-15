@@ -14,6 +14,10 @@
 //!
 //! Sessions run as the box's user, in the chosen folder, like a terminal would:
 //! each agent asks before it runs commands or edits (its own permission prompts).
+//! That's everything the box's account can do -- read TT Station's own keys and
+//! settings, use docker and sudo -- so starting, watching and typing into one is
+//! an owner's (`routes::OwnerAuth`); members code in Code's sandbox
+//! (`crate::workspace`), in a folder [`member_folder`] allows.
 //!
 //! - `GET /coding`: agents, sessions, recent folders, and whether the served
 //!   model suits coding agents (`check`).
@@ -39,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::routes::{AppState, BearerAuth};
+use crate::routes::{AppState, BearerAuth, CallerAuth};
 
 /// Where Claude Code compacts a session on the box when the model's agent
 /// reliability hasn't been measured (`crate::evals::compact_window`): local models
@@ -466,12 +470,18 @@ pub(crate) async fn check(state: &AppState) -> Value {
 // ---------------------------------------------------------------- routes
 
 /// `GET /coding`.
-pub(crate) async fn get_coding(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
+/// A member gets the agents but no sessions: those are owners' (they run as the box).
+pub(crate) async fn get_coding(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
+) -> Json<Value> {
     let c = check(&state).await;
     let st = state.clone();
+    let owner = caller.owner();
     let (agents, sessions, recent) = tokio::task::spawn_blocking(move || {
         let agents: Vec<Value> = AGENTS.iter().map(|a| json!({ "id": a.id, "name": a.name, "blurb": a.blurb, "available": find_bin(a).is_some() })).collect();
-        let sessions = all(&st);
+        let sessions = if owner { all(&st) } else { Vec::new() };
         let mut recent: Vec<String> = Vec::new();
         for s in &sessions {
             if !recent.contains(&s.folder) && Path::new(&s.folder).is_dir() {
@@ -484,7 +494,7 @@ pub(crate) async fn get_coding(State(state): State<AppState>, _auth: BearerAuth)
     .await
     .unwrap_or_default();
     Json(
-        json!({ "agents": agents, "sessions": sessions, "recent": recent, "check": c, "home": home() }),
+        json!({ "agents": agents, "sessions": sessions, "recent": recent, "check": c, "home": home(), "owner": owner }),
     )
 }
 
@@ -520,6 +530,87 @@ pub(crate) fn allowed_folder(folder: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
+/// Where the box keeps what it runs as its own account: TT Station's settings
+/// and state, its programs (every folder on `PATH`, the agent's own), and the
+/// checkouts its features run code from (tt-inference-server, tt-metal,
+/// tt-orchard, tt-lab, tt-kernel, tt-model-manager, TT Station's source).
+/// Real paths where they exist.
+fn box_software(state: &AppState) -> Vec<PathBuf> {
+    let h = home();
+    let env_or = |var: &str, default: PathBuf| std::env::var_os(var).map_or(default, PathBuf::from);
+    let mut v = vec![
+        state.config_dir(),
+        PathBuf::from(crate::config::default_tt_inference_repo()),
+        crate::native_vllm::tt_metal(),
+        h.join("tt-kernel-package-manager"),
+        h.join("dispatch"),
+        env_or("TT_ORCHARD_DIR", h.join("code/tt-orchard")),
+        h.join("code/tt-lab"),
+        h.join("code/tt-model-manager"),
+        h.join("code/tt-station"),
+        h.join("bin"),
+    ];
+    if let Some(lab) = std::env::var_os("TT_LAB_BIN") {
+        // `<checkout>/_out/tt-lab`
+        v.extend(Path::new(&lab).ancestors().nth(2).map(Path::to_path_buf));
+    }
+    // This agent's own source, when it was built on the box.
+    v.extend(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .map(Path::to_path_buf),
+    );
+    v.extend(
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf)),
+    );
+    v.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    v.into_iter()
+        .filter(|p| p.is_absolute())
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .collect()
+}
+
+/// [`member_folder`]'s rule, for a real path `p`: inside `home` but not `home`
+/// itself, no hidden folder on the way, and neither inside nor holding any of
+/// `blocked` (a folder holding one would hand the sandbox that one too).
+pub(crate) fn member_rule(home: &Path, blocked: &[PathBuf], p: &Path) -> Result<(), String> {
+    let Ok(rel) = p.strip_prefix(home) else {
+        return Err("Pick a project folder inside the home folder.".into());
+    };
+    if rel.as_os_str().is_empty() {
+        return Err("Pick a project folder inside the home folder.".into());
+    }
+    if rel
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    {
+        return Err(
+            "That's a hidden folder (it may hold keys or settings). Pick a project folder.".into(),
+        );
+    }
+    if blocked.iter().any(|b| p.starts_with(b) || b.starts_with(p)) {
+        return Err("That folder is (or holds) software the box runs as its own account, or TT Station's own settings, so a member's sandbox can't have it. Pick or make another project folder in the home folder.".into());
+    }
+    Ok(())
+}
+
+/// A project folder a member may give Code's sandbox: [`allowed_folder`], and
+/// not where the box keeps what it runs as its own account ([`box_software`]).
+/// The sandbox gets the folder read-write, and the box's account later runs
+/// what's in there (a checkout it serves from, a folder on its `PATH`), so a
+/// member's sandbox writing it would be a way out of the sandbox.
+pub(crate) fn member_folder(state: &AppState, folder: &str) -> Result<PathBuf, String> {
+    let p = allowed_folder(folder)?;
+    let h = std::fs::canonicalize(home()).unwrap_or_else(|_| home());
+    member_rule(&h, &box_software(state), &p)?;
+    Ok(p)
+}
+
 /// Cuts `s` to at most `max` bytes, at a character boundary.
 pub(crate) fn cut(s: &mut String, max: usize) -> bool {
     if s.len() <= max {
@@ -533,10 +624,10 @@ pub(crate) fn cut(s: &mut String, max: usize) -> bool {
     true
 }
 
-/// `POST /coding/sessions`.
+/// `POST /coding/sessions` (owners).
 pub(crate) async fn post_session(
     State(state): State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     Json(body): Json<StartBody>,
 ) -> Reply {
     let agent = AGENTS
@@ -627,13 +718,19 @@ pub(crate) async fn post_session(
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crate::audit::record(
+        &state,
+        "host_run",
+        &format!("{} in {}", agent.name, s.folder),
+        "ok",
+    );
     Ok(Json(json!({ "session": describe(&s) })))
 }
 
 /// `POST /coding/sessions/{id}/stop`.
 pub(crate) async fn post_stop(
     State(state): State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
     if !valid_id(&id) || load(&state, &id).is_none() {
@@ -648,7 +745,7 @@ pub(crate) async fn post_stop(
 /// `DELETE /coding/sessions/{id}`: forget an ended session (its folder and files stay).
 pub(crate) async fn delete_session(
     State(state): State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
     if !valid_id(&id) || load(&state, &id).is_none() {
@@ -664,7 +761,7 @@ pub(crate) async fn delete_session(
 /// `GET /coding/sessions/{id}/changes`: what the agent changed (git status and diff).
 pub(crate) async fn get_changes(
     State(state): State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
     let s = load(&state, &id)
@@ -756,8 +853,14 @@ pub struct NewFolder {
     pub name: String,
 }
 
-/// `POST /coding/folders`: a new project folder, as a git repository.
-pub(crate) async fn post_folder(_auth: BearerAuth, Json(b): Json<NewFolder>) -> Reply {
+/// `POST /coding/folders`: a new project folder, as a git repository. A
+/// member's goes where [`member_folder`] would let it be used.
+pub(crate) async fn post_folder(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
+    Json(b): Json<NewFolder>,
+) -> Reply {
     let name = b.name.trim();
     if name.is_empty()
         || name.len() > 80
@@ -777,6 +880,10 @@ pub(crate) async fn post_folder(_auth: BearerAuth, Json(b): Json<NewFolder>) -> 
         return Err(err(StatusCode::BAD_REQUEST, "Only in your home folder."));
     }
     let p = parent.join(name);
+    if !caller.owner() {
+        let h = std::fs::canonicalize(home()).unwrap_or_else(|_| home());
+        member_rule(&h, &box_software(&state), &p).map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+    }
     if p.exists() {
         return Err(err(
             StatusCode::CONFLICT,
@@ -801,7 +908,7 @@ pub struct TermQuery {
     pub rows: Option<u16>,
 }
 
-/// `GET /coding/term` (WebSocket): a session's terminal.
+/// `GET /coding/term` (WebSocket, owners): a session's terminal.
 pub(crate) async fn term_ws(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -812,6 +919,15 @@ pub(crate) async fn term_ws(
     let Some(token) = crate::routes::ws_token(&headers).filter(|t| state.is_valid_token(t)) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    // A terminal is the box's own account: an owner's.
+    match crate::routes::resolve_caller(&headers, false, &state) {
+        Ok(c) if c.owner() => {}
+        Ok(c) => {
+            crate::audit::record_as(&state, &c.actor(), "denied", "GET /coding/term", "denied");
+            return (StatusCode::FORBIDDEN, crate::routes::OWNER_ONLY).into_response();
+        }
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+    }
     // Removing this device (or resetting the box) closes its terminal too.
     let signed_out = state.signed_out(token);
     let ws = ws.protocols([crate::routes::WS_PROTOCOL]);
@@ -922,6 +1038,49 @@ pub async fn watch_forever(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn members_folders_are_projects_not_the_box_own_software() {
+        let home = Path::new("/h");
+        let blocked = [
+            PathBuf::from("/h/code/tt-metal"),
+            PathBuf::from("/h/code/tt-station"),
+            PathBuf::from("/h/bin"),
+            PathBuf::from("/h/.config/tt-station"),
+        ];
+        let ok = |p: &str| member_rule(home, &blocked, Path::new(p));
+        assert!(ok("/h/projects/site").is_ok());
+        assert!(ok("/h/code/mine").is_ok());
+        for refused in [
+            "/h",                      // the whole home
+            "/elsewhere/proj",         // outside it
+            "/h/.ssh",                 // hidden: keys and settings
+            "/h/projects/.secret/x",   // hidden on the way
+            "/h/code",                 // holds the box's checkouts
+            "/h/code/tt-metal/models", // inside one
+            "/h/code/tt-station",      // the agent's own source
+            "/h/bin",                  // on PATH
+        ] {
+            assert!(ok(refused).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn the_box_software_includes_its_settings_and_programs() {
+        let dir = std::env::temp_dir().join(format!("tt-box-software-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_config_dir(dir.clone());
+        let v = box_software(&state);
+        assert!(v.contains(&std::fs::canonicalize(&dir).unwrap()));
+        let exe = std::env::current_exe().unwrap();
+        assert!(v.iter().any(|p| exe.starts_with(p)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_window_is_the_served_context_capped_and_compaction_fits_in_it() {

@@ -19,6 +19,13 @@
 //! commit or discard) and use the model. Without the sandbox it runs as the
 //! person, like a terminal, and always asks first.
 //!
+//! **Owners and members**: outside the sandbox Claude Code is the box's own
+//! account (TT Station's keys and settings, docker, sudo), so only an owner
+//! may start such a session or use one at all (send to it, answer it, see it);
+//! a member's sessions are sandboxed, in a folder `coding::member_folder`
+//! allows. A session someone started outside the sandbox stays an owner's,
+//! whoever started it.
+//!
 //! A session's conversation is kept by Claude Code (`--resume`), so it
 //! carries on after the app or this agent restarts.
 //!
@@ -44,7 +51,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-use crate::routes::{AppState, BearerAuth};
+use crate::routes::{AppState, BearerAuth, Caller, CallerAuth};
 
 type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
@@ -642,6 +649,10 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
     let cfg = dir(state, &s.id).join("claude");
     std::fs::create_dir_all(&cfg).map_err(|e| e.to_string())?;
     let cj = cfg.join(".claude.json");
+    // A sandbox writes this folder: never write through a link it left here.
+    if std::fs::symlink_metadata(&cj).is_ok_and(|m| m.file_type().is_symlink()) {
+        let _ = std::fs::remove_file(&cj);
+    }
     if !cj.exists() {
         let _ = std::fs::write(&cj, r#"{"hasCompletedOnboarding": true}"#);
     }
@@ -1551,8 +1562,9 @@ pub(crate) fn any_busy() -> bool {
         .any(|p| p.busy.load(Ordering::SeqCst))
 }
 
-/// Every question a Code session is waiting on the person for (`GET /approvals`).
-pub(crate) fn pending_approvals(state: &AppState) -> Vec<Value> {
+/// Every question a Code session is waiting on the person for (`GET /approvals`):
+/// for a member (`owner` false), the sandboxed sessions' only.
+pub(crate) fn pending_approvals(state: &AppState, owner: bool) -> Vec<Value> {
     let procs: Vec<(String, Arc<Proc>)> = PROCS
         .lock()
         .expect("code")
@@ -1561,7 +1573,11 @@ pub(crate) fn pending_approvals(state: &AppState) -> Vec<Value> {
         .collect();
     let mut out = Vec::new();
     for (id, p) in procs {
-        let title = load(state, &id).map(|s| s.title).unwrap_or_default();
+        let Some(s) = load(state, &id) else { continue };
+        if !owner && !s.sandbox {
+            continue;
+        }
+        let title = s.title;
         for (rid, (tool, input)) in p.pending.lock().expect("code").iter() {
             out.push(json!({
                 "id": format!("code:{id}:{rid}"), "kind": "code", "session": id, "request_id": rid, "where": title,
@@ -1585,7 +1601,13 @@ fn describe(state: &AppState, s: &Session) -> Value {
 }
 
 /// `GET /code`.
-pub(crate) async fn get_code(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
+/// A member sees only sandboxed sessions ([`may_use`]).
+pub(crate) async fn get_code(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
+) -> Json<Value> {
+    let owner = caller.owner();
     let check = crate::coding::check(&state).await;
     let st = state.clone();
     let port = state.ctrl_port();
@@ -1595,6 +1617,7 @@ pub(crate) async fn get_code(State(state): State<AppState>, _auth: BearerAuth) -
             .flatten()
             .flatten()
             .filter_map(|e| load(&st, &e.file_name().to_string_lossy()))
+            .filter(|s| owner || s.sandbox)
             .collect();
         v.sort_by_key(|s| std::cmp::Reverse(s.last.max(s.created)));
         let (image, gate) = sandbox_ready(port);
@@ -1608,6 +1631,8 @@ pub(crate) async fn get_code(State(state): State<AppState>, _auth: BearerAuth) -
     let setup = SETUP.lock().expect("code").clone();
     Json(json!({
         "sessions": sessions, "check": check, "claude": claude_bin().is_some(), "home": home(),
+        // Members get the sandbox only (`POST /code/sessions`).
+        "outside_sandbox": owner,
         "sandbox": { "ready": sandbox["image"] == true && sandbox["gate"] == true, "image": sandbox["image"], "gate": sandbox["gate"],
                      "step": setup.as_ref().map(|(s, _)| s.clone()), "error": setup.and_then(|(_, e)| e) },
     }))
@@ -1651,6 +1676,9 @@ fn git_dirs(folder: &Path) -> Vec<(String, Option<PathBuf>)> {
     }
     // Can't be mounted (crate::coding::allowed_folder).
     v.retain(|r| !r.contains([':', ',', '\n']));
+    // Only git directories really in the project: a sandbox can make `x/.git` a
+    // link to any folder on the box, and docker would mount where it points.
+    v.retain(|r| inside(folder, &folder.join(r)));
     v.into_iter()
         .map(|r| {
             let p = folder.join(&r);
@@ -1658,6 +1686,16 @@ fn git_dirs(folder: &Path) -> Vec<(String, Option<PathBuf>)> {
             (r, d)
         })
         .collect()
+}
+
+/// Whether `p` is really inside `folder`, links followed. A sandbox can put a
+/// link to anywhere on the box in its project; reading or mounting one from
+/// out here would hand the sandbox what it points at.
+fn inside(folder: &Path, p: &Path) -> bool {
+    match (std::fs::canonicalize(folder), std::fs::canonicalize(p)) {
+        (Ok(f), Ok(q)) => q.starts_with(f),
+        _ => false,
+    }
 }
 
 /// What a sandboxed session's model can write, for the git run here (crate::safegit).
@@ -1691,14 +1729,57 @@ fn yes() -> bool {
     true
 }
 
+/// What a member hears asking for Code outside the sandbox.
+const OUTSIDE_FOR_OWNERS: &str = "Only an owner of this box can run Code outside the sandbox: there it runs as the box's own account, which can read TT Station's keys and settings. Keep the sandbox on, or ask an owner.";
+
+/// What a member hears reaching for a session that runs outside the sandbox.
+const SESSION_FOR_OWNERS: &str = "Only an owner of this box can use this session: it runs outside the sandbox, as the box's own account.";
+
+/// Whether `caller` may use session `id`: an owner any, a member only a
+/// sandboxed one (refusals are logged, `crate::audit`). An unknown id passes,
+/// for the route's own "No such session".
+fn may_use(state: &AppState, caller: &Caller, id: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    if caller.owner() {
+        return Ok(());
+    }
+    match load(state, id) {
+        Some(s) if !s.sandbox => {
+            crate::audit::record_as(
+                state,
+                &caller.actor(),
+                "denied",
+                &format!("Code session {} (outside the sandbox)", s.title),
+                "denied",
+            );
+            Err(err(StatusCode::FORBIDDEN, SESSION_FOR_OWNERS))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// `POST /code/sessions`.
 pub(crate) async fn post_session(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     Json(b): Json<NewSession>,
 ) -> Reply {
-    let folder =
-        crate::coding::allowed_folder(&b.folder).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
+    if !b.sandbox && !caller.owner() {
+        crate::audit::record_as(
+            &state,
+            &caller.actor(),
+            "denied",
+            "Code outside the sandbox",
+            "denied",
+        );
+        return Err(err(StatusCode::FORBIDDEN, OUTSIDE_FOR_OWNERS));
+    }
+    let folder = if caller.owner() {
+        crate::coding::allowed_folder(&b.folder).map_err(|e| err(StatusCode::BAD_REQUEST, e))?
+    } else {
+        crate::coding::member_folder(&state, &b.folder)
+            .map_err(|e| err(StatusCode::FORBIDDEN, e))?
+    };
     let policy = b.policy.unwrap_or_else(|| "ask".into());
     if !["ask", "edits", "auto"].contains(&policy.as_str()) {
         return Err(err(
@@ -1739,6 +1820,14 @@ pub(crate) async fn post_session(
         think: b.think,
     };
     save(&state, &s);
+    if !s.sandbox {
+        crate::audit::record(
+            &state,
+            "host_run",
+            &format!("Code outside the sandbox in {}", s.folder),
+            "ok",
+        );
+    }
     event(
         &state,
         &id,
@@ -1757,9 +1846,11 @@ pub struct After {
 pub(crate) async fn get_session(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
     Query(q): Query<After>,
 ) -> Reply {
+    may_use(&state, &caller, &id)?;
     if !valid_id(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such session."));
     }
@@ -1793,9 +1884,11 @@ pub struct Message {
 pub(crate) async fn post_message(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
     Json(b): Json<Message>,
 ) -> Reply {
+    may_use(&state, &caller, &id)?;
     let s = load(&state, &id)
         .filter(|_| valid_id(&id))
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
@@ -1921,9 +2014,11 @@ pub struct Approve {
 pub(crate) async fn post_approve(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
     Json(b): Json<Approve>,
 ) -> Reply {
+    may_use(&state, &caller, &id)?;
     let p = proc_of(&id)
         .ok_or_else(|| err(StatusCode::CONFLICT, "That request isn't waiting any more."))?;
     let taken = p.pending.lock().expect("code").remove(&b.request_id);
@@ -1956,8 +2051,10 @@ pub(crate) async fn post_approve(
 pub(crate) async fn post_interrupt(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
+    may_use(&state, &caller, &id)?;
     let p =
         proc_of(&id).ok_or_else(|| err(StatusCode::CONFLICT, "It isn't working on anything."))?;
     if !p.busy.load(Ordering::SeqCst) {
@@ -1993,10 +2090,12 @@ fn kill(p: &Proc) {
 
 /// `POST /code/sessions/{id}/stop`: end Claude Code for this session (the conversation is kept).
 pub(crate) async fn post_stop(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
+    may_use(&state, &caller, &id)?;
     if let Some(p) = proc_of(&id) {
         forget_proc(&id, &p);
         tokio::task::spawn_blocking(move || kill(&p)).await.ok();
@@ -2008,8 +2107,10 @@ pub(crate) async fn post_stop(
 pub(crate) async fn delete_session(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
+    may_use(&state, &caller, &id)?;
     if !valid_id(&id) || load(&state, &id).is_none() {
         return Err(err(StatusCode::NOT_FOUND, "No such session."));
     }
@@ -2035,8 +2136,10 @@ fn git(
 pub(crate) async fn get_changes(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
+    may_use(&state, &caller, &id)?;
     let s = load(&state, &id)
         .filter(|_| valid_id(&id))
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
@@ -2053,7 +2156,11 @@ pub(crate) async fn get_changes(
         let files = crate::safegit::changed_files(Path::new(&s.folder), r);
         for f in files.iter().filter(|l| l.starts_with("??")).take(20) {
             let name = f[3..].trim();
-            if let Ok(text) = std::fs::read_to_string(Path::new(&s.folder).join(name)) {
+            let path = Path::new(&s.folder).join(name);
+            if !inside(Path::new(&s.folder), &path) {
+                continue;
+            }
+            if let Ok(text) = std::fs::read_to_string(&path) {
                 if text.len() < 40_000 {
                     diff.push_str(&format!("\ndiff --git a/{name} b/{name}\nnew file\n--- /dev/null\n+++ b/{name}\n"));
                     for l in text.lines() {
@@ -2110,6 +2217,7 @@ fn edited_changes(r: Option<&crate::safegit::Reach>, s: &Session, events: &Path)
             &[&["diff"], crate::safegit::DIFF, &["HEAD", "--", &abs]].concat(),
         ) {
             Ok(d) if !d.trim().is_empty() => diff.push_str(&d),
+            _ if !inside(root, &path) => {}
             _ => {
                 if let Ok(text) = std::fs::read_to_string(&path)
                     .map(|t| t.chars().take(40_000).collect::<String>())
@@ -2164,9 +2272,11 @@ pub struct Commit {
 pub(crate) async fn post_commit(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
     Json(b): Json<Commit>,
 ) -> Reply {
+    may_use(&state, &caller, &id)?;
     let s = load(&state, &id)
         .filter(|_| valid_id(&id))
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
@@ -2213,8 +2323,10 @@ pub(crate) async fn post_commit(
 pub(crate) async fn post_discard(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
+    may_use(&state, &caller, &id)?;
     let s = load(&state, &id)
         .filter(|_| valid_id(&id))
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
@@ -2235,7 +2347,16 @@ pub(crate) async fn post_discard(
             .map(str::trim)
             .filter(|f| made.contains(*f))
         {
-            if std::fs::remove_file(Path::new(&s.folder).join(f)).is_ok() {
+            let path = Path::new(&s.folder).join(f);
+            // The file itself (a link is removed, not what it points at), in a
+            // folder that's really in the project.
+            if !path
+                .parent()
+                .is_some_and(|d| inside(Path::new(&s.folder), d))
+            {
+                continue;
+            }
+            if std::fs::remove_file(&path).is_ok() {
                 n += 1;
             }
         }
@@ -2270,9 +2391,11 @@ pub struct Settings {
 pub(crate) async fn post_settings(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
     Json(b): Json<Settings>,
 ) -> Reply {
+    may_use(&state, &caller, &id)?;
     if !valid_id(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such session."));
     }
@@ -2301,9 +2424,11 @@ pub struct Forget {
 pub(crate) async fn post_forget(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
     Json(b): Json<Forget>,
 ) -> Reply {
+    may_use(&state, &caller, &id)?;
     if !valid_id(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such session."));
     }
@@ -2321,9 +2446,11 @@ pub struct Rename {
 pub(crate) async fn post_rename(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
     Json(b): Json<Rename>,
 ) -> Reply {
+    may_use(&state, &caller, &id)?;
     if !valid_id(&id) {
         return Err(err(StatusCode::NOT_FOUND, "No such session."));
     }
@@ -2583,5 +2710,27 @@ mod tests {
             ]
         );
         assert!(git_dirs(&t.path().join("none")).is_empty());
+    }
+
+    #[test]
+    fn a_sandbox_cannot_link_its_way_out_of_the_project() {
+        let t = tempfile::tempdir().unwrap();
+        let secret = t.path().join("config");
+        std::fs::create_dir_all(&secret).unwrap();
+        std::fs::write(secret.join("token"), "s3cret").unwrap();
+        let many = t.path().join("many");
+        std::fs::create_dir_all(many.join("a/.git")).unwrap();
+        // What a model in the sandbox could leave: `q/.git` linking to a folder
+        // on the box, and a link among the project's files.
+        std::fs::create_dir_all(many.join("q")).unwrap();
+        std::os::unix::fs::symlink(&secret, many.join("q/.git")).unwrap();
+        std::os::unix::fs::symlink(secret.join("token"), many.join("leak")).unwrap();
+        // The link isn't mounted into the next sandbox...
+        let got: Vec<String> = git_dirs(&many).into_iter().map(|(r, _)| r).collect();
+        assert_eq!(got, vec!["a/.git".to_string()]);
+        // ...nor read for Changes.
+        assert!(!inside(&many, &many.join("leak")));
+        assert!(!inside(&many, &many.join("q/.git")));
+        assert!(inside(&many, &many.join("a/.git")));
     }
 }
