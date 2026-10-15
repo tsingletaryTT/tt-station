@@ -88,12 +88,14 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 USER coder
 WORKDIR /work
 "#;
-/// The gate: forwards the model API (`/v1/…`) to the box and refuses everything else.
+/// The gate: forwards the model API (`/v1/…`) to the box and refuses everything else,
+/// including paths that only look like `/v1/` (dot segments, encoded slashes or
+/// dots, backslashes) in case anything between here and the agent normalizes them.
 /// A client that goes away (Stop) ends the model request too; an upstream that
 /// fails mid-reply ends only that reply, never the gate.
-const GATE_JS: &str = r#"const http=require("http");const T=new URL(process.env.TARGET);http.createServer((q,s)=>{if(!q.url.startsWith("/v1/")){s.writeHead(403,{"content-type":"text/plain"});return s.end("Only the model API is reachable from the sandbox.");}const p=http.request({host:T.hostname,port:T.port,path:q.url,method:q.method,headers:{...q.headers,host:T.host}},r=>{r.on("error",()=>s.destroy());if(!s.headersSent)s.writeHead(r.statusCode,r.headers);r.pipe(s);});p.on("error",e=>{if(!s.headersSent){s.writeHead(502,{"content-type":"text/plain"});s.end(String(e));}else s.destroy();});s.on("close",()=>p.destroy());q.on("error",()=>p.destroy());q.pipe(p);}).listen(8765,"0.0.0.0");"#;
+const GATE_JS: &str = r#"const http=require("http");const T=new URL(process.env.TARGET);http.createServer((q,s)=>{const u=q.url.split("?")[0];if(!u.startsWith("/v1/")||/(^|\/)\.{1,2}(\/|$)|%2e|%2f|%5c|\\/i.test(u)){s.writeHead(403,{"content-type":"text/plain"});return s.end("Only the model API is reachable from the sandbox.");}const p=http.request({host:T.hostname,port:T.port,path:q.url,method:q.method,headers:{...q.headers,host:T.host}},r=>{r.on("error",()=>s.destroy());if(!s.headersSent)s.writeHead(r.statusCode,r.headers);r.pipe(s);});p.on("error",e=>{if(!s.headersSent){s.writeHead(502,{"content-type":"text/plain"});s.end(String(e));}else s.destroy();});s.on("close",()=>p.destroy());q.on("error",()=>p.destroy());q.pipe(p);}).listen(8765,"0.0.0.0");"#;
 /// Bump when GATE_JS changes: a gate from another version (or for another port) is replaced.
-const GATE_VERSION: &str = "2";
+const GATE_VERSION: &str = "3";
 
 fn root(state: &AppState) -> PathBuf {
     state.config_dir().join("code")
