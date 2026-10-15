@@ -136,7 +136,7 @@ async fn app_keys_unlock_an_openai_api_that_follows_both_models() {
     assert!(body["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("Connect apps"));
+        .contains("App keys"));
 
     // Only a paired device can mint keys.
     let denied = h

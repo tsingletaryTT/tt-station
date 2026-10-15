@@ -90,6 +90,11 @@ const PAIR_TTL: Duration = Duration::from_secs(120);
 /// fat-fingers the code a few real chances to correct themselves.
 pub const MAX_PAIR_ATTEMPTS: u32 = 5;
 
+/// How many `/pair/init` calls the box accepts per minute. Anyone on the
+/// network can ask, and each ask puts a code in front of the owner (desktop
+/// app, phone, journal), so this caps how hard a stranger can spam them.
+const PAIR_INITS_PER_MINUTE: usize = 5;
+
 /// Seam for re-publishing this box's advertised `status` whenever it
 /// changes (`/run` succeeding, `/stop` completing), so the mDNS TXT record
 /// `tt-station discover` reads over the LAN never goes stale the way it did before
@@ -151,6 +156,10 @@ struct Inner {
     /// `wrong_attempts` hit `MAX_PAIR_ATTEMPTS` -- by `complete_pair`, so
     /// this map only ever holds pairing attempts that are still "live".
     pending_pairs: Mutex<HashMap<String, (String, Instant, u32)>>,
+    /// When recent `/pair/init` calls arrived, for `PAIR_INITS_PER_MINUTE`.
+    /// Per state rather than a process-wide static, so each agent (and each
+    /// test harness) has its own budget.
+    recent_pair_inits: Mutex<Vec<Instant>>,
     /// Bearer tokens minted by successful `/pair/complete` calls. Task 10's
     /// control routes will check incoming requests against this set; for
     /// now `/pair/complete` is the only thing that populates it.
@@ -527,6 +536,7 @@ impl AppState {
                 endpoint: Mutex::new(None),
                 backend,
                 pending_pairs: Mutex::new(HashMap::new()),
+                recent_pair_inits: Mutex::new(Vec::new()),
                 tokens: Mutex::new(tokens),
                 token_store,
                 write_lock: Mutex::new(()),
@@ -1982,6 +1992,22 @@ impl AppState {
         pending.insert(pair_id, (code, expiry, 0));
     }
 
+    /// Take one `/pair/init` from this minute's budget; `false` when it's spent.
+    fn allow_pair_init(&self) -> bool {
+        let now = Instant::now();
+        let mut recent = self
+            .inner
+            .recent_pair_inits
+            .lock()
+            .expect("recent_pair_inits mutex poisoned");
+        recent.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+        if recent.len() >= PAIR_INITS_PER_MINUTE {
+            return false;
+        }
+        recent.push(now);
+        true
+    }
+
     /// Check `code` against the pending pairing attempt for `pair_id`.
     ///
     /// Returns `true` only when `pair_id` is known, unexpired, and `code`
@@ -2473,17 +2499,12 @@ struct PairInitResponse {
 async fn pair_init(
     axum::extract::State(state): axum::extract::State<AppState>,
     body: axum::body::Bytes,
-) -> Result<Json<PairInitResponse>, StatusCode> {
-    // Anyone on the network can ask, and each ask notifies the owner: a few a minute at most.
-    static RECENT: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
-    {
-        let now = unix_now();
-        let mut recent = RECENT.lock().expect("pair init");
-        recent.retain(|t| now.saturating_sub(*t) < 60);
-        if recent.len() >= 5 {
-            return Err(StatusCode::TOO_MANY_REQUESTS);
-        }
-        recent.push(now);
+) -> Result<Json<PairInitResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if !state.allow_pair_init() {
+        return Err(tt_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many pairing requests in the last minute. Wait a minute and try again.",
+        ));
     }
     let pair_id = pairing::issue_pair_id();
     let code = pairing::issue_code();
@@ -4370,7 +4391,8 @@ async fn metrics_history(
 }
 
 /// `GET /metrics/now` (unauthed): the latest sample, the live inference view
-/// (phase, throughput, latency, media counters) and the energy/token totals.
+/// (phase, throughput, latency, media counters), the energy/token totals, and
+/// how well each model's tool calls fit their schemas (`/v1/messages`).
 async fn metrics_now(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Json<serde_json::Value> {
@@ -4379,6 +4401,7 @@ async fn metrics_now(
         "point": history.latest(),
         "inference": history.inference(),
         "totals": history.totals(),
+        "tool_calls": crate::anthropic::tool_call_health(),
     }))
 }
 

@@ -159,7 +159,10 @@ pub fn to_openai(req: &Value, model: &str) -> Value {
 
 fn stop_reason(finish: Option<&str>, has_tools: bool) -> &'static str {
     match finish {
-        Some("tool_calls") => "tool_use",
+        // vLLM can say `tool_calls` with no call in the reply (gpt-oss declining
+        // under tool_choice "required"); "tool_use" with nothing to run would
+        // leave the client waiting on a call that isn't there.
+        Some("tool_calls") if has_tools => "tool_use",
         Some("length") => "max_tokens",
         Some("stop") if has_tools => "tool_use",
         _ => "end_turn",
@@ -178,6 +181,11 @@ fn parse_args(args: &str, finished: bool) -> Value {
 
 /// An OpenAI chat completion as an Anthropic message.
 pub fn from_openai(resp: &Value, model: &str) -> Value {
+    from_openai_checked(resp, model, &ToolCheck::default())
+}
+
+/// [`from_openai`], with its tool calls checked against the request's tools.
+pub fn from_openai_checked(resp: &Value, model: &str, check: &ToolCheck) -> Value {
     let choice = &resp["choices"][0];
     let msg = &choice["message"];
     let mut content: Vec<Value> = Vec::new();
@@ -197,15 +205,18 @@ pub fn from_openai(resp: &Value, model: &str) -> Value {
         content.push(json!({ "type": "text", "text": text }));
     }
     for c in &calls {
+        let input = parse_args(c["function"]["arguments"].as_str().unwrap_or("{}"), choice["finish_reason"] != "length");
+        let (name, input, _) = check.call(c["function"]["name"].as_str().unwrap_or(""), input, false);
         content.push(json!({
             "type": "tool_use",
             "id": c["id"].as_str().map(str::to_string).unwrap_or_else(|| format!("toolu_{}", &crate::pairing::issue_pair_id()[..20])),
-            "name": c["function"]["name"],
-            "input": parse_args(c["function"]["arguments"].as_str().unwrap_or("{}"), choice["finish_reason"] != "length"),
+            "name": name,
+            "input": input,
         }));
     }
     let has_tools = !calls.is_empty() || leaked.is_some();
     if let Some((name, input)) = leaked {
+        let (name, input, _) = check.call(&name, input, true);
         content.push(json!({ "type": "tool_use", "id": format!("toolu_{}", &crate::pairing::issue_pair_id()[..20]), "name": name, "input": input }));
     }
     json!({
@@ -341,6 +352,254 @@ fn balanced_object(s: &str) -> &str {
     s
 }
 
+// ---------------------------------------------------------------- tool calls checked against their schemas
+//
+// A local model sometimes calls a tool in a way that doesn't fit the schema the
+// client sent: a name that isn't one of the tools, a parameter the tool doesn't
+// have, a number written as a string. Claude Code rejects such a call and the
+// model tries again, a whole round trip later. So each call is checked against
+// the request's tools here, and mended only where the mend can't change what
+// the model meant:
+//
+// - a tool name that matches exactly one real tool when case is ignored
+//   (`read` for `Read`): there is no other tool it could have meant;
+// - a string holding a clean JSON number or boolean where the schema wants
+//   that type (`"50"` for a number): the same value, quoted;
+// - a string holding JSON where the schema wants an object or array: the same
+//   value, encoded once too often.
+//
+// Nothing is guessed. A parameter the tool doesn't have (`line_start` where
+// Read has `offset`) is left alone, never renamed or dropped: dropping it would
+// quietly read the whole file instead. Such a call goes to the client as the
+// model wrote it, and the client's error tells the model what was wrong, which
+// is the best way it has to learn. Every call is counted, per served model, for
+// `tool_call_health`.
+
+/// How a tool call compared with its tool's schema.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallOutcome {
+    Valid,
+    Repaired,
+    Invalid,
+}
+
+/// Tool-call counts for one served model since the agent started.
+#[derive(Clone, Copy, Default)]
+struct CallCounts {
+    valid: u64,
+    repaired: u64,
+    invalid: u64,
+    /// Calls the model wrote as text, salvaged (also counted in the three above).
+    leaked: u64,
+}
+
+/// Keyed by the served model's id, which comes from the box, not the client,
+/// so it stays a handful of entries. Locked once per tool call, briefly.
+static CALL_COUNTS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, CallCounts>>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// How well each served model's `/v1/messages` tool calls have fit their
+/// schemas since the agent started: `[{model, calls, valid, repaired, invalid,
+/// leaked_as_text}]`. `calls = valid + repaired + invalid`; `leaked_as_text`
+/// are calls the model wrote as text that became calls, counted in those too.
+pub fn tool_call_health() -> Vec<Value> {
+    let counts = CALL_COUNTS.lock().expect("call counts").clone();
+    let mut out: Vec<Value> = counts
+        .into_iter()
+        .map(|(model, c)| json!({
+            "model": model, "calls": c.valid + c.repaired + c.invalid,
+            "valid": c.valid, "repaired": c.repaired, "invalid": c.invalid, "leaked_as_text": c.leaked,
+        }))
+        .collect();
+    out.sort_by(|a, b| a["model"].as_str().cmp(&b["model"].as_str()));
+    out
+}
+
+/// The tools of one request, to check that request's calls against.
+#[derive(Default)]
+pub struct ToolCheck {
+    /// The served model the counts go under; `None` checks nothing.
+    model: Option<String>,
+    /// Tool name → its input schema.
+    schemas: HashMap<String, Value>,
+    /// Stream only: block index → (name as the model wrote it, written as text).
+    open: HashMap<usize, (String, bool)>,
+}
+
+impl ToolCheck {
+    /// Check calls against an Anthropic request's `tools`, counting them under `served_model`.
+    pub fn new(tools: &Value, served_model: &str) -> Self {
+        let schemas = tools
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["input_schema"].is_object())
+            .filter_map(|t| Some((t["name"].as_str()?.to_string(), t["input_schema"].clone())))
+            .collect();
+        ToolCheck { model: Some(served_model.to_string()), schemas, open: HashMap::new() }
+    }
+
+    /// The tool `name` means: itself, or the one tool it matches ignoring case.
+    fn resolve(&self, name: &str) -> Option<String> {
+        if self.schemas.contains_key(name) {
+            return Some(name.to_string());
+        }
+        let mut alike = self.schemas.keys().filter(|k| k.eq_ignore_ascii_case(name));
+        match (alike.next(), alike.next()) {
+            (Some(only), None) => Some(only.clone()),
+            _ => None,
+        }
+    }
+
+    /// The name to show a client at the start of a call, before its input is in.
+    pub fn name(&self, name: &str) -> String {
+        match &self.model {
+            Some(_) => self.resolve(name).unwrap_or_else(|| name.to_string()),
+            None => name.to_string(),
+        }
+    }
+
+    /// Check one finished call, mend what can be mended safely, and count it.
+    pub fn call(&self, name: &str, input: Value, leaked: bool) -> (String, Value, CallOutcome) {
+        let Some(model) = &self.model else {
+            return (name.to_string(), input, CallOutcome::Valid);
+        };
+        let (fixed_name, input, outcome, problems) = self.check(name, input);
+        if outcome == CallOutcome::Invalid {
+            // What was wrong, never the arguments themselves (they can hold a file's content).
+            eprintln!("tt-station-agentd: {model} called {name} in a way it doesn't take: {}", problems.join(", "));
+        }
+        let mut counts = CALL_COUNTS.lock().expect("call counts");
+        let c = counts.entry(model.clone()).or_default();
+        match outcome {
+            CallOutcome::Valid => c.valid += 1,
+            CallOutcome::Repaired => c.repaired += 1,
+            CallOutcome::Invalid => c.invalid += 1,
+        }
+        if leaked {
+            c.leaked += 1;
+        }
+        (fixed_name, input, outcome)
+    }
+
+    /// Stream: a call starts at block `index`; the name to show for it.
+    fn open_call(&mut self, index: usize, name: &str, leaked: bool) -> String {
+        self.open.insert(index, (name.to_string(), leaked));
+        self.name(name)
+    }
+
+    /// Stream: the call at block `index` is whole; its input, mended if it can be.
+    fn close_call(&mut self, index: usize, input: Value) -> Value {
+        match self.open.remove(&index) {
+            Some((name, leaked)) => self.call(&name, input, leaked).1,
+            None => input,
+        }
+    }
+
+    /// The call checked, without counting: (name, input, outcome, what was wrong).
+    fn check(&self, name: &str, mut input: Value) -> (String, Value, CallOutcome, Vec<String>) {
+        let mut problems = Vec::new();
+        let mut repaired = false;
+        let Some(real) = self.resolve(name) else {
+            return (name.to_string(), input, CallOutcome::Invalid, vec![format!("no tool is named {name}")]);
+        };
+        if real != name {
+            repaired = true;
+        }
+        let schema = &self.schemas[&real];
+        let Some(args) = input.as_object_mut() else {
+            return (real, input, CallOutcome::Invalid, vec!["its input isn't an object".into()]);
+        };
+        if args.contains_key("_unparsed_arguments") {
+            return (real, input, CallOutcome::Invalid, vec!["its input isn't JSON".into()]);
+        }
+        let props = schema["properties"].as_object();
+        for key in schema["required"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            if !args.contains_key(key) {
+                problems.push(format!("missing {key}"));
+            }
+        }
+        for (key, value) in args.iter_mut() {
+            let Some(prop) = props.and_then(|p| p.get(key)) else {
+                if schema["additionalProperties"] == false {
+                    problems.push(format!("unexpected {key}"));
+                }
+                continue;
+            };
+            let types = schema_types(prop);
+            if types.is_empty() || types.iter().any(|t| has_type(value, t)) {
+                // Right type; an enum that leaves it out is still wrong.
+            } else if let Some(v) = value.as_str().and_then(|s| unquote(s, &types)) {
+                *value = v;
+                repaired = true;
+            } else {
+                problems.push(format!("{key} should be {}", types.join(" or ")));
+                continue;
+            }
+            if let Some(allowed) = prop["enum"].as_array() {
+                if !allowed.contains(value) {
+                    problems.push(format!("{key} isn't one of its choices"));
+                }
+            }
+        }
+        let outcome = match (problems.is_empty(), repaired) {
+            (false, _) => CallOutcome::Invalid,
+            (true, true) => CallOutcome::Repaired,
+            (true, false) => CallOutcome::Valid,
+        };
+        (real, input, outcome, problems)
+    }
+}
+
+/// A property schema's `type`, as a list (`"string"` or `["string", "null"]`);
+/// empty when it has none (`anyOf` and the like, which aren't checked).
+fn schema_types(prop: &Value) -> Vec<&str> {
+    match &prop["type"] {
+        Value::String(t) => vec![t.as_str()],
+        Value::Array(ts) => ts.iter().filter_map(Value::as_str).collect(),
+        _ => vec![],
+    }
+}
+
+/// Whether `v` is of JSON Schema type `t` (only the top level; an object's
+/// insides aren't looked into).
+fn has_type(v: &Value, t: &str) -> bool {
+    match t {
+        "string" => v.is_string(),
+        // `5.0` is an integer to JSON Schema, and to JavaScript.
+        "integer" => v.is_i64() || v.is_u64() || v.as_f64().is_some_and(|f| f.fract() == 0.0),
+        "number" => v.is_number(),
+        "boolean" => v.is_boolean(),
+        "object" => v.is_object(),
+        "array" => v.is_array(),
+        "null" => v.is_null(),
+        _ => true,
+    }
+}
+
+/// A string that is plainly a value of one of `types`, as that value: `"50"`
+/// for a number, `"true"` for a boolean, `"[1, 2]"` for an array. JSON's own
+/// grammar decides what's clean, so `"5px"`, `"0x10"`, `"NaN"` and `"1,000"`
+/// stay strings (and the call stays invalid).
+fn unquote(s: &str, types: &[&str]) -> Option<Value> {
+    let t = s.trim();
+    if types.contains(&"boolean") {
+        if t.eq_ignore_ascii_case("true") {
+            return Some(Value::Bool(true));
+        }
+        if t.eq_ignore_ascii_case("false") {
+            return Some(Value::Bool(false));
+        }
+    }
+    let parsed: Value = serde_json::from_str(t).ok()?;
+    let fits = match &parsed {
+        Value::Number(n) => types.contains(&"number") || (types.contains(&"integer") && (n.is_i64() || n.is_u64())),
+        Value::Object(_) => types.contains(&"object"),
+        Value::Array(_) => types.contains(&"array"),
+        _ => false,
+    };
+    fits.then_some(parsed)
+}
+
 // ---------------------------------------------------------------- what the model is doing
 
 /// One generation in flight, for the Code window ("thinking", "writing an edit"...).
@@ -391,6 +650,8 @@ pub struct Stream {
     tail: String,
     /// A tool call gpt-oss wrote as text: held from where it starts, made a call at the end.
     leak: Option<String>,
+    /// The request's tools, each call checked against them as its block closes.
+    check: ToolCheck,
 }
 
 fn event(name: &str, data: Value) -> String {
@@ -406,7 +667,7 @@ impl Stream {
         let id = crate::pairing::issue_pair_id();
         LIVE.lock().expect("live").insert(id.clone(), Live { session: None, started: std::time::Instant::now(), chars: 0, phase: "reading", tool: None, input_tokens: 0 });
         Stream { id, model: model.into(), started: false, open: None, next: 0, tools: HashMap::new(), tool_order: Vec::new(), finish: None,
-            input_tokens: 0, output_tokens: 0, in_think: false, show_thinking, tail: String::new(), leak: None }
+            input_tokens: 0, output_tokens: 0, in_think: false, show_thinking, tail: String::new(), leak: None, check: ToolCheck::default() }
     }
 
     /// Which Code session this generation is for.
@@ -414,6 +675,12 @@ impl Stream {
         if let Some(l) = LIVE.lock().expect("live").get_mut(&self.id) {
             l.session = session;
         }
+        self
+    }
+
+    /// Check tool calls against the request's tools (see [`ToolCheck`]).
+    pub fn checking(mut self, check: ToolCheck) -> Self {
+        self.check = check;
         self
     }
 
@@ -453,6 +720,7 @@ impl Stream {
             // Closed up only when the model ended the call itself, not when the
             // token limit cut it off.
             let input = parse_args(&args, self.finish.as_deref() != Some("length"));
+            let input = self.check.close_call(i, input);
             out.push(event("content_block_delta", json!({ "type": "content_block_delta", "index": i, "delta": { "type": "input_json_delta", "partial_json": input.to_string() } })));
         }
         out.push(event("content_block_stop", json!({ "type": "content_block_stop", "index": i })));
@@ -515,7 +783,9 @@ impl Stream {
             if !self.tools.contains_key(&k) {
                 let id = tc["id"].as_str().map(str::to_string).unwrap_or_else(|| format!("toolu_{}", &crate::pairing::issue_pair_id()[..20]));
                 let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
-                let i = self.open_block(&mut out, "tool_use", json!({ "type": "tool_use", "id": id, "name": name, "input": {} }));
+                // `open_block` gives the call the next index.
+                let shown = self.check.open_call(self.next, &name, false);
+                let i = self.open_block(&mut out, "tool_use", json!({ "type": "tool_use", "id": id, "name": shown, "input": {} }));
                 self.tools.insert(k, (i, String::new()));
                 self.tool_order.push(k);
                 self.live("calling", Some(name), 0);
@@ -580,7 +850,9 @@ impl Stream {
             match call {
                 Some((name, input)) => {
                     let id = format!("toolu_{}", &crate::pairing::issue_pair_id()[..20]);
-                    let i = self.open_block(&mut out, "tool_use", json!({ "type": "tool_use", "id": id, "name": name, "input": {} }));
+                    // `open_block` gives the call the next index.
+                    let shown = self.check.open_call(self.next, &name, true);
+                    let i = self.open_block(&mut out, "tool_use", json!({ "type": "tool_use", "id": id, "name": shown, "input": {} }));
                     self.tools.insert(u64::MAX, (i, input.to_string()));
                     self.tool_order.push(u64::MAX);
                 }
@@ -646,11 +918,13 @@ pub(crate) async fn v1_messages(State(state): State<AppState>, auth: GatewayAuth
             Err(e) => return error(StatusCode::BAD_GATEWAY, "api_error", &e.to_string()),
         };
         auth.record(&state, v["usage"]["prompt_tokens"].as_u64().unwrap_or(0), v["usage"]["completion_tokens"].as_u64().unwrap_or(0));
-        return Json(from_openai(&v, &asked)).into_response();
+        let check = ToolCheck::new(&req["tools"], &endpoint.model);
+        return Json(from_openai_checked(&v, &asked, &check)).into_response();
     }
     let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(64);
+    let check = ToolCheck::new(&req["tools"], &endpoint.model);
     tokio::spawn(async move {
-        let mut s = Stream::with_thinking(&asked, thinking).for_session(session);
+        let mut s = Stream::with_thinking(&asked, thinking).for_session(session).checking(check);
         relay(&mut s, upstream, &tx).await;
         let (input, output) = s.tokens();
         auth.record(&state, input, output);
@@ -776,6 +1050,15 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_calls_finish_without_a_call_ends_the_turn() {
+        let resp = json!({ "choices": [{ "finish_reason": "tool_calls", "message": { "content": "I can't do that with these tools." } }], "usage": {} });
+        assert_eq!(from_openai(&resp, "m")["stop_reason"], "end_turn");
+        let mut s = Stream::new("m");
+        s.chunk(&json!({ "choices": [{ "delta": { "content": "I can't." }, "finish_reason": "tool_calls" }] }));
+        assert!(s.finish().join("").contains("\"stop_reason\":\"end_turn\""));
+    }
+
+    #[test]
     fn says_prompt_too_long_only_when_it_is() {
         let kind = |status: u16, msg: &str| {
             let r = upstream_error(status, msg);
@@ -848,6 +1131,170 @@ mod tests {
         }).collect();
         assert_eq!(said, "The commentary track and the assistant");
         assert!(all.join("").contains("\"stop_reason\":\"end_turn\""));
+    }
+
+    /// Tools as Claude Code describes them (trimmed).
+    fn code_tools() -> Value {
+        let obj = |props: Value, required: Value| json!({ "type": "object", "properties": props, "required": required, "additionalProperties": false });
+        json!([
+            { "name": "Read", "input_schema": obj(json!({ "file_path": { "type": "string" }, "offset": { "type": "number" }, "limit": { "type": "integer" } }), json!(["file_path"])) },
+            { "name": "Grep", "input_schema": obj(json!({ "pattern": { "type": "string" }, "-i": { "type": "boolean" }, "output_mode": { "type": "string", "enum": ["content", "files_with_matches", "count"] } }), json!(["pattern"])) },
+            { "name": "TodoWrite", "input_schema": obj(json!({ "todos": { "type": "array" } }), json!(["todos"])) },
+            { "name": "Task", "input_schema": obj(json!({ "options": { "type": "object" }, "note": { "type": ["string", "null"] } }), json!([])) },
+            { "name": "Loose", "input_schema": { "type": "object", "properties": { "n": { "type": "number" } } } },
+        ])
+    }
+
+    fn checked(name: &str, input: Value) -> (String, Value, CallOutcome) {
+        let (name, input, outcome, _) = ToolCheck::new(&code_tools(), "unit").check(name, input);
+        (name, input, outcome)
+    }
+
+    #[test]
+    fn a_call_that_fits_is_left_alone() {
+        let input = json!({ "file_path": "a.rs", "offset": 10, "limit": 5 });
+        assert_eq!(checked("Read", input.clone()), ("Read".into(), input, CallOutcome::Valid));
+        // 5.0 is an integer, as far as JSON Schema and JavaScript go.
+        assert_eq!(checked("Read", json!({ "file_path": "a", "limit": 5.0 })).2, CallOutcome::Valid);
+        // Properties a schema doesn't close off may be anything.
+        assert_eq!(checked("Loose", json!({ "n": 1, "extra": "x" })).2, CallOutcome::Valid);
+    }
+
+    #[test]
+    fn a_tool_name_in_the_wrong_case_is_the_one_tool_it_matches() {
+        assert_eq!(checked("read", json!({ "file_path": "a" })).0, "Read");
+        assert_eq!(checked("GREP", json!({ "pattern": "x" })).2, CallOutcome::Repaired);
+        // Two tools that differ only in case: no telling which was meant.
+        let tools = json!([{ "name": "Read", "input_schema": { "type": "object" } }, { "name": "READ", "input_schema": { "type": "object" } }]);
+        let (name, _, outcome, _) = ToolCheck::new(&tools, "unit").check("read", json!({}));
+        assert_eq!((name.as_str(), outcome), ("read", CallOutcome::Invalid));
+    }
+
+    #[test]
+    fn an_invented_tool_is_not_mapped_to_a_real_one() {
+        let (name, input, outcome) = checked("Search", json!({ "pattern": "x" }));
+        assert_eq!((name.as_str(), outcome), ("Search", CallOutcome::Invalid));
+        assert_eq!(input, json!({ "pattern": "x" }));
+    }
+
+    #[test]
+    fn an_invented_parameter_is_never_renamed_or_dropped() {
+        let input = json!({ "file_path": "a.rs", "line_start": 10, "line_end": 20 });
+        let (_, out, outcome, problems) = ToolCheck::new(&code_tools(), "unit").check("Read", input.clone());
+        assert_eq!(outcome, CallOutcome::Invalid);
+        assert_eq!(out, input, "line_start stays line_start: dropping it would read the whole file");
+        assert_eq!(problems, ["unexpected line_end", "unexpected line_start"]);
+        assert_eq!(checked("Read", json!({ "offset": 1 })).2, CallOutcome::Invalid, "file_path is required");
+    }
+
+    #[test]
+    fn a_clean_number_or_boolean_in_a_string_is_unquoted() {
+        let (_, input, outcome) = checked("Read", json!({ "file_path": "a", "offset": "470", "limit": " 50 " }));
+        assert_eq!(outcome, CallOutcome::Repaired);
+        assert_eq!(input, json!({ "file_path": "a", "offset": 470, "limit": 50 }));
+        assert_eq!(checked("Read", json!({ "file_path": "a", "offset": "-1.5" })).1["offset"], -1.5);
+        assert_eq!(checked("Grep", json!({ "pattern": "x", "-i": "True" })).1["-i"], true);
+        // A string where the schema takes a string is never touched.
+        assert_eq!(checked("Read", json!({ "file_path": "123" })).1["file_path"], "123");
+        assert_eq!(checked("Task", json!({ "note": "42" })).2, CallOutcome::Valid);
+    }
+
+    #[test]
+    fn a_number_that_isnt_clean_stays_a_string() {
+        for bad in ["5px", "0x10", "NaN", "1,000", "", "ten", "1e400"] {
+            let (_, input, outcome) = checked("Read", json!({ "file_path": "a", "offset": bad }));
+            assert_eq!((input["offset"].as_str(), outcome), (Some(bad), CallOutcome::Invalid), "{bad:?}");
+        }
+        // Not an integer, so not a limit.
+        assert_eq!(checked("Read", json!({ "file_path": "a", "limit": "5.5" })).2, CallOutcome::Invalid);
+        assert_eq!(checked("Grep", json!({ "pattern": "x", "-i": "yes" })).2, CallOutcome::Invalid);
+        // A number where a string goes isn't turned into one: not a repair this makes.
+        assert_eq!(checked("Read", json!({ "file_path": 7 })).2, CallOutcome::Invalid);
+    }
+
+    #[test]
+    fn json_encoded_once_too_often_is_decoded() {
+        let (_, input, outcome) = checked("TodoWrite", json!({ "todos": "[{\"content\": \"a\"}]" }));
+        assert_eq!(outcome, CallOutcome::Repaired);
+        assert_eq!(input["todos"][0]["content"], "a");
+        assert_eq!(checked("Task", json!({ "options": "{\"x\": 1}" })).1["options"]["x"], 1);
+        // The wrong shape, or not JSON at all, stays as it was.
+        assert_eq!(checked("TodoWrite", json!({ "todos": "{\"content\": \"a\"}" })).2, CallOutcome::Invalid);
+        assert_eq!(checked("TodoWrite", json!({ "todos": "buy milk" })).2, CallOutcome::Invalid);
+    }
+
+    #[test]
+    fn enums_and_unparsed_arguments_are_invalid() {
+        assert_eq!(checked("Grep", json!({ "pattern": "x", "output_mode": "content" })).2, CallOutcome::Valid);
+        assert_eq!(checked("Grep", json!({ "pattern": "x", "output_mode": "lines" })).2, CallOutcome::Invalid);
+        assert_eq!(checked("Read", json!({ "_unparsed_arguments": "{\"file" })).2, CallOutcome::Invalid);
+    }
+
+    fn health(model: &str) -> Value {
+        tool_call_health().into_iter().find(|h| h["model"] == model).unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn checked_and_counted_without_streaming() {
+        let resp = json!({ "choices": [{ "finish_reason": "tool_calls", "message": { "content": "", "tool_calls": [
+            { "id": "c1", "function": { "name": "read", "arguments": "{\"file_path\":\"a\",\"offset\":\"5\"}" } },
+            { "id": "c2", "function": { "name": "Read", "arguments": "{\"file_path\":\"a\"}" } },
+            { "id": "c3", "function": { "name": "Search", "arguments": "{}" } },
+        ] } }], "usage": {} });
+        let m = from_openai_checked(&resp, "claude", &ToolCheck::new(&code_tools(), "unit-plain"));
+        assert_eq!(m["content"][0]["name"], "Read");
+        assert_eq!(m["content"][0]["input"]["offset"], 5);
+        assert_eq!(m["content"][2]["name"], "Search");
+        let h = health("unit-plain");
+        assert_eq!((h["calls"].as_u64(), h["valid"].as_u64(), h["repaired"].as_u64(), h["invalid"].as_u64()), (Some(3), Some(1), Some(1), Some(1)));
+
+        // A call written as text is checked too, and counted as leaked.
+        let resp = json!({ "choices": [{ "finish_reason": "stop", "message": { "content": LEAKED } }], "usage": {} });
+        let m = from_openai_checked(&resp, "claude", &ToolCheck::new(&code_tools(), "unit-leak"));
+        assert_eq!(m["content"][1]["name"], "Read");
+        let h = health("unit-leak");
+        assert_eq!((h["valid"].as_u64(), h["leaked_as_text"].as_u64()), (Some(1), Some(1)));
+
+        // Without the request's tools nothing is checked or counted.
+        let before = tool_call_health().len();
+        let m = from_openai(&json!({ "choices": [{ "finish_reason": "tool_calls", "message": { "tool_calls": [
+            { "id": "c", "function": { "name": "read", "arguments": "{\"offset\":\"5\"}" } }] } }] }), "claude");
+        assert_eq!((m["content"][0]["name"].as_str(), m["content"][0]["input"]["offset"].as_str()), (Some("read"), Some("5")));
+        assert_eq!(tool_call_health().len(), before);
+    }
+
+    #[test]
+    fn checked_and_counted_while_streaming() {
+        let mut s = Stream::new("m").checking(ToolCheck::new(&code_tools(), "unit-stream"));
+        let mut all = Vec::new();
+        let call = |i: u64, id: Option<&str>, name: Option<&str>, args: &str| {
+            let mut f = json!({ "arguments": args });
+            if let Some(n) = name { f["name"] = json!(n); }
+            json!({ "choices": [{ "delta": { "tool_calls": [{ "index": i, "id": id, "function": f }] } }] })
+        };
+        all.extend(s.chunk(&call(0, Some("c1"), Some("read"), "{\"file_path\": \"a\", ")));
+        all.extend(s.chunk(&call(0, None, None, "\"limit\": \"20\"}")));
+        all.extend(s.chunk(&call(1, Some("c2"), Some("Read"), "{\"file_path\": \"a\", \"line_start\": 3}")));
+        all.extend(s.chunk(&json!({ "choices": [{ "delta": {}, "finish_reason": "tool_calls" }] })));
+        all.extend(s.finish());
+        let events: Vec<Value> = all.iter().map(|e| serde_json::from_str(e.split("data: ").nth(1).unwrap().trim()).unwrap()).collect();
+        let starts: Vec<&Value> = events.iter().filter(|e| e["type"] == "content_block_start").collect();
+        assert_eq!(starts[0]["content_block"]["name"], "Read", "the name is mended before the block starts");
+        let inputs: Vec<Value> = events.iter().filter(|e| e["delta"]["type"] == "input_json_delta")
+            .map(|e| serde_json::from_str(e["delta"]["partial_json"].as_str().unwrap()).unwrap()).collect();
+        assert_eq!(inputs, [json!({ "file_path": "a", "limit": 20 }), json!({ "file_path": "a", "line_start": 3 })]);
+        // Input still goes out once per call, whole, when its block closes.
+        assert_eq!(inputs.len(), 2);
+        let h = health("unit-stream");
+        assert_eq!((h["calls"].as_u64(), h["repaired"].as_u64(), h["invalid"].as_u64()), (Some(2), Some(1), Some(1)));
+
+        // A call gpt-oss wrote as text, streamed.
+        let mut s = Stream::new("m").checking(ToolCheck::new(&code_tools(), "unit-stream-leak"));
+        s.chunk(&json!({ "choices": [{ "delta": { "content": LEAKED.replace("functions.Readjson", "functions.READjson") }, "finish_reason": "stop" }] }));
+        let text = s.finish().join("");
+        assert!(text.contains("\"name\":\"Read\""));
+        let h = health("unit-stream-leak");
+        assert_eq!((h["repaired"].as_u64(), h["leaked_as_text"].as_u64()), (Some(1), Some(1)));
     }
 
     #[test]
