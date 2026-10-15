@@ -788,11 +788,16 @@ struct AgentClient {
     }
 
     /// Finish pairing (over this already-pinned HTTPS client): the bearer token,
-    /// and the certificate the box reports (when it does).
-    func pairComplete(pairID: String, code: String) async throws -> (token: String, tls: TLSPin?) {
+    /// and the certificate the box reports (when it does). `name` and `platform`
+    /// are how this phone appears in the box's device list (Settings → Devices);
+    /// a box from before device tracking ignores them.
+    func pairComplete(pairID: String, code: String, name: String? = nil,
+                      platform: String? = nil) async throws -> (token: String, tls: TLSPin?) {
         struct Response: Decodable { let token: String; let tls: TLSPin? }
-        let response: Response = try await send("POST", "/pair/complete",
-                                                body: ["pair_id": pairID, "code": code], timeout: 10)
+        var body = ["pair_id": pairID, "code": code]
+        if let name, !name.isEmpty { body["name"] = name }
+        if let platform, !platform.isEmpty { body["platform"] = platform }
+        let response: Response = try await send("POST", "/pair/complete", body: body, timeout: 10)
         return (response.token, response.tls)
     }
 
