@@ -217,36 +217,63 @@ Row: **Reset chips**, **Suspend**, **Reboot**, **Shut Down** — deliberately **
 `systemctl suspend|reboot|poweroff` (and the equivalent logind D-Bus calls) normally require an
 interactive polkit authentication prompt for a non-root user — fine at a desktop, useless for a
 headless agent or a box panel with no one there to type a password. tt-station ships a polkit
-**rule** (not a full policy) that grants these specific actions unconditionally to a trusted
-group.
+**rule** (not a full policy) that grants these specific actions to the agent's own account,
+from its systemd user manager.
 
 ### What it grants
 
 `deploy/tt-station-power.rules`:
 
 ```javascript
-// tt-station: let box operators power-manage this machine without an
+// tt-station: let the TT Station agent power-manage this machine without an
 // interactive auth prompt, so `POST /power` (agent) and the box panel's
 // power row work headlessly. Grants ONLY the logind power actions, and only
-// to members of the `sudo` group (the QuietBox run-user is in it). Retarget
-// the group for a different setup — see docs/reference/power-controls.md.
+// to a process that is both:
+//  - run by a member of the `tt-station-power` group. Put the agent's own
+//    account in it and no other: `sudo groupadd -f tt-station-power &&
+//    sudo usermod -aG tt-station-power <user>` (polkit reads the group list
+//    each time; nothing needs restarting); and
+//  - inside that account's systemd user manager (`user@<uid>.service`), where
+//    the agent runs as a user service -- not a login shell (SSH, a console).
+// The limit: polkit can't single out one user service. User units are named
+// by their user, so `system_unit` only ever names the user manager, and any
+// process the agent's account runs under it (its desktop apps too) passes.
+// Needs polkit 121+ for `system_unit`; older polkit never grants. See
+// docs/reference/power-controls.md §6.
 polkit.addRule(function(action, subject) {
-    if (subject.isInGroup("sudo") && (
-            action.id == "org.freedesktop.login1.reboot" ||
+    if ((action.id == "org.freedesktop.login1.reboot" ||
             action.id == "org.freedesktop.login1.reboot-multiple-sessions" ||
             action.id == "org.freedesktop.login1.power-off" ||
             action.id == "org.freedesktop.login1.power-off-multiple-sessions" ||
             action.id == "org.freedesktop.login1.suspend" ||
-            action.id == "org.freedesktop.login1.suspend-multiple-sessions")) {
+            action.id == "org.freedesktop.login1.suspend-multiple-sessions") &&
+        subject.isInGroup("tt-station-power") &&
+        /^user[@-][0-9]+\.service$/.test(subject.system_unit || "")) {
         return polkit.Result.YES;
     }
 });
 ```
 
 Exactly six `org.freedesktop.login1` actions — reboot, reboot-multiple-sessions, power-off,
-power-off-multiple-sessions, suspend, suspend-multiple-sessions — and nothing else. It does not
-touch `reset-chips` (that's `tt-smi -r`, a plain process the run-user already has permission to
-execute; no polkit action is involved).
+power-off-multiple-sessions, suspend, suspend-multiple-sessions — and nothing else, and only when
+both hold:
+
+- **The account is in `tt-station-power`.** Put the agent's account in that group and nobody
+  else. polkit reads the group list on each check, so nothing needs restarting. (Until
+  2026-10 the rule granted the whole `sudo` group: every process of every admin account.)
+- **The process is in that account's systemd user manager** (`subject.system_unit` is
+  `user@<uid>.service`), where the agent runs as a user service. A login shell (SSH, a console)
+  is in a `session-N.scope` instead and doesn't pass.
+
+**The limit, stated plainly:** polkit can't single out the agent's own unit. User units are named
+by their user, so polkit only ever reports the user manager for them (polkit(8),
+`system_unit`), and any process the agent's account runs under its user manager — its desktop
+apps included — passes too. Separating the agent from the rest of the account would take a
+system service (its own unit name, `NoNewPrivileges=`) or a dedicated account. `system_unit`
+needs polkit 121 or newer (Ubuntu 24.04 ships 124); on older polkit the rule never grants.
+
+It does not touch `reset-chips` (that's `tt-smi -r`, a plain process the run-user already has
+permission to execute; no polkit action is involved).
 
 ### Where it installs
 
@@ -268,17 +295,21 @@ locally-edited copy, which dpkg keeps or prompts on conflict), and only `purge` 
 belt-and-suspenders no-op on top of dpkg's own conffile handling, not the only thing standing
 between "purged" and "rule still present".
 
-### The `sudo`-group default, and how to retarget it
+### Setting it up, and retargeting it
 
-The rule targets `subject.isInGroup("sudo")` because that's the group the QuietBox's normal
-run-user (`ttuser`) is already in. If your setup uses a different group (or you want a tighter
-grant, e.g. a dedicated `tt-station-power` group instead of the broad `sudo`), edit the installed
-rule directly:
+The package installs the rule; the account still has to be put in the group, once:
 
 ```bash
-sudo sed -i 's/isInGroup("sudo")/isInGroup("your-group-name")/' \
+sudo groupadd -f tt-station-power
+sudo usermod -aG tt-station-power ttuser   # the account the agent runs as
+```
+
+`GET /power/info` lists this (with the rule install) as a setup step whenever the agent can't
+power-manage the box headlessly. To grant a different group instead, edit the installed rule:
+
+```bash
+sudo sed -i 's/isInGroup("tt-station-power")/isInGroup("your-group-name")/' \
     /etc/polkit-1/rules.d/49-tt-station-power.rules
-sudo systemctl restart polkit   # or just wait — polkit picks up rules.d changes automatically
 ```
 
 (polkit reloads `rules.d/*.rules` automatically on file changes in modern versions; restarting
@@ -286,8 +317,10 @@ the `polkit` service is the fallback if a change doesn't seem to take.) The inst
 dpkg **conffile** (`/etc/polkit-1/rules.d/49-tt-station-power.rules` is listed in
 `debian/tt-station.conffiles`), so a locally-edited copy is **preserved** across a future
 `.deb` upgrade — dpkg detects the local modification and either keeps your version automatically
-or prompts you to resolve the conflict; it is never silently overwritten. `purge` (not a plain
-upgrade or `remove`) still deletes it — see `debian/tt-station.postrm`. If you'd rather not rely
+or prompts you to resolve the conflict; it is never silently overwritten. An unedited copy is
+replaced on upgrade, which is how boxes move from the old `sudo`-group rule to this one: after
+that upgrade, headless power needs the group step above. `purge` (not a plain upgrade or
+`remove`) still deletes it — see `debian/tt-station.postrm`. If you'd rather not rely
 on conffile handling at all (e.g. you're not using the `.deb`, or you just prefer it), carry the
 retargeted rule as a local override in `/etc/polkit-1/rules.d/` under a *different* filename with
 a lower sort prefix instead (rules load in filename order; polkit uses the *first* matching rule
@@ -301,6 +334,7 @@ package hasn't been built), install the rule by hand:
 ```bash
 sudo install -m 644 deploy/tt-station-power.rules \
     /etc/polkit-1/rules.d/49-tt-station-power.rules
+sudo groupadd -f tt-station-power && sudo usermod -aG tt-station-power "$USER"
 ```
 
 No service restart is required in most setups — polkit watches `rules.d/` for changes. Remove it

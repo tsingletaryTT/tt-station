@@ -181,10 +181,11 @@ pub fn setup_steps(r: &PowerReadiness, user: &str, rule_path: &str) -> Vec<Setup
     }
     if !r.headless_power {
         steps.push(SetupStep {
-            why: "Let the agent shut down, restart and sleep the box when nobody is logged in."
+            why: "Let the agent shut down, restart and sleep the box when nobody is logged in (only this account, from its user services)."
                 .to_string(),
+            // The rule grants the `tt-station-power` group: just the agent's account.
             command: format!(
-                "sudo install -m 644 {rule_path} /etc/polkit-1/rules.d/50-tt-station-power.rules"
+                "sudo groupadd -f tt-station-power && sudo usermod -aG tt-station-power {user} && sudo install -m 644 {rule_path} /etc/polkit-1/rules.d/50-tt-station-power.rules"
             ),
         });
     }
@@ -262,7 +263,7 @@ mod tests {
         assert_eq!(steps[0].command, "sudo loginctl enable-linger ttuser");
         assert_eq!(
             steps[1].command,
-            "sudo install -m 644 /r /etc/polkit-1/rules.d/50-tt-station-power.rules"
+            "sudo groupadd -f tt-station-power && sudo usermod -aG tt-station-power ttuser && sudo install -m 644 /r /etc/polkit-1/rules.d/50-tt-station-power.rules"
         );
         assert!(steps[2].why.contains("plug enp10s0"));
 
@@ -275,6 +276,17 @@ mod tests {
         assert!(setup_steps(&challenge, "ttuser", "/r")[0]
             .command
             .contains("polkit"));
+    }
+
+    #[test]
+    fn the_power_rule_is_the_agents_account_only() {
+        // Not every process of every sudo user: the agent's own group, from a
+        // user manager (where the agent runs), for the six logind actions.
+        assert!(!POLKIT_RULE.contains("isInGroup(\"sudo\")"));
+        assert!(POLKIT_RULE.contains("subject.isInGroup(\"tt-station-power\")"));
+        assert!(POLKIT_RULE.contains(r#"/^user[@-][0-9]+\.service$/.test(subject.system_unit || "")"#));
+        assert_eq!(POLKIT_RULE.matches("action.id == \"org.freedesktop.login1.").count(), 6);
+        assert_eq!(POLKIT_RULE.matches("polkit.Result.YES").count(), 1);
     }
 
     #[test]
