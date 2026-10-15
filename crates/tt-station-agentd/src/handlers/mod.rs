@@ -2,6 +2,7 @@
 //! them to paths.
 
 pub mod devices;
+pub mod logs;
 pub mod pairing;
 pub mod power;
 pub mod serving;
