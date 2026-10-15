@@ -467,9 +467,10 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
         ("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), "quietbox".into()),
         ("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), "quietbox".into()),
         ("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), context.to_string()),
-        // Summarize long before the window is full: past ~64K tokens a local model
-        // starts inventing tools and writing its calls as text.
-        ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), context.min(crate::coding::COMPACT_WINDOW).to_string()),
+        // Summarize long before the window is full: past some size a local model
+        // starts inventing tools and writing its calls as text. Where, is measured
+        // per model (the agent reliability eval); 64K when it hasn't been.
+        ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), context.min(crate::evals::compact_window(state, state.endpoint().map(|e| e.model).as_deref())).to_string()),
         ("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), output.to_string()),
         // No single file read or command output may take a big bite of the context:
         // a large file is read in parts (offset, limit) instead.

@@ -52,6 +52,7 @@ pub mod power;
 pub mod prefs;
 pub mod procscan;
 pub mod recorder;
+pub mod reliability;
 pub mod research;
 pub mod skills;
 pub mod routes;

@@ -954,6 +954,8 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .eval-case.ok svg { color: var(--vesper-teal-700); }
 .eval-case.no svg { color: #c53030; }
 .eval-case-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.eval-rel th, .eval-rel td { padding: 6px 8px; font-size: 12px; }
+.eval-rel tbody tr { cursor: default; }
 @media (max-width: 720px) { .eval-head { flex-direction: column; align-items: stretch; } }
 
 /* ---------------------------------------------------------------- App keys */

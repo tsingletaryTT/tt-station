@@ -41,8 +41,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::routes::{AppState, BearerAuth};
 
-/// Where Claude Code compacts a session on the box: local models get unreliable
-/// with tools well before their full window (gpt-oss-20b at ~85K wrote calls as text).
+/// Where Claude Code compacts a session on the box when the model's agent
+/// reliability hasn't been measured (`crate::evals::compact_window`): local models
+/// get unreliable with tools well before their full window (gpt-oss-20b at ~85K
+/// wrote calls as text).
 pub const COMPACT_WINDOW: u64 = 65_536;
 
 type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -147,7 +149,7 @@ fn launch(state: &AppState, agent: &Agent, bin: &Path, task: Option<&str>, folde
                 ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".into()),
                 ("ANTHROPIC_API_KEY", String::new()),
                 ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", window.min(1_000_000).to_string()),
-                ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", window.min(COMPACT_WINDOW).to_string()),
+                ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", window.min(crate::evals::compact_window(state, state.endpoint().map(|e| e.model).as_deref())).to_string()),
             ];
             (cmd, env.into_iter().map(|(a, b)| (a.to_string(), b)).collect())
         }
