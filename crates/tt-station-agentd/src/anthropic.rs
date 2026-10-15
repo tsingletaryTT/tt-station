@@ -157,6 +157,16 @@ pub fn to_openai(req: &Value, model: &str) -> Value {
     out
 }
 
+/// Room to answer within the model's context: prompt plus max_tokens past it is a
+/// 400 from some servers (Claude Code asks for large budgets by default).
+pub(crate) fn fit_output(req: &Value, body: &mut Value, ctx: u64) {
+    let prompt = (req["system"].to_string().len() + req["messages"].to_string().len() + req["tools"].to_string().len()) as u64 / 4;
+    let room = ctx.saturating_sub(prompt + 256).max(1024);
+    if body["max_tokens"].as_u64().is_some_and(|m| m > room) {
+        body["max_tokens"] = json!(room);
+    }
+}
+
 fn stop_reason(finish: Option<&str>, has_tools: bool) -> &'static str {
     match finish {
         Some("tool_calls") => "tool_use",
@@ -287,7 +297,7 @@ fn repair(raw: &str, close: bool) -> Option<Value> {
 const LEAK_MARKERS: [&str; 4] = ["assistantcommentary", "assistantanalysis", "commentary to=", "to=functions."];
 
 /// Where a leaked tool call starts in the text, if one does.
-fn leak_start(text: &str) -> Option<usize> {
+pub(crate) fn leak_start(text: &str) -> Option<usize> {
     LEAK_MARKERS.iter().filter_map(|m| text.find(m)).min()
 }
 
@@ -297,7 +307,7 @@ fn marker_prefix_len(text: &str) -> usize {
 }
 
 /// The last whole tool call in leaked harmony text: its name and arguments.
-fn leaked_call(text: &str) -> Option<(String, Value)> {
+pub(crate) fn leaked_call(text: &str) -> Option<(String, Value)> {
     text.rmatch_indices("to=functions.").find_map(|(i, m)| {
         let rest = &text[i + m.len()..];
         let mut name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
@@ -616,14 +626,8 @@ pub(crate) async fn v1_messages(State(state): State<AppState>, auth: GatewayAuth
     let asked = req["model"].as_str().unwrap_or("quietbox").to_string();
     let thinking = req["thinking"]["type"] == "enabled";
     let mut body = to_openai(&req, &endpoint.model);
-    // Room to answer within the model's context: prompt plus max_tokens past it is a
-    // 400 from the server (Claude Code asks for large budgets by default).
     if let Some(ctx) = crate::coding::known_context(&endpoint.model) {
-        let prompt = (req["system"].to_string().len() + req["messages"].to_string().len() + req["tools"].to_string().len()) as u64 / 4;
-        let room = ctx.saturating_sub(prompt + 256).max(1024);
-        if body["max_tokens"].as_u64().is_some_and(|m| m > room) {
-            body["max_tokens"] = json!(room);
-        }
+        fit_output(&req, &mut body, ctx);
     }
     let url = crate::assistant::chat_completions_url(&endpoint.base_url);
     let client = match reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(900)).build() {

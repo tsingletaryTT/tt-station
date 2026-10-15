@@ -4,7 +4,7 @@
 //! Model check-ups: how good is the model that's serving, at the things this
 //! box uses it for -- and which of the models tried so far to use for what.
 //!
-//! One evaluation runs five small, automatically graded test sets against the
+//! One evaluation runs six, automatically graded test sets against the
 //! served model, plus the speed benchmark ([`crate::bench`]):
 //!
 //! - **Tool use**: picks the right tool with the right arguments, or none when
@@ -15,6 +15,9 @@
 //! - **Following instructions**: JSON only, exact bullet counts, word limits.
 //! - **Long documents**: finds one fact hidden at different depths of a long
 //!   text sized to the model's context.
+//! - **Agent reliability**: valid tool calls in Code-like sessions from 8K to
+//!   120K tokens ([`crate::reliability`]), and from them the window Code
+//!   sessions on this model compact at ([`compact_window`]).
 //!
 //! Results are kept per model (`config/evals/`), and [`recommend`] compares
 //! the latest of each: best for Chat, for Code, for Research, and fastest.
@@ -105,6 +108,9 @@ pub struct Eval {
     pub activity: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+    /// The agent reliability measurements, per prompt size.
+    #[serde(default)]
+    pub reliability: Option<crate::reliability::Report>,
 }
 
 static CURRENT: LazyLock<Mutex<Option<Eval>>> = LazyLock::new(|| Mutex::new(None));
@@ -115,9 +121,24 @@ fn dir(state: &AppState) -> PathBuf {
 }
 
 fn save(state: &AppState, e: &Eval) {
-    let d = dir(state);
-    let _ = std::fs::create_dir_all(&d);
+    save_in(&dir(state), e);
+}
+
+/// Writes an evaluation where [`all`] finds it (`evals/<id>.json`).
+pub fn save_in(d: &std::path::Path, e: &Eval) {
+    let _ = std::fs::create_dir_all(d);
     let _ = std::fs::write(d.join(format!("{}.json", e.id)), serde_json::to_vec_pretty(e).unwrap_or_default());
+}
+
+/// Every graded request of an agent reliability run, next to it (`evals/raw/<id>.json`).
+pub fn save_trials(d: &std::path::Path, id: &str, trials: &[crate::reliability::Trial]) {
+    let raw = d.join("raw");
+    let _ = std::fs::create_dir_all(&raw);
+    let _ = std::fs::write(raw.join(format!("{id}.json")), serde_json::to_vec_pretty(trials).unwrap_or_default());
+}
+
+pub fn new_id() -> String {
+    format!("{}-{}", now(), &crate::pairing::issue_pair_id()[..6])
 }
 
 fn valid_id(id: &str) -> bool {
@@ -580,7 +601,7 @@ async fn long_context(m: &Model, context: Option<u64>) -> Category {
 pub async fn run(state: &AppState) -> Result<Eval, String> {
     let ep = state.endpoint().ok_or("Nothing is serving. Start a chat model, then evaluate it.")?;
     let context = served_context(state).await;
-    let id = format!("{}-{}", now(), &crate::pairing::issue_pair_id()[..6]);
+    let id = new_id();
     {
         let mut cur = CURRENT.lock().expect("evals");
         if cur.as_ref().is_some_and(|e| e.status == "running") {
@@ -594,14 +615,14 @@ pub async fn run(state: &AppState) -> Result<Eval, String> {
         url: crate::assistant::chat_completions_url(&ep.base_url),
         model: ep.model.clone(),
     });
-    let result = steps(state, &m, context).await;
+    let result = steps(state, &m, &ep.base_url, context).await;
     let mut e = CURRENT.lock().expect("evals").take().unwrap_or_default();
     e.finished = Some(now());
     e.activity = None;
     match result {
         Ok(()) => {
             e.status = "done".into();
-            e.overall = (!e.categories.is_empty()).then(|| e.categories.iter().map(Category::score).sum::<f64>() / e.categories.len() as f64);
+            e.overall = overall(&e.categories);
         }
         Err(why) => {
             e.status = if STOP.load(Ordering::SeqCst) { "stopped".into() } else { "failed".into() };
@@ -612,7 +633,14 @@ pub async fn run(state: &AppState) -> Result<Eval, String> {
     Ok(e)
 }
 
-async fn steps(state: &AppState, m: &Arc<Model>, context: Option<u64>) -> Result<(), String> {
+/// The mean of the categories, leaving out agent reliability so check-ups from
+/// before it existed compare evenly with newer ones.
+fn overall(categories: &[Category]) -> Option<f64> {
+    let scored: Vec<&Category> = categories.iter().filter(|c| c.key != "agent").collect();
+    (!scored.is_empty()).then(|| scored.iter().map(|c| c.score()).sum::<f64>() / scored.len() as f64)
+}
+
+async fn steps(state: &AppState, m: &Arc<Model>, base_url: &str, context: Option<u64>) -> Result<(), String> {
     let stop = || if STOP.load(Ordering::SeqCst) { Err("Stopped.".to_string()) } else { Ok(()) };
     match crate::bench::run(state).await {
         Ok(b) => progress(|e| e.speed = Speed { ttft_s: b.ttft_s, single_tps: b.single_tps, batch_tps: b.batch_tps, wh_per_million_tokens: b.wh_per_million_tokens }),
@@ -634,7 +662,67 @@ async fn steps(state: &AppState, m: &Arc<Model>, context: Option<u64>) -> Result
         };
         progress(|e| e.categories.push(c));
     }
+    stop()?;
+    progress(|e| e.activity = Some("Testing agent reliability".into()));
+    let server = crate::reliability::Server { http: m.http.clone(), base_url: base_url.to_string(), model: m.model.clone(), context };
+    let say = |what: String| progress(|e| e.activity = Some(format!("Testing agent reliability: {what}")));
+    let (report, trials) = crate::reliability::run(&server, &crate::reliability::Options::default(), &say, &|| STOP.load(Ordering::SeqCst)).await?;
+    if let Some(id) = CURRENT.lock().expect("evals").as_ref().map(|e| e.id.clone()) {
+        save_trials(&dir(state), &id, &trials);
+    }
+    progress(|e| {
+        e.categories.push(agent_category(&report));
+        e.reliability = Some(report);
+    });
     Ok(())
+}
+
+/// Agent reliability as a category: valid calls of all graded, one line per size.
+pub fn agent_category(r: &crate::reliability::Report) -> Category {
+    let cases = r
+        .rows
+        .iter()
+        .map(|row| {
+            let mut wrong = Vec::new();
+            for (n, what) in [(row.leaked, "leaked as text"), (row.invented, "invented a tool"), (row.invalid_args, "bad arguments"), (row.no_call, "no call"), (row.errors, "request failed")] {
+                if n > 0 {
+                    wrong.push(format!("{n} {what}"));
+                }
+            }
+            Case {
+                name: format!("{}K-token session", row.target / 1024),
+                ok: row.trials >= crate::reliability::MIN_TRIALS && row.valid_rate >= crate::reliability::THRESHOLD,
+                detail: format!("{}/{} valid (95% CI {:.0}–{:.0}%){}", row.valid, row.trials, 100.0 * row.ci_low, 100.0 * row.ci_high, if wrong.is_empty() { String::new() } else { format!("; {}", wrong.join(", ")) }),
+                seconds: row.median_s.unwrap_or(0.0),
+            }
+        })
+        .collect::<Vec<_>>();
+    Category { key: "agent".into(), label: "Agent reliability".into(), passed: r.rows.iter().map(|x| x.valid).sum(), total: r.rows.iter().map(|x| x.trials).sum(), cases }
+}
+
+// ---------------------------------------------------------------- compaction
+
+/// Where Code sessions compact when nothing has been measured for the model.
+pub const DEFAULT_COMPACT_WINDOW: u64 = crate::coding::COMPACT_WINDOW;
+/// Never below this: Claude Code's own prompt and a few files have to fit, or
+/// it compacts again straight after compacting.
+pub const MIN_COMPACT_WINDOW: u64 = 32_768;
+
+/// The window measured for `model`: its latest agent reliability run's
+/// recommendation (see [`crate::reliability::RULE`]), if one was made.
+pub fn measured_window(evals: &[Eval], model: &str) -> Option<u64> {
+    evals
+        .iter()
+        .filter(|e| e.model == model && e.status == "done")
+        .filter_map(|e| e.reliability.as_ref().map(|r| (e.started, r)))
+        .max_by_key(|(started, _)| *started)
+        .and_then(|(_, r)| r.recommended_window)
+        .map(|w| w.max(MIN_COMPACT_WINDOW))
+}
+
+/// Where a Code session on `model` should compact: as measured, else the default.
+pub fn compact_window(state: &AppState, model: Option<&str>) -> u64 {
+    model.and_then(|m| measured_window(&all(state), m)).unwrap_or(DEFAULT_COMPACT_WINDOW)
 }
 
 async fn served_context(state: &AppState) -> Option<u64> {
@@ -666,7 +754,8 @@ pub struct Pick {
 /// Which model to use for what, from the latest finished evaluation of each.
 pub fn recommend(evals: &[Eval]) -> Vec<Pick> {
     let mut latest: HashMap<&str, &Eval> = HashMap::new();
-    for e in evals.iter().filter(|e| e.status == "done") {
+    // A run of agent reliability alone (`examples/agent_reliability.rs`) has nothing else to compare.
+    for e in evals.iter().filter(|e| e.status == "done" && e.categories.iter().any(|c| c.key != "agent")) {
         latest.entry(e.model.as_str()).and_modify(|x| if e.started > x.started { *x = e }).or_insert(e);
     }
     let models: Vec<&Eval> = latest.into_values().collect();
@@ -797,5 +886,30 @@ mod tests {
         assert_eq!(pick("Code"), Some("coder"));
         assert_eq!(pick("Speed"), Some("tiny"));
         assert_ne!(pick("Research"), Some("tiny"), "8K context is too small for research");
+    }
+
+    #[test]
+    fn compaction_uses_the_latest_measured_window_for_the_model() {
+        let mk = |model: &str, started, window: Option<Option<u64>>| Eval {
+            id: format!("{model}-{started}"), model: model.into(), started, status: "done".into(),
+            reliability: window.map(|w| crate::reliability::Report { recommended_window: w, ..Default::default() }),
+            ..Default::default()
+        };
+        let evals = vec![
+            mk("openai/gpt-oss-20b", 1, Some(Some(98_304))),
+            mk("openai/gpt-oss-20b", 2, Some(Some(65_536))),
+            // A later check-up without the agent tests doesn't hide the measurement.
+            mk("openai/gpt-oss-20b", 3, None),
+            mk("Qwen/Qwen3-32B", 1, Some(None)),
+            mk("tiny", 1, Some(Some(8_192))),
+        ];
+        assert_eq!(measured_window(&evals, "openai/gpt-oss-20b"), Some(65_536), "the latest run wins");
+        assert_eq!(measured_window(&evals, "Qwen/Qwen3-32B"), None, "nothing held up: no measured window");
+        assert_eq!(measured_window(&evals, "never-tested"), None);
+        assert_eq!(measured_window(&evals, "tiny"), Some(MIN_COMPACT_WINDOW), "never below the floor");
+        let mut stopped = mk("openai/gpt-oss-20b", 9, Some(Some(16_384)));
+        stopped.status = "stopped".into();
+        assert_eq!(measured_window(&[evals.clone(), vec![stopped]].concat(), "openai/gpt-oss-20b"), Some(65_536), "an unfinished run doesn't count");
+        assert_eq!(measured_window(&evals, "Qwen/Qwen3-32B").unwrap_or(DEFAULT_COMPACT_WINDOW), 65_536, "the fallback is 64K");
     }
 }
