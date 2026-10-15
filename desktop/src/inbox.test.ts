@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { answer, gather, PAIR_TTL_S, type BoxApproval, type BringupRunLite, type BoxEvent } from "./inbox";
+import { answer, badgeText, bellLabel, gather, newestFirst, PAIR_TTL_S, type BoxApproval, type BringupRunLite, type BoxEvent } from "./inbox";
 
 const NOW = 1_800_000_000;
 const code: BoxApproval = { id: "code:s1:r1", kind: "code", where: "~/src/app", summary: "npm test", session: "s1", can_always: true };
@@ -91,5 +91,18 @@ describe("answering", () => {
       ["/bringup/codex/runs/c1/approvals/a1", "acceptForSession"],
       ["/bringup/codex/runs/c1/approvals/a1", "decline"],
     ]);
+  });
+});
+
+describe("the bell", () => {
+  it("orders newest first", () => {
+    const items = gather({ approvals: [code, routine], bringup: [run], events: [], owner: true, now: NOW });
+    expect(newestFirst(items).map((i) => i.kind)).toEqual(["code", "routine", "bringup"]);
+  });
+
+  it("shows no count at zero and 9+ past nine", () => {
+    expect([0, 1, 9, 10, 250].map(badgeText)).toEqual([null, "1", "9", "9+", "9+"]);
+    expect(bellLabel(3)).toBe("Notifications, 3 waiting");
+    expect(bellLabel(0)).toBe("Notifications, nothing waiting");
   });
 });

@@ -23,11 +23,15 @@ Tenstorrent's Vesper design system (`@tenstorrent/vesper`, React).
 
 ## Places
 
+**Needs you** is the bell at the top right of the window, not a sidebar place:
+a count when something is waiting for your OK (9+ past nine), and a dropdown of
+it, newest first: Code's questions and routines' actions for everyone,
+bring-up's commands and pairing requests for owners, each with Allow/Deny or
+Open (keyboard: ↑ ↓ A D Enter; Escape closes). Its "See everything" opens the
+full page (`/app/inbox`).
+
 Home (what's serving, modes, happening now, chips, today's numbers with a link
-to energy, Box Doctor) · **Needs you** (everything waiting for your OK, with a
-count in the sidebar: Code's questions and routines' actions for everyone,
-bring-up's commands and pairing requests for owners; Allow/Deny or Open,
-keyboard: ↑ ↓ A D Enter) · Chat (streaming, Markdown, thinking, tool actions
+to energy, Box Doctor) · Chat (streaming, Markdown, thinking, tool actions
 with confirmation) · Studio (images, video, transcription with drag and drop) ·
 Routines (jobs the box does on its own, including switching modes at set times,
 which used to be Settings → Schedules) · Models (catalogue, downloads, start,

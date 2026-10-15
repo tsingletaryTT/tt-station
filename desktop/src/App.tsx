@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 // The app's frame: a sidebar of places, the box's live state at the bottom of
-// it, and the current place on the right. Routes live under /app/.
+// it, and the current place on the right under a slim top bar with the
+// notifications bell (Needs you). Routes live under /app/.
 
 import { type ComponentType, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -20,8 +21,7 @@ import { adoptFromBox, placeVisible, storedChoice, useDevTools } from "./devtool
 import { OfflineBanner } from "./OfflineBanner";
 import { RecordingBanner } from "./RecordingBanner";
 import { useConnectivity } from "./connectivity";
-import { useInbox } from "./useInbox";
-import { Badge } from "@tenstorrent/vesper/badge";
+import { NotificationBell } from "./NotificationBell";
 
 // Every place but Home loads when it's first opened, so the app starts on Home
 // without waiting for screens it may not need.
@@ -47,7 +47,6 @@ export type Route = "home" | "inbox" | "chat" | "studio" | "research" | "code" |
 
 const PLACES: { route: Route; label: string; icon: IconKind; group: number }[] = [
   { route: "home", label: "Home", icon: "quietbox", group: 0 },
-  { route: "inbox", label: "Needs you", icon: "user", group: 0 },
   { route: "chat", label: "Chat", icon: "chat", group: 0 },
   { route: "studio", label: "Studio", icon: "ai-video-gen", group: 0 },
   { route: "research", label: "Research", icon: "search", group: 0 },
@@ -63,10 +62,13 @@ const PLACES: { route: Route; label: string; icon: IconKind; group: number }[] =
   { route: "settings", label: "Settings", icon: "gear", group: 2 },
 ];
 
+/** Places with an address but no sidebar entry: Needs you opens from the bell's "See everything". */
+const UNLISTED: Route[] = ["inbox"];
+
 function routeFromPath(): Route {
   const r = location.pathname.replace(/^\/app\/?/, "").split("/")[0] as Route;
   // Orchard (Quick port) is one of Bring-up's ways; its old address still opens it there.
-  return r === "orchard" ? "bringup" : PLACES.some((p) => p.route === r) ? r : "home";
+  return r === "orchard" ? "bringup" : PLACES.some((p) => p.route === r) || UNLISTED.includes(r) ? r : "home";
 }
 
 /** Opens a place; `hash` picks something in it (a Code session, a run, a Settings section). */
@@ -180,11 +182,16 @@ function Shell() {
   return (
     <div className="shell">
       <Sidebar route={route} places={places} />
-      <main className="content" key={route}>
-        <OfflineBanner />
-        <RecordingBanner />
-        <Suspense fallback={<div className="page-loading" role="status" aria-label="Loading" />}>{page}</Suspense>
-      </main>
+      <div className="main-col">
+        <header className="topbar">
+          <NotificationBell />
+        </header>
+        <main className="content" key={route}>
+          <OfflineBanner />
+          <RecordingBanner />
+          <Suspense fallback={<div className="page-loading" role="status" aria-label="Loading" />}>{page}</Suspense>
+        </main>
+      </div>
       <Toasts />
     </div>
   );
@@ -192,7 +199,6 @@ function Shell() {
 
 function Sidebar({ route, places }: { route: Route; places: typeof PLACES }) {
   const shortcut = useToriShortcut();
-  const waiting = useInbox().items.length;
   return (
     <nav className="sidebar" aria-label="Places">
       <div className="brand">
@@ -219,9 +225,6 @@ function Sidebar({ route, places }: { route: Route; places: typeof PLACES }) {
               aria-current={route === p.route ? "page" : undefined} title={i < 9 ? `${p.label} (Ctrl+${i + 1})` : p.label}>
               <Icon kind={p.icon} className="nav-icon" aria-hidden />
               <span className="grow">{p.label}</span>
-              {p.route === "inbox" && waiting > 0 && (
-                <Badge as="span" size="sm" variant="warning" className="nav-count" aria-label={`${waiting} waiting`}>{waiting > 99 ? "99+" : waiting}</Badge>
-              )}
             </button>
           </div>
         ))}
