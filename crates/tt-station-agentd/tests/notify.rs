@@ -213,13 +213,13 @@ async fn alerts_are_pushed_to_registered_phones() {
         .json()
         .await
         .unwrap();
-    // Pairing this harness put its code in the feed first; that's the owner's
-    // copy of the code, not what this test is about.
+    // Pairing this harness put its code, and then the new device, in the feed
+    // first; that's the owner's copy, not what this test is about.
     let titles: Vec<&str> = events["events"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|e| e["kind"] != "pairing")
+        .filter(|e| e["kind"] != "pairing" && e["kind"] != "devices")
         .map(|e| e["title"].as_str().unwrap())
         .collect();
     assert_eq!(titles, ["Hello from qb2-lab", "FLUX.1-dev downloaded"]);

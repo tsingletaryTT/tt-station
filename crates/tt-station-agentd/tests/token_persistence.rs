@@ -1,5 +1,6 @@
-//! Integration tests for persisting issued bearer tokens across agent
-//! restarts (`AppState::new_persisting` / `--token-store`).
+//! Integration tests for persisting paired devices across agent restarts
+//! (`AppState::new_persisting` / `--token-store`). The store keeps a digest
+//! of each token, never the token (`crate::sessions`).
 //!
 //! The whole point of persistence is that a *second, independent*
 //! `AppState` built from the same file sees the tokens the first one
@@ -34,6 +35,25 @@ fn fresh_token_store_path() -> std::path::PathBuf {
             .unwrap()
             .as_nanos()
     ))
+}
+
+/// The token digests in a store file (the `{"version": 2, "sessions": [..]}`
+/// format), asserting on the way that no raw token is in it.
+fn stored_digests(path: &std::path::Path, raw_tokens: &[&str]) -> Vec<String> {
+    let contents = std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("token store file {path:?} not written: {err}"));
+    for t in raw_tokens {
+        assert!(!contents.contains(t), "the raw token {t:?} was written to disk");
+    }
+    let file: serde_json::Value =
+        serde_json::from_str(&contents).expect("token store file was not valid JSON");
+    assert_eq!(file["version"], 2);
+    file["sessions"]
+        .as_array()
+        .expect("sessions missing")
+        .iter()
+        .map(|s| s["token_sha256"].as_str().expect("token_sha256 missing").to_string())
+        .collect()
 }
 
 /// Spin up the real router on an ephemeral port backed by `state`, and hand
@@ -93,11 +113,11 @@ async fn pair(client: &reqwest::Client, state: &AppState, base: &str) -> String 
 }
 
 /// Issuing a token (via the normal `/pair/init` + `/pair/complete` flow)
-/// against a *persisting* `AppState` must write the whole token set out to
-/// the configured file: the file should exist afterward, parse as a JSON
-/// array containing the freshly-minted token, and (on unix) be mode 0600 --
-/// these are bearer secrets, not something any other user on the box should
-/// be able to read.
+/// against a *persisting* `AppState` must write the device out to the
+/// configured file: the file should exist afterward, hold the new token's
+/// digest and never the token itself, and (on unix) be mode 0600 -- even
+/// digests say which devices are paired, nothing another user on the box
+/// should read.
 #[tokio::test]
 async fn issuing_a_token_persists_it_to_the_configured_file() {
     let path = fresh_token_store_path();
@@ -112,14 +132,8 @@ async fn issuing_a_token_persists_it_to_the_configured_file() {
 
     let token = pair(&client, &state, &base).await;
 
-    let contents = std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("token store file {path:?} not written: {err}"));
-    let tokens: Vec<String> =
-        serde_json::from_str(&contents).expect("token store file was not a valid JSON array");
-    assert!(
-        tokens.contains(&token),
-        "expected persisted token set {tokens:?} to contain the freshly-issued token {token:?}"
-    );
+    let digests = stored_digests(&path, &[&token]);
+    assert_eq!(digests, [tt_station_agentd::sessions::token_digest(&token)]);
 
     #[cfg(unix)]
     {
@@ -135,8 +149,9 @@ async fn issuing_a_token_persists_it_to_the_configured_file() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// The core "survives restart" proof: write a tokens.json by hand (standing
-/// in for what a previous agent process would have written), build a
+/// The core "survives restart" proof, which is also the upgrade path: write a
+/// tokens.json by hand in the OLD raw-token format (standing in for what an
+/// agent from before device tracking wrote), build a
 /// *brand new, independent* `AppState` from that file (standing in for the
 /// agent restarting), and confirm a request bearing that token is accepted
 /// -- while a token that was never issued is still rejected. This never
@@ -182,6 +197,10 @@ async fn a_token_written_to_the_store_is_accepted_by_a_freshly_constructed_state
         "a token loaded from the persisted store should have been accepted"
     );
     assert_eq!(known_resp.status(), reqwest::StatusCode::CONFLICT);
+
+    // And the file was converted: the token's digest, not the token.
+    let digests = stored_digests(&path, &[known_token]);
+    assert_eq!(digests, [tt_station_agentd::sessions::token_digest(known_token)]);
 
     let _ = std::fs::remove_file(&path);
 }
@@ -267,15 +286,15 @@ async fn plain_new_never_touches_the_filesystem() {
 
 /// Two sequential token issues against the same persisting `AppState` must
 /// both end up in the file afterward -- the "ordering / last-wins" case the
-/// dedicated write-lock in `persist_tokens` (routes.rs) is meant to protect:
-/// each `/pair/complete` re-snapshots and rewrites the WHOLE token set, so
+/// dedicated write-lock in `Sessions::save` (sessions.rs) is meant to protect:
+/// each `/pair/complete` re-snapshots and rewrites the WHOLE device table, so
 /// the second write must never regress and lose the first token, and the
 /// file's final contents must reflect both, not just whichever request's
 /// write happened to land last with a stale, pre-second-insert snapshot.
 ///
 /// True concurrent-write ordering is hard to force deterministically in a
 /// unit test (see the task notes); this sequential case is what
-/// `persist_tokens`'s write-lock + fresh-snapshot-under-the-lock design
+/// `Sessions::save`'s write-lock + fresh-snapshot-under-the-lock design
 /// (rather than a snapshot captured before the lock, which could go stale)
 /// is meant to make safe even when calls do overlap.
 #[tokio::test]
@@ -297,18 +316,15 @@ async fn two_sequential_token_issues_both_end_up_in_the_file() {
         "each /pair/complete should mint a distinct token"
     );
 
-    let contents = std::fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("token store file {path:?} not written: {err}"));
-    let tokens: Vec<String> =
-        serde_json::from_str(&contents).expect("token store file was not a valid JSON array");
-
+    let digests = stored_digests(&path, &[&first_token, &second_token]);
+    let digest = tt_station_agentd::sessions::token_digest;
     assert!(
-        tokens.contains(&first_token),
-        "expected persisted token set {tokens:?} to still contain the first token {first_token:?}"
+        digests.contains(&digest(&first_token)),
+        "expected the store {digests:?} to still hold the first device"
     );
     assert!(
-        tokens.contains(&second_token),
-        "expected persisted token set {tokens:?} to contain the second token {second_token:?}"
+        digests.contains(&digest(&second_token)),
+        "expected the store {digests:?} to hold the second device"
     );
 
     let _ = std::fs::remove_file(&path);

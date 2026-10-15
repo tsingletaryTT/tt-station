@@ -13,8 +13,7 @@
 //! along for the ride. `main.rs` is responsible for anything that touches
 //! the outside world.
 
-use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -159,30 +158,11 @@ struct Inner {
     /// Recent `/pair/init` asks: when, and from which address (`None` when
     /// the server doesn't know its peers). See `pair_init_allowed`.
     pair_inits: Mutex<Vec<(u64, Option<std::net::IpAddr>)>>,
-    /// Bearer tokens minted by successful `/pair/complete` calls. Task 10's
-    /// control routes will check incoming requests against this set; for
-    /// now `/pair/complete` is the only thing that populates it.
-    tokens: Mutex<HashSet<String>>,
-    /// Optional path to persist the `tokens` set to on disk, so a paired
-    /// client survives an agent restart instead of every restart emptying
-    /// `tokens` and forcing a re-pair. `None` (the default, what
-    /// `AppState::new` builds) means in-memory only -- exactly the
-    /// pre-persistence behavior every existing test relies on. Set via
-    /// `AppState::new_persisting`, which also loads any tokens already at
-    /// this path into `tokens` up front.
-    token_store: Option<PathBuf>,
-    /// Dedicated lock serializing DISK writes of the token store, kept
-    /// separate from `tokens` itself. `persist_tokens` holds this (not
-    /// `tokens`) across the snapshot-capture + file-write: concurrent
-    /// `/pair/complete` calls each insert into `tokens` under its own brief
-    /// lock, then queue up here to write. Because the snapshot is retaken
-    /// fresh *after* acquiring this lock (not reused from whatever was
-    /// captured back when `insert_token` ran), and `tokens` only ever grows,
-    /// whichever write actually lands last on disk is guaranteed to reflect
-    /// the union of every insert that happened before it -- a stale snapshot
-    /// captured earlier can never clobber a fresher one that already made it
-    /// to disk. See `persist_tokens`.
-    write_lock: Mutex<()>,
+    /// Paired devices: one session per `/pair/complete`, holding only a
+    /// digest of its bearer token, with expiry and per-device revocation (see
+    /// `crate::sessions`). Persisted to `--token-store` when `new_persisting`
+    /// built this state; in memory only for `new`.
+    sessions: Arc<crate::sessions::Sessions>,
     /// Optional hook for re-publishing this box's advertised `status`
     /// whenever `set_serving`/`set_idle` change it. `None` (what every
     /// constructor here builds by default) is a no-op -- exactly the
@@ -489,43 +469,36 @@ impl AppState {
     /// wrapped in an `Arc`, since `AppState` never needs to construct a
     /// backend itself.
     pub fn new(name: String, chips: String, backend: Arc<dyn ServingBackend>) -> Self {
-        Self::new_inner(name, chips, backend, HashSet::new(), None)
+        Self::new_inner(name, chips, backend, crate::sessions::Sessions::in_memory())
     }
 
-    /// Construct state whose bearer-token set is persisted to `token_store`
+    /// Construct state whose paired devices are persisted to `token_store`
     /// on disk, so a paired client survives an agent restart instead of
     /// being forced to re-pair.
     ///
-    /// Any tokens already at `token_store` are loaded into the in-memory set
-    /// up front (standing in for "the agent restarted, but the file from
-    /// its previous run is still there"). A missing file is treated as "no
-    /// tokens yet" -- the normal state for a box that's never persisted a
-    /// token before. An unreadable or corrupt file logs a warning to stderr
-    /// and also starts empty: a hand-corrupted or half-written token store
-    /// must never fail agent startup, let alone panic it.
-    ///
-    /// From this point on, every successful `/pair/complete` (via
-    /// `insert_token`) rewrites the whole token set back out to
-    /// `token_store` -- see `persist_tokens`.
+    /// Whatever is already at `token_store` is loaded up front, and a file
+    /// in the old raw-token format is converted in place (see
+    /// `crate::sessions`). A missing file means "no paired devices yet"; an
+    /// unreadable or corrupt one logs a warning to stderr and also starts
+    /// empty -- a bad token store must never fail agent startup, let alone
+    /// panic it.
     pub fn new_persisting(
         name: String,
         chips: String,
         backend: Arc<dyn ServingBackend>,
         token_store: PathBuf,
     ) -> Self {
-        let tokens = load_tokens(&token_store);
-        Self::new_inner(name, chips, backend, tokens, Some(token_store))
+        let sessions = crate::sessions::Sessions::open(token_store);
+        Self::new_inner(name, chips, backend, sessions)
     }
 
-    /// Shared construction path for `new`/`new_persisting`: only the
-    /// starting `tokens` set and whether persistence is enabled differ
-    /// between the two.
+    /// Shared construction path for `new`/`new_persisting`: only where the
+    /// paired devices come from (and go to) differs between the two.
     fn new_inner(
         name: String,
         chips: String,
         backend: Arc<dyn ServingBackend>,
-        tokens: HashSet<String>,
-        token_store: Option<PathBuf>,
+        sessions: crate::sessions::Sessions,
     ) -> Self {
         AppState {
             inner: Arc::new(Inner {
@@ -536,9 +509,7 @@ impl AppState {
                 backend,
                 pending_pairs: Mutex::new(HashMap::new()),
                 pair_inits: Mutex::new(Vec::new()),
-                tokens: Mutex::new(tokens),
-                token_store,
-                write_lock: Mutex::new(()),
+                sessions: Arc::new(sessions),
                 advertiser: None,
                 tt_smi_bin: DEFAULT_TT_SMI_BIN.to_string(),
                 telemetry_interval_ms: DEFAULT_TELEMETRY_INTERVAL_MS,
@@ -1956,14 +1927,40 @@ impl AppState {
         }
     }
 
-    /// Check a bearer token against the valid-token set minted by
-    /// `/pair/complete`.
+    /// Check a bearer token against the paired devices, counting it as a use
+    /// of that device when it's good (see `crate::sessions`).
     pub(crate) fn is_valid_token(&self, token: &str) -> bool {
-        self.inner
-            .tokens
-            .lock()
-            .expect("tokens mutex poisoned")
-            .contains(token)
+        self.authenticate(token).is_ok()
+    }
+
+    /// [`Self::is_valid_token`], saying which device the token belongs to or
+    /// why it was refused.
+    pub(crate) fn authenticate(&self, token: &str) -> Result<String, crate::sessions::AuthFailure> {
+        self.inner.sessions.authenticate(token)
+    }
+
+    /// The paired devices.
+    pub fn sessions(&self) -> Arc<crate::sessions::Sessions> {
+        Arc::clone(&self.inner.sessions)
+    }
+
+    /// Resolves once `token` stops being good -- its device was removed or
+    /// the box was reset -- so a long-lived WebSocket can close itself rather
+    /// than outlive the pairing that opened it.
+    pub(crate) fn signed_out(&self, token: String) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let sessions = self.sessions();
+        let mut changes = sessions.revocations();
+        async move {
+            loop {
+                if !sessions.is_live(&token) {
+                    return;
+                }
+                if changes.changed().await.is_err() {
+                    // The state is gone (shutdown): nothing more will change.
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
     }
 
     /// Record a freshly-issued pairing attempt: `pair_id` will be accepted
@@ -2054,120 +2051,20 @@ impl AppState {
         false
     }
 
-    /// Add a newly-minted bearer token to the valid-token set. Task 10's
-    /// control routes will read this set back to authenticate requests.
-    ///
-    /// If persistence is enabled (`token_store` is `Some`), the whole
-    /// updated set is also written out to disk afterward -- see
-    /// `persist_tokens` for the write-lock + fresh-snapshot discipline that
-    /// keeps concurrent `/pair/complete` calls from writing stale snapshots
-    /// out of order, and from ever doing file I/O while holding the
-    /// `tokens` mutex.
-    fn insert_token(&self, token: String) {
-        self.inner
-            .tokens
-            .lock()
-            .expect("tokens mutex poisoned")
-            .insert(token);
-        self.persist_tokens();
-    }
-
-    /// Write the CURRENT `tokens` set to `token_store`, if persistence is
-    /// enabled; a no-op when it isn't (`AppState::new`'s `None` path).
-    ///
-    /// Deliberately takes no snapshot argument -- unlike an earlier version
-    /// of this method, which took an already-cloned snapshot from the
-    /// caller. That let two concurrent `/pair/complete` calls each capture
-    /// their own snapshot *before* racing for the disk write, so whichever
-    /// one's (possibly older/stale) snapshot happened to write LAST would
-    /// silently clobber a newer one already on disk and lose a token that
-    /// really was inserted. Instead, this method:
-    ///
-    ///   1. Acquires `write_lock` (distinct from `tokens`) to serialize
-    ///      writes -- only one persist runs at a time.
-    ///   2. THEN takes a fresh snapshot of `tokens` (briefly locking and
-    ///      immediately dropping that lock -- file I/O never runs while
-    ///      `tokens` is held, since `is_valid_token` locks it on every
-    ///      authed request and must never block on disk).
-    ///   3. Writes that fresh snapshot to disk.
-    ///
-    /// Because the snapshot is retaken after acquiring `write_lock` rather
-    /// than reused from whenever the caller happened to insert, and
-    /// `tokens` only ever grows, the write that actually lands last on disk
-    /// is always a superset of every earlier one -- the last IN-MEMORY
-    /// state wins on disk, not just the last write to *start*.
-    ///
-    /// A failed write is logged to stderr rather than propagated: the
-    /// in-memory set (what actually gates auth for the rest of this
-    /// process's life) was already updated by the time this is called, so a
-    /// persistence failure shouldn't fail the pairing request that
-    /// triggered it -- it just means a subsequent restart won't remember
-    /// this token.
-    fn persist_tokens(&self) {
-        let Some(path) = &self.inner.token_store else {
-            return;
-        };
-
-        let _write_guard = self
-            .inner
-            .write_lock
-            .lock()
-            .expect("token-store write lock poisoned");
-        let snapshot = self
-            .inner
-            .tokens
-            .lock()
-            .expect("tokens mutex poisoned")
-            .clone();
-
-        if let Err(err) = save_tokens(path, &snapshot) {
-            eprintln!(
-                "tt-station-agentd: failed to persist token store at {}: {err:#}",
-                path.display()
-            );
-        }
-    }
-
-    /// Clear ALL issued bearer tokens: empty the in-memory set AND, if
-    /// persistence is enabled, delete the on-disk token store -- so a demo
-    /// `POST /reset` returns the box to "never been paired" and every token
-    /// any client is still holding stops working.
-    ///
-    /// Same lock discipline as `persist_tokens`: the in-memory clear happens
-    /// under the `tokens` lock, which is then DROPPED before any disk I/O
-    /// runs (file work is serialized under `write_lock` instead), because
-    /// `is_valid_token` locks `tokens` on every authed request and must
-    /// never block on the disk. Deleting the file (rather than writing an
-    /// empty JSON array) matches a fresh box, which has no token store at all
-    /// -- and `load_tokens` treats a missing file as "no tokens yet", so a
-    /// later restart comes up empty either way.
+    /// Sign every paired device out (`POST /reset`): their tokens stop
+    /// working at once, open terminals close, and the token store is
+    /// deleted, so a restart comes up never-paired too.
     fn clear_tokens(&self) {
-        {
-            self.inner
-                .tokens
-                .lock()
-                .expect("tokens mutex poisoned")
-                .clear();
-        }
-
-        let Some(path) = &self.inner.token_store else {
-            return;
-        };
-
-        let _write_guard = self
-            .inner
-            .write_lock
-            .lock()
-            .expect("token-store write lock poisoned");
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            // A missing store is already the desired end state -- not an error.
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => eprintln!(
-                "tt-station-agentd: failed to remove token store at {} during reset: {err}",
-                path.display()
+        let count = self.inner.sessions.revoke_all();
+        self.people().forget_all_phones();
+        self.notifier().record(crate::notify::Draft {
+            kind: "devices",
+            title: "Every device was signed out".to_string(),
+            body: format!(
+                "The box was reset, so {count} paired device{} must pair again.",
+                if count == 1 { "" } else { "s" }
             ),
-        }
+        });
     }
 
     /// Test-only accessor: look up the code currently pending for
@@ -2207,139 +2104,6 @@ impl AppState {
             .expect("pending_pairs mutex poisoned")
             .insert(pair_id.to_string(), (code.to_string(), already_expired, 0));
     }
-}
-
-/// Load a persisted bearer-token set from `path` (a JSON array of
-/// strings). Never returns `Err` -- a missing file (the normal case for a
-/// box that's never persisted a token before) and an unreadable/corrupt one
-/// both resolve to an empty set, differing only in whether a warning gets
-/// printed to stderr. Startup must never fail, and never panic, just
-/// because the token store is absent or got hand-edited into garbage.
-fn load_tokens(path: &Path) -> HashSet<String> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return HashSet::new(),
-        Err(err) => {
-            eprintln!(
-                "tt-station-agentd: failed to read token store at {}: {err} -- starting with an empty token set",
-                path.display()
-            );
-            return HashSet::new();
-        }
-    };
-
-    match serde_json::from_str::<Vec<String>>(&contents) {
-        Ok(tokens) => tokens.into_iter().collect(),
-        Err(err) => {
-            eprintln!(
-                "tt-station-agentd: token store at {} is not valid JSON ({err}) -- starting with an empty token set",
-                path.display()
-            );
-            HashSet::new()
-        }
-    }
-}
-
-/// Persist `tokens` to `path` as a JSON array of strings.
-///
-/// Creates the parent directory if it doesn't exist yet (mode `0700` on
-/// unix), then writes to a temp file in that same directory and renames it
-/// into place -- so a concurrent reader (there shouldn't be one, but belt
-/// and suspenders) never observes a partially-written file -- and sets the
-/// final file to mode `0600` on unix. These are bearer secrets: anything
-/// less than owner-only permissions on both the directory and the file
-/// would let another local user on the box read them.
-///
-/// Sorts the tokens before serializing purely so the file's byte content is
-/// deterministic given the same set (easier to eyeball/diff by hand); the
-/// on-disk representation is otherwise just "the whole current set."
-fn save_tokens(path: &Path, tokens: &HashSet<String>) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        // Only create (and chmod) the parent when it doesn't already exist.
-        // The common case in practice is a pre-existing, already-shared
-        // directory (`/tmp` in tests; a config dir a previous run already
-        // created) -- unconditionally chmod-ing that out from under whatever
-        // it currently is would both fight the box's own conventions and,
-        // for something like `/tmp` that this process doesn't own, simply
-        // fail with EPERM.
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            fs::create_dir_all(parent)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-            }
-        }
-    }
-
-    let mut sorted: Vec<&String> = tokens.iter().collect();
-    sorted.sort();
-    let json = serde_json::to_string(&sorted)?;
-
-    // Write-temp-then-rename rather than writing `path` directly: a rename
-    // on the same filesystem is atomic, so any reader of `path` (in
-    // practice, just this process's own next `load_tokens` call on a future
-    // restart) always sees either the old complete contents or the new
-    // complete contents, never a half-written file.
-    let tmp_path = path.with_extension("tmp");
-
-    let result = write_tmp_and_rename(&tmp_path, path, &json);
-    if result.is_err() {
-        // Best-effort cleanup: a failed write or rename shouldn't leave a
-        // stale `.tmp` file lying around for the next `save_tokens` call
-        // (or a curious operator) to trip over. Ignore the removal's own
-        // result -- if the file's already gone, or removing it also fails,
-        // that's not this function's problem to escalate; the original
-        // error from `write_tmp_and_rename` is what matters and is returned
-        // below regardless.
-        let _ = fs::remove_file(&tmp_path);
-    }
-    result
-}
-
-/// Create `tmp_path` fresh and write `json` to it, then atomically rename it
-/// onto `path`.
-///
-/// On unix, `tmp_path` is created with `OpenOptions` specifying mode `0600`
-/// from the moment the file is created (`create(true)` + `.mode(0o600)`)
-/// rather than the previous `fs::write` (which creates the file with the
-/// process's default umask-derived mode, e.g. `0644`) followed by a
-/// separate `set_permissions` call -- that older sequence left a brief
-/// window where the file existed on disk World/group-readable before the
-/// chmod landed. Creating it restrictively from the start closes that
-/// window entirely: the bearer tokens in this file are never written to a
-/// less-than-owner-only-readable file, not even momentarily.
-fn write_tmp_and_rename(tmp_path: &Path, path: &Path, json: &str) -> anyhow::Result<()> {
-    use std::io::Write;
-
-    // Remove any stale tmp first so we always create the file fresh. `.mode(0600)`
-    // below only applies when OpenOptions *creates* the file; a leftover tmp from a
-    // crash-between-write-and-rename would otherwise be reused/truncated while keeping
-    // its old (possibly looser) permissions. Ignore NotFound.
-    let _ = fs::remove_file(tmp_path);
-
-    #[cfg(unix)]
-    let mut file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(tmp_path)?
-    };
-    #[cfg(not(unix))]
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(tmp_path)?;
-
-    file.write_all(json.as_bytes())?;
-    drop(file);
-
-    fs::rename(tmp_path, path)?;
-
-    Ok(())
 }
 
 /// JSON body returned by `GET /status`.
@@ -2570,27 +2334,43 @@ async fn pair_offer(
 }
 
 /// JSON body accepted by `POST /pair/complete`.
+///
+/// `name`/`platform` say what's pairing (`"Jane's MacBook"`, `"macOS"`), for
+/// the device list; both are optional, so every older client still pairs and
+/// gets an honest default name. `label` is what earlier desktop apps sent
+/// for the same purpose, used when `name` isn't given.
 #[derive(Deserialize)]
 struct PairCompleteRequest {
     pair_id: String,
     code: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
 }
 
 /// JSON body returned by `POST /pair/complete` on success.
 #[derive(Serialize)]
 struct PairCompleteResponse {
     token: String,
+    /// This device's id in `GET /devices`.
+    device_id: String,
     /// Where this box serves HTTPS and the certificate to pin (`crate::tls`).
     #[serde(skip_serializing_if = "Option::is_none")]
     tls: Option<crate::tls::TlsInfo>,
 }
 
 /// `POST /pair/complete` finishes a pairing attempt: if `code` matches the
-/// still-unexpired code for `pair_id`, mint a bearer token, add it to the
-/// valid-token set, and return it. Otherwise (unknown pair_id, expired, or
-/// wrong code) respond `401 Unauthorized` without minting anything -- the
-/// caller can't tell *why* it failed, which avoids leaking whether a given
-/// pair_id ever existed.
+/// still-unexpired code for `pair_id`, mint a bearer token, record a device
+/// session for it (only the token's digest is kept), and return the token.
+/// Otherwise (unknown pair_id, expired, or wrong code) respond `401
+/// Unauthorized` without minting anything -- the caller can't tell *why* it
+/// failed, which avoids leaking whether a given pair_id ever existed.
+///
+/// A successful pairing is an event (and a push to paired phones), so the
+/// owner hears about every new device that can control the box.
 async fn pair_complete(
     axum::extract::State(state): axum::extract::State<AppState>,
     Json(req): Json<PairCompleteRequest>,
@@ -2600,20 +2380,68 @@ async fn pair_complete(
     }
 
     let token = pairing::issue_token();
-    state.insert_token(token.clone());
+    let name = req.name.as_deref().filter(|n| !n.trim().is_empty()).or(req.label.as_deref());
+    let session = state.inner.sessions.pair(&token, name, req.platform.as_deref());
+    let what = match &session.platform {
+        Some(p) => format!("{} ({p})", session.name),
+        None => session.name.clone(),
+    };
+    state.notifier().emit(crate::notify::Draft {
+        kind: "devices",
+        title: format!("New device paired: {what}"),
+        body: "It can now use and control this box. If you don't recognize it, remove it in Settings → Pairing and security → Devices.".to_string(),
+    });
 
     Ok(Json(PairCompleteResponse {
         token,
+        device_id: session.id,
         tls: state.tls(),
     }))
 }
 
+/// The bearer token on a request, if it carries one.
+fn bearer(parts: &Parts) -> Option<&str> {
+    parts
+        .headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
+
+/// Why an authed route turned a request away: always `401`, with a plain
+/// `{"error": ..}` saying what to do (pair again). A missing token, a
+/// malformed header, and a token that was never issued or was removed all
+/// read the same, so the answer says nothing about which tokens exist; only
+/// a token that really was paired, and went unused too long, hears that it
+/// expired.
+#[derive(Debug)]
+pub struct AuthRejection(crate::sessions::AuthFailure);
+
+impl axum::response::IntoResponse for AuthRejection {
+    fn into_response(self) -> Response {
+        let mut res = (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse { error: self.0.message() }),
+        )
+            .into_response();
+        res.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            axum::http::HeaderValue::from_static("Bearer"),
+        );
+        res
+    }
+}
+
+/// Check the request's bearer token, returning the caller's device id.
+fn authenticate_parts(parts: &Parts, state: &AppState) -> Result<String, AuthRejection> {
+    let token = bearer(parts).ok_or(AuthRejection(crate::sessions::AuthFailure::Unknown))?;
+    state.authenticate(token).map_err(AuthRejection)
+}
+
 /// Extractor guarding the control routes (`/run`, `/stop`, `/endpoint`):
-/// requires `Authorization: Bearer <token>` where `<token>` is in the
-/// valid-token set minted by `/pair/complete`. Missing header, a non-Bearer
-/// scheme, or a token not in the set all reject identically with `401` --
-/// deliberately indistinguishable, same reasoning as `pair_complete` not
-/// saying *why* a pairing attempt failed.
+/// requires `Authorization: Bearer <token>` where `<token>` belongs to a
+/// live paired device (see `crate::sessions`). Anything else is a `401`
+/// ([`AuthRejection`]).
 ///
 /// Implemented as a real extractor (rather than an inline check duplicated
 /// in each handler) so adding it to a route is just adding it to the
@@ -2623,19 +2451,98 @@ async fn pair_complete(
 pub(crate) struct BearerAuth;
 
 impl FromRequestParts<AppState> for BearerAuth {
-    type Rejection = StatusCode;
+    type Rejection = AuthRejection;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, StatusCode> {
-        let token = parts
-            .headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AuthRejection> {
+        authenticate_parts(parts, state).map(|_| BearerAuth)
+    }
+}
 
-        match token {
-            Some(token) if state.is_valid_token(token) => Ok(BearerAuth),
-            _ => Err(StatusCode::UNAUTHORIZED),
-        }
+/// [`BearerAuth`], keeping which paired device is calling (`GET /devices`
+/// marks it; `DELETE /devices/{id}` knows when a device signs itself out).
+pub(crate) struct ThisDevice(pub String);
+
+impl FromRequestParts<AppState> for ThisDevice {
+    type Rejection = AuthRejection;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AuthRejection> {
+        authenticate_parts(parts, state).map(ThisDevice)
+    }
+}
+
+/// One paired device, as `GET /devices` shows it: never its token or digest.
+#[derive(Serialize)]
+struct DeviceView {
+    id: String,
+    name: String,
+    platform: Option<String>,
+    /// Unix seconds; `null` for a device paired before the box kept track.
+    paired: Option<u64>,
+    last_used: u64,
+    /// Unix seconds: when it stops working unless it's used before then.
+    expires: u64,
+    /// The device making this request.
+    this_device: bool,
+}
+
+/// `GET /devices` (bearer-guarded): every paired device, most recently used
+/// first, marking the caller's own.
+async fn get_devices(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    ThisDevice(me): ThisDevice,
+) -> Json<serde_json::Value> {
+    let devices: Vec<DeviceView> = state
+        .sessions()
+        .list()
+        .into_iter()
+        .map(|s| DeviceView {
+            this_device: s.id == me,
+            expires: s.expires(),
+            id: s.id,
+            name: s.name,
+            platform: s.platform,
+            paired: s.created,
+            last_used: s.last_used,
+        })
+        .collect();
+    Json(serde_json::json!({
+        "devices": devices,
+        "idle_expiry_days": crate::sessions::IDLE_EXPIRY.as_secs() / 86_400,
+    }))
+}
+
+/// `DELETE /devices/{id}` (bearer-guarded): sign one device out. Its token
+/// stops working on the next request, and its open terminals close. A
+/// device may remove itself -- that's signing out -- and still gets this
+/// answer, since it was authenticated on the way in.
+async fn delete_device(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    ThisDevice(me): ThisDevice,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let Some(removed) = state.sessions().revoke(&id) else {
+        return Err(tt_error(StatusCode::NOT_FOUND, "No such device. It may have been removed already."));
+    };
+    state.people().forget_phone(&removed.token_sha256);
+    let this_device = removed.id == me;
+    state.notifier().record(crate::notify::Draft {
+        kind: "devices",
+        title: if this_device {
+            format!("{} signed out", removed.name)
+        } else {
+            format!("Device removed: {}", removed.name)
+        },
+        body: "It can no longer use this box until it pairs again.".to_string(),
+    });
+    Ok(Json(serde_json::json!({ "removed": removed.id, "this_device": this_device })))
+}
+
+/// How the box closes a WebSocket whose device was signed out: 1008
+/// (policy violation), with the reason a person would want.
+pub(crate) fn signed_out_frame() -> axum::extract::ws::CloseFrame {
+    axum::extract::ws::CloseFrame {
+        code: axum::extract::ws::close_code::POLICY,
+        reason: "This device was signed out of the box.".into(),
     }
 }
 
@@ -2669,9 +2576,9 @@ pub(crate) fn ws_token(headers: &axum::http::HeaderMap) -> Option<String> {
 pub(crate) struct LocalOrPaired;
 
 impl FromRequestParts<AppState> for LocalOrPaired {
-    type Rejection = StatusCode;
+    type Rejection = AuthRejection;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, StatusCode> {
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AuthRejection> {
         if parts.extensions.get::<LocalCaller>().is_some() {
             return Ok(LocalOrPaired);
         }
@@ -2802,7 +2709,7 @@ async fn stop_model(
 ///      serving container and, on `RunPyBackend`, reset the board too. Run
 ///      via `spawn_blocking` since it shells out (`docker`, `tt-smi`), same
 ///      rule `/run` and `/stop` follow for the backend's sync methods.
-///   2. Clear ALL issued bearer tokens (in-memory set + persisted store).
+///   2. Sign out EVERY paired device (in-memory sessions + persisted store).
 ///   3. Best-effort revoke every `ttstation:<label>`-tagged SSH key the pair
 ///      flow ever installed (`authkeys::revoke_all_ttstation`) -- a reset
 ///      should also demo losing the keyless-SSH access pairing granted, not
@@ -2851,7 +2758,7 @@ async fn reset(
     // below: a refusal must leave the box, and the pairing, untouched.
     .map_err(contention_aware_error)?;
 
-    // Forget every issued token (invalidates the caller's own -- expected).
+    // Sign out every paired device (the caller's own too -- expected).
     state.clear_tokens();
 
     // Best-effort: also revoke every keyless-SSH key the pair flow ever
@@ -4128,6 +4035,8 @@ pub fn app(state: AppState) -> Router {
         .route("/run", post(run_model))
         .route("/stop", post(stop_model))
         .route("/reset", post(reset))
+        .route("/devices", get(get_devices))
+        .route("/devices/{id}", axum::routing::delete(delete_device))
         .route("/power", post(power))
         .route("/endpoint", get(get_endpoint))
         .route("/leases", get(get_leases))
@@ -5546,5 +5455,48 @@ mod local_http_tests {
         assert_eq!(state.inner.pair_inits.lock().unwrap().len(), PAIR_INITS_PER_MINUTE);
         // A minute later, everyone may ask again.
         assert!(state.pair_init_allowed(ip(9), 1061));
+    }
+}
+
+#[cfg(test)]
+mod signed_out_tests {
+    use super::AppState;
+    use std::time::Duration;
+
+    fn state() -> AppState {
+        AppState::new(
+            "qb2-lab".to_string(),
+            "4xBH".to_string(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+    }
+
+    /// An open WebSocket's watch resolves when its own device is removed, and
+    /// only then: removing another device leaves it open.
+    #[tokio::test]
+    async fn open_sockets_close_when_their_device_is_removed() {
+        let state = state();
+        let mine = state.sessions().pair("mine", Some("Mine"), None);
+        let other = state.sessions().pair("other", Some("Other"), None);
+        let watch = tokio::spawn(state.signed_out("mine".to_string()));
+
+        state.sessions().revoke(&other.id);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!watch.is_finished(), "another device's removal closed this socket");
+
+        state.sessions().revoke(&mine.id);
+        tokio::time::timeout(Duration::from_secs(2), watch)
+            .await
+            .expect("the socket stayed open after its device was removed")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_sockets_close_on_reset() {
+        let state = state();
+        state.sessions().pair("mine", None, None);
+        let watch = tokio::spawn(state.signed_out("mine".to_string()));
+        state.clear_tokens();
+        tokio::time::timeout(Duration::from_secs(2), watch).await.expect("still open after a reset").unwrap();
     }
 }

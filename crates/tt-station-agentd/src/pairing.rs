@@ -39,6 +39,12 @@ pub fn issue_token() -> String {
     hex_encode(rand::rng().random::<[u8; 32]>())
 }
 
+/// A paired device's id (`crate::sessions`): 8 random bytes hex-encoded.
+/// Not a secret -- it names the device in `/devices` -- just unique.
+pub fn issue_device_id() -> String {
+    hex_encode(rand::rng().random::<[u8; 8]>())
+}
+
 /// Lower-case hex encoding, shared by `issue_pair_id` and `issue_token` so
 /// there's exactly one place that decides what "URL-safe random string"
 /// looks like on the wire.

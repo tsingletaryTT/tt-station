@@ -74,9 +74,11 @@ pub(crate) async fn get_toplike() -> axum::Json<Value> {
 
 /// `GET /toplike/term` (WebSocket; the token in a header, `routes::ws_token`).
 pub(crate) async fn term_ws(ws: WebSocketUpgrade, State(state): State<AppState>, headers: axum::http::HeaderMap, Query(q): Query<TermQuery>) -> Response {
-    if !crate::routes::ws_token(&headers).is_some_and(|t| state.is_valid_token(&t)) {
+    let Some(token) = crate::routes::ws_token(&headers).filter(|t| state.is_valid_token(t)) else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
+    // Removing this device (or resetting the box) closes the view too.
+    let signed_out = state.signed_out(token);
     let ws = ws.protocols([crate::routes::WS_PROTOCOL]);
     let Some(bin) = binary() else {
         return (StatusCode::NOT_FOUND, "tt-toplike isn't installed on this box").into_response();
@@ -93,7 +95,7 @@ pub(crate) async fn term_ws(ws: WebSocketUpgrade, State(state): State<AppState>,
     let port = state.ctrl_port();
     ws.on_upgrade(move |socket| async move {
         SESSIONS.fetch_add(1, Ordering::SeqCst);
-        run(socket, bin, port, mode, keys, cols, rows).await;
+        run(socket, bin, port, mode, keys, cols, rows, signed_out).await;
         SESSIONS.fetch_sub(1, Ordering::SeqCst);
     })
 }
@@ -113,7 +115,9 @@ fn openpty(cols: u16, rows: u16) -> std::io::Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) })
 }
 
-async fn run(mut socket: WebSocket, bin: String, port: u16, mode: &'static str, keys: &'static str, cols: u16, rows: u16) {
+#[allow(clippy::too_many_arguments)]
+async fn run(mut socket: WebSocket, bin: String, port: u16, mode: &'static str, keys: &'static str, cols: u16, rows: u16, signed_out: impl std::future::Future<Output = ()>) {
+    tokio::pin!(signed_out);
     let (master, slave) = match openpty(cols, rows) {
         Ok(p) => p,
         Err(e) => {
@@ -174,6 +178,10 @@ async fn run(mut socket: WebSocket, bin: String, port: u16, mode: &'static str, 
 
     loop {
         tokio::select! {
+            () = &mut signed_out => {
+                let _ = socket.send(Message::Close(Some(crate::routes::signed_out_frame()))).await;
+                break;
+            }
             out = rx.recv() => match out {
                 Some(bytes) => {
                     if socket.send(Message::Binary(bytes.into())).await.is_err() { break; }
