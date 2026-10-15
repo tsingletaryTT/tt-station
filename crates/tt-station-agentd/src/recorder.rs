@@ -12,8 +12,17 @@
 //!
 //! - `GET /record`: sources on the box, and the recording in progress if any
 //!   (with who started it).
-//! - `POST /record/start` `{title?, mic?, system?}`: start recording.
-//! - `POST /record/stop` `{discard?}`: stop; queues a transcription job.
+//! - `POST /record/start` `{title?, mic?, system?, documents?, keep_audio?}`:
+//!   start recording.
+//! - `POST /record/stop` `{discard?, documents?, keep_audio?}`: stop; queues a
+//!   transcription job.
+//!
+//! The job is the recording's starter's (`crate::jobs::visible`: they and the
+//! owners see it, like a recording they uploaded), and it follows the choices
+//! made for this recording -- `documents` (add the transcript to the Library)
+//! and `keep_audio` (keep the recording once it's transcribed), given at start
+//! or, to change their mind, at stop. A choice not given falls back to the
+//! household's defaults (`crate::export::DataSettings`) when the job finishes.
 //!
 //! Any paired device can start a recording, so the room is always told
 //! ([`announce_start`], [`announce_end`]): the box chimes when a recording
@@ -34,7 +43,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::jobs::When;
+use crate::jobs::{NewJob, When};
 use crate::routes::{AppState, BearerAuth, ErrorResponse};
 
 /// Longest single recording: four hours.
@@ -54,6 +63,11 @@ struct Active {
     system_level: Arc<AtomicU32>,
     /// Who started it, as people read it (a person's or a device's name).
     started_by: String,
+    /// Who started it, as the activity log knows them: their device (`None`
+    /// for the box itself). The transcription job is theirs.
+    starter: crate::audit::Actor,
+    /// The choices made at the start (see [`Choices`]).
+    choices: Choices,
     /// The room has been told it ended (it ended on its own).
     end_announced: bool,
 }
@@ -253,6 +267,47 @@ pub struct StartBody {
     pub mic: Option<bool>,
     #[serde(default)]
     pub system: Option<bool>,
+    /// What to do with this recording once it's transcribed.
+    #[serde(flatten)]
+    pub choices: Choices,
+}
+
+/// One recording's choices, the same ones an uploaded recording gets
+/// (`POST /jobs/transcribe`). `None`: the household default, decided when the
+/// transcript is done.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct Choices {
+    /// Add the transcript to the shared Library.
+    #[serde(default)]
+    pub documents: Option<bool>,
+    /// Keep the recording after it's transcribed.
+    #[serde(default)]
+    pub keep_audio: Option<bool>,
+}
+
+impl Choices {
+    /// These choices, with any made later (at stop) taking their place.
+    pub fn then(self, later: Choices) -> Choices {
+        Choices {
+            documents: later.documents.or(self.documents),
+            keep_audio: later.keep_audio.or(self.keep_audio),
+        }
+    }
+}
+
+/// The transcription job for a recording `starter` made with `choices`: theirs
+/// (they and the owners see it), following what they chose for it.
+pub fn new_job(starter: &crate::audit::Actor, choices: Choices) -> NewJob {
+    NewJob {
+        to_documents: choices.documents,
+        keep_audio: choices.keep_audio,
+        started_by: starter.device_id.clone(),
+        started_by_name: starter
+            .device_id
+            .as_ref()
+            .map(|_| starter.device_name.clone()),
+        shared: false,
+    }
 }
 
 fn default_title() -> String {
@@ -377,6 +432,7 @@ pub(crate) async fn start(
     // here because they don't follow the work onto another thread.
     let by = crate::notify::Requester::current(state);
     let started_by = by.label();
+    let starter = by.actor.clone();
     let started = tokio::task::spawn_blocking(move || {
         let mut guard = ACTIVE.lock().expect("recorder mutex");
         if let Some(a) = guard.as_mut() {
@@ -459,6 +515,8 @@ pub(crate) async fn start(
             mic_level,
             system_level,
             started_by,
+            starter,
+            choices: body.choices,
             end_announced: false,
         });
         Ok((StatusCode::CREATED, Json(status_of(&mut guard))))
@@ -479,6 +537,9 @@ pub struct StopBody {
     /// Throw the recording away instead of transcribing it.
     #[serde(default)]
     pub discard: bool,
+    /// A change of mind about this recording (over what was chosen at start).
+    #[serde(flatten)]
+    pub choices: Choices,
 }
 
 /// `POST /record/stop` (authed): `{job}` once it's queued for transcription.
@@ -487,14 +548,30 @@ pub(crate) async fn post_stop(
     _auth: BearerAuth,
     body: Option<Json<StopBody>>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
-    stop(&state, body.map(|b| b.0.discard).unwrap_or(false)).await
+    stop_with(&state, body.map(|b| b.0).unwrap_or_default()).await
 }
 
-/// Stop recording and queue the transcript (for `POST /record/stop` and Tori).
+/// Stop recording and queue the transcript, as chosen at the start (for Tori).
 pub(crate) async fn stop(
     state: &AppState,
     discard: bool,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    stop_with(
+        state,
+        StopBody {
+            discard,
+            ..StopBody::default()
+        },
+    )
+    .await
+}
+
+/// Stop recording and queue the transcript (for `POST /record/stop`).
+pub(crate) async fn stop_with(
+    state: &AppState,
+    body: StopBody,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let discard = body.discard;
     let jobs = state
         .jobs()
         .ok_or_else(|| err(StatusCode::CONFLICT, "This agent has no job queue."))?;
@@ -509,6 +586,8 @@ pub(crate) async fn stop(
         mut child,
         path,
         end_announced,
+        starter,
+        choices,
         ..
     } = active;
     let by = crate::notify::Requester::current(state);
@@ -550,7 +629,8 @@ pub(crate) async fn stop(
             "The recording came out empty, so there's nothing to transcribe.",
         ));
     }
-    let job = jobs.add(id, "transcribe", &title, When::Now, true);
+    let new = new_job(&starter, choices.then(body.choices));
+    let job = jobs.add_with(id, "transcribe", &title, When::Now, new);
     Ok(Json(json!({ "job": job })))
 }
 
@@ -617,6 +697,110 @@ mod tests {
         assert_eq!(start.device_name, "Max's iPhone");
         assert_eq!(start.device_id.as_deref(), Some(session.id.as_str()));
         assert_eq!(start.target, "rec-1");
+    }
+
+    fn phone(id: &str) -> crate::audit::Actor {
+        crate::audit::Actor {
+            device_id: Some(id.into()),
+            device_name: format!("{id}'s phone"),
+        }
+    }
+
+    #[test]
+    fn the_choices_come_from_the_request_and_default_to_the_household() {
+        let start: StartBody = serde_json::from_value(json!({
+            "title": "Standup", "documents": false, "keep_audio": true
+        }))
+        .unwrap();
+        assert_eq!(
+            start.choices,
+            Choices {
+                documents: Some(false),
+                keep_audio: Some(true)
+            }
+        );
+        // Nothing said: the household decides when the transcript is done.
+        let bare: StartBody = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(bare.choices, Choices::default());
+        let stop: StopBody = serde_json::from_value(json!({ "keep_audio": false })).unwrap();
+        assert!(!stop.discard);
+        assert_eq!(stop.choices.keep_audio, Some(false));
+        assert_eq!(stop.choices.documents, None);
+    }
+
+    #[test]
+    fn a_change_of_mind_at_stop_wins_and_the_rest_stays() {
+        let at_start = Choices {
+            documents: Some(true),
+            keep_audio: Some(true),
+        };
+        let at_stop = Choices {
+            documents: None,
+            keep_audio: Some(false),
+        };
+        assert_eq!(
+            at_start.then(at_stop),
+            Choices {
+                documents: Some(true),
+                keep_audio: Some(false)
+            }
+        );
+        assert_eq!(
+            Choices::default().then(Choices::default()),
+            Choices::default()
+        );
+    }
+
+    #[test]
+    fn a_recording_job_is_its_starters_and_follows_their_choices() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jobs = crate::jobs::Jobs::open(tmp.path());
+        let choices = Choices {
+            documents: Some(false),
+            keep_audio: Some(true),
+        };
+        let j = jobs.add_with(
+            "rec1".into(),
+            "transcribe",
+            "Standup",
+            When::Now,
+            new_job(&phone("max"), choices),
+        );
+        assert_eq!(j.started_by.as_deref(), Some("max"));
+        assert_eq!(j.started_by_name.as_deref(), Some("max's phone"));
+        assert_eq!((j.to_documents, j.keep_audio), (Some(false), Some(true)));
+        assert!(!j.shared);
+
+        let caller = |id: &str, owner: bool| crate::routes::Caller {
+            local: false,
+            device: Some(crate::sessions::Session {
+                id: id.into(),
+                token_sha256: String::new(),
+                name: id.into(),
+                platform: None,
+                created: None,
+                last_used: 0,
+                owner,
+            }),
+        };
+        assert!(
+            crate::jobs::visible(&j, &caller("max", false)),
+            "the starter's"
+        );
+        assert!(
+            !crate::jobs::visible(&j, &caller("ana", false)),
+            "not another member's"
+        );
+        assert!(
+            crate::jobs::visible(&j, &caller("laptop", true)),
+            "owners see all"
+        );
+
+        // Started on the box itself (or by Tori there): the box's, owners only;
+        // no choices means the household's defaults.
+        let b = new_job(&crate::audit::Actor::the_box(), Choices::default());
+        assert_eq!((b.started_by, b.started_by_name), (None, None));
+        assert_eq!((b.to_documents, b.keep_audio), (None, None));
     }
 
     #[test]
