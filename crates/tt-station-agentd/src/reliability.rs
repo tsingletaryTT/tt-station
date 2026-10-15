@@ -998,13 +998,17 @@ async fn session(server: &Server, seed: u64, target: u64, tasks: usize, ratio: &
     let mut prefill_s = None;
     // A longer or shorter session from the same seed starts the same way, so after
     // the first count the server reads only what changed at the end.
-    for _ in 0..5 {
+    for _ in 0..6 {
         messages = history(&p, seed, chars);
         let mut probe = messages.clone();
         probe.push(json!({ "role": "user", "content": "x".repeat(longest) }));
         let (_, body) = request(server, &system, &probe);
         let t = Instant::now();
-        let Some(n) = server.count(&body).await else { break };
+        let Some(n) = server.count(&body).await else {
+            // Most likely past the model's context (the first guess at the size overshot): try smaller.
+            chars = chars * 17 / 20;
+            continue;
+        };
         prefill_s = prefill_s.or(Some(t.elapsed().as_secs_f64()));
         let size = chars as f64 / n as f64;
         *ratio.lock().expect("ratio") = size;
