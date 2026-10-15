@@ -24,7 +24,6 @@ fn scratch(tag: &str) -> PathBuf {
 
 struct Box_ {
     base: String,
-    state: AppState,
     token: String,
     c: reqwest::Client,
 }
@@ -46,7 +45,6 @@ impl Box_ {
         let token = support::pair(&base, &state).await;
         Box_ {
             base,
-            state,
             token,
             c: reqwest::Client::new(),
         }
@@ -127,11 +125,11 @@ async fn schedules_are_checked_normalized_sorted_and_saved() {
         .await;
     assert_eq!(times(&list), ["07:30", "18:05"], "kept in time order");
 
-    // Saved, and read back by a fresh box.
-    let saved: Vec<Schedule> = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-    assert_eq!(saved.len(), 2);
-    assert_eq!(Schedules::open(&file).list(), saved);
-    assert_eq!(b.state.schedules().list(), saved);
+    // Saved (as the routines they became), and read back by a fresh box.
+    let routines = file.parent().unwrap().join("config/routines/routines.json");
+    assert!(routines.exists(), "saved as routines");
+    let fresh = Box_::new(&file).await;
+    assert_eq!(fresh.send("GET", "/schedules", None).await, (200, list));
 }
 
 #[tokio::test]
@@ -191,16 +189,15 @@ async fn a_schedule_is_changed_turned_off_and_removed() {
             .await;
         assert_eq!(status, 400, "{patch}");
     }
-    assert_eq!(
-        b.state
-            .schedules()
-            .list()
-            .iter()
-            .find(|s| s.id == id)
-            .unwrap()
-            .time,
-        "21:00"
-    );
+    let (_, now) = b.send("GET", "/schedules", None).await;
+    let kept = now["schedules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(kept["time"], "21:00");
     let (status, r) = b
         .send(
             "PATCH",
@@ -217,7 +214,12 @@ async fn a_schedule_is_changed_turned_off_and_removed() {
         b.send("DELETE", &format!("/schedules/{id}"), None).await.0,
         404
     );
-    assert_eq!(Schedules::open(&file).list().len(), 1);
+    // The removal is saved: a fresh box sees the one left.
+    let fresh = Box_::new(&file).await;
+    assert_eq!(
+        times(&fresh.send("GET", "/schedules", None).await.1),
+        ["12:00"]
+    );
 }
 
 #[tokio::test]
