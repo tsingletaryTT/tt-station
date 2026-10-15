@@ -5,6 +5,7 @@
 //! generation proxies (`/generate/*`), and the assistant's refusal to chat with a
 //! non-chat model. A fake backend "serves" by pointing at a stub tt-media-server.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 use serde_json::{json, Value};
 use tt_station_agentd::routes::{app, AppState};
 use tt_station_agentd::serving::ServingBackend;
+use tt_station_agentd::ttcli::TtCli;
 
 /// A stub tt-media-server: images, video jobs, and FastAPI-style errors.
 async fn stub_media_server() -> String {
@@ -68,10 +70,12 @@ struct FakeBackend {
     delay: Duration,
     error: Option<String>,
     serving: Mutex<Option<String>>,
+    starts: Arc<AtomicUsize>,
 }
 
 impl ServingBackend for FakeBackend {
     fn start_forcing(&self, _model: &str, _force: bool) -> anyhow::Result<Endpoint> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
         std::thread::sleep(self.delay);
         if let Some(e) = &self.error {
             anyhow::bail!("{e}");
@@ -105,21 +109,75 @@ struct Harness {
     client: reqwest::Client,
     base: String,
     token: String,
+    /// How many times the backend was asked to start a model.
+    starts: Arc<AtomicUsize>,
+    _scratch: Option<tempfile::TempDir>,
+}
+
+/// A stub `tt` whose catalog takes `secs` to answer. It knows one model,
+/// `Missing-1B`, whose weights aren't on the box; any other model passes
+/// `check_servable` (tt doesn't know it).
+fn slow_tt(dir: &std::path::Path, secs: f32) -> TtCli {
+    let catalog = dir.join("catalog.json");
+    std::fs::write(
+        &catalog,
+        r#"{"device": "p300x2", "models": [
+          { "name": "Missing-1B", "hf_repo": "org/Missing-1B", "model_type": "llm",
+            "cached": false, "cache_size_bytes": 0, "min_disk_gb": 0.001,
+            "devices": { "p300x2": { "status": "COMPLETE", "supported": true } } } ]}"#,
+    )
+    .unwrap();
+    let script = dir.join("tt.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "[ \"$1\" = \"--json\" ] && shift\n\
+             case \"$1\" in --version) echo \"tt 9.9.9\"; exit 0;; esac\n\
+             sleep {secs}\ncat '{catalog}'\n",
+            catalog = catalog.display()
+        ),
+    )
+    .unwrap();
+    TtCli::new(
+        vec!["sh".to_string(), script.display().to_string()],
+        dir.join("hf"),
+    )
 }
 
 impl Harness {
     async fn new(served_id: &str, delay_ms: u64, error: Option<&str>) -> Self {
+        Self::build(served_id, delay_ms, error, None).await
+    }
+
+    /// Like `new`, with a `tt` whose catalog check takes `secs`: the window a
+    /// second start used to slip through.
+    async fn with_slow_catalog(served_id: &str, delay_ms: u64, secs: f32) -> Self {
+        Self::build(served_id, delay_ms, None, Some(secs)).await
+    }
+
+    async fn build(
+        served_id: &str,
+        delay_ms: u64,
+        error: Option<&str>,
+        slow_catalog: Option<f32>,
+    ) -> Self {
         let media = stub_media_server().await;
+        let starts = Arc::new(AtomicUsize::new(0));
         let backend: Arc<dyn ServingBackend> = Arc::new(FakeBackend {
             base_url: media,
             served_id: served_id.to_string(),
             delay: Duration::from_millis(delay_ms),
             error: error.map(str::to_string),
             serving: Mutex::new(None),
+            starts: Arc::clone(&starts),
         });
-        let state = AppState::new("qb2-lab".into(), "4xBH".into(), backend)
+        let mut state = AppState::new("qb2-lab".into(), "4xBH".into(), backend)
             .with_device_mesh(Some("p300x2".into()))
             .with_telemetry_config("/nonexistent/tt-smi".to_string(), 1000);
+        let scratch = slow_catalog.map(|_| tempfile::tempdir().unwrap());
+        if let (Some(dir), Some(secs)) = (&scratch, slow_catalog) {
+            state = state.with_tt_cli(Arc::new(slow_tt(dir.path(), secs)));
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let router = app(state.clone());
@@ -149,6 +207,8 @@ impl Harness {
             client,
             base,
             token: done["token"].as_str().unwrap().to_string(),
+            starts,
+            _scratch: scratch,
         }
     }
 
@@ -224,6 +284,57 @@ async fn a_second_start_while_one_is_in_flight_is_refused() {
         .await;
     assert_eq!(s, 409, "{b}");
     assert!(b["error"].as_str().unwrap().contains("already starting"));
+}
+
+/// Two clients starting at once: the phase check and the move to `starting`
+/// used to sit on either side of awaits (the catalog check, leaving
+/// co-serving), so both could pass and the box was started twice.
+#[tokio::test]
+async fn two_concurrent_serves_start_the_box_once() {
+    let h = Harness::with_slow_catalog("Qwen/Qwen3-32B", 100, 0.3).await;
+    let (a, b) = tokio::join!(
+        h.post("/serve", json!({ "model": "Qwen3-32B" })),
+        h.post("/serve", json!({ "model": "Llama-3.1-8B-Instruct" })),
+    );
+    let mut codes = [a.0, b.0];
+    codes.sort();
+    assert_eq!(codes, [202, 409], "{} / {}", a.1, b.1);
+    let refused = if a.0 == 409 { &a.1 } else { &b.1 };
+    assert!(
+        refused["error"].as_str().unwrap().contains("already starting"),
+        "{refused}"
+    );
+    assert_eq!(h.wait_phase("serving").await["phase"], "serving");
+    assert_eq!(h.starts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn two_concurrent_runs_start_the_box_once() {
+    let h = Harness::with_slow_catalog("Qwen/Qwen3-32B", 100, 0.3).await;
+    let (a, b) = tokio::join!(
+        h.post("/run", json!({ "model": "Qwen3-32B" })),
+        h.post("/serve", json!({ "model": "Qwen3-32B" })),
+    );
+    let mut codes = [a.0, b.0];
+    codes.sort();
+    assert!(codes == [200, 409] || codes == [202, 409], "{codes:?}: {} / {}", a.1, b.1);
+    assert_eq!(h.wait_phase("serving").await["phase"], "serving");
+    assert_eq!(h.starts.load(Ordering::SeqCst), 1);
+}
+
+/// A start refused by the catalog check (weights not downloaded) hands its
+/// claim back: the box is startable again rather than stuck saying `starting`.
+#[tokio::test]
+async fn a_refused_start_releases_its_claim() {
+    let h = Harness::with_slow_catalog("Qwen/Qwen3-32B", 10, 0.0).await;
+    let (s, b) = h.post("/serve", json!({ "model": "Missing-1B" })).await;
+    assert_eq!(s, 409, "{b}");
+    assert!(b["error"].as_str().unwrap().contains("isn't downloaded"), "{b}");
+    assert_eq!(h.get("/serve").await.1["phase"], "idle");
+    let (s, b) = h.post("/serve", json!({ "model": "Qwen3-32B" })).await;
+    assert_eq!(s, 202, "{b}");
+    assert_eq!(h.wait_phase("serving").await["phase"], "serving");
+    assert_eq!(h.starts.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

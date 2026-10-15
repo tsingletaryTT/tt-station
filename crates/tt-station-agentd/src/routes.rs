@@ -1483,7 +1483,22 @@ impl AppState {
     /// into the returned `anyhow::Error`; callers that care about contention
     /// pass the error through `contention_aware_error`, which still finds a
     /// `gozer::Contention` anywhere in the chain.
+    ///
+    /// Refused with a [`StartInFlight`] (a `409` through `contention_aware_error`)
+    /// while another start or a stop is in flight; see [`AppState::claim_start`].
     pub(crate) async fn start_serving(&self, model: &str, force: bool) -> anyhow::Result<Endpoint> {
+        let prev = self.claim_start(model)?;
+        self.start_serving_claimed(model, force, prev).await
+    }
+
+    /// [`AppState::start_serving`] for a caller that already holds the
+    /// [`AppState::claim_start`] claim (`prev` is what it replaced).
+    pub(crate) async fn start_serving_claimed(
+        &self,
+        model: &str,
+        force: bool,
+        prev: Lifecycle,
+    ) -> anyhow::Result<Endpoint> {
         // Run the bring-up on its own task so it finishes -- and records its
         // outcome -- even when the caller goes away. A phone's `POST /run` dies
         // when the app is backgrounded minutes into a load; if this future were
@@ -1494,7 +1509,14 @@ impl AppState {
         tokio::spawn(async move {
             // An ordinary start takes the whole box: leave co-serving first.
             crate::coserve::leave_split(&me).await;
-            me.start_serving_tracked(&model, force).await
+            let result = me.start_serving_tracked(&model, force).await;
+            if result.is_err() {
+                // Refused before the backend was asked (chips held): nothing
+                // started, so the claim goes back. A real failure already moved
+                // the lifecycle to `failed`, which this leaves alone.
+                me.release_start(prev, &model);
+            }
+            result
         })
         .await
         .map_err(|join_err| anyhow::anyhow!("run task panicked: {join_err}"))?
@@ -1657,6 +1679,59 @@ impl AppState {
             error,
             adopted: false,
         };
+    }
+
+    /// Claim the lifecycle for a start of `model`: check nothing else is
+    /// starting or stopping and set `Starting` under ONE hold of the lock, so
+    /// two clients asking at once can't both pass the check (the start itself
+    /// only gets to `start_serving_tracked` after awaits -- `check_servable`,
+    /// `coserve::leave_split` -- that used to leave that window open). Returns
+    /// the lifecycle it replaced, for [`AppState::release_start`] when the start
+    /// never gets going.
+    pub(crate) fn claim_start(&self, model: &str) -> Result<Lifecycle, StartInFlight> {
+        let mut life = self
+            .inner
+            .lifecycle
+            .lock()
+            .expect("lifecycle mutex poisoned");
+        match life.phase {
+            Phase::Starting => {
+                return Err(StartInFlight(format!(
+                    "{} is already starting. Wait for it, or stop it first.",
+                    life.model.clone().unwrap_or_else(|| "A model".to_string())
+                )))
+            }
+            Phase::Stopping => {
+                return Err(StartInFlight(
+                    "The box is stopping a model. Try again in a moment.".to_string(),
+                ))
+            }
+            _ => {}
+        }
+        let prev = life.clone();
+        *life = Lifecycle {
+            phase: Phase::Starting,
+            model: Some(model.to_string()),
+            served_id: None,
+            since: unix_now(),
+            error: None,
+            adopted: false,
+        };
+        Ok(prev)
+    }
+
+    /// Hand back a [`AppState::claim_start`] claim whose start never got going
+    /// (refused before the backend was asked): restore `prev`, unless something
+    /// has moved the lifecycle on since.
+    pub(crate) fn release_start(&self, prev: Lifecycle, model: &str) {
+        let mut life = self
+            .inner
+            .lifecycle
+            .lock()
+            .expect("lifecycle mutex poisoned");
+        if life.phase == Phase::Starting && life.model.as_deref() == Some(model) {
+            *life = prev;
+        }
     }
 
     /// Why `model` can't be started right now from the tt catalog's view (not
@@ -2643,10 +2718,9 @@ fn backend_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
 /// no duration, since gozer exposes none. Used by the three routes that can
 /// contend; every other route keeps `backend_error`.
 fn contention_aware_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
-    if err
-        .chain()
-        .any(|cause| cause.is::<crate::gozer::Contention>())
-    {
+    if err.chain().any(|cause| {
+        cause.is::<crate::gozer::Contention>() || cause.is::<StartInFlight>()
+    }) {
         return (
             StatusCode::CONFLICT,
             Json(ErrorResponse {
@@ -2676,11 +2750,19 @@ async fn run_model(
     _auth: BearerAuth,
     Json(req): Json<RunRequest>,
 ) -> Result<Json<RunResponse>, (StatusCode, Json<ErrorResponse>)> {
-    check_servable(&state, &req.model).await?;
+    // Claimed before the first await: a second `/run` (or `/serve`) meanwhile
+    // gets a 409 instead of starting the box twice.
+    let prev = state
+        .claim_start(&req.model)
+        .map_err(|e| tt_error(StatusCode::CONFLICT, e.0))?;
+    if let Err(e) = check_servable(&state, &req.model).await {
+        state.release_start(prev, &req.model);
+        return Err(e);
+    }
     // A contended box answers 409 (naming the board and the holder), not
     // 500 -- see `contention_aware_error`.
     let endpoint = state
-        .start_serving(&req.model, req.force)
+        .start_serving_claimed(&req.model, req.force, prev)
         .await
         .map_err(contention_aware_error)?;
 
@@ -4528,27 +4610,34 @@ pub(crate) async fn begin_serve(
     if let Some(holder) = state.chips_holder() {
         return Err(tt_error(StatusCode::CONFLICT, holder));
     }
-    let life = state.lifecycle();
-    if matches!(life.phase, Phase::Starting | Phase::Stopping) {
-        return Err(tt_error(
-            StatusCode::CONFLICT,
-            match life.phase {
-                Phase::Starting => format!(
-                    "{} is already starting. Wait for it, or stop it first.",
-                    life.model.unwrap_or_else(|| "A model".to_string())
-                ),
-                _ => "The box is stopping a model. Try again in a moment.".to_string(),
-            },
-        ));
+    // Claimed before the first await, so a second caller sees `starting`.
+    let prev = state
+        .claim_start(model)
+        .map_err(|e| tt_error(StatusCode::CONFLICT, e.0))?;
+    if let Err(e) = check_servable(state, model).await {
+        state.release_start(prev, model);
+        return Err(e);
     }
-    check_servable(state, model).await?;
     let model = model.to_string();
     let bg = state.clone();
     tokio::spawn(async move {
-        let _ = bg.start_serving(&model, force).await;
+        let _ = bg.start_serving_claimed(&model, force, prev).await;
     });
     Ok(())
 }
+
+/// Why a start was refused: another start or a stop is already in flight.
+/// Answered as `409` (see `contention_aware_error`).
+#[derive(Debug)]
+pub struct StartInFlight(pub String);
+
+impl std::fmt::Display for StartInFlight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StartInFlight {}
 
 // ---------------------------------------------------------------------
 // Image and video generation, proxied to the served media server
