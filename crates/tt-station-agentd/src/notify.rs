@@ -9,7 +9,8 @@
 //! changes into [`Event`]s. Each is kept for clients (`GET /events?since=`) and
 //! pushed through Apple's push service to every phone that registered its
 //! device token (`POST /notify/devices`) -- see `crate::apns`. Pushes carry
-//! model names and events, never chat content.
+//! model names and events, never chat content -- and never a pairing code
+//! (see [`push_alert`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -372,6 +373,7 @@ impl Notifier {
     }
 
     /// Push `event` to every registered phone; returns how many got it.
+    /// What's sent is [`push_alert`]'s version of it.
     /// Forgets tokens Apple says are dead, and fixes a token's environment when
     /// Apple says it's the other one.
     pub async fn push(&self, event: &Event) -> usize {
@@ -379,6 +381,7 @@ impl Notifier {
             return 0;
         };
         let subtitle = self.box_name.lock().expect("notify mutex poisoned").clone();
+        let (title, body, data) = push_alert(event);
         let mut sent = 0;
         for device in self.devices() {
             let mut sandbox = device.sandbox;
@@ -386,11 +389,11 @@ impl Notifier {
                 .send(
                     &device.token,
                     sandbox,
-                    &event.title,
+                    &title,
                     &subtitle,
-                    &event.body,
+                    &body,
                     &event.kind,
-                    event.data.as_ref(),
+                    data,
                 )
                 .await;
             if outcome == crate::apns::Delivery::WrongEnvironment {
@@ -399,11 +402,11 @@ impl Notifier {
                     .send(
                         &device.token,
                         sandbox,
-                        &event.title,
+                        &title,
                         &subtitle,
-                        &event.body,
+                        &body,
                         &event.kind,
-                        event.data.as_ref(),
+                        data,
                     )
                     .await;
                 if outcome == crate::apns::Delivery::Sent {
@@ -497,6 +500,22 @@ impl Notifier {
         if let Err(e) = write() {
             eprintln!("tt-station-agentd: couldn't save notification devices: {e}");
         }
+    }
+}
+
+/// What a push says about `event`: (title, body, data). A push's text passes
+/// through Apple, so a pairing code -- which lets whoever types it in control
+/// the box -- never rides along: the push only says someone is asking, and
+/// TT Station shows the code from `GET /events`, over its own authenticated
+/// connection.
+pub fn push_alert(event: &Event) -> (String, String, Option<&serde_json::Value>) {
+    match event.kind.as_str() {
+        "pairing" => (
+            "A computer is asking to pair".to_string(),
+            "Open TT Station to see the code. If you didn't start pairing, ignore this.".to_string(),
+            None,
+        ),
+        _ => (event.title.clone(), event.body.clone(), event.data.as_ref()),
     }
 }
 

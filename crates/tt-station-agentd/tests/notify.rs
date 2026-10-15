@@ -252,6 +252,80 @@ async fn alerts_are_pushed_to_registered_phones() {
     assert!(power["can_power_off"].is_string());
 }
 
+/// A pairing code lets whoever types it control the box, and a push's text
+/// passes through Apple: the push only says someone is asking; the code is in
+/// the box's own feed (`/events`, authenticated) for TT Station to show.
+#[tokio::test]
+async fn a_pairing_push_never_carries_the_code() {
+    let pushes: Pushes = Arc::default();
+    let apns_base = stub_apns(pushes.clone()).await;
+    let apns = Apns::new(
+        ApnsConfig {
+            team_id: "TEAM123456".into(),
+            key_id: "KEY1234567".into(),
+            key_file: String::new(),
+            topic: "com.tenstorrent.ttstation.mobile".into(),
+            endpoint: Some(apns_base),
+        },
+        &test_key_pem(),
+    )
+    .unwrap();
+    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(Idle))
+        .with_notifier(Notifier::in_memory().with_apns(apns));
+    let base = serve(app(state.clone())).await;
+    let client = reqwest::Client::new();
+    let token = pair(&client, &state, &base).await;
+    let ok = client
+        .post(format!("{base}/notify/devices"))
+        .bearer_auth(&token)
+        .json(&json!({ "token": LIVE, "sandbox": true, "name": "iPhone" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+
+    // Another computer asks to pair.
+    let init: Value = client
+        .post(format!("{base}/pair/init"))
+        .json(&json!({ "device": "Sam's MacBook" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code = state.last_code(init["pair_id"].as_str().unwrap()).unwrap();
+    let spaced = format!("{} {}", &code[..3], &code[3..]);
+    let mut pushed = None;
+    for _ in 0..100 {
+        pushed = pushes.lock().unwrap().iter().find(|p| p.0 == LIVE && p.3["kind"] == "pairing").map(|p| p.3.clone());
+        if pushed.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let pushed = pushed.expect("the phone is told someone is asking");
+    let text = pushed.to_string();
+    assert!(!text.contains(&code) && !text.contains(&spaced), "no code through Apple: {text}");
+    assert_eq!(pushed["aps"]["alert"]["title"], "A computer is asking to pair");
+    assert!(pushed["aps"]["alert"]["body"].as_str().unwrap().contains("Open TT Station to see the code"));
+    assert!(pushed.get("data").is_none());
+
+    // TT Station reads the code from the box itself.
+    let events: Value = client
+        .get(format!("{base}/events?since=0"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let last = events["events"].as_array().unwrap().iter().rev().find(|e| e["kind"] == "pairing").unwrap().clone();
+    assert!(last["title"].as_str().unwrap().contains(&spaced), "{last}");
+    assert!(last["title"].as_str().unwrap().contains("Sam's MacBook"));
+}
+
 #[tokio::test]
 async fn without_a_push_key_the_box_says_so() {
     let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(Idle));
