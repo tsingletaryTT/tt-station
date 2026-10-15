@@ -14,13 +14,16 @@ import { Typography } from "@tenstorrent/vesper/typography";
 import { StatusIndicator } from "@tenstorrent/vesper/status-indicator";
 import { Icon } from "@tenstorrent/vesper/icons";
 import { del, duration, fetchBlob, get, type Job, post, type Serve, short, text, upload } from "../api";
-import { Card, copyText, Empty, Eyebrow, Page, toastError, toastOk, usePoll } from "../ui";
+import { Card, copyText, Empty, Eyebrow, Page, toastError, toastOk, usePoll, useReducedMotion, useServe } from "../ui";
+import { addToast } from "@tenstorrent/vesper/toast";
+import { ask, whoIsAffected } from "../dialog";
+import { deleteWithUndo, UNDO_MS } from "../undo";
 import { MeetingRecorder } from "../recorder";
 
 type Tab = "images" | "video" | "transcribe";
 
 export function Studio() {
-  const serve = usePoll(() => get<Serve>("/serve"), 5000);
+  const serve = useServe(5000);
   const kind = serve.data?.phase === "serving" ? serve.data.kind : null;
   const [tab, setTab] = useState<Tab>(location.hash === "#transcribe" ? "transcribe" : "images");
   useEffect(() => { if (kind === "video") setTab("video"); }, [kind]);
@@ -49,6 +52,8 @@ function NeedsMode({ what, mode, serve, onSwitched }: { what: string; mode: stri
       children: busy ? "Switching…" : `Switch to ${what}`,
       disabled: busy,
       onClick: async () => {
+        const current = serve?.phase === "serving" ? short(serve.served_id ?? serve.model) : null;
+        if (current && !(await ask(`Switch the box to ${what}?`, { body: whoIsAffected(current), confirm: `Switch to ${what}` }))) return;
         setBusy(true);
         try { await post(`/modes/${mode}`, {}); toastOk(`Switching the box to ${what}.`); onSwitched(); } catch (e) { toastError(e); } finally { setBusy(false); }
       },
@@ -71,6 +76,7 @@ function Images({ serve, onSwitched }: { serve: Serve | null; onSwitched: () => 
   const [busy, setBusy] = useState(false);
   const [made, setMade] = useState<Made[]>([]);
   const [started, setStarted] = useState(0);
+  const reduce = useReducedMotion();
   const [, tick] = useState(0);
   useEffect(() => {
     if (!busy) return;
@@ -112,7 +118,7 @@ function Images({ serve, onSwitched }: { serve: Serve | null; onSwitched: () => 
             {busy ? `Making… ${Math.round((Date.now() - started) / 1000)} s` : "Make"}
           </Button>
         </div>
-        {busy && <ProgressBar value={Math.min(95, ((Date.now() - started) / 1000 / (Number(steps) * 0.6)) * 100)} animated aria-label="Making" />}
+        {busy && <ProgressBar value={Math.min(95, ((Date.now() - started) / 1000 / (Number(steps) * 0.6)) * 100)} animated={!reduce} aria-label="Making" />}
       </Card>
       {made.length === 0 ? (
         <Empty title="Nothing made yet">Pictures you make here stay until you close the app. Right-click one to save it.</Empty>
@@ -185,6 +191,28 @@ function Transcribe() {
   const [tonight, setTonight] = useState(false);
   const [open, setOpen] = useState<{ job: Job; text: string } | null>(null);
   const picker = useRef<HTMLInputElement>(null);
+  const [gone, setGone] = useState<string[]>([]);
+  const active = (j: Job) => ["queued", "waiting", "switching", "running"].includes(j.status);
+  // Cancelling work in progress asks first (the parts done are lost); a finished transcript can be brought back for a few seconds.
+  const removeJob = async (j: Job) => {
+    if (active(j)) {
+      if (!(await ask(`Cancel transcribing ${j.title}?`, {
+        body: j.status === "running" ? `It's ${j.done} of ${j.total} parts in; what's done so far is discarded.` : "It's taken off the list and won't run.",
+        confirm: "Cancel it", cancel: "Keep going", danger: true,
+      }))) return;
+      try { await del(`/jobs/${j.id}`); void jobs.refresh(); } catch (e) { toastError(e); }
+      return;
+    }
+    if (open?.job.id === j.id) setOpen(null);
+    const undo = deleteWithUndo({
+      hide: () => setGone((g) => [...g, j.id]),
+      show: () => setGone((g) => g.filter((x) => x !== j.id)),
+      remove: () => del(`/jobs/${j.id}`),
+      removed: () => void jobs.refresh(),
+      failed: toastError,
+    });
+    addToast({ content: "Transcript deleted.", timeout: UNDO_MS, action: { content: "Undo", altText: "Bring the transcript back", handler: undo } });
+  };
 
   const send = async (file: File) => {
     setSending(file.name);
@@ -219,9 +247,9 @@ function Transcribe() {
 
       <div className="section-title"><Eyebrow>Transcripts</Eyebrow></div>
       <Card>
-        {(jobs.data?.jobs ?? []).length === 0 && <Empty title="No transcripts yet" />}
+        {(jobs.data?.jobs ?? []).filter((j) => !gone.includes(j.id)).length === 0 && <Empty title="No transcripts yet" />}
         <div className="list">
-          {(jobs.data?.jobs ?? []).map((j) => (
+          {(jobs.data?.jobs ?? []).filter((j) => !gone.includes(j.id)).map((j) => (
             <div key={j.id} className="list-row">
               <Icon kind={j.status === "done" ? "success" : j.status === "failed" ? "error" : "clock"} width={18} height={18}
                 style={{ color: j.status === "done" ? "var(--vesper-mint-600)" : j.status === "failed" ? "var(--vesper-red-600)" : "var(--vesper-text-accent)" }} />
@@ -235,8 +263,8 @@ function Transcribe() {
               </div>
               {j.status === "waiting" && <Button size="sm" variant="subtle" onClick={async () => { try { await post(`/jobs/${j.id}/run`); jobs.refresh(); } catch (e) { toastError(e); } }}>Run now</Button>}
               {j.status === "done" && <Button size="sm" variant="subtle" onClick={async () => setOpen({ job: j, text: await text(`/jobs/${j.id}/result`) })}>Open</Button>}
-              <Button size="sm" variant="ghost" onClick={async () => { try { await del(`/jobs/${j.id}`); jobs.refresh(); } catch (e) { toastError(e); } }}>
-                {["queued", "waiting", "switching", "running"].includes(j.status) ? "Cancel" : "Delete"}
+              <Button size="sm" variant="ghost" aria-label={`${active(j) ? "Cancel" : "Delete"} ${j.title}`} onClick={() => removeJob(j)}>
+                {active(j) ? "Cancel" : "Delete"}
               </Button>
             </div>
           ))}

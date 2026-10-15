@@ -150,9 +150,11 @@ export function FolderBrowser({ home, onPick }: { home: string; onPick: (path: s
       </div>
       <div className="list" style={{ maxHeight: 360, overflowY: "auto" }}>
         {(l?.folders ?? []).map((f) => (
-          <div key={f.path} className="list-row" style={{ cursor: "pointer" }} onClick={() => setPath(f.path)}>
-            <span>📁</span><span className="grow">{f.name}</span>{f.git && <Badge size="sm" variant="mint" subtle>git</Badge>}
-            <Button size="xs" variant="ghost" onClick={(e) => { e.stopPropagation(); onPick(f.path); }}>Use</Button>
+          <div key={f.path} className="list-row">
+            <button type="button" className="folder-open" onClick={() => setPath(f.path)} aria-label={`Open ${f.name}${f.git ? " (git repository)" : ""}`}>
+              <span aria-hidden>📁</span><span className="grow">{f.name}</span>{f.git && <Badge size="sm" variant="mint" subtle>git</Badge>}
+            </button>
+            <Button size="xs" variant="ghost" aria-label={`Use ${f.name}`} onClick={() => onPick(f.path)}>Use</Button>
           </div>
         ))}
         {l && l.folders.length === 0 && <span className="muted" style={{ fontSize: 13 }}>No folders here.</span>}
@@ -172,6 +174,7 @@ function SessionView({ s, onChanged, onDeleted }: { s: Session; onChanged: () =>
     try { await post(`/coding/sessions/${s.id}/stop`); onChanged(); } catch (e) { toastError(e); }
   };
   const remove = async () => {
+    if (!(await ask("Remove this session?", { body: `Its terminal and history leave TT Station. Its changes in ${base(s.folder)} stay.`, confirm: "Remove", danger: true }))) return;
     try { await del(`/coding/sessions/${s.id}`); onDeleted(); } catch (e) { toastError(e); }
   };
   return (
