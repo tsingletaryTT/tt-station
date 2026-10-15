@@ -2452,6 +2452,7 @@ async fn get_leases(
 /// this handler to redact -- it just serves the stored summary verbatim.
 async fn get_config(
     axum::extract::State(state): axum::extract::State<AppState>,
+    _caller: LocalOrPaired,
 ) -> Json<ConfigSummary> {
     Json(state.config_summary())
 }
@@ -2632,6 +2633,22 @@ impl FromRequestParts<AppState> for BearerAuth {
             Some(token) if state.is_valid_token(token) => Ok(BearerAuth),
             _ => Err(StatusCode::UNAUTHORIZED),
         }
+    }
+}
+
+/// The box itself (plain HTTP from this machine, see `only_local`) or a
+/// paired caller: for what the box's own tools (`tt-station console`, the
+/// panel) read without pairing, but the network may not.
+pub(crate) struct LocalOrPaired;
+
+impl FromRequestParts<AppState> for LocalOrPaired {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, StatusCode> {
+        if parts.extensions.get::<LocalCaller>().is_some() {
+            return Ok(LocalOrPaired);
+        }
+        BearerAuth::from_request_parts(parts, state).await.map(|_| LocalOrPaired)
     }
 }
 
@@ -3289,12 +3306,11 @@ struct LogsResponse {
     lines: Vec<String>,
 }
 
-/// `GET /logs` (UNAUTHED, like `/status`/`/models`/`/serving`): tail the
+/// `GET /logs` (the box itself, or paired -- `LocalOrPaired`): tail the
 /// newest tt-inference-server workflow log for `?source=container|run`.
-///
-/// Read-only file access, exactly as exposed as the other unauthed discovery
-/// routes -- see `crate::logs` for the pure tail/redact logic this delegates
-/// to. `?source` defaults to `container`; `?tail` defaults to
+/// Logs say what the box runs and where its files are: not for anyone on
+/// the network. See `crate::logs` for the pure tail/redact logic this
+/// delegates to. `?source` defaults to `container`; `?tail` defaults to
 /// `crate::logs::DEFAULT_TAIL`, capped at `crate::logs::MAX_TAIL`.
 ///
 /// Error contract: an unrecognized `source` is a `400` (caller's mistake); no
@@ -3304,6 +3320,7 @@ struct LogsResponse {
 /// served yet" is the normal state of an idle box, not a failure.
 async fn get_logs(
     axum::extract::State(state): axum::extract::State<AppState>,
+    _caller: LocalOrPaired,
     RawQuery(query): RawQuery,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let (source_str, tail) = parse_logs_query(query.as_deref());
@@ -3385,6 +3402,7 @@ pub(crate) fn read_log_tail(
 async fn logs_ws(
     ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<AppState>,
+    _caller: LocalOrPaired,
     RawQuery(query): RawQuery,
 ) -> Response {
     let (source_str, tail) = parse_logs_query(query.as_deref());
@@ -3945,7 +3963,50 @@ pub fn local_http_app(state: AppState) -> Router {
         .with_state(state.clone());
     app(state.clone())
         .merge(local_only)
-        .layer(axum::middleware::from_fn_with_state(state, only_local))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), only_local))
+        .layer(axum::middleware::from_fn_with_state(state, known_host))
+}
+
+/// A web page in a browser on the box can't use the plain-HTTP API through a
+/// name of its own that it points at 127.0.0.1 (DNS rebinding): requests must
+/// name the box as the box knows itself. (HTTPS needs no such check: a
+/// browser won't talk to the box's own certificate under another name.)
+async fn known_host(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let host = req.headers().get(axum::http::header::HOST).and_then(|h| h.to_str().ok());
+    match host {
+        Some(h) if !host_is_the_box(h, state.name()) => (
+            StatusCode::MISDIRECTED_REQUEST,
+            Json(serde_json::json!({ "error": format!("This box doesn't answer to {h}.") })),
+        )
+            .into_response(),
+        _ => next.run(req).await,
+    }
+}
+
+/// Whether a `Host` header names this box: loopback, its own addresses, its
+/// names (`<name>.local`, its hostname), or Docker's name for it.
+pub fn host_is_the_box(host: &str, name: &str) -> bool {
+    // Drop the port: "[::1]:8765" -> "::1", "box.local:8765" -> "box.local".
+    let h = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h),
+    };
+    let h = h.trim_end_matches('.').to_ascii_lowercase();
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return ip.is_loopback() || own_addresses().contains(&ip) || ip.to_canonical().is_loopback();
+    }
+    let me = name.to_ascii_lowercase();
+    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_ascii_lowercase();
+    h == "localhost"
+        || h.ends_with(".localhost")
+        || h == "host.docker.internal"
+        || (!me.is_empty() && (h == me || h == format!("{me}.local")))
+        || (!hostname.is_empty() && (h == hostname || h == format!("{hostname}.local")))
 }
 
 /// `POST /pair/qr` (the box itself): a one-time pairing link and its QR, for
@@ -5410,7 +5471,7 @@ mod logs_query_tests {
 
 #[cfg(test)]
 mod local_http_tests {
-    use super::{container_peer, local_peer, AppState, PAIR_INITS_PER_ADDRESS, PAIR_INITS_PER_MINUTE};
+    use super::{container_peer, host_is_the_box, local_peer, AppState, PAIR_INITS_PER_ADDRESS, PAIR_INITS_PER_MINUTE};
 
     #[test]
     fn plain_http_is_for_the_box_and_its_containers_get_only_v1() {
@@ -5424,6 +5485,16 @@ mod local_http_tests {
         assert!(!local_peer("172.32.0.1".parse().unwrap()));
         assert!(!local_peer("192.168.1.20".parse().unwrap()));
         assert!(!local_peer("100.100.1.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn the_plain_http_api_answers_only_to_the_boxs_own_names() {
+        for h in ["127.0.0.1:8765", "localhost:8765", "localhost", "[::1]:8765", "app.localhost:8765", "host.docker.internal:8765", "qb2-lab.local:8765", "QB2-LAB:8765", "127.0.0.1"] {
+            assert!(host_is_the_box(h, "qb2-lab"), "{h}");
+        }
+        for h in ["evil.example:8765", "evil.example", "127.0.0.1.evil.example:8765", "qb2-lab.local.evil.example", "localhost.evil.example:8765", "8.8.8.8:8765", "[2606:4700::1111]:80"] {
+            assert!(!host_is_the_box(h, "qb2-lab"), "{h}");
+        }
     }
 
     #[test]
