@@ -563,6 +563,17 @@ pub(crate) async fn post_pull(State(state): State<AppState>, _auth: BearerAuth, 
     if unit_active(&u) {
         return Ok(Json(json!({ "pulling": true })));
     }
+    // Room for it? Checked before anything starts, from its details (cached
+    // when the app just showed them). Unknown sizes or free space refuse nothing.
+    if let Ok(Json(details)) = info(body.id.clone()).await {
+        let here = details["weights"]
+            .as_str()
+            .map_or(0, |w| crate::download::repo_on_disk(&crate::download::hub_dir(), w));
+        if let (Some(need), Some(free)) = (crate::download::package_need(&details, here), disk_free()) {
+            let name = body.id.rsplit('/').next().unwrap_or(&body.id);
+            crate::download::check_room(name, need, free).map_err(|e| err(StatusCode::CONFLICT, e))?;
+        }
+    }
     let dir = work_dir(&state, &body.id);
     std::fs::create_dir_all(&dir).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let (log, exit) = (dir.join("pull.log"), dir.join("pull.exit"));

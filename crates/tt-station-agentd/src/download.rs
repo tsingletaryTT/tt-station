@@ -225,6 +225,35 @@ pub fn progress(key: &str, done: u64, total: Option<u64>) -> Value {
     json!({ "done_bytes": done, "total_bytes": total, "percent": percent, "bytes_per_s": rate.map(|r| r.round() as u64), "eta_s": eta })
 }
 
+/// Refuse a download that can't fit before it starts, rather than after it has
+/// filled the disk (and everything else on it): `need` bytes still to fetch
+/// against `free` where they'll land.
+pub fn check_room(what: &str, need: u64, free: u64) -> Result<(), String> {
+    if need <= free {
+        return Ok(());
+    }
+    let gb = |b: u64| b as f64 / 1e9;
+    Err(format!(
+        "{what} needs about {:.1} GB of free disk to download; the box has {:.1} GB free. Free up {:.1} GB (remove models you don't use) and try again.",
+        gb(need),
+        gb(free),
+        gb(need - free)
+    ))
+}
+
+/// What a community package download still needs on disk, from its details
+/// (`community::info`): the package, plus its weights less `weights_here`
+/// already in the cache (a resumed download), unless they're all here. `None`
+/// when the sizes aren't known (then nothing is refused).
+pub fn package_need(info: &Value, weights_here: u64) -> Option<u64> {
+    let package = info["package_bytes"].as_u64()?;
+    if info["weights_on_box"].as_bool() == Some(true) || info["weights"].is_null() {
+        return Some(package);
+    }
+    let weights = info["weights_bytes"].as_u64()?;
+    Some(package + weights.saturating_sub(weights_here))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +323,26 @@ mod tests {
         assert_eq!(unlink_small_files(&hub, "org/m"), 0);
         assert_eq!(unlink_small_files(&hub, "org/missing"), 0);
         let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn a_download_that_cant_fit_is_refused_with_the_numbers() {
+        assert!(check_room("Qwen3-32B", 60_000_000_000, 61_000_000_000).is_ok());
+        let e = check_room("Qwen3-32B", 65_000_000_000, 20_000_000_000).unwrap_err();
+        assert!(e.contains("65.0 GB"), "{e}");
+        assert!(e.contains("20.0 GB free"), "{e}");
+        assert!(e.contains("Free up 45.0 GB"), "{e}");
+    }
+
+    #[test]
+    fn a_package_needs_its_size_plus_the_weights_not_yet_here() {
+        let info = json!({ "package_bytes": 10, "weights": "org/w", "weights_bytes": 100, "weights_on_box": false });
+        assert_eq!(package_need(&info, 0), Some(110));
+        assert_eq!(package_need(&info, 40), Some(70), "a resumed download");
+        let here = json!({ "package_bytes": 10, "weights": "org/w", "weights_bytes": 100, "weights_on_box": true });
+        assert_eq!(package_need(&here, 0), Some(10));
+        let unknown = json!({ "package_bytes": 10, "weights": "org/w", "weights_bytes": null });
+        assert_eq!(package_need(&unknown, 0), None);
     }
 
     #[test]
