@@ -387,7 +387,7 @@ async fn detect(model: &str, base_url: &str) -> PrefixCache {
     if measured(model).is_some_and(|m| m.cached_seen) {
         return PrefixCache::new(Cache::On, "the server reported cached prompt tokens");
     }
-    let metrics = reqwest::Client::new().get(format!("{}/metrics", root(base_url))).timeout(Duration::from_secs(3)).send().await;
+    let metrics = crate::localhttp::local().get(format!("{}/metrics", root(base_url))).timeout(Duration::from_secs(3)).send().await;
     if let Ok(r) = metrics {
         if let Ok(text) = r.text().await {
             if let Some(on) = cache_from_metrics(&text) {
@@ -428,7 +428,7 @@ async fn served_context(model: &str, base_url: &str) -> Option<u64> {
         }
     }
     let url = format!("{}/v1/models", root(base_url));
-    let c = match reqwest::Client::new().get(url).timeout(Duration::from_secs(3)).send().await {
+    let c = match crate::localhttp::local().get(url).timeout(Duration::from_secs(3)).send().await {
         Ok(r) => r.json::<Value>().await.ok().and_then(|v| {
             let data = v["data"].as_array()?;
             data.iter().find(|d| d["id"].as_str().is_some_and(|id| same_model(id, model))).or(data.first())?["max_model_len"].as_u64()
@@ -437,13 +437,6 @@ async fn served_context(model: &str, base_url: &str) -> Option<u64> {
     };
     CONTEXT.lock().expect("context").insert(model.to_string(), (Instant::now(), c));
     c
-}
-
-/// The window Code sessions get and where they compact, from the model's
-/// context: the same figures `workspace.rs` launches Claude Code with.
-pub fn window_and_compaction(context: Option<u64>) -> (u64, u64) {
-    let window = context.unwrap_or(131_072).min(131_072);
-    (window, window.min(crate::coding::COMPACT_WINDOW))
 }
 
 // ---------------------------------------------------------------- choosing the model
@@ -517,7 +510,8 @@ pub(crate) async fn get_speed(State(state): State<AppState>, _auth: BearerAuth, 
         Some(e) => (served_context(&e.model, &e.base_url).await, Some(prefix_cache(&e.model, &e.base_url).await)),
         None => (None, None),
     };
-    let (window, compact_at) = window_and_compaction(context);
+    // The same figures Claude Code was launched with (`coding::code_window`).
+    let (window, compact_at) = crate::coding::code_window(&state, context);
     Ok(Json(json!({
         "model": endpoint.as_ref().map(|e| e.model.clone()),
         "window": window,
@@ -723,14 +717,6 @@ mod tests {
         let m = measured("test-ring-model").unwrap();
         assert_eq!(m.decode_tps.len(), SAMPLES);
         assert_eq!(median_f(&m.decode_tps), Some(19.0));
-    }
-
-    #[test]
-    fn the_window_and_compaction_follow_the_launch() {
-        assert_eq!(window_and_compaction(Some(131_072)), (131_072, crate::coding::COMPACT_WINDOW));
-        assert_eq!(window_and_compaction(Some(262_144)), (131_072, crate::coding::COMPACT_WINDOW));
-        assert_eq!(window_and_compaction(Some(32_768)), (32_768, 32_768));
-        assert_eq!(window_and_compaction(None), (131_072, crate::coding::COMPACT_WINDOW));
     }
 
     #[test]

@@ -47,6 +47,77 @@ use crate::routes::{AppState, BearerAuth};
 /// wrote calls as text).
 pub const COMPACT_WINDOW: u64 = 65_536;
 
+/// The most context Claude Code gets on the box, whatever the model serves: the
+/// whole conversation is read again at every step, so a bigger window only makes
+/// steps slower.
+pub const MAX_WINDOW: u64 = 131_072;
+
+/// The window Claude Code runs with on the box and where it compacts, for the
+/// served model's `context` (its `max_model_len`, `None` when unknown). Both
+/// launch paths (Code in `workspace.rs`, coding sessions here) and Code's speed
+/// panel (`codespeed.rs`) use this, so what the panel shows is what was launched.
+pub fn code_window(state: &AppState, context: Option<u64>) -> (u64, u64) {
+    window_for(context, crate::evals::compact_window(state, state.endpoint().map(|e| e.model).as_deref()))
+}
+
+/// [`code_window`]'s arithmetic: the served context capped at [`MAX_WINDOW`], and
+/// compaction at `compact` (measured per model) but never past the window.
+pub fn window_for(context: Option<u64>, compact: u64) -> (u64, u64) {
+    let window = context.unwrap_or(MAX_WINDOW).min(MAX_WINDOW);
+    (window, window.min(compact))
+}
+
+/// How Claude Code runs on the box's model, for every launch of it: the extra
+/// arguments and environment both Code (`workspace.rs`) and coding sessions
+/// (here) start it with. Each caller adds what is its own (config folder, key,
+/// session header, thinking).
+///
+/// `context` is the served model's; `web` offers the web tools (not from a
+/// sandbox, which has no internet).
+pub(crate) fn claude_tuning(state: &AppState, context: Option<u64>, folder: &Path, web: bool) -> (Vec<String>, Vec<(String, String)>) {
+    let (window, compact_at) = code_window(state, context);
+    // Its answers fit in what's left of the context: Claude Code asks for large
+    // output budgets by default, and prompt plus budget past the context is refused.
+    let output = (window / 4).clamp(4096, 16_384);
+    // Only the tools coding needs. Claude Code offers about twenty (agents,
+    // schedules, worktrees, messages, plan mode…) that can't help here, and every
+    // one is described in the prompt the model re-reads at each step.
+    let mut tools = vec!["Bash", "Read", "Edit", "Write"];
+    // Its description costs ~450 tokens at every step: only for projects with notebooks.
+    if crate::workspace::has_notebooks(folder) {
+        tools.push("NotebookEdit");
+    }
+    if web {
+        tools.extend(["WebFetch", "WebSearch"]);
+    }
+    // One argument: `--tools a b` would also take a task that follows as a tool.
+    let args = vec![format!("--tools={}", tools.join(","))];
+    let env = [
+        ("ANTHROPIC_API_KEY", String::new()),
+        ("ANTHROPIC_MODEL", "quietbox".into()),
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL", "quietbox".into()),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL", "quietbox".into()),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "quietbox".into()),
+        ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", window.to_string()),
+        // Summarize long before the window is full: past some size a local model
+        // starts inventing tools and writing its calls as text. Where, is measured
+        // per model (the agent reliability eval); 64K when it hasn't been.
+        ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", compact_at.to_string()),
+        ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", output.to_string()),
+        // No single file read or command output may take a big bite of the context:
+        // a large file is read in parts (offset, limit) instead.
+        ("CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS", "8000".into()),
+        ("BASH_MAX_OUTPUT_LENGTH", "15000".into()),
+        // No per-request header line at the top of the system prompt: it changes every
+        // request, so the server could never reuse (prefix-cache) the conversation's start.
+        ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0".into()),
+        ("DISABLE_TELEMETRY", "1".into()),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".into()),
+        ("DISABLE_AUTOUPDATER", "1".into()),
+    ];
+    (args, env.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+}
+
 type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 const HOST: &str = include_str!("code_session.py");
@@ -132,26 +203,19 @@ fn launch(state: &AppState, agent: &Agent, bin: &Path, task: Option<&str>, folde
             c["projects"][&f]["hasTrustDialogAccepted"] = json!(true);
             let _ = std::fs::write(&cfg, serde_json::to_vec_pretty(&c).unwrap_or_default());
             // Its context window: the served model's own (it can't know "quietbox").
-            let window = FIT.lock().expect("fit").as_ref().and_then(|(_, _, v)| v["context"].as_u64()).unwrap_or(131_072);
+            let context = FIT.lock().expect("fit").as_ref().and_then(|(_, _, v)| v["context"].as_u64());
+            let (args, mut env) = claude_tuning(state, context, folder, true);
             let mut cmd = vec![b];
+            cmd.extend(args);
             if let Some(t) = task.filter(|t| !t.trim().is_empty()) {
                 cmd.push(t.to_string());
             }
-            let env = [
-                ("CLAUDE_CONFIG_DIR", dir.display().to_string()),
-                ("ANTHROPIC_BASE_URL", base),
-                ("ANTHROPIC_AUTH_TOKEN", k),
-                ("ANTHROPIC_MODEL", "quietbox".into()),
-                ("ANTHROPIC_DEFAULT_OPUS_MODEL", "quietbox".into()),
-                ("ANTHROPIC_DEFAULT_SONNET_MODEL", "quietbox".into()),
-                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "quietbox".into()),
-                ("DISABLE_TELEMETRY", "1".into()),
-                ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".into()),
-                ("ANTHROPIC_API_KEY", String::new()),
-                ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", window.min(1_000_000).to_string()),
-                ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", window.min(crate::evals::compact_window(state, state.endpoint().map(|e| e.model).as_deref())).to_string()),
-            ];
-            (cmd, env.into_iter().map(|(a, b)| (a.to_string(), b)).collect())
+            env.extend([
+                ("CLAUDE_CONFIG_DIR".to_string(), dir.display().to_string()),
+                ("ANTHROPIC_BASE_URL".to_string(), base),
+                ("ANTHROPIC_AUTH_TOKEN".to_string(), k),
+            ]);
+            (cmd, env)
         }
         "opencode" => {
             let cfg = root(state).join("opencode.json");
@@ -278,7 +342,7 @@ pub(crate) async fn check(state: &AppState) -> Value {
         }
     }
     let models_url = format!("http://127.0.0.1:{}/v1/models", state.serving_port());
-    let context = match reqwest::Client::new().get(models_url).timeout(Duration::from_secs(5)).send().await {
+    let context = match crate::localhttp::local().get(models_url).timeout(Duration::from_secs(5)).send().await {
         Ok(r) => r.json::<Value>().await.ok().and_then(|v| v["data"][0]["max_model_len"].as_u64()),
         Err(_) => None,
     };
@@ -289,7 +353,7 @@ pub(crate) async fn check(state: &AppState) -> Value {
         "tool_choice": "auto",
     });
     let started = Instant::now();
-    let r = reqwest::Client::new().post(crate::assistant::chat_completions_url(&ep.base_url)).json(&body).timeout(Duration::from_secs(120)).send().await;
+    let r = crate::localhttp::local().post(crate::assistant::chat_completions_url(&ep.base_url)).json(&body).timeout(Duration::from_secs(120)).send().await;
     let secs = started.elapsed().as_secs_f32();
     let reply: Option<Value> = match r {
         Ok(r) => r.json().await.ok(),
@@ -614,5 +678,41 @@ pub async fn watch_forever(state: AppState) {
         }
         first = false;
         tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_is_the_served_context_capped_and_compaction_fits_in_it() {
+        assert_eq!(window_for(Some(131_072), COMPACT_WINDOW), (131_072, COMPACT_WINDOW));
+        assert_eq!(window_for(Some(262_144), COMPACT_WINDOW), (MAX_WINDOW, COMPACT_WINDOW));
+        assert_eq!(window_for(Some(32_768), COMPACT_WINDOW), (32_768, 32_768));
+        assert_eq!(window_for(None, COMPACT_WINDOW), (MAX_WINDOW, COMPACT_WINDOW));
+        // A measured compaction point is used as is.
+        assert_eq!(window_for(Some(131_072), 98_304), (131_072, 98_304));
+    }
+
+    #[test]
+    fn every_claude_launch_is_tuned_for_the_prefix_cache_and_a_small_window() {
+        let dir = std::env::temp_dir().join(format!("tt-claude-tuning-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = AppState::new("t".into(), "1xBH".into(), std::sync::Arc::new(crate::serving::dstack::DstackBackend)).with_config_dir(dir.clone());
+        let (args, env) = claude_tuning(&state, Some(262_144), &dir, false);
+        assert_eq!(args, ["--tools=Bash,Read,Edit,Write"]);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        // The window and compaction point are the ones the speed panel reports.
+        let (window, compact_at) = code_window(&state, Some(262_144));
+        assert_eq!(get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"), Some(window.to_string().as_str()));
+        assert_eq!(get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"), Some(compact_at.to_string().as_str()));
+        assert_eq!(get("CLAUDE_CODE_ATTRIBUTION_HEADER"), Some("0"));
+        assert_eq!(get("CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS"), Some("8000"));
+        assert_eq!(get("BASH_MAX_OUTPUT_LENGTH"), Some("15000"));
+        assert_eq!(get("CLAUDE_CODE_MAX_OUTPUT_TOKENS"), Some("16384"));
+        let (args, _) = claude_tuning(&state, None, &dir, true);
+        assert_eq!(args, ["--tools=Bash,Read,Edit,Write,WebFetch,WebSearch"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

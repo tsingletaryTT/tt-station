@@ -6,7 +6,7 @@
 // changes anything (start or stop a model, reset chips, switch modes).
 // Conversations are kept on this computer.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { externalLinks } from "../links";
@@ -20,6 +20,7 @@ import { type ActionReport, ApiError, clientKind, fetchBlob, get, type Mode, pos
 import { toastError, toastOk, usePoll, useToriShortcut } from "../ui";
 import { type AskHooks, VoiceMode } from "../VoiceMode";
 import { ask, askText } from "../dialog";
+import { frameBatcher } from "../render";
 
 interface Message {
   role: "user" | "assistant";
@@ -62,7 +63,9 @@ export function Chat() {
   const messages = conv?.messages ?? [];
   const canChat = !!brain.data?.where;
 
-  useEffect(() => { save(convs); }, [convs]);
+  // Saved when an answer is done, not at every streamed token (each save writes
+  // every conversation).
+  useEffect(() => { if (!busy) save(convs); }, [convs, busy]);
   useEffect(() => {
     const open = () => setVoice(true);
     window.addEventListener("tt:voice", open);
@@ -75,8 +78,18 @@ export function Chat() {
     if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 200) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
+  // Re-sorted only when a conversation's time changes, not at every streamed token.
   const update = (id: string, fn: (c: Conversation) => Conversation) =>
-    setConvs((all) => all.map((c) => (c.id === id ? fn(c) : c)).sort((a, b) => b.updated - a.updated));
+    setConvs((all) => {
+      let moved = false;
+      const next = all.map((c) => {
+        if (c.id !== id) return c;
+        const n = fn(c);
+        moved = n.updated !== c.updated;
+        return n;
+      });
+      return moved ? next.sort((a, b) => b.updated - a.updated) : next;
+    });
 
   const send = async (text: string, hooks?: AskHooks) => {
     const prompt = text.trim();
@@ -101,6 +114,16 @@ export function Chat() {
     const patchLast = (fn: (m: Message) => Message) =>
       update(id!, (c) => ({ ...c, messages: c.messages.map((m, i) => (i === c.messages.length - 1 ? fn(m) : m)) }));
     let said = "";
+    // Streamed text and thinking go into the message once per frame, not per token.
+    let streamed = "";
+    let thought = "";
+    const batch = frameBatcher(() => {
+      if (!streamed && !thought) return;
+      const [t, r] = [streamed, thought];
+      streamed = "";
+      thought = "";
+      patchLast((m) => ({ ...m, content: m.content + t, reasoning: r ? (m.reasoning ?? "") + r : m.reasoning }));
+    });
     try {
       const turns = history.map((m) => ({ role: m.role, content: m.content })).slice(-24);
       // Spoken answers are shorter: the model is told so.
@@ -111,15 +134,20 @@ export function Chat() {
         else if (e.type === "reset") { said = ""; hooks?.onReset?.(); }
         else if (e.type === "done") said = e.reply;
         if (e.type === "error") hooks?.onError(e.error);
-        if (e.type === "delta") patchLast((m) => ({ ...m, content: m.content + e.text }));
-        else if (e.type === "reasoning") patchLast((m) => ({ ...m, reasoning: (m.reasoning ?? "") + e.text }));
-        else if (e.type === "reset") patchLast((m) => ({ ...m, content: "" }));
+        if (e.type === "delta") { streamed += e.text; batch.poke(); continue; }
+        if (e.type === "reasoning") { thought += e.text; batch.poke(); continue; }
+        batch.now();
+        if (e.type === "reset") patchLast((m) => ({ ...m, content: "" }));
         else if (e.type === "action") patchLast((m) => ({ ...m, actions: upsertAction(m.actions, e.action) }));
         else if (e.type === "done") patchLast((m) => ({ ...m, content: e.reply, model: e.model }));
         else if (e.type === "error") patchLast((m) => ({ ...m, error: e.error }));
       }
+      batch.now();
       hooks?.onDone(said);
     } catch (e) {
+      // Superseded by a newer question (voice): its answer is the last message now.
+      if (abort.current !== ctrl) { streamed = ""; thought = ""; }
+      batch.now();
       if ((e as Error).name !== "AbortError") {
         patchLast((m) => ({ ...m, error: (e as Error).message }));
         hooks?.onError((e as Error).message);
@@ -148,6 +176,11 @@ export function Chat() {
       toastError(e instanceof ApiError && e.status === 404 ? new Error("That request expired. Ask again.") : e);
     }
   };
+
+  // Stable, so finished answers (memoized) don't re-render while another streams.
+  const confirmRef = useRef(confirm);
+  confirmRef.current = confirm;
+  const onConfirm = useCallback((a: ActionReport, approve: boolean) => confirmRef.current(a, approve), []);
 
   const remove = (id: string) => {
     setConvs((all) => all.filter((c) => c.id !== id));
@@ -205,7 +238,7 @@ export function Chat() {
             {messages.length === 0 && canChat && <Welcome onPick={(p) => send(p)} />}
             {messages.map((m, i) => m.role === "user"
               ? <div key={i} className="msg-user">{m.content}</div>
-              : <AssistantMessage key={i} m={m} streaming={busy && i === messages.length - 1} onConfirm={confirm} />)}
+              : <AssistantMessage key={i} m={m} streaming={busy && i === messages.length - 1} onConfirm={onConfirm} />)}
           </div>
         </div>
 
@@ -302,7 +335,9 @@ function Welcome({ onPick }: { onPick: (p: string) => void }) {
   );
 }
 
-function AssistantMessage({ m, streaming, onConfirm }: {
+/** One answer. Memoized: while one streams, the finished ones above it keep their
+ *  objects (only the last message changes) and skip rendering their Markdown. */
+const AssistantMessage = memo(function AssistantMessage({ m, streaming, onConfirm }: {
   m: Message; streaming: boolean; onConfirm: (a: ActionReport, approve: boolean) => void;
 }) {
   const [showThinking, setShowThinking] = useState(false);
@@ -345,7 +380,7 @@ function AssistantMessage({ m, streaming, onConfirm }: {
       </div>
     </div>
   );
-}
+});
 
 /** A picture the assistant drew (fetched with the token, so it can't be a plain <img src>). */
 function CreationImage({ id }: { id: string }) {

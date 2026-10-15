@@ -27,6 +27,7 @@ import remarkGfm from "remark-gfm";
 import { ago, ApiError, del, get, post } from "../api";
 import { Eyebrow, MoreMenu, toastError, toastOk, usePoll, writeClipboard } from "../ui";
 import { ask, askText } from "../dialog";
+import { reuse } from "../render";
 import { navigate } from "../App";
 import { FolderBrowser } from "./Terminals";
 import { CodeModelButton, SpeedStrip } from "./CodeSpeed";
@@ -443,7 +444,15 @@ function SessionPane({ s, check, onChanged, onForgotten }: { s: Sess; check: Ove
   const [stopping, setStopping] = useState(false);
   const { events, meta, trouble, gone, refresh } = useSession(s.id, sending || stopping);
   const live = meta?.session ?? s;
-  const thread = useMemo(() => build(events), [events]);
+  // Rebuilt at every poll; the items that didn't change keep their objects, so
+  // their (memoized) views don't render again.
+  const shown = useRef<Item[]>([]);
+  const thread = useMemo(() => {
+    const t = build(events);
+    t.items = reuse(shown.current, t.items);
+    shown.current = t.items;
+    return t;
+  }, [events]);
   const working = live.busy || sending;
   useEffect(() => { if (!live.busy) setStopping(false); }, [live.busy]);
   useEffect(() => { if (gone) onForgotten(); }, [gone]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -453,6 +462,9 @@ function SessionPane({ s, check, onChanged, onForgotten }: { s: Sess; check: Ove
   const [changesOpen, setChangesOpen] = useState(false);
   const [changesFile, setChangesFile] = useState<string | null>(null);
   const openChanges = (file: string | null = null) => { setChangesFile(file); setChangesOpen(true); changes.open(); };
+  const openRef = useRef(openChanges);
+  openRef.current = openChanges;
+  const onFile = useCallback((file: string) => openRef.current(file), []);
 
   // Scrolling: follow new output only while you're at the bottom.
   const scroller = useRef<HTMLDivElement>(null);
@@ -534,7 +546,7 @@ function SessionPane({ s, check, onChanged, onForgotten }: { s: Sess; check: Ove
         <div className="chat-thread code-thread">
           {thread.plan && thread.plan.length > 0 && <PlanCard todos={thread.plan} />}
           {thread.items.map((it, i) => (
-            <ItemView key={it.key} it={it} live={working && i === thread.items.length - 1} onFile={openChanges} />
+            <ItemView key={it.key} it={it} live={working && i === thread.items.length - 1} onFile={onFile} />
           ))}
           {thread.thinking && working && <LiveThought t={thread.thinking} />}
           {thread.streaming && <div className="msg-assistant"><div className="msg-body markdown selectable"><Reply text={thread.streaming} /></div></div>}

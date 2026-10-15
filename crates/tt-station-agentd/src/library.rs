@@ -217,7 +217,7 @@ fn index_blocking(state: &AppState, src: &Source) -> Result<(usize, usize, usize
 /// service is up. Returns how many documents got them.
 async fn embed_missing(state: &AppState) -> usize {
     let Some(docs) = state.docs() else { return 0 };
-    let client = reqwest::Client::new();
+    let client = crate::localhttp::local();
     let mut done = 0;
     for id in docs.without_vectors() {
         let Some(passages) = docs.passages(&id) else { continue };
@@ -240,7 +240,7 @@ async fn embed_missing(state: &AppState) -> usize {
 
 /// A query's meaning vector, if the embedding service is up.
 pub async fn embed_query(text: &str) -> Option<Vec<f32>> {
-    let r = reqwest::Client::new().post(EMBED_URL).json(&json!({ "inputs": [text], "truncate": true })).timeout(Duration::from_secs(20)).send().await.ok()?;
+    let r = crate::localhttp::local().post(EMBED_URL).json(&json!({ "inputs": [text], "truncate": true })).timeout(Duration::from_secs(20)).send().await.ok()?;
     r.json::<Vec<Vec<f32>>>().await.ok()?.into_iter().next()
 }
 

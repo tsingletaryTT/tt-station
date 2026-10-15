@@ -16,7 +16,6 @@
 //! - `POST /v1/messages/count_tokens`: an estimate (about 4 characters a token).
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
@@ -943,11 +942,7 @@ pub(crate) async fn v1_messages(State(state): State<AppState>, auth: GatewayAuth
         fit_output(&req, &mut body, ctx);
     }
     let url = crate::assistant::chat_completions_url(&endpoint.base_url);
-    let client = match reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).read_timeout(Duration::from_secs(900)).build() {
-        Ok(c) => c,
-        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, "api_error", &e.to_string()),
-    };
-    let upstream = match client.post(&url).json(&body).send().await {
+    let upstream = match crate::localhttp::local().post(&url).json(&body).send().await {
         Ok(r) => r,
         Err(e) => return error(StatusCode::BAD_GATEWAY, "api_error", &format!("Couldn't reach the model on the box: {e}")),
     };

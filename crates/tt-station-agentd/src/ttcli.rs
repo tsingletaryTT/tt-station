@@ -31,8 +31,14 @@ use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
 
-/// How long a `tt model list` result is reused (~0.3s per call on a QuietBox).
-pub const CATALOG_TTL: Duration = Duration::from_secs(10);
+/// How long a `tt model list` result is reused (~0.3s and a Python start per
+/// call on a QuietBox). What tt lists only changes when a model is pulled,
+/// removed or tt is updated, and each of those drops the cached catalog.
+pub const CATALOG_TTL: Duration = Duration::from_secs(60);
+
+/// How long a cached catalog's weights measurement (on disk, see
+/// [`weights_state`]) is reused: downloads made outside tt show up this soon.
+pub const WEIGHTS_TTL: Duration = Duration::from_secs(10);
 
 /// How often a pull's waiter thread checks whether `tt model pull` exited.
 const PULL_POLL: Duration = Duration::from_millis(500);
@@ -345,6 +351,9 @@ pub enum PullRefusal {
     Spawn(String),
 }
 
+/// A cached catalog: when tt listed it, when its weights were measured, the catalog.
+type CachedCatalog = (Instant, Instant, Catalog);
+
 /// The official tt CLI, plus this agent's pull jobs.
 pub struct TtCli {
     /// How to invoke `tt` -- normally just its path. A list so tests can run a
@@ -358,8 +367,9 @@ pub struct TtCli {
     pull_env: Vec<(String, String)>,
     /// Where pull logs go.
     log_dir: PathBuf,
-    /// Recent catalogs by device (`p300x2`, and `p300` for co-serving's halves).
-    catalog: Mutex<HashMap<String, (Instant, Catalog)>>,
+    /// Recent catalogs by device (`p300x2`, and `p300` for co-serving's halves):
+    /// when tt listed it, when its weights were measured, the catalog.
+    catalog: Arc<Mutex<HashMap<String, CachedCatalog>>>,
     jobs: Arc<Mutex<HashMap<String, PullJob>>>,
     children: Arc<Mutex<HashMap<String, Child>>>,
     /// Pulls this agent didn't spawn but adopted at startup (`pid` per model):
@@ -374,7 +384,7 @@ impl TtCli {
             hf_cache: hf_cache.into(),
             pull_env: Vec::new(),
             log_dir: std::env::temp_dir().join("tt-station-pulls"),
-            catalog: Mutex::new(HashMap::new()),
+            catalog: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             children: Arc::new(Mutex::new(HashMap::new())),
             adopted: Arc::new(Mutex::new(HashMap::new())),
@@ -469,15 +479,22 @@ impl TtCli {
     pub fn catalog(&self, device: Option<&str>, fresh: bool) -> Result<Catalog> {
         let key = device.map(str::to_lowercase).unwrap_or_default();
         if !fresh {
-            if let Some((at, cat)) = self
+            let cached = self
                 .catalog
                 .lock()
                 .expect("catalog mutex poisoned")
                 .get(&key)
-            {
-                if at.elapsed() < CATALOG_TTL {
-                    return Ok(cat.clone());
+                .filter(|(at, _, _)| at.elapsed() < CATALOG_TTL)
+                .cloned();
+            if let Some((at, weighed, mut cat)) = cached {
+                if weighed.elapsed() >= WEIGHTS_TTL {
+                    self.weigh(&mut cat);
+                    self.catalog
+                        .lock()
+                        .expect("catalog mutex poisoned")
+                        .insert(key, (at, Instant::now(), cat.clone()));
                 }
+                return Ok(cat);
             }
         }
         let mut args = vec!["--json", "model", "list"];
@@ -495,14 +512,19 @@ impl TtCli {
             ));
         }
         let mut cat = parse_catalog(&String::from_utf8_lossy(&out.stdout), device)?;
-        for model in &mut cat.models {
-            (model.weights, model.downloaded_bytes) = weights_state(&self.hf_cache, model);
-        }
+        self.weigh(&mut cat);
         self.catalog
             .lock()
             .expect("catalog mutex poisoned")
-            .insert(key, (Instant::now(), cat.clone()));
+            .insert(key, (Instant::now(), Instant::now(), cat.clone()));
         Ok(cat)
+    }
+
+    /// Measure each model's weights on disk now.
+    fn weigh(&self, cat: &mut Catalog) {
+        for model in &mut cat.models {
+            (model.weights, model.downloaded_bytes) = weights_state(&self.hf_cache, model);
+        }
     }
 
     /// Start `tt model pull <model.name>` in the background. A finished job for
@@ -559,10 +581,11 @@ impl TtCli {
 
         // Waiter: poll the child (holding the lock only briefly, so a cancel can
         // get in), then record the outcome and drop the stale catalog.
-        let (name, jobs, children) = (
+        let (name, jobs, children, catalog) = (
             model.name.clone(),
             Arc::clone(&self.jobs),
             Arc::clone(&self.children),
+            Arc::clone(&self.catalog),
         );
         std::thread::spawn(move || loop {
             let status = {
@@ -614,6 +637,8 @@ impl TtCli {
                     job.state
                 );
             }
+            // What tt lists as downloaded changed with it.
+            catalog.lock().expect("catalog mutex poisoned").clear();
             break;
         });
         // The catalog's `cached` flags are about to change.
@@ -1124,6 +1149,46 @@ mod tests {
             Some("https://huggingface.co/black-forest-labs/FLUX.1-schnell")
         );
         assert_eq!(explain_pull_failure("Traceback: boom"), (None, None));
+    }
+
+    #[test]
+    fn the_catalog_is_listed_once_a_minute_and_again_after_a_pull_or_removal() {
+        let dir = std::env::temp_dir().join(format!("tt-catalog-ttl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (counter, catalog) = (dir.join("runs"), dir.join("catalog.json"));
+        std::fs::write(&catalog, SAMPLE).unwrap();
+        let script = dir.join("tt.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "case \"$*\" in\n  *\"model list\"*) printf x >> '{}'; cat '{}';;\n  *\"model pull\"*) sleep 0.3;;\nesac\n",
+                counter.display(),
+                catalog.display()
+            ),
+        )
+        .unwrap();
+        let tt = TtCli::new(vec!["sh".into(), script.display().to_string()], dir.join("hf"))
+            .with_log_dir(dir.join("logs"));
+        let runs = || std::fs::read(&counter).map(|v| v.len()).unwrap_or(0);
+        for _ in 0..5 {
+            tt.catalog(Some("p300x2"), false).unwrap();
+        }
+        assert_eq!(runs(), 1, "reused within the minute");
+        tt.invalidate_catalog();
+        tt.catalog(Some("p300x2"), false).unwrap();
+        assert_eq!(runs(), 2, "listed again after a removal");
+        // A pull that finishes drops it too: what tt lists as downloaded changed.
+        let model = tt.catalog(Some("p300x2"), false).unwrap().models[0].clone();
+        tt.start_pull(&model).unwrap();
+        tt.catalog(Some("p300x2"), false).unwrap();
+        assert_eq!(runs(), 3, "listed again when the pull started");
+        let t0 = Instant::now();
+        while tt.is_pulling(&model.name) && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        tt.catalog(Some("p300x2"), false).unwrap();
+        assert_eq!(runs(), 4, "and again when it finished");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

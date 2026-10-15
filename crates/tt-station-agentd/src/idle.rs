@@ -116,7 +116,7 @@ pub fn parse_metrics(text: &str) -> (f64, f64) {
 async fn active(state: &AppState) -> Option<bool> {
     let ep = state.endpoint()?;
     let base = ep.base_url.trim_end_matches('/').trim_end_matches("/v1");
-    let text = reqwest::Client::new().get(format!("{base}/metrics")).timeout(Duration::from_secs(5)).send().await.ok()?.text().await.ok()?;
+    let text = crate::localhttp::local().get(format!("{base}/metrics")).timeout(Duration::from_secs(5)).send().await.ok()?.text().await.ok()?;
     if !text.contains("vllm:") {
         return None;
     }

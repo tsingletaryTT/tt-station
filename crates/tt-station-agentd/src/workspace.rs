@@ -158,16 +158,71 @@ fn event(state: &AppState, id: &str, mut e: Value) {
     }
 }
 
+/// Where recent reads of each session's events ended: `(seq of the last event,
+/// byte offset just past its line)`, a few per session (more than one app may
+/// be watching). A poll that carries on from one reads only what was added
+/// since, not the whole file.
+static READ_TO: LazyLock<Mutex<HashMap<String, Vec<ReadTo>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// `(seq of the last event read, byte offset just past its line)`.
+type ReadTo = (u64, u64);
+const READ_POINTS: usize = 4;
+
 fn events_after(state: &AppState, id: &str, after: u64) -> Vec<Value> {
-    // Event n is line n: skip straight to the cursor (a long session has hundreds
-    // of thousands of lines, and this runs about once a second while it works).
-    std::fs::read_to_string(dir(state, id).join("events.jsonl"))
-        .unwrap_or_default()
-        .lines()
-        .skip(after.saturating_sub(1) as usize)
+    let path = dir(state, id).join("events.jsonl");
+    // Carry on from the latest place a read ended at or before `after`.
+    let from = (after > 0)
+        .then(|| READ_TO.lock().expect("code").get(id).and_then(|points| points.iter().filter(|(seq, _)| *seq <= after).max().copied()))
+        .flatten();
+    let read = from.and_then(|(seq, offset)| events_from(&path, seq, offset, after)).or_else(|| events_from(&path, 0, 0, after));
+    let Some((events, end)) = read else { return vec![] };
+    if let Some(end) = end {
+        let mut all = READ_TO.lock().expect("code");
+        let points = all.entry(id.to_string()).or_default();
+        if !points.contains(&end) {
+            points.push(end);
+            points.sort_unstable();
+            if points.len() > READ_POINTS {
+                points.remove(0);
+            }
+        }
+    }
+    events
+}
+
+/// The events after `after` in the session's file, reading from byte `offset`,
+/// where event `seq + 1` begins (event n is line n), plus where this read ended
+/// (`None`: nothing there). Only whole lines are read: one being written is
+/// left for the next read. `None` when the file isn't what the offset expects
+/// (rewritten, say).
+fn events_from(path: &Path, seq: u64, offset: u64, after: u64) -> Option<(Vec<Value>, Option<ReadTo>)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) if offset == 0 => return Some((vec![], None)),
+        Err(_) => return None,
+    };
+    if f.metadata().ok()?.len() < offset {
+        return None;
+    }
+    f.seek(SeekFrom::Start(offset)).ok()?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes).ok()?;
+    let whole = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let text = String::from_utf8_lossy(&bytes[..whole]);
+    let lines: Vec<&str> = text.lines().collect();
+    let seq_of = |l: &str| serde_json::from_str::<Value>(l).ok().and_then(|e| e["seq"].as_u64());
+    if offset > 0 && lines.first().is_some_and(|l| seq_of(l) != Some(seq + 1)) {
+        return None;
+    }
+    let end = lines.last().and_then(|l| seq_of(l)).map(|last| (last, offset + whole as u64));
+    // Lines up to `after` aren't wanted: skip them unread.
+    let events = lines
+        .iter()
+        .skip(after.saturating_sub(seq + 1) as usize)
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .filter(|e| e["seq"].as_u64().unwrap_or(0) > after)
-        .collect()
+        .collect();
+    Some((events, end))
 }
 
 // ---------------------------------------------------------------- the running agent
@@ -388,7 +443,7 @@ How to work well here:\n\
 }
 
 /// Whether a project has Jupyter notebooks (a quick look, skipping the usual bulk).
-fn has_notebooks(root: &Path) -> bool {
+pub(crate) fn has_notebooks(root: &Path) -> bool {
     let mut stack = vec![(root.to_path_buf(), 0)];
     let mut seen = 0;
     while let Some((dir, depth)) = stack.pop() {
@@ -428,66 +483,30 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
     if !cj.exists() {
         let _ = std::fs::write(&cj, r#"{"hasCompletedOnboarding": true}"#);
     }
-    // Claude Code compacts its history before this: smaller contexts keep each step fast
-    // (the whole conversation is read again at every step).
-    // The whole conversation is read again at every step, so a smaller window keeps
-    // steps fast; too small, and a real task fills it faster than it can summarize
-    // (Claude Code stops: "Autocompact is thrashing").
-    let context = crate::coding::check(state).await["context"].as_u64().unwrap_or(131_072).min(131_072);
-    // Its answers fit in what's left of the context: Claude Code asks for large
-    // output budgets by default, and prompt plus budget past the context is refused.
-    let output = (context / 4).clamp(4096, 16_384);
+    // Claude Code compacts its history before the window is full: smaller contexts
+    // keep each step fast (the whole conversation is read again at every step); too
+    // small, and a real task fills it faster than it can summarize (Claude Code
+    // stops: "Autocompact is thrashing"). See `coding::code_window`.
+    let context = crate::coding::check(state).await["context"].as_u64();
+    let (tuning, tuned_env) = crate::coding::claude_tuning(state, context, Path::new(&s.folder), !s.sandbox);
     let mut args: Vec<String> = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
         "--permission-prompt-tool", "stdio", "--permission-mode", mode(&s.policy, s.sandbox)].iter().map(|a| a.to_string()).collect();
     args.push("--append-system-prompt".into());
     args.push(setting(s.sandbox));
-    // Only the tools coding needs here. Claude Code offers about twenty (agents,
-    // schedules, worktrees, messages, plan mode…) that can't help in this window,
-    // and every one is described in the prompt the model re-reads at each step.
-    // No web from the sandbox: it has no internet.
-    let mut tools = vec!["Bash", "Read", "Edit", "Write"];
-    // Its description costs ~450 tokens at every step: only for projects with notebooks.
-    if has_notebooks(Path::new(&s.folder)) {
-        tools.push("NotebookEdit");
-    }
-    if !s.sandbox {
-        tools.extend(["WebFetch", "WebSearch"]);
-    }
-    args.push("--tools".into());
-    args.push(tools.join(","));
+    args.extend(tuning);
     if let Some(c) = &s.claude_session {
         args.push("--resume".into());
         args.push(c.clone());
     }
-    let envs: Vec<(String, String)> = vec![
+    let mut envs: Vec<(String, String)> = tuned_env;
+    envs.extend([
         ("ANTHROPIC_AUTH_TOKEN".into(), key),
-        ("ANTHROPIC_API_KEY".into(), String::new()),
-        ("ANTHROPIC_MODEL".into(), "quietbox".into()),
-        ("ANTHROPIC_DEFAULT_OPUS_MODEL".into(), "quietbox".into()),
-        ("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), "quietbox".into()),
-        ("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), "quietbox".into()),
-        ("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), context.to_string()),
-        // Summarize long before the window is full: past some size a local model
-        // starts inventing tools and writing its calls as text. Where, is measured
-        // per model (the agent reliability eval); 64K when it hasn't been.
-        ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), context.min(crate::evals::compact_window(state, state.endpoint().map(|e| e.model).as_deref())).to_string()),
-        ("CLAUDE_CODE_MAX_OUTPUT_TOKENS".into(), output.to_string()),
-        // No single file read or command output may take a big bite of the context:
-        // a large file is read in parts (offset, limit) instead.
-        ("CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS".into(), "8000".into()),
-        ("BASH_MAX_OUTPUT_LENGTH".into(), "15000".into()),
         // So the box knows which session a model request is for (its activity line).
         ("ANTHROPIC_CUSTOM_HEADERS".into(), format!("x-tt-session: {}", s.id)),
-        ("DISABLE_TELEMETRY".into(), "1".into()),
-        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), "1".into()),
-        ("DISABLE_AUTOUPDATER".into(), "1".into()),
         ("MAX_THINKING_TOKENS".into(), if s.think { "6000".into() } else { "0".into() }),
-        // No per-request header line at the top of the system prompt: it changes every
-        // request, so the server could never reuse (prefix-cache) the conversation's start.
-        ("CLAUDE_CODE_ATTRIBUTION_HEADER".into(), "0".into()),
         // No __pycache__ folders showing up as "changes" after every test run.
         ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
-    ];
+    ]);
     let container = format!("tt-code-{}", s.id);
     let port = state.ctrl_port();
     let cmd = if s.sandbox {
@@ -1565,6 +1584,43 @@ mod tests {
 
     fn session(folder: &str, sandbox: bool) -> Session {
         Session { id: "t".into(), folder: folder.into(), title: "t".into(), created: 0, sandbox, policy: "ask".into(), claude_session: None, last: 0, always: vec![], think: false }
+    }
+
+    #[test]
+    fn polls_read_only_the_events_added_since_the_last_one() {
+        use std::io::Write;
+        let home = std::env::temp_dir().join(format!("tt-code-events-{}", std::process::id()));
+        let state = AppState::new("t".into(), "1xBH".into(), Arc::new(crate::serving::dstack::DstackBackend)).with_config_dir(home.clone());
+        let id = "ev-poll";
+        std::fs::create_dir_all(dir(&state, id)).unwrap();
+        let seqs = |v: Vec<Value>| v.iter().map(|e| e["seq"].as_u64().unwrap()).collect::<Vec<_>>();
+        assert!(events_after(&state, id, 0).is_empty(), "no file yet");
+        for n in 0..5 {
+            event(&state, id, json!({ "kind": "delta", "text": n.to_string() }));
+        }
+        // No cursor: everything, as before.
+        assert_eq!(seqs(events_after(&state, id, 0)), [1, 2, 3, 4, 5]);
+        assert_eq!(READ_TO.lock().unwrap()[id], [(5, std::fs::metadata(dir(&state, id).join("events.jsonl")).unwrap().len())]);
+        event(&state, id, json!({ "kind": "delta", "text": "5" }));
+        assert_eq!(seqs(events_after(&state, id, 5)), [6]);
+        // An earlier cursor (another app) is served too.
+        assert_eq!(seqs(events_after(&state, id, 3)), [4, 5, 6]);
+        assert!(events_after(&state, id, 6).is_empty());
+        // A line still being written waits for the next poll.
+        let path = dir(&state, id).join("events.jsonl");
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(f, "{{\"kind\":\"delta\",\"seq\":7").unwrap();
+        assert!(events_after(&state, id, 6).is_empty());
+        writeln!(f, "}}").unwrap();
+        assert_eq!(seqs(events_after(&state, id, 6)), [7]);
+        // The file rewritten under it: read from the start again.
+        std::fs::write(&path, "{\"kind\":\"start\",\"seq\":1}\n{\"kind\":\"notice\",\"seq\":2}\n").unwrap();
+        assert_eq!(seqs(events_after(&state, id, 1)), [2]);
+        // Rewritten longer: what was at the old place isn't event 8 any more.
+        let lines: String = (1..=30).map(|n| format!("{{\"kind\":\"notice\",\"seq\":{n}}}\n")).collect();
+        std::fs::write(&path, lines).unwrap();
+        assert_eq!(seqs(events_after(&state, id, 7)), (8..=30).collect::<Vec<u64>>());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::sync::{LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -98,8 +98,34 @@ fn docker_state(container: &str) -> String {
         .unwrap_or_else(|| "missing".into())
 }
 
+/// How long a container's state is reused: `GET /embeddings` is polled while
+/// its page is open, and turning a service on or off drops it at once.
+const STATE_TTL: Duration = Duration::from_secs(5);
+
+static STATES: LazyLock<Mutex<HashMap<&'static str, (Instant, String)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// [`docker_state`] for the routes: off the async runtime, and reused for [`STATE_TTL`].
+async fn docker_state_recent(container: &'static str) -> String {
+    if let Some((at, state)) = STATES.lock().expect("embeddings").get(container) {
+        if at.elapsed() < STATE_TTL {
+            return state.clone();
+        }
+    }
+    let state = tokio::process::Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Status}}", container])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "missing".into());
+    STATES.lock().expect("embeddings").insert(container, (Instant::now(), state.clone()));
+    state
+}
+
 async fn healthy(port: u16) -> bool {
-    reqwest::Client::new()
+    crate::localhttp::local()
         .get(format!("http://127.0.0.1:{port}/health"))
         .timeout(Duration::from_secs(2))
         .send()
@@ -122,13 +148,14 @@ pub fn embed_dims(state: &AppState) -> u32 {
 async fn describe(state: &AppState, svc: &Service) -> Value {
     let model = settings(state).get(svc.id).cloned();
     let step = STEPS.lock().expect("embeddings").get(svc.id).cloned();
-    let docker = docker_state(svc.container);
     let up = model.is_some() && healthy(svc.port).await;
-    let status = match (&model, &step, docker.as_str(), up) {
-        (None, _, _, _) => "off",
-        (_, Some((_, Some(_))), _, _) => "failed",
-        (_, _, _, true) => "ready",
-        (_, Some(_), _, _) | (_, _, "running", false) => "starting",
+    let status = match (&model, &step, up) {
+        (None, _, _) => "off",
+        (_, Some((_, Some(_))), _) => "failed",
+        (_, _, true) => "ready",
+        (_, Some(_), _) => "starting",
+        // Only now does docker have something to say: running but not answering yet.
+        _ if docker_state_recent(svc.container).await == "running" => "starting",
         _ => "stopped",
     };
     json!({
@@ -149,6 +176,7 @@ pub fn set(state: &AppState, svc: &'static Service, model: Option<String>) {
     };
     save(state, &s);
     STEPS.lock().expect("embeddings").remove(svc.id);
+    STATES.lock().expect("embeddings").remove(svc.container);
     let _ = Command::new("docker").args(["rm", "-f", svc.container]).stdin(Stdio::null()).output();
     let Some(model) = model else { return };
     STEPS.lock().expect("embeddings").insert(svc.id, ("Downloading the server".into(), None));
@@ -199,7 +227,8 @@ pub fn ensure_embed(state: &AppState) {
 
 /// `GET /embeddings`.
 pub(crate) async fn get_embeddings(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
-    Json(json!({ "services": [describe(&state, &EMBED).await, describe(&state, &RERANK).await] }))
+    let (embed, rerank) = tokio::join!(describe(&state, &EMBED), describe(&state, &RERANK));
+    Json(json!({ "services": [embed, rerank] }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,7 +268,7 @@ pub async fn v1_embeddings(state: &AppState, mut body: Value) -> Option<Response
         // TEI answers floats only.
         o.remove("encoding_format");
     }
-    let r = reqwest::Client::new()
+    let r = crate::localhttp::local()
         .post(format!("http://127.0.0.1:{}/v1/embeddings", EMBED.port))
         .json(&body)
         .timeout(Duration::from_secs(300))
@@ -299,7 +328,7 @@ pub async fn v1_rerank(state: &AppState, body: Value) -> Response {
     if docs.is_empty() {
         return Json(json!({ "model": model, "results": [] })).into_response();
     }
-    let r = reqwest::Client::new()
+    let r = crate::localhttp::local()
         .post(format!("http://127.0.0.1:{}/rerank", RERANK.port))
         .json(&request)
         .timeout(Duration::from_secs(300))
