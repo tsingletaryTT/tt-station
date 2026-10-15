@@ -1241,7 +1241,9 @@ fn launch(state: &AppState, env: &CodexEnv, run: &CodexRun, log_dir: &Path, stag
         .arg("--setenv=PYTHONUNBUFFERED=1")
         .arg(format!("--setenv=TT_STATION_URL=http://127.0.0.1:{}", state.ctrl_port()))
         .arg(format!("--setenv=TT_STATION_RUN={}", run.id))
-        .arg(format!("--setenv=TT_STATION_RUN_SECRET={}", run.secret))
+        // The value from systemd-run's environment, not its command line.
+        .arg("--setenv=TT_STATION_RUN_SECRET")
+        .env("TT_STATION_RUN_SECRET", &run.secret)
         .args(["sh", "-c", &script])
         .stdin(Stdio::null())
         .output()
@@ -1709,6 +1711,13 @@ pub fn decide_waiting(decision: &str) -> Option<(String, String)> {
     Some((decision.to_string(), what))
 }
 
+/// What [`decide_waiting`] would answer right now (the command, or the kind of request).
+pub fn waiting_on() -> Option<String> {
+    let all = APPROVALS.lock().expect("approvals");
+    let (_, a) = all.iter().find(|(_, a)| a.decision.is_none())?;
+    Some(a.command.clone().unwrap_or_else(|| a.kind.clone()))
+}
+
 /// Is a bring-up waiting on a person?
 pub fn anything_waiting() -> bool {
     APPROVALS.lock().expect("approvals").iter().any(|(_, a)| a.decision.is_none())
@@ -2035,6 +2044,61 @@ mod tests {
         assert!(ev[0]["output"].as_str().unwrap().contains("pcc 0.91"));
         assert_eq!(ev[1]["exit"], 0);
         assert_eq!(ev[1]["output"], "README.md");
+    }
+
+    /// The approval policy the drivers apply (Python, run here as the box runs it).
+    #[test]
+    fn the_approval_policy_asks_where_it_should() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(t.path().join("codex_bringup.py"), DRIVER).unwrap();
+        std::fs::write(t.path().join("permission_mcp.py"), PERMISSION_MCP).unwrap();
+        let repo = t.path().join("tt-metal");
+        std::fs::create_dir_all(repo.join("models")).unwrap();
+        std::fs::create_dir_all(t.path().join("tt-metal-old")).unwrap();
+        let check = r#"
+import json, os, sys
+import codex_bringup as cb, permission_mcp as pm
+repo = os.environ["TT_STATION_REPO"]
+asked = []
+pm.ask_person = lambda kind, params, why: asked.append(why) or "decline"
+def allowed(tool, args):
+    asked.clear()
+    return pm.decide(tool, args)["behavior"] == "allow"
+# Paths: inside the repo, not a sibling that starts the same way.
+assert cb.inside(repo + "/models/x.py", repo)
+assert not cb.inside(repo + "-old/x.py", repo)
+assert allowed("Edit", {"file_path": repo + "/models/x.py"})
+assert not allowed("Edit", {"file_path": repo + "-old/x.py"}), asked
+assert cb.risk("ls", repo + "-old", repo) == "runs outside the repo (" + repo + "-old)"
+# Unknown tools and fetches off the documentation sites wait for a person.
+assert not allowed("mcp__other__do_things", {}) and "doesn't know" in asked[0]
+assert not allowed("WebFetch", {"url": "https://evil.example/?d=secret"})
+assert not allowed("WebFetch", {"url": "https://huggingface.co/x?leak=1"})
+assert allowed("WebFetch", {"url": "https://huggingface.co/Qwen/Qwen3-8B/blob/main/config.json"})
+assert allowed("Read", {"file_path": "/etc/hostname"}) and allowed("WebSearch", {"query": "x"})
+# The convenience denylist: new cheap catches, routine work untouched.
+for c in ["rm -rf ~/.ssh", "rm ~/.bashrc", "rm -rf $HOME/.config", "rm -rf /*", "python3 -c 'import shutil; shutil.rmtree(p)'",
+          "echo x >> ~/.bashrc", "echo k | tee -a ~/.ssh/authorized_keys", "sudo ls", "git push", "tt-smi -r"]:
+    assert cb.risk(c, repo, repo), c
+for c in ["pytest models/x -k y", "rm -rf build", "rm -f /tmp/x.log", "python3 -c 'print(1)'", "make -j", "echo x > out.txt", "git status"]:
+    assert cb.risk(c, repo, repo) is None, c
+print("ok")
+"#;
+        let out = std::process::Command::new("python3")
+            .args(["-I", "-c", &format!("import sys; sys.path.insert(0, {:?}); exec(sys.stdin.read())", t.path().display().to_string())])
+            .env("TT_STATION_REPO", &repo)
+            .env("TT_STATION_POLICY", "smart")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut c| {
+                use std::io::Write;
+                c.stdin.take().unwrap().write_all(check.as_bytes())?;
+                c.wait_with_output()
+            })
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok", "{}", String::from_utf8_lossy(&out.stderr));
     }
 
     #[test]

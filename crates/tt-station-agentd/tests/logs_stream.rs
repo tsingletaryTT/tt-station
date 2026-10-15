@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use tt_station_agentd::routes::{app, AppState};
+use tt_station_agentd::routes::{local_http_app, AppState};
 use tt_station_agentd::serving::dstack::DstackBackend;
 
 #[tokio::test]
@@ -30,11 +30,12 @@ async fn logs_stream_replays_tail_then_follows() {
 
     let state = AppState::new("qb2".into(), "4xBH".into(), Arc::new(DstackBackend))
         .with_log_source(repo.path());
-    let router = app(state);
+    // The box's own plain-HTTP server: the stream answers it without pairing.
+    let router = local_http_app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
+        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
     });
 
     let url = format!("ws://{addr}/logs/stream?source=container&tail=2");

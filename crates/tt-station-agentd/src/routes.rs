@@ -90,10 +90,10 @@ const PAIR_TTL: Duration = Duration::from_secs(120);
 /// fat-fingers the code a few real chances to correct themselves.
 pub const MAX_PAIR_ATTEMPTS: u32 = 5;
 
-/// How many `/pair/init` calls the box accepts per minute. Anyone on the
-/// network can ask, and each ask puts a code in front of the owner (desktop
-/// app, phone, journal), so this caps how hard a stranger can spam them.
-const PAIR_INITS_PER_MINUTE: usize = 5;
+/// `/pair/init` asks one address may make a minute (each one notifies the owner).
+pub const PAIR_INITS_PER_ADDRESS: usize = 5;
+/// `/pair/init` asks a minute from every address together.
+pub const PAIR_INITS_PER_MINUTE: usize = 20;
 
 /// Seam for re-publishing this box's advertised `status` whenever it
 /// changes (`/run` succeeding, `/stop` completing), so the mDNS TXT record
@@ -156,10 +156,9 @@ struct Inner {
     /// `wrong_attempts` hit `MAX_PAIR_ATTEMPTS` -- by `complete_pair`, so
     /// this map only ever holds pairing attempts that are still "live".
     pending_pairs: Mutex<HashMap<String, (String, Instant, u32)>>,
-    /// When recent `/pair/init` calls arrived, for `PAIR_INITS_PER_MINUTE`.
-    /// Per state rather than a process-wide static, so each agent (and each
-    /// test harness) has its own budget.
-    recent_pair_inits: Mutex<Vec<Instant>>,
+    /// Recent `/pair/init` asks: when, and from which address (`None` when
+    /// the server doesn't know its peers). See `pair_init_allowed`.
+    pair_inits: Mutex<Vec<(u64, Option<std::net::IpAddr>)>>,
     /// Bearer tokens minted by successful `/pair/complete` calls. Task 10's
     /// control routes will check incoming requests against this set; for
     /// now `/pair/complete` is the only thing that populates it.
@@ -536,7 +535,7 @@ impl AppState {
                 endpoint: Mutex::new(None),
                 backend,
                 pending_pairs: Mutex::new(HashMap::new()),
-                recent_pair_inits: Mutex::new(Vec::new()),
+                pair_inits: Mutex::new(Vec::new()),
                 tokens: Mutex::new(tokens),
                 token_store,
                 write_lock: Mutex::new(()),
@@ -1980,6 +1979,20 @@ impl AppState {
     /// timer/background task) keeps the fix O(n) in the number of currently
     /// pending pairs and needs no extra moving parts: every `/pair/init`
     /// call is already a natural point to tidy up.
+    /// Whether one more `/pair/init` may go ahead now from `peer`, counting
+    /// it if so. Each address gets a few a minute, so one asker can't use up
+    /// pairing for everyone; a ceiling across all addresses keeps the
+    /// owner's notifications bounded however many addresses ask.
+    pub(crate) fn pair_init_allowed(&self, peer: Option<std::net::IpAddr>, now: u64) -> bool {
+        let mut recent = self.inner.pair_inits.lock().expect("pair inits");
+        recent.retain(|(t, _)| now.saturating_sub(*t) < 60);
+        if recent.len() >= PAIR_INITS_PER_MINUTE || recent.iter().filter(|(_, p)| *p == peer).count() >= PAIR_INITS_PER_ADDRESS {
+            return false;
+        }
+        recent.push((now, peer));
+        true
+    }
+
     fn insert_pending_pair(&self, pair_id: String, code: String) {
         let now = Instant::now();
         let expiry = now + PAIR_TTL;
@@ -1990,22 +2003,6 @@ impl AppState {
             .expect("pending_pairs mutex poisoned");
         pending.retain(|_, (_, exp, _)| *exp > now);
         pending.insert(pair_id, (code, expiry, 0));
-    }
-
-    /// Take one `/pair/init` from this minute's budget; `false` when it's spent.
-    fn allow_pair_init(&self) -> bool {
-        let now = Instant::now();
-        let mut recent = self
-            .inner
-            .recent_pair_inits
-            .lock()
-            .expect("recent_pair_inits mutex poisoned");
-        recent.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
-        if recent.len() >= PAIR_INITS_PER_MINUTE {
-            return false;
-        }
-        recent.push(now);
-        true
     }
 
     /// Check `code` against the pending pairing attempt for `pair_id`.
@@ -2455,6 +2452,7 @@ async fn get_leases(
 /// this handler to redact -- it just serves the stored summary verbatim.
 async fn get_config(
     axum::extract::State(state): axum::extract::State<AppState>,
+    _caller: LocalOrPaired,
 ) -> Json<ConfigSummary> {
     Json(state.config_summary())
 }
@@ -2498,9 +2496,13 @@ struct PairInitResponse {
 /// `/pair/complete`.
 async fn pair_init(
     axum::extract::State(state): axum::extract::State<AppState>,
+    peer: Option<axum::extract::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     body: axum::body::Bytes,
 ) -> Result<Json<PairInitResponse>, (StatusCode, Json<ErrorResponse>)> {
-    if !state.allow_pair_init() {
+    // Anyone on the network can ask, and each ask notifies the owner: a few a
+    // minute from any one address, and a ceiling for all of them together.
+    let peer = peer.map(|axum::extract::Extension(axum::extract::ConnectInfo(a))| a.ip().to_canonical());
+    if !state.pair_init_allowed(peer, unix_now()) {
         return Err(tt_error(
             StatusCode::TOO_MANY_REQUESTS,
             "Too many pairing requests in the last minute. Wait a minute and try again.",
@@ -2634,6 +2636,46 @@ impl FromRequestParts<AppState> for BearerAuth {
             Some(token) if state.is_valid_token(token) => Ok(BearerAuth),
             _ => Err(StatusCode::UNAUTHORIZED),
         }
+    }
+}
+
+/// The subprotocol a WebSocket from the desktop app asks for; it carries
+/// its token as a second one, `tt-token.<token>` (see [`ws_token`]).
+pub const WS_PROTOCOL: &str = "tt-station";
+
+/// The bearer token a WebSocket upgrade carries: the `Authorization` header
+/// (the phone sets it), or -- a browser can't set headers on a WebSocket --
+/// a `tt-token.<token>` entry in `Sec-WebSocket-Protocol` (the desktop app).
+/// Never the URL: URLs end up in logs and process lists.
+pub(crate) fn ws_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if let Some(t) = bearer {
+        return Some(t.to_string());
+    }
+    headers
+        .get_all(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .find_map(|p| p.trim().strip_prefix("tt-token.").map(str::to_string))
+}
+
+/// The box itself (plain HTTP from this machine, see `only_local`) or a
+/// paired caller: for what the box's own tools (`tt-station console`, the
+/// panel) read without pairing, but the network may not.
+pub(crate) struct LocalOrPaired;
+
+impl FromRequestParts<AppState> for LocalOrPaired {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, StatusCode> {
+        if parts.extensions.get::<LocalCaller>().is_some() {
+            return Ok(LocalOrPaired);
+        }
+        BearerAuth::from_request_parts(parts, state).await.map(|_| LocalOrPaired)
     }
 }
 
@@ -3291,12 +3333,11 @@ struct LogsResponse {
     lines: Vec<String>,
 }
 
-/// `GET /logs` (UNAUTHED, like `/status`/`/models`/`/serving`): tail the
+/// `GET /logs` (the box itself, or paired -- `LocalOrPaired`): tail the
 /// newest tt-inference-server workflow log for `?source=container|run`.
-///
-/// Read-only file access, exactly as exposed as the other unauthed discovery
-/// routes -- see `crate::logs` for the pure tail/redact logic this delegates
-/// to. `?source` defaults to `container`; `?tail` defaults to
+/// Logs say what the box runs and where its files are: not for anyone on
+/// the network. See `crate::logs` for the pure tail/redact logic this
+/// delegates to. `?source` defaults to `container`; `?tail` defaults to
 /// `crate::logs::DEFAULT_TAIL`, capped at `crate::logs::MAX_TAIL`.
 ///
 /// Error contract: an unrecognized `source` is a `400` (caller's mistake); no
@@ -3306,6 +3347,7 @@ struct LogsResponse {
 /// served yet" is the normal state of an idle box, not a failure.
 async fn get_logs(
     axum::extract::State(state): axum::extract::State<AppState>,
+    _caller: LocalOrPaired,
     RawQuery(query): RawQuery,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let (source_str, tail) = parse_logs_query(query.as_deref());
@@ -3387,6 +3429,7 @@ pub(crate) fn read_log_tail(
 async fn logs_ws(
     ws: WebSocketUpgrade,
     axum::extract::State(state): axum::extract::State<AppState>,
+    _caller: LocalOrPaired,
     RawQuery(query): RawQuery,
 ) -> Response {
     let (source_str, tail) = parse_logs_query(query.as_deref());
@@ -3947,7 +3990,50 @@ pub fn local_http_app(state: AppState) -> Router {
         .with_state(state.clone());
     app(state.clone())
         .merge(local_only)
-        .layer(axum::middleware::from_fn_with_state(state, only_local))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), only_local))
+        .layer(axum::middleware::from_fn_with_state(state, known_host))
+}
+
+/// A web page in a browser on the box can't use the plain-HTTP API through a
+/// name of its own that it points at 127.0.0.1 (DNS rebinding): requests must
+/// name the box as the box knows itself. (HTTPS needs no such check: a
+/// browser won't talk to the box's own certificate under another name.)
+async fn known_host(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let host = req.headers().get(axum::http::header::HOST).and_then(|h| h.to_str().ok());
+    match host {
+        Some(h) if !host_is_the_box(h, state.name()) => (
+            StatusCode::MISDIRECTED_REQUEST,
+            Json(serde_json::json!({ "error": format!("This box doesn't answer to {h}.") })),
+        )
+            .into_response(),
+        _ => next.run(req).await,
+    }
+}
+
+/// Whether a `Host` header names this box: loopback, its own addresses, its
+/// names (`<name>.local`, its hostname), or Docker's name for it.
+pub fn host_is_the_box(host: &str, name: &str) -> bool {
+    // Drop the port: "[::1]:8765" -> "::1", "box.local:8765" -> "box.local".
+    let h = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h),
+    };
+    let h = h.trim_end_matches('.').to_ascii_lowercase();
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return ip.is_loopback() || own_addresses().contains(&ip) || ip.to_canonical().is_loopback();
+    }
+    let me = name.to_ascii_lowercase();
+    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_ascii_lowercase();
+    h == "localhost"
+        || h.ends_with(".localhost")
+        || h == "host.docker.internal"
+        || (!me.is_empty() && (h == me || h == format!("{me}.local")))
+        || (!hostname.is_empty() && (h == hostname || h == format!("{hostname}.local")))
 }
 
 /// `POST /pair/qr` (the box itself): a one-time pairing link and its QR, for
@@ -5417,7 +5503,7 @@ mod logs_query_tests {
 
 #[cfg(test)]
 mod local_http_tests {
-    use super::{container_peer, local_peer};
+    use super::{container_peer, host_is_the_box, local_peer, AppState, PAIR_INITS_PER_ADDRESS, PAIR_INITS_PER_MINUTE};
 
     #[test]
     fn plain_http_is_for_the_box_and_its_containers_get_only_v1() {
@@ -5431,5 +5517,34 @@ mod local_http_tests {
         assert!(!local_peer("172.32.0.1".parse().unwrap()));
         assert!(!local_peer("192.168.1.20".parse().unwrap()));
         assert!(!local_peer("100.100.1.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn the_plain_http_api_answers_only_to_the_boxs_own_names() {
+        for h in ["127.0.0.1:8765", "localhost:8765", "localhost", "[::1]:8765", "app.localhost:8765", "host.docker.internal:8765", "qb2-lab.local:8765", "QB2-LAB:8765", "127.0.0.1"] {
+            assert!(host_is_the_box(h, "qb2-lab"), "{h}");
+        }
+        for h in ["evil.example:8765", "evil.example", "127.0.0.1.evil.example:8765", "qb2-lab.local.evil.example", "localhost.evil.example:8765", "8.8.8.8:8765", "[2606:4700::1111]:80"] {
+            assert!(!host_is_the_box(h, "qb2-lab"), "{h}");
+        }
+    }
+
+    #[test]
+    fn pairing_asks_are_limited_per_address_with_a_ceiling() {
+        let state = AppState::new("t".to_string(), "1xBH".to_string(), std::sync::Arc::new(crate::serving::dstack::DstackBackend));
+        let ip = |n: u8| Some(std::net::IpAddr::from([192, 168, 1, n]));
+        for _ in 0..PAIR_INITS_PER_ADDRESS {
+            assert!(state.pair_init_allowed(ip(9), 1000));
+        }
+        assert!(!state.pair_init_allowed(ip(9), 1000), "one address hammering is stopped");
+        assert!(state.pair_init_allowed(ip(2), 1000), "and doesn't lock out the owner's phone");
+        // Many addresses together hit the ceiling.
+        let mut n = 10;
+        while state.pair_init_allowed(ip(n), 1000) {
+            n += 1;
+        }
+        assert_eq!(state.inner.pair_inits.lock().unwrap().len(), PAIR_INITS_PER_MINUTE);
+        // A minute later, everyone may ask again.
+        assert!(state.pair_init_allowed(ip(9), 1061));
     }
 }

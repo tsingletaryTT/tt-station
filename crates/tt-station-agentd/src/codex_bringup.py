@@ -33,16 +33,34 @@ import time
 import urllib.error
 import urllib.request
 
+# A convenience, not containment: it keeps routine work from waiting on a
+# person and catches the obvious slips. A command can always be spelled so
+# that no pattern sees it (a script, a variable, another language); what
+# actually contains a bring-up is the account it runs as and the chips it
+# leases, and `ask` for anything that matters.
 RISKY = [
     (re.compile(r"\btt-smi\b.*\s-r\b|\btt-smi\s+-r\b|\breset\b.*\bboard"), "resets chips"),
     (re.compile(r"\bsudo\b"), "uses sudo"),
     (re.compile(r"\brm\s+-[a-z]*r[a-z]*f?\s+(/|~|\$HOME)(\s|$)"), "deletes outside the repo"),
+    (re.compile(r"""\brm\s+(-\S+\s+)*["']?(/\*|~|\$HOME\b|\$\{HOME\})"""), "deletes in your home folder"),
+    (re.compile(r"\bpython3?\b.*\s-c\b.*\b(shutil\.rmtree|os\.(remove|unlink|rmdir|removedirs))\b"), "deletes files from Python"),
+    (re.compile(r"""(>|\btee\s+(-a\s+)?)\s*["']?(~|\$HOME\b|\$\{HOME\})/\."""), "changes a settings file in your home folder"),
     (re.compile(r"\bgit\s+push\b"), "pushes to a remote"),
     (re.compile(r"\b(pip|uv|npm|apt|apt-get)\s+(install|add)\b"), "installs packages"),
     (re.compile(r"\b(docker|systemctl)\b"), "changes services or containers"),
     (re.compile(r"\b(shutdown|reboot|mkfs|dd\s+if=)\b"), "could damage the system"),
     (re.compile(r"\bcurl\b.*\|\s*(ba)?sh\b"), "runs a downloaded script"),
 ]
+
+
+def inside(path: str, root: str) -> bool:
+    """Whether `path` is `root` or under it, symlinks resolved (not a sibling
+    that merely starts the same way, like tt-metal-old next to tt-metal)."""
+    p, r = os.path.realpath(path), os.path.realpath(root)
+    try:
+        return os.path.commonpath([p, r]) == r
+    except ValueError:
+        return False
 
 
 def risk(command: str | None, cwd: str | None, repo: str) -> str | None:
@@ -52,7 +70,7 @@ def risk(command: str | None, cwd: str | None, repo: str) -> str | None:
     for pattern, why in RISKY:
         if pattern.search(command):
             return why
-    if cwd and not os.path.realpath(cwd).startswith(os.path.realpath(repo)):
+    if cwd and not inside(cwd, repo):
         return f"runs outside the repo ({cwd})"
     return None
 
@@ -146,7 +164,7 @@ def main() -> int:
             kind = "command" if "commandExecution" in method else "file change"
             if method.endswith("fileChange/requestApproval"):
                 root = params.get("grantRoot")
-                why = None if not root or os.path.realpath(root).startswith(os.path.realpath(repo)) else f"writes outside the repo ({root})"
+                why = None if not root or inside(root, repo) else f"writes outside the repo ({root})"
             else:
                 why = risk(params.get("command"), params.get("cwd"), repo)
             if policy == "ask":

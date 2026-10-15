@@ -119,7 +119,8 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
     })
 }
 
-/// `GET /config` (UNAUTHED, mirroring the agent's own route -- see
+/// `GET /config` (no token needed on the box itself; from the network the
+/// agent wants a paired token since 2026-10 -- mirroring the agent's own route, see
 /// `tt-station-agentd::routes::get_config`, Task 5): the box's fully-resolved
 /// serving config, redacted to a [`ConfigSummary`] (no `hf_token`, no
 /// token-store contents -- see that type's docs).
@@ -141,7 +142,8 @@ pub async fn get_config(base: &str) -> anyhow::Result<ConfigSummary> {
     Ok(resp.json().await?)
 }
 
-/// `GET /logs?source=<source>&tail=<tail>` (UNAUTHED, mirroring the agent's
+/// `GET /logs?source=<source>&tail=<tail>` (no token needed on the box
+/// itself; from the network the agent wants a paired token since 2026-10 -- mirroring the agent's
 /// own route -- see `tt-station-agentd::routes::get_logs`, Task 2): the
 /// trailing `tail` lines of the box's `source` log stream (`"container"` or
 /// `"run"`), bundled as a [`LogsInfo`].

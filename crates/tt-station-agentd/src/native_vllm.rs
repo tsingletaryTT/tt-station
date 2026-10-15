@@ -443,7 +443,8 @@ pub async fn serve_dir(state: &AppState, dir: &Path, label: &str, stop_serving: 
         .arg("--setenv=VLLM_USE_V1=1")
         .arg("--setenv=PYTHONUNBUFFERED=1");
     if let Some(token) = crate::bringup::hf_token() {
-        cmd.arg(format!("--setenv=HF_TOKEN={token}"));
+        // The value from systemd-run's environment, not its command line.
+        cmd.arg("--setenv=HF_TOKEN").env("HF_TOKEN", token);
     }
     for (k, v) in &launch_env {
         cmd.arg(format!("--setenv={k}={v}"));

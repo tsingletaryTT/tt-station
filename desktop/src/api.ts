@@ -108,6 +108,10 @@ export const delWith = <T>(path: string, body: unknown) => request<T>("DELETE", 
 export const text = (path: string) => request<string>("GET", path, undefined, { raw: true });
 export const upload = <T>(path: string, file: Blob) => request<T>("POST", path, file);
 
+/** Subprotocols for a WebSocket to the box: a browser can't set headers on
+ *  one, so the token rides here, never in the URL. */
+export const wsProtocols = (): string[] => ["tt-station", ...(token ? [`tt-token.${token}`] : [])];
+
 /** The Authorization header, for the few calls that stream (Lab, chat). */
 export const authHeader = (): Record<string, string> => (token ? { authorization: `Bearer ${token}` } : {});
 
@@ -620,6 +624,16 @@ export async function runOnClient(a: ActionReport): Promise<void> {
   const r = (await window.ttDesktop?.computer?.(a.tool, a.args ?? {}).catch((e: Error) => ({ ok: false, error: e.message })))
     ?? { ok: false, error: "This app can't do that on this computer." };
   await post("/assistant/client-result", { id: a.id, ...r }).catch(() => {});
+}
+
+/** A confirmed step for this computer: once the person approves a step that
+ *  acts here (`status: "on_client"`), the device hands it back to run. Returns
+ *  what happened, or null when the step ran on the device. */
+export async function runConfirmed(r: { status?: string; run?: { tool: string; args?: Record<string, unknown> } } | undefined): Promise<string | null> {
+  if (r?.status !== "on_client" || !r.run) return null;
+  const out: { ok: boolean; summary?: string; error?: string } = (await window.ttDesktop?.computer?.(r.run.tool, r.run.args ?? {}).catch((e: Error) => ({ ok: false, error: e.message })))
+    ?? { ok: false, error: "This app can't do that on this computer." };
+  return out.ok ? out.summary ?? "Done." : out.error ?? "It didn't work.";
 }
 
 /** A list of actions with this report added, or replacing the one with its id. */

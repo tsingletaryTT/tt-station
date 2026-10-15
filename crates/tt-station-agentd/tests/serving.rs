@@ -97,7 +97,7 @@ fn docker_start_issues_run_command_and_returns_endpoint() {
         "docker run args should carry --publish: {run_cmd:?}"
     );
     assert!(
-        run_cmd.iter().any(|a| a == "8080:8000"),
+        run_cmd.iter().any(|a| a == "127.0.0.1:8080:8000"),
         "docker run args should map the host port onto the container's fixed port 8000: {run_cmd:?}"
     );
     assert!(
@@ -174,9 +174,9 @@ fn docker_start_keeps_raw_model_in_argv_but_sanitizes_container_name() {
     );
 }
 
-/// A configured HF token should show up as `--env HF_TOKEN=<token>` -- only
-/// needed for gated Hugging Face repos, so it must not appear when unset
-/// (see the sibling test below).
+/// A configured HF token should show up as `--env HF_TOKEN` -- by name only,
+/// the value going through docker's own environment so it never shows in a
+/// process list -- and only when set (see the sibling test below).
 #[test]
 fn docker_start_includes_hf_token_env_when_configured() {
     let runner = FakeRunner::new(0);
@@ -193,8 +193,12 @@ fn docker_start_includes_hf_token_env_when_configured() {
         "docker run args should carry --env when a token is configured: {run_cmd:?}"
     );
     assert!(
-        run_cmd.iter().any(|a| a == "HF_TOKEN=secret-token"),
-        "docker run args should carry the HF_TOKEN value: {run_cmd:?}"
+        run_cmd.windows(2).any(|w| w[0] == "--env" && w[1] == "HF_TOKEN"),
+        "docker run args should name HF_TOKEN: {run_cmd:?}"
+    );
+    assert!(
+        !run_cmd.iter().any(|a| a.contains("secret-token")),
+        "the token's value must not be in the command line: {run_cmd:?}"
     );
 }
 
@@ -505,7 +509,7 @@ fn unleased_docker_run_argv(image: &str, host_port: u16, model: &str) -> Vec<Str
         "--volume",
         "tt-station-cache:/home/container_app_user/cache_root",
         "--publish",
-        &format!("{host_port}:8000"),
+        &format!("127.0.0.1:{host_port}:8000"),
         image,
         "--model",
         model,
@@ -1496,4 +1500,17 @@ fn docker_swap_never_releases_a_lease_recorded_by_a_concurrent_serve() {
         "the concurrent serve's lease must still be held afterwards: {:?}",
         gozer.held_lease_ids()
     );
+}
+
+/// The Docker backend publishes the keyless model port on loopback unless
+/// the endpoint is advertised at a network address.
+#[test]
+fn docker_publishes_on_loopback_unless_advertised_on_the_network() {
+    use tt_station_agentd::serving::loopback_only;
+    for h in ["127.0.0.1", "localhost", "::1", "127.0.0.2"] {
+        assert!(loopback_only(h), "{h}");
+    }
+    for h in ["192.168.1.20", "quietbox.local", "0.0.0.0", "::"] {
+        assert!(!loopback_only(h), "{h}");
+    }
 }

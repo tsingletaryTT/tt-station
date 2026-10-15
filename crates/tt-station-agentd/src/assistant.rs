@@ -146,6 +146,39 @@ pub const READ_ONLY_TOOLS: [&str; 20] = [
 /// Names of the tools that only ever become pending actions.
 pub const DISRUPTIVE_TOOLS: [&str; 5] = ["run_model", "stop_model", "reset_chips", "switch_mode", "install_app"];
 
+/// Read-only tools that act -- on the box, the person's computer, a bring-up,
+/// a recording or what Tori remembers -- rather than only look. Once text from
+/// the web has come into a turn it may be what's steering the model, so for
+/// the rest of that turn each of these waits for the person, like the
+/// disruptive ones (see [`needs_confirmation`]).
+pub const ACTING_TOOLS: [&str; 10] = [
+    "remember",
+    "forget",
+    "open_app",
+    "control_computer",
+    "open_folder",
+    "open_station",
+    "start_recording",
+    "stop_recording",
+    "bringup_decide",
+    "research",
+];
+
+/// Tools whose results carry text from the web.
+pub const WEB_TOOLS: [&str; 2] = ["web_search", "read_webpage"];
+
+/// Whether a model's call of a read-only tool must wait for the person.
+/// Always: answering a bring-up (it runs a command on the box), starting a
+/// recording, opening a web address. Once web text is in the turn (`tainted`):
+/// any acting tool.
+pub fn needs_confirmation(name: &str, args: &Value, tainted: bool) -> bool {
+    match name {
+        "bringup_decide" | "start_recording" => true,
+        "open_app" if args["url"].as_str().is_some_and(|u| !u.trim().is_empty()) => true,
+        _ => tainted && ACTING_TOOLS.contains(&name),
+    }
+}
+
 // ---------------------------------------------------------------------
 // Wire types
 // ---------------------------------------------------------------------
@@ -289,6 +322,9 @@ pub struct ConfirmResponse {
     pub tool: String,
     pub status: ConfirmStatus,
     pub summary: String,
+    /// `{tool, args}` with [`ConfirmStatus::OnClient`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<Value>,
 }
 
 /// A [`ConfirmResponse`]'s status.
@@ -301,6 +337,9 @@ pub enum ConfirmStatus {
     Started,
     /// `stop_model`/`reset_chips` approved and finished.
     Done,
+    /// Approved, and for the person's computer to do: the app runs
+    /// [`ConfirmResponse::run`] itself (Tori on another computer).
+    OnClient,
 }
 
 /// A disruptive action parked until a human approves or denies it. Stored in
@@ -1125,7 +1164,21 @@ pub fn pending_summary(tool: &str, args: &Value, current_model: &str) -> String 
             args.get("name").and_then(Value::as_str).unwrap_or("the app"),
             args.get("blurb").and_then(Value::as_str).unwrap_or("")
         ),
-        other => format!("Run {other}."),
+        "open_app" => match (args["app"].as_str(), args["url"].as_str()) {
+            (Some(app), Some(url)) => format!("Open {url} in {app}."),
+            (_, Some(url)) => format!("Open {url}."),
+            (Some(app), _) => format!("Open {app}."),
+            _ => "Open an app.".to_string(),
+        },
+        "bringup_decide" => format!(
+            "{} what the bring-up is waiting on: {}",
+            if args["decision"] == "accept" { "Allow" } else { "Deny" },
+            crate::bringup::waiting_on().unwrap_or_else(|| "nothing right now".into())
+        ),
+        "start_recording" => "Start recording (the microphone, until you stop it).".to_string(),
+        "remember" => format!("Remember: {}", args["fact"].as_str().unwrap_or("something")),
+        "research" => format!("Research: {}", args["question"].as_str().unwrap_or("that")),
+        other => format!("Run {other} with {args}."),
     }
 }
 
@@ -1156,6 +1209,9 @@ pub fn pending_reply(proposed: &[(String, Value)]) -> String {
                 "I can set up {} on the box; it downloads the first time.",
                 args.get("name").and_then(Value::as_str).unwrap_or("that app")
             ),
+            "open_app" | "bringup_decide" | "start_recording" | "remember" | "research" => {
+                format!("I'd like to: {}", pending_summary(tool, args, ""))
+            }
             other => format!("I can run {other}."),
         })
         .collect();
@@ -2009,6 +2065,8 @@ async fn converse_rounds(
 ) -> Result<String, AssistantError> {
     // Rounds 0..MAX_TOOL_ROUNDS offer tools; the last round doesn't, which
     // forces a plain-text answer out of a model stuck calling tools.
+    // Web text has come into this turn (see `needs_confirmation`).
+    let mut tainted = false;
     for round in 0..=MAX_TOOL_ROUNDS {
         let offer_tools = round < MAX_TOOL_ROUNDS;
         let read = |message: &Value| {
@@ -2051,6 +2109,7 @@ async fn converse_rounds(
             actions,
             // Not streamed: nothing reaches the person's computer, so the box's own tools.
             false,
+            &mut tainted,
             &mut |_| {},
         )
         .await;
@@ -2083,6 +2142,7 @@ async fn run_tool_calls(
     served_model: &str,
     actions: &mut Vec<ActionReport>,
     client: bool,
+    tainted: &mut bool,
     on_action: &mut (dyn FnMut(&ActionReport) + Send),
 ) -> Vec<(String, Value)> {
     // Echo the assistant turn (with its tool calls) back so the next round's
@@ -2110,7 +2170,18 @@ async fn run_tool_calls(
                 "tool_calls": [raw[i].clone()],
             }));
         }
+        let args = call.args.as_ref().unwrap_or(&Value::Null);
+        let gated = tool_kind(&call.name) == Some(ToolKind::ReadOnly) && needs_confirmation(&call.name, args, *tainted);
         let result = match tool_kind(&call.name) {
+            Some(ToolKind::ReadOnly) if gated => match park(state, call, client && CLIENT_TOOLS.contains(&call.name.as_str())) {
+                Ok((pending, report)) => {
+                    proposed.push((report.tool.clone(), report.args.clone()));
+                    on_action(&report);
+                    actions.push(report);
+                    pending
+                }
+                Err(reason) => json!({ "error": reason }),
+            },
             Some(ToolKind::ReadOnly) => {
                 let (result, report) = if client && CLIENT_TOOLS.contains(&call.name.as_str()) {
                     run_on_client(call, on_action).await
@@ -2143,6 +2214,9 @@ async fn run_tool_calls(
                 )
             }),
         };
+        if WEB_TOOLS.contains(&call.name.as_str()) {
+            *tainted = true;
+        }
         messages.push(json!({
             "role": "tool",
             "tool_call_id": call.id,
@@ -2151,6 +2225,33 @@ async fn run_tool_calls(
         }));
     }
     proposed
+}
+
+/// Marks a parked action that the person's computer, not the box, runs once approved.
+const ON_CLIENT: &str = "_on_client";
+
+/// Parks a model's call of an acting tool until the person confirms it (see
+/// [`needs_confirmation`]); `confirm` runs it, or hands it back to the
+/// person's computer when it acts there.
+fn park(state: &AppState, call: &ToolCall, on_client: bool) -> Result<(Value, ActionReport), String> {
+    let args = call.args.clone().map_err(|raw| format!("arguments were not a JSON object: {raw}"))?;
+    let summary = pending_summary(&call.name, &args, "");
+    let mut stored = args.clone();
+    if call.name == "bringup_decide" {
+        // The very request the person is shown, not whatever is waiting when they answer.
+        stored["what"] = json!(crate::bringup::waiting_on().ok_or("the bring-up isn't waiting on anything")?);
+    }
+    if on_client {
+        stored[ON_CLIENT] = json!(true);
+    }
+    let id = state.insert_pending_action(PendingAction { tool: call.name.clone(), args: stored, summary: summary.clone(), created: Instant::now() });
+    let result = json!({
+        "status": "needs_confirmation",
+        "summary": summary,
+        "note": "Not done yet. Ask the user to confirm.",
+    });
+    let report = ActionReport { id, tool: call.name.clone(), args, status: ActionStatus::NeedsConfirmation, summary, images: Vec::new() };
+    Ok((result, report))
 }
 
 /// Everything `POST /assistant/stream` needs before streaming starts -- failures
@@ -2194,6 +2295,8 @@ pub(crate) async fn converse_stream(
     };
     let mut actions: Vec<ActionReport> = Vec::new();
     let mut streamed_any = false;
+    // Web text has come into this turn (see `needs_confirmation`).
+    let mut tainted = false;
     for round in 0..=MAX_TOOL_ROUNDS {
         let offer_tools = round < MAX_TOOL_ROUNDS;
         if streamed_any {
@@ -2293,6 +2396,7 @@ pub(crate) async fn converse_stream(
             &model,
             &mut actions,
             opts.client,
+            &mut tainted,
             &mut |report| {
                 let _ = tx.send(StreamEvent::Action {
                     action: report.clone(),
@@ -2955,6 +3059,7 @@ pub(crate) async fn confirm(
         tool: action.tool.clone(),
         status,
         summary,
+        run: None,
     };
 
     if !req.approve {
@@ -3070,6 +3175,26 @@ pub(crate) async fn confirm(
                 "Reset the chips. Nothing is serving now.".to_string(),
             ))
         }
+        // An acting tool that waited for the person (needs_confirmation).
+        name if READ_ONLY_TOOLS.contains(&name) => {
+            let mut args = action.args.clone();
+            let on_client = args.as_object_mut().and_then(|a| a.remove(ON_CLIENT)).is_some_and(|v| v == true);
+            if on_client {
+                return Ok(ConfirmResponse {
+                    run: Some(json!({ "tool": name, "args": args })),
+                    ..respond(ConfirmStatus::OnClient, action.summary.clone())
+                });
+            }
+            if name == "bringup_decide" && crate::bringup::waiting_on().as_deref() != args["what"].as_str() {
+                return Err(AssistantError::Backend(anyhow::anyhow!("the bring-up is no longer waiting on that")));
+            }
+            let call = ToolCall { id: req.action_id.clone(), name: name.to_string(), args: Ok(args) };
+            let (_, report) = run_read_only(state, &call).await;
+            if report.status == ActionStatus::Error {
+                return Err(AssistantError::Backend(anyhow::anyhow!(report.summary)));
+            }
+            Ok(respond(ConfirmStatus::Done, report.summary))
+        }
         other => Err(AssistantError::Backend(anyhow::anyhow!(
             "pending action has unknown tool {other}"
         ))),
@@ -3079,6 +3204,25 @@ pub(crate) async fn confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_waits_for_the_person() {
+        let none = json!({});
+        for t in ["bringup_decide", "start_recording"] {
+            assert!(needs_confirmation(t, &none, false), "{t}");
+        }
+        assert!(needs_confirmation("open_app", &json!({ "url": "https://x.example" }), false));
+        assert!(!needs_confirmation("open_app", &json!({ "app": "VS Code" }), false));
+        assert!(!needs_confirmation("remember", &json!({ "fact": "x" }), false));
+        // Web text in the turn: every acting tool, no looking tool.
+        for t in ACTING_TOOLS {
+            assert!(needs_confirmation(t, &none, true), "{t}");
+            assert_eq!(tool_kind(t), Some(ToolKind::ReadOnly), "{t}");
+        }
+        for t in ["box_status", "web_search", "read_webpage", "search_documents", "find_files", "bringup_status", "research_check"] {
+            assert!(!needs_confirmation(t, &none, true), "{t}");
+        }
+    }
 
     #[tokio::test]
     async fn a_computer_step_runs_on_the_persons_computer_and_comes_back() {

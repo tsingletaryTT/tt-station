@@ -209,7 +209,10 @@ pub const APPS: &[AppDef] = &[
             ("LDR_SEARCH_PRIVATE_ENGINE_URL_ALLOWLIST", "{app:searxng}"),
         ],
         command: None,
-        local_only: false,
+        // It holds a key to the box's model and spends it for whoever reaches
+        // it: this computer only (another computer's TT Station opens it
+        // through its SSH tunnel).
+        local_only: true,
         url_suffix: "",
         homepage: "https://github.com/LearningCircuit/local-deep-research",
         needs: &["searxng"],
@@ -681,7 +684,14 @@ fn install_blocking(state: &AppState, def: &'static AppDef, step: &dyn Fn(&str))
         }
     }
     for (k, v) in def.env {
-        cmd.args(["-e", &format!("{k}={}", fill(v, &base, &key, &token, &model).replace("{embed_dim}", &dims))]);
+        let value = fill(v, &base, &key, &token, &model).replace("{embed_dim}", &dims);
+        if v.contains("{key}") || v.contains("{token}") {
+            // A secret: docker takes it from its own environment, by name, so
+            // it never shows in a process list.
+            cmd.args(["-e", k]).env(k, value);
+        } else {
+            cmd.args(["-e", &format!("{k}={value}")]);
+        }
     }
     cmd.args(def.extra_args);
     if def.show_key {
@@ -833,6 +843,10 @@ mod tests {
         assert!(
             app("jupyter").unwrap().local_only,
             "Jupyter runs code: never on the network"
+        );
+        assert!(
+            app("localdeepresearch").unwrap().local_only,
+            "it spends the box's model key for whoever reaches it: never on the network"
         );
     }
 }

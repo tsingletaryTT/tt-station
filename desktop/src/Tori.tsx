@@ -10,10 +10,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { externalLinks } from "./links";
 import { Button } from "@tenstorrent/vesper/button";
 import { IconButton } from "@tenstorrent/vesper/icon-button";
 import { Icon } from "@tenstorrent/vesper/icons";
-import { type ActionReport, clientKind, get, post, runOnClient, short, streamChat, upsertAction } from "./api";
+import { type ActionReport, clientKind, get, post, runConfirmed, runOnClient, short, streamChat, upsertAction } from "./api";
 import { toastError } from "./ui";
 import { Orb, type Phase } from "./VoiceMode";
 import { Listener, Speaker, type VoiceStatus } from "./voice";
@@ -238,8 +239,8 @@ export function ToriWindow() {
 
   const confirm = async (a: ActionReport, approve: boolean) => {
     try {
-      const r = await post<{ summary?: string; message?: string }>("/assistant/confirm", { action_id: a.id, approve });
-      const note = r?.summary ?? r?.message ?? (approve ? "Done." : "Cancelled.");
+      const r = await post<{ summary?: string; message?: string; status?: string; run?: { tool: string; args?: Record<string, unknown> } }>("/assistant/confirm", { action_id: a.id, approve });
+      const note = (await runConfirmed(r)) ?? r?.summary ?? r?.message ?? (approve ? "Done." : "Cancelled.");
       setTurns((all) => all.map((t) => ({ ...t, actions: t.actions?.map((x) => (x.id === a.id ? { ...x, status: "done" as const, summary: note } : x)) })));
     } catch (e) { toastError(e); }
   };
@@ -289,7 +290,7 @@ export function ToriWindow() {
                 <span key={a.id} className="action"><Icon kind={a.status === "error" ? "warning" : a.status === "on_client" ? "spinner" : "checkmark"} width={12} height={12} />{a.summary}</span>
               ))}
               <div className="markdown selectable">
-                {t.content ? <Markdown remarkPlugins={[remarkGfm]}>{t.content}</Markdown>
+                {t.content ? <Markdown remarkPlugins={[remarkGfm]} components={externalLinks}>{t.content}</Markdown>
                   : busy && i === recent.length - 1 ? <span className="muted cursor" /> : null}
               </div>
               {(t.actions ?? []).filter((a) => a.status === "needs_confirmation").map((a) => (

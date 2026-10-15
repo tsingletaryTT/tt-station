@@ -7,17 +7,33 @@
 
 use std::sync::Arc;
 
-use tt_station_agentd::routes::{app, AppState};
+use tt_station_agentd::routes::{app, local_http_app, AppState};
 use tt_station_agentd::serving::dstack::DstackBackend;
 
+/// The box's own plain-HTTP server, which `/logs` answers without pairing
+/// (the console and panel read it there).
 async fn spawn(state: AppState) -> String {
+    let router = local_http_app(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+/// From the network (the HTTPS server's router), `/logs` needs a paired token.
+#[tokio::test]
+async fn logs_from_the_network_need_pairing() {
+    let state = AppState::new("t".to_string(), "1xBH".to_string(), Arc::new(DstackBackend));
     let router = app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
-    format!("http://{addr}")
+    let resp = reqwest::get(format!("http://{addr}/logs?source=run")).await.unwrap();
+    assert_eq!(resp.status(), 401);
 }
 
 #[tokio::test]

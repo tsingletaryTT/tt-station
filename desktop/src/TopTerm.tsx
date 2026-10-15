@@ -12,7 +12,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { Button } from "@tenstorrent/vesper/button";
-import { currentToken, get } from "./api";
+import { get, wsProtocols } from "./api";
 
 const VIEWS: { id: string; label: string; hint: string }[] = [
   { id: "arcade", label: "Arcade", hint: "Everything at once, with the @ hero" },
@@ -52,8 +52,8 @@ export function TopTerm() {
     try { term.loadAddon(new WebglAddon()); } catch { /* canvas renderer is fine */ }
     fit.fit();
     setState("connecting");
-    const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/toplike/term?token=${encodeURIComponent(currentToken() ?? "")}&mode=${view}&cols=${term.cols}&rows=${term.rows}`;
-    const ws = new WebSocket(url);
+    const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/toplike/term?mode=${view}&cols=${term.cols}&rows=${term.rows}`;
+    const ws = new WebSocket(url, wsProtocols());
     ws.binaryType = "arraybuffer";
     ws.onmessage = (m) => {
       setState("live");

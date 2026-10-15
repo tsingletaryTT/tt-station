@@ -9,13 +9,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { externalLinks } from "../links";
 import { Button } from "@tenstorrent/vesper/button";
 import { IconButton } from "@tenstorrent/vesper/icon-button";
 import { Icon } from "@tenstorrent/vesper/icons";
 import { Switch } from "@tenstorrent/vesper/switch";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { Admonition } from "@tenstorrent/vesper/admonition";
-import { type ActionReport, ApiError, clientKind, fetchBlob, get, type Mode, post, runOnClient, type Serve, short, streamChat, upsertAction } from "../api";
+import { type ActionReport, ApiError, clientKind, fetchBlob, get, type Mode, post, runConfirmed, runOnClient, type Serve, short, streamChat, upsertAction } from "../api";
 import { toastError, toastOk, usePoll, useToriShortcut } from "../ui";
 import { type AskHooks, VoiceMode } from "../VoiceMode";
 import { ask, askText } from "../dialog";
@@ -133,8 +134,8 @@ export function Chat() {
 
   const confirm = async (action: ActionReport, approve: boolean) => {
     try {
-      const r = await post<{ message?: string; status?: string }>("/assistant/confirm", { action_id: action.id, approve });
-      const note = (r as { summary?: string })?.summary ?? r?.message ?? (approve ? "Done." : "Cancelled.");
+      const r = await post<{ message?: string; status?: string; run?: { tool: string; args?: Record<string, unknown> } }>("/assistant/confirm", { action_id: action.id, approve });
+      const note = (await runConfirmed(r)) ?? (r as { summary?: string })?.summary ?? r?.message ?? (approve ? "Done." : "Cancelled.");
       if (!conv) return;
       update(conv.id, (c) => ({
         ...c,
@@ -324,7 +325,7 @@ function AssistantMessage({ m, streaming, onConfirm }: {
         ))}
         {(m.actions ?? []).flatMap((a) => a.images ?? []).map((id) => <CreationImage key={id} id={id} />)}
         <div className="markdown selectable">
-          {m.content ? <Markdown remarkPlugins={[remarkGfm]}>{m.content}</Markdown>
+          {m.content ? <Markdown remarkPlugins={[remarkGfm]} components={externalLinks}>{m.content}</Markdown>
             : streaming ? <span className="muted cursor">{m.reasoning ? "Thinking" : ""}</span> : null}
           {streaming && m.content && <span className="cursor" />}
         </div>

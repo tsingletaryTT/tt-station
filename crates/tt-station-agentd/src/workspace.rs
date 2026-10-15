@@ -382,7 +382,7 @@ How to work well here:\n\
 - After changing code, check it: run the project's tests, type checker or build if there is one, and fix what fails. If you can't run the check (the tool isn't available here), say so plainly in your summary: never say a change works when you couldn't check it.\n\
 - When you're done, say in a few sentences what you changed and how you checked it. Don't create notes, summaries or memory files (MEMORY.md, SUMMARY.md, CHANGES.md…) unless asked: the person reads your summary here.\n");
     if sandbox {
-        t.push_str("You are in a sandbox: the project is at /work and it is the only folder you can see; there is no internet access (no package installs, no git push); python3, pip (offline), pytest, git, ripgrep, make, curl, Node.js with npm and npx (offline: they run what's already in node_modules, e.g. `npx tsc --noEmit`), and Rust with cargo (offline, with the crates the box already has: `cargo check`, `cargo test`, `cargo clippy`) are available. If something needs the network, say so instead of retrying.\n");
+        t.push_str("You are in a sandbox: the project is at /work and it is the only folder you can see; there is no internet access (no package installs, no git push); the project's .git is read-only (git status, diff and log work; don't commit, the person commits from the Changes view); python3, pip (offline), pytest, git, ripgrep, make, curl, Node.js with npm and npx (offline: they run what's already in node_modules, e.g. `npx tsc --noEmit`), and Rust with cargo (offline, with the crates the box already has: `cargo check`, `cargo test`, `cargo clippy`) are available. If something needs the network, say so instead of retrying.\n");
     }
     t
 }
@@ -504,6 +504,15 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
             "-v", &format!("{}:/opt/claude-code:ro", pkg.display()),
             "-v", &format!("{}:/home/coder/.tt-claude", cfg.display()),
             "-e", "CLAUDE_CONFIG_DIR=/home/coder/.tt-claude", "-e", "ANTHROPIC_BASE_URL=http://box:8765", "-e", "HOME=/home/coder"]);
+        // The project's git directories go in read-only: the model can read
+        // history, but can't change how git behaves when the box runs it
+        // (crate::safegit). Commits are made from Changes, outside.
+        let read_only = git_dirs(Path::new(&s.folder));
+        for (rel, _) in &read_only {
+            c.arg("-v").arg(format!("{}:/work/{rel}:ro", Path::new(&s.folder).join(rel).display()));
+        }
+        let ro: Vec<PathBuf> = read_only.into_iter().filter_map(|(_, d)| d).collect();
+        std::fs::write(dir(state, &s.id).join(GIT_RO), serde_json::to_vec(&ro).unwrap_or_default()).map_err(|e| e.to_string())?;
         // The box's Rust toolchain and downloaded crates, read-only, offline; builds
         // go to their own volume.
         let (rustup, cargo) = (home().join(".rustup"), home().join(".cargo"));
@@ -520,8 +529,10 @@ async fn spawn(state: &AppState, s: &Session) -> Result<Arc<Proc>, String> {
             c.args(["-v", &format!("{}:/opt/node:ro", node.display()),
                 "-e", "PATH=/opt/cargo-bin:/opt/node/bin:/usr/local/bin:/usr/bin:/bin", "-e", "npm_config_cache=/tmp/npm-cache", "-e", "npm_config_offline=true"]);
         }
+        // Names only: docker takes each value from its own environment (the
+        // holder's spec), so the model key never shows in a process list.
         for (k, v) in &envs {
-            c.arg("-e").arg(format!("{k}={v}"));
+            c.arg("-e").arg(k).env(k, v);
         }
         c.arg(IMAGE).arg(inner_bin).args(&args);
         c
@@ -945,7 +956,7 @@ async fn handle(state: &AppState, id: &str, p: &Arc<Proc>, m: Value) {
             if let Some(s) = update(state, id, |s| s.last = now()) {
                 // What this turn edited; failing that (a change made with a shell
                 // command), whatever git sees as changed.
-                let n = if files.is_empty() { crate::coding::changed_files(&s.folder).len() } else { files.len() };
+                let n = if files.is_empty() { crate::safegit::changed_files(Path::new(&s.folder), reach(state, &s).as_ref()).len() } else { files.len() };
                 let body = match files.as_slice() {
                     [one] => format!("Edited {one}. Review it in TT Station → Code."),
                     [] if n > 0 => format!("{n} changed file{} to review in TT Station → Code.", if n == 1 { "" } else { "s" }),
@@ -1020,14 +1031,14 @@ pub(crate) fn pending_approvals(state: &AppState) -> Vec<Value> {
     out
 }
 
-fn describe(s: &Session) -> Value {
+fn describe(state: &AppState, s: &Session) -> Value {
     let p = proc_of(&s.id);
     json!({
         "id": s.id, "folder": s.folder, "title": s.title, "created": s.created, "last": s.last, "sandbox": s.sandbox, "policy": s.policy,
         "running": p.is_some(),
         "busy": p.as_ref().is_some_and(|p| p.busy.load(Ordering::SeqCst)) || STARTING.lock().expect("code").contains(&s.id),
         "waiting": p.as_ref().map_or(0, |p| p.pending.lock().expect("code").len()),
-        "changes": crate::coding::changed_files(&s.folder).len(),
+        "changes": crate::safegit::changed_files(Path::new(&s.folder), reach(state, s).as_ref()).len(),
         "always": s.always, "think": s.think,
     })
 }
@@ -1042,7 +1053,7 @@ pub(crate) async fn get_code(State(state): State<AppState>, _auth: BearerAuth) -
             .filter_map(|e| load(&st, &e.file_name().to_string_lossy())).collect();
         v.sort_by(|a, b| b.last.max(b.created).cmp(&a.last.max(a.created)));
         let (image, gate) = sandbox_ready(port);
-        (v.iter().map(|s| describe(s)).collect::<Vec<_>>(), json!({ "image": image, "gate": gate }))
+        (v.iter().map(|s| describe(&st, s)).collect::<Vec<_>>(), json!({ "image": image, "gate": gate }))
     }).await.unwrap_or_default();
     let setup = SETUP.lock().expect("code").clone();
     Json(json!({
@@ -1073,6 +1084,33 @@ pub struct NewSession {
     pub policy: Option<String>,
     #[serde(default)]
     pub think: bool,
+}
+
+/// Where a sandboxed session's launch noted the git directories it mounted read-only.
+const GIT_RO: &str = "git-ro.json";
+
+/// The project's `.git` (directory or file), or each of its projects' when it's
+/// a folder of projects: relative path, and the directory's real path when it is one.
+fn git_dirs(folder: &Path) -> Vec<(String, Option<PathBuf>)> {
+    let mut v: Vec<String> = projects_inside(folder).into_iter().map(|p| format!("{p}/.git")).collect();
+    if folder.join(".git").exists() {
+        v = vec![".git".into()];
+    }
+    // Can't be mounted (crate::coding::allowed_folder).
+    v.retain(|r| !r.contains([':', ',', '\n']));
+    v.into_iter().map(|r| {
+        let p = folder.join(&r);
+        let d = p.is_dir().then(|| std::fs::canonicalize(&p).ok()).flatten();
+        (r, d)
+    }).collect()
+}
+
+/// What a sandboxed session's model can write, for the git run here (crate::safegit).
+fn reach(state: &AppState, s: &Session) -> Option<crate::safegit::Reach> {
+    s.sandbox.then(|| crate::safegit::Reach {
+        folder: PathBuf::from(&s.folder),
+        read_only: std::fs::read(dir(state, &s.id).join(GIT_RO)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default(),
+    })
 }
 
 /// Git repositories directly inside `folder`, when it isn't one itself (a folder of projects).
@@ -1115,7 +1153,7 @@ pub(crate) async fn post_session(State(state): State<AppState>, _auth: BearerAut
     let s = Session { id: id.clone(), folder: folder.display().to_string(), title, created: now(), sandbox: b.sandbox, policy, claude_session: None, last: now(), always: vec![], think: b.think };
     save(&state, &s);
     event(&state, &id, json!({ "kind": "start", "sandbox": s.sandbox, "folder": s.folder }));
-    Ok(Json(json!({ "session": describe(&s) })))
+    Ok(Json(json!({ "session": describe(&state, &s) })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1140,7 +1178,7 @@ pub(crate) async fn get_session(State(state): State<AppState>, _auth: BearerAuth
         } else {
             vec![]
         };
-        Ok(Json(json!({ "session": describe(&s), "events": events_after(&st, &id, q.after), "pending": pending, "activity": activity })))
+        Ok(Json(json!({ "session": describe(&st, &s), "events": events_after(&st, &id, q.after), "pending": pending, "activity": activity })))
     })
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -1311,26 +1349,25 @@ pub(crate) async fn delete_session(State(state): State<AppState>, _auth: BearerA
     Ok(Json(json!({ "deleted": true })))
 }
 
-fn git(folder: &str, args: &[&str]) -> Result<String, String> {
-    let o = std::process::Command::new("git").arg("-C").arg(folder).args(args).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
-    if o.status.success() {
-        Ok(String::from_utf8_lossy(&o.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&o.stderr).trim().lines().last().unwrap_or("git failed").to_string())
-    }
+/// Git in the session's project, or a folder in it: see crate::safegit.
+fn git(reach: Option<&crate::safegit::Reach>, folder: &str, args: &[&str]) -> Result<String, String> {
+    crate::safegit::git(Path::new(folder), reach, args)
 }
 
 /// `GET /code/sessions/{id}/changes`.
 pub(crate) async fn get_changes(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
     let s = load(&state, &id).filter(|_| valid_id(&id)).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
     let events = dir(&state, &id).join("events.jsonl");
+    let r = reach(&state, &s);
     let v = tokio::task::spawn_blocking(move || {
-        let repo = git(&s.folder, &["rev-parse", "--is-inside-work-tree"]).is_ok();
+        let r = r.as_ref();
+        let repo = git(r, &s.folder, &["rev-parse", "--is-inside-work-tree"]).is_ok();
         if !repo {
-            return edited_changes(&s, &events);
+            return edited_changes(r, &s, &events);
         }
-        let mut diff = git(&s.folder, &["diff", "HEAD"]).or_else(|_| git(&s.folder, &["diff"])).unwrap_or_default();
-        let files = crate::coding::changed_files(&s.folder);
+        let diff_of = |rev: &[&str]| git(r, &s.folder, &[&["diff"], crate::safegit::DIFF, rev].concat());
+        let mut diff = diff_of(&["HEAD"]).or_else(|_| diff_of(&[])).unwrap_or_default();
+        let files = crate::safegit::changed_files(Path::new(&s.folder), r);
         for f in files.iter().filter(|l| l.starts_with("??")).take(20) {
             let name = f[3..].trim();
             if let Ok(text) = std::fs::read_to_string(Path::new(&s.folder).join(name)) {
@@ -1343,14 +1380,14 @@ pub(crate) async fn get_changes(State(state): State<AppState>, _auth: BearerAuth
             }
         }
         crate::coding::cut(&mut diff, 400_000);
-        json!({ "repo": repo, "files": files, "diff": diff, "log": git(&s.folder, &["log", "--oneline", "-8"]).unwrap_or_default() })
+        json!({ "repo": repo, "files": files, "diff": diff, "log": git(r, &s.folder, &["log", "--oneline", "-8"]).unwrap_or_default() })
     }).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(v))
 }
 
 /// Changes for a folder that isn't a git repository (say, a folder of projects):
 /// the files Claude Code edited, each diffed in the repository it's in, if any.
-fn edited_changes(s: &Session, events: &Path) -> Value {
+fn edited_changes(r: Option<&crate::safegit::Reach>, s: &Session, events: &Path) -> Value {
     let root = Path::new(&s.folder);
     let mut files = Vec::new();
     let mut diff = String::new();
@@ -1361,7 +1398,7 @@ fn edited_changes(s: &Session, events: &Path) -> Value {
         let status = if !path.exists() {
             "D".to_string()
         } else {
-            match git(&dir, &["status", "--porcelain", "--", &abs]) {
+            match git(r, &dir, &["status", "--porcelain", "--ignore-submodules=all", "--", &abs]) {
                 // Committed since, or edited back to how it was.
                 Ok(st) if st.trim().is_empty() => continue,
                 Ok(st) => st.trim().split_whitespace().next().unwrap_or("M").to_string(),
@@ -1372,7 +1409,7 @@ fn edited_changes(s: &Session, events: &Path) -> Value {
         if diff.len() > 400_000 {
             continue;
         }
-        match git(&dir, &["diff", "HEAD", "--", &abs]) {
+        match git(r, &dir, &[&["diff"], crate::safegit::DIFF, &["HEAD", "--", &abs]].concat()) {
             Ok(d) if !d.trim().is_empty() => diff.push_str(&d),
             _ => {
                 if let Ok(text) = std::fs::read_to_string(&path).map(|t| t.chars().take(40_000).collect::<String>()) {
@@ -1421,11 +1458,13 @@ pub struct Commit {
 pub(crate) async fn post_commit(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>, Json(b): Json<Commit>) -> Reply {
     let s = load(&state, &id).filter(|_| valid_id(&id)).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
     let msg = if b.message.trim().is_empty() { "Changes made in TT Station on the QuietBox".to_string() } else { b.message.trim().to_string() };
+    let r = reach(&state, &s);
     let out = tokio::task::spawn_blocking(move || {
+        let r = r.as_ref();
         // This folder only: in a subfolder of a bigger repository, not everyone else's changes.
-        git(&s.folder, &["add", "-A", "--", "."])?;
-        git(&s.folder, &["-c", "user.name=TT Station", "-c", "user.email=tt-station@localhost", "commit", "-q", "-m", &msg])?;
-        git(&s.folder, &["log", "--oneline", "-1"])
+        git(r, &s.folder, &["add", "-A", "--", "."])?;
+        git(r, &s.folder, &["-c", "user.name=TT Station", "-c", "user.email=tt-station@localhost", "commit", "-q", "-m", &msg])?;
+        git(r, &s.folder, &["log", "--oneline", "-1"])
     }).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?.map_err(|e| err(StatusCode::CONFLICT, e))?;
     event(&state, &id, json!({ "kind": "notice", "text": format!("Committed: {}", out.trim()) }));
     Ok(Json(json!({ "commit": out.trim() })))
@@ -1437,10 +1476,12 @@ pub(crate) async fn post_commit(State(state): State<AppState>, _auth: BearerAuth
 pub(crate) async fn post_discard(State(state): State<AppState>, _auth: BearerAuth, UrlPath(id): UrlPath<String>) -> Reply {
     let s = load(&state, &id).filter(|_| valid_id(&id)).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
     let events = dir(&state, &id).join("events.jsonl");
+    let r = reach(&state, &s);
     let removed = tokio::task::spawn_blocking(move || -> Result<usize, String> {
-        git(&s.folder, &["checkout", "--", "."])?;
+        let r = r.as_ref();
+        git(r, &s.folder, &["checkout", "--", "."])?;
         let made: std::collections::HashSet<String> = edited_in(&s, &events).into_iter().collect();
-        let untracked = git(&s.folder, &["ls-files", "--others", "--exclude-standard", "--", "."])?;
+        let untracked = git(r, &s.folder, &["ls-files", "--others", "--exclude-standard", "--", "."])?;
         let mut n = 0;
         for f in untracked.lines().map(str::trim).filter(|f| made.contains(*f)) {
             if std::fs::remove_file(Path::new(&s.folder).join(f)).is_ok() {
@@ -1477,7 +1518,7 @@ pub(crate) async fn post_settings(State(state): State<AppState>, _auth: BearerAu
         forget_proc(&id, &p);
         tokio::task::spawn_blocking(move || kill(&p)).await.ok();
     }
-    Ok(Json(json!({ "session": describe(&s) })))
+    Ok(Json(json!({ "session": describe(&state, &s) })))
 }
 
 /// The always-allowed list, without one entry.
@@ -1514,7 +1555,7 @@ pub(crate) async fn post_rename(State(state): State<AppState>, _auth: BearerAuth
     }
     let s = update(&state, &id, |s| s.title = title.clone())
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such session."))?;
-    Ok(Json(json!({ "session": describe(&s) })))
+    Ok(Json(json!({ "session": describe(&state, &s) })))
 }
 
 #[cfg(test)]
@@ -1578,5 +1619,23 @@ mod tests {
         std::fs::write(&log, lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
         assert_eq!(edited_in(&session("/x", true), &log), vec!["a.py".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_git_directories_the_sandbox_gets_read_only() {
+        let t = tempfile::tempdir().unwrap();
+        let repo = t.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("sub/.git")).unwrap();
+        assert_eq!(git_dirs(&repo), vec![(".git".to_string(), Some(std::fs::canonicalize(repo.join(".git")).unwrap()))]);
+        // A folder of projects: each one's; a linked worktree's `.git` file too, with no directory to trust.
+        let many = t.path().join("many");
+        std::fs::create_dir_all(many.join("a/.git")).unwrap();
+        std::fs::create_dir_all(many.join("b")).unwrap();
+        std::fs::write(many.join("b/.git"), "gitdir: /elsewhere\n").unwrap();
+        std::fs::create_dir_all(many.join("c")).unwrap();
+        let got = git_dirs(&many);
+        assert_eq!(got, vec![("a/.git".to_string(), Some(std::fs::canonicalize(many.join("a/.git")).unwrap())), ("b/.git".to_string(), None)]);
+        assert!(git_dirs(&t.path().join("none")).is_empty());
     }
 }

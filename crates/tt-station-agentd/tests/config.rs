@@ -7,9 +7,9 @@
 //! `with_serving_config`/`with_telemetry_config`), then hit the route with a
 //! real HTTP client.
 //!
-//! `/config` is UNAUTHED, like `/status`/`/models`/`/serving` -- the panel
-//! and Mac app need to read the active/available profiles without pairing
-//! first -- and the response is asserted to be exactly the `ConfigSummary`
+//! `/config` answers the box itself without pairing (the panel and
+//! `tt-station config` on the box read it over plain HTTP), and anyone else
+//! only with a paired token: it names paths on the box. The response is asserted to be exactly the `ConfigSummary`
 //! the state was built with, including a raw-body check that "hf_token"
 //! never appears: `ConfigSummary` has no field for one, so this is a
 //! by-construction guarantee, not a redaction step the route could get wrong.
@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use libttstation::model::ConfigSummary;
-use tt_station_agentd::routes::{app, AppState};
+use tt_station_agentd::routes::{app, local_http_app, AppState};
 use tt_station_agentd::serving::dstack::DstackBackend;
 
 /// `GET /config` should return 200 with a JSON body that round-trips back
@@ -44,7 +44,18 @@ async fn get_config_returns_summary_without_secrets() {
         Arc::new(DstackBackend),
     )
     .with_config_summary(summary.clone());
-    let router = app(state);
+    // From the network (the HTTPS server's router): pairing first.
+    let net = app(state.clone());
+    let net_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let net_addr = net_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(net_listener, net).await.unwrap();
+    });
+    let resp = reqwest::get(format!("http://{net_addr}/config")).await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // On the box itself (plain HTTP from loopback): no pairing needed.
+    let router = local_http_app(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -52,8 +63,12 @@ async fn get_config_returns_summary_without_secrets() {
     let addr = listener.local_addr().expect("failed to read local addr");
 
     tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
+        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
     });
+
+    // A page in a browser on the box, reaching it through a name of its own (DNS rebinding).
+    let rebound = reqwest::Client::new().get(format!("http://{addr}/config")).header("host", "evil.example:8765").send().await.unwrap();
+    assert_eq!(rebound.status(), reqwest::StatusCode::MISDIRECTED_REQUEST);
 
     let url = format!("http://{addr}/config");
     let resp = reqwest::get(&url).await.expect("GET /config failed");

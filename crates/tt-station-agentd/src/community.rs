@@ -579,7 +579,8 @@ pub(crate) async fn post_pull(State(state): State<AppState>, _auth: BearerAuth, 
         .arg(format!("--property=StandardError=append:{}", log.display()))
         .arg(format!("--setenv=PATH={path}"));
     if let Some(t) = crate::bringup::hf_token() {
-        cmd.arg(format!("--setenv=HF_TOKEN={t}"));
+        // The value from systemd-run's environment, not its command line.
+        cmd.arg("--setenv=HF_TOKEN").env("HF_TOKEN", t);
     }
     let out = cmd.args(["sh", "-c", &script]).stdin(Stdio::null()).output().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !out.status.success() {
@@ -987,7 +988,8 @@ async fn launch(state: &AppState, id: &str, bin: &Path, model: String, short: St
         .arg(format!("--property=StandardError=append:{}", log.display()))
         .arg(format!("--setenv=PATH={path}"));
     if let Some(t) = crate::bringup::hf_token() {
-        cmd.arg(format!("--setenv=HF_TOKEN={t}"));
+        // The value from systemd-run's environment, not its command line.
+        cmd.arg("--setenv=HF_TOKEN").env("HF_TOKEN", t);
     }
     cmd.arg(bin).args(["serve", id, "--local-only", "--no-update-check", "--port", &state.serving_port().to_string()]);
     if let Some(p) = &profile {

@@ -171,6 +171,11 @@ pub fn media_workers_stalled(docker_top: &str) -> bool {
 /// `ghcr.io/tenstorrent/tt-inference-server/`) that varies by mirror.
 const RELEASE_IMAGE_REPO_SUFFIX: &str = "vllm-tt-metal-src-release-ubuntu-22.04-amd64";
 
+/// Whether the checkout's `run.py` takes `flag` (it gains flags over time).
+fn run_py_has(repo_dir: &str, flag: &str) -> bool {
+    std::fs::read_to_string(std::path::Path::new(repo_dir).join("run.py")).is_ok_and(|s| s.contains(&format!("\"{flag}\"")))
+}
+
 /// Tenstorrent chips on this box: the numbered entries in `/dev/tenstorrent`.
 fn box_chip_count() -> Option<usize> {
     let n = std::fs::read_dir("/dev/tenstorrent")
@@ -1399,6 +1404,13 @@ impl ServingBackend for RunPyBackend {
 
         if self.config.no_auth {
             args.push("--no-auth".to_string());
+        }
+        // The keyless model port answers on this box only (see
+        // `loopback_only`). A run.py from before `--bind-host` (2026-03)
+        // can't be told, and publishes on every interface as it always has.
+        if super::loopback_only(&self.config.host) && run_py_has(&self.config.repo_dir, "--bind-host") {
+            args.push("--bind-host".to_string());
+            args.push("127.0.0.1".to_string());
         }
         if let Some(cache) = &self.config.host_hf_cache {
             args.push("--host-hf-cache".to_string());

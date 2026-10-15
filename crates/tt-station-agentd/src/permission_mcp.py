@@ -18,10 +18,23 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from codex_bringup import ask_person, risk  # noqa: E402
+from codex_bringup import ask_person, inside, risk  # noqa: E402
 
-READ_ONLY = {"Read", "Glob", "Grep", "LS", "WebSearch", "WebFetch", "TodoWrite", "Task", "NotebookRead", "Skill", "BashOutput"}
+READ_ONLY = {"Read", "Glob", "Grep", "LS", "WebSearch", "TodoWrite", "Task", "NotebookRead", "Skill", "BashOutput", "KillShell", "KillBash", "ExitPlanMode"}
 EDITS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+# Where a bring-up reads documentation. Fetching any other address waits for
+# a person: a URL can carry what the agent read (its query string is a way out).
+DOC_HOSTS = ("huggingface.co", "github.com", "raw.githubusercontent.com", "docs.tenstorrent.com", "arxiv.org", "pytorch.org", "docs.vllm.ai")
+
+
+def doc_page(url) -> bool:
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit(str(url or ""))
+    except ValueError:
+        return False
+    host = (u.hostname or "").lower()
+    return u.scheme == "https" and not u.query and any(host == h or host.endswith("." + h) for h in DOC_HOSTS)
 
 
 def decide(tool: str, args: dict) -> dict:
@@ -30,13 +43,16 @@ def decide(tool: str, args: dict) -> dict:
     why: str | None
     if tool in READ_ONLY:
         why = None
+    elif tool == "WebFetch":
+        why = None if doc_page(args.get("url")) else f"fetches {str(args.get('url'))[:200]}"
     elif tool == "Bash":
         why = risk(args.get("command"), args.get("cwd") or repo, repo)
     elif tool in EDITS:
         path = os.path.realpath(args.get("file_path") or args.get("notebook_path") or repo)
-        why = None if path.startswith(repo) else f"writes outside the repo ({path})"
+        why = None if inside(path, repo) else f"writes outside the repo ({path})"
     else:
-        why = None
+        # A tool this list doesn't know (an MCP server's, a new one): a person decides.
+        why = f"uses {tool}, which TT Station doesn't know"
     if policy == "ask" and tool not in READ_ONLY:
         why = why or "you asked to approve everything"
     if why is None:
