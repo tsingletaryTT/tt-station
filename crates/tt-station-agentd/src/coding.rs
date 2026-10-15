@@ -342,7 +342,7 @@ pub(crate) async fn check(state: &AppState) -> Value {
         }
     }
     let models_url = format!("http://127.0.0.1:{}/v1/models", state.serving_port());
-    let context = match reqwest::Client::new().get(models_url).timeout(Duration::from_secs(5)).send().await {
+    let context = match crate::localhttp::local().get(models_url).timeout(Duration::from_secs(5)).send().await {
         Ok(r) => r.json::<Value>().await.ok().and_then(|v| v["data"][0]["max_model_len"].as_u64()),
         Err(_) => None,
     };
@@ -353,7 +353,7 @@ pub(crate) async fn check(state: &AppState) -> Value {
         "tool_choice": "auto",
     });
     let started = Instant::now();
-    let r = reqwest::Client::new().post(crate::assistant::chat_completions_url(&ep.base_url)).json(&body).timeout(Duration::from_secs(120)).send().await;
+    let r = crate::localhttp::local().post(crate::assistant::chat_completions_url(&ep.base_url)).json(&body).timeout(Duration::from_secs(120)).send().await;
     let secs = started.elapsed().as_secs_f32();
     let reply: Option<Value> = match r {
         Ok(r) => r.json().await.ok(),

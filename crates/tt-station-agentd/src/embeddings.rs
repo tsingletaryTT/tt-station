@@ -125,7 +125,7 @@ async fn docker_state_recent(container: &'static str) -> String {
 }
 
 async fn healthy(port: u16) -> bool {
-    reqwest::Client::new()
+    crate::localhttp::local()
         .get(format!("http://127.0.0.1:{port}/health"))
         .timeout(Duration::from_secs(2))
         .send()
@@ -268,7 +268,7 @@ pub async fn v1_embeddings(state: &AppState, mut body: Value) -> Option<Response
         // TEI answers floats only.
         o.remove("encoding_format");
     }
-    let r = reqwest::Client::new()
+    let r = crate::localhttp::local()
         .post(format!("http://127.0.0.1:{}/v1/embeddings", EMBED.port))
         .json(&body)
         .timeout(Duration::from_secs(300))
@@ -328,7 +328,7 @@ pub async fn v1_rerank(state: &AppState, body: Value) -> Response {
     if docs.is_empty() {
         return Json(json!({ "model": model, "results": [] })).into_response();
     }
-    let r = reqwest::Client::new()
+    let r = crate::localhttp::local()
         .post(format!("http://127.0.0.1:{}/rerank", RERANK.port))
         .json(&request)
         .timeout(Duration::from_secs(300))

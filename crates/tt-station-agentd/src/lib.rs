@@ -36,6 +36,7 @@ pub mod inference;
 pub mod jobs;
 pub mod lab;
 pub mod library;
+pub mod localhttp;
 pub mod logs;
 pub mod memory;
 pub mod modes;

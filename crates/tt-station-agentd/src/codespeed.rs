@@ -387,7 +387,7 @@ async fn detect(model: &str, base_url: &str) -> PrefixCache {
     if measured(model).is_some_and(|m| m.cached_seen) {
         return PrefixCache::new(Cache::On, "the server reported cached prompt tokens");
     }
-    let metrics = reqwest::Client::new().get(format!("{}/metrics", root(base_url))).timeout(Duration::from_secs(3)).send().await;
+    let metrics = crate::localhttp::local().get(format!("{}/metrics", root(base_url))).timeout(Duration::from_secs(3)).send().await;
     if let Ok(r) = metrics {
         if let Ok(text) = r.text().await {
             if let Some(on) = cache_from_metrics(&text) {
@@ -428,7 +428,7 @@ async fn served_context(model: &str, base_url: &str) -> Option<u64> {
         }
     }
     let url = format!("{}/v1/models", root(base_url));
-    let c = match reqwest::Client::new().get(url).timeout(Duration::from_secs(3)).send().await {
+    let c = match crate::localhttp::local().get(url).timeout(Duration::from_secs(3)).send().await {
         Ok(r) => r.json::<Value>().await.ok().and_then(|v| {
             let data = v["data"].as_array()?;
             data.iter().find(|d| d["id"].as_str().is_some_and(|id| same_model(id, model))).or(data.first())?["max_model_len"].as_u64()
