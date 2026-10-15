@@ -34,7 +34,8 @@ import langflowLogo from "../assets/logos/langflow.png";
 import continueLogo from "../assets/logos/continue.png";
 import clineLogo from "../assets/logos/cline.png";
 import aiderLogo from "../assets/logos/aider.png";
-import { type AppKey, type Client, del, get, onAnotherComputer, openBoxShell, patch, post, ago } from "../api";
+import { type AppKey, type Client, del, get, onAnotherComputer, openBoxShell, patch, post, put, ago } from "../api";
+import { boxOnlyReason } from "../boxapps";
 import { Card, copyText, Eyebrow, Page, Spark, toastError, toastOk, usePoll, writeClipboard } from "../ui";
 import { Switch } from "@tenstorrent/vesper/switch";
 import { ask } from "../dialog";
@@ -54,6 +55,65 @@ interface BoxApp {
   used_by?: string[];
   /** For apps set up in their own settings screen: what to paste there. */
   connect?: { base_url: string; api_key: string | null; model: string | null } | null;
+  /** Box-only (the default) or open to the network. */
+  network?: {
+    open: boolean; can_share: boolean; why_not?: string; who?: string; note?: string;
+    /** Published on the network right now. */
+    on_network: boolean;
+    /** Running with the address it was made with, not its setting's: until it's next started here. */
+    restart_to_apply: boolean;
+  };
+}
+
+/** Opens a store app; from a browser on another computer, a box-only app says why it can't. */
+function openBoxApp(a: BoxApp) {
+  const why = boxOnlyReason(a.url!, location.hostname, !!window.ttDesktop, !!a.network?.can_share);
+  if (why) toastError(new Error(why));
+  else open(a.url!, a.name);
+}
+
+/** "Open to the network": off (box only) by default; on only after the owner reads who can reach it. */
+function NetworkSetting({ a, onChanged }: { a: BoxApp; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const n = a.network;
+  if (!n) return null;
+  if (!n.can_share) {
+    return (
+      <details>
+        <summary className="muted" style={{ fontSize: 12, cursor: "pointer" }}>On this box only</summary>
+        <Typography variant="copy-xs" className="muted">{n.why_not}</Typography>
+        {n.on_network && <Typography variant="copy-xs" style={{ color: "var(--vesper-text-error)" }}>It's still reachable from the network until you next start it here.</Typography>}
+      </details>
+    );
+  }
+  const set = async (open: boolean) => {
+    if (open && !(await ask(`Open ${a.name} to the network?`, {
+      body: [n.who, n.note, `It changes the next time ${a.name} starts here${a.state === "running" ? " (it's running now: restart it to apply)" : ""}. You can turn this off any time.`].filter(Boolean).join(" "),
+      confirm: "Open to the network",
+    }))) return;
+    setBusy(true);
+    try {
+      await put(`/apps/${a.id}/network`, { open });
+      toastOk(open ? `${a.name} opens to the network the next time it starts.` : `${a.name} goes back to this box only the next time it starts.`);
+    } catch (e) { toastError(e); } finally { setBusy(false); onChanged(); }
+  };
+  const restart = async () => {
+    setBusy(true);
+    try { await post(`/apps/${a.id}/stop`); await post(`/apps/${a.id}/start`); } catch (e) { toastError(e); } finally { setBusy(false); onChanged(); }
+  };
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <Switch size="sm" label="Open to the network" checked={n.open} disabled={busy} onChange={(e) => void set(e.target.checked)} />
+      {n.restart_to_apply && (
+        <div className="row wrap" style={{ gap: 6 }}>
+          <Typography variant="copy-xs" style={{ color: n.on_network ? "var(--vesper-text-error)" : undefined }} className={n.on_network ? "" : "muted"}>
+            {n.on_network ? "Still reachable from the network until it's restarted here." : "Still on this box only until it's restarted here."}
+          </Typography>
+          {a.state === "running" && <Button size="xs" variant="subtle" disabled={busy} onClick={() => void restart()}>Restart now</Button>}
+        </div>
+      )}
+    </div>
+  );
 }
 
 const BLURBS: Record<string, string> = {
@@ -743,7 +803,7 @@ export function Connect() {
           )}
           <div className="grow" />
           <div className="row">
-            {a.state === "running" && a.url && <Button size="sm" onClick={() => open(a.url!, a.name)}>Open</Button>}
+            {a.state === "running" && a.url && <Button size="sm" onClick={() => openBoxApp(a)}>Open</Button>}
             {(a.state === "not_installed" || a.state === "failed") && <Button size="sm" variant="subtle" disabled={busy === a.id}
               onClick={() => act(a.id, () => post(`/apps/${a.id}/start`))}>Install</Button>}
             {a.state === "stopped" && <Button size="sm" variant="subtle" onClick={() => act(a.id, () => post(`/apps/${a.id}/start`))}>Start</Button>}
@@ -753,8 +813,8 @@ export function Connect() {
             }}>Stop</Button>}
             {(a.state === "stopped" || a.state === "failed") && <Button size="sm" variant="ghost"
               onClick={async () => { if (await ask(`Remove ${a.name}?`, { body: "Its data is kept and comes back if you install it again.", confirm: "Remove", danger: true })) act(a.id, () => del(`/apps/${a.id}`)); }}>Remove</Button>}
-            {a.local_only && <span className="muted" style={{ fontSize: 11 }}>This computer only</span>}
           </div>
+          {a.state !== "not_installed" && <NetworkSetting a={a} onChanged={() => apps.refresh()} />}
         </Card>
       ),
     })),
