@@ -3,6 +3,7 @@
 
 pub mod assistant;
 pub mod devices;
+pub mod docs;
 pub mod logs;
 pub mod media;
 pub mod memories;
