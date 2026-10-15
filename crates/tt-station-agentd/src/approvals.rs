@@ -9,7 +9,8 @@
 //! - `GET /approvals`: `{approvals: [{id, kind, where, summary, can_always, ...}]}`
 //! - `POST /approvals/answer {id, allow, always?}`
 //!
-//! Ids: `code:<session>:<request>` and `routine:<run>`. The same objects ride
+//! Ids: `code:<session>:<request>`, `routine:<run>` (a running routine's
+//! question) and `routine:<run>:<n>` (a step it queued after reading the web). The same objects ride
 //! along on the box's events (`data.approval`), so a notification can answer.
 
 use axum::extract::{Path as UrlPath, State};
@@ -25,7 +26,7 @@ type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
 /// `GET /approvals`
 pub(crate) async fn get_approvals(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
     let mut all = crate::workspace::pending_approvals(&state);
-    all.extend(crate::routines::pending_approval(&state));
+    all.extend(crate::routines::pending_approvals(&state));
     Json(json!({ "approvals": all }))
 }
 
@@ -44,6 +45,11 @@ pub(crate) async fn post_answer(State(state): State<AppState>, auth: BearerAuth,
         (Some("code"), Some(session), Some(request_id)) => {
             let body = crate::workspace::Approve { request_id: request_id.to_string(), allow: a.allow, always: a.always };
             crate::workspace::post_approve(State(state), auth, UrlPath(session.to_string()), Json(body)).await
+        }
+        (Some("routine"), Some(run), Some(n)) => {
+            let n: usize = n.parse().map_err(|_| (StatusCode::BAD_REQUEST, Json(json!({ "error": "Unknown approval." }))))?;
+            let done = crate::routines::answer_queued(&state, run, n, a.allow)?;
+            Ok(Json(json!({ "ok": true, "status": done })))
         }
         (Some("routine"), Some(run), None) => {
             crate::routines::post_approve(State(state), auth, UrlPath(run.to_string()), Json(crate::routines::Decision { allow: a.allow })).await

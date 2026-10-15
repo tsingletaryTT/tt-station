@@ -21,6 +21,16 @@
 //! While models are switched the runner waits for one to serve again before
 //! asking the model anything.
 //!
+//! Once text from the web (web_search, read_webpage) has come into a run it
+//! may be what's steering the model, so -- as with Tori -- from then on every
+//! acting step (the actions, even ones given ahead of time; `remember`;
+//! `research`), and any read of an address the run didn't already know (see
+//! `crate::urltrust`), is queued for the person instead of run: a
+//! notification asks, the run carries on without it and its report says
+//! what's waiting. Answered later, an allowed step runs then (`GET
+//! /approvals`, `POST /approvals/answer` with `routine:<run>:<n>`), within
+//! [`QUEUE_TTL`].
+//!
 //! One run at a time: runs share the chips.
 //!
 //! - `GET /routines`, `POST /routines`, `PUT /routines/{id}`, `DELETE /routines/{id}`
@@ -55,6 +65,8 @@ fn now() -> u64 {
 const MAX_ROUNDS: usize = 30;
 /// Runs kept on disk.
 const KEEP_RUNS: usize = 200;
+/// How long a step queued for the person can still be allowed.
+pub const QUEUE_TTL: u64 = 24 * 3600;
 
 // ---------------------------------------------------------------- data
 
@@ -125,6 +137,21 @@ pub struct Pending {
     pub since: u64,
 }
 
+/// A step queued for the person after web text came into the run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Queued {
+    pub n: usize,
+    pub tool: String,
+    pub args: Value,
+    pub summary: String,
+    pub since: u64,
+    /// `waiting` | `allowed` | `declined` | `expired`
+    pub status: String,
+    /// What it did, once allowed.
+    #[serde(default)]
+    pub result: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {
     pub id: String,
@@ -146,6 +173,9 @@ pub struct Run {
     /// What it's doing right now ("Waiting for the download", "Thinking").
     #[serde(default)]
     pub activity: Option<String>,
+    /// Steps queued for the person (see the module doc).
+    #[serde(default)]
+    pub queued: Vec<Queued>,
 }
 
 // ---------------------------------------------------------------- storage
@@ -337,6 +367,17 @@ fn is_action(tool: &str) -> bool {
     ACTIONS.contains(&tool)
 }
 
+/// Borrowed tools that act rather than look (see the module doc).
+const ACTING: [&str; 2] = ["remember", "research"];
+
+/// Whether a run that's read the web (`turn`) must queue `tool` for the person.
+fn must_queue(tool: &str, args: &Value, turn: &crate::urltrust::Turn) -> bool {
+    (turn.tainted() && (is_action(tool) || ACTING.contains(&tool))) || crate::assistant::fetches_unknown_address(tool, args, turn)
+}
+
+/// What the model is told about a step it asked for that waits for the person.
+const QUEUED_NOTE: &str = "Not done: text from the web came into this run and may be what asked for this, so it's waiting for the person's OK. Carry on without it, and say in your report that it's waiting.";
+
 /// What an action will do, in a person's words.
 fn action_summary(tool: &str, args: &Value) -> String {
     match tool {
@@ -344,6 +385,8 @@ fn action_summary(tool: &str, args: &Value) -> String {
         "stop_model" => "Stop the model that's serving".into(),
         "download_model" => format!("Download {}", args["id"].as_str().unwrap_or("a model")),
         "reset_chips" => "Reset the chips".into(),
+        "remember" | "research" => crate::assistant::pending_summary(tool, args, ""),
+        "read_webpage" => format!("Read {}", args["url"].as_str().unwrap_or("a web page")),
         other => other.to_string(),
     }
 }
@@ -621,6 +664,7 @@ fn start(state: &AppState, r: &Routine, trigger: &str) -> Result<Run, String> {
         report: None,
         pending: None,
         activity: Some("Starting".into()),
+        queued: vec![],
     };
     save_run(state, &run);
     *current = Some(run.id.clone());
@@ -638,6 +682,8 @@ fn start(state: &AppState, r: &Routine, trigger: &str) -> Result<Run, String> {
             Err(e) if stopping(&id) => ("stopped", format!("Stopped. {e}")),
             Err(e) => ("failed", e),
         };
+        let waiting = load_run(&st, &id).map(|r| r.queued).unwrap_or_default();
+        let report = report + &waiting_note(&waiting);
         let run = update_run(&st, &id, |r| {
             r.status = status.into();
             r.finished = Some(now());
@@ -653,7 +699,10 @@ fn start(state: &AppState, r: &Routine, trigger: &str) -> Result<Run, String> {
             st.notifier().emit(crate::notify::Draft {
                 kind: "routine",
                 title: match status { "done" => format!("{} finished", run.name), "stopped" => format!("{} stopped", run.name), _ => format!("{} didn't finish", run.name) },
-                body: cut(&headline, 200),
+                body: match waiting.len() {
+                    0 => cut(&headline, 200),
+                    n => format!("{} · {n} step{} wait{} for your OK", cut(&headline, 160), if n == 1 { "" } else { "s" }, if n == 1 { "s" } else { "" }),
+                },
             });
         }
     });
@@ -663,6 +712,9 @@ fn start(state: &AppState, r: &Routine, trigger: &str) -> Result<Run, String> {
 /// The run itself: the model plans, the runner acts. The report, or why it failed.
 async fn execute(state: &AppState, r: &Routine, run_id: &str) -> Result<String, String> {
     let mut messages = vec![json!({ "role": "system", "content": system_prompt(r) }), json!({ "role": "user", "content": "Carry out the routine now." })];
+    // The goal is the person's own words: addresses in it are theirs.
+    let mut turn = crate::urltrust::Turn::default();
+    turn.person_said(&r.goal);
     let tools = tools();
     let client = reqwest::Client::new();
     for round in 0..=MAX_ROUNDS {
@@ -713,8 +765,12 @@ async fn execute(state: &AppState, r: &Routine, run_id: &str) -> Result<String, 
         for call in calls {
             let args = call.args.clone().unwrap_or_else(|_| json!({}));
             let began = Instant::now();
+            let queue = call.args.is_ok() && must_queue(&call.name, &args, &turn);
             let (ok, result) = if call.args.is_err() {
                 (false, "Those arguments weren't valid JSON; call it again.".to_string())
+            } else if queue {
+                queue_for_person(state, r, run_id, &call.name, &args);
+                (false, QUEUED_NOTE.to_string())
             } else if is_action(&call.name) && !r.allowed.contains(&call.name) {
                 match ask_person(state, r, run_id, &call.name, &args).await {
                     Some(true) => run_tool(state, run_id, &call.name, &args).await,
@@ -724,7 +780,10 @@ async fn execute(state: &AppState, r: &Routine, run_id: &str) -> Result<String, 
             } else {
                 run_tool(state, run_id, &call.name, &args).await
             };
-            let kind = if is_action(&call.name) { "action" } else if call.name.starts_with("wait_") { "wait" } else { "tool" };
+            if crate::assistant::WEB_TOOLS.contains(&call.name.as_str()) && !queue {
+                turn.web_result(&result);
+            }
+            let kind = if queue { "queued" } else if is_action(&call.name) { "action" } else if call.name.starts_with("wait_") { "wait" } else { "tool" };
             update_run(state, run_id, |run| {
                 run.steps.push(Step { ts: now(), kind: kind.into(), tool: Some(call.name.clone()), args: args.clone(), result: cut(&result, 2000), ok, seconds: began.elapsed().as_secs() });
             });
@@ -739,12 +798,95 @@ pub(crate) fn is_running() -> bool {
     CURRENT.lock().expect("routines").is_some()
 }
 
-/// The routine run's question for the person, if it's waiting on one (`GET /approvals`).
-pub(crate) fn pending_approval(state: &AppState) -> Option<Value> {
-    let id = CURRENT.lock().expect("routines").clone()?;
-    let run = load_run(state, &id)?;
-    let p = run.pending?;
-    Some(json!({ "id": format!("routine:{id}"), "kind": "routine", "run": id, "where": run.name, "summary": p.summary, "tool": p.tool, "input": p.args, "since": p.since, "can_always": false }))
+/// What routines are waiting on the person for (`GET /approvals`): the
+/// running one's question, and steps queued after a web read.
+pub(crate) fn pending_approvals(state: &AppState) -> Vec<Value> {
+    let mut out = Vec::new();
+    let current = CURRENT.lock().expect("routines").clone();
+    if let Some(run) = current.as_deref().and_then(|id| load_run(state, id)) {
+        if let Some(p) = run.pending {
+            out.push(json!({ "id": format!("routine:{}", run.id), "kind": "routine", "run": run.id, "where": run.name, "summary": p.summary, "tool": p.tool, "input": p.args, "since": p.since, "can_always": false }));
+        }
+    }
+    let t = now();
+    for run in all_runs(state).into_iter().filter(|r| r.started + QUEUE_TTL > t) {
+        for q in run.queued.iter().filter(|q| q.status == "waiting" && q.since + QUEUE_TTL > t) {
+            out.push(queued_approval(&run.id, &run.name, q));
+        }
+    }
+    out
+}
+
+fn queued_approval(run: &str, name: &str, q: &Queued) -> Value {
+    json!({ "id": format!("routine:{run}:{}", q.n), "kind": "routine", "run": run, "where": name, "summary": q.summary,
+        "tool": q.tool, "input": q.args, "since": q.since, "can_always": false, "queued": true })
+}
+
+/// Queues `tool` for the person instead of running it, and asks them.
+fn queue_for_person(state: &AppState, r: &Routine, run_id: &str, tool: &str, args: &Value) {
+    let summary = action_summary(tool, args);
+    let mut queued = None;
+    update_run(state, run_id, |run| {
+        let q = Queued { n: run.queued.len(), tool: tool.into(), args: args.clone(), summary: summary.clone(), since: now(), status: "waiting".into(), result: None };
+        queued = Some(q.clone());
+        run.queued.push(q);
+    });
+    let Some(q) = queued else { return };
+    state.notifier().emit_with(
+        crate::notify::Draft {
+            kind: "routine",
+            title: format!("{} needs your OK", r.name),
+            body: format!("{summary}? It read the web first, so it's waiting for you."),
+        },
+        Some(json!({ "approval": queued_approval(run_id, &r.name, &q) })),
+    );
+}
+
+/// The end of a report: what's waiting for the person.
+fn waiting_note(queued: &[Queued]) -> String {
+    let waiting: Vec<&Queued> = queued.iter().filter(|q| q.status == "waiting").collect();
+    if waiting.is_empty() {
+        return String::new();
+    }
+    let mut note = "\n\n**Waiting for your OK.** This run read the web, so these weren't done without you (allow them in TT Station within a day):".to_string();
+    for q in waiting {
+        note.push_str(&format!("\n- {}", q.summary));
+    }
+    note
+}
+
+/// One answer at a time, so a step is never run twice.
+static ANSWERING: Mutex<()> = Mutex::new(());
+
+/// The person's answer to a queued step: declined, or run now (in the background).
+pub(crate) fn answer_queued(state: &AppState, run_id: &str, n: usize, allow: bool) -> Result<String, (StatusCode, Json<Value>)> {
+    let _one = ANSWERING.lock().expect("routines");
+    if !valid_id(run_id) {
+        return Err(err(StatusCode::NOT_FOUND, "No such run."));
+    }
+    let run = load_run(state, run_id).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such run."))?;
+    let q = run.queued.get(n).cloned().ok_or_else(|| err(StatusCode::NOT_FOUND, "Nothing like that is waiting."))?;
+    if q.status != "waiting" {
+        return Err(err(StatusCode::CONFLICT, "It isn't waiting for an answer any more."));
+    }
+    let status = if now() >= q.since + QUEUE_TTL { "expired" } else if allow { "allowed" } else { "declined" };
+    update_run(state, run_id, |r| r.queued[n].status = status.into());
+    match status {
+        "expired" => return Err(err(StatusCode::CONFLICT, "It waited too long, so it won't run now. Run the routine again.")),
+        "declined" => return Ok("declined".into()),
+        _ => {}
+    }
+    let (st, id) = (state.clone(), run_id.to_string());
+    tokio::spawn(async move {
+        let began = Instant::now();
+        let (ok, result) = run_tool(&st, &id, &q.tool, &q.args).await;
+        update_run(&st, &id, |r| {
+            r.queued[n].result = Some(cut(&result, 2000));
+            r.steps.push(Step { ts: now(), kind: if is_action(&q.tool) { "action" } else { "tool" }.into(), tool: Some(q.tool.clone()), args: q.args.clone(),
+                result: cut(&format!("Allowed by you: {result}"), 2000), ok, seconds: began.elapsed().as_secs() });
+        });
+    });
+    Ok("allowed".into())
 }
 
 /// Asks the person to OK an action: Some(answer), or None if the run was stopped.
@@ -1041,5 +1183,41 @@ mod tests {
             assert!(!names.iter().any(|n| n == never), "{never} has no place in an unattended run");
         }
         assert!(is_action("start_model") && !is_action("ask_model"));
+    }
+
+    #[test]
+    fn after_web_text_acting_steps_are_queued() {
+        let mut turn = crate::urltrust::Turn::default();
+        turn.person_said("Every morning, read https://status.example/today and remember anything odd.");
+        let none = json!({});
+        // Before the web: looking, remembering and actions go as before.
+        for t in ["box_status", "remember", "start_model", "read_webpage"] {
+            assert!(!must_queue(t, &json!({ "url": "https://anything.example/?q=1" }), &turn), "{t}");
+        }
+        turn.web_result(r#"{"url":"https://status.example/today","text":"All good. See https://status.example/history"}"#);
+        // Every action -- given ahead of time or not -- remembering and research wait.
+        for t in ACTIONS.iter().chain(ACTING.iter()) {
+            assert!(must_queue(t, &none, &turn), "{t}");
+        }
+        for t in ["box_status", "list_models", "ask_model", "community_models", "wait_until_ready"] {
+            assert!(!must_queue(t, &none, &turn), "{t}");
+        }
+        // Reading: known addresses go; new ones (or new queries) wait.
+        assert!(!must_queue("read_webpage", &json!({ "url": "https://status.example/history" }), &turn));
+        assert!(!must_queue("read_webpage", &json!({ "url": "https://status.example/today" }), &turn));
+        assert!(must_queue("read_webpage", &json!({ "url": "https://status.example/today?box=qb2&model=Qwen3" }), &turn));
+        assert!(must_queue("read_webpage", &json!({ "url": "https://collector.example/" }), &turn));
+    }
+
+    #[test]
+    fn a_report_says_what_waits() {
+        let q = |n, status: &str| Queued { n, tool: "remember".into(), args: json!({ "fact": "x" }), summary: format!("Remember: x{n}"), since: 0, status: status.into(), result: None };
+        assert_eq!(waiting_note(&[]), "");
+        assert_eq!(waiting_note(&[q(0, "declined")]), "");
+        let note = waiting_note(&[q(0, "waiting"), q(1, "allowed"), q(2, "waiting")]);
+        assert!(note.contains("Waiting for your OK") && note.contains("Remember: x0") && note.contains("Remember: x2") && !note.contains("x1"), "{note}");
+        // Older runs on disk have no queue.
+        let old: Run = serde_json::from_value(json!({ "id": "1-a", "routine": "r", "name": "n", "trigger": "manual", "started": 1, "status": "done" })).unwrap();
+        assert!(old.queued.is_empty());
     }
 }
