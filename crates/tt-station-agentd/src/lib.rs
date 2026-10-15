@@ -9,6 +9,7 @@ pub mod approvals;
 pub mod apps;
 pub mod assistant;
 pub mod audit;
+pub mod auth;
 pub mod authkeys;
 pub mod bench;
 pub mod boot;
