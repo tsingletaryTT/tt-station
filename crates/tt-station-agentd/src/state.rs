@@ -117,6 +117,7 @@ pub(crate) struct PerAgent {
     pub(crate) idle: crate::idle::PerAgent,
     pub(crate) library: crate::library::PerAgent,
     pub(crate) routines: crate::routines::PerAgent,
+    pub(crate) toplike_term: crate::toplike_term::PerAgent,
 }
 
 /// The actual state data, held once behind the `Arc` in `AppState`.

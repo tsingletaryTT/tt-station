@@ -47,7 +47,16 @@ pub const MODES: &[(&str, &str, &str)] = &[
 ];
 
 const MAX_SESSIONS: usize = 4;
-static SESSIONS: AtomicUsize = AtomicUsize::new(0);
+/// What `crate::toplike_term` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// tt-toplike views open now (at most `MAX_SESSIONS`).
+    sessions: AtomicUsize,
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().toplike_term
+}
 
 fn binary() -> Option<String> {
     std::env::var("TT_TOPLIKE_BIN").ok().or_else(|| {
@@ -100,7 +109,7 @@ pub(crate) async fn term_ws(
     let Some(&(_, mode, keys)) = MODES.iter().find(|(name, _, _)| *name == wanted) else {
         return (StatusCode::BAD_REQUEST, "unknown view").into_response();
     };
-    if SESSIONS.load(Ordering::SeqCst) >= MAX_SESSIONS {
+    if mine(&state).sessions.load(Ordering::SeqCst) >= MAX_SESSIONS {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             "too many tt-toplike views open",
@@ -111,9 +120,9 @@ pub(crate) async fn term_ws(
     let rows = q.rows.unwrap_or(40).clamp(12, 120);
     let port = state.ctrl_port();
     ws.on_upgrade(move |socket| async move {
-        SESSIONS.fetch_add(1, Ordering::SeqCst);
+        mine(&state).sessions.fetch_add(1, Ordering::SeqCst);
         run(socket, bin, port, mode, keys, cols, rows, signed_out).await;
-        SESSIONS.fetch_sub(1, Ordering::SeqCst);
+        mine(&state).sessions.fetch_sub(1, Ordering::SeqCst);
     })
 }
 
