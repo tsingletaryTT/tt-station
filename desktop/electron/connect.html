@@ -1,0 +1,228 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc. -->
+<!--
+  Pairing a box from another computer (a Mac, on first run): find it on the
+  network (or type its address), check its certificate's fingerprint, and
+  type the code the box shows in TT Station on its own screen and on paired
+  phones. Or paste a pairing link from the box's Settings.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>TT Station</title>
+<style>
+  :root { --bg: #050f0e; --card: #0b1a18; --line: #1f3532; --text: #e7f0ee; --muted: #7d9b97; --accent: #26b5a5; --accent-fill: #12796e; --warn: #ffa333; --bad: #ff6b5e; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font: 14px/1.5 "Inter Tight", -apple-system, system-ui, sans-serif; }
+  body { display: grid; place-items: center; padding: 48px 16px; box-sizing: border-box; min-height: 100vh;
+    background-image: radial-gradient(#25403d 1px, transparent 1px); background-size: 24px 24px; -webkit-app-region: drag; }
+  main { width: min(520px, 100%); -webkit-app-region: no-drag; }
+  .logo { width: 40px; height: 40px; margin-bottom: 12px; color: var(--text); }
+  h1 { font-weight: 500; font-size: 28px; letter-spacing: -0.4px; margin: 0 0 6px; }
+  p { color: var(--muted); margin: 0 0 18px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; margin-bottom: 14px; }
+  .eyebrow { font: 500 11px "IBM Plex Mono", ui-monospace, monospace; letter-spacing: 1.1px; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+  .box { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid transparent; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  .box:hover { background: #10241f; border-color: var(--line); }
+  .box .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+  .box b { font-weight: 600; }
+  .muted { color: var(--muted); }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  input { flex: 1; min-width: 0; background: #071512; border: 1px solid var(--line); border-radius: 10px; color: var(--text); font: inherit; padding: 9px 12px; outline: none; }
+  input:focus { border-color: var(--accent); }
+  input.code { font: 500 28px "IBM Plex Mono", ui-monospace, monospace; letter-spacing: 10px; text-align: center; padding: 10px; }
+  button.primary, button.ghost { font: 600 12px "IBM Plex Mono", ui-monospace, monospace; letter-spacing: .8px; text-transform: uppercase; border-radius: 10px; padding: 10px 14px; cursor: pointer; border: 1px solid transparent; }
+  button.primary { background: var(--accent-fill); color: #fff; }
+  button.primary:disabled { opacity: .45; cursor: default; }
+  button.ghost { background: none; color: var(--muted); border-color: var(--line); }
+  .fp { font: 500 15px "IBM Plex Mono", ui-monospace, monospace; letter-spacing: 1px; color: var(--text); background: #071512; border-radius: 8px; padding: 8px 10px; display: inline-block; }
+  .error { color: var(--bad); font-size: 13px; margin-top: 8px; min-height: 1em; }
+  .spin { width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  details summary { cursor: pointer; color: var(--muted); }
+  [hidden] { display: none !important; }
+  .stack-form { display: flex; flex-direction: column; gap: 8px; }
+  .hint { font-size: 12px; margin: 10px 0 0; }
+  .alt { font-size: 13px; text-align: center; margin-top: 4px; }
+  button.link { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+</style>
+</head>
+<body>
+<main>
+  <svg class="logo" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2 3 6.5v5.2l9 4.6 9-4.6V6.5L12 2Zm0 2.2 6.6 3.3L12 10.8 5.4 7.5 12 4.2ZM3 14.2v3.3l9 4.5 9-4.5v-3.3l-9 4.6-9-4.6Z"/></svg>
+
+  <section id="pick">
+    <h1>Connect a Tenstorrent device</h1>
+    <p>A QuietBox, a Galaxy server, a workstation with Tenstorrent cards: anything running TT Station. This app connects to it over your network, encrypted and pinned to the device's own certificate.</p>
+    <div class="card">
+      <div class="row" style="justify-content: space-between"><div class="eyebrow" style="margin: 0">On this network</div><button class="ghost" id="rescan" style="padding: 4px 8px">Look again</button></div>
+      <div id="found" style="margin-top: 8px"><div class="row muted"><div class="spin"></div> Looking for devices…</div></div>
+    </div>
+    <div class="card">
+      <div class="eyebrow">Or type its address</div>
+      <div class="row">
+        <input id="addr" placeholder="10.0.0.122 or my-galaxy.local" spellcheck="false" autocapitalize="off">
+        <button class="primary" id="go">Connect</button>
+      </div>
+      <div class="error" id="addr-error"></div>
+    </div>
+    <details class="card">
+      <summary>Have a pairing link?</summary>
+      <p style="margin: 10px 0">On the device, open TT Station → Settings → Pairing and security → <b>Pair another computer</b>, make a link, and paste it here.</p>
+      <div class="row">
+        <input id="link" placeholder="ttstation://pair?…" spellcheck="false">
+        <button class="primary" id="link-go">Pair</button>
+      </div>
+      <div class="error" id="link-error"></div>
+    </details>
+  </section>
+
+  <section id="account" hidden>
+    <h1 id="account-title">Connect</h1>
+    <p id="account-lead">Sign in with your account on the device: the one you'd use to SSH in.</p>
+    <div class="card" id="trying"><div class="row muted"><div class="spin"></div> <span id="trying-text">Trying your SSH keys…</span></div></div>
+    <div class="card" id="login" hidden>
+      <div class="eyebrow">Your account on <span id="login-name">it</span></div>
+      <div class="stack-form">
+        <input id="user" placeholder="Username" value="ttuser" spellcheck="false" autocapitalize="off" autocomplete="username">
+        <input id="password" type="password" placeholder="Password" autocomplete="current-password">
+      </div>
+      <p class="hint">The password goes straight to the device over SSH, only to let this Mac in. TT Station doesn't keep it.</p>
+      <div class="error" id="login-error"></div>
+      <div class="row" style="margin-top: 12px; justify-content: space-between">
+        <button class="ghost" id="login-back">Back</button>
+        <button class="primary" id="login-go">Connect</button>
+      </div>
+    </div>
+    <p class="alt"><button class="link" id="use-code">Use a pairing code instead</button> <span class="muted">— for when someone else has the device's login</span></p>
+  </section>
+
+  <section id="code" hidden>
+    <h1 id="code-title">Pair with the device</h1>
+    <p>The device just showed a pairing code: as a notification in TT Station on its own screen, and on any phone paired with it. Ask whoever is there for it.</p>
+    <div class="card">
+      <div class="eyebrow">Check it's your device</div>
+      <p style="margin: 0 0 8px">The notification names the device's certificate. It should start with:</p>
+      <span class="fp" id="fp"></span>
+    </div>
+    <div class="card">
+      <div class="eyebrow">Pairing code</div>
+      <input id="code-input" class="code" inputmode="numeric" maxlength="7" placeholder="••••••" autocomplete="one-time-code">
+      <div class="error" id="code-error"></div>
+      <div class="row" style="margin-top: 12px; justify-content: space-between">
+        <button class="ghost" id="back">Back</button>
+        <div class="row"><button class="ghost" id="again">New code</button><button class="primary" id="pair" disabled>Pair</button></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+  const tt = window.ttDesktop;
+  const $ = (id) => document.getElementById(id);
+  const grouped = (hex) => hex.slice(0, 16).match(/.{4}/g).join(" ");
+  let target = null; // { host, tls, fp, name, pairId }
+
+  function show(which) { for (const id of ["pick", "account", "code"]) $(id).hidden = which !== id; }
+
+  async function scan() {
+    $("found").innerHTML = '<div class="row muted"><div class="spin"></div> Looking for devices…</div>';
+    const boxes = await tt.discover();
+    const el = $("found");
+    el.innerHTML = "";
+    if (!boxes.length) {
+      el.innerHTML = '<div class="muted">None found. Type the device\'s address below (on the device: TT Station → Settings → Pairing and security → Pair another computer shows it), or check this computer is on the same network. macOS may ask to let TT Station find devices on your local network: allow it.</div>';
+      return;
+    }
+    for (const b of boxes) {
+      const btn = document.createElement("button");
+      btn.className = "box";
+      btn.innerHTML = '<span class="dot"></span><span style="flex:1"><b></b> <span class="muted mono"></span></span><span class="muted"></span>';
+      btn.querySelector("b").textContent = b.name;
+      btn.querySelector(".mono").textContent = b.host;
+      // What it is: its chips and how they're arranged (4xBH · p300x2, a Galaxy's 32 chips…).
+      btn.lastChild.textContent = b.paired ? "Paired" : [b.chips, b.mesh].filter(Boolean).join(" · ");
+      btn.onclick = () => begin(b.host, b.tls, $("addr-error"));
+      el.appendChild(btn);
+    }
+  }
+
+  async function begin(host, tls, errEl) {
+    errEl.textContent = "";
+    host = host.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+    let port = tls || 8766;
+    const m = host.match(/^([^:\]]+|\[[^\]]+\]):(\d+)$/);
+    if (m) { host = m[1].replace(/^\[|\]$/g, ""); port = Number(m[2]) === 8765 ? 8766 : Number(m[2]); }
+    if (!host) return;
+    errEl.textContent = "Connecting…";
+    const p = await tt.probe(host, port);
+    if (!p.ok) { errEl.textContent = p.error; return; }
+    errEl.textContent = "";
+    target = { host, tls: port, fp: p.fp, name: p.name };
+    $("account-title").textContent = `Connect to ${p.name}`;
+    $("login-name").textContent = p.name;
+    $("login-error").textContent = "";
+    $("password").value = "";
+    show("account");
+    // Someone who already SSHes in gets connected with no typing at all.
+    $("trying").hidden = false; $("login").hidden = true;
+    $("trying-text").textContent = `Trying your SSH keys for ${$("user").value}@${host}…`;
+    const r = await tt.pairAccount(target, $("user").value.trim() || "ttuser", null);
+    if (r.ok) return; // the window moves on to the device
+    $("trying").hidden = true; $("login").hidden = false;
+    // A missing key is the usual case, not an error worth showing.
+    if (r.kind !== "auth") $("login-error").textContent = r.error;
+    $("password").focus();
+  }
+
+  async function signIn() {
+    const user = $("user").value.trim();
+    if (!user) { $("user").focus(); return; }
+    $("login-go").disabled = true;
+    $("login-error").textContent = "Signing in…";
+    const r = await tt.pairAccount(target, user, $("password").value || null);
+    $("login-go").disabled = false;
+    if (!r.ok) { $("login-error").textContent = r.error; $("password").select(); }
+  }
+
+  async function useCode() {
+    $("code-error").textContent = "";
+    const s = await tt.pairStart(target.host, target.tls, target.fp);
+    if (!s.ok) { $("login-error").textContent = s.error; return; }
+    target.pairId = s.pairId;
+    $("code-title").textContent = `Pair with ${target.name}`;
+    $("fp").textContent = grouped(target.fp);
+    $("code-input").value = "";
+    show("code");
+    $("code-input").focus();
+  }
+
+  $("rescan").onclick = scan;
+  $("go").onclick = () => begin($("addr").value, null, $("addr-error"));
+  $("addr").onkeydown = (e) => { if (e.key === "Enter") $("go").click(); };
+  $("link-go").onclick = async () => {
+    $("link-error").textContent = "Pairing…";
+    const r = await tt.addBox($("link").value);
+    if (!r.ok) { $("link-error").textContent = r.error; return; }
+    await tt.switchBox(r.id);
+  };
+  $("code-input").oninput = () => { $("pair").disabled = $("code-input").value.replace(/\D/g, "").length !== 6; };
+  $("code-input").onkeydown = (e) => { if (e.key === "Enter" && !$("pair").disabled) $("pair").click(); };
+  $("back").onclick = () => show("account");
+  $("again").onclick = useCode;
+  $("login-go").onclick = signIn;
+  $("password").onkeydown = (e) => { if (e.key === "Enter") signIn(); };
+  $("user").onkeydown = (e) => { if (e.key === "Enter") $("password").focus(); };
+  $("login-back").onclick = () => show("pick");
+  $("use-code").onclick = useCode;
+  $("pair").onclick = async () => {
+    $("pair").disabled = true;
+    $("code-error").textContent = "Pairing…";
+    const r = await tt.pairFinish({ ...target, code: $("code-input").value });
+    if (!r.ok) { $("code-error").textContent = r.error; $("pair").disabled = false; }
+  };
+  scan();
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+.stage/
+.build/
+dist/
+icon.icns

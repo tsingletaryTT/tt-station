@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- macOS asks before an app talks to devices on the local network: this is what it says why. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>TT Station finds your Tenstorrent devices on your network and connects to them.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_tenstorrent._tcp</string>
+  </array>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Tori listens when you talk to it, and meetings you record are transcribed on your Tenstorrent device.</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>12.0</string>
+</dict>
+</plist>
