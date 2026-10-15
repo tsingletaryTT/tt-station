@@ -1382,11 +1382,15 @@ version = "0.11.0"
 dependencies = [
  "anyhow",
  "mdns-sd",
+ "rcgen",
  "reqwest",
+ "ring",
+ "rustls",
  "security-framework",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "wiremock",
 ]
 
@@ -1539,10 +1543,12 @@ version = "0.11.0"
 dependencies = [
  "anyhow",
  "axum",
+ "axum-server",
  "clap",
  "libttstation",
  "mdns-sd",
  "rand 0.9.4",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
@@ -3089,10 +3095,12 @@ dependencies = [
  "libttstation",
  "ratatui",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite 0.24.0",
 ]
 

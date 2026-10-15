@@ -90,6 +90,17 @@ enum Command {
         /// Chip inventory string returned from `/status`.
         #[arg(long, default_value = "4xBH")]
         chips: String,
+
+        /// Also serve the same API over HTTPS on this port, like a real box's
+        /// TLS port (the control port + 1), with a self-signed certificate.
+        #[arg(long = "tls-port")]
+        tls_port: Option<u16>,
+
+        /// Where the HTTPS certificate is kept (made there the first time, as
+        /// the real agent does). Defaults to a fresh temp dir, so each run has
+        /// a new certificate -- what a test needs to see a pin refused.
+        #[arg(long = "tls-dir", requires = "tls_port")]
+        tls_dir: Option<PathBuf>,
     },
 }
 
@@ -108,7 +119,9 @@ async fn main() -> Result<()> {
             ctrl_port,
             name,
             chips,
-        } => serve(ctrl_port, name, chips).await,
+            tls_port,
+            tls_dir,
+        } => serve(ctrl_port, name, chips, tls_port, tls_dir).await,
     }
 }
 
@@ -827,6 +840,8 @@ fn app(state: MockState) -> Router {
             post(ssh_authorize_mock).delete(ssh_revoke_mock),
         )
         .route("/telemetry", get(telemetry_ws))
+        .route("/tls", get(get_tls))
+        .route("/logs/stream", get(logs_stream_ws))
         .route("/assistant", post(assistant_mock))
         .route("/assistant/confirm", post(assistant_confirm_mock))
         .route("/v1/chat/completions", post(chat_completions))
@@ -834,15 +849,81 @@ fn app(state: MockState) -> Router {
         .with_state(state)
 }
 
+/// What `GET /tls` answers: `{"tls": {"port", "sha256"}}` when HTTPS is on,
+/// `{"tls": null}` otherwise -- the real agent's shape (`tls::get_tls`).
+static TLS_INFO: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+
+async fn get_tls() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "tls": TLS_INFO.get().cloned() }))
+}
+
+/// `GET /logs/stream`: a canned two-line log over a WebSocket, then close --
+/// enough for `tt-station logs --follow` to show it reached the box.
+async fn logs_stream_ws(ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(|mut socket| async move {
+        for line in ["mock-box: log line 1", "mock-box: log line 2"] {
+            if socket.send(Message::Text(line.into())).await.is_err() {
+                return;
+            }
+        }
+        let _ = socket.send(Message::Close(None)).await;
+    })
+}
+
 /// Bind `ctrl_port` and serve the fake control API + fake vLLM endpoint
-/// until the process is killed. No graceful-shutdown handling (unlike
+/// until the process is killed -- and, with `tls_port`, the same API over
+/// HTTPS there with a certificate made by the real agent's own code
+/// (`tt_station_agentd::tls`). No graceful-shutdown handling (unlike
 /// `tt-station-agentd`) -- this is a disposable test fixture, normally
 /// killed outright by whatever spawned it (see `crates/tt-station/tests/e2e_mock.rs`).
-async fn serve(ctrl_port: u16, name: String, chips: String) -> Result<()> {
+async fn serve(
+    ctrl_port: u16,
+    name: String,
+    chips: String,
+    tls_port: Option<u16>,
+    tls_dir: Option<PathBuf>,
+) -> Result<()> {
     let state = MockState::new(name.clone(), chips, ctrl_port);
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", ctrl_port))
         .await
         .with_context(|| format!("failed to bind control port {ctrl_port}"))?;
+
+    if let Some(tls_port) = tls_port {
+        let dir = tls_dir.unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("mock-box-tls-{}-{}", std::process::id(), tls_port))
+        });
+        let identity = tt_station_agentd::tls::identity(
+            &dir,
+            vec![
+                "localhost".into(),
+                "127.0.0.1".into(),
+                format!("{name}.local"),
+            ],
+        )
+        .map_err(|e| anyhow::anyhow!("making the HTTPS certificate: {e}"))?;
+        let _ = TLS_INFO.set(serde_json::json!({ "port": tls_port, "sha256": identity.sha256 }));
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = axum_server::tls_rustls::RustlsConfig::from_pem(
+            identity.cert_pem.into_bytes(),
+            identity.key_pem.into_bytes(),
+        )
+        .await
+        .context("loading the HTTPS certificate")?;
+        println!(
+            "mock-box: HTTPS on port {tls_port} (certificate sha256 {})",
+            identity.sha256
+        );
+        let tls_app = app(state.clone());
+        tokio::spawn(async move {
+            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], tls_port));
+            if let Err(e) = axum_server::bind_rustls(addr, config)
+                .serve(tls_app.into_make_service())
+                .await
+            {
+                eprintln!("mock-box: HTTPS server stopped: {e}");
+            }
+        });
+    }
 
     println!("mock-box: serving fake agent '{name}' on port {ctrl_port} (Ctrl-C to stop)");
 

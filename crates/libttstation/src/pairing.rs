@@ -28,8 +28,9 @@ pub async fn pair_init(base: &str) -> anyhow::Result<String> {
         pair_id: String,
     }
 
-    let resp = reqwest::Client::new()
-        .post(join(base, "pair/init"))
+    let url = join(base, "pair/init");
+    let resp = crate::transport::client_for(&url)
+        .post(&url)
         .send()
         .await?
         .error_for_status()
@@ -58,8 +59,9 @@ pub async fn pair_complete(base: &str, pair_id: &str, code: &str) -> anyhow::Res
         token: String,
     }
 
-    let resp = reqwest::Client::new()
-        .post(join(base, "pair/complete"))
+    let url = join(base, "pair/complete");
+    let resp = crate::transport::client_for(&url)
+        .post(&url)
         .json(&PairCompleteRequest { pair_id, code })
         .send()
         .await?;

@@ -36,6 +36,58 @@ pub trait SecretStore {
     fn clear(&self) -> Result<()>;
 }
 
+/// What `tt-station pair` keeps per box: the bearer token and, for a box
+/// reached over the network, its HTTPS port and pinned certificate
+/// fingerprint (see [`crate::transport`]). Stored in a [`SecretStore`] as one
+/// JSON string, so the token and its pin always travel together.
+///
+/// Pairings made before HTTPS stored the bare token; [`StoredPairing::decode`]
+/// reads those as a pairing with no pin, which the CLI then pins on first use.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoredPairing {
+    pub token: String,
+    /// The box's HTTPS port. `None` for the box itself (plain HTTP on
+    /// 127.0.0.1) and for pairings from before HTTPS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_port: Option<u16>,
+    /// SHA-256 of the box's certificate, lowercase hex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+impl StoredPairing {
+    /// A pairing with no pin (the box itself, or one made before HTTPS).
+    pub fn token_only(token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
+            tls_port: None,
+            sha256: None,
+        }
+    }
+
+    /// Read a stored value: this type's JSON, or a bare token (older
+    /// pairings). Tokens are never JSON objects, so the two can't be confused.
+    pub fn decode(raw: &str) -> Self {
+        let raw = raw.trim();
+        if raw.starts_with('{') {
+            if let Ok(pairing) = serde_json::from_str::<StoredPairing>(raw) {
+                return pairing;
+            }
+        }
+        Self::token_only(raw)
+    }
+
+    /// The string to put in a [`SecretStore`].
+    pub fn encode(&self) -> String {
+        serde_json::to_string(self).expect("a pairing always serializes")
+    }
+
+    /// Whether this is a network pairing whose certificate is pinned.
+    pub fn is_pinned(&self) -> bool {
+        self.tls_port.is_some() && self.sha256.is_some()
+    }
+}
+
 /// File-backed `SecretStore`: a single JSON file holding a `box_name ->
 /// token` map. Used everywhere `KeychainStore` isn't available (Linux, CI,
 /// tests), and is the only implementation compiled on non-macOS targets.
@@ -465,6 +517,32 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    // -- StoredPairing: token + pin in one stored value -------------------
+
+    #[test]
+    fn pairing_round_trips_through_a_store() {
+        let (_dir, path) = temp_store_path();
+        let store = FileStore::new(path);
+        let pairing = StoredPairing {
+            token: "tok-123".into(),
+            tls_port: Some(8766),
+            sha256: Some("ab".repeat(32)),
+        };
+        store.set("qb2.local:8765", &pairing.encode()).unwrap();
+        let back = StoredPairing::decode(&store.get("qb2.local:8765").unwrap().unwrap());
+        assert_eq!(back, pairing);
+        assert!(back.is_pinned());
+    }
+
+    #[test]
+    fn a_bare_token_from_before_https_reads_as_unpinned() {
+        let old = StoredPairing::decode("Zm9vYmFy-token_123");
+        assert_eq!(old, StoredPairing::token_only("Zm9vYmFy-token_123"));
+        assert!(!old.is_pinned());
+        // The box itself keeps no pin, and encodes to just its token field.
+        assert_eq!(StoredPairing::token_only("t").encode(), r#"{"token":"t"}"#);
     }
 
     // -- resolve_store_kind: pure selector, no I/O -----------------------

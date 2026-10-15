@@ -555,7 +555,7 @@ fn localhost_token_exists(host: &str) -> anyhow::Result<bool> {
 /// `pair_complete` therefore always saw a code mismatch and 'p' could never
 /// succeed. The fix mints the pairing attempt THIS keypress will complete:
 ///
-///   1. `cmd_pair_init(host)` mints a fresh `pair_id` and tells the agent to
+///   1. `cmd_pair_init(host, None)` mints a fresh `pair_id` and tells the agent to
 ///      mint+log a fresh code -- the code itself is intentionally NEVER
 ///      returned over HTTP (see `routes::pair_init`'s doc): it's only ever
 ///      "displayed on the box's screen," which for this project means the
@@ -565,13 +565,13 @@ fn localhost_token_exists(host: &str) -> anyhow::Result<bool> {
 ///      [`find_fresh_pairing_code`] for why a short retry loop, not a single
 ///      read, covers the (small) race between the agent's `println!` landing
 ///      in journald and this read.
-///   3. `cmd_pair_complete(host, pair_id, code, enable_ssh: false)` exchanges
+///   3. `cmd_pair_complete(host, pair_id, code, fp, enable_ssh: false)` exchanges
 ///      them for a bearer token and persists it via the SAME `SecretStore`
 ///      `tt-station pair`/`tt-station reset` use -- so `R`eset (and every other authed
 ///      command run against `host` afterward) sees it immediately.
 fn run_pair(env: &dyn LifecycleEnv, names: &ToolNames, host: &str) -> String {
-    let pair_id = match crate::run_async(crate::cmd_pair_init(host)) {
-        Ok(id) => id,
+    let (pair_id, target) = match crate::run_async(crate::cmd_pair_init(host, None)) {
+        Ok(started) => started,
         Err(e) => return format!("pair failed: could not start pairing: {e}"),
     };
 
@@ -582,7 +582,15 @@ fn run_pair(env: &dyn LifecycleEnv, names: &ToolNames, host: &str) -> String {
         }
     };
 
-    match crate::run_async(crate::cmd_pair_complete(host, &pair_id, &code, false)) {
+    // Same certificate `pair-init` saw (none on the box itself: plain HTTP).
+    let fp = target.cert.map(|c| c.sha256);
+    match crate::run_async(crate::cmd_pair_complete(
+        host,
+        &pair_id,
+        &code,
+        fp.as_deref(),
+        false,
+    )) {
         Ok(_ssh) => "pair: ok".to_string(),
         Err(e) => format!("pair failed: {e}"),
     }
