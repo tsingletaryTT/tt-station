@@ -39,6 +39,7 @@ import { Card, copyText, Eyebrow, Page, Spark, toastError, toastOk, usePoll, wri
 import { Switch } from "@tenstorrent/vesper/switch";
 import { ask } from "../dialog";
 import { navigate } from "../App";
+import { useDevTools } from "../devtools";
 import { AGENT_KEY } from "./Terminals";
 
 interface BoxApp {
@@ -231,6 +232,7 @@ function SshCard({ ssh }: { ssh: SshInfo }) {
 
 /** In the desktop app on another computer: open the box's shell there, no setup. */
 function FromThisComputer() {
+  const devTools = useDevTools();
   const [here, setHere] = useState(false);
   const [command, setCommand] = useState<string | null>(null);
   useEffect(() => { void onAnotherComputer().then(setHere); }, []);
@@ -250,7 +252,7 @@ function FromThisComputer() {
         <Button size="sm" onClick={() => run("terminal")}>Open Terminal</Button>
         <Button size="sm" variant="subtle" onClick={() => run("vscode")}>Open in VS Code</Button>
         <Button size="sm" variant="ghost" onClick={copy}>Copy the ssh command</Button>
-        <Button size="sm" variant="ghost" onClick={() => navigate("terminals")}>Command line in TT Station</Button>
+        {devTools && <Button size="sm" variant="ghost" onClick={() => navigate("terminals")}>Command line in TT Station</Button>}
       </div>
       {command && <code className="pair-link" title={command}>{command}</code>}
     </div>
@@ -537,6 +539,7 @@ tradingagents`}</CodeBlock>
 
 /** A tool you set up yourself: what to paste, and a key made for it. */
 function CodeToolTile({ t, base, model }: { t: (typeof CODE_TOOLS)[number]; base: string; model: string }) {
+  const devTools = useDevTools();
   const guide = useSheet();
   const [key, setKey] = useState<string | null>(null);
   const makeKey = async () => {
@@ -551,7 +554,7 @@ function CodeToolTile({ t, base, model }: { t: (typeof CODE_TOOLS)[number]; base
       <div><Typography variant="heading-xs">{t.name}</Typography><Typography variant="copy-sm" className="muted">{t.blurb}</Typography></div>
       <div className="grow" />
       <div className="row">
-        {t.onBox && <Button size="sm" title="Its own terminal app, running on the box, shown in TT Station" onClick={() => { try { localStorage.setItem(AGENT_KEY, t.onBox!); } catch { /* private */ } navigate("terminals"); }}>Open on the box</Button>}
+        {t.onBox && devTools && <Button size="sm" title="Its own terminal app, running on the box, shown in TT Station" onClick={() => { try { localStorage.setItem(AGENT_KEY, t.onBox!); } catch { /* private */ } navigate("terminals"); }}>Open on the box</Button>}
         <Button size="sm" variant="subtle" onClick={guide.open}>{t.onBox ? "On your computer" : "Set it up"}</Button>
         <Button size="sm" variant="ghost" onClick={() => openExternal(t.homepage)}>Website</Button>
       </div>

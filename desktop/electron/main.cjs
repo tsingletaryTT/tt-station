@@ -9,7 +9,7 @@
 // agent's `local-secret` file (readable only by this user) proves we're the
 // box's owner, and buys a pairing token like the phone's.
 
-const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, shell, globalShortcut, nativeImage, net, session, safeStorage } = require("electron");
+const { app, BrowserWindow, Tray, Menu, Notification, ipcMain, shell, globalShortcut, nativeImage, nativeTheme, net, session, safeStorage } = require("electron");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -162,11 +162,11 @@ function parsePairLink(link) {
   try { url = new URL(String(link).trim()); } catch { throw new Error("That isn't a pairing link."); }
   const q = url.searchParams;
   if (url.protocol !== "ttstation:" || !q.get("pair") || !q.get("code")) throw new Error("That isn't a TT Station pairing link.");
-  if (!q.get("tls") || !q.get("fp")) throw new Error("That device's TT Station is too old to pair securely (its link has no certificate). Update it first.");
+  if (!q.get("tls") || !q.get("fp")) throw new Error("That box's TT Station is too old to pair securely (its link has no certificate). Update it first.");
   // The name and address end up in a Terminal script and ~/.ssh/config.
-  if (!validHost(q.get("host"))) throw new Error("That pairing link's device address isn't valid.");
+  if (!validHost(q.get("host"))) throw new Error("That pairing link's box address isn't valid.");
   const name = cleanName(q.get("name") || q.get("host"));
-  if (!name) throw new Error("That pairing link's device name isn't valid.");
+  if (!name) throw new Error("That pairing link's box name isn't valid.");
   return { name, host: q.get("host"), tls: Number(q.get("tls")), fp: q.get("fp").toLowerCase(), pair: q.get("pair"), code: q.get("code") };
 }
 
@@ -174,7 +174,7 @@ async function addBox(link) {
   const p = parsePairLink(link);
   const local = await credsFor("local").catch(() => null);
   const mine = local?.token ? await call(local.base, "GET", "/security", { token: local.token }).catch(() => null) : null;
-  if (mine?.json?.tls?.sha256 && mine.json.tls.sha256.toLowerCase() === p.fp) throw new Error("That's this device.");
+  if (mine?.json?.tls?.sha256 && mine.json.tls.sha256.toLowerCase() === p.fp) throw new Error("That's this box.");
   return pairFinish(p);
 }
 
@@ -182,7 +182,7 @@ const hostUrl = (host, port) => `https://${host.includes(":") ? `[${host}]` : ho
 
 /** Completes a pairing ({host, tls, fp, name, pair, code}); saves the box. */
 async function pairFinish(p) {
-  if (!validHost(p.host)) throw new Error("That device address isn't valid.");
+  if (!validHost(p.host)) throw new Error("That box address isn't valid.");
   p = { ...p, name: cleanName(p.name) || p.host };
   const base = hostUrl(p.host, p.tls);
   pairing.set(p.host, p);
@@ -211,7 +211,7 @@ async function credsFor(id) {
     return { base: `http://127.0.0.1:${secret.port}`, token: readLocalToken(), name: secret.name };
   }
   const b = boxes.boxes.find((x) => x.id === id);
-  if (!b) throw new Error("That device isn't paired with this computer.");
+  if (!b) throw new Error("That box isn't paired with this computer.");
   return { base: `https://${b.host.includes(":") ? `[${b.host}]` : b.host}:${b.tls}`, token: b.token, name: b.name };
 }
 
@@ -257,10 +257,10 @@ async function signIn() {
   if (boxes.current !== "local") {
     const c = await credsFor(boxes.current);
     const box = boxes.boxes.find((b) => b.id === boxes.current);
-    if (!c.token && box?.sealedToken) throw new Error(`This computer's keychain wouldn't open the saved sign-in for ${c.name}. Unlock your keychain and reopen TT Station, or add the device again.`);
+    if (!c.token && box?.sealedToken) throw new Error(`This computer's keychain wouldn't open the saved sign-in for ${c.name}. Unlock your keychain and reopen TT Station, or add the box again.`);
     const check = await call(c.base, "GET", "/people", { token: c.token }).catch((e) => ({ ok: false, status: 0, error: e }));
     if (check.ok) return c;
-    if (check.status === 401) throw new Error(`${c.name} doesn't recognize this computer any more${check.json?.error?.includes("expired") ? " (it went unused too long)" : ""}. Add it again (the device name at top left → Add another device).`);
+    if (check.status === 401) throw new Error(`${c.name} doesn't recognize this computer any more${check.json?.error?.includes("expired") ? " (it went unused too long)" : ""}. Add it again (the box name at top left → Add another box).`);
     throw new Error(`Can't reach ${c.name} right now.`);
   }
   return signInLocal();
@@ -321,15 +321,15 @@ function discover() {
 
 /** The certificate a box presents (its fingerprint, to show and pin) and its name. */
 async function probe(host, tls) {
-  if (!validHost(host)) throw new Error("That isn't a device address.");
+  if (!validHost(host)) throw new Error("That isn't a box address.");
   const fp = await new Promise((resolve, reject) => {
     const sock = require("node:tls").connect({ host, port: tls, rejectUnauthorized: false, timeout: 6000 }, () => {
       const cert = sock.getPeerCertificate();
       sock.end();
-      if (!cert?.raw) reject(new Error("The device didn't present a certificate."));
+      if (!cert?.raw) reject(new Error("The box didn't present a certificate."));
       else resolve(crypto.createHash("sha256").update(cert.raw).digest("hex"));
     });
-    sock.on("timeout", () => { sock.destroy(); reject(new Error(`No answer from ${host}:${tls}. Is the device on, and this computer on the same network?`)); });
+    sock.on("timeout", () => { sock.destroy(); reject(new Error(`No answer from ${host}:${tls}. Is the box on, and this computer on the same network?`)); });
     sock.on("error", (e) => reject(new Error(e.code === "ECONNREFUSED" ? `${host} isn't running TT Station on port ${tls}.` : `Couldn't reach ${host}: ${e.message}`)));
   });
   pairing.set(host, { host, fp });
@@ -356,14 +356,14 @@ import json, os, sys, urllib.request
 dirs = [os.environ.get("TT_CONFIG_DIR"), os.path.expanduser("~/.config/tt-station")]
 found = next((d for d in dirs if d and os.path.isfile(os.path.join(d, "local-secret"))), None)
 if not found:
-    print(json.dumps({"error": "TT Station isn't set up for this account on the device (no ~/.config/tt-station/local-secret). Sign in as the account that runs it."}))
+    print(json.dumps({"error": "TT Station isn't set up for this account on the box (no ~/.config/tt-station/local-secret). Sign in as the account that runs it."}))
     sys.exit(0)
 s = json.load(open(os.path.join(found, "local-secret")))
 req = urllib.request.Request("http://127.0.0.1:%d/pair/offer" % s["port"], data=b"", method="POST", headers={"x-tt-local-secret": s["secret"]})
 try:
     offer = json.load(urllib.request.urlopen(req, timeout=10))
 except Exception as e:
-    print(json.dumps({"error": "TT Station's agent on the device didn't answer (%s). Is it running? systemctl --user status tt-station-agentd" % e}))
+    print(json.dumps({"error": "TT Station's agent on the box didn't answer (%s). Is it running? systemctl --user status tt-station-agentd" % e}))
     sys.exit(0)
 print(json.dumps({"name": s.get("name"), "pair_id": offer.get("pair_id"), "code": offer.get("code"), "tls": offer.get("tls"), "user": os.environ.get("USER")}))
 `;
@@ -371,7 +371,7 @@ print(json.dumps({"name": s.get("name"), "pair_id": offer.get("pair_id"), "code"
 /** SSH to the device and pair there. No password: the person's own keys (or none and it fails fast). */
 function sshPair(host, user, password) {
   return new Promise((resolve, reject) => {
-    if (!validHost(host)) return reject(new Error("That device address isn't valid."));
+    if (!validHost(host)) return reject(new Error("That box address isn't valid."));
     if (!validUser(user)) return reject(Object.assign(new Error("That isn't a username."), { kind: "auth" }));
     const args = ["-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new", "-o", "NumberOfPasswordPrompts=1"];
     const env = { ...process.env };
@@ -401,13 +401,13 @@ function sshPair(host, user, password) {
       if (r) return r.error ? reject(Object.assign(new Error(r.error), { kind: "device" })) : resolve(r);
       const e = err.toLowerCase();
       // A hardened box (deploy/harden-box.sh) offers keys only: "Permission denied (publickey)".
-      if (password && e.includes("permission denied (publickey)")) return reject(Object.assign(new Error("This device doesn't accept passwords over SSH, only keys. Use a pairing code instead."), { kind: "keys-only" }));
+      if (password && e.includes("permission denied (publickey)")) return reject(Object.assign(new Error("This box doesn't accept passwords over SSH, only keys. Use a pairing code instead."), { kind: "keys-only" }));
       if (e.includes("permission denied")) return reject(Object.assign(new Error(password ? "That username and password didn't work." : "No SSH key of yours is let in."), { kind: "auth" }));
       if (e.includes("host key verification failed") || e.includes("remote host identification has changed"))
         return reject(new Error(`${host}'s SSH identity changed since this computer last saw it. If that's expected, remove its line from ~/.ssh/known_hosts and try again.`));
       if (e.includes("connection refused")) return reject(new Error(`${host} doesn't accept SSH (port 22). Turn SSH on there, or use a pairing code.`));
       if (e.includes("timed out") || e.includes("no route")) return reject(new Error(`Couldn't reach ${host} over SSH.`));
-      if (e.includes("python3") && e.includes("not found")) return reject(new Error("The device has no python3, which pairing over SSH needs. Use a pairing code."));
+      if (e.includes("python3") && e.includes("not found")) return reject(new Error("The box has no python3, which pairing over SSH needs. Use a pairing code."));
       reject(new Error(err.trim().split("\n").pop() || `ssh stopped (${code}).`));
     });
     child.stdin.end(PAIR_ON_DEVICE);
@@ -419,7 +419,7 @@ async function pairWithAccount(p, user, password) {
   const r = await sshPair(p.host, user, password);
   const fp = String(r.tls?.sha256 || "").toLowerCase();
   if (!fp || fp !== String(p.fp).toLowerCase())
-    throw new Error("The device's certificate over SSH doesn't match the one on the network, so this wasn't saved. Something between this computer and the device may be pretending to be it.");
+    throw new Error("The box's certificate over SSH doesn't match the one on the network, so this wasn't saved. Something between this computer and the box may be pretending to be it.");
   const id = await pairFinish({ host: p.host, tls: Number(r.tls?.port) || p.tls, fp, name: r.name || p.name, pair: r.pair_id, code: String(r.code) });
   const box = boxes.boxes.find((b) => b.id === id);
   if (box) { box.loginUser = validUser(r.user) ? r.user : user; saveBoxes(); }
@@ -432,7 +432,7 @@ async function pairStart(host, tls, fp) {
   try {
     const r = await call(hostUrl(host, tls), "POST", "/pair/init", { body: { device: deviceName() } });
     if (r.status === 429) throw new Error("Too many pairing tries just now. Wait a minute.");
-    if (!r.ok || !r.json?.pair_id) throw new Error(`The device answered ${r.status}.`);
+    if (!r.ok || !r.json?.pair_id) throw new Error(`The box answered ${r.status}.`);
     return r.json.pair_id;
   } finally {
     pairing.delete(host);
@@ -455,11 +455,11 @@ function run(cmd, args) {
 
 async function sshReady() {
   const id = boxes.current;
-  if (id === "local") throw new Error("This is the device itself: open a terminal here.");
+  if (id === "local") throw new Error("This is the box itself: open a terminal here.");
   const box = boxes.boxes.find((b) => b.id === id);
-  if (!box) throw new Error("Pick a device first.");
+  if (!box) throw new Error("Pick a box first.");
   // Saved before addresses were checked, or edited by hand.
-  if (!validHost(box.host)) throw new Error("This device's saved address isn't valid. Remove it and add it again.");
+  if (!validHost(box.host)) throw new Error("This box's saved address isn't valid. Remove it and add it again.");
   if (!fs.existsSync(SSH_KEY)) {
     fs.mkdirSync(path.dirname(SSH_KEY), { recursive: true, mode: 0o700 });
     await run("ssh-keygen", ["-t", "ed25519", "-N", "", "-C", `tt-station@${deviceName().replace(/\s+/g, "-")}`, "-f", SSH_KEY]);
@@ -468,11 +468,11 @@ async function sshReady() {
     const c = await credsFor(id);
     const pub = fs.readFileSync(`${SSH_KEY}.pub`, "utf8").trim();
     const r = await call(c.base, "POST", "/ssh/authorize", { token: c.token, body: { public_key: pub, label: `tt-station-${deviceName().replace(/[^A-Za-z0-9._-]+/g, "-")}` } });
-    if (!r.ok) throw new Error(r.json?.error || `The device wouldn't add this computer's key (${r.status}).`);
+    if (!r.ok) throw new Error(r.json?.error || `The box wouldn't add this computer's key (${r.status}).`);
     box.sshUser = r.json?.ssh_user || "ttuser";
     saveBoxes();
   }
-  if (!validUser(box.sshUser)) throw new Error("The device named an account this computer can't use for SSH.");
+  if (!validUser(box.sshUser)) throw new Error("The box named an account this computer can't use for SSH.");
   return box;
 }
 
@@ -571,7 +571,7 @@ async function computerTool(tool, args) {
       return { summary: `Opened ${name}`, result: { opened: name } };
     }
     case "control_computer": {
-      if (!IS_MAC) throw new Error("That only works on a Mac or on the device itself for now.");
+      if (!IS_MAC) throw new Error("That only works on a Mac or on the box itself for now.");
       const action = String(args.action || ""), v = Number(args.value);
       // Music and Spotify, whichever is playing; Spotify is only named when it's
       // running (its name in a script would otherwise make macOS ask where it is).
@@ -675,7 +675,7 @@ async function reachable(url) {
     t = { local, child };
     tunnels.set(key, t);
     for (let i = 0; i < 50 && !(await portOpen(local)); i++) {
-      if (child.exitCode !== null) throw new Error("Couldn't reach that app on the device (SSH tunnel failed).");
+      if (child.exitCode !== null) throw new Error("Couldn't reach that app on the box (SSH tunnel failed).");
       await new Promise((r) => setTimeout(r, 200));
     }
   }
@@ -730,7 +730,8 @@ function createWindow() {
     minHeight: 640,
     title: "TT Station",
     icon: ICON,
-    backgroundColor: "#050f0e",
+    // The system's light or dark, so the first frame doesn't flash the other one.
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#050f0e" : "#f8fcfb",
     autoHideMenuBar: true,
     show: false,
     webPreferences: {
@@ -751,7 +752,7 @@ function createWindow() {
     if (!isMainFrame || loading || code === -3 || !/^https?:/.test(url)) return;
     auth = null;
     clearTimeout(retry);
-    win.loadFile(path.join(__dirname, "offline.html"), { query: { why: "The device didn't answer.", remote: boxes.current !== "local" ? "1" : "" } }).catch(() => {});
+    showOffline("The box didn't answer.");
     retry = setTimeout(load, 5000);
   });
   // Closing hides to the tray, like other always-there apps; Quit is in the tray.
@@ -782,12 +783,19 @@ async function load() {
       await win.loadFile(path.join(__dirname, "connect.html")).catch(() => {});
       return;
     }
-    await win.loadFile(path.join(__dirname, "offline.html"), { query: { why: String(error.message || error), remote: boxes.current !== "local" ? "1" : "" } }).catch(() => {});
+    await showOffline(String(error.message || error));
     retry = setTimeout(load, 5000);
   }
 }
 
 let retry = null;
+
+/** The "can't reach it" screen, naming the box, while load() keeps trying. */
+function showOffline(why) {
+  let name = "";
+  try { name = boxList().boxes.find((b) => b.id === boxes.current)?.name ?? ""; } catch { /* no name: the page says "your box" */ }
+  return win.loadFile(path.join(__dirname, "offline.html"), { query: { why, name, remote: boxes.current !== "local" ? "1" : "" } }).catch(() => {});
+}
 
 /** The pairing screen: find a box on the network, or paste a link. */
 function showConnect() {
@@ -973,7 +981,8 @@ function openAppWindow(url, title) {
     height: 860,
     title,
     icon: ICON,
-    backgroundColor: "#050f0e",
+    // The system's light or dark, so the first frame doesn't flash the other one.
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#050f0e" : "#f8fcfb",
     autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, sandbox: true },
   });
@@ -1003,7 +1012,7 @@ async function refreshTray() {
   const recording = remote ? localRecording : rec?.json?.recording;
   const serve = status?.json;
   const line = !serve
-    ? "Can't reach the device"
+    ? "Can't reach the box"
     : serve.phase === "serving" ? `Serving ${serve.model ?? serve.served_id ?? "a model"}`
     : serve.phase === "starting" ? `Starting ${serve.model ?? "a model"}…`
     : "Nothing serving";
@@ -1036,7 +1045,7 @@ async function refreshTray() {
           else openTranscribe();
         } },
     { type: "separator" },
-    ...(boxes.boxes.length ? [{ label: "Device", submenu: boxList().boxes.map((b) => ({ label: b.name, type: "radio", checked: b.id === boxes.current, click: () => switchBox(b.id) })) }] : []),
+    ...(boxes.boxes.length ? [{ label: "Box", submenu: boxList().boxes.map((b) => ({ label: b.name, type: "radio", checked: b.id === boxes.current, click: () => switchBox(b.id) })) }] : []),
     { label: "Mode", submenu: modeItems.length ? modeItems : [{ label: "Unavailable", enabled: false }] },
     { label: "Stop the model", enabled: serve?.phase === "serving", click: () => call(auth.base, "POST", "/stop", { token: auth.token, body: {} }) },
     { type: "separator" },
@@ -1267,19 +1276,19 @@ function buildMenu() {
   const list = boxList();
   const sshItem = (label, what, accelerator) => ({ label, accelerator, enabled: list.current !== "local" && list.boxes.length > 0, click: async () => {
     const r = await sshAction(what).then((x) => ({ ok: true, ...x }), (e) => ({ ok: false, error: e.message }));
-    if (!r.ok) notify({ title: "Couldn't open the device's terminal", body: r.error });
+    if (!r.ok) notify({ title: "Couldn't open the box's terminal", body: r.error });
   } });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: "appMenu" },
     { role: "editMenu" },
-    { label: "Device", submenu: [
-      sshItem("Open Terminal on Device", "terminal", "CmdOrCtrl+Shift+T"),
+    { label: "Box", submenu: [
+      sshItem("Open Terminal on Box", "terminal", "CmdOrCtrl+Shift+T"),
       { label: "Command Line in TT Station", click: () => { show(); win?.webContents.send("navigate", "/terminals"); } },
-      sshItem("Open Device in VS Code", "vscode"),
+      sshItem("Open Box in VS Code", "vscode"),
       { type: "separator" },
       ...list.boxes.map((b) => ({ label: b.name, type: "radio", checked: b.id === list.current, click: () => switchBox(b.id) })),
       { type: "separator" },
-      { label: "Add Another Device…", click: showConnect },
+      { label: "Add Another Box…", click: showConnect },
     ] },
     { role: "viewMenu" },
     { role: "windowMenu" },

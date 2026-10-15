@@ -15,7 +15,7 @@ import { Typography } from "@tenstorrent/vesper/typography";
 import { Icon } from "@tenstorrent/vesper/icons";
 import { TextArea } from "@tenstorrent/vesper/text-area";
 import { ApiError, del, duration, get, post, short } from "../api";
-import { Card, copyText, Eyebrow, toastError, toastOk, usePoll } from "../ui";
+import { Card, copyText, Eyebrow, toastError, toastOk, usePoll, LinkButton } from "../ui";
 import { ask, askToStop } from "../dialog";
 
 export interface Engine {
@@ -108,7 +108,8 @@ export function EngineCards({ engines, recommend, selected, onSelect }: {
   return (
     <div className="engine-cards">
       {engines.map((e) => (
-        <button key={e.id} className={`engine ${selected === e.id ? "on" : ""}`} onClick={() => onSelect(e.id)} aria-pressed={selected === e.id}>
+        <div key={e.id} className="engine-wrap">
+        <button className={`engine ${selected === e.id ? "on" : ""}`} onClick={() => onSelect(e.id)} aria-pressed={selected === e.id}>
           <div className="row-between">
             <b>{e.name}</b>
             {e.id === recommend ? <Badge size="sm" variant="mint" subtle>Recommended</Badge>
@@ -117,14 +118,16 @@ export function EngineCards({ engines, recommend, selected, onSelect }: {
           </div>
           <span className="muted" style={{ fontSize: 13 }}>{e.blurb}</span>
           <span className="muted mono" style={{ fontSize: 11 }}>{e.estimate}{e.account ? ` · ${e.account} account` : " · no account"}</span>
-          {!e.ready && e.why_not && <span style={{ fontSize: 12, color: "var(--vesper-text-warning, var(--vesper-amber-600))" }}>{e.why_not}</span>}
-          {e.id === "claude" && e.installed && !e.signed_in && (
-            <span role="button" tabIndex={0} className="link-button" style={{ fontSize: 12 }}
-              onClick={async (ev) => { ev.stopPropagation(); try { await post("/bringup/claude/login"); toastOk("A terminal opened on the box: sign in there, then come back."); } catch (err) { toastError(err); } }}>
-              Sign in to Claude Code
-            </span>
-          )}
+          {!e.ready && e.why_not && <span style={{ fontSize: 12, color: "var(--vesper-text-warning)" }}>{e.why_not}</span>}
         </button>
+          {/* Its own control, beside the card: a button can't hold another. */}
+          {e.id === "claude" && e.installed && !e.signed_in && (
+            <LinkButton className="engine-signin"
+              onClick={async () => { try { await post("/bringup/claude/login"); toastOk("A terminal opened on the box: sign in there, then come back."); } catch (err) { toastError(err); } }}>
+              Sign in to Claude Code
+            </LinkButton>
+          )}
+        </div>
       ))}
     </div>
   );
@@ -302,7 +305,7 @@ export function CodexRunDetail({ initial, onChanged, onDeleted }: { initial: Cod
           <span>{run.blocked.reason ?? `${agent} said it can't finish this stage without a person.`}</span>
           <TellBox run={run} agent={agent} blocked onSent={() => { poll.refresh(); onChanged(); }} />
           <span className="muted" style={{ fontSize: 12 }}>
-            Or <span role="button" tabIndex={0} className="link-button" onClick={() => act("resume")}>resume without an answer</span>, to have it try again as is.
+            Or <LinkButton onClick={() => act("resume")}>resume without an answer</LinkButton>, to have it try again as is.
           </span>
         </Card>
       )}

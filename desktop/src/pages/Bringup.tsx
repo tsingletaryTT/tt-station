@@ -110,7 +110,7 @@ function StartBringup({ initial, engines, canClose, onClose, onStarted }: {
   useEffect(() => { if (initial) void look(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const chosen = engines.find((e) => e.id === engine);
-  const name = chosen?.name ?? (engine === "orchard" ? "Orchard" : engine === "claude" ? "Claude Code" : "Codex");
+  const name = chosen?.name ?? (engine === "orchard" ? "Quick port" : engine === "claude" ? "Claude Code" : "Codex");
 
   const startAgent = async (stopServing = false) => {
     if (!survey || !engine) return;
@@ -157,8 +157,8 @@ function StartBringup({ initial, engines, canClose, onClose, onStarted }: {
                 <Admonition variant="warning" subtle size="sm">{name}: {chosen.why_not}</Admonition>
               ) : engine === "orchard" ? (
                 <div className="start-go">
-                  <div className="muted" style={{ fontSize: 13 }}>Orchard grafts the new weights onto the architecture that already runs here, with agents on this box's own models: no account, and no full port needed.</div>
-                  <div><Button onClick={() => { try { localStorage.setItem(HANDOFF_KEY, survey.model); } catch { /* private */ } navigate("orchard"); }}>Bring it up in Orchard</Button></div>
+                  <div className="muted" style={{ fontSize: 13 }}>A Quick port grafts the new weights onto the architecture that already runs here, with agents on this box's own models: no account, and no full port needed.</div>
+                  <div><Button onClick={() => { try { localStorage.setItem(HANDOFF_KEY, survey.model); } catch { /* private */ } navigate("orchard"); }}>Bring it up with a Quick port</Button></div>
                 </div>
               ) : (
                 <div className="start-go">

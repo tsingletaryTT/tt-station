@@ -61,7 +61,7 @@ const ACTOR_PLAIN: Record<string, string> = {
 const CLASSES: Record<string, { title: string; plain: string }> = {
   "weights-only": { title: "Weights only", plain: "Same architecture as the model it builds on; only the weights differ. The quickest graft." },
   "weights+sidecar": { title: "Weights + a sidecar", plain: "Same backbone, plus an extra weights file (a task head, say) the base doesn't have. Its output is checked on its own." },
-  "full-port": { title: "Needs new model code", plain: "It doesn't fit an architecture that runs here. Orchard stops before stage 2; an agent port (Codex or Claude) is the way." },
+  "full-port": { title: "Needs new model code", plain: "It doesn't fit an architecture that runs here. The Quick port stops before stage 2; an Agent port (Codex or Claude Code) is the way." },
   unknown: { title: "Couldn't tell", plain: "Stage 0 couldn't decide, so nothing unproven runs as a weights-only graft." },
 };
 

@@ -54,15 +54,15 @@
   <svg class="logo" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2 3 6.5v5.2l9 4.6 9-4.6V6.5L12 2Zm0 2.2 6.6 3.3L12 10.8 5.4 7.5 12 4.2ZM3 14.2v3.3l9 4.5 9-4.5v-3.3l-9 4.6-9-4.6Z"/></svg>
 
   <section id="pick">
-    <h1>Connect a Tenstorrent device</h1>
-    <p>A QuietBox, a Galaxy server, a workstation with Tenstorrent cards: anything running TT Station. This app connects to it over your network, encrypted and pinned to the device's own certificate.</p>
+    <h1>Connect a Tenstorrent box</h1>
+    <p>A QuietBox, a Galaxy server, a workstation with Tenstorrent cards: anything running TT Station. This app connects to it over your network, encrypted and pinned to the box's own certificate.</p>
     <div class="card" id="here" hidden>
-      <div class="eyebrow">This device</div>
+      <div class="eyebrow">This computer</div>
       <button class="box" id="here-go"><span class="dot"></span><span style="flex:1"><b id="here-name"></b> <span class="muted mono">this computer</span></span><span class="muted">Sign in</span></button>
     </div>
     <div class="card">
       <div class="row" style="justify-content: space-between"><div class="eyebrow" style="margin: 0">On this network</div><button class="ghost" id="rescan" style="padding: 4px 8px">Look again</button></div>
-      <div id="found" style="margin-top: 8px"><div class="row muted"><div class="spin"></div> Looking for devices…</div></div>
+      <div id="found" style="margin-top: 8px"><div class="row muted"><div class="spin"></div> Looking for boxes…</div></div>
     </div>
     <div class="card">
       <div class="eyebrow">Or type its address</div>
@@ -74,7 +74,7 @@
     </div>
     <details class="card">
       <summary>Have a pairing link?</summary>
-      <p style="margin: 10px 0">On the device, open TT Station → Settings → Pairing and security → <b>Pair another computer</b>, make a link, and paste it here.</p>
+      <p style="margin: 10px 0">On the box, open TT Station → Settings → Pairing and security → <b>Pair another computer</b>, make a link, and paste it here.</p>
       <div class="row">
         <input id="link" placeholder="ttstation://pair?…" spellcheck="false">
         <button class="primary" id="link-go">Pair</button>
@@ -85,7 +85,7 @@
 
   <section id="account" hidden>
     <h1 id="account-title">Connect</h1>
-    <p id="account-lead">Sign in with your account on the device: the one you'd use to SSH in.</p>
+    <p id="account-lead">Sign in with your account on the box: the one you'd use to SSH in.</p>
     <div class="card" id="trying"><div class="row muted"><div class="spin"></div> <span id="trying-text">Trying your SSH keys…</span></div></div>
     <div class="card" id="login" hidden>
       <div class="eyebrow">Your account on <span id="login-name">it</span></div>
@@ -93,22 +93,22 @@
         <input id="user" placeholder="Username" value="ttuser" spellcheck="false" autocapitalize="off" autocomplete="username">
         <input id="password" type="password" placeholder="Password" autocomplete="current-password">
       </div>
-      <p class="hint">The password goes straight to the device over SSH, only to let this computer in. TT Station doesn't keep it. Devices set up to accept SSH keys only need a pairing code instead.</p>
+      <p class="hint">The password goes straight to the box over SSH, only to let this computer in. TT Station doesn't keep it. Boxes set up to accept SSH keys only need a pairing code instead.</p>
       <div class="error" id="login-error"></div>
       <div class="row" style="margin-top: 12px; justify-content: space-between">
         <button class="ghost" id="login-back">Back</button>
         <button class="primary" id="login-go">Connect</button>
       </div>
     </div>
-    <p class="alt"><button class="link" id="use-code">Use a pairing code instead</button> <span class="muted">(works on every device, including ones that only accept SSH keys)</span></p>
+    <p class="alt"><button class="link" id="use-code">Use a pairing code instead</button> <span class="muted">(works on every box, including ones that only accept SSH keys)</span></p>
   </section>
 
   <section id="code" hidden>
-    <h1 id="code-title">Pair with the device</h1>
-    <p>The device just showed a pairing code: as a notification in TT Station on its own screen, and on any phone paired with it. Ask whoever is there for it.</p>
+    <h1 id="code-title">Pair with the box</h1>
+    <p>The box just showed a pairing code: as a notification in TT Station on its own screen, and on any phone paired with it. Ask whoever is there for it.</p>
     <div class="card">
-      <div class="eyebrow">Check it's your device</div>
-      <p style="margin: 0 0 8px">The notification names the device's certificate. It should start with:</p>
+      <div class="eyebrow">Check it's your box</div>
+      <p style="margin: 0 0 8px">The notification names the box's certificate. It should start with:</p>
       <span class="fp" id="fp"></span>
     </div>
     <div class="card">
@@ -131,12 +131,12 @@
   function show(which) { for (const id of ["pick", "account", "code"]) $(id).hidden = which !== id; }
 
   async function scan() {
-    $("found").innerHTML = '<div class="row muted"><div class="spin"></div> Looking for devices…</div>';
+    $("found").innerHTML = '<div class="row muted"><div class="spin"></div> Looking for boxes…</div>';
     const boxes = await tt.discover();
     const el = $("found");
     el.innerHTML = "";
     if (!boxes.length) {
-      el.innerHTML = '<div class="muted">None found. Type the device\'s address below (on the device: TT Station → Settings → Pairing and security → Pair another computer shows it), or check this computer is on the same network. macOS may ask to let TT Station find devices on your local network: allow it.</div>';
+      el.innerHTML = '<div class="muted">None found. Type the box\'s address below (on the box: TT Station → Settings → Pairing and security → Pair another computer shows it), or check this computer is on the same network. macOS may ask to let TT Station find boxes on your local network: allow it.</div>';
       return;
     }
     for (const b of boxes) {
@@ -173,7 +173,7 @@
     $("trying").hidden = false; $("login").hidden = true;
     $("trying-text").textContent = `Trying your SSH keys for ${$("user").value}@${host}…`;
     const r = await tt.pairAccount(target, $("user").value.trim() || "ttuser", null);
-    if (r.ok) return; // the window moves on to the device
+    if (r.ok) return; // the window moves on to the box
     $("trying").hidden = true; $("login").hidden = false;
     // A missing key is the usual case, not an error worth showing.
     if (r.kind !== "auth") $("login-error").textContent = r.error;

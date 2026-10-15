@@ -5,35 +5,71 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
 <title>TT Station</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #050f0e; color: #e7f0ee;
-    font: 15px/1.5 "Inter Tight", system-ui, sans-serif; }
-  body { display: grid; place-items: center;
-    background-image: radial-gradient(#678583 1px, transparent 1px); background-size: 24px 24px; }
-  main { max-width: 440px; text-align: center; padding: 32px; }
-  h1 { font-weight: 500; font-size: 24px; letter-spacing: -0.3px; margin: 16px 0 8px; }
-  p { color: #7d9b97; margin: 0 0 6px; }
-  code { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: #b3ccc8; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: #ffa333; margin: 0 auto;
-    animation: pulse 1.4s ease-in-out infinite; }
+  /* Vesper's stone and teal, light and dark (this page loads before the app and its tokens). */
+  :root { color-scheme: light dark;
+    --bg: #f8fcfb; --dots: #bdd1cf; --text: #050f0e; --muted: #344b49; --faint: #51706d; --line: #d0e1e0; --card: #eef6f6;
+    --accent: #176782; --accent-fill: #1b8eb1; --on-accent: #f1f8f8; --pulse: #a8610b; }
+  @media (prefers-color-scheme: dark) { :root {
+    --bg: #050f0e; --dots: #2d4340; --text: #e7f0ee; --muted: #b3ccc8; --faint: #7d9b97; --line: #233431; --card: #0b1817;
+    --accent: #46afd2; --accent-fill: #1a8fb2; --on-accent: #f1f8f8; --pulse: #ffa333; } }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 15px/1.5 "Inter Tight", system-ui, sans-serif; }
+  body { display: grid; place-items: center; background-image: radial-gradient(var(--dots) 1px, transparent 1px); background-size: 24px 24px; }
+  main { max-width: 460px; padding: 32px; }
+  h1 { font-weight: 500; font-size: 24px; letter-spacing: -0.3px; margin: 16px 0 8px; text-align: center; }
+  p { color: var(--muted); margin: 0 0 8px; text-align: center; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--pulse); margin: 0 auto; animation: pulse 1.4s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .3 } }
+  @media (prefers-reduced-motion: reduce) { .dot { animation: none; } }
+  .card { margin-top: 18px; padding: 14px 16px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); }
+  .card b { display: block; font-weight: 500; margin-bottom: 6px; }
+  ul { margin: 0; padding-left: 18px; color: var(--muted); }
+  li + li { margin-top: 4px; }
+  details { margin-top: 14px; color: var(--faint); font-size: 13px; }
+  summary { cursor: pointer; }
+  summary:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  code { display: block; margin-top: 6px; font: 12px "IBM Plex Mono", ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; color: var(--muted); user-select: text; }
+  .actions { text-align: center; margin-top: 16px; }
+  button { font: 600 12px "IBM Plex Mono", ui-monospace, monospace; letter-spacing: .8px; text-transform: uppercase; background: var(--accent-fill); color: var(--on-accent);
+    border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; }
 </style>
 </head>
 <body>
 <main>
-  <div class="dot"></div>
-  <h1>Connecting…</h1>
-  <p>TT Station starts as soon as its agent answers. Trying again every few seconds.</p>
-  <p><code id="why"></code></p>
-  <p id="local-hint"><code>systemctl --user status tt-station-agentd</code></p>
-  <p id="remote-hint" hidden><button id="other" style="margin-top: 14px; font: 600 12px 'IBM Plex Mono', monospace; letter-spacing: .8px; text-transform: uppercase; background: #12796e; color: #fff; border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer;">Add or pick another device</button></p>
+  <div class="dot" aria-hidden="true"></div>
+  <h1 id="title">Can't reach your box</h1>
+  <p role="status">TT Station opens as soon as it answers. Trying again every few seconds.</p>
+  <div class="card">
+    <b>What to check</b>
+    <ul>
+      <li id="on">The box is switched on, and has had a minute or two to start.</li>
+      <li id="local-hint">If it just restarted or updated, this screen goes away by itself once it's ready.</li>
+      <li id="remote-hint" hidden>This computer and the box are on the same network (or the same VPN).</li>
+      <li>Your Wi-Fi or network cable is connected.</li>
+    </ul>
+  </div>
+  <p class="actions" id="other-wrap" hidden><button id="other">Add or pick another box</button></p>
+  <details id="details" hidden>
+    <summary>Details for support</summary>
+    <code id="why"></code>
+  </details>
 </main>
 <script>
   const q = new URLSearchParams(location.search);
-  document.getElementById("why").textContent = q.get("why") || "";
+  const name = (q.get("name") || "").trim();
+  if (name) {
+    document.getElementById("title").textContent = `Can't reach ${name}`;
+    document.getElementById("on").textContent = `${name} is switched on, and has had a minute or two to start.`;
+  }
+  const why = q.get("why") || "";
+  if (why) {
+    document.getElementById("why").textContent = `${why}\n${new Date().toLocaleString()}`;
+    document.getElementById("details").hidden = false;
+  }
   if (q.get("remote")) {
-    // Another computer: the device isn't here to check with systemctl; adding it again or picking another is.
+    // Another computer: same network, or pair it again / pick another box.
     document.getElementById("local-hint").hidden = true;
     document.getElementById("remote-hint").hidden = false;
+    document.getElementById("other-wrap").hidden = false;
     document.getElementById("other").onclick = () => window.ttDesktop?.showConnect?.();
   }
 </script>

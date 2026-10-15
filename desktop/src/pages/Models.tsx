@@ -12,10 +12,11 @@ import { Icon } from "@tenstorrent/vesper/icons";
 import type { IconKind } from "@tenstorrent/vesper/icons";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { useModal, Modal } from "@tenstorrent/vesper/modal";
-import { ApiError, bytes, del, get, post, type Pull, sameModel, type Serve, type TtModel } from "../api";
-import { ask, askToStop } from "../dialog";
+import { ApiError, bytes, del, get, post, type Pull, sameModel, short, type TtModel } from "../api";
+import { ask, askToStop, whoIsAffected } from "../dialog";
+import { useDevTools } from "../devtools";
 import { navigate } from "../App";
-import { Card, DownloadProgress, Empty, Eyebrow, matches, Page, toastError, toastOk, usePoll } from "../ui";
+import { Card, DownloadProgress, Empty, Eyebrow, matches, Page, toastError, toastOk, usePoll, useServe } from "../ui";
 import { CatalogFavorites, CommunityCatalog, CommunitySection, takeOpenRequest, useCommunity } from "./CommunityModels";
 import { FavoriteStar, useFavorites } from "../favorites";
 import { CpuServices } from "./CpuServices";
@@ -124,7 +125,8 @@ function CodeModels({ query, filter, onServe }: { query: string; filter: Filter;
 export function Models() {
   const catalog = usePoll(() => get<{ models: TtModel[]; pulls: Pull[]; disk_free_bytes: number }>("/tt/models"), 30000);
   const pulls = usePoll(() => get<{ pulls: Pull[]; disk_free_bytes: number }>("/tt/pulls"), 3000);
-  const serve = usePoll(() => get<Serve>("/serve"), 4000);
+  const serve = useServe(4000);
+  const devTools = useDevTools();
   const community = useCommunity();
   const [opened] = useState(takeOpenRequest);
   const [query, setQuery] = useState(opened?.query ?? "");
@@ -148,6 +150,9 @@ export function Models() {
   }, [catalog.data, query, filter, fav.list]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const start = async (m: TtModel) => {
+    const s = serve.data;
+    const current = s && (s.phase === "serving" || s.phase === "starting") ? short(s.served_id ?? s.model) : null;
+    if (current && !(await ask(`Start ${m.name} instead of ${current}?`, { body: whoIsAffected(current), confirm: `Start ${m.name}` }))) return;
     try {
       await post("/serve", { model: m.name, force: true });
       toastOk(`Starting ${m.name}. It takes a few minutes; you'll get a notification.`);
@@ -157,7 +162,7 @@ export function Models() {
 
   return (
     <Page title="Models" subtitle={`${(catalog.data?.models ?? []).filter((m) => m.supported).length} models run on this box · ${bytes(pulls.data?.disk_free_bytes ?? catalog.data?.disk_free_bytes)} free`}
-      actions={<Button variant="tertiary" iconLeft={<Icon kind="ai-task" />} onClick={() => navigate("bringup")}>Not listed? Bring one up</Button>}>
+      actions={devTools ? <Button variant="tertiary" iconLeft={<Icon kind="ai-task" aria-hidden />} onClick={() => navigate("bringup")}>Not listed? Bring one up</Button> : undefined}>
       <div className="row-between wrap">
         <div style={{ width: 360, visibility: filter === "checkups" ? "hidden" : undefined }}>
           <TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search models" iconLeft={<Icon kind="search" />} />
@@ -232,8 +237,13 @@ export function Models() {
       {filter !== "community" && filter !== "favorites" && filter !== "checkups" && models.length === 0 && !catalog.error && catalog.data && (
         <Card>
           <Eyebrow>Not in the list?</Eyebrow>
-          <Typography variant="copy-md">Bring up a Hugging Face model yourself: graft it onto one that runs here with Orchard, port a new architecture with an agent, or start a community package someone already made.</Typography>
-          <div><Button variant="subtle" onClick={() => navigate("bringup")}>Open Bring-up</Button></div>
+          {devTools ? <>
+            <Typography variant="copy-md">Bring up a Hugging Face model yourself: a Quick port grafts it onto one that runs here, an Agent port writes a new architecture's code, or start a community package someone already made.</Typography>
+            <div><Button variant="subtle" onClick={() => navigate("bringup")}>Open Bring-up</Button></div>
+          </> : <>
+            <Typography variant="copy-md">Try the Community tab: people package models for Tenstorrent chips there. To port a model yourself, turn on Developer tools in Settings → General.</Typography>
+            <div><Button variant="subtle" onClick={() => setFilter("community")}>Browse community models</Button></div>
+          </>}
         </Card>
       )}
 
