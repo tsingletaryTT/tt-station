@@ -1,6 +1,7 @@
-# People, schedules, energy and remote access (reference)
+# People, schedules and energy (reference)
 
-Four box features that need no account anywhere.
+Box features that need no account anywhere, plus serving an Orchard result. (Remote access
+over WireGuard was documented here but never implemented; see below.)
 
 ## People (`/people`, `src/people.rs`)
 
@@ -33,20 +34,14 @@ The history now keeps per-day totals (energy from the chips' power readings, tok
 about two years). `/energy` returns `{months: [{month, energy_kwh, tokens, requests, days}],
 days: [last 31]}`. The phone prices it at its own $/kWh setting.
 
-## Remote access over WireGuard (`/remote/wireguard`, `src/wireguard.rs`)
+## Remote access: not implemented
 
-The agent makes x25519 keys (`x25519-dalek`; no `wg` binary needed) and writes, under
-`<config>/wireguard/`, `tunnel.json`, `wg-tt.conf` (0600) and `install.sh`. The tunnel is
-`10.77.0.0/24`, the box `10.77.0.1`, with 8 phone slots made up front so adding a phone never needs
-root again. Phones route only `10.77.0.1/32` through the tunnel.
-
-Owner steps, once: `sudo sh <config>/wireguard/install.sh` (installs `wireguard-tools` if missing,
-`/etc/wireguard/wg-tt.conf`, `wg-quick@wg-tt`, a ufw rule if ufw is active) and forward UDP 51820
-on the router to the box. `GET` status (`configured`, `running` = `/sys/class/net/wg-tt`, slots,
-`install_command`), `POST /setup {endpoint, port, reset}`, `POST /peers {name}` → the phone's
-config. The app shares it to the WireGuard app and saves `10.77.0.1` as the box's remote address;
-QR pairing offers it too when the tunnel is up, and the TLS certificate names it (new certificates
-only; pinning is by fingerprint, so existing ones keep working).
+An earlier version of this page described a WireGuard tunnel set up by the agent (a
+`remote/wireguard` route family and a `wireguard.rs` module). **That feature does not exist in
+the code**: there is no such route in `crates/tt-station-agentd/src/routes.rs` and no WireGuard
+module. Off-LAN access today means bringing your own VPN: when the box has a Tailscale address,
+QR pairing carries it so the phone can reach the box away from home (`pairqr.rs`), and pairing and
+TLS apply as on the LAN.
 
 ## Serving an Orchard result (`POST /orchard/runs/{name}/serve`, `POST /orchard/packaging`)
 
