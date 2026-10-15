@@ -1,0 +1,54 @@
+# cargo-deny configuration (https://embarkstudios.github.io/cargo-deny/).
+# Run: `cargo deny check` (CI runs it in the `rust` job).
+#
+# The license allow-list is what the workspace actually uses today, computed with
+# `cargo deny list` (2026-10). Adding a license here is a decision: see
+# THIRD_PARTY_LICENSES.md, "Flagged for legal review".
+
+[graph]
+# Every platform the agent, the CLI and the macOS/Linux clients build for.
+all-features = false
+no-default-features = false
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+# Only for the crate that needs it, so it can't spread silently.
+[[licenses.exceptions]]
+# Mozilla's CA root list, a data license. Flagged for legal review.
+name = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
+[licenses.private]
+# Our own crates are not published to crates.io.
+ignore = true
+
+[bans]
+# Two major versions of one crate cost build time and binary size, but are
+# common in a tree this size (e.g. rand 0.8/0.9, tungstenite 0.24/0.29): warn
+# for now, tighten once the duplicates are cleaned up.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[advisories]
+# RustSec advisory database. Vulnerabilities fail the check; unmaintained and
+# yanked crates are reported as warnings by default in this cargo-deny version.
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

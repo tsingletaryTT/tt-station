@@ -33,11 +33,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends devscripts debhelper rustc cargo
 
-      # rustup toolchain (>= 1.93) needed: apt's rustc is too old for the build-dep.
-      - name: Install Rust toolchain
+      # rustup toolchain needed: apt's rustc is too old for the build-dep. The
+      # version comes from rust-toolchain.toml (the same pin CI and developers
+      # use), not a number repeated here: this step used to install 1.93 while
+      # the repo pinned 1.96.
+      - name: Install Rust toolchain (rust-toolchain.toml)
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" toolchain install || "$HOME/.cargo/bin/rustup" show
+          "$HOME/.cargo/bin/rustc" --version
 
       - name: Patch changelog suite (${{ matrix.suite }})
         if: matrix.suite != 'noble'
