@@ -122,6 +122,7 @@ pub(crate) struct PerAgent {
     pub(crate) idle: crate::idle::PerAgent,
     pub(crate) library: crate::library::PerAgent,
     pub(crate) native_vllm: crate::native_vllm::PerAgent,
+    pub(crate) research: crate::research::PerAgent,
     pub(crate) routines: crate::routines::PerAgent,
     pub(crate) toplike_term: crate::toplike_term::PerAgent,
 }

@@ -410,13 +410,32 @@ fn strings(v: &Value, key: &str, max: usize) -> Vec<String> {
 
 // ---------------------------------------------------------------- the run
 
-static STOPS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-/// One job on the model at a time.
-static RUNNER: LazyLock<Arc<tokio::sync::Mutex<()>>> =
-    LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
+/// What `crate::research` keeps for the life of one agent (`crate::state::PerAgent`).
+pub(crate) struct PerAgent {
+    /// Jobs asked to stop.
+    stops: Mutex<HashSet<String>>,
+    /// One job on the model at a time.
+    runner: Arc<tokio::sync::Mutex<()>>,
+    /// Explanations written at once, across everyone; the rest wait a moment, then are told the box is busy.
+    explaining: Arc<tokio::sync::Semaphore>,
+}
 
-fn stopped(id: &str) -> bool {
-    STOPS.lock().expect("research").contains(id)
+impl Default for PerAgent {
+    fn default() -> Self {
+        PerAgent {
+            stops: Mutex::new(HashSet::new()),
+            runner: Arc::new(tokio::sync::Mutex::new(())),
+            explaining: Arc::new(tokio::sync::Semaphore::new(2)),
+        }
+    }
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().research
+}
+
+fn stopped(state: &AppState, id: &str) -> bool {
+    mine(state).stops.lock().expect("research").contains(id)
 }
 
 fn set_step(state: &AppState, job: &mut Job, step: &str) {
@@ -427,7 +446,7 @@ fn set_step(state: &AppState, job: &mut Job, step: &str) {
 /// Start (or carry on with) a job in the background.
 fn spawn(state: AppState, id: String) {
     tokio::spawn(async move {
-        let _turn = RUNNER.clone().lock_owned().await;
+        let _turn = mine(&state).runner.clone().lock_owned().await;
         let Some(mut job) = load_job(&state, &id) else {
             return;
         };
@@ -464,7 +483,7 @@ fn spawn(state: AppState, id: String) {
                     None,
                 );
             }
-            Err(e) if stopped(&id) => {
+            Err(e) if stopped(&state, &id) => {
                 job.state = "stopped".into();
                 job.step = "Stopped".into();
                 event(&state, &id, "info", format!("Stopped. ({e})"));
@@ -486,7 +505,7 @@ fn spawn(state: AppState, id: String) {
                 );
             }
         }
-        STOPS.lock().expect("research").remove(&id);
+        mine(&state).stops.lock().expect("research").remove(&id);
         save_job(&state, &job);
     });
 }
@@ -533,7 +552,7 @@ async fn run(state: &AppState, job: &mut Job) -> Result<(), String> {
     job.model = Some(llm.model.clone());
     let (n_sub, per_search, rounds, max_pages) = job.depth.shape();
     let check_stop = || {
-        if stopped(&id) {
+        if stopped(state, &id) {
             Err("stopped".to_string())
         } else {
             Ok(())
@@ -697,7 +716,7 @@ async fn run(state: &AppState, job: &mut Job) -> Result<(), String> {
                 let state = state.clone();
                 let id = id.clone();
                 async move {
-                    if stopped(&id) {
+                    if stopped(&state, &id) {
                         return;
                     }
                     let src = shared.lock().expect("sources")[i].clone();
@@ -1000,7 +1019,7 @@ pub(crate) async fn post_stop(
         job.step = "Stopped".into();
         save_job(&state, &job);
     }
-    STOPS.lock().expect("research").insert(id);
+    mine(&state).stops.lock().expect("research").insert(id);
     Ok(Json(json!({ "stopping": true })))
 }
 
@@ -1062,10 +1081,6 @@ const MAX_QUESTION: usize = 500;
 const NEARBY_CHARS: usize = 6000;
 /// How much of the cited sources' notes it sees.
 const NOTES_CHARS: usize = 2500;
-/// Explanations written at once, across everyone; the rest wait a moment, then are told the box is busy.
-static EXPLAINING: LazyLock<Arc<tokio::sync::Semaphore>> =
-    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExplainMode {
@@ -1354,16 +1369,19 @@ pub(crate) async fn post_explain(
     if kind != "chat" && kind != "other" {
         return Err(err(StatusCode::CONFLICT, format!("The box is serving {} ({kind}), and explaining needs a chat model. Start one like Qwen3-32B.", short(&Some(ep.model.clone())))));
     }
-    let permit = tokio::time::timeout(Duration::from_secs(10), EXPLAINING.clone().acquire_owned())
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .ok_or_else(|| {
-            err(
-                StatusCode::TOO_MANY_REQUESTS,
-                "The box is busy explaining other passages. Try again in a moment.",
-            )
-        })?;
+    let permit = tokio::time::timeout(
+        Duration::from_secs(10),
+        mine(&state).explaining.clone().acquire_owned(),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .ok_or_else(|| {
+        err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "The box is busy explaining other passages. Try again in a moment.",
+        )
+    })?;
 
     let cited: Vec<Source> = read_json(&folder.join("cited.json")).unwrap_or_default();
     let title = job
