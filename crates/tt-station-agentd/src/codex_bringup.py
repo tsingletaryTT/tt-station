@@ -11,13 +11,15 @@ the app (and on the phone) and answers here.
 
 Environment: TT_STATION_URL (the agent, e.g. http://127.0.0.1:8765),
 TT_STATION_RUN (this run's id) and TT_STATION_RUN_SECRET (proves the driver
-is the run's own when it reports approvals).
+is the run's own when it reports approvals; removed from the environment the
+stage inherits).
 
 Policies:
   ask    every approval request waits for a person
   smart  routine work is approved here (tests, builds, edits inside the
          repo); anything risky waits for a person (chip resets, sudo, deleting
-         outside the repo, git push, network installs, writes outside the repo)
+         outside the repo, installs, writes outside the repo, and anything that
+         talks to another machine: curl, ssh, git push, inline network code...)
   auto   everything is approved (Codex runs with approval policy `never`)
 """
 
@@ -33,11 +35,32 @@ import time
 import urllib.error
 import urllib.request
 
-# A convenience, not containment: it keeps routine work from waiting on a
-# person and catches the obvious slips. A command can always be spelled so
-# that no pattern sees it (a script, a variable, another language); what
-# actually contains a bring-up is the account it runs as and the chips it
-# leases, and `ask` for anything that matters.
+# The run's secret proves this driver (and its permission server) is the run's
+# own when it reports approvals. Nothing the stage runs needs it, so it leaves
+# the environment here, before Codex (and every command it runs) inherits it.
+RUN_SECRET = os.environ.pop("TT_STATION_RUN_SECRET", "")
+
+# `git`, then its global options, then the subcommand.
+GIT = r"\bgit(\s+(-[Cc]\s+\S+|--?[\w-]+(=\S+)?))*\s+"
+# An interpreter, and code in the command line that reaches the network: inline
+# code (`python -c`, `node -e`, a heredoc) is where a script would hide it.
+INTERPRETER = re.compile(r"(?<![\w.-])(python[\d.]*|node|nodejs|deno|bun|perl|ruby|php|lua|Rscript)(?![\w./=-])")
+NET_CODE = re.compile(
+    r"(\b(import|from)\s+(socket|ssl|urllib\w*|requests|httpx|http|aiohttp|ftplib|smtplib|poplib|imaplib|telnetlib"
+    r"|paramiko|websockets?|websocket_client|xmlrpc|huggingface_hub|boto3|pycurl|asyncssh|grpc)\b"
+    r"|__import__|\bimportlib\b|\burlopen\b|-m\s+http\.server\b"
+    r"""|require\(\s*['"](node:)?(https?|http2|net|dgram|tls|child_process)['"]|\bfetch\(|from\s+['"](node:)?(https?|net|dgram|tls)['"]"""
+    r"|IO::Socket|\bLWP\b|HTTP::Tiny|\bNet::|net/http|open-uri|\bfsockopen\b|\bcurl_init\b)"
+)
+
+# A guard, not containment: it keeps routine work from waiting on a person and
+# catches the obvious slips, including the obvious ways to send what the agent
+# has read off the box. A command can always be spelled so that no pattern sees
+# it (a script it wrote, a variable, another language): what actually contains
+# a bring-up is the account it runs as, the chips it leases, and `ask` for
+# anything that matters. Real containment is a network namespace for the stage
+# (no route out but a proxy to the model and documentation hosts); that's the
+# follow-up, not this list.
 RISKY = [
     (re.compile(r"\btt-smi\b.*\s-r\b|\btt-smi\s+-r\b|\breset\b.*\bboard"), "resets chips"),
     (re.compile(r"\bsudo\b"), "uses sudo"),
@@ -45,11 +68,22 @@ RISKY = [
     (re.compile(r"""\brm\s+(-\S+\s+)*["']?(/\*|~|\$HOME\b|\$\{HOME\})"""), "deletes in your home folder"),
     (re.compile(r"\bpython3?\b.*\s-c\b.*\b(shutil\.rmtree|os\.(remove|unlink|rmdir|removedirs))\b"), "deletes files from Python"),
     (re.compile(r"""(>|\btee\s+(-a\s+)?)\s*["']?(~|\$HOME\b|\$\{HOME\})/\."""), "changes a settings file in your home folder"),
-    (re.compile(r"\bgit\s+push\b"), "pushes to a remote"),
-    (re.compile(r"\b(pip|uv|npm|apt|apt-get)\s+(install|add)\b"), "installs packages"),
+    (re.compile(r"\b(pip3?|uv|npm|pnpm|yarn|bun|apt|apt-get|conda|mamba|gem|cargo)\s+(install|add)\b|\bpip3?\s+download\b|\bgo\s+(get|install)\b"), "installs packages"),
     (re.compile(r"\b(docker|systemctl)\b"), "changes services or containers"),
     (re.compile(r"\b(shutdown|reboot|mkfs|dd\s+if=)\b"), "could damage the system"),
     (re.compile(r"\bcurl\b.*\|\s*(ba)?sh\b"), "runs a downloaded script"),
+    # Talking to another machine. Not a word inside a path or a flag (~/.ssh, -nc).
+    (re.compile(r"(?<![\w.-])(curl|wget|aria2c|nc|ncat|netcat|socat|telnet|ftp|tftp|sftp|lftp|ssh|scp|mosh|gh)(?![\w./=-])"), "uses the network"),
+    (re.compile(r"(?<![\w.-])(npx|pnpx|bunx|uvx|pipx)(?![\w./=-])"), "downloads and runs a package"),
+    (re.compile(r"/dev/(tcp|udp)/"), "opens a network connection"),
+    (re.compile(r"\brsync\b[^|;&]*(\s([\w.-]+@)?[\w.-]+:|rsync://)"), "copies to or from another machine"),
+    (re.compile(r"\b(hf|huggingface-cli)\s+(upload|repo|api)\b"), "sends files to Hugging Face"),
+    # git that sends, or that fetches from an address it names (a URL can carry data out).
+    (re.compile(GIT + r"(push|send-email|request-pull)\b"), "pushes to a remote"),
+    (re.compile(GIT + r"(remote\s+(add|set-url)\b|config\b[^|;&]*(\burl\b|\.url\b|insteadof|pushurl))", re.I), "changes where git sends things"),
+    (re.compile(GIT + r"(clone|fetch|pull|ls-remote|submodule|archive)\b[^|;&]*(://|\s[\w.-]+@[\w.-]+:)"), "fetches from an address it names"),
+    # Code that writes the command it runs, where no pattern can read it.
+    (re.compile(r"(^|[;&|(]\s*)eval\s|\|\s*(ba|z|da|k)?sh\b|\bbase64\s+(-d|--decode)\b|\bxxd\s+-r\b"), "runs code it generates"),
 ]
 
 
@@ -70,6 +104,9 @@ def risk(command: str | None, cwd: str | None, repo: str) -> str | None:
     for pattern, why in RISKY:
         if pattern.search(command):
             return why
+    # Inline code (python -c, node -e, a heredoc) that brings in networking.
+    if INTERPRETER.search(command) and NET_CODE.search(command):
+        return "runs inline code that uses the network"
     if cwd and not inside(cwd, repo):
         return f"runs outside the repo ({cwd})"
     return None
@@ -80,7 +117,7 @@ def post(path: str, body: dict) -> dict:
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Run-Secret": os.environ.get("TT_STATION_RUN_SECRET", "")},
+        headers={"Content-Type": "application/json", "X-Run-Secret": RUN_SECRET},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=40) as res:

@@ -134,9 +134,19 @@ under `gozer run --chips 4 --fresh`, as the systemd unit
 
 The driver (`codex_bringup.py`) loads the real runner and replaces only its
 approval handler: with policy `smart` (default) routine commands are approved
-on the box and risky ones (chip resets, sudo, installs, pushes, deletes or
-writes outside the repo, services/containers) wait for a person in the app;
-`ask` sends every request; `auto` keeps the runner's unattended behaviour.
+on the box and risky ones (chip resets, sudo, installs, deletes or writes
+outside the repo, services/containers, and anything that talks to another
+machine: curl/wget/nc/ssh/scp, git push or a fetch from a named URL, inline
+`python -c`/`node -e` code that imports networking) wait for a person in the
+app; `ask` sends every request; `auto` keeps the runner's unattended
+behaviour. Claude's WebFetch reads documentation pages on a few hosts without
+asking; any other address, a query string, or a path that isn't a page's shape
+asks. This is a guard, not containment (a script the agent writes can still
+reach the network); a network namespace for the stage is the follow-up. The
+run's secret (`TT_STATION_RUN_SECRET`) is removed from the environment the
+stage inherits; `HF_TOKEN` isn't set in it, but the stage reads
+`~/.cache/huggingface/token` through `HOME`, which it needs to download gated
+weights.
 Stop and Resume (resume continues the stage's Codex thread via
 `--resume-stage`). Claude Code is listed as the next engine.
 

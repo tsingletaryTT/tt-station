@@ -30,6 +30,9 @@ import subprocess
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
+# Only the permission server needs the run's secret (it reports approvals);
+# Claude and every command it runs inherit this environment, so it leaves here.
+RUN_SECRET = os.environ.pop("TT_STATION_RUN_SECRET", "")
 SKILL_RE = re.compile(r"\$([A-Za-z0-9][A-Za-z0-9_-]*)")
 DONE_RE = re.compile(r"^\s*GOAL:\s*(complete|blocked)\b\s*[—:-]?\s*(.*)$", re.I | re.M)
 
@@ -110,19 +113,29 @@ class Stage:
         self.log = log_dir / f"{self.name}.jsonl"
         self.manifest = log_dir / "manifest.txt"
 
-    def run_claude(self, text: str, session: str | None) -> tuple[str | None, str, bool]:
-        """One `claude -p` turn. Returns (session id, final text, failed)."""
+    def mcp_config(self) -> pathlib.Path:
+        """The permission server's config, in a file only this account can read
+        rather than on Claude's command line (which every account can list)."""
         a = self.args
         mcp = {"mcpServers": {"ttstation": {
             "command": sys.executable, "args": [str(HERE / "permission_mcp.py")],
-            "env": {k: os.environ.get(k, "") for k in ("TT_STATION_URL", "TT_STATION_RUN", "TT_STATION_RUN_SECRET")}
-            | {"TT_STATION_POLICY": a.policy, "TT_STATION_REPO": a.repo},
+            "env": {k: os.environ.get(k, "") for k in ("TT_STATION_URL", "TT_STATION_RUN")}
+            | {"TT_STATION_RUN_SECRET": RUN_SECRET, "TT_STATION_POLICY": a.policy, "TT_STATION_REPO": a.repo},
         }}}
+        mcp_file = self.log_dir / "mcp.json"
+        fd = os.open(mcp_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(mcp, f)
+        return mcp_file
+
+    def run_claude(self, text: str, session: str | None) -> tuple[str | None, str, bool]:
+        """One `claude -p` turn. Returns (session id, final text, failed)."""
+        a = self.args
         argv = [a.claude_bin, "-p", text, "--output-format", "stream-json", "--verbose", "--add-dir", a.repo]
         if a.policy == "auto":
             argv += ["--dangerously-skip-permissions"]
         else:
-            argv += ["--mcp-config", json.dumps(mcp), "--permission-prompt-tool", "mcp__ttstation__approve"]
+            argv += ["--mcp-config", str(self.mcp_config()), "--permission-prompt-tool", "mcp__ttstation__approve"]
         if a.model:
             argv += ["--model", a.model]
         if session:
