@@ -73,7 +73,7 @@ pub const QUEUE_TTL: u64 = 24 * 3600;
 
 // ---------------------------------------------------------------- data
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Schedule {
     /// `manual` | `daily` | `weekdays` | `hourly`
     #[serde(default = "manual")]
@@ -88,6 +88,17 @@ pub struct Schedule {
 
 fn manual() -> String {
     "manual".into()
+}
+
+/// Run by hand: what a routine (or request) with no `schedule` gets.
+impl Default for Schedule {
+    fn default() -> Self {
+        Schedule {
+            kind: manual(),
+            time: None,
+            every_hours: None,
+        }
+    }
 }
 
 /// What a routine may do without asking: the action tools it was given.
