@@ -108,6 +108,10 @@ export const delWith = <T>(path: string, body: unknown) => request<T>("DELETE", 
 export const text = (path: string) => request<string>("GET", path, undefined, { raw: true });
 export const upload = <T>(path: string, file: Blob) => request<T>("POST", path, file);
 
+/** Subprotocols for a WebSocket to the box: a browser can't set headers on
+ *  one, so the token rides here, never in the URL. */
+export const wsProtocols = (): string[] => ["tt-station", ...(token ? [`tt-token.${token}`] : [])];
+
 /** The Authorization header, for the few calls that stream (Lab, chat). */
 export const authHeader = (): Record<string, string> => (token ? { authorization: `Bearer ${token}` } : {});
 

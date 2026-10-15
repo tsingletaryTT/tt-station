@@ -21,7 +21,7 @@
 //!   `DELETE /coding/sessions/{id}`; `GET /coding/sessions/{id}/changes` (git status and diff).
 //! - `GET /coding/folders?path=`: folders to pick from; `POST /coding/folders`: `{parent, name}`
 //!   makes a new project (a git repository).
-//! - `GET /coding/term?token=&session=&cols=&rows=` (WebSocket): the session's terminal.
+//! - `GET /coding/term?session=&cols=&rows=` (WebSocket, token in a header -- `routes::ws_token`): the session's terminal.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -526,7 +526,6 @@ pub(crate) async fn post_folder(_auth: BearerAuth, Json(b): Json<NewFolder>) -> 
 
 #[derive(Debug, Deserialize)]
 pub struct TermQuery {
-    pub token: String,
     pub session: String,
     #[serde(default)]
     pub cols: Option<u16>,
@@ -535,10 +534,12 @@ pub struct TermQuery {
 }
 
 /// `GET /coding/term` (WebSocket): a session's terminal.
-pub(crate) async fn term_ws(ws: WebSocketUpgrade, State(state): State<AppState>, Query(q): Query<TermQuery>) -> Response {
-    if !state.is_valid_token(&q.token) {
+pub(crate) async fn term_ws(ws: WebSocketUpgrade, State(state): State<AppState>, headers: axum::http::HeaderMap, Query(q): Query<TermQuery>) -> Response {
+    // The token in a header, not the URL (crate::routes::ws_token).
+    if !crate::routes::ws_token(&headers).is_some_and(|t| state.is_valid_token(&t)) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let ws = ws.protocols([crate::routes::WS_PROTOCOL]);
     if !valid_id(&q.session) || load(&state, &q.session).is_none() {
         return (StatusCode::NOT_FOUND, "no such session").into_response();
     }

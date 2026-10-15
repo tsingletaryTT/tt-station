@@ -20,7 +20,7 @@ import { TextArea } from "@tenstorrent/vesper/text-area";
 import { TextInput } from "@tenstorrent/vesper/text-input";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { Sheet, useSheet } from "@tenstorrent/vesper/sheet";
-import { ago, currentToken, del, get, post } from "../api";
+import { ago, del, get, post, wsProtocols } from "../api";
 import { Card, Eyebrow, Page, toastError, toastOk, usePoll } from "../ui";
 import { ask } from "../dialog";
 import { navigate } from "../App";
@@ -236,8 +236,8 @@ function CodeTerm({ id }: { id: string }) {
     term.open(host.current);
     try { term.loadAddon(new WebglAddon()); } catch { /* canvas is fine */ }
     fit.fit();
-    const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/coding/term?token=${encodeURIComponent(currentToken() ?? "")}&session=${id}&cols=${term.cols}&rows=${term.rows}`;
-    const ws = new WebSocket(url);
+    const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/coding/term?session=${id}&cols=${term.cols}&rows=${term.rows}`;
+    const ws = new WebSocket(url, wsProtocols());
     ws.binaryType = "arraybuffer";
     ws.onopen = () => setState("live");
     ws.onmessage = (m) => term.write(typeof m.data === "string" ? m.data : new Uint8Array(m.data));

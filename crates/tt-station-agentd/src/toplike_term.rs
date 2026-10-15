@@ -57,8 +57,6 @@ fn binary() -> Option<String> {
 #[derive(Debug, Deserialize)]
 pub struct TermQuery {
     #[serde(default)]
-    pub token: String,
-    #[serde(default)]
     pub mode: Option<String>,
     #[serde(default)]
     pub cols: Option<u16>,
@@ -74,11 +72,12 @@ pub(crate) async fn get_toplike() -> axum::Json<Value> {
     }))
 }
 
-/// `GET /toplike/term` (WebSocket, `?token=`).
-pub(crate) async fn term_ws(ws: WebSocketUpgrade, State(state): State<AppState>, Query(q): Query<TermQuery>) -> Response {
-    if !state.is_valid_token(&q.token) {
+/// `GET /toplike/term` (WebSocket; the token in a header, `routes::ws_token`).
+pub(crate) async fn term_ws(ws: WebSocketUpgrade, State(state): State<AppState>, headers: axum::http::HeaderMap, Query(q): Query<TermQuery>) -> Response {
+    if !crate::routes::ws_token(&headers).is_some_and(|t| state.is_valid_token(&t)) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let ws = ws.protocols([crate::routes::WS_PROTOCOL]);
     let Some(bin) = binary() else {
         return (StatusCode::NOT_FOUND, "tt-toplike isn't installed on this box").into_response();
     };

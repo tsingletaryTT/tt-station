@@ -2636,6 +2636,30 @@ impl FromRequestParts<AppState> for BearerAuth {
     }
 }
 
+/// The subprotocol a WebSocket from the desktop app asks for; it carries
+/// its token as a second one, `tt-token.<token>` (see [`ws_token`]).
+pub const WS_PROTOCOL: &str = "tt-station";
+
+/// The bearer token a WebSocket upgrade carries: the `Authorization` header
+/// (the phone sets it), or -- a browser can't set headers on a WebSocket --
+/// a `tt-token.<token>` entry in `Sec-WebSocket-Protocol` (the desktop app).
+/// Never the URL: URLs end up in logs and process lists.
+pub(crate) fn ws_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if let Some(t) = bearer {
+        return Some(t.to_string());
+    }
+    headers
+        .get_all(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .find_map(|p| p.trim().strip_prefix("tt-token.").map(str::to_string))
+}
+
 /// The box itself (plain HTTP from this machine, see `only_local`) or a
 /// paired caller: for what the box's own tools (`tt-station console`, the
 /// panel) read without pairing, but the network may not.

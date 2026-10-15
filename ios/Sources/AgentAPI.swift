@@ -1240,13 +1240,12 @@ struct AgentClient {
     }
 
     /// The real tt-toplike, streamed: a WebSocket to `/toplike/term` (see the agent's
-    /// `toplike_term.rs`), over `wss://` on the pinned session. The agent's route
-    /// reads the token from the query string only (`?token=`), so it is sent there
-    /// too; the connection is TLS, so it is not exposed on the network.
+    /// `toplike_term.rs`), over `wss://` on the pinned session. The token goes in
+    /// the `Authorization` header (`webSocket`), never the URL.
     func toplikeSocket(mode: String, cols: Int, rows: Int) -> URLSessionWebSocketTask? {
-        guard let token else { return nil }
+        guard token != nil else { return nil }
         let task = webSocket("/toplike/term", query: [
-            URLQueryItem(name: "token", value: token), URLQueryItem(name: "mode", value: mode),
+            URLQueryItem(name: "mode", value: mode),
             URLQueryItem(name: "cols", value: String(cols)), URLQueryItem(name: "rows", value: String(rows)),
         ])
         task?.maximumMessageSize = 8 << 20
