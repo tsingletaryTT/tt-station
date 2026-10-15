@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+#
+# Release-signing public keys every TT Station agent trusts, compiled in
+# (crates/tt-station-agentd/src/release_keys.rs). An update is installed only
+# if its package carries a valid signature from one of these, or from a key
+# in the box's own update channel file (docs/reference/releases.md).
+#
+# One key per line: `<name> <base64 of the 32-byte Ed25519 public key>`.
+# Names are what logs and refusals show; use `tt-station-<year><letter>`.
+# Rotating: add the new key here, ship a release signed with the OLD key that
+# carries both, then switch the release secret; remove the old key a release
+# or two later (docs/reference/releases.md, "Rotating a key").
+#
+# Empty until the release key holder is decided: with no keys here, a box
+# installs only releases signed by keys its owner has added to the channel
+# file. The release workflow refuses to publish packages whose signature
+# doesn't check out against this file.

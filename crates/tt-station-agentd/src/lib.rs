@@ -58,6 +58,7 @@ pub mod power;
 pub mod prefs;
 pub mod procscan;
 pub mod recorder;
+pub mod release_keys;
 pub mod reliability;
 pub mod research;
 pub mod routes;
