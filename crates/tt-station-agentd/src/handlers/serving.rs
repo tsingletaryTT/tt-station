@@ -177,7 +177,7 @@ pub(crate) async fn get_serve(
         "split": crate::coserve::is_split(&state),
         "eta_s": life_model_eta,
         // A start that has shown no progress for a while (community packages): seconds.
-        "stalled_s": (life.phase == Phase::Starting).then(crate::community::stalled_s).flatten(),
+        "stalled_s": (life.phase == Phase::Starting).then(|| crate::community::stalled_s(&state)).flatten(),
         // `ok`, `degraded` (loaded but not answering) or `unknown`; see `/status`'s `model_health`.
         "health": state.liveness().health().state,
         "companion": state.companion().map(|c| {

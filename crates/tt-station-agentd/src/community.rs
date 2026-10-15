@@ -324,9 +324,9 @@ pub(crate) async fn get_community(State(state): State<AppState>, _auth: BearerAu
                 "serving": current(&st, &life),
                 // A package starting: its newest boot step, for the card.
                 "starting": starting(&st, &life),
-                "stopping": STOPPING.lock().expect("community").clone().map(|(id, since)| json!({ "id": id, "since": since })),
+                "stopping": mine(&state).stopping.lock().expect("community").clone().map(|(id, since)| json!({ "id": id, "since": since })),
                 // The last start that failed (until the next one), for its card.
-                "failed": preparing().and_then(|p| p.error.map(|e| json!({ "id": p.id, "error": e }))),
+                "failed": preparing(&state).and_then(|p| p.error.map(|e| json!({ "id": p.id, "error": e }))),
             })
         })
         .await
@@ -337,7 +337,7 @@ pub(crate) async fn get_community(State(state): State<AppState>, _auth: BearerAu
 /// A package starting: since the click, and what it's doing (the agent's own
 /// steps first, then the newest line `tt-model serve` printed).
 fn starting(state: &AppState, life: &crate::routes::Lifecycle) -> Option<Value> {
-    let prep = preparing().filter(|p| p.error.is_none());
+    let prep = preparing(state).filter(|p| p.error.is_none());
     if let Some(p) = prep.as_ref().filter(|p| !p.launched) {
         return Some(json!({ "id": p.id, "since": p.since, "step": p.step }));
     }
@@ -345,7 +345,7 @@ fn starting(state: &AppState, life: &crate::routes::Lifecycle) -> Option<Value> 
     let since = prep.filter(|p| p.id == id).map_or(life.since, |p| p.since);
     let step = last_line(&work_dir(state, &id).join("serve.log"))
         .unwrap_or_else(|| "Starting the container".into());
-    Some(json!({ "id": id, "since": since, "step": step, "stalled_s": stalled_s() }))
+    Some(json!({ "id": id, "since": since, "step": step, "stalled_s": stalled_s(state) }))
 }
 
 /// A fetched list: when it was fetched (as an instant and in Unix seconds), and its items.
@@ -962,17 +962,36 @@ fn delete_repo(hub: &Path, repo: &str) -> u64 {
     freed
 }
 
-/// What a community package started: (package id, the model it serves).
-/// Kept on disk too (`community/serving.json`), so an agent restart still
-/// knows which container to stop.
-static SERVING: Mutex<Option<(String, String)>> = Mutex::new(None);
+/// What `crate::community` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// What a community package started: (package id, the model it serves).
+    /// Kept on disk too (`community/serving.json`), so an agent restart still
+    /// knows which container to stop.
+    serving: Mutex<Option<(String, String)>>,
+    /// The start being prepared (chips reset, old model stopped) before launch.
+    prep: Mutex<Option<Prep>>,
+    /// Where `recover` hands a stuck start to `restarter`, once it runs.
+    restart: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<(String, String, u64)>>,
+    /// The start being watched: (package, when it last showed progress).
+    stall: Mutex<Option<(String, Instant)>>,
+    /// A package being stopped (since when): its container shutting down, then
+    /// its chips reset, which takes a few minutes.
+    stopping: Mutex<Option<(String, u64)>>,
+    /// When a stop last reset every board (by releasing their leases).
+    just_reset: Mutex<Option<Instant>>,
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().community
+}
 
 fn serving_file(state: &AppState) -> PathBuf {
     state.config_dir().join("community/serving.json")
 }
 
 fn serving(state: &AppState) -> Option<(String, String)> {
-    let mut held = SERVING.lock().expect("community");
+    let mut held = mine(state).serving.lock().expect("community");
     if held.is_none() {
         *held = std::fs::read(serving_file(state))
             .ok()
@@ -1029,7 +1048,7 @@ fn set_serving(state: &AppState, now: Option<(String, String)>) {
             let _ = std::fs::remove_file(&file);
         }
     }
-    *SERVING.lock().expect("community") = now;
+    *mine(state).serving.lock().expect("community") = now;
 }
 
 /// `POST /community/serve`: run a downloaded package on the chips; Chat picks it up.
@@ -1086,7 +1105,7 @@ pub(crate) async fn post_serve(
             ),
         ));
     }
-    if let Some((id, _)) = STOPPING.lock().expect("community").clone() {
+    if let Some((id, _)) = mine(&state).stopping.lock().expect("community").clone() {
         return Err(err(
             StatusCode::CONFLICT,
             format!(
@@ -1095,7 +1114,7 @@ pub(crate) async fn post_serve(
             ),
         ));
     }
-    if let Some(p) = preparing().filter(|p| !p.launched && p.error.is_none()) {
+    if let Some(p) = preparing(&state).filter(|p| !p.launched && p.error.is_none()) {
         return Err(err(
             StatusCode::CONFLICT,
             format!("{} is already starting.", short_id(&p.id)),
@@ -1103,17 +1122,20 @@ pub(crate) async fn post_serve(
     }
     let replace =
         !matches!(life.phase, Phase::Idle | Phase::Failed) || crate::coserve::is_split(&state);
-    set_preparing(Some(Prep {
-        id: body.id.clone(),
-        since: now_secs(),
-        step: if replace {
-            "Stopping the model that's serving".into()
-        } else {
-            "Resetting the chips".into()
-        },
-        launched: false,
-        error: None,
-    }));
+    set_preparing(
+        &state,
+        Some(Prep {
+            id: body.id.clone(),
+            since: now_secs(),
+            step: if replace {
+                "Stopping the model that's serving".into()
+            } else {
+                "Resetting the chips".into()
+            },
+            launched: false,
+            error: None,
+        }),
+    );
     // The rest takes a minute or more (a stop, a chip reset): answer now, and
     // let the card follow along through `GET /community`'s `starting`.
     let model = pkg["weights"].as_str().unwrap_or(&body.id).to_string();
@@ -1125,7 +1147,7 @@ pub(crate) async fn post_serve(
                 "tt-station-agentd: community: {} didn't start: {e}",
                 body.id
             );
-            update_preparing(&body.id, |p| p.error = Some(e.clone()));
+            update_preparing(&state, &body.id, |p| p.error = Some(e.clone()));
             state.notifier().emit(crate::notify::Draft {
                 kind: "model_failed",
                 title: format!("{} didn't start", short_id(&body.id)),
@@ -1147,18 +1169,17 @@ struct Prep {
     error: Option<String>,
 }
 
-static PREP: Mutex<Option<Prep>> = Mutex::new(None);
-
-fn preparing() -> Option<Prep> {
-    PREP.lock().expect("community").clone()
+fn preparing(state: &AppState) -> Option<Prep> {
+    mine(state).prep.lock().expect("community").clone()
 }
 
-fn set_preparing(p: Option<Prep>) {
-    *PREP.lock().expect("community") = p;
+fn set_preparing(state: &AppState, p: Option<Prep>) {
+    *mine(state).prep.lock().expect("community") = p;
 }
 
-fn update_preparing(id: &str, f: impl FnOnce(&mut Prep)) {
-    if let Some(p) = PREP
+fn update_preparing(state: &AppState, id: &str, f: impl FnOnce(&mut Prep)) {
+    if let Some(p) = mine(state)
+        .prep
         .lock()
         .expect("community")
         .as_mut()
@@ -1271,14 +1292,14 @@ async fn launch(
             .stop_serving()
             .await
             .map_err(|e| format!("Couldn't stop the model that was serving: {e:#}"))?;
-        update_preparing(id, |p| p.step = "Resetting the chips".into());
+        update_preparing(state, id, |p| p.step = "Resetting the chips".into());
     }
     // Always a full reset before a start, even right after a stop. Stopping a
     // community model resets each board as gozer releases it, but a start that
     // followed only that failed in tt-metal's device discovery
     // (`get_num_devices`: "unordered_map::at"); the same start after a full
     // `tt-smi -r` came up fine. A minute well spent.
-    let _ = chips_just_reset();
+    let _ = chips_just_reset(state);
     {
         let reset = state.clone();
         tokio::task::spawn_blocking(move || reset.run_power_command(crate::power::PowerAction::ResetChips, false))
@@ -1303,7 +1324,7 @@ async fn launch(
         if !held {
             break;
         }
-        update_preparing(id, |p| {
+        update_preparing(state, id, |p| {
             p.step = "Waiting for the last model to let go of the chips".into()
         });
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1313,7 +1334,7 @@ async fn launch(
     for lease in take_leases(state) {
         release_lease(&lease).await;
     }
-    update_preparing(id, |p| p.step = "Starting the container".into());
+    update_preparing(state, id, |p| p.step = "Starting the container".into());
     // tt-model always serves a package's default profile; a package made for several
     // boards may default to another one (sjettTT's Flash Next defaults to 4x p150).
     let profile = {
@@ -1389,7 +1410,7 @@ async fn launch(
     }
     set_serving(state, Some((id.to_string(), model.clone())));
     crate::orchard::adopt_when_serving(state, state.serving_port(), model);
-    update_preparing(id, |p| p.launched = true);
+    update_preparing(state, id, |p| p.launched = true);
     let _ = std::fs::remove_file(dir.join("check.json"));
     tokio::spawn(adopt_chips(state.clone(), id.to_string(), short));
     tokio::spawn(check_replies(state.clone(), id.to_string()));
@@ -1415,13 +1436,10 @@ pub fn last_good(state: &AppState) -> Option<String> {
     v["id"].as_str().map(str::to_string)
 }
 
-static RESTART: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<(String, String, u64)>> =
-    std::sync::OnceLock::new();
-
 /// Starts the last good model again after a stuck start was stopped (see `recover`).
 pub async fn restarter(state: AppState) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String, u64)>();
-    let _ = RESTART.set(tx);
+    let _ = mine(&state).restart.set(tx);
     while let Some((stuck, back, minutes)) = rx.recv().await {
         let body = IdBody {
             id: back.clone(),
@@ -1453,7 +1471,7 @@ async fn recover(state: &AppState, stuck: &str, minutes: u64) {
     let back = last_good(state)
         .filter(|g| g != stuck && installed().iter().any(|p| p["id"] == g.as_str()));
     // Started by the restarter: a start can't start one from inside its own watch.
-    if let (Some(g), Some(tx)) = (&back, RESTART.get()) {
+    if let (Some(g), Some(tx)) = (&back, mine(state).restart.get()) {
         let _ = tx.send((stuck.to_string(), g.clone(), minutes));
         return;
     }
@@ -1468,13 +1486,11 @@ async fn recover(state: &AppState, stuck: &str, minutes: u64) {
     });
 }
 
-/// The start being watched: (package, when it last showed progress).
-static STALL: Mutex<Option<(String, Instant)>> = Mutex::new(None);
-
 /// How long the starting package has shown no progress, once that's past
 /// `STALL_AFTER` (seconds); None while it's moving, or nothing is starting.
-pub fn stalled_s() -> Option<u64> {
-    STALL
+pub fn stalled_s(state: &AppState) -> Option<u64> {
+    mine(state)
+        .stall
         .lock()
         .expect("community")
         .as_ref()
@@ -1530,7 +1546,7 @@ async fn boot_progress(id: &str, since: u64) -> (bool, u64) {
 }
 
 async fn watch_boot(state: AppState, id: String) {
-    *STALL.lock().expect("community") = Some((id.clone(), Instant::now()));
+    *mine(&state).stall.lock().expect("community") = Some((id.clone(), Instant::now()));
     let mut checked = now_secs();
     let mut cache_bytes = 0u64;
     let mut ticks = 0u32;
@@ -1540,7 +1556,7 @@ async fn watch_boot(state: AppState, id: String) {
         if !matches!(life.phase, Phase::Starting)
             || serving(&state).map(|(i, _)| i) != Some(id.clone())
         {
-            *STALL.lock().expect("community") = None;
+            *mine(&state).stall.lock().expect("community") = None;
             return;
         }
         if unit_active(crate::orchard::HARVEST_UNIT) || container_up(&id).await {
@@ -1553,7 +1569,7 @@ async fn watch_boot(state: AppState, id: String) {
                 cache_bytes = bytes;
                 // How long it's been quiet (the lock is let go before anything waits).
                 let quiet = {
-                    let mut stall = STALL.lock().expect("community");
+                    let mut stall = mine(&state).stall.lock().expect("community");
                     if moved {
                         *stall = Some((id.clone(), Instant::now()));
                         None
@@ -1566,7 +1582,7 @@ async fn watch_boot(state: AppState, id: String) {
                 };
                 if let Some(quiet) = quiet {
                     if quiet >= RECOVER_AFTER {
-                        *STALL.lock().expect("community") = None;
+                        *mine(&state).stall.lock().expect("community") = None;
                         recover(&state, &id, quiet.as_secs() / 60).await;
                         return;
                     }
@@ -1582,7 +1598,7 @@ async fn watch_boot(state: AppState, id: String) {
             }
             continue;
         }
-        *STALL.lock().expect("community") = None;
+        *mine(&state).stall.lock().expect("community") = None;
         let line = failure_line(&work_dir(&state, &id).join("serve.log"))
             .unwrap_or_else(|| "tt-model stopped".into());
         let msg = format!("It stopped while starting: {line}");
@@ -1593,7 +1609,7 @@ async fn watch_boot(state: AppState, id: String) {
             release_lease(&lease).await;
         }
         state.set_lifecycle(Phase::Failed, life.model, None, Some(msg.clone()));
-        update_preparing(&id, |p| p.error = Some(msg.clone()));
+        update_preparing(&state, &id, |p| p.error = Some(msg.clone()));
         return; // the lifecycle's Failed notifies
     }
 }
@@ -1667,7 +1683,7 @@ pub async fn stop_package(state: &AppState) {
         return;
     };
     set_serving(state, None);
-    *STOPPING.lock().expect("community") = Some((id.clone(), now_secs()));
+    *mine(state).stopping.lock().expect("community") = Some((id.clone(), now_secs()));
     let leases = take_leases(state);
     // The container closing the chips, then gozer resetting each board: no
     // tt-smi readings meanwhile (they fail, and they slow the resets down).
@@ -1718,20 +1734,14 @@ pub async fn stop_package(state: &AppState) {
     }
     // Every board was just reset: the next start needn't reset them again.
     if all && leases.len() as u64 * 2 >= BOX_CHIPS {
-        *JUST_RESET.lock().expect("community") = Some(Instant::now());
+        *mine(state).just_reset.lock().expect("community") = Some(Instant::now());
     }
-    *STOPPING.lock().expect("community") = None;
+    *mine(state).stopping.lock().expect("community") = None;
 }
 
-/// A package being stopped (since when): its container shutting down, then
-/// its chips reset, which takes a few minutes.
-static STOPPING: Mutex<Option<(String, u64)>> = Mutex::new(None);
-
-/// When a stop last reset every board (by releasing their leases).
-static JUST_RESET: Mutex<Option<Instant>> = Mutex::new(None);
-
-fn chips_just_reset() -> bool {
-    JUST_RESET
+fn chips_just_reset(state: &AppState) -> bool {
+    mine(state)
+        .just_reset
         .lock()
         .expect("community")
         .take()

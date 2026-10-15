@@ -744,7 +744,7 @@ async fn wait_until_ready(state: &AppState, run_id: &str, minutes: u64) -> (bool
             }
             _ => {}
         }
-        if let Some(stuck) = crate::community::stalled_s() {
+        if let Some(stuck) = crate::community::stalled_s(state) {
             return (
                 false,
                 format!(

@@ -667,7 +667,7 @@ pub async fn gather(state: &AppState) -> Facts {
         network,
         iommu_translated,
         driver_hangs,
-        stuck_start: crate::community::stalled_s(),
+        stuck_start: crate::community::stalled_s(state),
     }
 }
 

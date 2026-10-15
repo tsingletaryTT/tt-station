@@ -115,6 +115,7 @@ pub struct AppState {
 pub(crate) struct PerAgent {
     pub(crate) apps: crate::apps::PerAgent,
     pub(crate) bench: crate::bench::PerAgent,
+    pub(crate) community: crate::community::PerAgent,
     pub(crate) embeddings: crate::embeddings::PerAgent,
     pub(crate) favorites: crate::favorites::PerAgent,
     pub(crate) idle: crate::idle::PerAgent,
