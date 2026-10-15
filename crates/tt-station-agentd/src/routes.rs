@@ -35,6 +35,7 @@ use crate::pairing;
 use crate::serving::discovery::discover_serving_cached;
 use crate::serving::docker::RealCommandRunner;
 
+pub(crate) use crate::error::*;
 pub use crate::state::*;
 
 /// JSON body returned by `GET /status`.
@@ -890,56 +891,6 @@ struct RunRequest {
 #[derive(Serialize)]
 struct RunResponse {
     endpoint: Endpoint,
-}
-
-/// JSON body returned when a control route fails after auth passes (backend
-/// `start`/`stop` error, or a `spawn_blocking` join failure). Kept as a
-/// simple `{ "error": "<message>" }` shape -- there's exactly one consumer
-/// (Task 11's `AgentClient`) and it doesn't need anything richer than a
-/// human-readable reason to log/surface.
-#[derive(Serialize)]
-pub(crate) struct ErrorResponse {
-    pub(crate) error: String,
-}
-
-fn backend_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: err.to_string(),
-        }),
-    )
-}
-
-/// `backend_error`, except that a failure caused by ANOTHER TENANT HOLDING
-/// CHIPS answers `409 Conflict` instead of `500`.
-///
-/// Nothing went wrong in those cases: the box's current state conflicts with
-/// what was asked (`POST /run` on a fully-leased box, `POST /reset` or
-/// `POST /power reset-chips` while a neighbour holds a lease), which is
-/// exactly what 409 means -- and it is the same code `GET /endpoint` already
-/// uses for "well-formed request, wrong box state". A client can retry a 409
-/// after the holder finishes; a 500 tells it to go looking for a bug.
-///
-/// Detected by walking the error chain rather than matching on message text,
-/// so a `.context(..)` added anywhere between the backend and here cannot
-/// silently turn a 409 back into a 500. The message is passed through
-/// verbatim -- it already names the board and the holder, and (deliberately)
-/// no duration, since gozer exposes none. Used by the three routes that can
-/// contend; every other route keeps `backend_error`.
-fn contention_aware_error(err: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
-    if err
-        .chain()
-        .any(|cause| cause.is::<crate::gozer::Contention>() || cause.is::<StartInFlight>())
-    {
-        return (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: err.to_string(),
-            }),
-        );
-    }
-    backend_error(err)
 }
 
 /// `POST /run { "model": "...", "force": <bool> }` (bearer-guarded): ask the
@@ -1853,19 +1804,6 @@ fn parse_logs_query(query: Option<&str>) -> (String, usize) {
         }
     }
     (source, tail)
-}
-
-/// Build the small `{ "error": "<message>" }` response for a `400 Bad
-/// Request` -- a validation failure the CALLER can fix (a bad/private key,
-/// a malformed label, a revoke request naming neither `label` nor
-/// `public_key`), as opposed to `backend_error`'s `500`, which is for
-/// failures on THIS box's side (a backend/I-O error after auth and
-/// validation both passed).
-fn bad_request(message: String) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ErrorResponse { error: message }),
-    )
 }
 
 /// JSON body accepted by `POST /ssh/authorize`.
@@ -3534,15 +3472,6 @@ fn tt_unavailable() -> (StatusCode, Json<ErrorResponse>) {
             error: "The official Tenstorrent CLI (tt) isn't installed on this box, so models \
                     can't be listed or downloaded from here."
                 .to_string(),
-        }),
-    )
-}
-
-fn tt_error(status: StatusCode, error: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        status,
-        Json(ErrorResponse {
-            error: error.into(),
         }),
     )
 }

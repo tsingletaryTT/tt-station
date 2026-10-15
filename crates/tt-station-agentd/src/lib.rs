@@ -27,6 +27,7 @@ pub mod docs;
 pub mod doctor;
 pub mod download;
 pub mod embeddings;
+pub mod error;
 pub mod evals;
 pub mod export;
 pub mod favorites;
