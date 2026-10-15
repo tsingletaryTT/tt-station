@@ -39,9 +39,9 @@ IdP setup. An optional central fleet service (SCIM, push revocation) would add 3
 
 | Piece | Where | What it does today |
 |---|---|---|
-| Pairing | `routes.rs` (`/pair/init`, `/pair/complete`, `/pair/offer`, `/pair/qr`), `pairing.rs`, `pairqr.rs` | The box shows a 6-digit code, valid for 120 s with 5 wrong attempts per `pair_id` (`PAIR_TTL`, `MAX_PAIR_ATTEMPTS`). `/pair/offer` and the QR are for holders of the box user's `local-secret`, and anything paired that way is an owner. The QR also carries the TLS fingerprint. |
-| Device sessions | `sessions.rs` | Each session has a 256-bit bearer token. The box stores only its SHA-256, in `agentd-tokens.json` (0600, store v3). A session ends after **90 days idle** (`IDLE_EXPIRY`); every use slides the window, and there is no absolute lifetime. Revocation is per device (`revoke`) or for everyone (`revoke_all`). A `watch` channel closes the session's open WebSockets (`routes.rs` `signed_out`). |
-| Roles | `routes.rs` `Caller` / `OwnerAuth` | Two roles, owner and member. The first device to pair becomes an owner (`owner_claimed`), and the local user is always an owner. When a member is refused, `OwnerAuth` returns 403 and the refusal is audited. |
+| Pairing | `handlers/pairing.rs` (`/pair/init`, `/pair/complete`, `/pair/offer`, `/pair/qr`), `state/tokens.rs`, `pairing.rs`, `pairqr.rs` | The box shows a 6-digit code, valid for 120 s with 5 wrong attempts per `pair_id` (`PAIR_TTL`, `MAX_PAIR_ATTEMPTS`). `/pair/offer` and the QR are for holders of the box user's `local-secret`, and anything paired that way is an owner. The QR also carries the TLS fingerprint. |
+| Device sessions | `sessions.rs` | Each session has a 256-bit bearer token. The box stores only its SHA-256, in `agentd-tokens.json` (0600, store v3). A session ends after **90 days idle** (`IDLE_EXPIRY`); every use slides the window, and there is no absolute lifetime. Revocation is per device (`revoke`) or for everyone (`revoke_all`). A `watch` channel closes the session's open WebSockets (`state/tokens.rs` `signed_out`). |
+| Roles | `auth.rs` `Caller` / `OwnerAuth` | Two roles, owner and member. The first device to pair becomes an owner (`owner_claimed`), and the local user is always an owner. When a member is refused, `OwnerAuth` returns 403 and the refusal is audited. |
 | Local trust | `localpeer.rs` | Plain HTTP from 127.0.0.1 counts as owner only if `/proc/net/tcp` shows the socket belongs to the agent's own uid. |
 | Transport | `tls.rs` | A self-signed certificate on ctrl-port+1. Clients **pin** its SHA-256, which they get from the pairing answer or the QR. Plain HTTP for other hosts is off by default (`/security`). |
 | App keys | `gateway.rs` | `ttq-…` keys for the `/v1` model API. The box stores SHA-256 digests (`app-keys.json`), allows at most 32, and supports expiry, rate and token limits, scopes and pausing. A key is owned by the box, not by a person. |
@@ -349,7 +349,7 @@ agent actions don't either: they're frequent, and each one is already a human de
 | `POST /auth/oidc/device`, `GET /auth/oidc/device/{id}` | public | The box runs RFC 8628: `{user_code, verification_uri_complete}`, then a poll for the session token. |
 | `GET /audit/export?after=<seq>` | owner | Pull export (§7). |
 
-Extractor changes in `routes.rs`:
+Extractor changes in `auth.rs`:
 
 - `resolve_caller` rejects stale org sessions (`AuthFailure::Stale`).
 - A new `StepUpOwner` extractor wraps `OwnerAuth` for the sensitive routes.

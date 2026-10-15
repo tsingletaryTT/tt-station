@@ -38,7 +38,7 @@ days: [last 31]}`. The phone prices it at its own $/kWh setting.
 
 An earlier version of this page described a WireGuard tunnel set up by the agent (a
 `remote/wireguard` route family and a `wireguard.rs` module). **That feature does not exist in
-the code**: there is no such route in `crates/tt-station-agentd/src/routes.rs` and no WireGuard
+the code**: there is no such route in `crates/tt-station-agentd/src/router.rs` and no WireGuard
 module. Off-LAN access today means bringing your own VPN: when the box has a Tailscale address,
 QR pairing carries it so the phone can reach the box away from home (`pairqr.rs`), and pairing and
 TLS apply as on the LAN.

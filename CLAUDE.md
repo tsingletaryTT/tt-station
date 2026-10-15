@@ -139,6 +139,21 @@ of it. #23 also reads tt-smi **6.x**'s top-level `processes[]`; this box is on t
 Items marked "(branch)" are committed on `jberkowitz/mobile-voice` but not yet on `main`.
 
 **Agent (`crates/tt-station-agentd`)** — box-side daemon, default backend `runpy`:
+- Where things live (`src/`): `state.rs` is `AppState` (types, constructors, `with_*`
+  builders, accessors) with its methods split by area under `state/` (`serving.rs` start/stop
+  and lifecycle, `tokens.rs` bearer tokens and pair codes, `hardware.rs` the `tt-smi` snapshot,
+  gozer and power commands); `state::PerAgent` holds the mutable state modules used to keep in
+  statics (one `PerAgent` struct per module, reached with `state.per_agent()`). `auth.rs` has the
+  extractors (`BearerAuth`, `OwnerAuth`, `CallerAuth`/`Caller`, `Who`, `LocalOrPaired`,
+  `ThisDevice`, `PlainHttp`), `PUBLIC_ROUTES`/`HANDLER_AUTHED_ROUTES` and the auth layers.
+  `router.rs` is the route table (`app()`, `local_http_app()`; `scripts/check-doc-routes.py` and
+  `tests/access_control.rs` parse it). `handlers/` holds the core handlers, one file per area
+  (`status`, `pairing`, `devices`, `serving`, `power`, `telemetry`, `logs`, `ssh`, `security`,
+  `assistant`, `media`, `ttcli`, `memories`, `docs`); feature modules (`routines.rs`,
+  `community.rs`, ...) keep their own handlers. `error.rs` has `ApiError` (status + message,
+  answered as `{"error": ...}`) and `err()`; `served.rs` is the one `/v1/models` probe;
+  `localhttp.rs` the shared client for the box's own services. `routes.rs` only re-exports all
+  of these so old `crate::routes::X` paths still work: import from the defining module instead.
 - Serves via `tt-inference-server/run.py`, deferring device/image/impl/engine to it.
   On this board `run.py` can't auto-detect the device, so the agent does: **`--tt-device`
   auto-detected from `tt-smi`** (4× p300c → `p300x2`); **`--serving-image` must be pinned**

@@ -1,7 +1,7 @@
 # The official tt CLI as model manager: `/tt/*` and `--serve-with tt` (reference)
 
 *Documents `crates/tt-station-agentd/src/ttcli.rs`, the `/tt/*` handlers in
-`crates/tt-station-agentd/src/routes.rs`, and the `tt_cli_serve` launch path in
+`crates/tt-station-agentd/src/handlers/ttcli.rs`, and the `tt_cli_serve` launch path in
 `crates/tt-station-agentd/src/serving/runpy.rs`. On branch `jberkowitz/mobile-voice`.*
 
 ## Why
