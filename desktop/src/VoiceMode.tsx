@@ -274,7 +274,8 @@ export function Orb({ phase, mic, out, size = 380 }: { phase: Phase; mic: Analys
       // Integrated motion: speed can change, position never jumps.
       const speed = p === "thinking" ? 1.1 : p === "speaking" ? 0.55 : p === "paused" || p === "starting" ? 0.12 : 0.3;
       spin += dt * (reduce ? 0 : speed);
-      breath += dt * (p === "thinking" ? 2.2 : 0.9);
+      // Reduced motion: no drifting or breathing; loudness still shows, gently, in its size.
+      breath += reduce ? 0 : dt * (p === "thinking" ? 2.2 : 0.9);
       const target_c = COLORS[p];
       for (let i = 0; i < 3; i++) color[i] += (target_c[i] - color[i]) * (1 - Math.exp(-dt / 0.4));
 
