@@ -15,8 +15,8 @@ import { Typography } from "@tenstorrent/vesper/typography";
 import { boxName, duration, get, type DoctorCheck, type Job, type MetricsNow, type Mode, type OrchardStatus, post,
   type Serve, short } from "../api";
 import { navigate } from "../App";
-import { WhatsNewCard } from "./Discover";
-import { ResearchCard } from "./Research";
+import { WhatsNewCard } from "./WhatsNewCard";
+import { ResearchCard } from "./ResearchCard";
 import { Card, Eyebrow, Page, Stat, tempTone, toastError, toastOk, usePoll, useTelemetry } from "../ui";
 import { openTranscribe, RecordingNow, useRecorder } from "../recorder";
 

@@ -14,6 +14,7 @@ import { Icon } from "@tenstorrent/vesper/icons";
 import { currentToken, get, onAnotherComputer, post } from "./api";
 import { navigate } from "./App";
 import { Card, Eyebrow, toastError, toastOk } from "./ui";
+import { sharedSource } from "./poll";
 import { ask } from "./dialog";
 
 export interface Recording {
@@ -89,7 +90,7 @@ class LocalRecorder {
     const res = await fetch(`/jobs/transcribe?name=${encodeURIComponent(name)}&when=now`, {
       method: "POST", body: blob, headers: { authorization: `Bearer ${currentToken() ?? ""}`, "content-type": "application/octet-stream" },
     });
-    if (!res.ok) throw new Error(`The device didn't take the recording (${res.status}).`);
+    if (!res.ok) throw new Error(`The box didn't take the recording (${res.status}).`);
     return "Saved. The transcript will be ready in a few minutes; you'll get a notification.";
   }
 }
@@ -137,11 +138,12 @@ export function useRecorder() {
   }, [local]);
   useEffect(() => {
     if (local !== false) return;
-    let alive = true;
-    const load = () => get<RecordState>("/record").then((s) => alive && setState(s)).catch(() => {});
-    load();
-    const t = setInterval(load, live ? 200 : 4000);
-    return () => { alive = false; clearInterval(t); };
+    // One poll for every recorder on screen; it rests while the window is hidden.
+    const src = sharedSource("/record", () => get<RecordState>("/record"));
+    if (src.data) setState(src.data);
+    const stop = src.add(live ? 200 : 4000, () => { if (src.data) setState(src.data); });
+    if (tick) void src.fetch();
+    return stop;
   }, [live, tick, local]);
   return { state, local: local === true, refresh: () => setTick((n) => n + 1) };
 }
@@ -207,7 +209,7 @@ export function MeetingRecorder({ onQueued }: { onQueued?: () => void }) {
         <>
           {local ? (
             <Typography variant="copy-sm" className="muted">
-              Records this computer's microphone, then the device writes a transcript you can search and ask about. On a call through the speakers it hears both sides; with headphones on, only you (macOS doesn't let apps record other apps' sound).
+              Records this computer's microphone, then the box writes a transcript you can search and ask about. On a call through the speakers it hears both sides; with headphones on, only you (macOS doesn't let apps record other apps' sound).
             </Typography>
           ) : (
             <Typography variant="copy-sm" className="muted">
@@ -222,7 +224,7 @@ export function MeetingRecorder({ onQueued }: { onQueued?: () => void }) {
               onKeyDown={(e) => { if (e.key === "Enter") start(); }} /></div>
             <Button onClick={start} disabled={busy || !state} iconLeft={<Icon kind="microphone" />}>Record</Button>
           </div>
-          <Typography variant="copy-xs" className="muted">Let everyone know you're recording. {local ? "The recording goes to your device to be transcribed; audio and transcripts stay there." : "Audio and transcripts stay on this box."}</Typography>
+          <Typography variant="copy-xs" className="muted">Let everyone know you're recording. {local ? "The recording goes to your box to be transcribed; audio and transcripts stay there." : "Audio and transcripts stay on this box."}</Typography>
         </>
       )}
     </Card>
