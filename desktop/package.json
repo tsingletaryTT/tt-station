@@ -11,7 +11,7 @@
     "build": "tsc --noEmit -p . && vite build",
     "typecheck": "tsc --noEmit -p .",
     "start": "electron . --ozone-platform-hint=auto",
-    "test": "vitest run"
+    "test": "vitest run && node --test test/*.test.cjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",
