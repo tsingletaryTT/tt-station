@@ -125,6 +125,7 @@ pub(crate) struct PerAgent {
     pub(crate) native_vllm: crate::native_vllm::PerAgent,
     pub(crate) research: crate::research::PerAgent,
     pub(crate) routines: crate::routines::PerAgent,
+    pub(crate) telemetry: crate::handlers::telemetry::PerAgent,
     pub(crate) toplike_term: crate::toplike_term::PerAgent,
     pub(crate) voice: crate::voice::PerAgent,
 }

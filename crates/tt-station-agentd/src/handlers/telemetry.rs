@@ -59,7 +59,7 @@ pub(crate) async fn telemetry_ws(
         .as_deref()
         .map(|q| q.split('&').any(|kv| kv == "view=lite"))
         .unwrap_or(false);
-    let Some(slot) = TelemetrySlot::take() else {
+    let Some(slot) = TelemetrySlot::take(&state) else {
         return tt_error(
             StatusCode::TOO_MANY_REQUESTS,
             "Too many live telemetry views are open on this box. Close one and try again.",
@@ -76,31 +76,37 @@ pub(crate) async fn telemetry_ws(
     })
 }
 
-/// Live `/telemetry` sockets, and how many may be open at once: each one runs
-/// its own process scan every interval.
-static TELEMETRY_SOCKETS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// What `crate::handlers::telemetry` keeps for the life of one agent
+/// (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// Live `/telemetry` sockets, and how many may be open at once: each one runs
+    /// its own process scan every interval.
+    sockets: Arc<std::sync::atomic::AtomicUsize>,
+}
 
 pub const MAX_TELEMETRY_SOCKETS: usize = 16;
 
 /// One of the [`MAX_TELEMETRY_SOCKETS`], held for a socket's life (and
 /// given back however it ends, a failed upgrade included).
-struct TelemetrySlot;
+struct TelemetrySlot(Arc<std::sync::atomic::AtomicUsize>);
 
 impl TelemetrySlot {
-    fn take() -> Option<Self> {
+    fn take(state: &AppState) -> Option<Self> {
         use std::sync::atomic::Ordering::SeqCst;
-        TELEMETRY_SOCKETS
+        let sockets = &state.per_agent().telemetry.sockets;
+        sockets
             .fetch_update(SeqCst, SeqCst, |n| {
                 (n < MAX_TELEMETRY_SOCKETS).then_some(n + 1)
             })
             .ok()
-            .map(|_| TelemetrySlot)
+            .map(|_| TelemetrySlot(Arc::clone(sockets)))
     }
 }
 
 impl Drop for TelemetrySlot {
     fn drop(&mut self) {
-        TELEMETRY_SOCKETS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -469,13 +475,14 @@ mod signed_out_tests {
 
     #[test]
     fn telemetry_sockets_are_capped_and_given_back() {
-        let slots: Vec<TelemetrySlot> = std::iter::from_fn(TelemetrySlot::take)
+        let state = state();
+        let slots: Vec<TelemetrySlot> = std::iter::from_fn(|| TelemetrySlot::take(&state))
             .take(MAX_TELEMETRY_SOCKETS + 5)
             .collect();
         assert_eq!(slots.len(), MAX_TELEMETRY_SOCKETS);
-        assert!(TelemetrySlot::take().is_none());
+        assert!(TelemetrySlot::take(&state).is_none());
         drop(slots);
-        assert!(TelemetrySlot::take().is_some());
+        assert!(TelemetrySlot::take(&state).is_some());
     }
 
     /// The same, for a stream that knows its caller by device id (logs,
