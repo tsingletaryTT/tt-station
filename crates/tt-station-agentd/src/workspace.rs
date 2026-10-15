@@ -26,12 +26,21 @@
 //! allows. A session someone started outside the sandbox stays an owner's,
 //! whoever started it.
 //!
+//! **Folders a member's sandbox wrote** ([`SharedUse`]): what a sandbox leaves
+//! in a project (git hooks, a Makefile, npm scripts, `.claude` settings) runs
+//! as the box's account the next time something outside the sandbox works
+//! there. So the box remembers which folders members' sandboxed sessions used,
+//! who and when, and an owner starting Code outside the sandbox -- or a coding
+//! session or terminal (`crate::coding`) -- in one of them, inside one, or
+//! around one gets `409` with `needs_confirm: "shared_folder"` until they say
+//! `confirm_shared: true` ([`shared_check`]).
+//!
 //! A session's conversation is kept by Claude Code (`--resume`), so it
 //! carries on after the app or this agent restarts.
 //!
 //! - `GET /code`: sessions, whether the sandbox is set up, the model check.
 //! - `POST /code/setup`: build the sandbox image and start the gate.
-//! - `POST /code/sessions` `{folder, sandbox, policy}`; `DELETE /code/sessions/{id}`.
+//! - `POST /code/sessions` `{folder, sandbox, policy, confirm_shared?}`; `DELETE /code/sessions/{id}`.
 //! - `GET /code/sessions/{id}?after=N`: the session and its events after N.
 //! - `POST /code/sessions/{id}/message` `{text}`; `/approve` `{request_id, allow, always}`;
 //!   `/interrupt`; `/stop`; `/commit` `{message}`; `/discard`.
@@ -126,6 +135,11 @@ pub struct Session {
     /// Let the model think before acting (better on hard tasks, much slower).
     #[serde(default)]
     pub think: bool,
+    /// The member who started it (a person's or a device's name); `None` for an
+    /// owner's. Each turn of a member's sandboxed session is noted against its
+    /// folder ([`note_shared_use`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
 }
 
 fn valid_id(id: &str) -> bool {
@@ -1661,6 +1675,10 @@ pub struct NewSession {
     pub policy: Option<String>,
     #[serde(default)]
     pub think: bool,
+    /// Start outside the sandbox even though a member's sandboxed session used
+    /// the folder (the `409` with `needs_confirm: "shared_folder"` said so).
+    #[serde(default)]
+    pub confirm_shared: bool,
 }
 
 /// Where a sandboxed session's launch noted the git directories it mounted read-only.
@@ -1759,6 +1777,178 @@ fn may_use(state: &AppState, caller: &Caller, id: &str) -> Result<(), (StatusCod
     }
 }
 
+// ---------------------------------------------------------------- folders members' sandboxes used
+
+/// A member's sandboxed session used `folder` (a real path), last at `when`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedUse {
+    pub folder: String,
+    /// A person's name, else their device's.
+    pub who: String,
+    /// Unix seconds.
+    pub when: u64,
+}
+
+/// How many uses are remembered (the oldest go first).
+const MAX_SHARED_USES: usize = 500;
+
+/// [`note_shared_use`]'s arithmetic: `who` used `folder` at `when` (one entry
+/// per folder and person, the latest time).
+pub fn track_use(uses: &mut Vec<SharedUse>, folder: &Path, who: &str, when: u64) {
+    let f = folder.display().to_string();
+    match uses.iter_mut().find(|u| u.folder == f && u.who == who) {
+        Some(u) => u.when = u.when.max(when),
+        None => uses.push(SharedUse {
+            folder: f,
+            who: who.to_string(),
+            when,
+        }),
+    }
+    if uses.len() > MAX_SHARED_USES {
+        uses.sort_by_key(|u| std::cmp::Reverse(u.when));
+        uses.truncate(MAX_SHARED_USES);
+    }
+}
+
+/// What to do about a start outside the sandbox in `folder`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SharedDecision {
+    /// Nothing a member's sandbox touched (or a sandboxed start): go ahead.
+    Proceed,
+    /// A member's sandbox used it, and the owner said to go ahead anyway.
+    Confirmed(Vec<SharedUse>),
+    /// A member's sandbox used it: ask first.
+    NeedsConfirm(Vec<SharedUse>),
+}
+
+/// Whether starting something outside the sandbox (`sandbox: false`) in
+/// `folder` needs the owner to confirm: when a member's sandboxed session used
+/// that folder, a folder inside it (the start would reach what was left there),
+/// or a folder around it (whatever it left in the project around this one: a
+/// Makefile, hooks, settings, still applies). Paths compare by component, so
+/// `~/proj` and `~/project` are different folders.
+pub fn shared_check(
+    uses: &[SharedUse],
+    folder: &Path,
+    sandbox: bool,
+    confirmed: bool,
+) -> SharedDecision {
+    if sandbox {
+        return SharedDecision::Proceed;
+    }
+    let mut hits: Vec<SharedUse> = uses
+        .iter()
+        .filter(|u| {
+            let used = Path::new(&u.folder);
+            folder.starts_with(used) || used.starts_with(folder)
+        })
+        .cloned()
+        .collect();
+    if hits.is_empty() {
+        return SharedDecision::Proceed;
+    }
+    hits.sort_by_key(|u| std::cmp::Reverse(u.when));
+    if confirmed {
+        SharedDecision::Confirmed(hits)
+    } else {
+        SharedDecision::NeedsConfirm(hits)
+    }
+}
+
+/// Forget the `confirmed` uses: the owner has seen them. A later use warns again.
+pub fn acknowledge(uses: &mut Vec<SharedUse>, confirmed: &[SharedUse]) {
+    uses.retain(|u| !confirmed.contains(u));
+}
+
+/// The `409` an unconfirmed start gets: a plain warning, and who used the folder when.
+pub fn shared_refusal(folder: &Path, hits: &[SharedUse]) -> (StatusCode, Json<Value>) {
+    let mut names: Vec<&str> = Vec::new();
+    for u in hits {
+        if !names.contains(&u.who.as_str()) {
+            names.push(&u.who);
+        }
+    }
+    let who = match names.as_slice() {
+        [] => "A member".to_string(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": format!("{who} used this folder in Code's sandbox. Anything left in it (git hooks, a Makefile, npm scripts, Claude settings) would run as the box's own account outside the sandbox, with its keys, docker and sudo. Look over the folder first, or keep the sandbox on. To go ahead anyway, confirm."),
+            "needs_confirm": "shared_folder",
+            "used_by": hits.iter().map(|u| json!({ "who": u.who, "when": u.when, "folder": u.folder })).collect::<Vec<_>>(),
+            "folder": folder.display().to_string(),
+        })),
+    )
+}
+
+fn shared_path(state: &AppState) -> PathBuf {
+    root(state).join("shared-folders.json")
+}
+
+static SHARED_LOCK: Mutex<()> = Mutex::new(());
+
+/// A member's sandboxed session (by `who`) is using `folder`: remember it.
+pub(crate) fn note_shared_use(state: &AppState, folder: &Path, who: &str) {
+    let _held = SHARED_LOCK.lock().expect("shared folders");
+    let path = shared_path(state);
+    let mut uses: Vec<SharedUse> = crate::fsio::read_json_or_backup(&path).unwrap_or_default();
+    track_use(&mut uses, folder, who, now());
+    crate::fsio::save_json(&path, &uses, crate::fsio::PRIVATE);
+}
+
+/// [`shared_check`] against what's remembered, for a start outside the sandbox
+/// in `folder` (a real path). `Err` is the `409` to answer with; a confirmed
+/// start goes in the activity log, and its warning is forgotten.
+pub(crate) fn check_shared_folder(
+    state: &AppState,
+    folder: &Path,
+    confirmed: bool,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let _held = SHARED_LOCK.lock().expect("shared folders");
+    let path = shared_path(state);
+    let mut uses: Vec<SharedUse> = crate::fsio::read_json_or_backup(&path).unwrap_or_default();
+    match shared_check(&uses, folder, false, confirmed) {
+        SharedDecision::Proceed => Ok(()),
+        SharedDecision::NeedsConfirm(hits) => Err(shared_refusal(folder, &hits)),
+        SharedDecision::Confirmed(hits) => {
+            let mut who: Vec<&str> = Vec::new();
+            for u in &hits {
+                if !who.contains(&u.who.as_str()) {
+                    who.push(&u.who);
+                }
+            }
+            crate::audit::record(
+                state,
+                "shared_folder_confirmed",
+                &format!(
+                    "{} (used in the sandbox by {})",
+                    folder.display(),
+                    who.join(", ")
+                ),
+                "ok",
+            );
+            acknowledge(&mut uses, &hits);
+            crate::fsio::save_json(&path, &uses, crate::fsio::PRIVATE);
+            Ok(())
+        }
+    }
+}
+
+/// How people read `caller`: their person's name, else their device's.
+fn caller_label(state: &AppState, caller: &Caller) -> String {
+    match &caller.device {
+        Some(d) => state
+            .people()
+            .person_of_digest(&d.token_sha256)
+            .map(|p| p.name)
+            .unwrap_or_else(|| d.name.clone()),
+        None => "This box".to_string(),
+    }
+}
+
 /// `POST /code/sessions`.
 pub(crate) async fn post_session(
     State(state): State<AppState>,
@@ -1802,6 +1992,10 @@ pub(crate) async fn post_session(
             })),
         ));
     }
+    let member = (!caller.owner()).then(|| caller_label(&state, &caller));
+    if !b.sandbox {
+        check_shared_folder(&state, &folder, b.confirm_shared)?;
+    }
     let id = format!("{}-{}", now(), &crate::pairing::issue_pair_id()[..6]);
     std::fs::create_dir_all(dir(&state, &id))
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1820,8 +2014,12 @@ pub(crate) async fn post_session(
         last: now(),
         always: vec![],
         think: b.think,
+        member,
     };
     save(&state, &s);
+    if let (true, Some(who)) = (s.sandbox, s.member.as_deref()) {
+        note_shared_use(&state, &folder, who);
+    }
     if !s.sandbox {
         crate::audit::record(
             &state,
@@ -1897,6 +2095,10 @@ pub(crate) async fn post_message(
     let text = b.text.trim().to_string();
     if text.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "Say what to do."));
+    }
+    // Another turn of a member's sandbox in its folder.
+    if let (true, Some(who)) = (s.sandbox, s.member.as_deref()) {
+        note_shared_use(&state, Path::new(&s.folder), who);
     }
     if state.endpoint().is_none() {
         return Err(err(
@@ -2487,6 +2689,150 @@ mod tests {
             last: 0,
             always: vec![],
             think: false,
+            member: None,
+        }
+    }
+
+    fn used(folder: &str, who: &str, when: u64) -> SharedUse {
+        SharedUse {
+            folder: folder.into(),
+            who: who.into(),
+            when,
+        }
+    }
+
+    #[test]
+    fn a_members_sandboxed_use_is_tracked_with_who_and_when() {
+        let mut uses = Vec::new();
+        track_use(&mut uses, Path::new("/h/proj"), "Max", 100);
+        track_use(&mut uses, Path::new("/h/proj"), "Max", 200);
+        track_use(&mut uses, Path::new("/h/proj"), "Ana", 150);
+        assert_eq!(
+            uses,
+            vec![used("/h/proj", "Max", 200), used("/h/proj", "Ana", 150)]
+        );
+        // Kept to a size, newest first.
+        for i in 0..(MAX_SHARED_USES as u64 + 5) {
+            track_use(&mut uses, Path::new(&format!("/h/p{i}")), "Max", 1000 + i);
+        }
+        assert_eq!(uses.len(), MAX_SHARED_USES);
+        assert!(!uses.iter().any(|u| u.folder == "/h/proj"));
+    }
+
+    #[test]
+    fn an_owner_starting_outside_the_sandbox_where_a_member_worked_is_asked_first() {
+        let uses = vec![used("/h/proj", "Max", 100), used("/h/other", "Ana", 50)];
+        let folder = Path::new("/h/proj");
+        // In the sandbox: no warning.
+        assert_eq!(
+            shared_check(&uses, folder, true, false),
+            SharedDecision::Proceed
+        );
+        // Outside it: asked first, with who and when.
+        assert_eq!(
+            shared_check(&uses, folder, false, false),
+            SharedDecision::NeedsConfirm(vec![used("/h/proj", "Max", 100)])
+        );
+        // Confirmed: goes ahead.
+        assert_eq!(
+            shared_check(&uses, folder, false, true),
+            SharedDecision::Confirmed(vec![used("/h/proj", "Max", 100)])
+        );
+        // A folder no member's sandbox used.
+        assert_eq!(
+            shared_check(&uses, Path::new("/h/mine"), false, false),
+            SharedDecision::Proceed
+        );
+        // By component: /h/project isn't /h/proj.
+        assert_eq!(
+            shared_check(&uses, Path::new("/h/project"), false, false),
+            SharedDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn nested_folders_count_both_ways() {
+        let uses = vec![used("/h/code/site", "Max", 100)];
+        // Inside the folder the sandbox used.
+        assert!(matches!(
+            shared_check(&uses, Path::new("/h/code/site/web"), false, false),
+            SharedDecision::NeedsConfirm(_)
+        ));
+        // Around it.
+        assert!(matches!(
+            shared_check(&uses, Path::new("/h/code"), false, false),
+            SharedDecision::NeedsConfirm(_)
+        ));
+        // A sibling.
+        assert_eq!(
+            shared_check(&uses, Path::new("/h/code/api"), false, false),
+            SharedDecision::Proceed
+        );
+        // Several uses: newest first.
+        let uses = vec![
+            used("/h/code/site", "Max", 100),
+            used("/h/code/site/web", "Ana", 300),
+        ];
+        assert_eq!(
+            shared_check(&uses, Path::new("/h/code/site"), false, false),
+            SharedDecision::NeedsConfirm(vec![
+                used("/h/code/site/web", "Ana", 300),
+                used("/h/code/site", "Max", 100)
+            ])
+        );
+    }
+
+    #[test]
+    fn the_refusal_says_who_and_asks_for_the_confirm_flag() {
+        let hits = vec![used("/h/proj", "Max", 200), used("/h/proj/a", "Ana", 100)];
+        let (status, Json(body)) = shared_refusal(Path::new("/h/proj"), &hits);
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["needs_confirm"], "shared_folder");
+        assert_eq!(body["folder"], "/h/proj");
+        assert_eq!(body["used_by"][0]["who"], "Max");
+        assert_eq!(body["used_by"][0]["when"], 200);
+        let e = body["error"].as_str().unwrap();
+        assert!(e.starts_with("Max and Ana used this folder"), "{e}");
+        assert!(e.contains("box's own account"), "{e}");
+    }
+
+    #[test]
+    fn a_confirmed_start_is_remembered_and_a_new_use_warns_again() {
+        let home = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_config_dir(home.path().to_path_buf());
+        let folder = Path::new("/h/proj");
+        assert!(check_shared_folder(&state, folder, false).is_ok());
+        note_shared_use(&state, folder, "Max");
+        let (status, Json(body)) = check_shared_folder(&state, folder, false).unwrap_err();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["used_by"][0]["who"], "Max");
+        // Confirmed: goes ahead, logged, and that warning is done with.
+        assert!(check_shared_folder(&state, folder, true).is_ok());
+        assert!(check_shared_folder(&state, folder, false).is_ok());
+        let (log, _) = state.audit().page(0, 10);
+        assert!(log.iter().any(|l| l.action == "shared_folder_confirmed"));
+        // Saved atomically, owner-only, with nothing left over.
+        note_shared_use(&state, folder, "Ana");
+        assert!(check_shared_folder(&state, folder, false).is_err());
+        let names: Vec<String> = std::fs::read_dir(root(&state))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["shared-folders.json".to_string()]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(shared_path(&state))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
         }
     }
 

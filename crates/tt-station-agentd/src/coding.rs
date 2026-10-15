@@ -21,7 +21,9 @@
 //!
 //! - `GET /coding`: agents, sessions, recent folders, and whether the served
 //!   model suits coding agents (`check`).
-//! - `POST /coding/sessions`: `{agent, folder, task?}`; `POST /coding/sessions/{id}/stop`;
+//! - `POST /coding/sessions`: `{agent, folder, task?, confirm_shared?}` (`409` with
+//!   `needs_confirm: "shared_folder"` when a member's sandbox used the folder,
+//!   `crate::workspace::check_shared_folder`); `POST /coding/sessions/{id}/stop`;
 //!   `DELETE /coding/sessions/{id}`; `GET /coding/sessions/{id}/changes` (git status and diff).
 //! - `GET /coding/folders?path=`: folders to pick from; `POST /coding/folders`: `{parent, name}`
 //!   makes a new project (a git repository).
@@ -509,6 +511,9 @@ pub struct StartBody {
     pub folder: String,
     #[serde(default)]
     pub task: Option<String>,
+    /// Start even though a member's sandboxed Code session used the folder.
+    #[serde(default)]
+    pub confirm_shared: bool,
 }
 
 /// Only folders in the user's home (not the home itself, not hidden ones' insides).
@@ -652,6 +657,12 @@ pub(crate) async fn post_session(
         Ok(p) if agent.id == "shell" && p == home_dir => p,
         _ => allowed_folder(&body.folder).map_err(|e| err(StatusCode::BAD_REQUEST, e))?,
     };
+    // Every session here runs as the box's account: ask first where a member's
+    // sandbox left files. Not for a terminal in the home folder itself, which
+    // holds every project and so would always ask.
+    if folder != home_dir {
+        crate::workspace::check_shared_folder(&state, &folder, body.confirm_shared)?;
+    }
     if agent.id != "shell" && state.endpoint().is_none() {
         return Err(err(
             StatusCode::CONFLICT,
