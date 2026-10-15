@@ -10,9 +10,17 @@
 //! second, tiny output (8 kHz stereo PCM on stdout, mic left, meeting right)
 //! drives the live level meters so you can see both sides are being heard.
 //!
-//! - `GET /record`: sources on the box, and the recording in progress if any.
+//! - `GET /record`: sources on the box, and the recording in progress if any
+//!   (with who started it).
 //! - `POST /record/start` `{title?, mic?, system?}`: start recording.
 //! - `POST /record/stop` `{discard?}`: stop; queues a transcription job.
+//!
+//! Any paired device can start a recording, so the room is always told
+//! ([`announce_start`], [`announce_end`]): the box chimes when a recording
+//! starts and when it stops (`crate::chime`), the desktop app on the box shows
+//! a banner while it runs (from `GET /record`), the other paired phones get a
+//! "the box started recording" notification (`crate::notify`), and the
+//! activity log (`crate::audit`) keeps who started and stopped it.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -44,6 +52,10 @@ struct Active {
     /// Latest RMS level per side, dBFS × 10 as bits of an f32.
     mic_level: Arc<AtomicU32>,
     system_level: Arc<AtomicU32>,
+    /// Who started it, as people read it (a person's or a device's name).
+    started_by: String,
+    /// The room has been told it ended (it ended on its own).
+    end_announced: bool,
 }
 
 static ACTIVE: Mutex<Option<Active>> = Mutex::new(None);
@@ -214,6 +226,7 @@ fn status_of(active: &mut Option<Active>) -> Value {
             "system_db": a.system.as_ref().map(|_| level(&a.system_level)),
             "ended": ended,
             "max_seconds": MAX_SECONDS,
+            "started_by": a.started_by,
         })
     });
     json!({
@@ -258,6 +271,91 @@ fn default_title() -> String {
     )
 }
 
+/// What the room and the household are told when a recording starts: a chime
+/// on the box, an event for everyone (pushed to every paired phone but the
+/// one that started it), and a line in the activity log.
+fn announce_start(state: &AppState, by: &crate::notify::Requester, id: &str) {
+    crate::chime::play(crate::chime::Chime::RecordingStarted);
+    let who = by.label();
+    state.notifier().emit_to(
+        crate::notify::Draft {
+            kind: "recording",
+            title: format!("{} started recording", state.name()),
+            body: format!(
+                "Started by {who}. Everything said near the box is recorded until someone stops it."
+            ),
+        },
+        Some(json!({ "recording": { "id": id, "started_by": who } })),
+        crate::notify::Audience::Household,
+        by.device.clone(),
+    );
+    crate::audit::record_as(state, &by.actor, "record_start", id, "ok");
+}
+
+/// The recording `id` ended: chime, and say so (recorded for `/events`, not
+/// pushed: the start was the news). `how` is `stopped`, `discarded` or
+/// `ended` (on its own: a device went away, or it hit [`MAX_SECONDS`]).
+fn announce_end(state: &AppState, id: &str, how: &str) {
+    crate::chime::play(crate::chime::Chime::RecordingStopped);
+    state.notifier().record_to(
+        crate::notify::Draft {
+            kind: "recording_stopped",
+            title: format!("{} stopped recording", state.name()),
+            body: match how {
+                "ended" => "The recording ended on its own.".to_string(),
+                "discarded" => "The recording was thrown away.".to_string(),
+                _ => "The recording is being transcribed.".to_string(),
+            },
+        },
+        Some(json!({ "recording": { "id": id } })),
+        crate::notify::Audience::Household,
+        None,
+    );
+}
+
+/// Until recording `id` is over: when it ends on its own (rather than being
+/// stopped), tell the room.
+fn watch_end(state: AppState, id: String) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let watched = id.clone();
+            let ended = tokio::task::spawn_blocking(move || {
+                let mut guard = ACTIVE.lock().expect("recorder mutex");
+                match guard.as_mut() {
+                    Some(a) if a.id == watched => {
+                        if a.child.try_wait().ok().flatten().is_some() {
+                            a.end_announced = true;
+                            Some(true)
+                        } else {
+                            None
+                        }
+                    }
+                    // Stopped (which announces it), or another recording.
+                    _ => Some(false),
+                }
+            })
+            .await
+            .unwrap_or(Some(false));
+            match ended {
+                Some(true) => {
+                    crate::audit::record_as(
+                        &state,
+                        &crate::audit::Actor::the_box(),
+                        "record_end",
+                        &id,
+                        "ended",
+                    );
+                    announce_end(&state, &id, "ended");
+                    return;
+                }
+                Some(false) => return,
+                None => {}
+            }
+        }
+    });
+}
+
 /// `POST /record/start` (authed).
 pub(crate) async fn post_start(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -275,7 +373,11 @@ pub(crate) async fn start(
     let jobs = state
         .jobs()
         .ok_or_else(|| err(StatusCode::CONFLICT, "This agent has no job queue."))?;
-    tokio::task::spawn_blocking(move || {
+    // Who's asking: the request's device and person (Tori's included), read
+    // here because they don't follow the work onto another thread.
+    let by = crate::notify::Requester::current(state);
+    let started_by = by.label();
+    let started = tokio::task::spawn_blocking(move || {
         let mut guard = ACTIVE.lock().expect("recorder mutex");
         if let Some(a) = guard.as_mut() {
             if a.child.try_wait().ok().flatten().is_none() {
@@ -356,11 +458,20 @@ pub(crate) async fn start(
             system: want_system.then(|| speakers().unwrap_or_else(|| "Speakers".into())),
             mic_level,
             system_level,
+            started_by,
+            end_announced: false,
         });
         Ok((StatusCode::CREATED, Json(status_of(&mut guard))))
     })
     .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    let id = started.1["recording"]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    announce_start(state, &by, &id);
+    watch_end(state.clone(), id);
+    Ok(started)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -397,8 +508,17 @@ pub(crate) async fn stop(
         title,
         mut child,
         path,
+        end_announced,
         ..
     } = active;
+    let by = crate::notify::Requester::current(state);
+    crate::audit::record_as(
+        state,
+        &by.actor,
+        "record_stop",
+        &id,
+        if discard { "discarded" } else { "ok" },
+    );
     // SIGINT lets ffmpeg finish the file properly.
     tokio::task::spawn_blocking(move || {
         unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
@@ -414,6 +534,10 @@ pub(crate) async fn stop(
     })
     .await
     .ok();
+    // After ffmpeg has finished, so the chime isn't the recording's last sound.
+    if !end_announced {
+        announce_end(state, &id, if discard { "discarded" } else { "stopped" });
+    }
     let dir = jobs.job_dir(&id);
     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     if discard || size < 2048 {
@@ -442,6 +566,57 @@ mod tests {
         assert!(args.contains("amix=inputs=2"));
         assert!(args.contains("/x/input.ogg"));
         assert!(args.ends_with("pipe:1"));
+    }
+
+    #[tokio::test]
+    async fn a_recording_tells_the_household_and_the_log_who_started_it() {
+        let state = AppState::new(
+            "qb2-lab".to_string(),
+            "4xBH".to_string(),
+            Arc::new(crate::serving::dstack::DstackBackend),
+        );
+        let session = state
+            .sessions()
+            .pair("max-token", Some("Max's iPhone"), None, false);
+        let max = state.people().add("Max").unwrap();
+        state.people().assign("max-token", Some(&max.id)).unwrap();
+        let by = crate::audit::ACTOR
+            .scope(
+                crate::audit::Actor {
+                    device_id: Some(session.id.clone()),
+                    device_name: session.name.clone(),
+                },
+                async { crate::notify::Requester::current(&state) },
+            )
+            .await;
+        assert_eq!(by.label(), "Max");
+        assert_eq!(by.device.as_deref(), Some(session.token_sha256.as_str()));
+
+        announce_start(&state, &by, "rec-1");
+        let e = state.notifier().since(0).pop().unwrap();
+        assert_eq!(e.kind, "recording");
+        assert_eq!(e.title, "qb2-lab started recording");
+        assert!(e.body.contains("Started by Max"), "{}", e.body);
+        assert_eq!(e.audience, crate::notify::Audience::Household);
+        assert_eq!(
+            e.quiet_for.as_deref(),
+            Some(session.token_sha256.as_str()),
+            "not pushed back to the phone that started it"
+        );
+        let push = crate::notify::push_payload(&e, "qb2-lab").to_string();
+        assert!(push.contains("The box started recording") && !push.contains("Max"));
+
+        announce_end(&state, "rec-1", "stopped");
+        assert_eq!(
+            state.notifier().since(e.seq).pop().unwrap().kind,
+            "recording_stopped"
+        );
+
+        let (log, _) = state.audit().page(0, 10);
+        let start = log.iter().find(|l| l.action == "record_start").unwrap();
+        assert_eq!(start.device_name, "Max's iPhone");
+        assert_eq!(start.device_id.as_deref(), Some(session.id.as_str()));
+        assert_eq!(start.target, "rec-1");
     }
 
     #[test]

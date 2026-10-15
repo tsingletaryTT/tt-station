@@ -7,10 +7,18 @@
 //!
 //! A watcher compares the box's state every few seconds ([`diff`]) and turns
 //! changes into [`Event`]s. Each is kept for clients (`GET /events?since=`) and
-//! pushed through Apple's push service to every phone that registered its
+//! pushed through Apple's push service to the phones that registered their
 //! device token (`POST /notify/devices`) -- see `crate::apns`. Pushes carry
 //! generic words per kind of event and the event's id, never what happened
 //! (see [`push_payload`]); the app fetches the event itself.
+//!
+//! Each event has an [`Audience`]: the household (the box's own news -- a
+//! model, a download, heat, power -- and a recording, which concerns everyone
+//! in the room), the owners (pairing, devices, approvals, and work nobody in
+//! particular asked for), or one person (their research report). The same
+//! rule decides both whose phones are pushed ([`Notifier::recipients`]) and
+//! who sees the event in `GET /events` ([`Notifier::since_for`]): a member
+//! sees the household's events and their own, never someone else's.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -22,7 +30,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::routes::{AppState, BearerAuth, ErrorResponse, Phase};
+use crate::routes::{AppState, BearerAuth, CallerAuth, ErrorResponse, Phase};
 
 const KEEP_EVENTS: usize = 200;
 const WATCH_INTERVAL: Duration = Duration::from_secs(5);
@@ -44,6 +52,134 @@ pub struct Event {
     /// person to allow something (see `GET /approvals`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    /// Who it's for (see the module docs).
+    #[serde(skip)]
+    pub audience: Audience,
+    /// The device (its pairing token's digest) not to push it to: the one
+    /// that caused it, which already knows.
+    #[serde(skip)]
+    pub quiet_for: Option<String>,
+}
+
+/// Who an event is for: whose phones are pushed, and who sees it in `GET /events`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Audience {
+    /// Everyone who uses the box.
+    #[default]
+    Household,
+    /// Owners only.
+    Owners,
+    /// One person, by id (`crate::people`).
+    Person(String),
+    /// One device, by its pairing token's digest (a test notification).
+    Device(String),
+}
+
+/// Someone looking at events, or a phone that might be pushed one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Viewer {
+    pub owner: bool,
+    /// Their person's id, if the device is someone's.
+    pub person: Option<String>,
+    /// Their pairing token's digest; `None` for the box itself.
+    pub device: Option<String>,
+}
+
+impl Audience {
+    /// The audience for an event of `kind` that names no one in particular.
+    /// What changes who can reach the box, what asks for an OK, and work
+    /// whose person isn't known go to owners; the box's own state, and a
+    /// recording (the room's business), to everyone. Kinds this doesn't know
+    /// go to owners: a new kind of news is private until someone says it isn't.
+    pub fn for_kind(kind: &str, data: Option<&Value>) -> Audience {
+        if data.is_some_and(|d| d.get("approval").is_some()) {
+            return Audience::Owners;
+        }
+        match kind {
+            "model_ready" | "model_failed" | "model" | "download_done" | "download_failed"
+            | "chips_hot" | "box_online" | "power" | "schedule" | "recording"
+            | "recording_stopped" => Audience::Household,
+            _ => Audience::Owners,
+        }
+    }
+
+    /// One person's, or the owners' when nobody in particular asked.
+    pub fn person_or_owners(person: Option<String>) -> Audience {
+        person.map_or(Audience::Owners, Audience::Person)
+    }
+
+    pub fn shows_to(&self, v: &Viewer) -> bool {
+        match self {
+            Audience::Household => true,
+            Audience::Owners => v.owner,
+            Audience::Person(id) => v.person.as_deref() == Some(id.as_str()),
+            Audience::Device(d) => v.device.as_deref() == Some(d.as_str()),
+        }
+    }
+}
+
+/// Who's making the current request (from `crate::audit::ACTOR` and
+/// `crate::people::CALLER`), for events about something they started.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Requester {
+    pub actor: crate::audit::Actor,
+    /// Their device's pairing token digest; `None` for the box itself.
+    pub device: Option<String>,
+    pub person: Option<crate::people::Person>,
+}
+
+impl Requester {
+    pub fn current(state: &AppState) -> Requester {
+        let actor = crate::audit::ACTOR
+            .try_with(Clone::clone)
+            .unwrap_or_else(|_| crate::audit::Actor::the_box());
+        let device = actor
+            .device_id
+            .as_deref()
+            .and_then(|id| state.sessions().get(id))
+            .map(|s| s.token_sha256);
+        let person = crate::people::current().or_else(|| {
+            device
+                .as_deref()
+                .and_then(|d| state.people().person_of_digest(d))
+        });
+        Requester {
+            actor,
+            device,
+            person,
+        }
+    }
+
+    /// How a person reads who it was: their name, else their device's.
+    pub fn label(&self) -> String {
+        match &self.person {
+            Some(p) => p.name.clone(),
+            None => self.actor.device_name.clone(),
+        }
+    }
+}
+
+/// Where the notifier looks up whose a device is.
+#[derive(Clone)]
+struct Directory {
+    sessions: std::sync::Arc<crate::sessions::Sessions>,
+    people: std::sync::Arc<crate::people::People>,
+}
+
+impl Directory {
+    /// The viewer behind a live device; `None` once it's signed out or expired.
+    fn viewer(&self, digest: &str) -> Option<Viewer> {
+        let session = self
+            .sessions
+            .list()
+            .into_iter()
+            .find(|s| s.token_sha256 == digest)?;
+        Some(Viewer {
+            owner: session.owner,
+            person: self.people.person_of_digest(digest).map(|p| p.id),
+            device: Some(digest.to_string()),
+        })
+    }
 }
 
 /// What the watcher compares.
@@ -211,6 +347,11 @@ pub struct Device {
     pub name: String,
     /// Unix seconds.
     pub added: u64,
+    /// The digest of the pairing token it registered with: whose phone it is,
+    /// and whether it's still paired. `None` for a registration from before
+    /// pushes were routed; the app registers again when it opens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -228,6 +369,7 @@ pub struct Notifier {
     /// Why push isn't available, when `apns` is `None` and setup was attempted.
     apns_problem: Option<String>,
     box_name: Mutex<String>,
+    directory: Mutex<Option<Directory>>,
 }
 
 impl std::fmt::Debug for Notifier {
@@ -259,6 +401,7 @@ impl Notifier {
             apns: None,
             apns_problem: None,
             box_name: Mutex::new(String::new()),
+            directory: Mutex::new(None),
         }
     }
 
@@ -287,6 +430,7 @@ impl Notifier {
             apns,
             apns_problem,
             box_name: Mutex::new(String::new()),
+            directory: Mutex::new(None),
         }
     }
 
@@ -301,12 +445,58 @@ impl Notifier {
         *self.box_name.lock().expect("notify mutex poisoned") = name.to_string();
     }
 
+    /// Where to look up whose each device is (`AppState` wires this up).
+    pub fn set_directory(
+        &self,
+        sessions: std::sync::Arc<crate::sessions::Sessions>,
+        people: std::sync::Arc<crate::people::People>,
+    ) {
+        *self.directory.lock().expect("notify mutex poisoned") =
+            Some(Directory { sessions, people });
+    }
+
+    /// Who the device with this pairing token digest is, while it's paired.
+    pub fn viewer(&self, digest: &str) -> Option<Viewer> {
+        let dir = self
+            .directory
+            .lock()
+            .expect("notify mutex poisoned")
+            .clone();
+        dir?.viewer(digest)
+    }
+
     pub fn devices(&self) -> Vec<Device> {
         self.devices.lock().expect("notify mutex poisoned").clone()
     }
 
-    /// Register (or refresh) a phone's device token.
-    pub fn register(&self, token: &str, sandbox: bool, name: &str) -> Result<(), String> {
+    /// The phones `event` is pushed to: those whose paired device it's for
+    /// ([`Audience::shows_to`]), minus the one that caused it. A phone whose
+    /// device was signed out gets nothing; one registered before pushes were
+    /// routed (no device on record) gets only the household's news.
+    pub fn recipients(&self, event: &Event) -> Vec<Device> {
+        self.devices()
+            .into_iter()
+            .filter(|d| match d.session.as_deref() {
+                Some(digest) => {
+                    event.quiet_for.as_deref() != Some(digest)
+                        && self
+                            .viewer(digest)
+                            .is_some_and(|v| event.audience.shows_to(&v))
+                }
+                None => event.audience == Audience::Household,
+            })
+            .collect()
+    }
+
+    /// Register (or refresh) a phone's device token, for the paired device
+    /// whose token has the digest `session`.
+    pub fn register(
+        &self,
+        token: &str,
+        sandbox: bool,
+        name: &str,
+        session: Option<&str>,
+    ) -> Result<(), String> {
         let token = token.trim().to_lowercase();
         if token.len() < 32 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err("That isn't an APNs device token.".to_string());
@@ -318,6 +508,7 @@ impl Notifier {
             sandbox,
             name: name.chars().take(60).collect(),
             added: unix_now(),
+            session: session.map(str::to_string),
         });
         drop(devices);
         self.save();
@@ -349,7 +540,8 @@ impl Notifier {
         }
     }
 
-    /// Record an event and push it to every registered phone (in the background).
+    /// Record an event and push it (in the background) to the phones of
+    /// whoever its kind is for ([`Audience::for_kind`]).
     pub fn emit(self: &std::sync::Arc<Self>, draft: Draft) -> Event {
         self.emit_with(draft, None)
     }
@@ -360,7 +552,20 @@ impl Notifier {
         draft: Draft,
         data: Option<serde_json::Value>,
     ) -> Event {
-        let event = self.record_with(draft, data);
+        let audience = Audience::for_kind(draft.kind, data.as_ref());
+        self.emit_to(draft, data, audience, None)
+    }
+
+    /// [`Self::emit_with`], for `audience`, not pushed to the device whose
+    /// token digest is `quiet_for`.
+    pub fn emit_to(
+        self: &std::sync::Arc<Self>,
+        draft: Draft,
+        data: Option<serde_json::Value>,
+        audience: Audience,
+        quiet_for: Option<String>,
+    ) -> Event {
+        let event = self.record_to(draft, data, audience, quiet_for);
         let me = std::sync::Arc::clone(self);
         let pushed = event.clone();
         tokio::spawn(async move {
@@ -376,7 +581,7 @@ impl Notifier {
         let _ = tokio::time::timeout(Duration::from_secs(8), self.push(&event)).await;
     }
 
-    /// Push `event` to every registered phone; returns how many got it.
+    /// Push `event` to its [`Self::recipients`]; returns how many got it.
     /// What's sent is [`push_payload`]'s version of it.
     /// Forgets tokens Apple says are dead, and fixes a token's environment when
     /// Apple says it's the other one.
@@ -387,14 +592,19 @@ impl Notifier {
         let subtitle = self.box_name.lock().expect("notify mutex poisoned").clone();
         let payload = push_payload(event, &subtitle);
         let mut sent = 0;
-        for device in self.devices() {
+        for device in self.recipients(event) {
             let mut sandbox = device.sandbox;
             let mut outcome = apns.send(&device.token, sandbox, &payload).await;
             if outcome == crate::apns::Delivery::WrongEnvironment {
                 sandbox = !sandbox;
                 outcome = apns.send(&device.token, sandbox, &payload).await;
                 if outcome == crate::apns::Delivery::Sent {
-                    let _ = self.register(&device.token, sandbox, &device.name);
+                    let _ = self.register(
+                        &device.token,
+                        sandbox,
+                        &device.name,
+                        device.session.as_deref(),
+                    );
                 }
             }
             match outcome {
@@ -416,10 +626,18 @@ impl Notifier {
 
     /// Record an event without pushing it.
     pub fn record(&self, draft: Draft) -> Event {
-        self.record_with(draft, None)
+        let audience = Audience::for_kind(draft.kind, None);
+        self.record_to(draft, None, audience, None)
     }
 
-    fn record_with(&self, draft: Draft, data: Option<serde_json::Value>) -> Event {
+    /// Record an event for `audience` without pushing it.
+    pub fn record_to(
+        &self,
+        draft: Draft,
+        data: Option<serde_json::Value>,
+        audience: Audience,
+        quiet_for: Option<String>,
+    ) -> Event {
         let event = {
             let mut seq = self.seq.lock().expect("notify mutex poisoned");
             *seq += 1;
@@ -430,6 +648,8 @@ impl Notifier {
                 title: draft.title,
                 body: draft.body,
                 data,
+                audience,
+                quiet_for,
             }
         };
         {
@@ -446,12 +666,24 @@ impl Notifier {
         event
     }
 
+    /// Every event after `seq`, whoever it's for (the box's own checks).
     pub fn since(&self, seq: u64) -> Vec<Event> {
         self.events
             .lock()
             .expect("notify mutex poisoned")
             .iter()
             .filter(|e| e.seq > seq)
+            .cloned()
+            .collect()
+    }
+
+    /// The events after `seq` that `viewer` may see: the same rule as pushes.
+    pub fn since_for(&self, seq: u64, viewer: &Viewer) -> Vec<Event> {
+        self.events
+            .lock()
+            .expect("notify mutex poisoned")
+            .iter()
+            .filter(|e| e.seq > seq && e.audience.shows_to(viewer))
             .cloned()
             .collect()
     }
@@ -533,6 +765,11 @@ pub fn push_alert(event: &Event) -> (&'static str, &'static str) {
             "Check the box's airflow; it will slow down to protect itself.",
         ),
         "box_online" => ("Your box is online", "TT Station can reach it."),
+        "recording" => (
+            "The box started recording",
+            "Everything said near it is being recorded. Open TT Station to see who started it, or to stop it.",
+        ),
+        "recording_stopped" => ("The box stopped recording", "Open TT Station for details."),
         "power" => ("Your box's power changed", "Open TT Station for details."),
         "devices" => (
             "The devices that can use your box changed",
@@ -670,14 +907,17 @@ pub struct RegisterDevice {
 }
 
 /// `POST /notify/devices` (authed) `{token, sandbox, name}`: this phone wants
-/// push notifications.
+/// push notifications -- the ones for whoever the paired device it's asking
+/// with is (see [`Audience`]).
 pub(crate) async fn register_device(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     Json(req): Json<RegisterDevice>,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let n = state.notifier();
-    n.register(&req.token, req.sandbox, &req.name)
+    let session = caller.device.map(|d| d.token_sha256);
+    n.register(&req.token, req.sandbox, &req.name, session.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
     let (available, problem) = n.push_status();
     Ok(Json(
@@ -698,19 +938,31 @@ pub(crate) async fn unregister_device(
     }
 }
 
-/// `POST /notify/test` (authed): push a test notification now; answers how
-/// many phones got it.
+/// `POST /notify/test` (authed): push a test notification now -- to the
+/// asking phone, or from the box itself to the owners' -- and answer how many
+/// phones got it.
 pub(crate) async fn test_notify(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let n = state.notifier();
-    let event = n.record(Draft {
-        kind: "test",
-        title: format!("Hello from {}", state.name()),
-        body: "Notifications are working: you'll hear when downloads finish and models are ready."
-            .to_string(),
-    });
+    let audience = match caller.device {
+        Some(d) => Audience::Device(d.token_sha256),
+        None => Audience::Owners,
+    };
+    let event = n.record_to(
+        Draft {
+            kind: "test",
+            title: format!("Hello from {}", state.name()),
+            body:
+                "Notifications are working: you'll hear when downloads finish and models are ready."
+                    .to_string(),
+        },
+        None,
+        audience,
+        None,
+    );
     let (available, problem) = n.push_status();
     if !available {
         return Err((
@@ -738,14 +990,37 @@ pub struct Since {
     pub since: u64,
 }
 
-/// `GET /events?since=N` (authed): events after `N`, for the app's own alerts.
+/// Who the caller of a request is, as an event's [`Audience`] sees them.
+pub(crate) fn viewer_of(state: &AppState, caller: &crate::routes::Caller) -> Viewer {
+    match &caller.device {
+        Some(d) => Viewer {
+            owner: d.owner,
+            person: state
+                .people()
+                .person_of_digest(&d.token_sha256)
+                .map(|p| p.id),
+            device: Some(d.token_sha256.clone()),
+        },
+        // The box's own user: an owner (see `routes::Caller::owner`), nobody in particular.
+        None => Viewer {
+            owner: caller.owner(),
+            person: None,
+            device: None,
+        },
+    }
+}
+
+/// `GET /events?since=N` (authed): events after `N` that are for the caller,
+/// for the app's own alerts.
 pub(crate) async fn get_events(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     axum::extract::Query(q): axum::extract::Query<Since>,
 ) -> Json<Value> {
     let n = state.notifier();
-    Json(json!({ "events": n.since(q.since), "latest": n.latest_seq() }))
+    let viewer = viewer_of(&state, &caller);
+    Json(json!({ "events": n.since_for(q.since, &viewer), "latest": n.latest_seq() }))
 }
 
 #[cfg(test)]
@@ -863,6 +1138,8 @@ mod tests {
             "chips_hot",
             "box_online",
             "power",
+            "recording",
+            "recording_stopped",
             "devices",
             "pairing",
             "schedule",
@@ -884,6 +1161,8 @@ mod tests {
                     title: format!("Report ready: {secret}"),
                     body: format!("rm -rf {secret}; 123 456"),
                     data,
+                    audience: Audience::Owners,
+                    quiet_for: Some("digest".into()),
                 };
                 let p = push_payload(&event, "qb2-lab");
                 let text = p.to_string();
@@ -914,6 +1193,8 @@ mod tests {
             title: String::new(),
             body: String::new(),
             data: Some(json!({ "approval": {} })),
+            audience: Audience::Owners,
+            quiet_for: None,
         };
         assert_eq!(push_alert(&ask).0, "Code needs your OK");
         assert_eq!(
@@ -937,17 +1218,254 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tt-notify-{}", std::process::id()));
         let n = Notifier::open(dir.join("notify.json"));
         let token = "a1".repeat(32);
-        n.register(&token, true, "Jesse's iPhone").unwrap();
-        n.register(&token.to_uppercase(), false, "Jesse's iPhone")
+        n.register(&token, true, "Jesse's iPhone", None).unwrap();
+        n.register(&token.to_uppercase(), false, "Jesse's iPhone", Some("d1"))
             .unwrap();
         assert_eq!(n.devices().len(), 1, "same token, refreshed");
         assert!(!n.devices()[0].sandbox);
-        assert!(n.register("not-a-token", true, "x").is_err());
+        assert_eq!(n.devices()[0].session.as_deref(), Some("d1"));
+        assert!(n.register("not-a-token", true, "x", None).is_err());
         assert_eq!(Notifier::open(dir.join("notify.json")).devices().len(), 1);
         assert!(n.unregister(&token));
         assert!(!n.unregister(&token));
         let (available, problem) = n.push_status();
         assert!(!available && problem.unwrap().contains("apns.toml"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A box with an owner (Olive, two phones), a member (Max), a member who
+    /// is nobody in particular, a signed-out phone, and a phone registered
+    /// before pushes were routed.
+    struct Household {
+        n: std::sync::Arc<Notifier>,
+        olive: String,
+        max: String,
+    }
+
+    const OLIVE_PHONE: &str = "olive-phone";
+    const OLIVE_MAC: &str = "olive-mac";
+    const MAX_PHONE: &str = "max-phone";
+    const GUEST_PHONE: &str = "guest-phone";
+    const GONE_PHONE: &str = "gone-phone";
+
+    fn household() -> Household {
+        use crate::sessions::{token_digest, unix_now, Session, Sessions};
+        let sessions = Sessions::in_memory();
+        for (token, owner) in [
+            (OLIVE_PHONE, true),
+            (OLIVE_MAC, true),
+            (MAX_PHONE, false),
+            (GUEST_PHONE, false),
+        ] {
+            sessions.insert_for_test(Session {
+                id: token.to_string(),
+                token_sha256: token_digest(token),
+                name: token.to_string(),
+                platform: None,
+                created: Some(unix_now()),
+                last_used: unix_now(),
+                owner,
+            });
+        }
+        let people = crate::people::People::in_memory();
+        let olive = people.add("Olive").unwrap().id;
+        let max = people.add("Max").unwrap().id;
+        people.assign(OLIVE_PHONE, Some(&olive)).unwrap();
+        people.assign(OLIVE_MAC, Some(&olive)).unwrap();
+        people.assign(MAX_PHONE, Some(&max)).unwrap();
+        // Max's old phone: still Max's in the book, but signed out.
+        people.assign(GONE_PHONE, Some(&max)).unwrap();
+        let n = Notifier::in_memory();
+        n.set_directory(std::sync::Arc::new(sessions), std::sync::Arc::new(people));
+        for (i, token) in [OLIVE_PHONE, OLIVE_MAC, MAX_PHONE, GUEST_PHONE, GONE_PHONE]
+            .iter()
+            .enumerate()
+        {
+            let apns = format!("{i}").repeat(64);
+            n.register(&apns, false, token, Some(&token_digest(token)))
+                .unwrap();
+        }
+        n.register(&"f".repeat(64), false, "legacy", None).unwrap();
+        Household {
+            n: std::sync::Arc::new(n),
+            olive,
+            max,
+        }
+    }
+
+    fn draft(kind: &'static str) -> Draft {
+        Draft {
+            kind,
+            title: "t".into(),
+            body: "b".into(),
+        }
+    }
+
+    fn names(devices: Vec<Device>) -> Vec<String> {
+        let mut v: Vec<String> = devices.into_iter().map(|d| d.name).collect();
+        v.sort();
+        v
+    }
+
+    fn viewer(h: &Household, token: &str) -> Viewer {
+        h.n.viewer(&crate::sessions::token_digest(token)).unwrap()
+    }
+
+    #[test]
+    fn kinds_have_the_audience_they_concern() {
+        for kind in [
+            "model_ready",
+            "download_failed",
+            "chips_hot",
+            "power",
+            "recording",
+        ] {
+            assert_eq!(
+                Audience::for_kind(kind, None),
+                Audience::Household,
+                "{kind}"
+            );
+        }
+        for kind in [
+            "pairing", "devices", "research", "job_done", "coding", "routine", "doctor", "new_kind",
+        ] {
+            assert_eq!(Audience::for_kind(kind, None), Audience::Owners, "{kind}");
+        }
+        let ask = json!({ "approval": { "id": "x" } });
+        assert_eq!(Audience::for_kind("model", Some(&ask)), Audience::Owners);
+        assert_eq!(Audience::person_or_owners(None), Audience::Owners);
+        assert_eq!(
+            Audience::person_or_owners(Some("p".into())),
+            Audience::Person("p".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn pushes_go_to_the_people_they_concern() {
+        let h = household();
+        let n = &h.n;
+        // The box's own news: every paired phone, and the old registration.
+        let e = n.emit(draft("model_ready"));
+        assert_eq!(
+            names(n.recipients(&e)),
+            [
+                "guest-phone",
+                "legacy",
+                "max-phone",
+                "olive-mac",
+                "olive-phone"
+            ]
+        );
+        // Pairing and approvals: owners only.
+        let e = n.emit(draft("pairing"));
+        assert_eq!(names(n.recipients(&e)), ["olive-mac", "olive-phone"]);
+        let e = n.emit_with(draft("coding"), Some(json!({ "approval": {} })));
+        assert_eq!(names(n.recipients(&e)), ["olive-mac", "olive-phone"]);
+        // Max's report: Max's live phone only (not his signed-out one, not Olive's).
+        let e = n.emit_to(
+            draft("research"),
+            None,
+            Audience::Person(h.max.clone()),
+            None,
+        );
+        assert_eq!(names(n.recipients(&e)), ["max-phone"]);
+        // Nobody in particular asked: the owners.
+        let e = n.emit_to(
+            draft("research"),
+            None,
+            Audience::person_or_owners(None),
+            None,
+        );
+        assert_eq!(names(n.recipients(&e)), ["olive-mac", "olive-phone"]);
+        // A recording: everyone but the phone that started it.
+        let e = n.emit_to(
+            draft("recording"),
+            None,
+            Audience::Household,
+            Some(crate::sessions::token_digest(MAX_PHONE)),
+        );
+        assert_eq!(
+            names(n.recipients(&e)),
+            ["guest-phone", "legacy", "olive-mac", "olive-phone"]
+        );
+        // A test: just the phone that asked.
+        let e = n.record_to(
+            draft("test"),
+            None,
+            Audience::Device(crate::sessions::token_digest(GUEST_PHONE)),
+            None,
+        );
+        assert_eq!(names(n.recipients(&e)), ["guest-phone"]);
+    }
+
+    #[test]
+    fn events_show_the_household_and_your_own_not_other_peoples() {
+        let h = household();
+        let n = &h.n;
+        n.record(draft("model_ready"));
+        n.record(draft("pairing"));
+        n.record_to(
+            draft("research"),
+            None,
+            Audience::Person(h.max.clone()),
+            None,
+        );
+        n.record_to(
+            draft("research"),
+            None,
+            Audience::Person(h.olive.clone()),
+            None,
+        );
+        n.record_to(
+            draft("recording"),
+            None,
+            Audience::Household,
+            Some(crate::sessions::token_digest(MAX_PHONE)),
+        );
+        let seen = |v: &Viewer| {
+            n.since_for(0, v)
+                .into_iter()
+                .map(|e| match e.audience {
+                    Audience::Person(p) if p == h.max => "max's".to_string(),
+                    Audience::Person(_) => "olive's".to_string(),
+                    _ => e.kind,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            seen(&viewer(&h, MAX_PHONE)),
+            ["model_ready", "max's", "recording"],
+            "a member: the household's, and their own"
+        );
+        assert_eq!(
+            seen(&viewer(&h, GUEST_PHONE)),
+            ["model_ready", "recording"],
+            "nobody in particular: the household's"
+        );
+        assert_eq!(
+            seen(&viewer(&h, OLIVE_MAC)),
+            ["model_ready", "pairing", "olive's", "recording"],
+            "an owner: also the owners', but not another person's"
+        );
+        let the_box = Viewer {
+            owner: true,
+            person: None,
+            device: None,
+        };
+        assert_eq!(seen(&the_box), ["model_ready", "pairing", "recording"]);
+        // What a phone is pushed, it can fetch: the same rule.
+        for e in n.since(0) {
+            for d in n.recipients(&e) {
+                if let Some(digest) = &d.session {
+                    let v = n.viewer(digest).unwrap();
+                    assert!(n.since_for(0, &v).contains(&e), "{} for {}", e.kind, d.name);
+                }
+            }
+        }
+        assert!(
+            n.viewer(&crate::sessions::token_digest(GONE_PHONE))
+                .is_none(),
+            "a signed-out device is nobody"
+        );
     }
 }

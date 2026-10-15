@@ -100,6 +100,10 @@ pub struct Job {
     pub title: Option<String>,
     #[serde(default)]
     pub round: usize,
+    /// Who asked (`crate::people` id): the report's news goes to their
+    /// phones, or to the owners' when nobody in particular asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -447,14 +451,18 @@ fn spawn(state: AppState, id: String) {
                 job.state = "done".into();
                 job.step = "Done".into();
                 event(&state, &id, "done", "The report is ready.");
-                state.notifier().emit(crate::notify::Draft {
-                    kind: "research",
-                    title: format!("Report ready: {}", clip(&job.question, 60)),
-                    body: job
-                        .summary
-                        .clone()
-                        .unwrap_or_else(|| "Your research report is ready in TT Station.".into()),
-                });
+                state.notifier().emit_to(
+                    crate::notify::Draft {
+                        kind: "research",
+                        title: format!("Report ready: {}", clip(&job.question, 60)),
+                        body: job.summary.clone().unwrap_or_else(|| {
+                            "Your research report is ready in TT Station.".into()
+                        }),
+                    },
+                    None,
+                    crate::notify::Audience::person_or_owners(job.person.clone()),
+                    None,
+                );
             }
             Err(e) if stopped(&id) => {
                 job.state = "stopped".into();
@@ -466,11 +474,16 @@ fn spawn(state: AppState, id: String) {
                 job.step = "Didn't finish".into();
                 job.error = Some(e.clone());
                 event(&state, &id, "error", e.clone());
-                state.notifier().emit(crate::notify::Draft {
-                    kind: "research",
-                    title: format!("Research didn't finish: {}", clip(&job.question, 50)),
-                    body: e,
-                });
+                state.notifier().emit_to(
+                    crate::notify::Draft {
+                        kind: "research",
+                        title: format!("Research didn't finish: {}", clip(&job.question, 50)),
+                        body: e,
+                    },
+                    None,
+                    crate::notify::Audience::person_or_owners(job.person.clone()),
+                    None,
+                );
             }
         }
         STOPS.lock().expect("research").remove(&id);
@@ -912,6 +925,9 @@ pub async fn start(state: &AppState, body: StartBody) -> Result<Job, (StatusCode
         summary: None,
         title: None,
         round: 0,
+        person: crate::notify::Requester::current(state)
+            .person
+            .map(|p| p.id),
     };
     save_job(state, &job);
     event(

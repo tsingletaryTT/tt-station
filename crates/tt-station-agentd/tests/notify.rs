@@ -374,3 +374,137 @@ async fn without_a_push_key_the_box_says_so() {
         .unwrap();
     assert_eq!(test.status(), 409);
 }
+
+/// Pushes go to the people an event concerns, and `/events` agrees: a member
+/// gets the household's news and their own, never another person's or the
+/// owners'.
+#[tokio::test]
+async fn pushes_and_events_are_routed_to_the_people_they_concern() {
+    use tt_station_agentd::notify::Audience;
+    const OWNER_PHONE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const MEMBER_PHONE: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    let pushes: Pushes = Arc::default();
+    let apns_base = stub_apns(pushes.clone()).await;
+    let apns = Apns::new(
+        ApnsConfig {
+            team_id: "TEAM123456".into(),
+            key_id: "KEY1234567".into(),
+            key_file: String::new(),
+            topic: "com.tenstorrent.ttstation.mobile".into(),
+            endpoint: Some(apns_base),
+        },
+        &test_key_pem(),
+    )
+    .unwrap();
+    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(Idle))
+        .with_notifier(Notifier::in_memory().with_apns(apns));
+    let base = serve(app(state.clone())).await;
+    let client = reqwest::Client::new();
+    // The first device is an owner; the next, a member who says they're Max.
+    let owner = pair(&client, &state, &base).await;
+    let member = pair(&client, &state, &base).await;
+    let people: Value = client
+        .post(format!("{base}/people"))
+        .bearer_auth(&member)
+        .json(&json!({ "name": "Max", "me": true }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let max = people["me"].as_str().unwrap().to_string();
+    for (token, phone) in [(&owner, OWNER_PHONE), (&member, MEMBER_PHONE)] {
+        let ok = client
+            .post(format!("{base}/notify/devices"))
+            .bearer_auth(token)
+            .json(&json!({ "token": phone, "sandbox": true, "name": phone }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), 200);
+    }
+    let n = state.notifier();
+    let draft = |kind: &'static str, title: &str| Draft {
+        kind,
+        title: title.to_string(),
+        body: String::new(),
+    };
+    let household = n.emit(draft("model_ready", "household"));
+    let owners = n.emit_with(
+        draft("coding", "owners"),
+        Some(json!({ "approval": { "id": "a" } })),
+    );
+    let maxs = n.emit_to(
+        draft("research", "max's"),
+        None,
+        Audience::Person(max.clone()),
+        None,
+    );
+    let nobodys = n.emit_to(
+        draft("research", "nobody's"),
+        None,
+        Audience::person_or_owners(None),
+        None,
+    );
+    let all = [&household, &owners, &maxs, &nobodys];
+    for _ in 0..100 {
+        let seen = pushes.lock().unwrap().len();
+        // household x2, owners x1, max's x1, nobody's x1.
+        if seen >= 5 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let got = |phone: &str| {
+        let pushes = pushes.lock().unwrap();
+        all.iter()
+            .filter(|e| pushes.iter().any(|p| p.0 == phone && p.3["event"] == e.seq))
+            .map(|e| e.title.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(got(OWNER_PHONE), ["household", "owners", "nobody's"]);
+    assert_eq!(got(MEMBER_PHONE), ["household", "max's"]);
+
+    let titles = |token: &str| {
+        let client = client.clone();
+        let url = format!("{base}/events?since=0");
+        let token = token.to_string();
+        async move {
+            let v: Value = client
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            v["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["title"].as_str().unwrap().to_string())
+                .filter(|t| ["household", "owners", "max's", "nobody's"].contains(&t.as_str()))
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(titles(&member).await, ["household", "max's"]);
+    assert_eq!(titles(&owner).await, ["household", "owners", "nobody's"]);
+    // Nor does a member see who's pairing, or the code.
+    let kinds: Value = client
+        .get(format!("{base}/events?since=0"))
+        .bearer_auth(&member)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(kinds["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| e["kind"] != "pairing" && e["kind"] != "devices"));
+}

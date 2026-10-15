@@ -576,6 +576,17 @@ impl AppState {
                 ),
             }),
         }
+        .wire_notifier()
+    }
+
+    /// Let the notifier look up whose each device is, for routing pushes
+    /// (`crate::notify::Audience`). Again whenever either side is replaced.
+    fn wire_notifier(self) -> Self {
+        self.inner.notifier.set_directory(
+            Arc::clone(&self.inner.sessions),
+            Arc::clone(&self.inner.people),
+        );
+        self
     }
 
     /// Attach a [`StatusAdvertiser`] hook, so `set_serving`/`set_idle`
@@ -757,7 +768,7 @@ impl AppState {
                 eprintln!("tt-station-agentd: with_notifier called on a shared AppState; ignored")
             }
         }
-        self
+        self.wire_notifier()
     }
 
     /// Record the config directory. Same contract as the other `with_*`.
@@ -862,7 +873,7 @@ impl AppState {
                 eprintln!("tt-station-agentd: with_people called on a shared AppState; ignored")
             }
         }
-        self
+        self.wire_notifier()
     }
 
     pub fn with_schedules(mut self, schedules: crate::schedules::Schedules) -> Self {
