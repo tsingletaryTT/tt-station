@@ -683,7 +683,7 @@ fn record_utterance(patience: Duration, ptt: bool) -> Result<Vec<i16>, String> {
     result
 }
 
-fn wav(samples: &[i16]) -> Vec<u8> {
+pub(crate) fn wav(samples: &[i16]) -> Vec<u8> {
     let data_len = (samples.len() * 2) as u32;
     let mut out = Vec::with_capacity(44 + data_len as usize);
     out.extend(b"RIFF");
@@ -716,6 +716,9 @@ pub struct HearBody {
 
 /// `POST /voice/hear` (authed): listen through the box's microphone until
 /// someone has said something and stopped; `{text}` ("" if nobody spoke).
+/// The box ticks softly first (`crate::chime::Chime::Listening`), so the room
+/// knows the microphone opened. One request, a minute at most, nothing kept:
+/// a tick rather than the recording chime, banner and notification.
 pub(crate) async fn post_hear(
     _auth: BearerAuth,
     body: Option<Json<HearBody>>,
@@ -729,7 +732,16 @@ pub(crate) async fn post_hear(
     let body = body.map(|b| b.0).unwrap_or_default();
     let patience = Duration::from_secs_f64(body.patience_s.unwrap_or(8.0).clamp(1.0, 60.0));
     let ptt = body.ptt;
-    let samples = tokio::task::spawn_blocking(move || record_utterance(patience, ptt)).await;
+    let samples = tokio::task::spawn_blocking(move || {
+        // The room hears a soft tick as the microphone opens, so a request
+        // from a phone elsewhere isn't silent listening. It plays to the end
+        // before the microphone opens, so it isn't heard as speech.
+        if let Err(e) = crate::chime::play_blocking(crate::chime::Chime::Listening) {
+            eprintln!("tt-station-agentd: listening chime: {e}");
+        }
+        record_utterance(patience, ptt)
+    })
+    .await;
     HEARING.store(false, Ordering::SeqCst);
     HEAR_LEVEL.store((-100f32).to_bits(), Ordering::Relaxed);
     let samples = samples

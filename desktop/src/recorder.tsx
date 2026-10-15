@@ -20,6 +20,8 @@ import { ask } from "./dialog";
 export interface Recording {
   id: string; title: string; started: number; seconds: number; max_seconds: number; ended: boolean;
   mic: string | null; system: string | null; mic_db: number | null; system_db: number | null;
+  /** Who started it (a person's or a device's name); absent on this computer's own recordings. */
+  started_by?: string | null;
 }
 export interface RecordState { microphone: string | null; speakers: string | null; recording: Recording | null }
 

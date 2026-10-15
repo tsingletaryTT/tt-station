@@ -1002,6 +1002,9 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .offline-banner { position: sticky; top: 0; z-index: 50; margin: 0; padding: 10px 40px; border-bottom: 1px solid var(--vesper-border-warning-subtle);
   background: var(--vesper-background-warning-subtle); color: var(--vesper-text-primary); font-size: 13px; }
 .offline-row { display: flex; align-items: center; gap: 12px; max-width: 1160px; margin: 0 auto; }
+.recording-banner { position: sticky; top: 0; z-index: 50; margin: 0; padding: 10px 40px; border-bottom: 1px solid var(--vesper-border-error-subtle, var(--line));
+  background: var(--vesper-background-error-subtle, color-mix(in srgb, #d4493f 12%, transparent)); color: var(--vesper-text-primary); font-size: 13px; }
+.recording-banner .rec-dot { flex: none; }
 .offline-icon { width: 16px; height: 16px; flex: none; color: var(--vesper-icon-warning); }
 .offline-meta { color: var(--vesper-text-secondary); }
 .offline-help { max-width: 1160px; margin: 8px auto 2px; padding-left: 28px; display: flex; flex-direction: column; gap: 6px; color: var(--vesper-text-secondary); }

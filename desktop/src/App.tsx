@@ -18,6 +18,7 @@ import { pressable, toastError, useServe, useTelemetry, tempTone, tempWord, useT
 import { Home } from "./pages/Home";
 import { adoptFromBox, placeVisible, storedChoice, useDevTools } from "./devtools";
 import { OfflineBanner } from "./OfflineBanner";
+import { RecordingBanner } from "./RecordingBanner";
 import { useConnectivity } from "./connectivity";
 
 // Every place but Home loads when it's first opened, so the app starts on Home
@@ -174,6 +175,7 @@ function Shell() {
       <Sidebar route={route} places={places} />
       <main className="content" key={route}>
         <OfflineBanner />
+        <RecordingBanner />
         <Suspense fallback={<div className="page-loading" role="status" aria-label="Loading" />}>{page}</Suspense>
       </main>
       <Toasts />
