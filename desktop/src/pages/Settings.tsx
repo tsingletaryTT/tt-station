@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 // Settings: the desktop app, power, the household, schedules, energy, remote
-// access and the box's software.
+// access, your data and the box's software.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@tenstorrent/vesper/button";
 import { Switch } from "@tenstorrent/vesper/switch";
 import { TextInput } from "@tenstorrent/vesper/text-input";
@@ -12,7 +12,8 @@ import { Select } from "@tenstorrent/vesper/select";
 import { Badge } from "@tenstorrent/vesper/badge";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { useModal, Modal } from "@tenstorrent/vesper/modal";
-import { ago, type AuditEntry, boxName, del, delWith, get, type Mode, patch, type PairedDevice, type Person, post, put, type Schedule } from "../api";
+import { ago, ApiError, type AuditEntry, authHeader, boxName, bytes, del, delWith, get, type Mode, patch, type PairedDevice, type Person, post, put, type Schedule, upload } from "../api";
+import { changesSomething, type DataSettings, describePreview, exportFileName, type ImportPreview, RETENTION_CHOICES, retentionDays, retentionValue } from "../yourdata";
 import { OWNER_ONLY, useOwner } from "../role";
 import { ThemeSwitcher } from "@tenstorrent/vesper/theme-switcher";
 import { Card, copyText, Empty, Eyebrow, Page, readable, Spark, toastError, toastOk, usePoll } from "../ui";
@@ -22,13 +23,14 @@ import { DevToolsSetting } from "../DevToolsSetting";
 import { deleteWithUndo, UNDO_MS } from "../undo";
 import { addToast } from "@tenstorrent/vesper/toast";
 
-type Section = "general" | "tori" | "models" | "power" | "people" | "phone" | "about";
+type Section = "general" | "tori" | "models" | "power" | "people" | "data" | "phone" | "about";
 const SECTIONS: { id: Section; label: string; hint: string }[] = [
   { id: "general", label: "General", hint: "This app, start at login, keys" },
   { id: "tori", label: "Assistant (Tori) and voice", hint: "Shortcut, voice, speed" },
   { id: "models", label: "Models", hint: "Which models the box uses" },
   { id: "power", label: "Power and energy", hint: "Power, schedules, energy use" },
   { id: "people", label: "People", hint: "You and your household" },
+  { id: "data", label: "Your data", hint: "Recordings, how long things are kept, export and import" },
   { id: "phone", label: "Pairing and security", hint: "Devices, phones, other computers, SSH keys, encryption, activity" },
   { id: "about", label: "About", hint: "Software on the box" },
 ];
@@ -58,8 +60,9 @@ export function Settings() {
           {section === "general" && <Desktop />}
           {section === "tori" && <><ToriCard /><Voice /></>}
           {section === "models" && <ModelPrefs />}
-          {section === "power" && <><Power /><IdleCard /><Schedules /><Energy /></>}
+          {section === "power" && <><Power /><IdleCard /><AfterPowerCut /><Schedules /><Energy /></>}
           {section === "people" && <Household />}
+          {section === "data" && <YourData />}
           {section === "phone" && <Phone />}
           {section === "about" && <><Updates /><Software /></>}
         </div>
@@ -708,6 +711,130 @@ function IdleCard() {
       ) : mins != null && mins >= 1 ? (
         <span className="muted" style={{ fontSize: 12 }}>The model's been idle for {mins} min.</span>
       ) : null}
+    </Card>
+  );
+}
+
+type DataSettingsReply = { settings: DataSettings; owner: boolean };
+
+/** The household's data settings, shared by the cards that change them. */
+function useDataSettings() {
+  const data = usePoll(() => get<DataSettingsReply>("/data/settings"), 60000);
+  const save = async (next: Partial<DataSettings>, said = "Saved.") => {
+    try { await put("/data/settings", next); void data.refresh(); toastOk(said); } catch (e) { toastError(e); }
+  };
+  return { settings: data.data?.settings, owner: data.data?.owner !== false, save };
+}
+
+/**
+ * Your data (owners change it): what happens to recordings and transcripts,
+ * how long the box keeps them, and taking everything to another box.
+ */
+function YourData() {
+  const { settings: s, owner, save } = useDataSettings();
+  const [busy, setBusy] = useState<"export" | "import" | null>(null);
+  const picker = useRef<HTMLInputElement>(null);
+
+  const exportAll = async () => {
+    setBusy("export");
+    try {
+      const res = await fetch("/export", { method: "POST", headers: authHeader() });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        throw new ApiError(res.status, body?.error ?? res.statusText);
+      }
+      const blob = await res.blob();
+      const name = exportFileName(res.headers.get("content-disposition"));
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      toastOk(`Saved ${name} (${bytes(blob.size)}). Keep it somewhere private: it has your transcripts, reports and memories.`);
+    } catch (e) { toastError(e); } finally { setBusy(null); }
+  };
+
+  const importFile = async (file: File) => {
+    setBusy("import");
+    try {
+      const { preview } = await upload<{ preview: ImportPreview }>("/import?dry_run=true", file);
+      if (!changesSomething(preview)) { toastOk(describePreview(preview)); return; }
+      const sure = await ask(`Import ${file.name}?`, {
+        body: `${describePreview(preview)} Nothing on this box is deleted.`,
+        confirm: "Import",
+      });
+      if (!sure) return;
+      const done = await upload<{ preview: ImportPreview }>("/import", file);
+      toastOk(`Imported. ${describePreview(done.preview)}`);
+    } catch (e) { toastError(e); } finally {
+      setBusy(null);
+      if (picker.current) picker.current.value = "";
+    }
+  };
+
+  if (!s) return null;
+  return (
+    <>
+      <Card>
+        <Eyebrow>Recordings and transcripts</Eyebrow>
+        <div className="row-between" style={{ gap: 12 }}>
+          <div className="stack" style={{ gap: 2 }}>
+            <span>Keep recordings after they're transcribed</span>
+            <span className="muted" style={{ fontSize: 12 }}>Off: the audio is deleted once the transcript is ready. Someone can still keep one when they upload it.</span>
+          </div>
+          <Switch checked={s.keep_audio} disabled={!owner} aria-label="Keep recordings" onChange={(e) => save({ keep_audio: e.target.checked })} />
+        </div>
+        <div className="row-between" style={{ gap: 12 }}>
+          <div className="stack" style={{ gap: 2 }}>
+            <span>Add transcripts to the Library</span>
+            <span className="muted" style={{ fontSize: 12 }}>The Library is shared: everyone on the box, and the assistant, can search it. Off: a transcript goes there only when whoever made it asks.</span>
+          </div>
+          <Switch checked={s.transcripts_to_library} disabled={!owner} aria-label="Add transcripts to the Library" onChange={(e) => save({ transcripts_to_library: e.target.checked })} />
+        </div>
+        <div className="row-between" style={{ gap: 12 }}>
+          <div className="stack" style={{ gap: 2 }}>
+            <span>Delete transcripts and research reports after</span>
+            <span className="muted" style={{ fontSize: 12 }}>Counted from when each one finished. Anything still running is never deleted.</span>
+          </div>
+          <Select size="sm" value={retentionValue(s.retention_days)} disabled={!owner} aria-label="Delete after" options={RETENTION_CHOICES}
+            onValueChange={(v) => v && save({ retention_days: retentionDays(v) }, v === "keep" ? "Kept until you delete them." : "Saved. Older ones go within the hour.")} />
+        </div>
+        <Typography variant="copy-xs" className="muted">People see their own transcripts and the ones shared with them; owners see all of them.</Typography>
+        {!owner && <Typography variant="copy-xs" className="muted">{OWNER_ONLY}</Typography>}
+      </Card>
+      <Card>
+        <Eyebrow>Take your data with you</Eyebrow>
+        <Typography variant="copy-sm" className="muted">
+          One file with your research reports, transcripts (and recordings you kept), memories, people, routines, schedules, settings, model check-ups, Code sessions' details and image prompts. It never includes passwords, keys or the box's pairings, so devices pair again on a new box.
+        </Typography>
+        <div className="row" style={{ gap: 8 }}>
+          <Button size="sm" disabled={!owner || busy !== null} onClick={exportAll}>{busy === "export" ? "Exporting…" : "Export"}</Button>
+          <Button size="sm" variant="subtle" disabled={!owner || busy !== null} onClick={() => picker.current?.click()}>{busy === "import" ? "Importing…" : "Import…"}</Button>
+          <input ref={picker} type="file" accept=".tar.gz,.tgz,application/gzip" hidden aria-label="Export file to import"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) void importFile(f); }} />
+        </div>
+        <Typography variant="copy-xs" className="muted">Importing shows what it would add or replace first. It adds to what's here and replaces only things with the same name.</Typography>
+        {!owner && <Typography variant="copy-xs" className="muted">{OWNER_ONLY}</Typography>}
+      </Card>
+    </>
+  );
+}
+
+/** After a power cut: start the model that was serving again (owners). */
+function AfterPowerCut() {
+  const { settings: s, owner, save } = useDataSettings();
+  if (!s) return null;
+  return (
+    <Card>
+      <Eyebrow>After a power cut</Eyebrow>
+      <div className="row-between" style={{ gap: 12 }}>
+        <div className="stack" style={{ gap: 2 }}>
+          <span>Start the last model when the box boots</span>
+          <span className="muted" style={{ fontSize: 12 }}>Only if it was serving when the box went down. A model someone stopped stays stopped.</span>
+        </div>
+        <Switch checked={s.restart_last_model} disabled={!owner} aria-label="Start the last model when the box boots" onChange={(e) => save({ restart_last_model: e.target.checked })} />
+      </div>
+      {!owner && <Typography variant="copy-xs" className="muted">{OWNER_ONLY}</Typography>}
     </Card>
   );
 }
