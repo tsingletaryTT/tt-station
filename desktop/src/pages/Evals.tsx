@@ -14,6 +14,7 @@ import { Admonition } from "@tenstorrent/vesper/admonition";
 import { Icon } from "@tenstorrent/vesper/icons";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { Sheet, useSheet } from "@tenstorrent/vesper/sheet";
+import { Switch } from "@tenstorrent/vesper/switch";
 import { ago, del, get, post } from "../api";
 import { Card, Empty, Eyebrow, toastError, usePoll } from "../ui";
 import { ask } from "../dialog";
@@ -96,6 +97,8 @@ export function Evals() {
   const d = data.data;
   const sheet = useSheet();
   const [open, setOpen] = useState<Eval | null>(null);
+  // Long Code sessions: the slow part, and only worth it when choosing a model for Code.
+  const [withAgent, setWithAgent] = useState(false);
   const running = d?.running?.status === "running" ? d.running : null;
 
   // The latest finished check-up of each model, best first.
@@ -111,7 +114,7 @@ export function Evals() {
   const failed = (d?.evals ?? []).find((e) => e.status !== "done");
 
   const start = async () => {
-    try { await post("/evals"); void data.refresh(); } catch (e) { toastError(e); }
+    try { await post("/evals", { agent: withAgent }); void data.refresh(); } catch (e) { toastError(e); }
   };
   const stop = async () => { try { await post("/evals/stop"); } catch (e) { toastError(e); } };
   const remove = async (e: Eval) => {
@@ -126,15 +129,18 @@ export function Evals() {
         <div className="stack" style={{ gap: 4, minWidth: 0 }}>
           <Typography variant="heading-xs">Model check-ups</Typography>
           <span className="muted" style={{ fontSize: 13 }}>
-            Graded tests of what the box uses a model for: tool use, writing code that passes tests, reasoning, following instructions, finding facts in long documents, and making clean tool calls deep into long Code sessions (which sets where Code compacts), plus its speed. Takes about 15 minutes, most of it the long sessions.
+            Graded tests of what the box uses a model for: tool use, writing code that passes tests, reasoning, following instructions, finding facts in long documents, plus its speed. Takes a few minutes. Add agent reliability to also test clean tool calls deep into long Code sessions, which sets where Code compacts; that adds about 15 minutes.
           </span>
         </div>
         {running ? (
           <Button variant="subtle" onClick={stop}>Stop</Button>
         ) : (
-          <Button disabled={!d?.serving} onClick={start} title={d?.serving ? undefined : "Start a chat model first"}>
-            {d?.serving ? `Check up on ${short(d.serving)}` : "Nothing is serving"}
-          </Button>
+          <div className="stack" style={{ gap: 8, alignItems: "flex-end" }}>
+            <Button disabled={!d?.serving} onClick={start} title={d?.serving ? undefined : "Start a chat model first"}>
+              {d?.serving ? `Check up on ${short(d.serving)}` : "Nothing is serving"}
+            </Button>
+            <Switch label="Agent reliability (+15 min)" checked={withAgent} onChange={(e) => setWithAgent(e.target.checked)} />
+          </div>
         )}
       </Card>
 

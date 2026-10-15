@@ -597,8 +597,9 @@ async fn long_context(m: &Model, context: Option<u64>) -> Category {
 
 // ---------------------------------------------------------------- the run
 
-/// Evaluates what's serving now. Takes a few minutes; one at a time.
-pub async fn run(state: &AppState) -> Result<Eval, String> {
+/// Evaluates what's serving now. Takes a few minutes; one at a time. Agent
+/// reliability (long Code sessions, about 15 minutes more) only when asked.
+pub async fn run(state: &AppState, agent: bool) -> Result<Eval, String> {
     let ep = state.endpoint().ok_or("Nothing is serving. Start a chat model, then evaluate it.")?;
     let context = served_context(state).await;
     let id = new_id();
@@ -615,7 +616,7 @@ pub async fn run(state: &AppState) -> Result<Eval, String> {
         url: crate::assistant::chat_completions_url(&ep.base_url),
         model: ep.model.clone(),
     });
-    let result = steps(state, &m, &ep.base_url, context).await;
+    let result = steps(state, &m, &ep.base_url, context, agent).await;
     let mut e = CURRENT.lock().expect("evals").take().unwrap_or_default();
     e.finished = Some(now());
     e.activity = None;
@@ -640,7 +641,7 @@ fn overall(categories: &[Category]) -> Option<f64> {
     (!scored.is_empty()).then(|| scored.iter().map(|c| c.score()).sum::<f64>() / scored.len() as f64)
 }
 
-async fn steps(state: &AppState, m: &Arc<Model>, base_url: &str, context: Option<u64>) -> Result<(), String> {
+async fn steps(state: &AppState, m: &Arc<Model>, base_url: &str, context: Option<u64>, agent: bool) -> Result<(), String> {
     let stop = || if STOP.load(Ordering::SeqCst) { Err("Stopped.".to_string()) } else { Ok(()) };
     match crate::bench::run(state).await {
         Ok(b) => progress(|e| e.speed = Speed { ttft_s: b.ttft_s, single_tps: b.single_tps, batch_tps: b.batch_tps, wh_per_million_tokens: b.wh_per_million_tokens }),
@@ -661,6 +662,9 @@ async fn steps(state: &AppState, m: &Arc<Model>, base_url: &str, context: Option
             _ => long_context(m, context).await,
         };
         progress(|e| e.categories.push(c));
+    }
+    if !agent {
+        return Ok(());
     }
     stop()?;
     progress(|e| e.activity = Some("Testing agent reliability".into()));
@@ -800,7 +804,9 @@ pub(crate) async fn get_evals(State(state): State<AppState>, _auth: BearerAuth) 
 }
 
 /// `POST /evals`: evaluate what's serving (in the background).
-pub(crate) async fn post_eval(State(state): State<AppState>, _auth: BearerAuth) -> Reply {
+/// `POST /evals` (`{"agent": true}` adds agent reliability).
+pub(crate) async fn post_eval(State(state): State<AppState>, _auth: BearerAuth, body: Option<Json<Value>>) -> Reply {
+    let agent = body.is_some_and(|Json(b)| b["agent"] == true);
     if state.endpoint().is_none() {
         return Err(err(StatusCode::CONFLICT, "Nothing is serving. Start a chat model, then evaluate it."));
     }
@@ -809,7 +815,7 @@ pub(crate) async fn post_eval(State(state): State<AppState>, _auth: BearerAuth) 
     }
     let st = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = run(&st).await {
+        if let Err(e) = run(&st, agent).await {
             eprintln!("tt-station-agentd: evaluation: {e}");
         }
     });

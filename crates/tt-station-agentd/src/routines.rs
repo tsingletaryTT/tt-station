@@ -372,7 +372,7 @@ async fn run_tool(state: &AppState, run_id: &str, name: &str, args: &Value) -> (
         "ask_model" => ask_model(state, args).await,
         "evaluate_model" => {
             set_activity(state, run_id, "Evaluating the model");
-            match crate::evals::run(state).await {
+            match crate::evals::run(state, false).await {
                 Ok(e) if e.status == "done" => (true, json!({ "summary": crate::evals::headline(&e), "overall_percent": e.overall.map(|o| (o * 100.0).round()), "speed": e.speed, "context": e.context }).to_string()),
                 Ok(e) => (false, format!("The evaluation didn't finish: {}", e.error.unwrap_or_default())),
                 Err(e) => (false, e),
