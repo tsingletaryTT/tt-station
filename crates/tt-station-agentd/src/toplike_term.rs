@@ -141,7 +141,9 @@ async fn run(mut socket: WebSocket, bin: String, port: u16, mode: &'static str, 
             if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            Ok(())
+            // It only exists for this connection: gone with the agent, not
+            // left behind by a restart (see `crate::scope`).
+            crate::scope::die_with_parent()
         });
     }
     let mut child = match cmd.spawn() {

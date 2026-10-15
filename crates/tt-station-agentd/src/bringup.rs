@@ -458,13 +458,11 @@ fn runs_path(state: &AppState) -> PathBuf {
 }
 
 fn load_runs(state: &AppState) -> Vec<CodexRun> {
-    std::fs::read(runs_path(state)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    crate::fsio::read_json_or_backup(&runs_path(state)).unwrap_or_default()
 }
 
 fn save_runs(state: &AppState, runs: &[CodexRun]) {
-    let path = runs_path(state);
-    let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
-    let _ = std::fs::write(path, serde_json::to_vec_pretty(runs).unwrap_or_default());
+    crate::fsio::save_json(&runs_path(state), runs, crate::fsio::PRIVATE);
 }
 
 fn unit_active(unit: &str) -> bool {

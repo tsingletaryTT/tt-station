@@ -124,11 +124,11 @@ pub(crate) fn exists(state: &AppState, id: &str) -> bool {
 }
 
 fn load(state: &AppState, id: &str) -> Option<Session> {
-    std::fs::read(dir(state, id).join("session.json")).ok().and_then(|b| serde_json::from_slice(&b).ok())
+    crate::fsio::read_json_or_backup(&dir(state, id).join("session.json"))
 }
 
 fn save(state: &AppState, s: &Session) {
-    let _ = std::fs::write(dir(state, &s.id).join("session.json"), serde_json::to_vec_pretty(s).unwrap_or_default());
+    crate::fsio::save_json(&dir(state, &s.id).join("session.json"), s, crate::fsio::PRIVATE);
 }
 
 /// Changes a session on disk under one lock: two writers (an approval's "Always"

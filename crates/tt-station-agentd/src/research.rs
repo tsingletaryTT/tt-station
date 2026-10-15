@@ -131,14 +131,12 @@ fn valid_id(id: &str) -> bool {
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
-    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok())
+    crate::fsio::read_json_or_backup(path)
 }
 
+/// Research is about the person's own questions and files: owner-only.
 fn write_json<T: Serialize>(path: &Path, v: &T) {
-    let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, serde_json::to_vec_pretty(v).unwrap_or_default()).is_ok() {
-        let _ = std::fs::rename(tmp, path);
-    }
+    crate::fsio::save_json(path, v, crate::fsio::PRIVATE);
 }
 
 fn load_job(state: &AppState, id: &str) -> Option<Job> {
@@ -157,7 +155,11 @@ fn sources(state: &AppState, id: &str) -> Vec<Source> {
 fn event(state: &AppState, id: &str, kind: &str, text: impl Into<String>) {
     use std::io::Write;
     let line = json!({ "ts": now(), "kind": kind, "text": text.into() }).to_string();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir(state, id).join("events.jsonl")) {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    if let Ok(mut f) = opts.open(dir(state, id).join("events.jsonl")) {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -594,7 +596,8 @@ async fn run(state: &AppState, job: &mut Job) -> Result<(), String> {
         list.push_str(&format!("{}. [{}]({})\n", s.n, s.title.clone().unwrap_or_else(|| s.url.clone()).replace(['[', ']'], ""), s.url));
     }
     report.push_str(&list);
-    std::fs::write(folder.join("report.md"), &report).map_err(|e| e.to_string())?;
+    crate::fsio::write_atomic(&folder.join("report.md"), report.as_bytes(), crate::fsio::PRIVATE)
+        .map_err(|e| e.to_string())?;
     write_json(&folder.join("cited.json"), &cited);
     job.summary = summary_of(&report);
     save_job(state, job);
@@ -677,7 +680,7 @@ pub async fn start(state: &AppState, body: StartBody) -> Result<Job, (StatusCode
         return Err(err(StatusCode::CONFLICT, c["why"].as_str().unwrap_or("The box isn't ready for research.").to_string()));
     }
     let id = format!("{}-{}", now(), &crate::pairing::issue_pair_id()[..6]);
-    std::fs::create_dir_all(dir(state, &id)).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::fsio::ensure_private_dir(&dir(state, &id)).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let job = Job {
         id: id.clone(),
         question,

@@ -112,3 +112,45 @@ async fn status_reports_mac_when_set() {
     let body: serde_json::Value = resp.json().await.expect("response was not valid JSON");
     assert_eq!(body["mac"], "aa:bb:cc:dd:ee:ff");
 }
+
+/// `GET /healthz`: unauthenticated, minimal -- `ok` while the config dir is
+/// readable, `503` when it isn't -- and `/status` carries the versions a
+/// client compares against.
+#[tokio::test]
+async fn healthz_is_minimal_and_status_carries_versions() {
+    async fn serve(state: AppState) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let router = app(state);
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        base
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ok = serve(
+        AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+            .with_config_dir(dir.path().to_path_buf()),
+    )
+    .await;
+    let r = reqwest::get(format!("{ok}/healthz")).await.unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::OK);
+    assert_eq!(r.text().await.unwrap(), "ok");
+
+    let status: serde_json::Value = reqwest::get(format!("{ok}/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["agent_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(status["api_version"], 1);
+    assert!(status["min_client"].as_u64().unwrap() <= 1);
+    assert_eq!(status["model_health"]["state"], "unknown");
+
+    let broken = serve(
+        AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+            .with_config_dir(dir.path().join("missing")),
+    )
+    .await;
+    let r = reqwest::get(format!("{broken}/healthz")).await.unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+}

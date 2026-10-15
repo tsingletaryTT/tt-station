@@ -493,6 +493,8 @@ pub async fn gather(state: &AppState) -> Facts {
         since,
     ));
     let serving_reachable = match (life.phase, state.endpoint()) {
+        // Up, but the liveness watcher's one-token checks keep missing.
+        (Phase::Serving, Some(_)) if state.liveness().is_degraded() => Some(false),
         (Phase::Serving, Some(endpoint)) => {
             let base = endpoint
                 .base_url

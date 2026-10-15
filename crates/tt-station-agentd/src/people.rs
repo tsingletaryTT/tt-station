@@ -71,10 +71,7 @@ impl People {
 
     pub fn open(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let book = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let book = crate::fsio::read_json_or_backup(&path).unwrap_or_default();
         People {
             path: Some(path),
             book: Mutex::new(book),
@@ -83,15 +80,8 @@ impl People {
 
     fn save(&self, book: &Book) {
         let Some(path) = &self.path else { return };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(bytes) = serde_json::to_vec_pretty(book) {
-            let tmp = path.with_extension("tmp");
-            if std::fs::write(&tmp, bytes).is_ok() {
-                let _ = std::fs::rename(tmp, path);
-            }
-        }
+        // Who may use the box, and how: the owner's eyes only.
+        crate::fsio::save_json(path, book, crate::fsio::PRIVATE);
     }
 
     pub fn list(&self) -> Vec<Person> {
@@ -335,6 +325,18 @@ pub(crate) async fn delete_person(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_book_is_saved_owner_only_and_reloads() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("people.json");
+        let ana = People::open(&path).add("Ana").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(People::open(&path).get(&ana.id), Some(ana));
+    }
 
     #[test]
     fn phones_belong_to_people_by_digest() {

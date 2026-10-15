@@ -263,8 +263,7 @@ impl Jobs {
         let mut jobs: Vec<Job> = std::fs::read_dir(&dir)
             .map(|it| {
                 it.flatten()
-                    .filter_map(|e| std::fs::read(e.path().join("job.json")).ok())
-                    .filter_map(|b| serde_json::from_slice(&b).ok())
+                    .filter_map(|e| crate::fsio::read_json_or_backup(&e.path().join("job.json")))
                     .collect()
             })
             .unwrap_or_default();
@@ -306,11 +305,7 @@ impl Jobs {
     }
 
     fn save(&self, job: &Job) {
-        let dir = self.job_dir(&job.id);
-        let _ = std::fs::create_dir_all(&dir);
-        if let Ok(bytes) = serde_json::to_vec_pretty(job) {
-            let _ = std::fs::write(dir.join("job.json"), bytes);
-        }
+        crate::fsio::save_json(&self.job_dir(&job.id).join("job.json"), job, crate::fsio::PRIVATE);
     }
 
     pub fn update(&self, id: &str, change: impl FnOnce(&mut Job)) -> Option<Job> {
@@ -753,7 +748,11 @@ async fn transcribe(state: &AppState, jobs: &Jobs, job: Job, base: &str) {
                 segments.extend(segments_from_whisper(&value, offset, piece.length));
                 jobs.update(&job.id, |j| j.done = i as u32 + 1);
                 // Keep partial results, so a long job shows progress.
-                let _ = tokio::fs::write(dir.join("transcript.txt"), to_text(&segments)).await;
+                let (path, partial) = (dir.join("transcript.txt"), to_text(&segments));
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::fsio::write_atomic(&path, partial.as_bytes(), crate::fsio::PRIVATE)
+                })
+                .await;
             }
             Err(e) => {
                 jobs.update(&job.id, |j| {
@@ -767,15 +766,19 @@ async fn transcribe(state: &AppState, jobs: &Jobs, job: Job, base: &str) {
     }
     let _ = std::fs::remove_dir_all(&chunk_dir);
     let text = to_text(&segments);
-    let _ = tokio::fs::write(dir.join("transcript.txt"), &text).await;
-    let _ = tokio::fs::write(dir.join("transcript.srt"), to_srt(&segments)).await;
-    let _ = tokio::fs::write(
-        dir.join("transcript.json"),
-        serde_json::to_vec_pretty(
-            &json!({ "title": job.title, "duration_s": length, "segments": segments }),
-        )
-        .unwrap_or_default(),
+    // What was said in a meeting: readable by the box's user only.
+    let transcript_json = serde_json::to_vec_pretty(
+        &json!({ "title": job.title, "duration_s": length, "segments": segments }),
     )
+    .unwrap_or_default();
+    let (srt, folder) = (to_srt(&segments), dir.clone());
+    let text_copy = text.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        use crate::fsio::{write_atomic, PRIVATE};
+        let _ = write_atomic(&folder.join("transcript.txt"), text_copy.as_bytes(), PRIVATE);
+        let _ = write_atomic(&folder.join("transcript.srt"), srt.as_bytes(), PRIVATE);
+        let _ = write_atomic(&folder.join("transcript.json"), &transcript_json, PRIVATE);
+    })
     .await;
     if job.to_documents && !text.is_empty() {
         if let Some(docs) = state.docs() {

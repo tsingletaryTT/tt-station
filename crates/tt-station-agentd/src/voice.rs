@@ -113,10 +113,7 @@ fn settings_path(state: &AppState) -> std::path::PathBuf {
 }
 
 pub fn settings(state: &AppState) -> Settings {
-    std::fs::read(settings_path(state))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    crate::fsio::read_json_or_backup(&settings_path(state)).unwrap_or_default()
 }
 
 fn docker_state(container: &str) -> String {
@@ -430,8 +427,7 @@ pub(crate) async fn put_voice(
     if let Some(speed) = body.speed {
         s.speed = speed.clamp(0.5, 2.0);
     }
-    let bytes = serde_json::to_vec_pretty(&s).unwrap_or_default();
-    std::fs::write(settings_path(&state), bytes)
+    crate::fsio::write_json(&settings_path(&state), &s, crate::fsio::PRIVATE)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(s))
 }
@@ -792,8 +788,17 @@ pub(crate) async fn post_say(
         .await
         .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "The box's voice isn't running."))?;
     let audio = res.bytes().await.map_err(|e| err(StatusCode::BAD_GATEWAY, e.to_string()))?;
-    let path = std::env::temp_dir().join(format!("tt-say-{}.wav", std::process::id()));
-    tokio::fs::write(&path, &audio).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // A private, unguessable file (not `/tmp/tt-say-<pid>.wav`, which anyone
+    // on the box could create first, or swap for a symlink).
+    let path = tokio::task::spawn_blocking(move || -> std::io::Result<std::path::PathBuf> {
+        use std::io::Write;
+        let (mut f, path) = crate::fsio::private_temp_file("tt-say-", ".wav")?;
+        f.write_all(&audio)?;
+        Ok(path)
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let path2 = path.clone();
     let played = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let mut child = Command::new("pw-play")

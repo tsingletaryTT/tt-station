@@ -53,3 +53,28 @@ certificate's SHA-256) and then talks only HTTPS. QR pairing refuses if the netw
 answer doesn't match the QR. Phones paired earlier upgrade once via `GET /tls` (trust on
 first use, like pairing) after proving the pinned connection works. Plain HTTP stays for
 discovery, telemetry and older clients.
+
+## Model health (`crate::liveness`, `/status` `model_health`)
+
+Every 45 s the agent asks the served chat model for one token (20 s deadline), unless the
+metrics recorder saw it generating in the last interval (so a busy model gets no extra
+load). Three misses in a row (timeout, refused connection, 5xx) make
+`model_health.state` `degraded` with a `reason` and `restart: "/doctor/fix/restart_model"`;
+the next answer makes it `ok`. `status` stays `serving:<id>`; `GET /serve` adds `health`.
+Nothing restarts on its own. Docker's healthcheck is ignored: the tt-inference-server
+image checks `127.0.0.1:8000/health`, which isn't where the box serves (gpt-oss: 8003),
+so such containers show `unhealthy` while answering normally.
+
+## Agent health and versions (`GET /healthz`, `/status`)
+
+`GET /healthz` (no auth): `200 ok` while the agent answers and its config dir is readable,
+else `503`; no other detail. `/status` carries `agent_version`, `api_version` and
+`min_client` (the oldest client `api_version` still served) for apps to compare.
+
+## Docker logs (`deploy/box-care.sh --docker-log-rotation`)
+
+Opt-in: merges json-file rotation (`max-size 50m`, `max-file 3`) into
+`/etc/docker/daemon.json` (backup kept) and **restarts Docker, which stops every running
+container, the served model included**. Run it when the box is idle; `--dry-run` prints
+the result. Only containers created afterwards get the cap. Model downloads check free
+space first and refuse with how much is needed vs free.
