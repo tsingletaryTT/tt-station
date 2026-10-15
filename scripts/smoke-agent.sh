@@ -67,5 +67,11 @@ echo "smoke: GET /healthz 200"
 status="$(code /status)"
 [ "$status" = 200 ] || fail "GET /status answered $status"
 echo "smoke: GET /status 200"
+# SMOKE_APP=1 (the .deb test): the packaged app must be served too.
+if [ "${SMOKE_APP:-0}" = 1 ]; then
+    app="$(code /app/)"
+    [ "$app" = 200 ] || fail "GET /app/ answered $app (is the app in the package?)"
+    echo "smoke: GET /app/ 200"
+fi
 kill -0 "$PID" 2>/dev/null || fail "the agent exited right after answering"
 echo "smoke: OK"

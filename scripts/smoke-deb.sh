@@ -35,9 +35,10 @@ docker run --rm \
         test -x /usr/bin/tt-station
         test -f /usr/lib/systemd/user/tt-station-agentd.service
         grep -q "^ExecStart=/usr/bin/tt-station-agentd" /usr/lib/systemd/user/tt-station-agentd.service
+        test -f /usr/share/tt-station/app/index.html
         tt-station-agentd --help >/dev/null
         echo "== smoke-testing the installed agent"
-        bash /smoke-agent.sh /usr/bin/tt-station-agentd
+        SMOKE_APP=1 bash /smoke-agent.sh /usr/bin/tt-station-agentd
         for panel in /tmp/tt-station-panel_*.deb; do
             [ -e "$panel" ] || continue
             echo "== checking $(basename "$panel") would install"

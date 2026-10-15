@@ -31,6 +31,14 @@ for cmd in cargo dpkg-buildpackage dh; do
     fi
 done
 
+# The app the agent serves at /app goes into the package (debian/rules installs
+# desktop/dist); the package build itself is offline, so build it here first.
+if ! command -v npm &>/dev/null; then
+    echo "ERROR: 'npm' (Node 22) not found; it builds the app that goes in the package."
+    exit 1
+fi
+(cd desktop && npm ci --no-audit --no-fund && npm run build)
+
 echo "╔══════════════════════════════════════════"
 echo "║  tt-station Debian package builder"
 echo "╚══════════════════════════════════════════"

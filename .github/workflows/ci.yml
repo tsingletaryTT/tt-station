@@ -105,6 +105,10 @@ jobs:
         run: |
           rustup toolchain install || rustup show
           rustup show active-toolchain
+      # build-deb.sh builds the app that goes in the package.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       # The same script the Release workflow builds with.
       - name: Build .deb packages
         run: ./build-deb.sh

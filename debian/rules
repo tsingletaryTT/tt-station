@@ -56,6 +56,12 @@ override_dh_auto_install:
 	install -d debian/tt-station/usr/share/doc/tt-station
 	install -m 644 README.md \
 	    debian/tt-station/usr/share/doc/tt-station/README.md
+	# The app the agent serves at /app (app_ui.rs looks in /usr/share/tt-station/app).
+	# Built before packaging by build-deb.sh, since the package build is offline;
+	# a package without it would install a box with no app, so that's an error.
+	test -f desktop/dist/index.html || { echo "desktop/dist is missing: build the app first (build-deb.sh does)" >&2; exit 1; }
+	install -d debian/tt-station/usr/share/tt-station/app
+	cp -r desktop/dist/. debian/tt-station/usr/share/tt-station/app/
 	# ── tt-station-panel (GTK on-box GUI) ──
 	install -d debian/tt-station-panel/usr/share/tt-station-panel
 	install -m 755 box-panel/tt-station-panel.py \

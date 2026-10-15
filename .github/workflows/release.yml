@@ -51,6 +51,11 @@ jobs:
         if: matrix.suite != 'noble'
         run: sed -i "1s/) noble;/) ${{ matrix.suite }};/" debian/changelog
 
+      # build-deb.sh builds the app that goes in the package.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Build .deb packages
         run: ./build-deb.sh
 

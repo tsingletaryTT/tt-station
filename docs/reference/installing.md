@@ -57,9 +57,9 @@ Then smoke-test the exact binary before going further:
 scripts/smoke-agent.sh debian/target/release/tt-station-agentd   # port 18765; the live agent is untouched
 ```
 
-Known gap: the package doesn't ship the web app (`/usr/share/tt-station/app`).
-If phones/desktop use `/app` on this box, point the packaged agent at a built
-copy in step 3 (`TT_STATION_APP_DIR`).
+The package ships the app the agent serves at `/app` (in
+`/usr/share/tt-station/app`); `build-deb.sh` builds it first, so building a
+package needs Node 22 as well as Rust.
 
 ### 1. Back up
 
@@ -107,8 +107,6 @@ of your own (the updater only ever writes `50-version.conf`):
 ```bash
 mkdir -p ~/.config/systemd/user/tt-station-agentd.service.d
 { echo '[Service]'; grep '^Environment=PATH=' "$B/tt-station-agentd.service"
-  # only if /app is used and the package doesn't ship it:
-  echo 'Environment=TT_STATION_APP_DIR=%h/code/tt-station/desktop/dist'
 } > ~/.config/systemd/user/tt-station-agentd.service.d/10-local.conf
 systemctl --user daemon-reload
 systemctl --user cat tt-station-agentd    # ExecStart=/usr/bin/tt-station-agentd, your PATH
