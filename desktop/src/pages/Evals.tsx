@@ -23,8 +23,10 @@ import { navigate } from "../App";
 interface Case { name: string; ok: boolean; detail: string; seconds: number }
 interface Category { key: string; label: string; passed: number; total: number; cases: Case[] }
 interface Speed { ttft_s: number | null; single_tps: number | null; batch_tps: number | null; wh_per_million_tokens: number | null }
-interface ReliabilityRow { target: number; prompt_tokens: number | null; trials: number; valid: number; leaked: number; invented: number; invalid_args: number; no_call: number; errors: number; salvaged: number; valid_rate: number; ci_low: number; ci_high: number; median_s: number | null }
-interface Reliability { rows: ReliabilityRow[]; recommended_window: number | null; rule: string; histories: number; tasks: number }
+interface ReliabilityRow { target: number; prompt_tokens: number | null; trials: number; valid: number; leaked: number; invented: number; invalid_args: number; no_call: number; errors: number; salvaged: number; valid_rate: number; ci_low: number; ci_high: number; median_s: number | null;
+  repaired?: number; within_1_retry?: number; within_2_retries?: number; recovered_rate?: number }
+// `retries` is 0 (or missing) for runs from before recovery was measured.
+interface Reliability { rows: ReliabilityRow[]; recommended_window: number | null; rule: string; histories: number; tasks: number; retries?: number }
 interface Eval { id: string; model: string; started: number; finished: number | null; status: string; context: number | null; speed: Speed; categories: Category[]; overall: number | null; activity: string | null; error: string | null; reliability?: Reliability | null }
 interface Pick { use_for: string; model: string; why: string }
 interface Data { evals: Eval[]; running: Eval | null; recommendations: Pick[]; serving: string | null }
@@ -39,6 +41,8 @@ const pct = (x: number) => `${Math.round(x * 100)}%`;
 /** Valid tool calls per session size, and the compaction window they set. */
 function ReliabilityView({ r }: { r: Reliability }) {
   const share = (k: number, n: number) => (n ? pct(k / n) : "–");
+  const recovery = (r.retries ?? 0) > 0;
+  const grade = (x: number) => (x >= 0.95 ? "good" : x >= 0.8 ? "fair" : "poor");
   return (
     <div className="stack" style={{ gap: 8 }}>
       <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
@@ -53,8 +57,11 @@ function ReliabilityView({ r }: { r: Reliability }) {
           <thead>
             <tr>
               <th>Session</th>
-              <th title="Every call names an offered tool, with arguments that fit its schema">Valid</th>
-              <th title="Wilson 95% interval">95% CI</th>
+              <th title="The first reply as the server returned it: every call names an offered tool, with arguments that fit its schema">First reply</th>
+              <th title="Wilson 95% interval of the first-reply rate">95% CI</th>
+              {recovery && <th title="The first reply after the translator salvaged and mended it">After repair</th>}
+              {recovery && <th title="A valid call after the translator, given Claude Code's error back at most once (what the window is set by)">Within 1 retry</th>}
+              {recovery && <th title="Within two retries">Within 2</th>}
               <th title="The call written into the reply text">Leaked</th>
               <th title="A call to a tool that wasn't offered">Invented</th>
               <th title="A known tool, arguments that don't fit">Bad args</th>
@@ -66,8 +73,11 @@ function ReliabilityView({ r }: { r: Reliability }) {
             {r.rows.map((x) => (
               <tr key={x.target}>
                 <td className="mono">{kTokens(x.target)}</td>
-                <td><span className={`eval-score ${x.valid_rate >= 0.95 ? "good" : x.valid_rate >= 0.8 ? "fair" : "poor"}`} title={`${x.valid} of ${x.trials}`}>{pct(x.valid_rate)}</span></td>
+                <td>{recovery ? <span className="mono" title={`${x.valid} of ${x.trials}`}>{pct(x.valid_rate)}</span> : <span className={`eval-score ${grade(x.valid_rate)}`} title={`${x.valid} of ${x.trials}`}>{pct(x.valid_rate)}</span>}</td>
                 <td className="mono muted">{pct(x.ci_low)}–{pct(x.ci_high)}</td>
+                {recovery && <td className="mono">{share(x.repaired ?? 0, x.trials)}</td>}
+                {recovery && <td><span className={`eval-score ${grade(x.recovered_rate ?? 0)}`} title={`${x.within_1_retry ?? 0} of ${x.trials}`}>{pct(x.recovered_rate ?? 0)}</span></td>}
+                {recovery && <td className="mono">{share(x.within_2_retries ?? 0, x.trials)}</td>}
                 <td className="mono">{share(x.leaked, x.trials)}</td>
                 <td className="mono">{share(x.invented, x.trials)}</td>
                 <td className="mono">{share(x.invalid_args, x.trials)}</td>

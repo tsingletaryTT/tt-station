@@ -9,7 +9,8 @@
 //!     --url http://localhost:8003/v1 --histories 8 --tasks 5 --out results.json
 //! ```
 //!
-//! Prints the table and the recommended compaction window; `--out` keeps the
+//! Prints the tables (first replies; recovery through the translator and
+//! retries) and the recommended compaction window; `--out` keeps the
 //! report and every graded request. `--save-eval DIR` also writes it as a
 //! check-up into DIR (the agent's is `~/.config/tt-station/evals`), where Code
 //! sessions on that model pick up its window.
@@ -42,6 +43,9 @@ struct Args {
     concurrency: usize,
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// Times a still-invalid call gets Claude Code's error back and is asked again (1-3).
+    #[arg(long, default_value_t = 2)]
+    retries: usize,
     /// Where to write the report and the graded requests (JSON).
     #[arg(long)]
     out: Option<String>,
@@ -65,14 +69,18 @@ async fn main() -> Result<(), String> {
         tasks: a.tasks,
         concurrency: a.concurrency.clamp(1, 8),
         seed: a.seed,
+        retries: a.retries.clamp(1, 3),
     };
     eprintln!("{model} ({} context): {} sessions x {} tasks per size, {} at once", context.map_or("unknown".into(), |c| format!("{}K", c / 1024)), opts.histories, opts.tasks, opts.concurrency);
     let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let t = std::time::Instant::now();
     let (report, trials) = reliability::run(&server, &opts, &|s| eprintln!("[{:>5.0} s] {s}", t.elapsed().as_secs_f64()), &|| false).await?;
+    let window = |w: Option<u64>| w.map_or("none (no tested size held up)".into(), |w| format!("{w} tokens ({}K)", w / 1024));
     println!("{}", reliability::table(&report));
-    println!("Recommended compaction window: {}", report.recommended_window.map_or("none (no tested size held up)".into(), |w| format!("{w} tokens ({}K)", w / 1024)));
+    println!("{}", reliability::recovery_table(&report));
+    println!("Recommended compaction window: {}", window(report.recommended_window));
     println!("Rule: {}", report.rule);
+    println!("By the earlier first-reply rule: {}", window(report.raw_window));
     eprintln!("{:.0} s in all", t.elapsed().as_secs_f64());
     if let Some(out) = &a.out {
         let v = json!({ "report": report, "trials": trials, "seconds": t.elapsed().as_secs_f64(), "started": started, "url": a.url });
