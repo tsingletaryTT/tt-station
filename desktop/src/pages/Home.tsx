@@ -123,7 +123,8 @@ export function Home() {
             <Stat label="Energy" value={((t?.energy_wh_today ?? 0) / 1000).toFixed(2)} unit="kWh" />
           </div>
           <Typography variant="copy-xs" className="muted">
-            All time: {fmt(t?.tokens_all ?? 0)} tokens, {(t?.requests_all ?? 0).toLocaleString()} requests, {((t?.energy_wh_all ?? 0) / 1000).toFixed(1)} kWh, all on your own hardware.
+            All time: {fmt(t?.tokens_all ?? 0)} tokens and {(t?.requests_all ?? 0).toLocaleString()} requests, all on your own hardware.{" "}
+            <LinkButton onClick={() => navigate("hardware", "energy")}>Energy use and cost</LinkButton>
           </Typography>
         </Card>
       </div>
