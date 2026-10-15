@@ -41,6 +41,9 @@ contextBridge.exposeInMainWorld("ttDesktop", {
   platform: process.platform,
   // Tori's computer tools, run on this computer.
   computer: (tool, args) => ipcRenderer.invoke("computer", tool, args),
+  // Links and apps the person said boxes may always open here, and forgetting them.
+  allowedActions: () => ipcRenderer.invoke("allowed-actions"),
+  forgetAllowedActions: (boxId, one) => ipcRenderer.invoke("forget-allowed-actions", boxId, one),
   onClientRecord: (fn) => ipcRenderer.on("client-record", (_e, req) => fn(req)),
   clientRecordDone: (nonce, result) => ipcRenderer.send(`client-record-done:${nonce}`, result),
 });

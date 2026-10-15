@@ -19,6 +19,7 @@ import { Card, copyText, Empty, Eyebrow, Page, readable, Spark, toastError, toas
 import { Speaker, type VoiceStatus } from "../voice";
 import { ask, askText } from "../dialog";
 import { DevToolsSetting } from "../DevToolsSetting";
+import { AllowedActionsSetting } from "../AllowedActionsSetting";
 import { deleteWithUndo, UNDO_MS } from "../undo";
 import { addToast } from "@tenstorrent/vesper/toast";
 
@@ -94,6 +95,7 @@ function Desktop() {
       )}
       <DevToolsSetting />
       <TokenStorage />
+      <AllowedActionsSetting />
       <div className="list">
         {[["Ctrl 1 – 9", "Jump between places (in sidebar order)"], ["Ctrl Enter", "Make (in Studio)"]].map(([k, v]) => (
           <div key={k} className="list-row"><span className="kbd">{k}</span><span className="muted">{v}</span></div>

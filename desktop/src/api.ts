@@ -41,6 +41,10 @@ declare global {
       platform?: string;
       /** Tori's computer tools, on this computer (Tori on another computer than the device). */
       computer?: (tool: string, args: Record<string, unknown>) => Promise<{ ok: boolean; summary?: string; result?: unknown; error?: string }>;
+      /** Links and apps the person said boxes may always open on this computer (Settings → This app). */
+      allowedActions?: () => Promise<{ boxId: string; name: string; sites: string[]; apps: string[] }[]>;
+      /** Forget them: all (no box), one box's, or one of a box's. Returns what's left. */
+      forgetAllowedActions?: (boxId?: string, one?: { kind: "site" | "app"; key: string }) => Promise<{ boxId: string; name: string; sites: string[]; apps: string[] }[]>;
       /** The menu bar and Tori asking the main window to record (another computer). */
       onClientRecord?: (fn: (req: { nonce: string; action: "start" | "stop"; title?: string }) => void) => void;
       clientRecordDone?: (nonce: string, result: { ok: boolean; summary?: string; error?: string }) => void;
