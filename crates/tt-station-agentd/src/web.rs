@@ -7,9 +7,13 @@
 //!
 //! `read_webpage` refuses addresses on the box's own networks (loopback,
 //! private, link-local): a page or a prompt must not be able to steer the
-//! assistant into the agent's own API or other devices on the LAN.
+//! assistant into the agent's own API or other devices on the LAN. The check
+//! is made where the connection is: the client resolves names through
+//! [`PublicOnly`], so a name that answers with a public address for the
+//! check and a private one for the connection (DNS rebinding) still can't
+//! reach the LAN, and every redirect is checked again.
 
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -139,23 +143,63 @@ pub fn readable_text(html: &str) -> (Option<String>, String) {
     (title, lines.join("\n"))
 }
 
-/// Whether `ip` is on this box's own networks (never fetched).
+/// Whether `ip` is on this box's own networks, or isn't a public unicast
+/// address at all (never fetched).
 pub fn is_private(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || crate::pairqr::is_tailscale(&v4)
-        }
+        IpAddr::V4(v4) => private_v4(v4),
         IpAddr::V6(v6) => {
+            let s = v6.segments();
+            // An IPv4 address written as IPv6 is that IPv4 address:
+            // mapped (::ffff:a.b.c.d), compatible (::a.b.c.d), NAT64 (64:ff9b::a.b.c.d).
+            let embedded = v6.to_ipv4_mapped().or_else(|| (s[..6] == [0; 6]).then(|| v6.to_ipv4()).flatten())
+                .or_else(|| (s[..6] == [0x64, 0xff9b, 0, 0, 0, 0]).then(|| Ipv4Addr::from(((s[6] as u32) << 16) | s[7] as u32)));
+            if let Some(v4) = embedded {
+                return private_v4(v4);
+            }
+            // 6to4 (2002:a.b.c.d::/48) carries one too.
+            if s[0] == 0x2002 && private_v4(Ipv4Addr::from(((s[1] as u32) << 16) | s[2] as u32)) {
+                return true;
+            }
             v6.is_loopback()
                 || v6.is_unspecified()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || v6.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (s[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (s[0] & 0xffc0) == 0xfec0 // site-local fec0::/10 (deprecated, still routed by some)
         }
+    }
+}
+
+fn private_v4(v4: Ipv4Addr) -> bool {
+    let [a, b, ..] = v4.octets();
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_multicast()
+        || a == 0 // 0.0.0.0/8: "this network"
+        || (a == 192 && b == 0 && v4.octets()[2] == 0) // 192.0.0.0/24: protocol assignments
+        || (a == 198 && (b == 18 || b == 19)) // 198.18.0.0/15: benchmarking
+        || a >= 240 // 240.0.0.0/4: reserved
+        || crate::pairqr::is_tailscale(&v4) // 100.64.0.0/10: carrier-grade NAT, Tailscale
+}
+
+/// Name resolution that answers only with public addresses: what the client
+/// connects to is what was checked.
+struct PublicOnly;
+
+impl reqwest::dns::Resolve for PublicOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let found: Vec<SocketAddr> = tokio::net::lookup_host((name.as_str(), 0)).await?.collect();
+            let public: Vec<SocketAddr> = found.iter().copied().filter(|a| !is_private(a.ip())).collect();
+            if public.is_empty() || public.len() < found.len() {
+                return Err(format!("{} is on a private network; only public pages can be read", name.as_str()).into());
+            }
+            Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
+        })
     }
 }
 
@@ -165,6 +209,7 @@ fn client() -> Result<reqwest::Client, String> {
         .timeout(Duration::from_secs(20))
         // Redirects are re-checked by hand (they could point at the LAN).
         .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(std::sync::Arc::new(PublicOnly))
         .build()
         .map_err(|e| e.to_string())
 }
@@ -202,6 +247,9 @@ pub async fn read_limited(url: &str, max_chars: usize) -> Result<(String, Option
         let host = parsed
             .host_str()
             .ok_or("that address has no host")?
+            // An IPv6 literal comes bracketed ("[::1]").
+            .trim_start_matches('[')
+            .trim_end_matches(']')
             .to_string();
         let port = parsed.port_or_known_default().unwrap_or(443);
         let addrs: Vec<IpAddr> = tokio::task::spawn_blocking(move || {
@@ -311,23 +359,68 @@ mod tests {
             "::1",
             "fd00::1",
             "fe80::1",
+            // Written as IPv6.
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:192.168.1.5",
+            "::127.0.0.1",
+            "64:ff9b::7f00:1",
+            "2002:c0a8:105::1",
+            // Not public unicast.
+            "0.1.2.3",
+            "100.64.0.1",
+            "100.127.255.254",
+            "169.254.169.254",
+            "224.0.0.1",
+            "255.255.255.255",
+            "240.0.0.1",
+            "198.18.0.1",
+            "ff02::1",
+            "fec0::1",
+            "fc00::1",
+            "::",
         ] {
             assert!(is_private(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["93.184.216.34", "2606:4700::1111"] {
+        for ip in ["93.184.216.34", "2606:4700::1111", "::ffff:93.184.216.34", "100.128.0.1", "8.8.8.8"] {
             assert!(!is_private(ip.parse().unwrap()), "{ip}");
         }
     }
 
     #[tokio::test]
     async fn read_refuses_the_box_itself() {
-        assert!(read("http://127.0.0.1:8765/status")
-            .await
-            .unwrap_err()
-            .contains("private"));
+        for url in ["http://127.0.0.1:8765/status", "http://[::ffff:127.0.0.1]:8765/status", "http://localhost:8765/status", "http://0.0.0.0:8765/", "http://169.254.169.254/latest/meta-data/"] {
+            assert!(read(url).await.unwrap_err().contains("private"), "{url}");
+        }
         assert!(read("file:///etc/passwd")
             .await
             .unwrap_err()
             .contains("http"));
+    }
+
+    /// A name that answers with a private address when the connection is
+    /// made (DNS rebinding: public for the check, private for the fetch)
+    /// never gets a connection: the client's own resolver refuses it.
+    #[tokio::test]
+    async fn the_client_itself_never_connects_to_a_private_address() {
+        use reqwest::dns::Resolve;
+        let name: reqwest::dns::Name = "localhost".parse().unwrap();
+        let err = PublicOnly.resolve(name).await.err().expect("refused");
+        assert!(err.to_string().contains("private"), "{err}");
+        // And a request through the client (the redirect-check path bypassed)
+        // fails before reaching the box's own listener.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = hit.clone();
+        tokio::spawn(async move {
+            if listener.accept().await.is_ok() {
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let r = client().unwrap().get(format!("http://localhost:{port}/")).send().await;
+        assert!(r.is_err());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!hit.load(std::sync::atomic::Ordering::SeqCst), "connected to the box");
     }
 }
