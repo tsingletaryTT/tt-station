@@ -1758,7 +1758,11 @@ const SESSION_FOR_OWNERS: &str = "Only an owner of this box can use this session
 /// Whether `caller` may use session `id`: an owner any, a member only a
 /// sandboxed one (refusals are logged, `crate::audit`). An unknown id passes,
 /// for the route's own "No such session".
-fn may_use(state: &AppState, caller: &Caller, id: &str) -> Result<(), (StatusCode, Json<Value>)> {
+pub(crate) fn may_use(
+    state: &AppState,
+    caller: &Caller,
+    id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
     if caller.owner() {
         return Ok(());
     }
@@ -2662,7 +2666,7 @@ pub(crate) async fn post_rename(
     if title.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "Give it a name."));
     }
-    if title.len() > 120 {
+    if title.chars().count() > 120 {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "Keep the name under 120 characters.",
