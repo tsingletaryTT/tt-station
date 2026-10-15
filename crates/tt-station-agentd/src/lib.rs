@@ -11,6 +11,7 @@ pub mod assistant;
 pub mod audit;
 pub mod authkeys;
 pub mod bench;
+pub mod boot;
 pub mod bringup;
 pub mod codespeed;
 pub mod coding;
