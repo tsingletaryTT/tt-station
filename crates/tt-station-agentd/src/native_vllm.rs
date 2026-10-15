@@ -358,7 +358,7 @@ pub(crate) async fn get_native(State(state): State<AppState>, _auth: BearerAuth)
                 "setup_log": if setting_up || setup_exit.is_some() { tail(&log, 12) } else { Vec::new() },
                 "bundles": bundles(&st),
                 // Still ours only while the agent serves the model native vLLM started.
-                "serving_native": NATIVE_SERVING.lock().expect("native").clone()
+                "serving_native": mine(&state).serving.lock().expect("native").clone()
                     .filter(|(_, model)| !matches!(serving.phase, Phase::Idle | Phase::Failed) && serving.model.as_deref() == Some(model.as_str()))
                     .map(|(label, _)| label),
                 "tt_kernel_hint": "tt-kernel pull <namespace/model>",
@@ -437,8 +437,16 @@ pub(crate) async fn post_setup(
     Ok(Json(json!({ "setting_up": true })))
 }
 
-/// What native vLLM last started: (bundle id, the model it serves).
-static NATIVE_SERVING: Mutex<Option<(String, String)>> = Mutex::new(None);
+/// What `crate::native_vllm` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// What native vLLM last started: (bundle id, the model it serves).
+    serving: Mutex<Option<(String, String)>>,
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().native_vllm
+}
 
 /// A launch: the command line, and the environment it runs with.
 type Launch = (Vec<String>, Vec<(String, String)>);
@@ -651,7 +659,7 @@ pub async fn serve_dir(state: &AppState, dir: &Path, label: &str, stop_serving: 
         ));
     }
     let model = meta["hf_weights"].as_str().unwrap_or(label).to_string();
-    *NATIVE_SERVING.lock().expect("native") = Some((label.to_string(), model.clone()));
+    *mine(state).serving.lock().expect("native") = Some((label.to_string(), model.clone()));
     crate::orchard::adopt_when_serving(state, port, model);
     Ok(Json(
         json!({ "serving": label, "log": log.display().to_string() }),
