@@ -95,9 +95,16 @@ fn save(state: &AppState, s: &HashMap<String, String>) {
 /// A service's setup: its step, and why it failed if it did.
 type Step = (String, Option<String>);
 
-/// Setting a service up: its step, or why it failed.
-static STEPS: LazyLock<Mutex<HashMap<&'static str, Step>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// What `crate::embeddings` keeps for the life of one agent (`crate::state::PerAgent`).
+#[derive(Default)]
+pub(crate) struct PerAgent {
+    /// Setting a service up: its step, or why it failed.
+    steps: Mutex<HashMap<&'static str, Step>>,
+}
+
+fn mine(state: &AppState) -> &PerAgent {
+    &state.per_agent().embeddings
+}
 
 fn docker_state(container: &str) -> String {
     Command::new("docker")
@@ -170,7 +177,12 @@ pub fn embed_dims(state: &AppState) -> u32 {
 
 async fn describe(state: &AppState, svc: &Service) -> Value {
     let model = settings(state).get(svc.id).cloned();
-    let step = STEPS.lock().expect("embeddings").get(svc.id).cloned();
+    let step = mine(state)
+        .steps
+        .lock()
+        .expect("embeddings")
+        .get(svc.id)
+        .cloned();
     let up = model.is_some() && healthy(svc.port).await;
     let status = match (&model, &step, up) {
         (None, _, _) => "off",
@@ -198,26 +210,30 @@ pub fn set(state: &AppState, svc: &'static Service, model: Option<String>) {
         None => s.remove(svc.id),
     };
     save(state, &s);
-    STEPS.lock().expect("embeddings").remove(svc.id);
+    mine(state).steps.lock().expect("embeddings").remove(svc.id);
     STATES.lock().expect("embeddings").remove(svc.container);
     let _ = Command::new("docker")
         .args(["rm", "-f", svc.container])
         .stdin(Stdio::null())
         .output();
     let Some(model) = model else { return };
-    STEPS
+    mine(state)
+        .steps
         .lock()
         .expect("embeddings")
         .insert(svc.id, ("Downloading the server".into(), None));
+    let st = state.clone();
     std::thread::spawn(move || {
         let step = |s: &str| {
-            STEPS
+            mine(&st)
+                .steps
                 .lock()
                 .expect("embeddings")
                 .insert(svc.id, (s.to_string(), None));
         };
         let fail = |e: String| {
-            STEPS
+            mine(&st)
+                .steps
                 .lock()
                 .expect("embeddings")
                 .insert(svc.id, ("Failed".into(), Some(e)));
@@ -272,7 +288,7 @@ pub fn set(state: &AppState, svc: &'static Service, model: Option<String>) {
         match out {
             Ok(o) if o.status.success() => {
                 // It answers once the model is downloaded and loaded; describe() sees that.
-                STEPS.lock().expect("embeddings").remove(svc.id);
+                mine(&st).steps.lock().expect("embeddings").remove(svc.id);
             }
             Ok(o) => fail(
                 String::from_utf8_lossy(&o.stderr)
