@@ -681,7 +681,9 @@ async fn steps(state: &AppState, m: &Arc<Model>, base_url: &str, context: Option
     Ok(())
 }
 
-/// Agent reliability as a category: valid calls of all graded, one line per size.
+/// Agent reliability as a category, one line per size: trials with a valid
+/// call within one retry (what [`crate::reliability::RULE`] judges), with the
+/// first replies as returned beside them.
 pub fn agent_category(r: &crate::reliability::Report) -> Category {
     let cases = r
         .rows
@@ -695,13 +697,17 @@ pub fn agent_category(r: &crate::reliability::Report) -> Category {
             }
             Case {
                 name: format!("{}K-token session", row.target / 1024),
-                ok: row.trials >= crate::reliability::MIN_TRIALS && row.valid_rate >= crate::reliability::THRESHOLD,
-                detail: format!("{}/{} valid (95% CI {:.0}–{:.0}%){}", row.valid, row.trials, 100.0 * row.ci_low, 100.0 * row.ci_high, if wrong.is_empty() { String::new() } else { format!("; {}", wrong.join(", ")) }),
+                ok: row.trials >= crate::reliability::MIN_TRIALS && row.recovered_rate >= crate::reliability::THRESHOLD,
+                detail: format!(
+                    "{}/{} valid within a retry (95% CI {:.0}–{:.0}%); first replies {}/{} valid{}",
+                    row.within_1_retry, row.trials, 100.0 * row.recovered_ci_low, 100.0 * row.recovered_ci_high, row.valid, row.trials,
+                    if wrong.is_empty() { String::new() } else { format!(" ({})", wrong.join(", ")) }
+                ),
                 seconds: row.median_s.unwrap_or(0.0),
             }
         })
         .collect::<Vec<_>>();
-    Category { key: "agent".into(), label: "Agent reliability".into(), passed: r.rows.iter().map(|x| x.valid).sum(), total: r.rows.iter().map(|x| x.trials).sum(), cases }
+    Category { key: "agent".into(), label: "Agent reliability".into(), passed: r.rows.iter().map(|x| x.within_1_retry).sum(), total: r.rows.iter().map(|x| x.trials).sum(), cases }
 }
 
 // ---------------------------------------------------------------- compaction

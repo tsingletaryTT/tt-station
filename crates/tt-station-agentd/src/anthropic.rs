@@ -432,6 +432,9 @@ pub struct ToolCheck {
     schemas: HashMap<String, Value>,
     /// Stream only: block index → (name as the model wrote it, written as text).
     open: HashMap<usize, (String, bool)>,
+    /// Off for a check that isn't a real client's call (the agent reliability
+    /// eval): it mends the same, but isn't counted or logged.
+    uncounted: bool,
 }
 
 impl ToolCheck {
@@ -444,7 +447,13 @@ impl ToolCheck {
             .filter(|t| t["input_schema"].is_object())
             .filter_map(|t| Some((t["name"].as_str()?.to_string(), t["input_schema"].clone())))
             .collect();
-        ToolCheck { model: Some(served_model.to_string()), schemas, open: HashMap::new() }
+        ToolCheck { model: Some(served_model.to_string()), schemas, open: HashMap::new(), uncounted: false }
+    }
+
+    /// As [`ToolCheck::new`], for calls that aren't a client's: checked and
+    /// mended the same, left out of [`tool_call_health`] and the log.
+    pub fn uncounted(tools: &Value, served_model: &str) -> Self {
+        ToolCheck { uncounted: true, ..Self::new(tools, served_model) }
     }
 
     /// The tool `name` means: itself, or the one tool it matches ignoring case,
@@ -485,6 +494,9 @@ impl ToolCheck {
             return (name.to_string(), input, CallOutcome::Valid);
         };
         let (fixed_name, input, outcome, problems) = self.check(name, input);
+        if self.uncounted {
+            return (fixed_name, input, outcome);
+        }
         if outcome == CallOutcome::Invalid {
             // What was wrong, never the arguments themselves (they can hold a file's content).
             eprintln!("tt-station-agentd: {model} called {name} in a way it doesn't take: {}", problems.join(", "));

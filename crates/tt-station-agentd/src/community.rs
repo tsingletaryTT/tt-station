@@ -51,6 +51,34 @@ fn need_tt_model() -> Result<PathBuf, (StatusCode, Json<Value>)> {
     tt_model().ok_or_else(|| err(StatusCode::CONFLICT, "tt-model (tt-model-manager) isn't installed on this box."))
 }
 
+/// The manifest `tt-model pull` keeps for a package
+/// (`~/.cache/tt-model/pulled/<org>__<name>/`; `tt-kernel` on a box from before the rename).
+fn pulled_manifest(id: &str) -> Option<Value> {
+    let cache = home().join(".cache");
+    let root = [cache.join("tt-model"), cache.join("tt-kernel")].into_iter().find(|d| d.is_dir())?;
+    let bytes = std::fs::read(root.join("pulled").join(id.replacen('/', "__", 1)).join("tt_kernel_manifest.json")).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// vLLM flags TT Station adds to a package's own, after its id on `tt-model
+/// serve` (which hands what it doesn't know on to `vllm serve`):
+///
+/// - `--enable-prompt-tokens-details`, so a reply's usage says how much of the
+///   prompt came from the prefix cache (`prompt_tokens_details.cached_tokens`,
+///   which the Code speed record reads). vLLM has had it since 0.6.4 (#10174,
+///   November 2024), before the platform-plugin API (#11602) that every
+///   `vllm-plugin` package needs, so all of those take it.
+///
+/// Only for `kind: vllm-plugin`: a `tt-dit-server` package isn't vLLM, and a
+/// `vllm-fork` one doesn't pass loose flags on to vLLM. Nothing for a package
+/// whose manifest can't be read.
+pub fn extra_vllm_args(manifest: Option<&Value>) -> Vec<String> {
+    match manifest.map(|m| &m["container"]["kind"]) {
+        Some(k) if k == "vllm-plugin" => vec!["--enable-prompt-tokens-details".into()],
+        _ => vec![],
+    }
+}
+
 /// `org/name` with the characters Hugging Face allows, nothing else.
 fn valid_id(id: &str) -> bool {
     let mut parts = id.split('/');
@@ -1006,6 +1034,8 @@ async fn launch(state: &AppState, id: &str, bin: &Path, model: String, short: St
     if let Some(p) = &profile {
         cmd.args(["--profile", p]);
     }
+    // After everything tt-model reads itself: what's left goes to vLLM.
+    cmd.args(extra_vllm_args(pulled_manifest(id).as_ref()));
     let out = cmd
         .stdin(Stdio::null())
         .output()
@@ -1464,6 +1494,16 @@ pub(crate) async fn delete_package(State(state): State<AppState>, _auth: BearerA
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asks_vllm_plugin_packages_for_cached_token_counts() {
+        let kind = |k: &str| json!({ "container": { "kind": k, "serve": { "args": [] } } });
+        assert_eq!(extra_vllm_args(Some(&kind("vllm-plugin"))), ["--enable-prompt-tokens-details"]);
+        assert!(extra_vllm_args(Some(&kind("tt-dit-server"))).is_empty(), "not vLLM");
+        assert!(extra_vllm_args(Some(&kind("vllm-fork"))).is_empty(), "loose flags don't reach its vLLM");
+        assert!(extra_vllm_args(Some(&json!({}))).is_empty());
+        assert!(extra_vllm_args(None).is_empty(), "no manifest, nothing guessed");
+    }
 
     #[test]
     fn matches_served_ids() {

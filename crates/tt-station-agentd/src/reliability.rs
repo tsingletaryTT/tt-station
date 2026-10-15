@@ -22,10 +22,21 @@
 //! - **invalid args**: a known tool, arguments that don't fit;
 //! - **no call**: it answered in text.
 //!
+//! That is the reply as the server returned it. A Code session doesn't stop
+//! there, so each trial then goes on the way Claude Code would
+//! ([`recover`]): the same stream through the translator's own streaming path
+//! ([`crate::anthropic::Stream`], which salvages calls leaked as text and mends
+//! tool names and arguments where that's safe), graded again; and while a call
+//! is still invalid, the reply goes into the session with a tool result
+//! carrying the error Claude Code gives for it ([`tool_use_error`]) and the
+//! model is asked again, up to [`Options::retries`] times. A reply with no call
+//! at all ends the turn, as it does in Claude Code: nothing to retry.
+//!
 //! The recommended compaction window ([`recommend_window`]) is the largest
-//! tested size at which it, and every smaller tested size, had at least 95%
-//! valid calls -- as the server returned them, before the translator salvages
-//! leaked calls.
+//! tested size at which it, and every smaller tested size, had at least 95% of
+//! trials with a valid call after the translator's repair and at most one
+//! retry ([`RULE`]). The first-reply, as-returned rate is kept beside it
+//! ([`recommend_window_raw`], [`RAW_RULE`]) to compare with earlier runs.
 //!
 //! The conversations are generated from a seed: nothing in them comes from a
 //! real session.
@@ -45,7 +56,14 @@ pub const THRESHOLD: f64 = 0.95;
 /// ...out of at least this many graded trials.
 pub const MIN_TRIALS: usize = 20;
 
-pub const RULE: &str = "The largest tested prompt size at which it, and every smaller tested size, had at least 95% valid tool calls (at least 20 graded trials each; calls as the server returned them, before any salvage of calls leaked as text).";
+/// Retries counted by the recommendation: one costs a Code session a round
+/// trip; a second, and the session is visibly struggling.
+pub const RULE_RETRIES: usize = 1;
+
+pub const RULE: &str = "The largest tested prompt size at which it, and every smaller tested size, had a valid tool call in at least 95% of trials after the translator's repair and at most one retry on Claude Code's validation error (at least 20 graded trials each).";
+
+/// The rule before recovery was measured, kept to compare with earlier runs.
+pub const RAW_RULE: &str = "The largest tested prompt size at which it, and every smaller tested size, had at least 95% valid tool calls (at least 20 graded trials each; calls as the server returned them, before any salvage of calls leaked as text).";
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -58,11 +76,14 @@ pub struct Options {
     pub concurrency: usize,
     /// Seeds the sessions: the same seed builds the same conversations.
     pub seed: u64,
+    /// Times a still-invalid call is answered with its error and asked again
+    /// (at least [`RULE_RETRIES`] for the recommendation to mean anything).
+    pub retries: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { lengths: LENGTHS.to_vec(), histories: 4, tasks: 5, concurrency: 4, seed: 1 }
+        Options { lengths: LENGTHS.to_vec(), histories: 4, tasks: 5, concurrency: 4, seed: 1, retries: 2 }
     }
 }
 
@@ -99,6 +120,33 @@ pub struct Trial {
     pub finish_reason: Option<String>,
     pub seconds: f64,
     pub ttft_s: Option<f64>,
+    /// The first reply had a valid call once through the translator (salvaged,
+    /// names and arguments mended).
+    #[serde(default)]
+    pub repaired: bool,
+    /// Retries it took to get a valid call (0: none needed after the
+    /// translator); `None` if it never did within the retries.
+    #[serde(default)]
+    pub valid_after: Option<usize>,
+    /// Why it never did: "no call" (the turn ended in text), "still invalid",
+    /// or a request that failed.
+    #[serde(default)]
+    pub failed_as: Option<String>,
+    /// Each retry: what it was told and what it did.
+    #[serde(default)]
+    pub retries: Vec<Retry>,
+}
+
+/// One round of recovery: the error Claude Code would have answered with, and the reply after it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Retry {
+    /// The tool results sent back (errors, and stand-ins for calls that were valid).
+    pub sent: Vec<String>,
+    /// The new reply's calls, after the translator.
+    pub calls: Vec<String>,
+    pub valid: bool,
+    pub detail: String,
+    pub seconds: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -125,6 +173,28 @@ pub struct Row {
     /// Reading the session from an empty cache (one per session).
     pub median_prefill_s: Option<f64>,
     pub median_ttft_s: Option<f64>,
+    /// First replies valid after the translator's repair and salvage.
+    #[serde(default)]
+    pub repaired: usize,
+    /// Valid within one retry (counts the repaired ones).
+    #[serde(default)]
+    pub within_1_retry: usize,
+    /// Valid within two retries.
+    #[serde(default)]
+    pub within_2_retries: usize,
+    /// Never valid within the retries.
+    #[serde(default)]
+    pub still_failing: usize,
+    /// Of those, the turn ended in text with no call (nothing to retry).
+    #[serde(default)]
+    pub ended_without_call: usize,
+    /// `within_1_retry / trials`: the rate [`RULE`] uses, and its Wilson 95% interval.
+    #[serde(default)]
+    pub recovered_rate: f64,
+    #[serde(default)]
+    pub recovered_ci_low: f64,
+    #[serde(default)]
+    pub recovered_ci_high: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -137,6 +207,14 @@ pub struct Report {
     pub rows: Vec<Row>,
     pub recommended_window: Option<u64>,
     pub rule: String,
+    /// Retries allowed per trial.
+    #[serde(default)]
+    pub retries: usize,
+    /// The window by [`RAW_RULE`] (first replies as returned), for comparison.
+    #[serde(default)]
+    pub raw_window: Option<u64>,
+    #[serde(default)]
+    pub raw_rule: String,
 }
 
 /// Wilson score interval (95%) for `k` of `n`.
@@ -165,6 +243,9 @@ pub fn summarize(target: u64, trials: &[Trial]) -> Row {
     let n = graded.len();
     let valid = of(Outcome::Valid);
     let (ci_low, ci_high) = wilson(valid, n);
+    let within = |k: usize| graded.iter().filter(|t| t.valid_after.is_some_and(|a| a <= k)).count();
+    let within_1_retry = within(1);
+    let (recovered_ci_low, recovered_ci_high) = wilson(within_1_retry, n);
     let mut tokens: Vec<u64> = trials.iter().filter_map(|t| t.prompt_tokens).collect();
     tokens.sort();
     Row {
@@ -193,14 +274,31 @@ pub fn summarize(target: u64, trials: &[Trial]) -> Row {
             seen.into_values().collect()
         }),
         median_ttft_s: median(graded.iter().filter_map(|t| t.ttft_s).collect()),
+        repaired: within(0),
+        within_1_retry,
+        within_2_retries: within(2),
+        still_failing: graded.iter().filter(|t| t.valid_after.is_none()).count(),
+        ended_without_call: graded.iter().filter(|t| t.valid_after.is_none() && t.failed_as.as_deref() == Some("no call")).count(),
+        recovered_rate: if n == 0 { 0.0 } else { within_1_retry as f64 / n as f64 },
+        recovered_ci_low,
+        recovered_ci_high,
     }
+}
+
+fn largest_holding(rows: &[Row], rate: fn(&Row) -> f64) -> Option<u64> {
+    let mut rows: Vec<&Row> = rows.iter().collect();
+    rows.sort_by_key(|r| r.target);
+    rows.iter().take_while(|r| r.trials >= MIN_TRIALS && rate(r) >= THRESHOLD).last().map(|r| r.target)
 }
 
 /// See [`RULE`]. `None` when even the smallest size falls short.
 pub fn recommend_window(rows: &[Row]) -> Option<u64> {
-    let mut rows: Vec<&Row> = rows.iter().collect();
-    rows.sort_by_key(|r| r.target);
-    rows.iter().take_while(|r| r.trials >= MIN_TRIALS && r.valid_rate >= THRESHOLD).last().map(|r| r.target)
+    largest_holding(rows, |r| r.recovered_rate)
+}
+
+/// See [`RAW_RULE`]: first replies as the server returned them.
+pub fn recommend_window_raw(rows: &[Row]) -> Option<u64> {
+    largest_holding(rows, |r| r.valid_rate)
 }
 
 // ---------------------------------------------------------------- a small, seeded random source
@@ -874,6 +972,8 @@ struct Reply {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     ttft: Option<f64>,
+    /// Every chunk as it came, for the translator to read again.
+    chunks: Vec<Value>,
 }
 
 async fn send(server: &Server, body: &Value) -> Result<Reply, String> {
@@ -900,6 +1000,7 @@ async fn send(server: &Server, body: &Value) -> Result<Reply, String> {
                 break 'read;
             }
             let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+            reply.chunks.push(v.clone());
             if let Some(u) = v["usage"].as_object() {
                 reply.prompt_tokens = u.get("prompt_tokens").and_then(Value::as_u64).or(reply.prompt_tokens);
                 reply.completion_tokens = u.get("completion_tokens").and_then(Value::as_u64).or(reply.completion_tokens);
@@ -970,6 +1071,194 @@ pub fn grade(tools: &Value, content: &str, calls: &[(String, String)], expect: &
     }
     let on_task = calls.iter().any(|(n, _)| expect.contains(&n.as_str()));
     (Outcome::Valid, false, on_task, shown.clone(), shown.join(", "))
+}
+
+// ---------------------------------------------------------------- what Claude Code gets, and does with it
+
+/// The reply as Claude Code receives it: the server's stream through the
+/// translator's own streaming path, as `/v1/messages` runs it (thinking not
+/// asked for, so not shown), put back together into the message's text and
+/// tool_use blocks. The check is the translator's, uncounted: the eval's calls
+/// stay out of the box's tool-call health.
+pub fn translate(tools: &Value, model: &str, chunks: &[Value]) -> Vec<Value> {
+    let mut s = crate::anthropic::Stream::with_thinking("quietbox", false).checking(crate::anthropic::ToolCheck::uncounted(tools, model));
+    let mut events: Vec<String> = chunks.iter().flat_map(|c| s.chunk(c)).collect();
+    events.extend(s.finish());
+    assemble(&events)
+}
+
+/// Anthropic stream events, back into the content blocks they spell out.
+fn assemble(events: &[String]) -> Vec<Value> {
+    let mut blocks: Vec<Value> = Vec::new();
+    let mut inputs: Vec<String> = Vec::new();
+    for e in events {
+        let Some(v) = e.lines().find_map(|l| l.strip_prefix("data: ")).and_then(|d| serde_json::from_str::<Value>(d).ok()) else { continue };
+        let i = v["index"].as_u64().unwrap_or(0) as usize;
+        match v["type"].as_str() {
+            Some("content_block_start") => {
+                while blocks.len() <= i {
+                    blocks.push(Value::Null);
+                    inputs.push(String::new());
+                }
+                blocks[i] = v["content_block"].clone();
+            }
+            Some("content_block_delta") if i < blocks.len() => {
+                let d = &v["delta"];
+                match d["type"].as_str() {
+                    Some("text_delta") => {
+                        let t = format!("{}{}", blocks[i]["text"].as_str().unwrap_or(""), d["text"].as_str().unwrap_or(""));
+                        blocks[i]["text"] = json!(t);
+                    }
+                    Some("input_json_delta") => inputs[i].push_str(d["partial_json"].as_str().unwrap_or("")),
+                    _ => {}
+                }
+            }
+            Some("content_block_stop") if i < blocks.len() && blocks[i]["type"] == "tool_use" => {
+                // As a client takes a call's input: the JSON it was sent, `{}` for none.
+                blocks[i]["input"] = if inputs[i].trim().is_empty() { json!({}) } else { serde_json::from_str(&inputs[i]).unwrap_or(Value::Null) };
+            }
+            _ => {}
+        }
+    }
+    blocks.retain(|b| b["type"] == "text" || b["type"] == "tool_use");
+    blocks
+}
+
+fn json_type(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// What Claude Code answers a call it won't run with (the `tool_result`,
+/// marked as an error), worded as Claude Code words it; `None` for a call it
+/// would run. The unknown-tool, missing and unexpected parameter wording is
+/// Claude Code's own, as it appears in Code sessions on the box (2.1.x); the
+/// wrong-type and enum wording wasn't seen there and follows its formatter's
+/// pattern.
+pub fn tool_use_error(tools: &Value, name: &str, input: &Value) -> Option<String> {
+    let Some(tool) = tools.as_array().into_iter().flatten().find(|t| t["name"] == name) else {
+        return Some(format!("<tool_use_error>Error: No such tool available: {name}</tool_use_error>"));
+    };
+    let why = check_call(tools, name, input).err()?;
+    let s = &tool["input_schema"];
+    let empty = serde_json::Map::new();
+    let obj = input.as_object().unwrap_or(&empty);
+    let mut issues = Vec::new();
+    for r in s["required"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|r| !obj.contains_key(*r)) {
+        issues.push(format!("The required parameter `{r}` is missing"));
+    }
+    let mut unexpected = Vec::new();
+    for (k, v) in obj {
+        let Some(p) = s["properties"].get(k) else {
+            unexpected.push(format!("An unexpected parameter `{k}` was provided"));
+            continue;
+        };
+        let want = p["type"].as_str().unwrap_or("");
+        let fits = match want {
+            "string" | "number" | "boolean" | "array" | "object" => json_type(v) == want,
+            "integer" => v.as_i64().is_some() || v.as_u64().is_some(),
+            _ => true,
+        };
+        if !fits {
+            issues.push(format!("The parameter `{k}` type is expected as `{want}` but provided as `{}`", json_type(v)));
+        } else if let Some(allowed) = p["enum"].as_array().filter(|a| !a.contains(v)) {
+            issues.push(format!("The parameter `{k}` must be one of {}", allowed.iter().map(Value::to_string).collect::<Vec<_>>().join(", ")));
+        }
+    }
+    issues.extend(unexpected);
+    if issues.is_empty() {
+        issues.push(why);
+    }
+    Some(format!(
+        "<tool_use_error>InputValidationError: {name} failed due to the following {}:\n{}</tool_use_error>",
+        if issues.len() == 1 { "issue" } else { "issues" },
+        issues.join("\n")
+    ))
+}
+
+/// What a client sends back for a call that was fine, beside another's error:
+/// the eval runs nothing, so a neutral stand-in.
+const STAND_IN: &str = "(no output)";
+
+/// A translated reply judged as Claude Code would: every call runnable
+/// (`Ok`), no call at all (`Err(None)`: the turn ends), or the tool results to
+/// send back (`Err(Some(..))`).
+fn judge(tools: &Value, content: &[Value]) -> Result<(), Option<Vec<Value>>> {
+    let uses: Vec<&Value> = content.iter().filter(|b| b["type"] == "tool_use").collect();
+    if uses.is_empty() {
+        return Err(None);
+    }
+    let errors: Vec<Option<String>> = uses.iter().map(|b| tool_use_error(tools, b["name"].as_str().unwrap_or(""), &b["input"])).collect();
+    if errors.iter().all(Option::is_none) {
+        return Ok(());
+    }
+    Err(Some(
+        uses.iter()
+            .zip(errors)
+            .map(|(b, e)| match e {
+                Some(e) => json!({ "type": "tool_result", "tool_use_id": b["id"], "content": e, "is_error": true }),
+                None => json!({ "type": "tool_result", "tool_use_id": b["id"], "content": STAND_IN }),
+            })
+            .collect(),
+    ))
+}
+
+fn shown_calls(content: &[Value]) -> Vec<String> {
+    content.iter().filter(|b| b["type"] == "tool_use").map(|b| clip(&format!("{}({})", b["name"].as_str().unwrap_or(""), b["input"]), 200)).collect()
+}
+
+fn reply_text(content: &[Value]) -> String {
+    clip(&content.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join(" "), 200)
+}
+
+/// How a trial recovered.
+struct Recovery {
+    repaired: bool,
+    valid_after: Option<usize>,
+    failed_as: Option<String>,
+    retries: Vec<Retry>,
+}
+
+/// The rest of the turn as Claude Code would have it: the first reply through
+/// the translator and, while a call is still invalid, its errors sent back and
+/// the model asked again, up to `retries` times. `messages` ends with the task.
+async fn recover(server: &Server, tools: &Value, system: &str, mut messages: Vec<Value>, first: &Reply, retries: usize) -> Recovery {
+    let mut content = translate(tools, &server.model, &first.chunks);
+    let mut log = Vec::new();
+    let done = |valid_after, failed_as: Option<&str>, log| Recovery { repaired: valid_after == Some(0), valid_after, failed_as: failed_as.map(str::to_string), retries: log };
+    for k in 0..=retries {
+        let results = match judge(tools, &content) {
+            Ok(()) => return done(Some(k), None, log),
+            Err(None) => return done(None, Some("no call"), log),
+            Err(Some(results)) => results,
+        };
+        if k == retries {
+            break;
+        }
+        let sent = results.iter().map(|r| r["content"].as_str().unwrap_or("").to_string()).collect();
+        messages.push(json!({ "role": "assistant", "content": content }));
+        messages.push(json!({ "role": "user", "content": results }));
+        let (_, body) = request(server, system, &messages);
+        let t = Instant::now();
+        match send(server, &body).await {
+            Ok(reply) => {
+                content = translate(tools, &server.model, &reply.chunks);
+                let valid = judge(tools, &content).is_ok();
+                log.push(Retry { sent, calls: shown_calls(&content), valid, detail: reply_text(&content), seconds: t.elapsed().as_secs_f64() });
+            }
+            Err(e) => {
+                log.push(Retry { sent, calls: vec![], valid: false, detail: e.clone(), seconds: t.elapsed().as_secs_f64() });
+                return done(None, Some("request failed"), log);
+            }
+        }
+    }
+    done(None, Some("still invalid"), log)
 }
 
 /// One generated session at `target` tokens, and the last turns to ask of it.
@@ -1053,10 +1342,14 @@ pub async fn run(server: &Server, opts: &Options, progress: &(dyn Fn(String) + S
                         let t = Instant::now();
                         let trial = match send(server, &body).await {
                             Ok(reply) => {
+                                let seconds = t.elapsed().as_secs_f64();
                                 let (outcome, salvaged, on_task, calls, detail) = grade(tools, &reply.content, &reply.calls, task.expect);
-                                Trial { target, history: h, task: task.key.into(), prompt_tokens: reply.prompt_tokens, completion_tokens: reply.completion_tokens, outcome, prefill_s: s.prefill_s, salvaged, on_task, calls, detail, finish_reason: reply.finish, seconds: t.elapsed().as_secs_f64(), ttft_s: reply.ttft }
+                                let r = recover(server, tools, &s.system, messages, &reply, opts.retries).await;
+                                Trial { target, history: h, task: task.key.into(), prompt_tokens: reply.prompt_tokens, completion_tokens: reply.completion_tokens, outcome, prefill_s: s.prefill_s, salvaged, on_task, calls, detail, finish_reason: reply.finish, seconds, ttft_s: reply.ttft,
+                                    repaired: r.repaired, valid_after: r.valid_after, failed_as: r.failed_as, retries: r.retries }
                             }
-                            Err(e) => Trial { target, history: h, task: task.key.into(), prompt_tokens: None, completion_tokens: None, outcome: Outcome::Error, prefill_s: s.prefill_s, salvaged: false, on_task: false, calls: vec![], detail: e, finish_reason: None, seconds: t.elapsed().as_secs_f64(), ttft_s: None },
+                            Err(e) => Trial { target, history: h, task: task.key.into(), prompt_tokens: None, completion_tokens: None, outcome: Outcome::Error, prefill_s: s.prefill_s, salvaged: false, on_task: false, calls: vec![], detail: e, finish_reason: None, seconds: t.elapsed().as_secs_f64(), ttft_s: None,
+                                repaired: false, valid_after: None, failed_as: None, retries: vec![] },
                         };
                         out.push(trial);
                     }
@@ -1075,8 +1368,9 @@ pub async fn run(server: &Server, opts: &Options, progress: &(dyn Fn(String) + S
         }
     }
     let recommended_window = recommend_window(&rows);
+    let raw_window = recommend_window_raw(&rows);
     Ok((
-        Report { model: server.model.clone(), context: server.context, histories: opts.histories, tasks: opts.tasks, seed: opts.seed, rows, recommended_window, rule: RULE.into() },
+        Report { model: server.model.clone(), context: server.context, histories: opts.histories, tasks: opts.tasks, seed: opts.seed, rows, recommended_window, rule: RULE.into(), retries: opts.retries, raw_window, raw_rule: RAW_RULE.into() },
         trials,
     ))
 }
@@ -1091,6 +1385,21 @@ pub fn table(report: &Report) -> String {
             "| {}K | {} | {} | {} | {:.0}–{:.0}% | {} | {} | {} | {} | {}/{} | {} | {} | {} |\n",
             r.target / 1024, r.prompt_tokens.map_or("–".into(), |t| t.to_string()), r.trials, pct(r.valid, r.trials), 100.0 * r.ci_low, 100.0 * r.ci_high,
             pct(r.leaked, r.trials), pct(r.invented, r.trials), pct(r.invalid_args, r.trials), pct(r.no_call, r.trials), r.salvaged, r.leaked, r.errors, secs(r.median_s), secs(r.median_prefill_s),
+        ));
+    }
+    out
+}
+
+/// Recovery, as a Markdown table: valid calls as returned, after the
+/// translator, and within one and two retries.
+pub fn recovery_table(report: &Report) -> String {
+    let pct = |k: usize, n: usize| if n == 0 { "–".to_string() } else { format!("{:.0}% ({k}/{n})", 100.0 * k as f64 / n as f64) };
+    let mut out = String::from("| Target | Trials | First reply valid (raw) | After translator repair | Within 1 retry | 95% CI (1 retry) | Within 2 retries | Still failing | of which: no call |\n|---|---|---|---|---|---|---|---|---|\n");
+    for r in &report.rows {
+        out.push_str(&format!(
+            "| {}K | {} | {} | {} | {} | {:.0}–{:.0}% | {} | {} | {} |\n",
+            r.target / 1024, r.trials, pct(r.valid, r.trials), pct(r.repaired, r.trials), pct(r.within_1_retry, r.trials), 100.0 * r.recovered_ci_low, 100.0 * r.recovered_ci_high,
+            pct(r.within_2_retries, r.trials), pct(r.still_failing, r.trials), r.ended_without_call,
         ));
     }
     out
@@ -1126,11 +1435,110 @@ mod tests {
 
     #[test]
     fn recommends_the_largest_size_that_holds_up_from_the_bottom() {
-        let row = |target, valid, trials| Row { target, valid, trials, valid_rate: valid as f64 / trials as f64, ..Default::default() };
+        let row = |target, valid, trials| Row { target, within_1_retry: valid, trials, recovered_rate: valid as f64 / trials as f64, ..Default::default() };
         assert_eq!(recommend_window(&[row(8192, 20, 20), row(16384, 20, 20), row(32768, 19, 20), row(65536, 18, 20), row(98304, 20, 20)]), Some(32768), "a later lucky size doesn't count past a failing one");
         assert_eq!(recommend_window(&[row(8192, 18, 20)]), None);
         assert_eq!(recommend_window(&[row(8192, 10, 10)]), None, "too few trials");
         assert_eq!(recommend_window(&[row(65536, 40, 40), row(8192, 40, 40)]), Some(65536), "order doesn't matter");
+    }
+
+    #[test]
+    fn the_raw_and_recovered_windows_are_judged_apart() {
+        // First replies at 86%, all but one fine within a retry.
+        let row = |target| Row { target, trials: 50, valid: 43, valid_rate: 0.86, within_1_retry: 49, recovered_rate: 0.98, ..Default::default() };
+        let rows = [row(8192), row(16384)];
+        assert_eq!(recommend_window(&rows), Some(16384));
+        assert_eq!(recommend_window_raw(&rows), None);
+    }
+
+    fn trial(outcome: Outcome, valid_after: Option<usize>, failed_as: Option<&str>) -> Trial {
+        Trial { target: 8192, history: 0, task: "t".into(), prompt_tokens: Some(8000), completion_tokens: None, outcome, prefill_s: None, salvaged: false, on_task: false, calls: vec![], detail: String::new(),
+            finish_reason: None, seconds: 1.0, ttft_s: None, repaired: valid_after == Some(0), valid_after, failed_as: failed_as.map(str::to_string), retries: vec![] }
+    }
+
+    #[test]
+    fn summarizes_recovery_cumulatively() {
+        let t = [
+            trial(Outcome::Valid, Some(0), None),
+            trial(Outcome::Invented, Some(0), None),
+            trial(Outcome::InvalidArgs, Some(1), None),
+            trial(Outcome::InvalidArgs, Some(2), None),
+            trial(Outcome::InvalidArgs, None, Some("still invalid")),
+            trial(Outcome::NoCall, None, Some("no call")),
+            trial(Outcome::Error, None, None),
+        ];
+        let r = summarize(8192, &t);
+        assert_eq!((r.trials, r.valid, r.repaired, r.within_1_retry, r.within_2_retries, r.still_failing, r.ended_without_call), (6, 1, 2, 3, 4, 2, 1));
+        assert!((r.recovered_rate - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn errors_are_worded_as_claude_code_words_them() {
+        let t = tools();
+        assert_eq!(tool_use_error(&t, "Read", &json!({ "file_path": "a", "offset": 1 })), None);
+        assert_eq!(tool_use_error(&t, "Read<|channel|>commentary", &json!({ "file_path": "a" })).unwrap(), "<tool_use_error>Error: No such tool available: Read<|channel|>commentary</tool_use_error>");
+        assert_eq!(tool_use_error(&t, "Edit", &json!({ "file_path": "a", "new_string": "b" })).unwrap(), "<tool_use_error>InputValidationError: Edit failed due to the following issue:\nThe required parameter `old_string` is missing</tool_use_error>");
+        assert_eq!(
+            tool_use_error(&t, "Read", &json!({ "file_path": "a", "line_start": 1, "line_end": 9 })).unwrap(),
+            "<tool_use_error>InputValidationError: Read failed due to the following issues:\nAn unexpected parameter `line_end` was provided\nAn unexpected parameter `line_start` was provided</tool_use_error>"
+        );
+        // Arguments that weren't JSON reach Claude Code as the translator passes them on.
+        assert_eq!(
+            tool_use_error(&t, "Bash", &json!({ "_unparsed_arguments": "{\"command\": \"ls" })).unwrap(),
+            "<tool_use_error>InputValidationError: Bash failed due to the following issues:\nThe required parameter `command` is missing\nAn unexpected parameter `_unparsed_arguments` was provided</tool_use_error>"
+        );
+        assert!(tool_use_error(&t, "Read", &json!({ "file_path": "a", "offset": "ten" })).unwrap().contains("The parameter `offset` type is expected as `number` but provided as `string`"));
+        assert!(tool_use_error(&t, "Grep", &json!({ "pattern": "x", "output_mode": "lines" })).unwrap().contains("`output_mode` must be one of"));
+        // An error exactly when the grader calls it invalid.
+        for (n, a) in [("Read", json!({})), ("Glob", json!({ "pattern": "*", "depth": 2 })), ("Bash", json!({ "command": "ls", "timeout": 5 })), ("Write", json!(null))] {
+            assert_eq!(tool_use_error(&t, n, &a).is_some(), check_call(&t, n, &a).is_err(), "{n} {a}");
+        }
+    }
+
+    /// A streamed reply, as vLLM sends it: text, then calls, then the finish.
+    fn chunks(text: &str, calls: &[(&str, &str)]) -> Vec<Value> {
+        let mut out = vec![json!({ "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "" } }] })];
+        if !text.is_empty() {
+            out.push(json!({ "choices": [{ "index": 0, "delta": { "content": text } }] }));
+        }
+        for (i, (n, a)) in calls.iter().enumerate() {
+            out.push(json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [{ "index": i, "id": format!("call_{i}"), "type": "function", "function": { "name": n, "arguments": "" } }] } }] }));
+            out.push(json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [{ "index": i, "function": { "arguments": a } }] } }] }));
+        }
+        out.push(json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": if calls.is_empty() { "stop" } else { "tool_calls" } }] }));
+        out
+    }
+
+    #[test]
+    fn the_translator_mends_what_it_safely_can_and_no_more() {
+        let t = tools();
+        let model = "eval-test/translate";
+        let one = |text: &str, calls: &[(&str, &str)]| translate(&t, model, &chunks(text, calls));
+        // Harmony residue on the name, a number written as a string: mended.
+        let c = one("", &[("Read<|channel|>commentary", r#"{"file_path":"/work/a.rs","offset":"10","limit":40}"#)]);
+        assert_eq!(c.len(), 1);
+        assert_eq!((c[0]["type"].as_str(), c[0]["name"].as_str(), &c[0]["input"]["offset"]), (Some("tool_use"), Some("Read"), &json!(10)));
+        assert_eq!(judge(&t, &c), Ok(()));
+        // A call leaked into the text: salvaged into a call, the text before it kept.
+        let c = one("Let me look.\n\nassistantcommentary to=functions.Read json{\"file_path\":\"/work/a.rs\"}", &[]);
+        assert_eq!(c.iter().map(|b| b["type"].as_str().unwrap()).collect::<Vec<_>>(), ["text", "tool_use"]);
+        assert_eq!(c[0]["text"].as_str().map(str::trim), Some("Let me look."));
+        assert_eq!(judge(&t, &c), Ok(()));
+        // An invented parameter: left alone, so Claude Code's error goes back.
+        let c = one("", &[("Read", r#"{"file_path":"a","line_start":1,"line_end":9}"#)]);
+        let Err(Some(results)) = judge(&t, &c) else { panic!("should be sent back") };
+        assert_eq!((results.len(), &results[0]["is_error"], &results[0]["tool_use_id"]), (1, &json!(true), &json!("call_0")));
+        assert!(results[0]["content"].as_str().unwrap().contains("unexpected parameter `line_end`"));
+        // Text alone ends the turn: nothing to retry.
+        assert_eq!(judge(&t, &one("All done.", &[])), Err(None));
+        // Two calls, one fine: it runs, the other gets its error.
+        let c = one("", &[("Bash", r#"{"command":"ls"}"#), ("Search", r#"{"query":"x"}"#)]);
+        let Err(Some(results)) = judge(&t, &c) else { panic!("should be sent back") };
+        assert_eq!(results[0]["content"], STAND_IN);
+        assert!(results[0].get("is_error").is_none());
+        assert_eq!(results[1]["content"], "<tool_use_error>Error: No such tool available: Search</tool_use_error>");
+        // None of it counts as a client's call.
+        assert!(crate::anthropic::tool_call_health().iter().all(|h| h["model"] != model));
     }
 
     #[test]

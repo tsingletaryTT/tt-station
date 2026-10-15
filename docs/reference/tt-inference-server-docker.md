@@ -100,6 +100,24 @@ Source of truth: `vllm-tt-metal/README.md` "Minimal Example" in the repo, corrob
 - If a device is wedged from a prior run: `tt-smi -r` reset between `docker stop` and next `docker run`.
 - Extra vLLM flags pass straight through after the standard args (`--max-model-len 8192`, `--enable-auto-tool-choice --tool-call-parser llama3_json`, …).
 
+## Cached-token reporting (`--enable-prompt-tokens-details`)
+
+vLLM puts `usage.prompt_tokens_details.cached_tokens` (prompt tokens served from the prefix
+cache) in its replies only when started with `--enable-prompt-tokens-details`. The translator
+already reads it into each Code step's speed record (`anthropic::Stream`, `codespeed`).
+Since 2026-10-15 the agent adds the flag where the vLLM it launches is known to take it:
+
+| Launch path | Adds the flag? | Why |
+|---|---|---|
+| Community packages, `tt-model serve` (`community::launch`) | yes, for `kind: vllm-plugin` | `tt-model serve` passes flags it doesn't know to `vllm serve` (checked with `--print`). vLLM added the flag in 0.6.4 (#10174, 2024-11), before the platform-plugin API (#11602, 2024-12) that `vllm-plugin` needs. The gpt-oss-20b package runs vLLM 0.26.0.dev4, and the flag is in its `cli_args.py`. Other packages on the box pin vLLM 0.24 or 0.26. |
+| Native vLLM bundles (`native_vllm::serve_argv`) | yes, when the command is a vLLM OpenAI server | It runs the tt-metal vLLM checkout (`~/dispatch/vllm`, merged from upstream 0.17), which has the flag. |
+| `run.py` / Docker backends (this page) | no | The vLLM versions in the tt-inference-server images weren't checked. An unknown flag stops vLLM from starting. To add it, put `"enable_prompt_tokens_details": true` in the `--vllm-override-args` JSON once an image is confirmed. |
+| Bring-up `serve` step (`bringup.rs`) | no | Not changed. |
+| `tt-dit-server` and `vllm-fork` packages | no | `tt-dit-server` isn't vLLM. `vllm-fork` doesn't pass loose flags through to vLLM. |
+
+The flag takes effect at a model's next start. A server that is already running keeps the
+flags it started with.
+
 ## Decisions taken for the PoC DockerBackend
 
 - **`--no-auth`** by default (no JWT-minting dependency in Rust). `Endpoint.requires_key = !no_auth`.
