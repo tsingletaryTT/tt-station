@@ -171,10 +171,14 @@ final class AlertCenter {
         let last = UserDefaults.standard.integer(forKey: key)
         guard let (events, latest) = try? await session.events(since: last) else { return }
         UserDefaults.standard.set(latest, forKey: key)
-        // First look at a box: just learn where its feed is. With push on, the
-        // box already told the phone.
-        guard last != 0, !UserDefaults.standard.bool(forKey: Self.pushKey(session.box.id)) else { return }
+        // First look at a box: just learn where its feed is.
+        guard last != 0 else { return }
+        // With push on, the box already told the phone -- except a pairing
+        // code, which a push never carries (its text passes through Apple):
+        // that's shown here, from the box's own feed, while it's still good.
+        let pushOn = UserDefaults.standard.bool(forKey: Self.pushKey(session.box.id))
         for event in events where event.kind != "test" {
+            if pushOn && !(event.kind == "pairing" && Date().timeIntervalSince1970 - event.at < 120) { continue }
             if foreground && UIApplication.shared.applicationState == .active {
                 banner = event
             } else {
@@ -289,7 +293,8 @@ struct AlertBanner: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 20))
         .padding(.horizontal, 12)
         .task {
-            try? await Task.sleep(for: .seconds(6))
+            // A pairing code needs time to read and type.
+            try? await Task.sleep(for: .seconds(event.kind == "pairing" ? 60 : 6))
             onDismiss()
         }
     }

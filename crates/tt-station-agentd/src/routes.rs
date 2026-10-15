@@ -4082,6 +4082,7 @@ pub fn app(state: AppState) -> Router {
         .route("/apps", get(crate::apps::get_apps))
         .route("/apps/{id}/start", post(crate::apps::post_start))
         .route("/apps/{id}/stop", post(crate::apps::post_stop))
+        .route("/apps/{id}/network", axum::routing::put(crate::apps::put_network))
         .route("/apps/{id}", axum::routing::delete(crate::apps::delete_app))
         .route("/energy", get(get_energy))
         .route("/record", get(crate::recorder::get_record))

@@ -28,7 +28,9 @@ interface LastRun { id: string; status: string; started: number; finished: numbe
 interface Routine { id: string; name: string; goal: string; schedule: Schedule; when: string; allowed: string[]; enabled: boolean; created: number; next_run: number | null; last: LastRun | null }
 interface Step { ts: number; kind: string; tool: string | null; args: Record<string, unknown>; result: string; ok: boolean; seconds: number }
 interface Pending { tool: string; args: Record<string, unknown>; summary: string; since: number }
-interface Run { id: string; routine: string; name: string; trigger: string; started: number; finished: number | null; status: string; steps: Step[]; report: string | null; pending: Pending | null; activity: string | null }
+interface Run { id: string; routine: string; name: string; trigger: string; started: number; finished: number | null; status: string; steps: Step[]; report: string | null; pending: Pending | null; activity: string | null; queued?: Queued[] }
+/** A step it asked for after reading the web: waits for the person, even when the run is over. */
+interface Queued { n: number; tool: string; summary: string; since: number; status: "waiting" | "allowed" | "declined" | "expired"; result: string | null }
 interface RunRow { id: string; status: string; trigger: string; started: number; finished: number | null; steps: number; headline: string | null }
 
 const ACTION_LABELS: Record<string, [string, string]> = {
@@ -223,6 +225,34 @@ function Decide({ run, onDone }: { run: Run; onDone: () => void }) {
   );
 }
 
+/** Steps it queued after reading the web: allowed, one runs now; declined, it's dropped. */
+function QueuedSteps({ run, onDone }: { run: Run; onDone: () => void }) {
+  const [busy, setBusy] = useState<number | null>(null);
+  const answer = async (q: Queued, allow: boolean) => {
+    setBusy(q.n);
+    try { await post("/approvals/answer", { id: `routine:${run.id}:${q.n}`, allow }); }
+    catch (e) { toastError(e); } finally { setBusy(null); onDone(); }
+  };
+  const words: Record<Queued["status"], string> = { waiting: "", allowed: "Allowed", declined: "Declined", expired: "Waited too long" };
+  return (
+    <div className="code-ask stack" style={{ gap: 8 }}>
+      <b>It read the web, so these wait for you</b>
+      <span className="muted" style={{ fontSize: 13 }}>Text from a web page may be what asked for them. Allow only what you meant the routine to do.</span>
+      {(run.queued ?? []).map((q) => (
+        <div key={q.n} className="row-between wrap" style={{ gap: 8 }}>
+          <span className="grow">{q.summary}{q.result ? <span className="muted"> · {q.result.slice(0, 160)}</span> : null}</span>
+          {q.status === "waiting" ? (
+            <div className="row" style={{ gap: 6 }}>
+              <Button size="sm" disabled={busy !== null} onClick={() => void answer(q, true)}>Allow</Button>
+              <Button size="sm" variant="subtle" disabled={busy !== null} onClick={() => void answer(q, false)}>Deny</Button>
+            </div>
+          ) : <span className="muted" style={{ fontSize: 12 }}>{words[q.status]}</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- editor
 
 function Editor({ start, onDone }: { start: Partial<Routine>; onDone: (saved: boolean) => void }) {
@@ -281,7 +311,7 @@ function Editor({ start, onDone }: { start: Partial<Routine>; onDone: (saved: bo
       </div>
       <div className="stack" style={{ gap: 6 }}>
         <b>May do without asking</b>
-        <span className="muted" style={{ fontSize: 12 }}>Looking things up never needs asking. Anything below that isn't ticked asks you first, with a notification; tick what it needs when nobody's around (overnight).</span>
+        <span className="muted" style={{ fontSize: 12 }}>Looking things up never needs asking. Anything below that isn't ticked asks you first, with a notification; tick what it needs when nobody's around (overnight). Once a run has read the web, everything that acts waits for you, ticked or not: the run finishes and tells you what's waiting.</span>
         {Object.entries(ACTION_LABELS).map(([id, [label, hint]]) => (
           <label key={id} className="routine-allow">
             <input type="checkbox" checked={allowed.includes(id)} onChange={(e) => setAllowed((a) => (e.target.checked ? [...a, id] : a.filter((x) => x !== id)))} />
@@ -336,6 +366,7 @@ const TOOL_LABEL: Record<string, string> = {
 function stepTitle(s: Step) {
   const a = s.args ?? {};
   const base = TOOL_LABEL[s.tool ?? ""] ?? s.tool ?? "";
+  if (s.kind === "queued") return `Waiting for your OK: ${base}`;
   if (s.tool === "start_model") return `Started ${String(a.model ?? "a model")}`;
   if (s.tool === "download_model") return `Started downloading ${String(a.id ?? "")}`;
   if (s.tool === "ask_model") return `Asked the model: “${String(a.prompt ?? "").slice(0, 80)}${String(a.prompt ?? "").length > 80 ? "…" : ""}”`;
@@ -380,6 +411,7 @@ function RunView({ id, onBack }: { id: string; onBack: () => void }) {
           </div>
         </div>
       )}
+      {(run.queued ?? []).length > 0 && <QueuedSteps run={run} onDone={() => void r.refresh()} />}
       <ol className="routine-steps">
         {steps.map((s, i) => s.kind === "note" ? (
           <li key={i} className="routine-note">{s.result}</li>

@@ -675,7 +675,7 @@ async function reachable(url) {
     t = { local, child };
     tunnels.set(key, t);
     for (let i = 0; i < 50 && !(await portOpen(local)); i++) {
-      if (child.exitCode !== null) throw new Error("Couldn't reach that app on the device (SSH tunnel failed).");
+      if (child.exitCode !== null) throw new Error("That app is only available on the box, and this computer couldn't connect to it over SSH. Check the box's SSH, or turn on Open to the network in the app's settings.");
       await new Promise((r) => setTimeout(r, 200));
     }
   }
