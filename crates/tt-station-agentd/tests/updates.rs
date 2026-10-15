@@ -195,7 +195,7 @@ fn trusted_keys_are_parsed_strictly() {
     assert_eq!(keys[0].fingerprint, keys[1].fingerprint);
     assert_eq!(keys[0].origin, "built in");
     for bad in [
-        format!("{b64}"),
+        b64.to_string(),
         format!("a b {b64}"),
         format!("bad/name {b64}"),
         "k AAAA".to_string(),
