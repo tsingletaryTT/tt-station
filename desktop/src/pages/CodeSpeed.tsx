@@ -76,14 +76,8 @@ export function SpeedStrip({ session, working }: { session: string; working: boo
   }, [open]);
 
   const d = speed.data;
-  // A hidden window skips its poll: that's not an error worth showing.
-  if (!d) {
-    return (
-      <div className="code-speed" aria-live="off">
-        <span className="muted">{speed.error && speed.error !== "hidden" ? "Speed isn't available right now." : "Loading speed…"}</span>
-      </div>
-    );
-  }
+  // Nothing measured yet (or the box can't say): no strip, rather than a line about its absence.
+  if (!d) return null;
   const last = d.steps[d.steps.length - 1];
   const used = last?.prompt_tokens ?? 0;
   const tone = contextTone(used, d.compact_at);

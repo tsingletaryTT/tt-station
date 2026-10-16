@@ -16,6 +16,7 @@
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "@tenstorrent/vesper/button";
+import { IconButton } from "@tenstorrent/vesper/icon-button";
 import { Admonition } from "@tenstorrent/vesper/admonition";
 import { Icon } from "@tenstorrent/vesper/icons";
 import { Switch } from "@tenstorrent/vesper/switch";
@@ -88,20 +89,23 @@ export function Code() {
         <Button size="sm" variant="tertiary" iconLeft={<Icon kind="add" />} onClick={() => setCreating(true)}>New session</Button>
         <div style={{ height: 10 }} />
         {sessions.map((s) => (
-          <button key={s.id} className={`code-sess ${sel?.id === s.id ? "on" : ""}`} onClick={() => { setPicked(s.id); setCreating(false); }}>
-            <span className="code-sess-top">
-              <span className={`run-dot ${s.waiting ? "needs" : s.busy ? "live" : "done"}`} aria-hidden="true" />
-              <b className="code-list-title">{s.title}</b>
-              {s.sandbox && <span className="code-sess-sandbox" title="Sandboxed" aria-label="Sandboxed">🔒</span>}
-            </span>
+          // Styled like Chat's conversations: a quiet row, tinted when picked.
+          <button key={s.id} className={`chat-row code-sess ${sel?.id === s.id ? "on" : ""}`} aria-current={sel?.id === s.id ? "true" : undefined}
+            title={`${s.title}\n${s.folder}`} onClick={() => { setPicked(s.id); setCreating(false); }}>
+            <span className="code-sess-title">{s.title}</span>
             <span className="code-sess-sub">
-              {s.waiting ? <b className="code-needs">Needs your OK</b> : s.busy ? "Working…" : ago(s.last || s.created)}
+              <span className={`run-dot ${s.waiting ? "needs" : s.busy ? "live" : "done"}`} aria-hidden="true" />
+              {s.waiting ? <b className="code-needs">Needs your OK</b> : s.busy ? <span>Working…</span> : <span>{ago(s.last || s.created)}</span>}
               {s.changes ? <span className="code-sess-changes">{s.changes} changed</span> : null}
+              <span className="grow" />
+              {s.sandbox
+                ? <span className="code-sess-mode" aria-label="Sandboxed"><Icon kind="lock" /></span>
+                : <span className="code-sess-mode warn" title="Runs as you, outside the sandbox">as you</span>}
             </span>
           </button>
         ))}
         <div className="grow" />
-        <button className="link-button" style={{ fontSize: 12 }} onClick={() => navigate("connect")}>Claude Code, OpenCode and others in their own terminal: Connect → Code</button>
+        <button className="link-button code-list-foot" onClick={() => navigate("connect")}>Coding tools on your own computer → Connect</button>
       </aside>
       <section className="chat-main">
         {!d ? <div className="chat-thread">{o.error ? <Admonition variant="warning" subtle size="sm">Couldn't reach the box: {o.error}. Retrying…</Admonition> : <span className="muted">Loading…</span>}</div>
@@ -144,12 +148,12 @@ function NewSession({ d, onCreated, onCancel }: { d: Overview; onCreated: (s: Se
           <Typography variant="heading-md">Code with the box's model</Typography>
           <span className="muted" style={{ fontSize: 13 }}>Pick a project, then ask for what you want: a fix, a feature, tests, an explanation. It reads, edits and runs things in the project, step by step, and asks before it changes anything.</span>
         </div>
-        {onCancel && <Button size="xs" variant="ghost" onClick={onCancel}>Cancel</Button>}
       </div>
       {!d.claude && <Admonition variant="warning" subtle size="sm">Code's agent engine isn't installed on the box. Install it with <code>npm i -g @anthropic-ai/claude-code</code>.</Admonition>}
       {d.check.level !== "ok" && <Admonition variant={d.check.level === "block" ? "warning" : "info"} subtle size="sm">{d.check.why}</Admonition>}
       <div className="code-new-model muted">Runs on <CodeModelButton model={d.check.model} />, the model the box is serving.</div>
 
+      <div className="code-new-steps">
       <div className="code-step">
         <span className="code-step-num">1</span>
         <div className="stack" style={{ gap: 8, flex: 1, minWidth: 0 }}>
@@ -174,7 +178,7 @@ function NewSession({ d, onCreated, onCancel }: { d: Overview; onCreated: (s: Se
         <span className="code-step-num">2</span>
         <div className="row-between" style={{ gap: 12, flex: 1, minWidth: 0 }}>
           <div className="stack" style={{ gap: 2 }}>
-            <b>🔒 Work in a sandbox</b>
+            <b className="code-step-title"><Icon kind="lock" />Work in a sandbox</b>
             <span className="muted" style={{ fontSize: 13 }}>
               {sandbox ? "Recommended. It can see only this project folder, has no internet, and can reach nothing on the box except the model. It can't touch the chips, your other files, keys or settings."
                 : "It runs on the box as you, like a terminal: it can reach your other files and the network, so it asks before every command."}
@@ -211,7 +215,11 @@ function NewSession({ d, onCreated, onCancel }: { d: Overview; onCreated: (s: Se
           <Switch checked={think} onChange={(e) => setThink(e.target.checked)} aria-label="Think before acting" />
         </div>
       </div>
-      <div><Button disabled={busy || !folder || !d.claude} onClick={create}>{busy ? "Starting…" : "Start"}</Button></div>
+      </div>
+      <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+        {onCancel && <Button variant="ghost" onClick={onCancel}>Cancel</Button>}
+        <Button disabled={busy || !folder || !d.claude} iconRight={<Icon kind="arrow-right" />} onClick={create}>{busy ? "Starting…" : "Start session"}</Button>
+      </div>
       <Sheet ref={browse.ref} popover title="Choose a project folder" description="A folder in your home folder. A git repository works best: every change can be reviewed and undone.">
         <FolderBrowser home={d.home} onPick={(p) => { setFolder(p); browse.close(); }} />
       </Sheet>
@@ -523,8 +531,8 @@ function SessionPane({ s, check, onChanged, onForgotten }: { s: Sess; check: Ove
           <div className="code-head-meta">
             <span className="mono" title={live.folder}>{live.folder.replace(/^\/home\/[^/]+/, "~")}</span>
             <span><CodeModelButton model={check.model} /></span>
-            {live.sandbox ? <span title="It sees only this folder, with no internet">🔒 Sandbox</span>
-              : <span className="warn" title="It runs on the box as you, like a terminal">Runs as you</span>}
+            {live.sandbox ? <span className="code-head-mode" title="It sees only this folder, with no internet"><Icon kind="lock" />Sandbox</span>
+              : <span className="code-head-mode warn" title="It runs on the box as you, like a terminal">Runs as you</span>}
             <span title={policy?.label}>{policy?.short}</span>
           </div>
         </div>
@@ -553,7 +561,7 @@ function SessionPane({ s, check, onChanged, onForgotten }: { s: Sess; check: Ove
             {thread.streaming && <div className="msg-assistant"><div className="msg-body markdown selectable"><Reply text={thread.streaming} /></div></div>}
             {thread.items.length <= 1 && !working && (
               <div className="code-empty">
-                <div className="code-empty-mark" aria-hidden="true">⌘</div>
+                <div className="code-empty-mark" aria-hidden="true"><Icon kind="ai-agent" /></div>
                 <b>What should it do in {live.title}?</b>
                 <span className="muted">Ask in plain words. It reads the project, makes the change, and shows you every step before it runs anything.</span>
                 <div className="code-empty-examples">
@@ -635,9 +643,12 @@ function Composer({ text, setText, working, sending, stopping, title, onSend, on
           }
           else if (e.key === "Escape" && working) { e.preventDefault(); onStop(); }
         }} />
-      {working && !text.trim() && <Button size="sm" variant="subtle" disabled={stopping} onClick={onStop}>{stopping ? "Stopping…" : "Stop"}</Button>}
-      {working && text.trim() && <Button size="sm" variant="subtle" disabled={sending || stopping} onClick={onSendNow} title="Stop what it's doing and send this as a new request (Ctrl+Enter)">Stop &amp; send</Button>}
-      <Button size="sm" disabled={!text.trim() || sending} onClick={onSend} title={working ? "Add to what it's doing: it reads this at its next step (Enter)" : undefined}>{working ? "Add" : "Send"}</Button>
+      {working && text.trim() && <Button size="sm" variant="ghost" disabled={sending || stopping} onClick={onSendNow} title="Stop what it's doing and send this as a new request (Ctrl+Enter)">Stop &amp; send</Button>}
+      {/* The same round buttons as Chat: stop while it works with nothing typed, otherwise send. */}
+      {working && !text.trim()
+        ? <IconButton icon={<Icon kind="close" />} variant="subtle" aria-label={stopping ? "Stopping" : "Stop"} title="Stop (Esc)" disabled={stopping} onClick={onStop} />
+        : <IconButton icon={<Icon kind="arrow-up" />} aria-label={working ? "Add to what it's doing" : "Send"}
+            title={working ? "Add to what it's doing: it reads this at its next step (Enter)" : "Send (Enter)"} disabled={!text.trim() || sending} onClick={onSend} />}
     </div>
   );
 }
@@ -737,7 +748,7 @@ function askVerb(a: Approval) {
 const ItemView = memo(function ItemView({ it, live, onFile }: { it: Item; live: boolean; onFile: (f: string) => void }) {
   switch (it.t) {
     case "start":
-      return <div className="code-note">{it.sandbox ? "🔒 Working in a sandbox: this project folder only, no internet, nothing on the box but the model." : "Working on the box as you. It asks before every command."}</div>;
+      return <div className="code-note code-start">{it.sandbox ? <><Icon kind="lock" />Working in a sandbox: this project folder only, no internet, nothing on the box but the model.</> : "Working on the box as you. It asks before every command."}</div>;
     case "user":
       return (
         <div className={`msg-user ${it.mid ? `mid ${it.mid}` : ""}`}>

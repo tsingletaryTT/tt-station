@@ -673,7 +673,13 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .code-approval.waiting { border-color: var(--vesper-amber-600); background: color-mix(in srgb, var(--vesper-amber-600) 8%, transparent); }
 .code-sandbox-box { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: var(--surface); }
 /* New-session flow: numbered steps that read as a short checklist. */
-.code-new { gap: 18px; }
+.code-new { gap: 18px; max-width: 760px; }
+/* The four choices as one panel, divided, so the form reads as a single decision. */
+.code-new-steps { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.code-new-steps > .code-step { padding: 16px 18px; }
+.code-new-steps > .code-step + .code-step { border-top: 1px solid var(--line); }
+.code-new .agent-picks { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 1100px) { .code-new .agent-picks { grid-template-columns: minmax(0, 1fr); } }
 .code-step { display: flex; gap: 14px; align-items: flex-start; }
 .code-step-num { flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
   font: 600 13px var(--mono); color: var(--vesper-teal-600); background: color-mix(in srgb, var(--vesper-teal-600) 12%, transparent);
@@ -701,31 +707,37 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 /* ---------- Code: the agentic coding window ---------- */
 .code-page { grid-template-columns: minmax(180px, 260px) minmax(0, 1fr); }
 @media (max-width: 1100px) { .code-page { grid-template-columns: 200px minmax(0, 1fr); } }
-.code-list-title { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .code-needs { color: var(--vesper-amber-600); font-weight: 600; }
-/* The session list: a two-line row — title + status dot on top, a quiet
-   relative-time / "N changed" line under it. */
-.code-sess { display: flex; flex-direction: column; gap: 2px; white-space: normal !important; overflow: visible; }
-.code-sess-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.code-sess-top .code-list-title { flex: 1 1 auto; min-width: 0; }
-.code-sess-sandbox { font-size: 11px; flex: none; opacity: .8; }
-.code-sess-sub { display: flex; align-items: baseline; gap: 6px; font-size: 11px; color: var(--muted); padding-left: 15px; }
+/* The session list: Chat's quiet rows (.chat-row), two lines -- the title, then
+   status, changes and where it runs. */
+.code-sess { all: unset; box-sizing: border-box; width: 100%; cursor: pointer; display: flex; flex-direction: column; align-items: stretch;
+  gap: 3px; padding: 8px 10px; border-radius: var(--vesper-radius-2); color: var(--vesper-text-secondary); font: 400 13px var(--sans);
+  transition: background 120ms ease, color 120ms ease; }
+.code-sess:focus-visible { outline: 2px solid var(--vesper-border-focus); outline-offset: -2px; }
+.code-sess-title { font-size: 13px; line-height: 1.35; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-sess.on .code-sess-title { color: var(--vesper-text-primary); font-weight: 500; }
+.code-sess-sub { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); min-width: 0; }
+.code-sess-sub > span:not(.grow) { white-space: nowrap; }
+.code-sess-sub .run-dot { width: 6px; height: 6px; }
 .code-sess-changes { color: var(--vesper-teal-600); font-weight: 500; }
-.code-sess.on .code-sess-sub { color: var(--vesper-text-secondary); }
-.code-head { gap: 12px; flex-wrap: wrap; padding: 12px 24px; }
-.code-head-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.code-head-policy { font-size: 12px; white-space: nowrap; }
-.code-head-path { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.code-sess-mode { display: inline-flex; align-items: center; opacity: .7; }
+.code-sess-mode svg { width: 11px; height: 11px; }
+.code-sess-mode.warn { color: var(--vesper-amber-600); opacity: 1; }
+.code-list-foot { font-size: 12px; text-align: left; padding: 8px 10px; white-space: normal; }
 .code-changes-count { display: inline-block; min-width: 1.1em; margin-left: 5px; padding: 0 5px; border-radius: 999px;
   background: var(--vesper-teal-600); color: var(--vesper-background-primary); font-size: 11px; font-weight: 600; line-height: 1.5; }
-@media (max-width: 1100px) { .code-head-policy { display: none; } }
 .code-trouble { padding: 6px 24px; font-size: 12px; color: var(--vesper-text-warning, var(--vesper-amber-600));
   background: color-mix(in srgb, var(--vesper-amber-600) 8%, transparent); border-bottom: 1px solid var(--line); }
 .code-thread { padding-left: 24px; padding-right: 24px; }
 .code-thread .msg-user { overflow-wrap: anywhere; }
 /* The empty thread: a calm invitation, not a wall of chips. */
 .code-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; padding: 28px 12px; max-width: 520px; margin: 0 auto; }
-.code-empty-mark { font-size: 30px; line-height: 1; color: var(--vesper-teal-600); opacity: .85; }
+.code-empty-mark { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; color: var(--vesper-teal-600);
+  background: color-mix(in srgb, var(--vesper-teal-600) 12%, transparent); }
+.code-empty-mark svg { width: 22px; height: 22px; }
+/* A new session's invitation sits in the middle of the pane, not under the header. */
+.code-thread:has(> .code-empty) { min-height: 100%; }
+.code-thread > .code-empty { margin-block: auto; }
 .code-empty-examples { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 4px; }
 .code-empty-examples .example-chip { text-align: center; }
 .msg-user.queued { opacity: .7; border-style: dashed; display: flex; gap: 10px; align-items: baseline; }
@@ -870,7 +882,7 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .msg-user.mid.lost .code-mid-tag { color: var(--vesper-text-error); }
 
 /* Code: the session's top bar -- title (click to rename), one quiet line of details, few actions. */
-.code-head { gap: 16px; flex-wrap: nowrap; padding: 12px 24px; align-items: center; }
+.code-head { gap: 16px; flex-wrap: nowrap; padding: 12px 32px; align-items: center; }
 .code-head-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
 .code-head-title { all: unset; cursor: text; font: 600 16px/1.3 var(--sans); color: var(--vesper-text-primary); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; max-width: 100%; border-radius: 6px; padding: 1px 4px; margin-left: -4px; }
@@ -881,6 +893,10 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .code-head-meta > span:first-child { flex-shrink: 2; }
 .code-head-meta > span + span::before { content: "·"; margin: 0 7px; color: var(--vesper-text-tertiary); }
 .code-head-meta .warn { color: var(--vesper-amber-600); }
+.code-head-mode { display: inline-flex; align-items: center; gap: 4px; }
+.code-head-mode svg, .code-start svg, .code-step-title svg { width: 12px; height: 12px; flex: none; }
+.code-start { display: inline-flex; align-items: center; justify-content: center; gap: 6px; align-self: center; }
+.code-step-title { display: inline-flex; align-items: center; gap: 6px; }
 .code-head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 /* The model Code runs on, in the header: opens "Model for Code". */
 .code-model-button { all: unset; cursor: pointer; border-radius: 6px; padding: 0 4px; margin: 0 -4px; color: var(--vesper-text-secondary); }
