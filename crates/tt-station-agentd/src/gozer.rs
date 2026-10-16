@@ -2380,10 +2380,22 @@ pub fn lease_gated_unit(
 
 /// A JSON list of lease ids kept in a file -- how leases on holder units are
 /// remembered across agent restarts (`<config>/holder-leases.json`).
+///
+/// Every read-change-write runs under one process-wide lock (the handle is
+/// made afresh wherever it's needed, so the lock can't live in it), and the
+/// file is replaced atomically (`crate::fsio::write_atomic`): two changes at
+/// once can't drop an id, and a crash can't leave half a list.
 pub struct LeaseFile(pub std::path::PathBuf);
+
+static LEASE_FILES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl LeaseFile {
     pub fn ids(&self) -> Vec<String> {
+        let _held = LEASE_FILES.lock().unwrap_or_else(|p| p.into_inner());
+        self.read()
+    }
+
+    fn read(&self) -> Vec<String> {
         std::fs::read(&self.0)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -2395,41 +2407,51 @@ impl LeaseFile {
             let _ = std::fs::remove_file(&self.0);
             return;
         }
-        if let Some(dir) = self.0.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        let bytes = serde_json::to_vec(ids).unwrap_or_default();
+        if let Err(e) = crate::fsio::write_atomic(&self.0, &bytes, crate::fsio::PRIVATE) {
+            crate::log::error(format!("couldn't save {}: {e}", self.0.display()));
         }
-        let _ = std::fs::write(&self.0, serde_json::to_vec(ids).unwrap_or_default());
+    }
+
+    /// Change the list under the lock.
+    fn change<T>(&self, f: impl FnOnce(&mut Vec<String>) -> T) -> T {
+        let _held = LEASE_FILES.lock().unwrap_or_else(|p| p.into_inner());
+        let mut ids = self.read();
+        let before = ids.clone();
+        let out = f(&mut ids);
+        if ids != before {
+            self.write(&ids);
+        }
+        out
     }
 
     pub fn add(&self, id: &str) {
-        let mut ids = self.ids();
-        if !ids.iter().any(|i| i == id) {
-            ids.push(id.to_string());
-        }
-        self.write(&ids);
+        self.change(|ids| {
+            if !ids.iter().any(|i| i == id) {
+                ids.push(id.to_string());
+            }
+        });
     }
 
     /// Every id, and the file emptied.
     pub fn take(&self) -> Vec<String> {
-        let ids = self.ids();
-        self.write(&[]);
-        ids
+        self.change(std::mem::take)
     }
 
     /// Replace `old` with `new` (or drop it); `false` when `old` isn't here.
     pub fn swap(&self, old: &str, new: Option<&str>) -> bool {
-        let mut ids = self.ids();
-        let Some(i) = ids.iter().position(|id| id == old) else {
-            return false;
-        };
-        match new {
-            Some(new) => ids[i] = new.to_string(),
-            None => {
-                ids.remove(i);
+        self.change(|ids| {
+            let Some(i) = ids.iter().position(|id| id == old) else {
+                return false;
+            };
+            match new {
+                Some(new) => ids[i] = new.to_string(),
+                None => {
+                    ids.remove(i);
+                }
             }
-        }
-        self.write(&ids);
-        true
+            true
+        })
     }
 }
 

@@ -556,3 +556,31 @@ fn lease_files_swap_and_drop_by_id() {
     assert_eq!(file.take(), vec!["c".to_string()]);
     assert!(file.ids().is_empty());
 }
+
+/// Changes from several threads at once all land, and the file is private.
+#[test]
+fn lease_file_changes_at_once_all_land() {
+    let dir = scratch("file-race");
+    let threads: Vec<_> = (0..8)
+        .map(|t| {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let file = gozer::holder_lease_file(&dir);
+                for n in 0..25 {
+                    file.add(&format!("lease-{t}-{n}"));
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    let file = gozer::holder_lease_file(&dir);
+    assert_eq!(file.ids().len(), 8 * 25, "no id was lost");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(dir.join("holder-leases.json"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
