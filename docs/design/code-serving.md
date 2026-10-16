@@ -1,6 +1,7 @@
 # Design: serving Code (agent) workloads on QuietBox 2
 
-*Status: proposal for decision. Written 2026-10-15 against `3d50ad6`. The live numbers below
+*Status: decided 2026-10-15: no default serving setup for Code (see **Decision** below); the
+benchmark in §5 was cancelled. The analysis is kept as background. Written 2026-10-15 against `3d50ad6`. The live numbers below
 were measured on the QuietBox (`tt-quietbox`) on 2026-10-15 unless another date is given.
 Audience: TT Station engineering, and whoever decides how company QuietBoxes are configured.*
 
@@ -18,22 +19,31 @@ the `p150x2-throughput` profile**. Two facts reframe the question:
    and a 64K re-read over 5 minutes. tt-lab has no server, no batching and no prefix cache. It
    shows what the chips can do, not something Code can use today.
 
-**Recommendation:**
+**Decision (2026-10-15): people pick any working model and profile in Code.** Rather than
+benchmarking configs and choosing a default serving setup for Code, the "Model for Code" picker
+offers every model on the box that would functionally work, from every source the box serves
+from, and the box records speed and check-up results per model and profile so the picker shows
+them:
 
-- **Personal developer box:** move gpt-oss-20b to the **4-chip profile the same package
-  already ships** (`p150x4` latency, or `p150x4-throughput`, whichever wins the benchmark in
-  §5). Nobody else is displaced, and the KV and prefix-cache pool doubles. Expected decode
-  gain is modest, an estimated 1.2–1.6×, until measured. The step-time model in §2 suggests
-  that is worth roughly 15–30% of model time per Code step.
-- **Shared team box:** **`p150x4-throughput`**. It's the same server with twice the KV pool,
-  about 16 concurrent 64K Code sessions with their prefix caches in place instead of about 8.
-  Also make **model switching owner-only**: today any paired member can stop the model for
-  everyone.
-- **Defer** a Code-dedicated model with speculative decoding (option c) and a co-served
-  drafter (option d) until the TT vLLM plugin has speculative decoding that keeps prefix
-  caching. Option (d) isn't a supported vLLM topology in any case.
-- **Before deciding,** run the benchmark protocol in §5. It mostly reuses the existing tools
-  and needs about 2 engineer-days for one new piece, a Code trace replay.
+- **Sources:** the `tt` catalog, installed tt-model community packages (each serve profile that
+  fits the box is its own choice, e.g. "gpt-oss-20b · 4 chips · low latency"), and native vLLM
+  bundles (`codemodels.rs`, `GET /code/models`).
+- **Listed when it would work:** a chat (instruct) LLM, its weights on the box, fitting the box's
+  chips, with tool calling on its serving path. When a source doesn't say whether it makes tool
+  calls, it's listed and marked "tool calling unverified" rather than hidden.
+- **Recorded per model and profile:** Code's measured speed (`code-speed.json`, keyed by the
+  package and profile that served) and the latest check-up's agent reliability (`evals/`, which
+  now record the setup).
+- **Switching** goes through each source's own serve route (`POST /serve`,
+  `POST /community/serve` with the chosen `profile`, `POST /vllm/native/serve`), so roles,
+  permission settings, leases and the confirm dialog apply as they do from Models.
+
+**The benchmark protocol in §5 was cancelled.** The per-profile speed and check-up records
+replace it: each profile people actually use for Code gets measured on the box as it runs.
+
+The rest of this document is the analysis that led here. Its earlier recommendation (a 4-chip
+default per box role, decided by the §5 benchmark) is withdrawn; its measurements and the
+step-time model in §2 still hold.
 
 ## 1. What is measured today
 
@@ -251,7 +261,11 @@ On a **personal** box the owner trades that consciously. Model switching already
 (`load_times`). On a **shared** box the trade belongs to the owner, which is why switching must
 become owner-only (§6).
 
-## 5. Measure before deciding: benchmark protocol
+## 5. Benchmark protocol (cancelled)
+
+*Cancelled 2026-10-15: Code's picker offers every working model and profile, and the box
+records speed and check-up results per model and profile instead (see the Decision above). The
+protocol is kept for reference.*
 
 **Configs:**
 
@@ -298,15 +312,19 @@ become owner-only (§6).
 | Change | Why | Effort |
 |---|---|---|
 | **Persist Code step speeds**: write each `codespeed::Step` into the session's `events.jsonl` `step` event; today those events are empty | S6 and real-world model-time share | S (1–2 d) |
-| **Profile-aware serving.** A "serving config" is package + profile: `POST /serve {model, profile}`, `/community/serve` passes `--profile`, and Models and the Code picker show the profile with measured speed per config (the `code-speed.json` book keyed by model + profile) | Options a1, b1 | M (1–2 wk) |
-| **Code picker covers community packages.** `GET /code/models` lists only the `tt` CLI catalog; the gpt-oss package Code runs on today shows up only because it is serving | Option b1 selection from Code | S–M |
-| **Box role default**: `box_role = "personal" \| "shared"` in `agentd.toml` picks the default profile and the switching policy | Per-box recommendation | S |
+| **Profile-aware serving.** *Done for community packages:* `POST /community/serve` takes a `profile`, the Code picker shows each profile, and `code-speed.json` keys speeds by model + package profile. Models doesn't offer a profile choice yet | Any profile can be Code's | M (1–2 wk) |
+| **Code picker covers every source.** *Done:* `GET /code/models` lists the `tt` catalog, community packages (per profile) and native vLLM bundles | Pick any working model in Code | S–M |
+| ~~**Box role default**~~: dropped; there's no default Code setup to pick | | |
 | **Owner-only switching on shared boxes.** `POST /serve`, `/community/serve` and the picker's `Switch` take `BearerAuth` today, so any member can stop the model for everyone. Make them owner-only (with step-up under org identity, see [enterprise-identity.md](enterprise-identity.md) §5) when `box_role = shared` | Protects other users | S |
 | **Co-serve under gozer.** The companion slot leases board 1 instead of being disabled | Option c1 | M |
 | **Code trace replay benchmark** (S4) | Measurement | S–M (2 d) |
 | Spec decoding (c3), drafter (d) | Depends on the plugin | External, L |
 
-## 7. Recommendation per box type
+## 7. Recommendation per box type (withdrawn)
+
+*Withdrawn 2026-10-15 with the benchmark: there's no default Code setup per box type. People
+pick any working model and profile in Code; switching policy is the model-control setting.
+Kept for reference.*
 
 | | Personal developer box | Shared team box |
 |---|---|---|
@@ -317,6 +335,9 @@ become owner-only (§6).
 | Later | c3 speculative decoding when the plugin supports it with the prefix cache; tt-lab once it has fast prefill and a server | c1 board split only if S3 shows Code and chat interfere even on the latency profile |
 
 ## 8. Decisions needed
+
+*Decided 2026-10-15: items 1 and 2 (no benchmark, no default profile; people pick in Code).
+Item 3 is each person's choice when they pick a 4-chip profile. The others stay open.*
 
 1. **Run the benchmark protocol (§5)** before changing defaults: about 1 day of exclusive box
    time plus ~2 eng-days for the S4 replay. Approve the box time.
