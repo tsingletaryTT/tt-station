@@ -28,7 +28,7 @@ approved.
 | Track | Slices | Builds and passes tests at | Land as |
 |---|---|---|---|
 | Build and CI | 00 | read-only (it references the later code) | with the agent |
-| CLI and client library | 01 | `01` (`cargo build -p tt-station -p mock-box`) | with the agent (the agent uses the library) |
+| CLI and client library | 01 | `01` (`cargo test -p tt-station -p libttstation`) | with the agent (the agent uses the library) |
 | Box agent | 02–10 | `10`: full `cargo build`/`cargo test` with the hardware stubs, `clippy`, `fmt` | one merge of `review/10-code` |
 | Desktop app | 11–12 | `12`: `npm run typecheck`, `npm test`, `npm run build` | one merge, after the agent |
 | iPhone app | 13–14 | `14`: Xcode build plus the iOS tests (CI `ios` job, needs a Mac) | one merge, after the agent |
@@ -41,8 +41,8 @@ Lines are added plus removed, tests and docs included.
 | # | Branch | Lines | Look at | Extra review |
 |---|---|---:|---|---|
 | 00 | `review/00-hygiene` | 3.2K | CI jobs, `.deb` packaging, `deploy/` (firewall, SSH hardening, bring-up containment), release signing scripts, licenses | security (deploy scripts run as root) |
-| 01 | `review/01-cli` | 2.7K | CLI over HTTPS with the box's certificate pinned; client library; mock box | security (certificate pinning) |
-| 02 | `review/02-agent-core` | 16.3K | The wiring (`main.rs`, `state.rs`, `router.rs`) plus sign-in, pairing, TLS, sessions, owner and member roles, audit log, app keys | **security**. The largest slice: about half is the wiring every later slice plugs into |
+| 01 | `review/01-cli` | 2.7K | CLI over HTTPS with the box's certificate pinned; client library | security (certificate pinning) |
+| 02 | `review/02-agent-core` | 16.3K | The wiring (`main.rs`, `state.rs`, `router.rs`) plus sign-in, pairing, TLS, sessions, owner and member roles, audit log, app keys, the mock box used by tests | **security**. The largest slice: about half is the wiring every later slice plugs into |
 | 03 | `review/03-serving-chips` | 14.5K | Starting and stopping models, chip leasing through gozer, liveness, telemetry, model modes | box check: start and stop a model |
 | 04 | `review/04-box-care` | 8.3K | Power, sleep and Wake-on-LAN, signed updates, export and import, doctor | security (privileged commands, update signatures) |
 | 05 | `review/05-assistant-gateway` | 13.4K | OpenAI and Anthropic `/v1` gateway, assistant tools and approvals, memories, documents, library | security (web content steering tools, key handling) |

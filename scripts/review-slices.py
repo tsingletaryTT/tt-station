@@ -45,12 +45,12 @@ SLICES = [
         "README.md", "Cargo.toml", "Cargo.lock", "CLAUDE.md", "docs/landing-plan.md",
         *docs("installing", "releases", "pinned-dependencies", "box-hardening"),
     ]),
-    ("01-cli", "CLI, client library and mock box", [
-        "crates/tt-station/*", "crates/libttstation/*", "crates/mock-box/*",
+    ("01-cli", "CLI and client library", [
+        "crates/tt-station/*", "crates/libttstation/*",
         *docs("cli-https-pinning"),
     ]),
     ("02-agent-core", "Agent core: wiring, sign-in, devices, roles, audit", [
-        "crates/tt-station-agentd/Cargo.toml",
+        "crates/tt-station-agentd/Cargo.toml", "crates/mock-box/*",
         *src("lib.rs", "main.rs", "state.rs", "state/*", "router.rs", "routes.rs",
              "handlers/mod.rs", "auth.rs", "error.rs", "localpeer.rs", "sessions.rs",
              "pairing.rs", "pairqr.rs", "tls.rs", "web.rs", "audit.rs", "authkeys.rs",
