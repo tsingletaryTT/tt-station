@@ -75,6 +75,13 @@ pub const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 /// Most entries in an archive.
 pub const MAX_ENTRIES: usize = 100_000;
 
+/// Where an export or an upload is spooled: on the data disk, under the
+/// config dir (`0700`), not in `$XDG_RUNTIME_DIR` (a small tmpfs a 6 GB
+/// archive would fill).
+fn temp_dir(config: &Path) -> PathBuf {
+    config.join("tmp")
+}
+
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -616,7 +623,8 @@ pub(crate) async fn post_export(
     let config = state.config_dir();
     let box_name = state.name().to_string();
     let made = tokio::task::spawn_blocking(move || -> std::io::Result<(std::fs::File, Value)> {
-        let (file, path) = crate::fsio::private_temp_file("tt-export-", ".tar.gz")?;
+        let (file, path) =
+            crate::fsio::private_temp_file_in(&temp_dir(&config), "tt-export-", ".tar.gz")?;
         let result = (|| {
             let manifest = write_archive(&collect(&config), &box_name, &file)?;
             let back = std::fs::File::open(&path)?;
@@ -1274,8 +1282,9 @@ pub(crate) async fn post_import(
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
     let dry_run = q.dry_run.unwrap_or(false);
-    let (file, path) = crate::fsio::private_temp_file("tt-import-", ".tar.gz")
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (file, path) =
+        crate::fsio::private_temp_file_in(&temp_dir(&state.config_dir()), "tt-import-", ".tar.gz")
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     // Removed however this ends.
     struct Cleanup(PathBuf);
     impl Drop for Cleanup {
