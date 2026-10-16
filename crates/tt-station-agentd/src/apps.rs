@@ -12,8 +12,8 @@
 //! Every app listens only on the box itself (127.0.0.1) unless its owner turns
 //! on **Open to the network** for it ([`Share`]): then it's published on every
 //! address at `http://<box>:<port>`, with its own sign-in on (some apps have one
-//! always; Langflow and LightRAG get theirs switched on; n8n only once its owner
-//! account exists; apps with no sign-in are never shared). Another computer's
+//! always; Langflow and LightRAG get theirs switched on; apps with no sign-in
+//! are never shared). Another computer's
 //! TT Station reaches a box-only app through its SSH tunnel; a plain browser
 //! elsewhere can't. A container keeps the address it was started with: a change
 //! takes effect the next time it's started from TT Station (which re-creates
@@ -86,9 +86,6 @@ pub enum Share {
     OwnLogin(&'static str),
     /// Its sign-in is turned on when it's shared: these on top of `env`.
     LoginWhenShared(&'static [(&'static str, &'static str)], &'static str),
-    /// Whoever opens it first becomes its owner (n8n): shared only once that
-    /// account exists, made on the box.
-    OwnerFirst(&'static str),
     /// Never on the network.
     Never(&'static str),
 }
@@ -149,30 +146,6 @@ pub const APPS: &[AppDef] = &[
         files: &[],
     },
     AppDef {
-        id: "n8n",
-        name: "n8n",
-        blurb: "Automations: wire the box's model into email, calendars, webhooks and more.",
-        category: "Automate",
-        image: "docker.n8n.io/n8nio/n8n:latest@sha256:dd580fe1ab6e99e85bc66f2acf8bc8c5e9409fbe61b2e2803c5024403ef52833",
-        port: 3022,
-        container_port: 5678,
-        data: "/home/node/.n8n",
-        env: &[
-            ("N8N_SECURE_COOKIE", "false"),
-            ("OPENAI_API_BASE", "{base}"),
-        ],
-        command: None,
-        share: Share::OwnerFirst("sign in to n8n and run its automations (which can call the box's model, send email and reach other services), with its owner's password"),
-        url_suffix: "",
-        homepage: "https://n8n.io",
-        needs: &[],
-        login_user: None,
-        hint: "",
-        extra_args: &[],
-        show_key: false,
-        files: &[],
-    },
-    AppDef {
         id: "flowise",
         name: "Flowise",
         blurb: "Build AI agents and RAG flows visually, on the box's model.",
@@ -199,7 +172,7 @@ pub const APPS: &[AppDef] = &[
     AppDef {
         id: "searxng",
         name: "SearXNG",
-        blurb: "A private search engine on the box: it asks Google, Bing and others for you, with no account. Research apps search through it.",
+        blurb: "A private search engine on the box: it asks Google, Bing and others for you, with no account. The research apps here, and TT Station's own Research, search through it.",
         category: "Research",
         image: "searxng/searxng:latest@sha256:5903efa50bc6b99293fa059f7a0ff37eddd910210196af77d02e5536ccdfb387",
         port: 3024,
@@ -272,27 +245,6 @@ pub const APPS: &[AppDef] = &[
         files: &[],
     },
     AppDef {
-        id: "comfyui",
-        name: "ComfyUI",
-        blurb: "Node-based image and video workflows. It runs on the box's CPU (ComfyUI doesn't support Tenstorrent chips yet), so large models are slow; Studio makes FLUX images on the chips.",
-        category: "Images",
-        image: "yanwk/comfyui-boot:cpu@sha256:c54d7d0d744672654b0ec6b3bc02c569fb4f5eaef86ff2dac099a6e9dc231f97",
-        port: 3027,
-        container_port: 8188,
-        data: "/root",
-        env: &[("CLI_ARGS", "--cpu")],
-        command: None,
-        share: Share::Never("It has no sign-in of its own: anyone who reaches it could run workflows (and install custom nodes, which are code) on the box."),
-        url_suffix: "",
-        homepage: "https://www.comfy.org",
-        needs: &[],
-        login_user: None,
-        hint: "",
-        extra_args: &[],
-        show_key: false,
-        files: &[],
-    },
-    AppDef {
         id: "langflow",
         name: "Langflow",
         blurb: "Build agents and RAG pipelines visually, on the box's model, and serve them as APIs.",
@@ -322,56 +274,10 @@ pub const APPS: &[AppDef] = &[
         files: &[],
     },
     AppDef {
-        id: "crawl4ai",
-        name: "Crawl4AI",
-        blurb: "Turns any web page into clean text for AI, with a playground to try it and tools agents can call. Uses the box's model to pull out structured data.",
-        category: "Research",
-        image: "unclecode/crawl4ai:0.9.4@sha256:9021b3cb5c6f12570bbcd5395638495e0a06969b3148e377b953d174af2ebc9b",
-        port: 3029,
-        container_port: 11235,
-        data: "/data",
-        env: &[
-            ("OPENAI_API_KEY", "{key}"),
-            ("LLM_PROVIDER", "openai/{model}"),
-            ("LLM_BASE_URL", "{base}"),
-        ],
-        command: None,
-        share: Share::Never("It has no sign-in by default, and it fetches any page for whoever asks (with the box's model)."),
-        url_suffix: "/playground",
-        homepage: "https://docs.crawl4ai.com",
-        needs: &[],
-        login_user: None,
-        hint: "",
-        extra_args: &["--shm-size=1g"],
-        show_key: false,
-        files: &[],
-    },
-    AppDef {
-        id: "scrapling",
-        name: "Scrapling",
-        blurb: "A stealthy web scraper that agents use as a tool (an MCP server): it gets past pages that block simple fetching.",
-        category: "Automate",
-        image: "pyd4vinci/scrapling:0.4.15@sha256:1bacbc8ec90b3090d462e12f6555e241daf0dfeb684ab326ffa09d52d8226e69",
-        port: 3030,
-        container_port: 8000,
-        data: "/data",
-        env: &[("SCRAPLING_MCP_AUTH_TOKEN", "{token}")],
-        command: Some(&["mcp", "--http", "--host", "0.0.0.0"]),
-        share: Share::OwnLogin("use it as an MCP tool with the access code as their bearer token, fetching pages through the box"),
-        url_suffix: "/mcp",
-        homepage: "https://github.com/D4Vinci/Scrapling",
-        needs: &[],
-        login_user: None,
-        hint: "It's a tool for agents, not a page to browse: add it to an agent (Hermes, OpenCode, Claude) as an MCP server at the address above, with the access code as its bearer token.",
-        extra_args: &[],
-        show_key: false,
-        files: &[],
-    },
-    AppDef {
         id: "openhands",
         name: "OpenHands",
         blurb: "An AI software engineer: give it a task in a project and it writes, runs and fixes the code, step by step, where you can watch.",
-        category: "Code",
+        category: "Agents",
         image: "ghcr.io/openhands/agent-canvas:latest@sha256:91b7a217dcbefe8c10562523b043458ed1dfaf8ba770194b319fe754cee03f23",
         port: 3031,
         container_port: 8000,
@@ -576,25 +482,6 @@ fn secret_in(def: &AppDef, env: &[String], placeholder: &str) -> Option<String> 
         })
 }
 
-/// n8n's own answer to "has someone made the owner account yet?" (`GET /rest/settings`).
-fn owner_set_up(settings: &Value) -> Option<bool> {
-    settings["data"]["userManagement"]["showSetupOnFirstLoad"]
-        .as_bool()
-        .map(|setup_pending| !setup_pending)
-}
-
-/// Asks the running app (on the box) whether its owner account exists.
-fn has_owner(def: &AppDef) -> Option<bool> {
-    let v: Value = reqwest::blocking::Client::new()
-        .get(format!("http://127.0.0.1:{}/rest/settings", def.port))
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .ok()?
-        .json()
-        .ok()?;
-    owner_set_up(&v)
-}
-
 /// The box's address on its network, as another computer would type it.
 fn lan_host(state: &AppState) -> String {
     crate::pairqr::lan_ipv4()
@@ -616,8 +503,6 @@ fn network_terms(state: &AppState, def: &AppDef) -> Value {
         Share::OwnLogin(what) => json!({ "can_share": true, "who": reach(what) }),
         Share::LoginWhenShared(_, what) => json!({ "can_share": true, "who": reach(what),
             "note": format!("{}'s own sign-in is turned on while it's open to the network.", def.name) }),
-        Share::OwnerFirst(what) => json!({ "can_share": true, "who": reach(what),
-            "note": format!("Only after you've made {}'s owner account here on the box: until then, whoever opens it first becomes its owner.", def.name) }),
     }
 }
 
@@ -912,7 +797,7 @@ fn install_blocking(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // An app key only for apps that call the box's model (SearXNG, ComfyUI… don't).
+    // An app key only for apps that call the box's model (SearXNG doesn't).
     let uses_key = def.show_key
         || def.env.iter().any(|(_, v)| v.contains("{key}"))
         || def.files.iter().any(|(_, c)| c.contains("{key}"));
@@ -1139,18 +1024,17 @@ pub(crate) async fn put_network(
     let done = tokio::task::spawn_blocking(move || {
         if body.open {
             match def.share {
-                Share::Never(why) => return Err(err(StatusCode::CONFLICT, format!("{} stays on the box. {why}", def.name))),
-                Share::OwnerFirst(_) => match (docker_state(def.id) == "running").then(|| has_owner(def)).flatten() {
-                    Some(true) => {}
-                    Some(false) => return Err(err(StatusCode::CONFLICT, format!(
-                        "Make {}'s owner account first: open it here on the box and sign up. Until then, whoever opens it first becomes its owner.", def.name))),
-                    None => return Err(err(StatusCode::CONFLICT, format!(
-                        "Start {} and make its owner account here on the box first; then it can be opened to the network.", def.name))),
-                },
+                Share::Never(why) => {
+                    return Err(err(
+                        StatusCode::CONFLICT,
+                        format!("{} stays on the box. {why}", def.name),
+                    ))
+                }
                 Share::OwnLogin(_) | Share::LoginWhenShared(..) => {}
             }
         }
-        set_open(&state, def.id, body.open).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        set_open(&state, def.id, body.open)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
         Ok(Json(describe(&state, def)))
     })
     .await
@@ -1284,14 +1168,11 @@ mod tests {
             "searxng",
             "localdeepresearch",
             "vane",
-            "comfyui",
-            "crawl4ai",
             "openhands",
         ] {
             assert!(matches!(app(id).unwrap().share, Share::Never(_)), "{id}");
         }
-        assert!(matches!(app("n8n").unwrap().share, Share::OwnerFirst(_)));
-        for id in ["lobechat", "flowise", "scrapling", "openclaw"] {
+        for id in ["lobechat", "flowise", "openclaw"] {
             let a = app(id).unwrap();
             assert!(matches!(a.share, Share::OwnLogin(_)), "{id}");
             // Its sign-in is always in its environment.
@@ -1369,27 +1250,6 @@ mod tests {
             secret_in(lightrag, &env, "{key}").as_deref(),
             Some("tt-key")
         );
-        assert_eq!(secret_in(app("comfyui").unwrap(), &env, "{token}"), None);
-    }
-
-    #[test]
-    fn n8n_is_shared_only_once_it_has_an_owner() {
-        assert_eq!(
-            owner_set_up(
-                &json!({ "data": { "userManagement": { "showSetupOnFirstLoad": true } } })
-            ),
-            Some(false)
-        );
-        assert_eq!(
-            owner_set_up(
-                &json!({ "data": { "userManagement": { "showSetupOnFirstLoad": false } } })
-            ),
-            Some(true)
-        );
-        assert_eq!(
-            owner_set_up(&json!({ "data": {} })),
-            None,
-            "unknown: not shared"
-        );
+        assert_eq!(secret_in(app("vane").unwrap(), &env, "{token}"), None);
     }
 }

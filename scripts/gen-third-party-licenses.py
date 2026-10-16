@@ -41,7 +41,6 @@ These are not blockers to building, but need a decision before TT Station ships 
 
 | Item | Where | License | Why it is flagged |
 |---|---|---|---|
-| **n8n** (`docker.n8n.io/n8nio/n8n`) | App catalogue, `crates/tt-station-agentd/src/apps.rs` (one-click install in Docker) | Sustainable Use License (fair-code, **not** OSI open source) | We do not redistribute the image (the user's box pulls it), but offering it from a Tenstorrent product may count as "making it available" commercially; the license restricts commercial redistribution and hosting for others. |
 | **`terminfo`** (Rust crate) | In `Cargo.lock` through `ratatui`'s optional termwiz backend (`tt-station console`). **Not compiled today** (the feature is off), so it is absent from the table below, but enabling that backend would ship it | WTFPL | Not on most corporate allow-lists; permissive in effect but often needs explicit sign-off. |
 | **`webpki-roots`** (Rust crate) | Transitive dependency of the TLS stack (`reqwest`/`rustls`) | CDLA-Permissive-2.0 | A data license (Mozilla's root CA list), not a software license; requires keeping the license text with redistributions. |
 """

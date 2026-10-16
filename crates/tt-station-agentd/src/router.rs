@@ -318,7 +318,6 @@ pub fn app(state: AppState) -> Router {
             "/research/{id}/explain",
             post(crate::research::post_explain),
         )
-        .route("/skills", get(crate::skills::get_skills))
         .route(
             "/embeddings",
             get(crate::embeddings::get_embeddings).put(crate::embeddings::put_embeddings),
@@ -379,7 +378,6 @@ pub fn app(state: AppState) -> Router {
             "/coding/folders",
             get(crate::coding::get_folders).post(crate::coding::post_folder),
         )
-        .route("/skills/{id}/hermes", post(crate::skills::post_hermes))
         // Idle sleep stops the model and waking starts it: the model-control setting applies.
         .route(
             "/idle",

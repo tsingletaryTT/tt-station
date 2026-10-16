@@ -285,7 +285,7 @@ async fn the_first_device_is_an_owner_and_members_cannot_manage_the_box() {
         (M::POST, format!("{base}/reset"), json!({})),
         (
             M::PUT,
-            format!("{base}/apps/n8n/network"),
+            format!("{base}/apps/langflow/network"),
             json!({ "open": true }),
         ),
         (M::POST, format!("{base}/hermes/install"), json!({})),
@@ -296,7 +296,7 @@ async fn the_first_device_is_an_owner_and_members_cannot_manage_the_box() {
             format!("{base}/updates/channel/approve"),
             json!({ "fingerprint": "0123456789abcdef" }),
         ),
-        (M::DELETE, format!("{base}/apps/n8n"), json!({})),
+        (M::DELETE, format!("{base}/apps/langflow"), json!({})),
         (
             M::POST,
             format!("{base}/software/cli-update"),

@@ -222,9 +222,9 @@ async fn the_app_list_needs_a_paired_device() {
     let r = b.c.get(format!("{}/apps", b.base)).send().await.unwrap();
     assert_eq!(r.status(), 401);
     for (method, path) in [
-        ("POST", "/apps/comfyui/start"),
-        ("POST", "/apps/comfyui/stop"),
-        ("DELETE", "/apps/comfyui"),
+        ("POST", "/apps/lightrag/start"),
+        ("POST", "/apps/lightrag/stop"),
+        ("DELETE", "/apps/lightrag"),
     ] {
         let r =
             b.c.request(method.parse().unwrap(), format!("{}{path}", b.base))
@@ -233,7 +233,7 @@ async fn the_app_list_needs_a_paired_device() {
                 .unwrap();
         assert_eq!(r.status(), 401, "{method} {path}");
     }
-    assert!(calls_for("tt-app-comfyui")
+    assert!(calls_for("tt-app-lightrag")
         .iter()
         .all(|c| c.starts_with("inspect")));
 }
@@ -364,41 +364,32 @@ async fn an_app_opened_to_the_network_is_published_on_every_address() {
 
 #[tokio::test]
 async fn an_app_that_never_shares_is_refused_and_the_refusal_is_audited() {
-    let b = Box_::new("comfy-share").await;
-    let (status, body) = b.network(&b.owner, "comfyui", true).await;
+    let b = Box_::new("vane-share").await;
+    let (status, body) = b.network(&b.owner, "vane", true).await;
     assert_eq!(status, 409, "{body}");
     assert!(body["error"]
         .as_str()
         .unwrap()
-        .starts_with("ComfyUI stays on the box."));
+        .starts_with("Vane stays on the box."));
     assert!(!b.config.join("apps/network.json").exists());
-    assert_eq!(b.tile("comfyui").await["network"]["open"], false);
-    let refused =
-        b.state.audit().page(0, 50).0.into_iter().any(|e| {
-            e.action == "app_network_open" && e.target == "comfyui" && e.result == "refused"
-        });
+    assert_eq!(b.tile("vane").await["network"]["open"], false);
+    let refused = b
+        .state
+        .audit()
+        .page(0, 50)
+        .0
+        .into_iter()
+        .any(|e| e.action == "app_network_open" && e.target == "vane" && e.result == "refused");
     assert!(refused);
     // Closing it is always allowed (nothing to refuse).
-    assert_eq!(b.network(&b.owner, "comfyui", false).await.0, 200);
-}
-
-#[tokio::test]
-async fn n8n_is_not_opened_before_it_runs_and_has_an_owner() {
-    let b = Box_::new("n8n").await;
-    let (status, body) = b.network(&b.owner, "n8n", true).await;
-    assert_eq!(status, 409, "{body}");
-    assert!(
-        body["error"].as_str().unwrap().contains("Start n8n"),
-        "{body}"
-    );
-    assert!(!b.config.join("apps/network.json").exists());
+    assert_eq!(b.network(&b.owner, "vane", false).await.0, 200);
 }
 
 #[tokio::test]
 async fn only_an_owner_opens_an_app_to_the_network() {
     let b = Box_::new("member").await;
     let member = support::pair(&b.base, &b.state).await;
-    let (status, _) = b.network(&member, "scrapling", true).await;
+    let (status, _) = b.network(&member, "flowise", true).await;
     assert_eq!(status, 403);
     assert!(!b.config.join("apps/network.json").exists());
     // A member still sees the list.
@@ -409,28 +400,6 @@ async fn only_an_owner_opens_an_app_to_the_network() {
             .await
             .unwrap();
     assert_eq!(r.status(), 200);
-}
-
-#[tokio::test]
-async fn only_an_owner_removes_an_app_and_its_network_sharing_goes_with_it() {
-    let b = Box_::new("remove").await;
-    let (status, _) = b.network(&b.owner, "openclaw", true).await;
-    assert_eq!(status, 200);
-    let member = support::pair(&b.base, &b.state).await;
-    let delete = |token: String| {
-        b.c.delete(format!("{}/apps/openclaw", b.base))
-            .bearer_auth(token)
-            .send()
-    };
-    assert_eq!(delete(member).await.unwrap().status(), 403);
-    assert!(!calls_for("tt-app-openclaw").contains(&"rm -f tt-app-openclaw".to_string()));
-    assert_eq!(delete(b.owner.clone()).await.unwrap().status(), 200);
-    let saved: Vec<String> =
-        serde_json::from_slice(&std::fs::read(b.config.join("apps/network.json")).unwrap())
-            .unwrap();
-    assert!(saved.is_empty(), "{saved:?}");
-    let tile = b.tile("openclaw").await;
-    assert_eq!(tile["network"]["open"], false, "{tile}");
 }
 
 #[tokio::test]
@@ -594,9 +563,12 @@ async fn an_app_that_shows_its_key_keeps_it_private_on_disk() {
 }
 
 #[tokio::test]
-async fn a_failed_pull_shows_on_the_tile_until_the_app_is_removed() {
-    let b = Box_::new("crawl").await;
-    let image = tt_station_agentd::apps::app("crawl4ai").unwrap().image;
+async fn a_failed_pull_shows_on_the_tile_until_an_owner_removes_the_app_and_its_network_sharing() {
+    // One test, as the stub's log is shared: removing is what it checks for.
+    let b = Box_::new("remove").await;
+    let (status, _) = b.network(&b.owner, "openclaw", true).await;
+    assert_eq!(status, 200);
+    let image = tt_station_agentd::apps::app("openclaw").unwrap().image;
     let fail = docker_dir().join(format!("fail-pull-{}", image.replace(['/', ':', '@'], "_")));
     std::fs::write(
         &fail,
@@ -604,25 +576,32 @@ async fn a_failed_pull_shows_on_the_tile_until_the_app_is_removed() {
     )
     .unwrap();
 
-    assert_eq!(b.post("/apps/crawl4ai/start").await.0, 200);
-    let tile = b.tile_when("crawl4ai", |t| t["state"] == "failed").await;
+    assert_eq!(b.post("/apps/openclaw/start").await.0, 200);
+    let tile = b.tile_when("openclaw", |t| t["state"] == "failed").await;
     assert_eq!(tile["error"], "Error: toomanyrequests: rate limited");
     assert_eq!(tile["step"], "Failed");
-    assert!(!calls_for("tt-app-crawl4ai")
+    assert!(!calls_for("tt-app-openclaw")
         .iter()
         .any(|c| c.starts_with("run ")));
 
-    let r =
-        b.c.delete(format!("{}/apps/crawl4ai", b.base))
-            .bearer_auth(&b.owner)
+    let member = support::pair(&b.base, &b.state).await;
+    let delete = |token: String| {
+        b.c.delete(format!("{}/apps/openclaw", b.base))
+            .bearer_auth(token)
             .send()
-            .await
+    };
+    assert_eq!(delete(member).await.unwrap().status(), 403);
+    assert!(!calls_for("tt-app-openclaw").contains(&"rm -f tt-app-openclaw".to_string()));
+    assert_eq!(delete(b.owner.clone()).await.unwrap().status(), 200);
+    assert!(calls_for("tt-app-openclaw").contains(&"rm -f tt-app-openclaw".to_string()));
+    let saved: Vec<String> =
+        serde_json::from_slice(&std::fs::read(b.config.join("apps/network.json")).unwrap())
             .unwrap();
-    assert_eq!(r.status(), 200);
-    assert!(calls_for("tt-app-crawl4ai").contains(&"rm -f tt-app-crawl4ai".to_string()));
-    let tile = b.tile("crawl4ai").await;
+    assert!(saved.is_empty(), "{saved:?}");
+    let tile = b.tile("openclaw").await;
     assert_eq!(tile["state"], "not_installed", "{tile}");
     assert!(tile["error"].is_null());
+    assert_eq!(tile["network"]["open"], false, "{tile}");
     std::fs::remove_file(fail).unwrap();
 }
 

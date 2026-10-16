@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-// Connect: an app store for the box. Open-source apps that run next to the
-// models (already wired to the box), agents, research tools, editor plugins,
-// terminals and hosted services with the same API, by category; and the box
-// as a private OpenAI-compatible API for everything else.
+// Connect: the most popular open-source tools a Tenstorrent box can serve,
+// each running on the box's own models. Chat apps, agents (Hermes, OpenClaw,
+// OpenHands), research apps and visual builders the box installs and wires to
+// its models; coding tools for your own computer that point at the box's
+// OpenAI API; and the box itself as a private OpenAI-compatible API (address,
+// models, app keys, code snippets) for everything else.
 
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useState } from "react";
 import { Button } from "@tenstorrent/vesper/button";
 import { Badge } from "@tenstorrent/vesper/badge";
 import { StatusIndicator } from "@tenstorrent/vesper/status-indicator";
@@ -22,21 +24,16 @@ import openwebuiLogo from "../assets/logos/openwebui.png";
 import anythingllmLogo from "../assets/logos/anythingllm.png";
 import lobechatLogo from "../assets/logos/lobechat.png";
 import jupyterLogo from "../assets/logos/jupyter.svg";
-import n8nLogo from "../assets/logos/n8n.svg";
 import flowiseLogo from "../assets/logos/flowise.png";
 import hermesLogo from "../assets/logos/hermes.png";
-import termiusLogo from "../assets/logos/termius.svg";
-import openrouterLogo from "../assets/logos/openrouter.svg";
-import consoleLogo from "../assets/logos/tt-console.svg";
 import searxngLogo from "../assets/logos/searxng.png";
-import comfyuiLogo from "../assets/logos/comfyui.png";
 import langflowLogo from "../assets/logos/langflow.png";
 import continueLogo from "../assets/logos/continue.png";
 import clineLogo from "../assets/logos/cline.png";
 import aiderLogo from "../assets/logos/aider.png";
-import { type AppKey, type Client, del, get, onAnotherComputer, openBoxShell, patch, post, put, ago } from "../api";
+import { type AppKey, type Client, del, get, patch, post, put, ago } from "../api";
 import { boxOnlyReason } from "../boxapps";
-import { Card, copyText, Eyebrow, Page, Spark, toastError, toastOk, usePoll, writeClipboard } from "../ui";
+import { Card, copyText, Eyebrow, Page, Spark, toastError, toastOk, usePoll } from "../ui";
 import { Switch } from "@tenstorrent/vesper/switch";
 import { ask } from "../dialog";
 import { OWNER_ONLY, OWNER_ONLY_HOST, useOwner } from "../role";
@@ -123,30 +120,16 @@ const BLURBS: Record<string, string> = {
 /** Each app's own logo (from its image on the box, or its project's repo). */
 const LOGOS: Record<string, string> = {
   openwebui: openwebuiLogo, anythingllm: anythingllmLogo, lobechat: lobechatLogo,
-  jupyter: jupyterLogo, n8n: n8nLogo, flowise: flowiseLogo,
-  searxng: searxngLogo, comfyui: comfyuiLogo, langflow: langflowLogo, continue: continueLogo, cline: clineLogo, aider: aiderLogo,
+  jupyter: jupyterLogo, flowise: flowiseLogo,
+  searxng: searxngLogo, langflow: langflowLogo, continue: continueLogo, cline: clineLogo, aider: aiderLogo,
 };
 /** Logos that are a filled square (the project's avatar): shown edge to edge. */
-const FULL = new Set(["searxng", "comfyui", "langflow", "continue", "cline", "aider"]);
+const FULL = new Set(["searxng", "langflow", "continue", "cline", "aider"]);
 
 function AppLogo({ id, name }: { id: string; name: string }) {
   const src = LOGOS[id];
   return src ? <img className={`app-logo img ${FULL.has(id) ? "full" : ""}`} src={src} alt="" /> : <div className="app-logo">{name[0]}</div>;
 }
-
-/** Hosted services that speak the same OpenAI API: for when the box is busy or you're away. */
-const CLOUDS = [
-  {
-    id: "tt-console", name: "Tenstorrent Console", cta: "Open Console", logo: consoleLogo, url: "https://console.tenstorrent.com",
-    base: "https://console.tenstorrent.com/v1",
-    blurb: "Tenstorrent's cloud: the same OpenAI-compatible API, on Tenstorrent hardware in the data center.",
-  },
-  {
-    id: "openrouter", name: "OpenRouter", cta: "Open OpenRouter", logo: openrouterLogo, url: "https://openrouter.ai",
-    base: "https://openrouter.ai/api/v1",
-    blurb: "Hundreds of hosted models from many providers behind one OpenAI-compatible API.",
-  },
-];
 
 function openExternal(url: string) {
   if (window.ttDesktop) window.ttDesktop.openExternal(url);
@@ -266,144 +249,6 @@ function HermesGuide({ s, refresh }: { s: Hermes; refresh: () => void }) {
   );
 }
 
-interface SshInfo {
-  listening: boolean; user: string; port: number; name: string; hosts: { label: string; host: string }[];
-  keys: { label: string; type: string }[]; command: string; link: string; config: string; qr_svg: string | null;
-}
-
-/** Signing in to the box over SSH: the addresses, and the keys TT Station has let in. */
-function SshCard({ ssh }: { ssh: SshInfo }) {
-  return (
-    <Card>
-      <div className="row-between">
-        <Eyebrow>SSH into the box</Eyebrow>
-        <StatusIndicator label={ssh.listening ? "SSH is on" : "SSH is off"} state={ssh.listening ? "ready" : "error"} />
-      </div>
-      {!ssh.listening && <Admonition variant="warning" subtle size="sm">The box's SSH server isn't running. Turn it on in a terminal on the box: <code>sudo systemctl enable --now ssh</code></Admonition>}
-      <div className="stack" style={{ gap: 8 }}>
-        {ssh.hosts.map((h) => <PasteValue key={h.host} label={h.label} value={`ssh ${ssh.user}@${h.host}`} />)}
-      </div>
-      {ssh.keys.length > 0 && <span className="muted" style={{ fontSize: 12 }}>Keys added through TT Station: {ssh.keys.map((k) => k.label).join(", ")}</span>}
-      <FromThisComputer />
-    </Card>
-  );
-}
-
-/** In the desktop app on another computer: open the box's shell there, no setup. */
-function FromThisComputer() {
-  const [here, setHere] = useState(false);
-  const [command, setCommand] = useState<string | null>(null);
-  useEffect(() => { void onAnotherComputer().then(setHere); }, []);
-  if (!here) return null;
-  const run = async (what: "terminal" | "vscode") => { const why = await openBoxShell(what); if (why) toastError(new Error(why)); };
-  const copy = async () => {
-    const r = await window.ttDesktop?.ssh?.("command");
-    if (!r?.ok || !r.command) { toastError(new Error(r?.error ?? "It isn't ready.")); return; }
-    setCommand(r.command);
-    if (await writeClipboard(r.command)) toastOk("Copied.");
-  };
-  return (
-    <div className="stack" style={{ gap: 8 }}>
-      <Eyebrow>From this computer</Eyebrow>
-      <span className="muted" style={{ fontSize: 13 }}>TT Station makes a key just for this (~/.ssh/tt-station_ed25519) and lets it into the box the first time: no passwords.</span>
-      <div className="row wrap" style={{ gap: 8 }}>
-        <Button size="sm" onClick={() => run("terminal")}>Open Terminal</Button>
-        <Button size="sm" variant="subtle" onClick={() => run("vscode")}>Open in VS Code</Button>
-        <Button size="sm" variant="ghost" onClick={copy}>Copy the ssh command</Button>
-      </div>
-      {command && <code className="pair-link" title={command}>{command}</code>}
-    </div>
-  );
-}
-
-/**
- * Termius (an SSH app for desktop and phone): its documented ways in are a
- * new host typed in, or an import of ~/.ssh/config. TT Station lets its key
- * in and hands over every value, with a QR for the phone (an ssh:// link,
- * which opens in whichever SSH app handles those links).
- */
-function TermiusGuide({ ssh, refresh }: { ssh: SshInfo; refresh: () => void }) {
-  const owner = useOwner();
-  const [key, setKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const keyIn = ssh.keys.some((k) => k.label.toLowerCase().startsWith("termius"));
-  const addKey = async () => {
-    setBusy(true);
-    try {
-      const r = await post<{ already_present: boolean }>("/ssh/authorize", { public_key: key.trim(), label: "termius" });
-      toastOk(r.already_present ? "That key could already sign in." : "Termius's key can sign in now.");
-      setKey(""); refresh();
-    } catch (e) { toastError(e); } finally { setBusy(false); }
-  };
-  return (
-    <div className="stack" style={{ gap: 14 }}>
-      <div className={`finish-step ${keyIn ? "done" : ""}`}>
-        <span className="finish-n">{keyIn ? "✓" : 1}</span>
-        <div className="grow stack" style={{ gap: 8 }}>
-          <b>Let Termius in with its key</b>
-          {keyIn ? <span className="muted" style={{ fontSize: 13 }}>Termius's key is added, so it signs in without a password.</span> : <>
-            <span className="muted" style={{ fontSize: 13 }}>In Termius, open <b>Keychain</b>, pick your key (or <b>Generate</b> one) and copy its <b>public key</b>. Paste it here.</span>
-            <TextInput size="sm" value={key} onChange={(e) => setKey(e.target.value)} placeholder="ssh-ed25519 AAAA… (the public key, never the private one)" />
-            <div><Button size="sm" disabled={busy || !owner || !/^(ssh-|ecdsa-|sk-)/.test(key.trim())} onClick={addKey}>Add the key</Button></div>
-            {!owner && <span className="muted" style={{ fontSize: 12 }}>{OWNER_ONLY}</span>}
-          </>}
-        </div>
-      </div>
-      <div className="finish-step">
-        <span className="finish-n">2</span>
-        <div className="grow stack" style={{ gap: 10 }}>
-          <b>Add this box to Termius</b>
-          <span className="muted" style={{ fontSize: 13 }}>In Termius: <b>New Host</b>, then fill in:</span>
-          <PasteValue label="Address" value={ssh.hosts[0]?.host ?? `${ssh.name}.local`} />
-          <PasteValue label="Username" value={ssh.user} />
-          <PasteValue label="Port" value={String(ssh.port)} />
-          <span className="muted" style={{ fontSize: 12 }}>Then set its key under <b>Credentials</b>. The box is reachable on your home network.</span>
-          {ssh.qr_svg && (
-            <div className="row" style={{ gap: 12, alignItems: "flex-start" }}>
-              <img src={`data:image/svg+xml;utf8,${encodeURIComponent(ssh.qr_svg)}`} alt="QR code of the box's SSH link" style={{ width: 132, height: 132, borderRadius: 8 }} />
-              <span className="muted" style={{ fontSize: 12 }}>On your phone: scan this with the camera. It's an <code>ssh://</code> link, so it opens in your SSH app if that app handles those links; if nothing opens, use the values above.</span>
-            </div>
-          )}
-          <details>
-            <summary className="muted" style={{ fontSize: 12, cursor: "pointer" }}>On a computer: import it instead</summary>
-            <div className="stack" style={{ gap: 6, marginTop: 6 }}>
-              <span className="muted" style={{ fontSize: 12 }}>Add this to <code>~/.ssh/config</code>, then in Termius: <b>New Host ▾ → Import → ~/.ssh</b>.</span>
-              <CodeBlock lang={shellscript} copyOnHover>{ssh.config}</CodeBlock>
-            </div>
-          </details>
-        </div>
-      </div>
-      <div className="finish-step">
-        <span className="finish-n">3</span>
-        <div className="grow stack" style={{ gap: 6 }}>
-          <b>Connect</b>
-          <span className="muted" style={{ fontSize: 13 }}>Open the host in Termius. On a first connect it asks you to trust the box's fingerprint: that's expected.</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function TermiusTile({ ssh, refresh }: { ssh: SshInfo; refresh: () => void }) {
-  const guide = useSheet();
-  const keyIn = ssh.keys.some((k) => k.label.toLowerCase().startsWith("termius"));
-  return (
-    <Card className="app-tile">
-      <div className="row-between">
-        <img className="app-logo img" src={termiusLogo} alt="" />
-        <Badge size="sm" variant="contrast" subtle>Terminal</Badge>
-      </div>
-      <div><Typography variant="heading-xs">Termius</Typography><Typography variant="copy-sm" className="muted">An SSH app for your computer and phone: a terminal on the box from anywhere, with its key so you never type a password.</Typography></div>
-      {keyIn && <Typography variant="copy-xs" className="muted">Termius's key is added.</Typography>}
-      <div className="grow" />
-      <div className="row"><Button size="sm" variant="subtle" onClick={guide.open}>{keyIn ? "Setup guide" : "Connect Termius"}</Button></div>
-      <Sheet ref={guide.ref} popover title="Connect Termius" description="Add the box to Termius on your computer or phone.">
-        <TermiusGuide ssh={ssh} refresh={refresh} />
-      </Sheet>
-    </Card>
-  );
-}
-
 /** Hermes Agent (Nous Research): its own desktop app, set up with a guide. */
 function HermesTile() {
   const owner = useOwner();
@@ -454,49 +299,30 @@ function HermesTile() {
 
 // ---------------------------------------------------------------- categories
 
-type Cat = "all" | "chat" | "agents" | "research" | "media" | "build" | "automate" | "code" | "skills" | "terminal" | "cloud";
+type Cat = "all" | "chat" | "agents" | "research" | "build" | "code";
 const CATS: { id: Cat; label: string; about: string }[] = [
   { id: "all", label: "All", about: "" },
   { id: "chat", label: "Chat", about: "Chat apps for you and your team, with documents and web search." },
   { id: "agents", label: "Agents", about: "Assistants that remember, use tools and work through tasks." },
   { id: "research", label: "Research", about: "Deep research: questions in, cited reports out, from the web and your documents." },
-  { id: "media", label: "Images & video", about: "Make and edit images and video." },
   { id: "build", label: "Build", about: "Notebooks and visual builders for your own AI apps." },
-  { id: "automate", label: "Automate", about: "Wire the box's model into email, calendars and other services." },
-  { id: "code", label: "Code", about: "Coding agents on your computer, on the box's model. TT Station's own Code page does this in the window, in a sandbox." },
-  { id: "skills", label: "Skills", about: "Skill packs trending on GitHub: instructions that make the agents on your box (Hermes, OpenCode, Pi, Claude Code) better at their jobs." },
-  { id: "terminal", label: "Terminal", about: "A shell on the box from your other devices." },
-  { id: "cloud", label: "Cloud", about: "Hosted services with the same API, for when the chips are busy or you're away." },
+  { id: "code", label: "Code", about: "Open-source coding tools on your computer, on the box's model through its OpenAI API. TT Station's own Code page is the built-in way: a coding agent in the window, in a sandbox on the box." },
 ];
 
 /** The box app's category (from `/apps`) as a store category. */
 function catOf(category: string): Cat {
   const c = category.toLowerCase();
   if (c.includes("research") || c.includes("search")) return "research";
-  if (c.includes("image") || c.includes("video") || c.includes("media")) return "media";
-  if (c.includes("automat")) return "automate";
   if (c.includes("agent")) return "agents";
   if (c.includes("code")) return "code";
   if (c.includes("chat")) return "chat";
   return "build";
 }
 
-// ---------------------------------------------------------------- editor and terminal tools
+// ---------------------------------------------------------------- coding tools
 
 /** Coding tools that point at any OpenAI-compatible server: how to set each one up. */
-const CODE_TOOLS: { id: string; name: string; blurb: string; homepage: string; cat?: Cat; badge?: string; steps: (base: string, model: string) => ReactNode }[] = [
-  {
-    id: "claudecode", name: "Claude Code", homepage: "https://claude.com/claude-code",
-    blurb: "Anthropic's coding agent, on the box's model: the box speaks its API, so no Anthropic account is needed. TT Station's Code page uses it too, in a sandbox.",
-    steps: (base) => <>
-      <span className="muted" style={{ fontSize: 13 }}>On your computer (Claude Code installed), point it at the box for a session:</span>
-      <CodeBlock lang={shellscript} copyOnHover>{`export ANTHROPIC_BASE_URL=${base.replace(/\/v1$/, "")}
-export ANTHROPIC_AUTH_TOKEN=<your app key>
-export ANTHROPIC_MODEL=quietbox
-claude`}</CodeBlock>
-      <span className="muted" style={{ fontSize: 12 }}>The box's address is encrypted with its own certificate. If Claude Code refuses it, allow unencrypted access in Settings → Security and activity and use the http address instead.</span>
-    </>,
-  },
+const CODE_TOOLS: { id: string; name: string; blurb: string; homepage: string; steps: (base: string, model: string) => ReactNode }[] = [
   {
     id: "continue", name: "Continue", homepage: "https://continue.dev",
     blurb: "An open-source AI coding assistant for VS Code and JetBrains: chat, edit and autocomplete.",
@@ -545,56 +371,6 @@ claude`}</CodeBlock>
 }`}</CodeBlock>
     </>,
   },
-  {
-    id: "pi", name: "Pi", homepage: "https://pi.dev",
-    blurb: "A small, hackable coding agent for the terminal, from the Pi toolkit trending on GitHub this year.",
-    steps: (base, model) => <>
-      <span className="muted" style={{ fontSize: 13 }}>Install it: <code>npm i -g --ignore-scripts @earendil-works/pi-coding-agent</code>. Add the box in <code>~/.pi/agent/models.json</code>, then pick it with <code>/model</code>:</span>
-      <CodeBlock lang={shellscript} copyOnHover>{`{
-  "providers": {
-    "quietbox": {
-      "baseUrl": "${base}",
-      "api": "openai-completions",
-      "apiKey": "<your app key>",
-      "models": [{ "id": "${model}" }]
-    }
-  }
-}`}</CodeBlock>
-    </>,
-  },
-  {
-    id: "ccswitch", name: "CC Switch", homepage: "https://github.com/farion1231/cc-switch",
-    blurb: "A desktop app that points Claude Code, Codex, OpenCode and others at any provider, and translates for the ones that can't talk to the box directly.",
-    steps: (base, model) => <ol className="guide-list">
-      <li>Install it from its releases page (Linux .deb, .rpm or AppImage; also macOS and Windows).</li>
-      <li>Add a custom provider: base URL <code>{base}</code>, your app key, model <code>{model}</code>.</li>
-      <li>For <b>Claude Code</b> and <b>Codex</b>: under Advanced, set the upstream format to <b>Chat Completions</b> and start its local routing. They speak other APIs (Anthropic Messages, OpenAI Responses), and CC Switch translates. Keep it running while you use them.</li>
-    </ol>,
-  },
-  {
-    id: "tradingagents", name: "TradingAgents", homepage: "https://github.com/TauricResearch/TradingAgents", cat: "research", badge: "Research",
-    blurb: "A team of AI analysts (fundamentals, news, sentiment, risk) debates a stock and makes a call. Trending this year; for research, not advice.",
-    steps: (base, model) => <>
-      <span className="muted" style={{ fontSize: 13 }}>Python 3.11 or newer:</span>
-      <CodeBlock lang={shellscript} copyOnHover>{`git clone https://github.com/TauricResearch/TradingAgents && cd TradingAgents && pip install .
-export TRADINGAGENTS_LLM_PROVIDER=openai_compatible
-export TRADINGAGENTS_LLM_BACKEND_URL=${base}
-export OPENAI_COMPATIBLE_API_KEY=<your app key>
-export TRADINGAGENTS_QUICK_THINK_LLM=${model}
-export TRADINGAGENTS_DEEP_THINK_LLM=${model}
-tradingagents`}</CodeBlock>
-    </>,
-  },
-  {
-    id: "graphify", name: "Graphify", homepage: "https://github.com/Graphify-Labs/graphify", cat: "build", badge: "Build",
-    blurb: "Maps a codebase or a folder of documents into a knowledge graph you can explore and your agents can query. Trending this year.",
-    steps: (base, model) => <>
-      <span className="muted" style={{ fontSize: 13 }}>Install it (<code>uv tool install graphifyy</code>, two y's), then build a graph with the box's model:</span>
-      <CodeBlock lang={shellscript} copyOnHover>{`OPENAI_BASE_URL=${base} OPENAI_API_KEY=<your app key> OPENAI_MODEL=${model} \\
-  graphify extract ./docs --backend openai`}</CodeBlock>
-      <span className="muted" style={{ fontSize: 12 }}>It writes <code>graph.html</code> to open in a browser, and <code>graph.json</code> for agents.</span>
-    </>,
-  },
 ];
 
 /** A tool you set up yourself: what to paste, and a key made for it. */
@@ -609,7 +385,7 @@ function CodeToolTile({ t, base, model }: { t: (typeof CODE_TOOLS)[number]; base
     <Card className="app-tile">
       <div className="row-between">
         <AppLogo id={t.id} name={t.name} />
-        <Badge size="sm" variant="contrast" subtle>{t.badge ?? "Code"}</Badge>
+        <Badge size="sm" variant="contrast" subtle>Code</Badge>
       </div>
       <div><Typography variant="heading-xs">{t.name}</Typography><Typography variant="copy-sm" className="muted">{t.blurb}</Typography></div>
       <div className="grow" />
@@ -646,80 +422,6 @@ function ResearchNote() {
   );
 }
 
-// ---------------------------------------------------------------- skill packs
-
-/** Trending agent skill packs, and how each agent takes them. `hermes` packs install in one click. */
-const SKILL_PACKS: { id: string; name: string; repo: string; blurb: string; hermes?: boolean; note?: string; how: [string, string][] }[] = [
-  {
-    id: "superpowers", name: "Superpowers", repo: "obra/superpowers", hermes: true,
-    blurb: "A complete way of working for coding agents: brainstorm, plan, test first, review. The most-starred skills pack this year.",
-    how: [["Pi", "pi install git:github.com/obra/superpowers"], ["Claude Code", "/plugin install superpowers@claude-plugins-official"], ["OpenCode", "Follow .opencode/INSTALL.md in the repo"]],
-  },
-  {
-    id: "mattpocock", name: "Matt Pocock's skills", repo: "mattpocock/skills",
-    blurb: "The skills a well-known TypeScript teacher uses every day: planning, refactoring, writing tests, explaining code.",
-    how: [["OpenCode", "npx skills@latest add mattpocock/skills -a opencode"], ["Pi", "npx skills@latest add mattpocock/skills -a pi"], ["Claude Code", "claude plugin install mattpocock-skills@claude-plugins-official"]],
-  },
-  {
-    id: "gstack", name: "gstack", repo: "garrytan/gstack",
-    blurb: "23 opinionated tools that give an agent a whole team's roles: product, design, engineering, QA and release. Needs Bun.",
-    how: [["OpenCode", "git clone --depth 1 https://github.com/garrytan/gstack.git ~/gstack && cd ~/gstack && ./setup --host opencode"], ["Claude Code", "git clone --depth 1 https://github.com/garrytan/gstack.git ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup"]],
-  },
-  {
-    id: "uiux", name: "UI/UX Pro Max", repo: "nextlevelbuilder/ui-ux-pro-max-skill",
-    blurb: "Design know-how for agents that build interfaces: layouts, color, type and accessibility, across web and mobile.",
-    how: [["OpenCode", "npm i -g ui-ux-pro-max-cli && uipro init --ai opencode"], ["Claude Code", "npm i -g ui-ux-pro-max-cli && uipro init --ai claude"]],
-  },
-  {
-    id: "anthropic", name: "Anthropic's skills", repo: "anthropics/skills",
-    blurb: "Anthropic's public skills, including making Word, PDF, PowerPoint and Excel files.",
-    note: "The document skills are source-available, not open source: fine to use, check before you share them.",
-    how: [["Claude Code", "/plugin marketplace add anthropics/skills"], ["Others", "Copy a skill's folder into ~/.agents/skills"]],
-  },
-];
-
-function SkillTile({ p }: { p: (typeof SKILL_PACKS)[number] }) {
-  const sk = usePoll(() => get<{ hermes: boolean; in_hermes: string[] }>("/skills").catch(() => null), 60000);
-  const guide = useSheet();
-  const [busy, setBusy] = useState(false);
-  const inHermes = sk.data?.in_hermes.includes(p.id);
-  const addToHermes = async () => {
-    setBusy(true);
-    try { const r = await post<{ note: string }>(`/skills/${p.id}/hermes`); toastOk(`${p.name} is in Hermes. ${r.note}`); sk.refresh(); }
-    catch (e) { toastError(e); } finally { setBusy(false); }
-  };
-  return (
-    <Card className="app-tile">
-      <div className="row-between">
-        <div className="app-logo">✦</div>
-        <div className="row" style={{ gap: 6 }}>
-          <Badge size="sm" variant="contrast" subtle>Skills</Badge>
-          {inHermes && <StatusIndicator label="In Hermes" state="ready" />}
-        </div>
-      </div>
-      <div><Typography variant="heading-xs">{p.name}</Typography><Typography variant="copy-sm" className="muted">{p.blurb}</Typography></div>
-      {p.note && <Typography variant="copy-xs" className="muted">{p.note}</Typography>}
-      <div className="grow" />
-      <div className="row">
-        {p.hermes && sk.data?.hermes && !inHermes && <Button size="sm" disabled={busy} onClick={addToHermes}>{busy ? "Adding…" : "Add to Hermes"}</Button>}
-        <Button size="sm" variant={p.hermes && sk.data?.hermes && !inHermes ? "ghost" : "subtle"} onClick={guide.open}>Add to an agent</Button>
-      </div>
-      <Sheet ref={guide.ref} popover title={`Add ${p.name}`} description={`From github.com/${p.repo}. Skills run inside your agent, on the box's model.`}>
-        <div className="stack" style={{ gap: 12 }}>
-          {p.hermes && <span className="muted" style={{ fontSize: 13 }}><b>Hermes Agent</b>: use “Add to Hermes” on the tile{sk.data?.hermes ? "" : " (once Hermes is set up in Agents)"}.</span>}
-          {p.how.map(([agent, cmd]) => (
-            <div key={agent} className="stack" style={{ gap: 4 }}>
-              <b style={{ fontSize: 13 }}>{agent}</b>
-              {/^(npx|npm|git|pi |claude|\/plugin|uv )/.test(cmd) ? <CodeBlock lang={shellscript} copyOnHover>{cmd}</CodeBlock> : <span className="muted" style={{ fontSize: 13 }}>{cmd}</span>}
-            </div>
-          ))}
-          <div><Button size="sm" variant="ghost" onClick={() => openExternal(`https://github.com/${p.repo}`)}>Open on GitHub</Button></div>
-        </div>
-      </Sheet>
-    </Card>
-  );
-}
-
 /** One entry in the store: where it's filed, how to find it, and its tile. */
 interface Entry { key: string; cat: Cat; text: string; on: boolean; node: ReactNode }
 
@@ -729,13 +431,13 @@ export function Connect() {
   const connect = usePoll(() => get<{ urls: { label: string; url: string }[]; models: { id: string }[] }>("/connect"), 30000);
   const keys = usePoll(() => get<{ keys: AppKey[] }>("/keys"), 15000);
   const owner = useOwner();
-  const ssh = usePoll(() => get<SshInfo>("/ssh/info"), 30000);
   const hermes = usePoll(() => get<Hermes>("/hermes").catch(() => null), 15000);
   const [busy, setBusy] = useState<string | null>(null);
   const [newKey, setNewKey] = useState<{ name: string; key: string } | null>(null);
   const [keyName, setKeyName] = useState("");
   const [query, setQuery] = useState("");
-  const [cat, setCat] = useState<Cat>(() => { try { return (localStorage.getItem("tt.connect.cat") as Cat) || "all"; } catch { return "all"; } });
+  // A category saved before it was taken out of the store falls back to All.
+  const [cat, setCat] = useState<Cat>(() => { try { const c = localStorage.getItem("tt.connect.cat"); return CATS.find((x) => x.id === c)?.id ?? "all"; } catch { return "all"; } });
   const pickCat = (c: Cat) => { setCat(c); try { localStorage.setItem("tt.connect.cat", c); } catch { /* private */ } };
 
   const act = async (id: string, fn: () => Promise<unknown>) => {
@@ -821,27 +523,7 @@ export function Connect() {
         </Card>
       ),
     })),
-    ...CODE_TOOLS.map((t): Entry => ({ key: t.id, cat: t.cat ?? "code", on: false, text: `${t.name} ${t.blurb} code editor`, node: <CodeToolTile key={t.id} t={t} base={base} model={model} /> })),
-    ...SKILL_PACKS.map((p): Entry => ({ key: `skill-${p.id}`, cat: "skills", on: false, text: `${p.name} ${p.blurb} skills`, node: <SkillTile key={p.id} p={p} /> })),
-    ...(ssh.data ? [{ key: "termius", cat: "terminal" as Cat, on: false, text: "Termius SSH terminal phone", node: <TermiusTile key="termius" ssh={ssh.data} refresh={ssh.refresh} /> }] : []),
-    ...CLOUDS.map((c): Entry => ({
-      key: c.id, cat: "cloud", on: false, text: `${c.name} ${c.blurb} cloud`,
-      node: (
-        <Card key={c.id} className="app-tile">
-          <div className="row-between">
-            <img className="app-logo img" src={c.logo} alt="" />
-            <Badge size="sm" variant="contrast" subtle>Cloud</Badge>
-          </div>
-          <div><Typography variant="heading-xs">{c.name}</Typography><Typography variant="copy-sm" className="muted">{c.blurb}</Typography></div>
-          <div className="row" style={{ gap: 6, minWidth: 0 }}>
-            <code className="grow" style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{c.base}</code>
-            <Button size="xs" variant="ghost" onClick={() => void copyText(c.base, "Address copied.")}>Copy</Button>
-          </div>
-          <div className="grow" />
-          <div className="row"><Button size="sm" variant="subtle" onClick={() => openExternal(c.url)}>{c.cta}</Button></div>
-        </Card>
-      ),
-    })),
+    ...CODE_TOOLS.map((t): Entry => ({ key: t.id, cat: "code", on: false, text: `${t.name} ${t.blurb} code editor`, node: <CodeToolTile key={t.id} t={t} base={base} model={model} /> })),
   ];
   const q = query.trim().toLowerCase();
   const shown = entries.filter((e) => (cat === "all" || e.cat === cat) && (!q || e.text.toLowerCase().includes(q)));
@@ -849,7 +531,7 @@ export function Connect() {
   const about = CATS.find((c) => c.id === cat)?.about;
 
   return (
-    <Page title="Connect" subtitle="Apps for your box: chat, agents, research, images, coding and more, each wired to the models on this box. And the box as a private OpenAI-compatible API.">
+    <Page title="Connect" subtitle="Popular open-source tools that run on the models on this box: chat, agents, research, builders and coding tools. And the box as a private OpenAI-compatible API.">
       <div className="row-between wrap">
         <div style={{ width: 320 }}><TextInput value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search apps" /></div>
         <div className="pill-tabs wrap-tabs" role="tablist" aria-label="App categories">
@@ -876,7 +558,6 @@ export function Connect() {
       {cat === "research" && <ResearchNote />}
       <div className="grid grid-3">{shown.filter((e) => !onBox.includes(e)).map((e) => e.node)}</div>
       {shown.length === 0 && <span className="muted">Nothing matches.</span>}
-      {(cat === "terminal" || cat === "all") && !q && ssh.data && <div className="grid grid-2" style={{ alignItems: "start" }}><SshCard ssh={ssh.data} /></div>}
 
       <div className="section-title"><Eyebrow>Your box as an API</Eyebrow></div>
       <div className="grid grid-2" style={{ alignItems: "start" }}>
@@ -920,7 +601,7 @@ print(reply.choices[0].message.content)`}</CodeBlock>
           <CodeBlock lang={shellscript} copyOnHover>{`curl ${base}/chat/completions \\
   -H "Authorization: Bearer ttq-…" -H "Content-Type: application/json" \\
   -d '{"model": "${model}", "messages": [{"role": "user", "content": "Hi"}]}'`}</CodeBlock>
-          <Typography variant="copy-xs" className="muted">In VS Code (Continue, Cline) or Cursor: choose "OpenAI-compatible", paste the address and a key. The same code works with Tenstorrent Console or OpenRouter: change the address and the key.</Typography>
+          <Typography variant="copy-xs" className="muted">In VS Code (Continue, Cline) or Cursor: choose "OpenAI-compatible", paste the address and a key.</Typography>
         </Card>
       </div>
     </Page>

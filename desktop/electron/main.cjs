@@ -1166,7 +1166,7 @@ function show() {
   win.focus();
 }
 
-/** A connected app (Open WebUI, ComfyUI…) in its own window, not a browser tab. */
+/** A connected app (Open WebUI, LobeChat…) in its own window, not a browser tab. */
 function openAppWindow(url, title) {
   const existing = appWindows.get(url);
   if (existing && !existing.isDestroyed()) {

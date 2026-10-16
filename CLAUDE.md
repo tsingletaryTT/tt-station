@@ -227,7 +227,9 @@ Items marked "(branch)" are committed on `jberkowitz/mobile-voice` but not yet o
   co-serve, doctor fixes and tt-smi. See `docs/reference/orchard.md`.
 - **Desktop app** (`desktop/`, Electron + React + Vesper): the agent serves the built screens at `/app`
   (`app_ui.rs`); the shell signs in via `local-secret`, adds tray/notifications/hotkey/autostart; app
-  catalogue `/apps` (`apps.rs`: LobeChat, Jupyter, n8n, Flowise in Docker, each with its own app key).
+  catalogue `/apps` (`apps.rs`: LobeChat, Jupyter, Flowise, Langflow, SearXNG, Local Deep Research, Vane,
+  LightRAG, OpenHands, OpenClaw in Docker, each with its own app key). Connect lists only popular
+  open-source tools that run on the box's own models.
   Build with Node 22 (`~/.local/share/node/current/bin`). See `desktop/README.md`.
 - **People / schedules / energy** (no accounts): `/people` (per-person memories,
   assistant knows who it's talking with), `/schedules` (switch modes at set times), `/energy`

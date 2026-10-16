@@ -237,10 +237,9 @@ when shared, or can't be shared:
 | Flowise | yes: `FLOWISE_USERNAME`/`FLOWISE_PASSWORD` (generated, shown) are always set, so nobody can claim its admin account without them |
 | Langflow | yes: sharing adds `LANGFLOW_AUTO_LOGIN=False`, so you sign in as `langflow` with the generated password (shown) instead of everyone getting the superuser, which can run Python code |
 | LightRAG | yes: `AUTH_ACCOUNTS` (generated password, shown) is always set; sharing adds `WHITELIST_PATHS=/health`, so its Ollama-style `/api/*` isn't left open |
-| n8n | only after its owner account exists (made on the box): until then whoever opens it first becomes its owner. TT Station asks n8n (`/rest/settings`) before allowing it |
-| Scrapling, OpenClaw | yes: their bearer token / gateway token (generated, shown as the access code) is always on |
+| OpenClaw | yes: its gateway token (generated, shown as the access code) is always on |
 | Jupyter, OpenHands | no: they run code on the box |
-| SearXNG, Vane, Crawl4AI, ComfyUI, Local Deep Research | no: no sign-in of their own (or anyone can sign up), and they spend the box's model or fetch pages for whoever reaches them |
+| SearXNG, Vane, Local Deep Research | no: no sign-in of their own (or anyone can sign up), and they spend the box's model or search the web for whoever reaches them |
 
 **A running container keeps the address it was started with.** A change applies the next
 time the app is started from TT Station, which re-creates the container (same data volume,

@@ -151,7 +151,6 @@ async fn running_things_as_the_box_is_for_owners() {
         ),
         (M::POST, "/desktop/open", json!({ "app": "Terminal" })),
         (M::POST, "/hermes/open", json!({})),
-        (M::POST, "/skills/x/hermes", json!({})),
         (M::POST, "/vllm/native/setup", json!({})),
     ];
     for (m, path, body) in refused {

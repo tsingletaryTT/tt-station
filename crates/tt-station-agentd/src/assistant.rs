@@ -544,7 +544,7 @@ pub fn tool_definitions() -> Value {
         ),
         tool(
             "install_app",
-            "Install (or start) an app from TT Station's app store on the box, in Docker, e.g. searxng (private search for research), localdeepresearch, lightrag, comfyui, langflow, crawl4ai, openhands. It downloads the app the first time. Needs the user's confirmation.",
+            "Install (or start) an app from TT Station's app store on the box, in Docker, e.g. searxng (private search for research), localdeepresearch, lightrag, langflow, openhands. It downloads the app the first time. Needs the user's confirmation.",
             json!({
                 "type": "object",
                 "properties": { "app": { "type": "string", "enum": crate::apps::APPS.iter().map(|a| a.id).collect::<Vec<_>>(), "description": "The app's id." } },

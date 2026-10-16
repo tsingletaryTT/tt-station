@@ -87,7 +87,7 @@ SLICES = [
     ("05-assistant-gateway", "OpenAI gateway and the assistant", [
         *src("gateway.rs", "anthropic.rs", "bench.rs", "creations.rs", "handlers/media.rs",
              "assistant.rs", "memory.rs", "docs.rs", "embeddings.rs", "approvals.rs",
-             "skills.rs", "library.rs", "handlers/assistant.rs", "handlers/memories.rs",
+             "library.rs", "handlers/assistant.rs", "handlers/memories.rs",
              "handlers/docs.rs"),
         *tests("gateway.rs", "anthropic.rs", "assistant.rs", "library.rs"),
         *docs("gateway", "assistant"),

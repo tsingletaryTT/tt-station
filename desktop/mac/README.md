@@ -56,7 +56,6 @@ from the same place.
   a key just for this (`~/.ssh/tt-station_ed25519`) and the device lets it
   in — no passwords.
 - **Box → Open Box in VS Code**: VS Code's Remote-SSH, on the device.
-- Connect → SSH → **Copy the ssh command**, for any other SSH app.
 
 ## Tori's shortcut
 

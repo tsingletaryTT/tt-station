@@ -48,7 +48,7 @@ Lines are added plus removed, tests and docs included.
 | 05 | `review/05-assistant-gateway` | 13.4K | OpenAI and Anthropic `/v1` gateway, assistant tools and approvals, memories, documents, library | security (web content steering tools, key handling) |
 | 06 | `review/06-household` | 8.5K | Notifications and APNs, voice, meeting recorder, transcription jobs, schedules | privacy (recording indicator, retention) |
 | 07 | `review/07-research-routines` | 13.6K | Deep research, routines, model check-ups and reliability evals | — |
-| 08 | `review/08-apps` | 7.1K | Store apps, desktop launches, community models | security, and **legal sign-off on the app catalog** (n8n's license) |
+| 08 | `review/08-apps` | 7.1K | Store apps, desktop launches, community models | security, and **legal sign-off on the app catalog** (all open source now; n8n, the one that wasn't, is out of the catalogue) |
 | 09 | `review/09-bringup-lab` | 12.4K | Orchard, Lab, model bring-up agents and their Landlock sandbox | security (agents with shell access) |
 | 10 | `review/10-code` | 11.1K | Code workspace: sandboxed sessions, safe git, model picker, speed | security (sandbox escape paths). **The agent builds from here** |
 | 11 | `review/11-desktop-shell` | 14.6K | Electron main process and preload, token store, API client, shared UI (3.9K is `package-lock.json`) | security (window navigation, IPC) |

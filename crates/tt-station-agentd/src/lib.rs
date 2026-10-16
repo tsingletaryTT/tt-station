@@ -79,7 +79,6 @@ pub mod scope;
 pub mod served;
 pub mod serving;
 pub mod sessions;
-pub mod skills;
 pub mod state;
 pub mod telemetry;
 pub mod tls;

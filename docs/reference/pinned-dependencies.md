@@ -22,15 +22,11 @@ multi-platform index, so it covers linux/amd64.
 |---|---|---|
 | `lobehub/lobe-chat:latest` | `sha256:b2d2454525523d9f0a19c79661f83ec45f13363dbadd5c1180887e77af35d872` | registry |
 | `quay.io/jupyter/minimal-notebook:latest` | `sha256:877180014994396eb0857d3bad2dfedfb704fffccf54be4d1b7b50a43093f188` | registry |
-| `docker.n8n.io/n8nio/n8n:latest` | `sha256:dd580fe1ab6e99e85bc66f2acf8bc8c5e9409fbe61b2e2803c5024403ef52833` | registry |
 | `flowiseai/flowise:latest` | `sha256:cf880b17b1290fbaebebc76c33954bde67b3775aff95feec72a1d060cc81e43d` | registry |
 | `searxng/searxng:latest` | `sha256:5903efa50bc6b99293fa059f7a0ff37eddd910210196af77d02e5536ccdfb387` | pulled on the box |
 | `localdeepresearch/local-deep-research:latest` | `sha256:ce95481a35d3eebc2c1ae7bd34fad426108c3fb8d1a22f66c9e772276869c2f0` | pulled on the box |
 | `itzcrazykns1337/vane:latest` | `sha256:0b61bf0d4470e9f2a9c71f794b72fab6e5a612177172770684c158a461f6896e` | registry |
-| `yanwk/comfyui-boot:cpu` | `sha256:c54d7d0d744672654b0ec6b3bc02c569fb4f5eaef86ff2dac099a6e9dc231f97` | registry |
 | `langflowai/langflow:latest` | `sha256:a0396e089eb97fa471ef8affc492b8c56abb3758040a5ddaa80814b0abad15bf` | registry |
-| `unclecode/crawl4ai:0.9.4` | `sha256:9021b3cb5c6f12570bbcd5395638495e0a06969b3148e377b953d174af2ebc9b` | registry |
-| `pyd4vinci/scrapling:0.4.15` | `sha256:1bacbc8ec90b3090d462e12f6555e241daf0dfeb684ab326ffa09d52d8226e69` | registry |
 | `ghcr.io/openhands/agent-canvas:latest` | `sha256:91b7a217dcbefe8c10562523b043458ed1dfaf8ba770194b319fe754cee03f23` | registry |
 | `openclaw/openclaw:2026.9.3` | `sha256:6cb72e1599b3b76e2ea3dcc2f4dd7f112247367fbecadfcdee8caa7423f4989b` | pulled on the box |
 | `ghcr.io/hkuds/lightrag:v1.5.7` | `sha256:5bdbd524931b011df246fe20888d110cef691e6804c12cde636a2b746d7de27e` | registry |
