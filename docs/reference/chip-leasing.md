@@ -169,7 +169,8 @@ not reset); prefer one `tt-station run` at a time.
 
 ### `POST /reset` (`tt-station reset --host …`) and `power reset-chips` (`tt-station power reset-chips --host …`)
 
-Both run a **whole-box** `tt-smi -r`, which on a shared box resets a neighbour mid-run. So both
+Both run a **whole-box** `tt-smi -r` -- under a short whole-box lease of their own when gozer is
+installed (§5) -- which on a shared box resets a neighbour mid-run. So both
 **refuse with `409` by default** while gozer reports a lease held by anyone other than this agent's
 own session (matched on the `tt-station:<serving_port>:` `who` prefix), and both accept `--force`
 to override that. Full behaviour, including the "could not be determined" case, is in
@@ -194,9 +195,10 @@ Four things worth knowing at the CLI:
   default (silence must not read as "nobody is here"), but an operator whose gozer is wedged must
   still be able to reset their own box without an ssh session. That was the sharpest symptom of
   over-enforcement: the box was unresettable exactly when it most needed resetting.
-- **A forced override is logged, and that log is the whole audit trail.** The refusal that would
-  have named the holder never happens, so the agent's journal line — holder `who` plus the chips —
-  is the only place a neighbour can later find out why their model died. Prefer the polite route
+- **A forced override is logged and audited.** The refusal that would have named the holder never
+  happens, so the agent's journal line — holder `who` plus the chips — and the activity-log entry
+  (`GET /audit`: result `forced`, target naming the holder) are where a neighbour can later find
+  out why their model died. Prefer the polite route
   (stop the other session, or `gozer reconcile` a stale one) when it is available.
 
 `BUSY-UNTRACKED` is deliberately **not** a refusal at all: it is not a lease, there is nobody to
@@ -223,8 +225,15 @@ So every lease is now owned by the process that actually uses the chips:
 | `runpy` / `docker` serve (a container) | agentd acquires (it needs the grant to pick `--device-id`/`--device`), launches, and once the serve is healthy **hands the lease off** to the container's main pid (`docker inspect --format {{.State.Pid}}`) | the container's main process |
 | native vLLM, a served bring-up (Orchard harvest), a community package (`tt-model serve`) -- the `tt-orchard-serve` holder unit | the unit starts behind a **gate** (`sh -c 'go=$(timeout 120 head -n1 FIFO) ...; exec "$@"'`); agentd acquires with `--owner-pid` = the unit's `MainPID`, then opens the gate and the server `exec`s in place (same pid) | the unit's main process |
 | bring-up (`lease_run.py` → `gozer run`), Orchard's own runs | `gozer run` | `gozer run`, the workload is its child |
-| `POST /reset`, `power reset-chips`, the pre-launch reset | no lease; guarded by the foreign-lease refusal (§4) | -- |
-| Lab (`tt-lab`) | no lease (unchanged; the agent refuses serves while it runs) | -- |
+| `POST /reset`, `power reset-chips`, and every `run_power_command` reset (Doctor, bring-up, Orchard, native vLLM, community starts) | a short whole-box lease (`gozer acquire --chips all --no-queue --owner-pid <agentd>`, `who` `tt-station:<port>:reset-chips`) around the `tt-smi -r`, then `gozer release --no-reset`. Refused (`409`, naming the holder) when someone else holds chips, unless `--force` (§4) -- then unleased, journalled, and audited. Unleased, as before, when the only busy chips are this agent's own serve or untracked work | this agent (it runs the reset) |
+| a serve's pre-launch reset (`tt-smi -r <bdf>,<bdf>`) | none of its own: it already runs under the serve's lease, scoped to the leased BDFs | (the serve's) |
+| Lab (`tt-lab`) | a whole-box lease (`--chips all`, `who` `tt-station:<port>:lab`) from before its pre-run reset until tt-lab exits, then `gozer release` (with reset). Chips held by anyone else: `409` naming the holder. The agent still refuses serves and resets while it runs | this agent (tt-lab's parent) |
+
+The reset and Lab leases are never handed to a workload: the reconciler leaves them alone while
+their owner lives, releases one whose owner is dead only when nothing serves on the port (a reset
+under a live, forced container would be worse than gozer's reap), and the startup sweep never
+adopts one as a serve's. Without gozer, both run unleased exactly as before (`GET /lab`'s
+`leasing` says so).
 
 Holder-unit lease ids are kept in `<config>/holder-leases.json` (community ones in
 `community/leases.json`) and released right **after** the unit is stopped, so the chips are reset.
@@ -277,7 +286,8 @@ Under the gatekeeper mutex: refuse (exit 13) if the lease no longer holds its un
 `<pid>` is not alive; set the lease's `pid`, `pgid` and `detached=false`, rewrite the lease record
 and each unit's lock copy (`update_unit_lease`), and log a `transferred` history event. agentd
 already calls it first and falls back only on argparse's "invalid choice" (exit 2), so no
-tt-station change is needed when it lands. Exposing `lease_id` in `gozer status --json` (known
+tt-station change is needed when it lands. This follow-up still stands: the reset and Lab leases
+above don't need it (their owner is the agent that runs them), but every serve's hand-off does. Exposing `lease_id` in `gozer status --json` (known
 limitation 4 in `gozer.rs`) remains the other small fix.
 
 ### The runpy `--device-id` mapping (verified from source)
@@ -307,6 +317,14 @@ run.py's host-side `tt-smi -s` checks.
 4. **Holder unit.** Start a native vLLM bundle: `systemctl --user show -p MainPID
    tt-orchard-serve` equals the lease's `pid` in `gozer status --json` both before and after the
    server is up (the gate `exec`s in place); `tt-station stop` releases it with a reset.
+5. **Lab lease.** With the box idle, start a Lab run: during it `gozer status` shows every chip
+   `CLAIMED`/`HELD` by `tt-station:<port>:lab` with `pid` = agentd's; after it, every chip
+   `FREE` and `gozer history` shows the release with a reset. tt-lab must still start on the
+   chips the lease's pre-run reset left (the "BRISC command did not finish" check).
+6. **Reset lease.** `tt-station power reset-chips` on an idle box: `gozer history` shows a
+   `tt-station:<port>:reset-chips` grant and a release with no reset around one `tt-smi -r`.
+   Because that release is `--no-reset`, gozer does not mark the units clean, so a later
+   `--fresh` acquire won't count them fresh (nothing in tt-station asks for `--fresh`).
 
 ---
 

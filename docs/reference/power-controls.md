@@ -58,7 +58,15 @@ match it.
   reset runs and the agent logs what it stepped on — the holder's `who` and the chips (or, for
   the undetermined case, that occupancy was unknown). That journal line is the only record left,
   because the refusal that would have named the holder never happened. Both refusal messages say
-  `--force` overrides them.
+  `--force` overrides them. A forced reset that overrode a holder is also written to the activity
+  log (`GET /audit`): action `power`, result `forced`, target naming the holder.
+  **With gozer, the reset runs under a short whole-box lease**: `gozer acquire --chips all` as
+  `tt-station:<serving_port>:reset-chips` (owned by agentd), the configured command, then
+  `gozer release --no-reset` (the command just reset them). When the lease can't be taken only
+  because the chips are this agent's own serve or untracked work, the reset runs unleased as
+  before; a forced reset past someone else's lease is unleased too. Every caller of
+  `run_power_command` gets this: the Doctor's fix, bring-up, Orchard, native vLLM and
+  community starts. See [`chip-leasing.md` §4](chip-leasing.md).
 - **`suspend` / `reboot` / `shutdown`** (the "machine ops",
   `PowerAction::is_machine_op() == true` for everything but `reset-chips`) —
   1. Best-effort stop any serving container first (reuses the backend's normal `stop` path) so a
