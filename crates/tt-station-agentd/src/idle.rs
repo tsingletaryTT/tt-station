@@ -71,6 +71,21 @@ struct Watch {
     last_active: u64,
     /// Waking now (so two requests don't start it twice).
     waking: bool,
+    /// The serve being watched (`AppState::serve_key`): what `tokens` and
+    /// `last_active` are about.
+    serve: Option<String>,
+}
+
+impl Watch {
+    /// Watch `serve` from now on: a different serve than last time (a model
+    /// started since) starts fresh, as just active.
+    fn follow(&mut self, serve: &str, now: u64) {
+        if self.serve.as_deref() != Some(serve) {
+            self.serve = Some(serve.to_string());
+            self.tokens = None;
+            self.last_active = now;
+        }
+    }
 }
 
 /// What `crate::idle` keeps for the life of one agent (`crate::state::PerAgent`).
@@ -213,6 +228,13 @@ pub async fn watch_forever(state: AppState) {
             mine(&state).watch.lock().expect("idle").tokens = None;
             continue;
         }
+        // What this pass decides about; checked again before stopping it.
+        let serve = state.serve_key();
+        mine(&state)
+            .watch
+            .lock()
+            .expect("idle")
+            .follow(&serve, now());
         match active(&state).await {
             Some(true) => mine(&state).watch.lock().expect("idle").last_active = now(),
             Some(false) if working(&state) => {
@@ -228,9 +250,17 @@ pub async fn watch_forever(state: AppState) {
         if idle_for < s.after_minutes.max(5) as u64 * 60 {
             continue;
         }
+        // A start, stop or swap during the metrics read: this pass's
+        // reading was about another serve. Leave the new one alone.
+        if state.serve_key() != serve {
+            continue;
+        }
         let Some(target) = current_target(&state).await else {
             continue;
         };
+        if state.serve_key() != serve {
+            continue;
+        }
         eprintln!(
             "tt-station-agentd: idle for {} min: stopping {}",
             idle_for / 60,
@@ -431,6 +461,22 @@ pub(crate) async fn post_sleep(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_serve_is_watched_from_scratch() {
+        let mut w = Watch::default();
+        w.follow("a", 100);
+        w.tokens = Some(5.0);
+        w.follow("a", 900);
+        assert_eq!(
+            (w.last_active, w.tokens),
+            (100, Some(5.0)),
+            "same serve: kept"
+        );
+        // A model started since the last look isn't idle for the old one's time.
+        w.follow("b", 1000);
+        assert_eq!((w.last_active, w.tokens), (1000, None));
+    }
 
     #[test]
     fn reads_vllm_counters() {
