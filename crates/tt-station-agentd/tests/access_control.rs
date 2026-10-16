@@ -57,16 +57,19 @@ async fn spawn_local(state: AppState) -> String {
 }
 
 /// `(method, route)` for every `.route(..)` in the body of `fn_header` in
-/// `src/router.rs`, up to the auth layer that closes it.
+/// `src/router.rs`, up to the auth layer that closes it (`require_auth`; a
+/// route's own layer, such as `crate::model_control`'s, doesn't).
 fn routes_in(fn_header: &str) -> Vec<(String, String)> {
     let src = include_str!("../src/router.rs");
     let start = src
         .find(fn_header)
         .unwrap_or_else(|| panic!("{fn_header} not found"));
     let body = &src[start..];
-    let end = body
-        .find(".route_layer(")
-        .expect("the router ends with its auth layer");
+    let end = regex::Regex::new(r"\.route_layer\(\s*axum::middleware::from_fn_with_state\(\s*state\.clone\(\),\s*require_auth")
+        .unwrap()
+        .find(body)
+        .expect("the router ends with its auth layer")
+        .start();
     let body = &body[..end];
     let route = regex::Regex::new(r#"\.route\(\s*"([^"]+)",\s*"#).unwrap();
     let method =

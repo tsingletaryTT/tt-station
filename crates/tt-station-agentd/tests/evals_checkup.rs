@@ -989,6 +989,60 @@ async fn every_check_up_route_needs_a_paired_device_and_members_can_read_results
     assert_eq!((status, &v["eval"]["id"]), (200, &json!("1-seen")));
 }
 
+#[tokio::test]
+async fn starting_and_stopping_check_ups_follows_who_may_start_and_stop_models() {
+    let s = station(None).await;
+    // Anyone may (the default): a member's start gets past the gate (and is
+    // refused only because nothing is serving).
+    let (status, v) = s
+        .call(
+            reqwest::Method::POST,
+            "/evals",
+            Some(&s.member),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(status, 409, "{v}");
+    let (status, _) = s
+        .call(
+            reqwest::Method::PUT,
+            "/data/settings",
+            Some(&s.owner),
+            Some(json!({ "model_control": "owners" })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    for path in ["/evals", "/evals/stop"] {
+        let (status, v) = s
+            .call(
+                reqwest::Method::POST,
+                path,
+                Some(&s.member),
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!(status, 403, "{path}: {v}");
+        assert_eq!(
+            v["error"],
+            "Only owners can start or stop models on this box."
+        );
+    }
+    let (status, _) = s
+        .call(
+            reqwest::Method::POST,
+            "/evals/stop",
+            Some(&s.owner),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(status, 200, "an owner's still works");
+    // Reading results stays open.
+    let (status, _) = s
+        .call(reqwest::Method::GET, "/evals", Some(&s.member), None)
+        .await;
+    assert_eq!(status, 200);
+}
+
 // ---------------------------------------------------------------- where Code compacts
 
 fn measured(id: &str, model: &str, started: u64, status: &str, window: Option<u64>) -> Eval {

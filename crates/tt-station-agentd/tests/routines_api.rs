@@ -116,7 +116,9 @@ fn calls(name: &str, args: Value) -> Value {
 
 struct Box_ {
     base: String,
+    /// An owner (paired first) and a member.
     token: String,
+    member: String,
     config: std::path::PathBuf,
     llm: StubLlm,
     backend: Arc<Mutex<Vec<String>>>,
@@ -145,9 +147,11 @@ impl Box_ {
         let router = app(state.clone());
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let token = support::pair(&base, &state).await;
+        let member = support::pair(&base, &state).await;
         Box_ {
             base,
             token,
+            member,
             config,
             llm,
             backend: backend_calls,
@@ -156,10 +160,20 @@ impl Box_ {
     }
 
     async fn send(&self, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+        self.send_as(&self.token, method, path, body).await
+    }
+
+    async fn send_as(
+        &self,
+        token: &str,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (u16, Value) {
         let mut r = self
             .c
             .request(method.parse().unwrap(), format!("{}{path}", self.base))
-            .bearer_auth(&self.token);
+            .bearer_auth(token);
         if let Some(b) = body {
             r = r.json(&b);
         }
@@ -454,6 +468,123 @@ async fn an_action_it_was_not_given_waits_for_the_person_and_runs_when_allowed()
     let (_, runs) = b.send("GET", &format!("/routines/{id}/runs"), None).await;
     assert_eq!(runs["runs"][0]["id"], run_id.as_str());
     assert_eq!(runs["runs"][0]["steps"], 1);
+    b.idle().await;
+}
+
+const OWNERS_ONLY: &str = "Only owners can start or stop models on this box.";
+
+#[tokio::test]
+async fn when_only_owners_may_a_members_routine_neither_switches_models_nor_approves() {
+    let _one = RUNS.lock().await;
+    let b = Box_::new("owners").await;
+    b.serve_model().await;
+    let (status, _) = b
+        .send(
+            "PUT",
+            "/data/settings",
+            Some(json!({ "model_control": "owners" })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let starts = || b.backend.lock().unwrap().clone();
+    let before = starts();
+
+    // A member's routine, given stop_model ahead of time: it runs for them,
+    // so it doesn't stop the model, and the model is told why.
+    *b.llm.script.lock().unwrap() = vec![
+        calls("stop_model", json!({})),
+        says("Headline: couldn't stop it.\n\nNot allowed."),
+    ];
+    let (status, r) = b
+        .send_as(
+            &b.member,
+            "POST",
+            "/routines",
+            Some(json!({ "name": "Stopper", "goal": "Stop the model.", "schedule": { "kind": "manual" }, "allowed": ["stop_model"] })),
+        )
+        .await;
+    assert_eq!(status, 200, "{r}");
+    let id = r["routine"]["id"].as_str().unwrap().to_string();
+    let (status, started) = b
+        .send_as(&b.member, "POST", &format!("/routines/{id}/run"), None)
+        .await;
+    assert_eq!(status, 200, "{started}");
+    let run_id = started["run"]["id"].as_str().unwrap().to_string();
+    let run = b.run_when(&run_id, |r| r["finished"].is_u64()).await;
+    assert_eq!(run["steps"][0]["tool"], "stop_model", "{run}");
+    assert_eq!(run["steps"][0]["ok"], false);
+    assert!(
+        run["steps"][0]["result"]
+            .as_str()
+            .unwrap()
+            .starts_with(OWNERS_ONLY),
+        "{run}"
+    );
+    assert_eq!(starts(), before, "nothing stopped");
+    b.idle().await;
+
+    // An owner's routine asking first: a member's yes is refused (it keeps
+    // waiting); an owner's goes through.
+    b.llm.requests.lock().unwrap().clear();
+    *b.llm.script.lock().unwrap() = vec![
+        calls("start_model", json!({ "model": SERVED })),
+        says("# Done\n\nStarted."),
+    ];
+    let id = b
+        .make(json!({ "name": "Starter", "goal": "Start the model." }))
+        .await;
+    let run_id = b.run(&id).await;
+    b.run_when(&run_id, |r| r["status"] == "waiting").await;
+    for path in [
+        format!("/routines/runs/{run_id}/approve"),
+        "/approvals/answer".to_string(),
+    ] {
+        let body = if path.ends_with("approve") {
+            json!({ "allow": true })
+        } else {
+            json!({ "id": format!("routine:{run_id}"), "allow": true })
+        };
+        let (status, v) = b.send_as(&b.member, "POST", &path, Some(body)).await;
+        assert_eq!(status, 403, "{path}: {v}");
+        assert_eq!(v["error"], OWNERS_ONLY);
+    }
+    let (status, _) = b
+        .send(
+            "POST",
+            &format!("/routines/runs/{run_id}/approve"),
+            Some(json!({ "allow": true })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let run = b.run_when(&run_id, |r| r["finished"].is_u64()).await;
+    assert_eq!(run["status"], "done", "{run}");
+    b.idle().await;
+
+    // A member's mode switch: refused, and said so in the run.
+    let (status, r) = b
+        .send_as(
+            &b.member,
+            "POST",
+            "/routines",
+            Some(
+                json!({ "name": "", "goal": "", "mode": "chat", "schedule": { "kind": "manual" } }),
+            ),
+        )
+        .await;
+    assert_eq!(status, 200, "{r}");
+    let id = r["routine"]["id"].as_str().unwrap().to_string();
+    let (status, started) = b
+        .send_as(&b.member, "POST", &format!("/routines/{id}/run"), None)
+        .await;
+    assert_eq!(status, 200, "{started}");
+    let run_id = started["run"]["id"].as_str().unwrap().to_string();
+    let run = b.run_when(&run_id, |r| r["finished"].is_u64()).await;
+    assert_eq!(run["status"], "failed", "{run}");
+    assert!(
+        run["report"].as_str().unwrap().contains(OWNERS_ONLY),
+        "{run}"
+    );
+    assert_eq!(starts(), before, "nothing switched");
     b.idle().await;
 }
 

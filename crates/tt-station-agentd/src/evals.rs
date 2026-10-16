@@ -25,7 +25,11 @@
 //! `evaluate_model` tool.
 //!
 //! - `GET /evals`, `POST /evals`, `POST /evals/stop`
-//! - `GET /evals/{id}`, `DELETE /evals/{id}`
+//! - `GET /evals/{id}`, `DELETE /evals/{id}` (with its trials file)
+//!
+//! A check-up holds the served model for minutes (about fifteen with agent
+//! reliability), so starting and stopping one follows who may start and stop
+//! models (`crate::model_control`, applied in the router).
 //!
 //! An evaluation in progress is saved after each step (the speed benchmark,
 //! then each category). If the agent restarts mid-way, [`resume`] picks it up

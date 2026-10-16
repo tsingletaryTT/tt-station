@@ -59,10 +59,15 @@ pub(crate) async fn assistant_chat(
     let opts = req.options(false);
     // The tools that act on the box's own computer are an owner's.
     let host_ok = caller.owner();
-    if let Some(done) = crate::assistant::HOST_OK
+    // Starting and stopping models: whoever `crate::model_control` allows.
+    let models_ok = crate::model_control::allows(&state, &caller);
+    if let Some(done) = crate::assistant::MODELS_OK
         .scope(
-            host_ok,
-            crate::assistant::quick(&state, &req.messages, opts),
+            models_ok,
+            crate::assistant::HOST_OK.scope(
+                host_ok,
+                crate::assistant::quick(&state, &req.messages, opts),
+            ),
         )
         .await
     {
@@ -71,9 +76,12 @@ pub(crate) async fn assistant_chat(
     crate::people::CALLER
         .scope(
             who.person,
-            crate::assistant::HOST_OK.scope(
-                host_ok,
-                crate::assistant::converse(&state, req.messages, opts),
+            crate::assistant::MODELS_OK.scope(
+                models_ok,
+                crate::assistant::HOST_OK.scope(
+                    host_ok,
+                    crate::assistant::converse(&state, req.messages, opts),
+                ),
             ),
         )
         .await
@@ -105,10 +113,15 @@ pub(crate) async fn assistant_stream(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     // The tools that act on the box's own computer are an owner's.
     let host_ok = caller.owner();
-    if let Some(done) = crate::assistant::HOST_OK
+    // Starting and stopping models: whoever `crate::model_control` allows.
+    let models_ok = crate::model_control::allows(&state, &caller);
+    if let Some(done) = crate::assistant::MODELS_OK
         .scope(
-            host_ok,
-            crate::assistant::quick(&state, &req.messages, opts),
+            models_ok,
+            crate::assistant::HOST_OK.scope(
+                host_ok,
+                crate::assistant::quick(&state, &req.messages, opts),
+            ),
         )
         .await
     {
@@ -131,13 +144,23 @@ pub(crate) async fn assistant_stream(
             )
             .await
             .map_err(assistant_error)?;
-        tokio::spawn(
-            crate::people::CALLER.scope(
-                person,
-                crate::assistant::HOST_OK
-                    .scope(host_ok, crate::assistant::converse_stream(state, chat, tx)),
+        // The turn runs on after this returns: it keeps who asked (for what
+        // its tools record, such as whose a research report is).
+        let actor = caller.actor();
+        tokio::spawn(crate::auth::as_caller(
+            caller,
+            crate::audit::ACTOR.scope(
+                actor,
+                crate::people::CALLER.scope(
+                    person,
+                    crate::assistant::MODELS_OK.scope(
+                        models_ok,
+                        crate::assistant::HOST_OK
+                            .scope(host_ok, crate::assistant::converse_stream(state, chat, tx)),
+                    ),
+                ),
             ),
-        );
+        ));
     }
     let events = futures_util::stream::unfold(rx, |mut rx| async move {
         let event = rx.recv().await?;
@@ -167,6 +190,21 @@ pub(crate) async fn assistant_confirm(
     if req.approve && tool.as_deref() == Some("reset_chips") && !caller.owner() {
         crate::audit::record(&state, "denied", "assistant reset_chips", "denied");
         return Err(tt_error(StatusCode::FORBIDDEN, OWNER_ONLY));
+    }
+    // Starting, stopping or switching the model: whoever `crate::model_control`
+    // allows (the card may have been offered before an owner changed it).
+    if req.approve
+        && tool
+            .as_deref()
+            .is_some_and(|t| crate::assistant::MODEL_TOOLS.contains(&t))
+        && !crate::model_control::allows(&state, &caller)
+    {
+        let what = format!("assistant {}", tool.as_deref().unwrap_or_default());
+        crate::audit::record(&state, "denied", &what, "denied");
+        return Err(tt_error(
+            StatusCode::FORBIDDEN,
+            crate::model_control::OWNERS_ONLY,
+        ));
     }
     let approve = req.approve;
     let done = crate::assistant::HOST_OK

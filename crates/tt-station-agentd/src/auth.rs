@@ -158,7 +158,7 @@ pub(crate) const OWNER_ONLY: &str =
 /// account, see `only_local`), a paired device, or both (the desktop app on
 /// the box, which also sends its token).
 #[derive(Debug, Clone)]
-pub(crate) struct Caller {
+pub struct Caller {
     pub local: bool,
     pub device: Option<crate::sessions::Session>,
 }
@@ -209,6 +209,24 @@ pub(crate) fn resolve_caller(
         });
     }
     Ok(Caller { local, device })
+}
+
+tokio::task_local! {
+    /// The caller of the request being handled (set by [`require_auth`], next
+    /// to `crate::audit::ACTOR`), for code a route reaches that has no
+    /// extractor of its own: the assistant's tools, a routine's approvals.
+    static CALLER: Caller;
+}
+
+/// Who is making the request being handled; `None` outside a request (the
+/// box's own background work: schedules, the boot restart, queues).
+pub(crate) fn current_caller() -> Option<Caller> {
+    CALLER.try_with(Clone::clone).ok()
+}
+
+/// Runs `f` as `caller`'s request would (tests, and work done on a person's behalf).
+pub async fn as_caller<F: std::future::Future>(caller: Caller, f: F) -> F::Output {
+    CALLER.scope(caller, f).await
 }
 
 /// [`LocalOrPaired`], keeping who the caller is.
@@ -323,13 +341,24 @@ pub(crate) async fn require_auth(
     let open =
         is_public_route(req.method(), &route) || HANDLER_AUTHED_ROUTES.contains(&route.as_str());
     match caller {
-        Ok(c) => crate::audit::ACTOR.scope(c.actor(), next.run(req)).await,
+        Ok(c) => {
+            let actor = c.actor();
+            CALLER
+                .scope(c, crate::audit::ACTOR.scope(actor, next.run(req)))
+                .await
+        }
         Err(_) if open => {
             let anyone = crate::audit::Actor {
                 device_id: None,
                 device_name: "Not paired".to_string(),
             };
-            crate::audit::ACTOR.scope(anyone, next.run(req)).await
+            let nobody = Caller {
+                local: false,
+                device: None,
+            };
+            CALLER
+                .scope(nobody, crate::audit::ACTOR.scope(anyone, next.run(req)))
+                .await
         }
         Err(failure) => AuthRejection(failure).into_response(),
     }

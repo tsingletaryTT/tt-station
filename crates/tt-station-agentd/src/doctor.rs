@@ -797,24 +797,38 @@ fn local_day_hm() -> (String, u32, u32) {
 pub(crate) async fn get_doctor(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
+    crate::routes::CallerAuth(caller): crate::routes::CallerAuth,
 ) -> Json<Value> {
     let (status, checks) = examine(&state).await;
-    Json(json!({ "status": status, "checks": checks }))
+    Json(json!({
+        "status": status,
+        "checks": checks,
+        // Which fixes and bundles this caller may use (see `post_fix`).
+        "owner": caller.owner(),
+        "may_control_models": crate::model_control::allows(&state, &caller),
+    }))
 }
 
 /// `POST /doctor/fix/{fix}` (authed): apply a safe fix, then re-check.
 /// `reset_chips` is an owner's, like `POST /power` `reset-chips`: it runs the
-/// same whole-box reset.
+/// same whole-box reset. So is `stop_stray_containers` (they may be someone's
+/// work the agent didn't start). `restart_model` is for whoever may start and
+/// stop models (`crate::model_control`).
 pub(crate) async fn post_fix(
     axum::extract::State(state): axum::extract::State<AppState>,
     _auth: BearerAuth,
     crate::routes::CallerAuth(caller): crate::routes::CallerAuth,
     axum::extract::Path(fix): axum::extract::Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    if fix == "reset_chips" && !caller.owner() {
-        let what = format!("POST /doctor/fix/{fix}");
+    let what = format!("POST /doctor/fix/{fix}");
+    // Resetting the chips and stopping containers the agent didn't start are
+    // an owner's; restarting the model follows `crate::model_control`.
+    if matches!(fix.as_str(), "reset_chips" | "stop_stray_containers") && !caller.owner() {
         crate::audit::record_as(&state, &caller.actor(), "denied", &what, "denied");
         return Err(err(StatusCode::FORBIDDEN, crate::routes::OWNER_ONLY));
+    }
+    if fix == "restart_model" {
+        crate::model_control::check_now(&state, &what)?;
     }
     if let Some(holder) = state.chips_holder() {
         return Err(err(StatusCode::CONFLICT, holder));
