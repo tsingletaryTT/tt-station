@@ -12,6 +12,8 @@ recorded at every finished start in `$TT_CONFIG_DIR/load-times.json`. `GET /serv
 `companion`) carry `eta_s` while loading. `POST /modes/{id}`: `202` started, `200` already
 active, `409` with the reason (e.g. what to download). The assistant's confirm-gated
 `switch_mode` tool uses the same path; `create_image` without an image model suggests it.
+Switching follows who may start and stop models (`model_control` in
+`docs/reference/your-data.md`): with `owners`, a member's `POST /modes/{id}` is `403`.
 
 ## Box Doctor (`GET /doctor`, `POST /doctor/fix/{fix}`, `POST /diagnostics`)
 
@@ -25,6 +27,18 @@ itself: `restart_model`, `stop_stray_containers`, `reset_chips` (idle only); oth
 problems". `POST /diagnostics` builds a `.tar.gz` (Doctor report, tt-smi, events,
 versions, agent journal, serving logs; secrets redacted) under
 `$TT_CONFIG_DIR/diagnostics/`; `GET /diagnostics/{id}` downloads it.
+
+Who may: reading the verdicts (`GET /doctor`) is anyone's, and its answer says what this
+caller may do (`owner`, `may_control_models`). `stop_stray_containers` and `reset_chips`
+are owners' (`403` otherwise): stray containers may be someone's work the agent didn't
+start. `restart_model` follows `model_control`. The support bundle carries logs (redacted
+still): `POST /diagnostics` and `GET /diagnostics/{id}` are owners'.
+
+## Check-ups (`GET /evals`, `POST /evals`, `POST /evals/stop`, `GET`/`DELETE /evals/{id}`)
+
+Reading results is anyone's. Starting and stopping a check-up holds the served model for
+minutes (about fifteen with agent reliability), so it follows `model_control`. Deleting one
+removes `evals/<id>.json` and its agent-reliability trials, `evals/raw/<id>.json`.
 
 ## Software (`GET /software`, `POST /software/cli-update`)
 

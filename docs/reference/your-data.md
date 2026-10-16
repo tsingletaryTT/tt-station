@@ -11,9 +11,10 @@ desktop app shows all of it to owners in Settings → Your data.
 | `transcripts_to_library` | off | Add finished transcripts to the shared Library, when the job didn't say. |
 | `retention_days` | none | Delete transcripts and research reports this many days after they finished (1–3650). Checked 3 minutes after start, then hourly; unfinished work is never touched; each sweep that deletes something is audited (`retention`). A transcript already added to the Library stays there. |
 | `restart_last_model` | off | Start the model that was serving again after the box boots (below). |
+| `model_control` | `anyone` | Who may start, stop and switch the served model: `anyone` or `owners` (`model_control.rs`; the desktop app shows it in Settings → Models). With `owners`, members get `403` "Only owners can start or stop models on this box." from every route and tool that starts, stops or switches serving; see `docs/security-faq.md`. |
 
-- `GET /data/settings` (authed): `{settings, owner}`.
-- `PUT /data/settings` (owners): any of the fields; `retention_days: null` turns it off. Audited (`data_settings`).
+- `GET /data/settings` (authed): `{settings, owner, may_control_models}`.
+- `PUT /data/settings` (owners): any of the fields; `retention_days: null` turns it off. Audited (`data_settings`); a change of `model_control` is also audited on its own (`model_control`, `anyone -> owners`).
 
 ## Start the last model when the box boots
 

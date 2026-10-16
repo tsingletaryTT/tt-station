@@ -45,7 +45,17 @@ empty.
 **`/schedules` still answers** in its old shape, from those routines, for phone apps that ask
 for it: `GET` lists mode routines as `{id, mode, time, days, enabled}`; `POST {mode, time,
 days}` adds one (as a routine); `PATCH /schedules/{id} {enabled?, mode?, time?, days?}` and
-`DELETE` change or remove the routine.
+`DELETE` change or remove the routine. A schedule keeps no author and switches as the box,
+so `POST` and `PATCH` follow who may start and stop models (`model_control`,
+`docs/reference/your-data.md`); `DELETE` doesn't.
+
+**Whom a routine acts for.** A routine records the device that last wrote it (`by`); a run
+records whom it acts for (`by`): whoever ran it by hand, else the routine's `by`. With
+`model_control: "owners"`, a run for a member doesn't start, stop or evaluate a model, or
+switch modes, on its own (the step fails with the reason, given ahead of time or not), and
+`reset_chips` given ahead of time needs an owner behind the run. Approving such a step
+(`POST /routines/runs/{run}/approve`, `/approvals/answer`) takes someone who may do it
+(`403` otherwise). Routines from before `by` was kept act as the box.
 
 ## Energy (`GET /energy`, `history.rs`)
 
