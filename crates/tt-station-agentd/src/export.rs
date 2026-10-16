@@ -1192,7 +1192,36 @@ fn file_change(target: &Path, sha: &str) -> Change {
 /// directory, merge the merged kinds into the box's stores, and pick up the
 /// imported jobs. The archive is read again (it's the agent's own private
 /// temp file, checked by [`inspect`]).
-pub fn apply(state: &AppState, archive: &Path, plan: &Plan) -> Result<Preview, String> {
+///
+/// `actor` (who imported it) is recorded in the activity log for a setting
+/// that is logged when changed by hand: who may start and stop models.
+pub fn apply(
+    state: &AppState,
+    archive: &Path,
+    plan: &Plan,
+    actor: &crate::audit::Actor,
+) -> Result<Preview, String> {
+    let config = state.config_dir();
+    let was_control = settings_in(&config).model_control;
+    let result = apply_files(state, archive, plan);
+    let control = settings_in(&config).model_control;
+    if control != was_control {
+        crate::audit::record_as(
+            state,
+            actor,
+            "model_control",
+            &format!(
+                "{} -> {} (imported)",
+                was_control.as_str(),
+                control.as_str()
+            ),
+            "ok",
+        );
+    }
+    result
+}
+
+fn apply_files(state: &AppState, archive: &Path, plan: &Plan) -> Result<Preview, String> {
     let config = state.config_dir();
     let mut ar = open_archive(archive).map_err(|e| e.to_string())?;
     let mut jobs_written: HashSet<String> = HashSet::new();
@@ -1317,12 +1346,13 @@ pub(crate) async fn post_import(
     }
     let current = Current::of(&state);
     let st = state.clone();
+    let actor = caller.actor();
     let result = tokio::task::spawn_blocking(move || {
         let plan = inspect(&path, &st.config_dir(), &current)?;
         if dry_run {
             return Ok(plan.preview);
         }
-        apply(&st, &path, &plan)
+        apply(&st, &path, &plan, &actor)
     })
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1483,7 +1513,11 @@ mod tests {
             r#"{"id":"1-live","routine":"r1","name":"n","trigger":"manual","started":1,"status":"running"}"#,
         );
         write(root, "model-prefs.json", r#"{"chat":"Qwen3-32B"}"#);
-        write(root, SETTINGS_FILE, r#"{"keep_audio":true}"#);
+        write(
+            root,
+            SETTINGS_FILE,
+            r#"{"keep_audio":true,"model_control":"owners"}"#,
+        );
         write(
             root,
             "evals/1-e.json",
@@ -1859,7 +1893,14 @@ mod tests {
         );
 
         let plan = inspect(&out, &b, &Current::of(&state)).unwrap();
-        apply(&state, &out, &plan).unwrap();
+        apply(&state, &out, &plan, &crate::audit::Actor::the_box()).unwrap();
+        // Who may start models changed with it, and the activity log says so.
+        let (log, _) = state.audit().page(0, 50);
+        assert!(
+            log.iter()
+                .any(|e| e.action == "model_control" && e.target == "anyone -> owners (imported)"),
+            "{log:?}"
+        );
         for rel in [
             "jobs/aaaa1111/transcript.txt",
             "jobs/bbbb2222/input.m4a",
