@@ -311,6 +311,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/research/{id}/stop", post(crate::research::post_stop))
         .route("/research/{id}/rename", post(crate::research::post_rename))
+        .route("/research/{id}/share", post(crate::research::post_share))
         .route(
             "/research/{id}/explain",
             post(crate::research::post_explain),

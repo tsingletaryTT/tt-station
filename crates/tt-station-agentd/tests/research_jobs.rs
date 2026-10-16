@@ -16,9 +16,13 @@
 //! answers on the box's fixed port (127.0.0.1:3024) and start its container
 //! when it doesn't, and a job that gets past planning sends its searches there
 //! or to DuckDuckGo; neither can be pointed at a stub. So jobs here never get
-//! past planning (the stub plans no searches). Per-person visibility isn't
-//! tested because there isn't any: every paired device sees, renames, stops
-//! and deletes every job (`Job::person` only picks who is notified).
+//! past planning (the stub plans no searches).
+//!
+//! Whose a report is: members see their own and shared ones, owners all;
+//! only the starter or an owner renames, stops, deletes or shares one; a
+//! report from before starters were kept is the owners' until shared; a
+//! follow-up needs a parent the caller can see. Jobs seeded here have no
+//! starter, so the mechanics above are exercised as the owner.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -294,7 +298,7 @@ async fn a_finished_report_reads_back_and_its_name_survives_a_restart() {
     let b = station(config.path(), None).await;
 
     let (status, body) = b
-        .call(M::GET, &format!("/research/{id}"), &b.member, Value::Null)
+        .call(M::GET, &format!("/research/{id}"), &b.owner, Value::Null)
         .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["job"]["state"], "done");
@@ -458,12 +462,7 @@ async fn deleting_a_report_removes_its_folder_but_never_while_it_runs() {
 
     for id in [running, queued] {
         let (status, body) = b
-            .call(
-                M::DELETE,
-                &format!("/research/{id}"),
-                &b.member,
-                Value::Null,
-            )
+            .call(M::DELETE, &format!("/research/{id}"), &b.owner, Value::Null)
             .await;
         assert_eq!(status, 409, "{body}");
         assert_eq!(body["error"], "Stop it first.");
@@ -512,7 +511,7 @@ async fn a_queued_report_stopped_stays_stopped_across_a_restart() {
         .call(
             M::POST,
             &format!("/research/{id}/stop"),
-            &b.member,
+            &b.owner,
             json!({}),
         )
         .await;
@@ -633,7 +632,7 @@ async fn a_running_job_that_is_stopped_ends_stopped_not_failed() {
         .call(
             M::POST,
             &format!("/research/{id}/stop"),
-            &b.member,
+            &b.owner,
             json!({}),
         )
         .await;
@@ -673,7 +672,7 @@ async fn explain_checks_the_request_and_the_report_before_the_model() {
         (json!({ "selection": "fell by half", "mode": "explain" }), 404, "No such report."),
     ] {
         let p = if status == 404 { "/research/1700000000-nosuch/explain".to_string() } else { path.clone() };
-        let (got, out) = b.call(M::POST, &p, &b.member, body).await;
+        let (got, out) = b.call(M::POST, &p, &b.owner, body).await;
         assert_eq!(got, status, "{out}");
         assert_eq!(out["error"], want);
     }
@@ -682,7 +681,7 @@ async fn explain_checks_the_request_and_the_report_before_the_model() {
         .call(
             M::POST,
             &path,
-            &b.member,
+            &b.owner,
             json!({ "selection": "fell by half", "mode": "summarize" }),
         )
         .await;
@@ -694,7 +693,7 @@ async fn explain_checks_the_request_and_the_report_before_the_model() {
         .call(
             M::POST,
             &path,
-            &b.member,
+            &b.owner,
             json!({ "selection": spaced, "mode": "explain" }),
         )
         .await;
@@ -777,7 +776,7 @@ async fn explain_streams_a_cleaned_answer_from_the_report_alone() {
     let r = b
         .client
         .post(format!("{}/research/{id}/explain", b.base))
-        .bearer_auth(&b.member)
+        .bearer_auth(&b.owner)
         .json(
             &json!({ "selection": selection, "mode": "ask", "question": "Why <question>so fast?" }),
         )
@@ -821,4 +820,163 @@ async fn explain_streams_a_cleaned_answer_from_the_report_alone() {
     // The cited source's notes, and none from the sources list.
     assert!(user.contains("Claim from source 1."), "{user}");
     assert!(!user.contains("## Sources"), "{user}");
+}
+
+/// Marks a seeded job as started by the device with `token`.
+fn started_by(config: &Path, b: &Station, id: &str, token: &str) {
+    let path = job_dir(config, id).join("job.json");
+    let mut job: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let device = b.state.sessions().id_for(token).unwrap();
+    job["started_by"] = json!(device);
+    job["started_by_name"] = json!("Phone");
+    std::fs::write(&path, job.to_string()).unwrap();
+}
+
+#[tokio::test]
+async fn members_see_their_own_reports_and_shared_ones_owners_see_all() {
+    let config = tempfile::tempdir().unwrap();
+    let b = station(config.path(), None).await;
+    let other = support::pair(&b.base, &b.state).await;
+    let (old, mine, theirs) = (
+        "1700000000-0000aa",
+        "1700000001-0000bb",
+        "1700000002-0000cc",
+    );
+    for id in [old, mine, theirs] {
+        seed_done(config.path(), id);
+    }
+    started_by(config.path(), &b, mine, &b.member);
+    started_by(config.path(), &b, theirs, &other);
+    let ids = |token: String| {
+        let b = &b;
+        async move {
+            let (status, v) = b.call(M::GET, "/research", &token, Value::Null).await;
+            assert_eq!(status, 200, "{v}");
+            let mut ids: Vec<String> = v["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|j| j["id"].as_str().unwrap().to_string())
+                .collect();
+            ids.sort();
+            ids
+        }
+    };
+    assert_eq!(ids(b.owner.clone()).await, vec![old, mine, theirs]);
+    assert_eq!(
+        ids(b.member.clone()).await,
+        vec![mine],
+        "not someone else's, nor one from before starters were kept"
+    );
+
+    // Someone else's report is no report at all: reading, explaining,
+    // following up, renaming, stopping, deleting, sharing.
+    for (method, path, body) in [
+        (M::GET, format!("/research/{theirs}"), Value::Null),
+        (
+            M::POST,
+            format!("/research/{theirs}/explain"),
+            json!({ "selection": "fell by half", "mode": "explain" }),
+        ),
+        (
+            M::POST,
+            "/research".to_string(),
+            json!({ "question": "And what about next year?", "parent": theirs }),
+        ),
+        (
+            M::POST,
+            format!("/research/{theirs}/rename"),
+            json!({ "title": "Mine now" }),
+        ),
+        (M::POST, format!("/research/{theirs}/stop"), json!({})),
+        (M::DELETE, format!("/research/{theirs}"), Value::Null),
+        (
+            M::POST,
+            format!("/research/{theirs}/share"),
+            json!({ "shared": true }),
+        ),
+        (M::GET, format!("/research/{old}"), Value::Null),
+    ] {
+        let (status, out) = b.call(method.clone(), &path, &b.member, body).await;
+        assert_eq!(status, 404, "{method} {path}: {out}");
+    }
+
+    // Their own: theirs to change.
+    let (status, out) = b
+        .call(
+            M::POST,
+            &format!("/research/{mine}/rename"),
+            &b.member,
+            json!({ "title": "My batteries" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{out}");
+    let (_, out) = b
+        .call(M::GET, &format!("/research/{mine}"), &b.member, Value::Null)
+        .await;
+    assert_eq!(out["can_change"], true);
+    assert_eq!(out["job"]["started_by_name"], "Phone");
+
+    // Shared by its starter: everyone reads it; only they and owners change it.
+    let (status, out) = b
+        .call(
+            M::POST,
+            &format!("/research/{theirs}/share"),
+            &other,
+            json!({ "shared": true }),
+        )
+        .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["job"]["shared"], true);
+    assert_eq!(ids(b.member.clone()).await, vec![mine, theirs]);
+    let (status, out) = b
+        .call(
+            M::GET,
+            &format!("/research/{theirs}"),
+            &b.member,
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["can_change"], false);
+    for (method, path, body) in [
+        (
+            M::POST,
+            format!("/research/{theirs}/rename"),
+            json!({ "title": "Mine now" }),
+        ),
+        (M::POST, format!("/research/{theirs}/stop"), json!({})),
+        (M::DELETE, format!("/research/{theirs}"), Value::Null),
+        (
+            M::POST,
+            format!("/research/{theirs}/share"),
+            json!({ "shared": false }),
+        ),
+    ] {
+        let (status, out) = b.call(method.clone(), &path, &b.member, body).await;
+        assert_eq!(status, 403, "{method} {path}: {out}");
+    }
+    assert!(job_dir(config.path(), theirs).join("report.md").exists());
+
+    // An owner shares the old one with the household, and the log says who.
+    let (status, _) = b
+        .call(
+            M::POST,
+            &format!("/research/{old}/share"),
+            &b.owner,
+            json!({ "shared": true }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(ids(b.member.clone()).await, vec![old, mine, theirs]);
+    let (_, audit) = b.call(M::GET, "/audit", &b.owner, Value::Null).await;
+    let shares: Vec<&Value> = audit["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["action"] == "research_share")
+        .collect();
+    assert_eq!(shares.len(), 2, "{audit}");
+    assert_eq!(shares[0]["target"], old);
+    assert_eq!(shares[0]["result"], "shared");
 }

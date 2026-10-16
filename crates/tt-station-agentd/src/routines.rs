@@ -796,7 +796,21 @@ async fn run_tool(state: &AppState, run_id: &str, name: &str, args: &Value) -> (
                 name: other.into(),
                 args: Ok(args.clone()),
             };
-            let (result, _) = crate::assistant::run_read_only(state, &call).await;
+            // As whom the run is for (a research report is theirs), else the box.
+            let device = load_run(state, run_id)
+                .and_then(|r| r.by)
+                .and_then(|id| state.sessions().get(&id));
+            let (result, _) = match device {
+                Some(d) => {
+                    let caller = crate::auth::Caller {
+                        local: false,
+                        device: Some(d),
+                    };
+                    crate::auth::as_caller(caller, crate::assistant::run_read_only(state, &call))
+                        .await
+                }
+                None => crate::assistant::run_read_only(state, &call).await,
+            };
             let ok = result.get("error").is_none();
             (ok, result.to_string())
         }

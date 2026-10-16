@@ -16,12 +16,24 @@
 //! follow-up starts from the sources its parent already read. One job runs
 //! at a time; the rest wait their turn. A finished job notifies.
 //!
-//! - `GET /research`: the jobs, newest first, and whether the box is ready (`check`).
+//! - `GET /research`: the jobs this caller may see, newest first, and whether
+//!   the box is ready (`check`).
 //! - `POST /research`: `{question, depth: quick|standard|deep, parent?}` starts one.
 //! - `GET /research/{id}`: the job, its progress, its sources and report.
-//! - `POST /research/{id}/stop`; `DELETE /research/{id}`.
+//! - `POST /research/{id}/stop`; `POST /research/{id}/rename`; `DELETE /research/{id}`.
+//! - `POST /research/{id}/share` `{shared}`: share it with everyone on the box, or stop.
 //! - `POST /research/{id}/explain`: `{selection, mode: explain|simpler|ask, question?}`;
 //!   explains part of a finished report from the report itself, streamed.
+//!
+//! **Whose a report is.** A job records the paired device that started it
+//! (and its name), as transcription jobs do (`crate::jobs`). Owners see every
+//! report; a member sees their own and the ones shared with the household
+//! ([`visible`]), and anything else is "No such report." (`404`), so a member
+//! doesn't learn other people's report ids. Reading, explaining and following
+//! up on a report is for whoever sees it; renaming, stopping, deleting and
+//! sharing it is for its starter or an owner ([`may_change`]). Reports from
+//! before this was kept, and ones the box started itself, have no starter:
+//! only owners see them until an owner shares them.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -36,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{err, ApiError};
-use crate::routes::{AppState, BearerAuth, Phase};
+use crate::routes::{AppState, BearerAuth, CallerAuth, Phase};
 
 type Reply = Result<Json<Value>, ApiError>;
 
@@ -101,6 +113,56 @@ pub struct Job {
     /// phones, or to the owners' when nobody in particular asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person: Option<String>,
+    /// The paired device that started it; `None` for the box itself and for
+    /// reports from before this was kept (owners only, unless shared).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<String>,
+    /// That device's name, for lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by_name: Option<String>,
+    /// Shared with everyone on the box, not just its starter and the owners.
+    #[serde(default)]
+    pub shared: bool,
+}
+
+/// Whether `caller` may see `job` (read, explain, follow up): owners see every
+/// report; anyone else their own and the shared ones.
+pub(crate) fn visible(job: &Job, caller: &crate::routes::Caller) -> bool {
+    caller.owner() || job.shared || is_starter(job, caller)
+}
+
+fn is_starter(job: &Job, caller: &crate::routes::Caller) -> bool {
+    job.started_by.is_some() && job.started_by == caller.device_id()
+}
+
+/// Whether `caller` may rename, stop, delete or share `job`: its starter or an owner.
+pub(crate) fn may_change(job: &Job, caller: &crate::routes::Caller) -> bool {
+    caller.owner() || is_starter(job, caller)
+}
+
+/// The report `id` if `caller` may see it; else `404`, as for one that doesn't exist.
+fn job_for(state: &AppState, id: &str, caller: &crate::routes::Caller) -> Result<Job, ApiError> {
+    Some(id)
+        .filter(|id| valid_id(id))
+        .and_then(|id| load_job(state, id))
+        .filter(|j| visible(j, caller))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))
+}
+
+/// [`job_for`], for a change only its starter or an owner may make (`403`).
+fn job_to_change(
+    state: &AppState,
+    id: &str,
+    caller: &crate::routes::Caller,
+) -> Result<Job, ApiError> {
+    let job = job_for(state, id, caller)?;
+    if !may_change(&job, caller) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "Only whoever started this report, or an owner, can change it.",
+        ));
+    }
+    Ok(job)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -149,6 +211,16 @@ fn load_job(state: &AppState, id: &str) -> Option<Job> {
 
 fn save_job(state: &AppState, job: &Job) {
     write_json(&dir(state, &job.id).join("job.json"), job);
+}
+
+/// [`save_job`] for the runner, keeping what people chose while it ran (a
+/// name, sharing) over its own copy.
+fn save_progress(state: &AppState, job: &mut Job) {
+    if let Some(saved) = load_job(state, &job.id) {
+        job.title = saved.title;
+        job.shared = saved.shared;
+    }
+    save_job(state, job);
 }
 
 fn sources(state: &AppState, id: &str) -> Vec<Source> {
@@ -425,7 +497,7 @@ fn stopped(state: &AppState, id: &str) -> bool {
 
 fn set_step(state: &AppState, job: &mut Job, step: &str) {
     job.step = step.to_string();
-    save_job(state, job);
+    save_progress(state, job);
 }
 
 /// Start (or carry on with) a job in the background.
@@ -439,7 +511,7 @@ fn spawn(state: AppState, id: String) {
             return;
         }
         job.state = "running".into();
-        save_job(&state, &job);
+        save_progress(&state, &mut job);
         // Just after an agent restart the serving model is still being picked back up.
         for _ in 0..36 {
             if state.endpoint().is_some() {
@@ -491,7 +563,7 @@ fn spawn(state: AppState, id: String) {
             }
         }
         mine(&state).stops.lock().expect("research").remove(&id);
-        save_job(&state, &job);
+        save_progress(&state, &mut job);
     });
 }
 
@@ -602,7 +674,7 @@ async fn run(state: &AppState, job: &mut Job) -> Result<(), String> {
             if v["enough"] == true || queries.is_empty() {
                 event(state, &id, "info", "Enough to write the report.");
                 job.round = rounds;
-                save_job(state, job);
+                save_progress(state, job);
                 break;
             }
         }
@@ -746,7 +818,7 @@ async fn run(state: &AppState, job: &mut Job) -> Result<(), String> {
         all = std::mem::take(&mut *shared.lock().expect("sources"));
         check_stop()?;
         job.round = round + 1;
-        save_job(state, job);
+        save_progress(state, job);
     }
 
     // 5. Write, from the notes, citing sources by number.
@@ -804,7 +876,7 @@ async fn run(state: &AppState, job: &mut Job) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     write_json(&folder.join("cited.json"), &cited);
     job.summary = summary_of(&report);
-    save_job(state, job);
+    save_progress(state, job);
     Ok(())
 }
 
@@ -871,18 +943,28 @@ pub struct StartBody {
     pub parent: Option<String>,
 }
 
-/// `GET /research`.
-pub(crate) async fn get_research(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
+/// `GET /research`: the reports this caller may see.
+pub(crate) async fn get_research(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
+) -> Json<Value> {
     let c = check(&state).await;
     let st = state.clone();
-    let jobs = tokio::task::spawn_blocking(move || all_jobs(&st))
+    let jobs: Vec<Job> = tokio::task::spawn_blocking(move || all_jobs(&st))
         .await
-        .unwrap_or_default();
-    Json(json!({ "jobs": jobs, "check": c }))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|j| visible(j, &caller))
+        .collect();
+    Json(json!({ "jobs": jobs, "check": c, "owner": caller.owner() }))
 }
 
-/// Start a job (the route, and the assistant's `research` tool).
+/// Start a job (the route, the assistant's `research` tool and routines'), as
+/// the request's caller (`crate::auth::current_caller`; none: the box).
 pub async fn start(state: &AppState, body: StartBody) -> Result<Job, ApiError> {
+    let caller = crate::auth::current_caller();
+    let device = caller.as_ref().and_then(|c| c.device.clone());
     let question = body.question.trim().to_string();
     if question.len() < 8 {
         return Err(err(StatusCode::BAD_REQUEST, "Ask a full question."));
@@ -894,7 +976,9 @@ pub async fn start(state: &AppState, body: StartBody) -> Result<Job, ApiError> {
         ));
     }
     if let Some(p) = &body.parent {
-        if !valid_id(p) || load_job(state, p).is_none() {
+        // A follow-up on a report this caller can't see is one that isn't there.
+        let seen = |j: &Job| caller.as_ref().is_none_or(|c| visible(j, c));
+        if !valid_id(p) || load_job(state, p).filter(seen).is_none() {
             return Err(err(
                 StatusCode::NOT_FOUND,
                 "The report to follow up on isn't there.",
@@ -932,6 +1016,9 @@ pub async fn start(state: &AppState, body: StartBody) -> Result<Job, ApiError> {
         person: crate::notify::Requester::current(state)
             .person
             .map(|p| p.id),
+        started_by: device.as_ref().map(|d| d.id.clone()),
+        started_by_name: device.map(|d| d.name),
+        shared: false,
     };
     save_job(state, &job);
     event(
@@ -966,12 +1053,14 @@ pub(crate) async fn post_research(
 pub(crate) async fn get_job(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
     if !valid_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "No such report."));
     }
-    let job = load_job(&state, &id).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
+    let job = job_for(&state, &id, &caller)?;
+    let mine = may_change(&job, &caller);
     let folder = dir(&state, &id);
     let srcs = sources(&state, &id);
     let cited: Vec<Source> = read_json(&folder.join("cited.json")).unwrap_or_default();
@@ -987,6 +1076,8 @@ pub(crate) async fn get_job(
             "failed": srcs.iter().filter(|s| s.status == "failed").count(),
         },
         "plan": read_json::<Value>(&folder.join("plan.json")),
+        // Whether this caller may rename, stop, delete and share it.
+        "can_change": mine,
     })))
 }
 
@@ -994,11 +1085,10 @@ pub(crate) async fn get_job(
 pub(crate) async fn post_stop(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
-    let mut job = load_job(&state, &id)
-        .filter(|_| valid_id(&id))
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
+    let mut job = job_to_change(&state, &id, &caller)?;
     if job.state == "queued" {
         job.state = "stopped".into();
         job.step = "Stopped".into();
@@ -1012,11 +1102,10 @@ pub(crate) async fn post_stop(
 pub(crate) async fn delete_job(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
-    let job = load_job(&state, &id)
-        .filter(|_| valid_id(&id))
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
+    let job = job_to_change(&state, &id, &caller)?;
     if job.state == "running" || job.state == "queued" {
         return Err(err(StatusCode::CONFLICT, "Stop it first."));
     }
@@ -1034,12 +1123,11 @@ pub struct Rename {
 pub(crate) async fn post_rename(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
     Json(b): Json<Rename>,
 ) -> Reply {
-    if !valid_id(&id) {
-        return Err(err(StatusCode::NOT_FOUND, "No such report."));
-    }
+    let mut job = job_to_change(&state, &id, &caller)?;
     let title = b.title.trim().to_string();
     if title.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "Give it a name."));
@@ -1050,10 +1138,35 @@ pub(crate) async fn post_rename(
             "Keep the name under 120 characters.",
         ));
     }
-    let mut job =
-        load_job(&state, &id).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
     job.title = Some(title.clone());
     save_job(&state, &job);
+    Ok(Json(json!({ "job": job })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ShareBody {
+    pub shared: bool,
+}
+
+/// `POST /research/{id}/share` `{shared}`: share a report with everyone on the
+/// box, or stop. Its starter or an owner; logged.
+pub(crate) async fn post_share(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+    CallerAuth(caller): CallerAuth,
+    UrlPath(id): UrlPath<String>,
+    Json(b): Json<ShareBody>,
+) -> Reply {
+    let mut job = job_to_change(&state, &id, &caller)?;
+    job.shared = b.shared;
+    save_job(&state, &job);
+    crate::audit::record_as(
+        &state,
+        &caller.actor(),
+        "research_share",
+        &id,
+        if b.shared { "shared" } else { "private" },
+    );
     Ok(Json(json!({ "job": job })))
 }
 
@@ -1320,6 +1433,7 @@ enum ExplainEvent {
 pub(crate) async fn post_explain(
     State(state): State<AppState>,
     who: crate::people::Who,
+    CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
     Json(body): Json<ExplainBody>,
 ) -> Result<
@@ -1334,7 +1448,7 @@ pub(crate) async fn post_explain(
     // Removing the device ends the stream (and so stops the model).
     let signed_out = state.signed_out(who.token);
     let (selection, mode, question) = checked(body)?;
-    let job = load_job(&state, &id).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
+    let job = job_for(&state, &id, &caller)?;
     let folder = dir(&state, &id);
     let report = match std::fs::read_to_string(folder.join("report.md")) {
         Ok(r) if job.state == "done" => r,
@@ -1530,6 +1644,37 @@ pub fn resume(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_runner_keeps_a_name_and_sharing_given_while_it_ran() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_config_dir(tmp.path().to_path_buf());
+        let mut running: Job = serde_json::from_value(json!({
+            "id": "1-abcdef", "question": "What changed?", "depth": "quick",
+            "created": 1, "state": "running", "started_by": "phone",
+        }))
+        .unwrap();
+        std::fs::create_dir_all(dir(&state, &running.id)).unwrap();
+        save_job(&state, &running);
+        // Shared and named from the app while it runs...
+        let mut chosen = running.clone();
+        chosen.shared = true;
+        chosen.title = Some("Changes".into());
+        save_job(&state, &chosen);
+        // ...and the runner's next step doesn't undo it.
+        running.step = "Reading".into();
+        save_progress(&state, &mut running);
+        let saved = load_job(&state, "1-abcdef").unwrap();
+        assert!(saved.shared);
+        assert_eq!(saved.title.as_deref(), Some("Changes"));
+        assert_eq!(saved.step, "Reading");
+        assert_eq!(saved.started_by.as_deref(), Some("phone"));
+    }
 
     #[test]
     fn reads_json_wrapped_in_prose() {
