@@ -130,7 +130,7 @@ struct LabView: View {
             if let model, model.tiles.count > 1 {
                 Picker("Chips", selection: $tiles) {
                     ForEach(model.tiles, id: \.self) { t in
-                        Text(t == 32 ? "All 4 chips" : "1 chip").tag(t)
+                        Text(t == 32 ? "All chips" : "1 chip").tag(t)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -186,7 +186,7 @@ struct LabView: View {
                         .foregroundStyle(run.ok ? .green : .red)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(run.prompt).lineLimit(1).font(.tt(.subheadline))
-                        Text("\(run.model) · \(run.tiles == 32 ? "4 chips" : "1 chip")\(run.stats.check == "exact" ? " · bit-exact" : "")")
+                        Text("\(run.model) · \(run.tiles == 32 ? "all chips" : "1 chip")\(run.stats.check == "exact" ? " · bit-exact" : "")")
                             .font(.tt(.caption)).foregroundStyle(.secondary)
                     }
                     Spacer()

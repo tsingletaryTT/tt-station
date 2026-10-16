@@ -2,7 +2,7 @@
 
 *Documents `crates/tt-station-agentd/src/ttcli.rs`, the `/tt/*` handlers in
 `crates/tt-station-agentd/src/handlers/ttcli.rs`, and the `tt_cli_serve` launch path in
-`crates/tt-station-agentd/src/serving/runpy.rs`. On branch `jberkowitz/mobile-voice`.*
+`crates/tt-station-agentd/src/serving/runpy.rs`.*
 
 ## Why
 
@@ -19,7 +19,7 @@ At startup the agent looks for `--tt-cli <path>`, else the first `tt` on `$PATH`
 `tt <version>`. Startup logs what it found:
 
 ```text
-tt-station-agentd: model manager: tt 1.0.1 (/home/ttuser/.tenstorrent-venv/bin/tt); serving with tt serve
+tt-station-agentd: model manager: tt 1.0.1 (/home/you/.tenstorrent-venv/bin/tt); serving with tt serve
 ```
 
 Without `tt`, the `/tt/*` routes answer `409` and everything else is unchanged.

@@ -1,8 +1,7 @@
 # `tt-station` CLI: HTTPS and certificate pinning (reference)
 
 *Documents `crates/libttstation/src/transport.rs`, `crates/tt-station/src/remote.rs`
-and the pairing commands in `crates/tt-station/src/main.rs`. On branch
-`jberkowitz/transport`.*
+and the pairing commands in `crates/tt-station/src/main.rs`.*
 
 ## Why
 

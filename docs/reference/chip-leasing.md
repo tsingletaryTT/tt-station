@@ -92,7 +92,7 @@ does not invent one — anywhere.
 `/status` gains a `leasing` object, and `tt-station status` prints it:
 
 ```
-$ tt-station status --host qb2-lab.local:8765
+$ tt-station status --host mybox.local:8765
 idle
 leasing:        gozer 0.1.0 (2 board(s), up to 2 concurrent session(s))
 ```

@@ -2,11 +2,16 @@
 
 ## Why
 
-A QuietBox is most useful when *everything* can use it -- not just the phone app.
-The agent exposes one stable, OpenAI-compatible endpoint on its control port:
+A box is most useful when *everything* can use it -- not just the phone app.
+The agent exposes one stable, OpenAI-compatible endpoint. From other computers
+it's HTTPS on the TLS port, with the box's own self-signed certificate (`GET
+/connect` lists the addresses and the certificate's SHA-256 fingerprint to pin or
+trust); plain HTTP on the control port answers on the box itself, and on the LAN
+only if an owner allows it in Settings:
 
 ```
-http://<box>:8765/v1
+https://<box>.local:8766/v1     # from other computers
+http://127.0.0.1:8765/v1        # on the box
 ```
 
 It follows whatever the box is doing: chat and completions go to the served chat
@@ -23,7 +28,7 @@ serving, so tools that insist on `gpt-4o` just work.
 | `POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings` | app key | Forwarded to the chat model; streaming (SSE) passes straight through. `503` when no chat model serves. |
 | `POST /v1/images/generations` | app key | OpenAI's image API on tt-media-server: `n` → `number_of_images` (1-4), steps default to 4 for FLUX schnell else 20, `guidance_scale` defaults to 3.5; answers `{created, data: [{b64_json}]}`. `response_format: "url"` is refused (`400`). |
 | `GET /keys`, `POST /keys {name}`, `DELETE /keys/{id}` | paired | Mint (secret returned once), list (hint, requests, last used), revoke. At most 32. |
-| `GET /connect` | paired | `{urls: [{label, url}], models, keys}` -- Bonjour name, LAN IP, Tailscale IP when present. |
+| `GET /connect` | paired | `{urls: [{label, url}], models, keys, fingerprint, lan_http}` -- the Bonjour name and LAN IP over HTTPS, plain HTTP on the LAN when allowed, and `127.0.0.1`. |
 | `POST /bench` | paired | Benchmark what serves (below). `409` while one runs or nothing serves. |
 | `GET /creations/{id}` | paired | A JPEG the assistant drew in chat (`create_image`). |
 

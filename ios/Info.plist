@@ -9,6 +9,8 @@
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+    <!-- Only standard HTTPS/TLS and SSH keys: exempt from export documentation. -->
+    <key>ITSAppUsesNonExemptEncryption</key><false/>
     <key>UILaunchScreen</key>
     <dict>
         <key>UIColorName</key><string>LaunchBackground</string>

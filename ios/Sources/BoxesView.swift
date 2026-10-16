@@ -28,7 +28,7 @@ struct WelcomeView: View {
                         if discovery.boxes.isEmpty {
                             HStack(spacing: 12) {
                                 ProgressView()
-                                Text("Searching this network for boxes running tt-station-agentd…")
+                                Text("Searching this network for Tenstorrent boxes running TT Station…")
                                     .font(.tt(.subheadline))
                                     .foregroundStyle(.secondary)
                                 Spacer()
@@ -49,7 +49,7 @@ struct WelcomeView: View {
                             .foregroundStyle(Brand.accent)
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Scan the pairing code").font(.tt(.headline))
-                            Text("Open TT Station on the box (**Settings → Devices and pairing**), then point this iPhone's Camera at the code.")
+                            Text("Open TT Station on the box (**Settings → Devices and pairing**), then point this iPhone's Camera at the code. No screen on the box? Run `tt-station-agentd pair` in a terminal on it to show the code there.")
                                 .font(.tt(.subheadline))
                                 .foregroundStyle(.secondary)
                         }
@@ -59,7 +59,7 @@ struct WelcomeView: View {
                     .card(tint: Brand.accent.opacity(0.2))
 
                     VStack(alignment: .leading, spacing: 12) {
-                        Step(number: 1, text: "Run tt-station-agentd on your Tenstorrent box (a QuietBox, a Galaxy server, a workstation with Tenstorrent cards).")
+                        Step(number: 1, text: "Install TT Station on your Tenstorrent box (a QuietBox, a Galaxy server, or a workstation with Tenstorrent cards).")
                         Step(number: 2, text: "Keep this phone on the same Wi-Fi as the box.")
                         Step(number: 3, text: "Scan the pairing code TT Station shows on the box.")
                     }

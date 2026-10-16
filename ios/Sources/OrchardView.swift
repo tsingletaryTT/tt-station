@@ -59,7 +59,7 @@ struct OrchardView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Give Orchard a model from Hugging Face. It works out how the model differs from one that already runs on Blackhole, writes and runs the tests, checks the output against a CPU reference on 1, 2 and 4 chips, and stops at a review bundle. Its agents run on this box, and it never publishes anything.")
+                    Text("Give Orchard a model from Hugging Face. It works out how the model differs from one that already runs on Blackhole, writes and runs the tests, checks the output against a CPU reference on 1, 2 and 4 chips, and stops at a review bundle. It's built for a QuietBox 2 (two p300c boards). Its agents run on this box, and it never publishes anything.")
                         .font(.tt(.footnote))
                         .foregroundStyle(.secondary)
                 }
@@ -101,7 +101,7 @@ struct OrchardView: View {
                     try? await Task.sleep(for: .seconds(live ? 5 : 20))
                 }
             }
-            .confirmationDialog("A bring-up needs all four chips", isPresented: $confirmStop, titleVisibility: .visible) {
+            .confirmationDialog("A bring-up needs all the box's chips", isPresented: $confirmStop, titleVisibility: .visible) {
                 Button("Stop the model and start", role: .destructive) { Task { await start(stopServing: true) } }
             } message: {
                 Text("Whatever is serving stops for the run, which takes hours. It starts again when the run ends.")
@@ -109,7 +109,7 @@ struct OrchardView: View {
             .confirmationDialog("Set up Orchard on the box?", isPresented: $confirmSetup, titleVisibility: .visible) {
                 Button("Set up") { Task { await runSetup() } }
             } message: {
-                Text("Runs tt-orchard's own setup: installs tt-gozer (the chip lease manager), a Python environment for the CPU reference, links the tt-orchard command, writes its QuietBox 2 config, and downloads the coder model the agents use (about 160 GB). It never resets a chip or publishes anything.")
+                Text("Runs tt-orchard's own setup: installs tt-gozer (the chip lease manager), a Python environment for the CPU reference, links the tt-orchard command, writes its config for a QuietBox 2 (two p300c boards; on other boxes you write it by hand), and downloads the coder model the agents use (about 160 GB). It never resets a chip or publishes anything.")
             }
         }
     }
@@ -488,7 +488,7 @@ struct OrchardRunView: View {
         } message: {
             Text("It releases the chips. Its ledger stays, so Retry picks it up again later.")
         }
-        .confirmationDialog("A bring-up needs all four chips", isPresented: $confirmStop, titleVisibility: .visible) {
+        .confirmationDialog("A bring-up needs all the box's chips", isPresented: $confirmStop, titleVisibility: .visible) {
             Button("Stop the model and retry", role: .destructive) { Task { await control("retry", stopServing: true) } }
         }
         .sheet(item: $report) { report in ReportView(report: report) }

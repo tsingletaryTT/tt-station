@@ -198,9 +198,9 @@ All errors are `{ "error": "<human-readable message>" }`.
 ## `tt-station ask`
 
 ```bash
-tt-station ask --host qb2-lab.local:8765 "what's running?"
-tt-station ask --host qb2-lab.local:8765 --confirm <action-id>          # approve
-tt-station ask --host qb2-lab.local:8765 --confirm <action-id> --deny   # refuse
+tt-station ask --host mybox.local:8765 "what's running?"
+tt-station ask --host mybox.local:8765 --confirm <action-id>          # approve
+tt-station ask --host mybox.local:8765 --confirm <action-id> --deny   # refuse
 ```
 
 Single-turn: each `ask` sends just that one message. Human output prints the reply and

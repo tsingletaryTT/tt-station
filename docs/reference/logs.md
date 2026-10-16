@@ -153,16 +153,16 @@ Examples:
 
 ```bash
 # Last 200 lines of the serving container's log (the default) — where failures live
-tt-station logs --host qb2-lab.local:8765
+tt-station logs --host mybox.local:8765
 
 # The last 50 lines of run.py's own launch log
-tt-station logs --host qb2-lab.local:8765 --source run --tail 50
+tt-station logs --host mybox.local:8765 --source run --tail 50
 
 # Live-follow the container log while a model is starting
-tt-station logs --host qb2-lab.local:8765 --follow
+tt-station logs --host mybox.local:8765 --follow
 
 # JSON, for scripting (one-shot only, not with --follow)
-tt-station --json logs --host qb2-lab.local:8765 --tail 20
+tt-station --json logs --host mybox.local:8765 --tail 20
 ```
 
 (`tt-station`/`tt-station-agentd` are this project's default binary/service names — every name is

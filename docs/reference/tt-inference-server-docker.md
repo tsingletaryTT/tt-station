@@ -1,6 +1,6 @@
 # tt-inference-server — real launch invocation (reference)
 
-*Researched 2026-07-03, blending the official repo, docs.tenstorrent.com, internal Glean, AND the operator's own validated launch scripts in `~/code/tt-local-generator/bin/start_*.sh`. Drives `crates/tt-station-agentd/src/serving/`.*
+*Researched 2026-07-03 from the official repo, docs.tenstorrent.com and launch scripts validated on a QuietBox. Drives `crates/tt-station-agentd/src/serving/`.*
 
 ## ⭐ Ground truth: launch LLMs via `run.py`, not raw `docker run`
 
@@ -161,8 +161,7 @@ own `container/` Dockerfile (the image's source label is
 Served on 8003, that check always failed, so Docker reported `unhealthy` while the model
 served fine. Neither tt-inference-server's images (no `HEALTHCHECK` in any of them) nor
 `tt-model serve` had a passthrough for docker flags, so the fix went into tt-model's
-`compose_run` (branch `jberkowitz/health-port` of `~/code/tt-model-manager`, the editable
-install the box runs): every `tt-model serve` now passes `--health-cmd` checking the port it
+`compose_run` (in tt-model-manager): every `tt-model serve` now passes `--health-cmd` checking the port it
 publishes, which replaces the image's check. A container started before that change keeps the
 old check until the model is restarted. The agent's own readiness checks hit the
 serving port directly and don't read Docker's health status. The Docker backend's images
@@ -197,4 +196,3 @@ overriding there.
 - https://github.com/tenstorrent/tt-inference-server/blob/main/docs/prerequisites.md
 - https://github.com/tenstorrent/tt-inference-server/pull/2242
 - https://docs.tenstorrent.com/getting-started/vLLM-servers.html
-- Glean: tt-vscode-toolkit lessons (tt-inference-server, qb2-local-agents)

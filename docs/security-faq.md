@@ -205,8 +205,8 @@ the activity log (`shared_folder_confirmed`), and clears those uses until a memb
 again.
 
 **Live telemetry** lists the box's processes; for members, each command line is cut to the
-executable's name. Removing a device closes its open terminals, log and telemetry streams
-and chat streams at once.
+executable's name. Removing a device closes its open log, telemetry and chat streams at
+once.
 
 ## Activity log
 
@@ -411,7 +411,7 @@ machine.
 **How do I revoke access or wipe pairings?**
 - **One device**: TT Station → Settings → **Devices and pairing** → Remove (or
   `DELETE /devices/{id}`; `GET /devices` lists them). It stops working on its next request,
-  and its open terminals close. Removing the computer you're on signs it out.
+  and its open streams close. Removing the computer you're on signs it out.
 - **Reset** (GTK panel button, or clear the box's token store): forgets **all** pairings,
   stops the serving model, resets the board — a clean slate. Clients must pair again.
 - **Revoke SSH**: `tt-station ssh-authorize --revoke` removes the tt-station-added key.

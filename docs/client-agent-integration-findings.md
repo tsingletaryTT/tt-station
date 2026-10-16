@@ -4,7 +4,7 @@
 **Author:** macOS client session (TTStation / `tt-station` CLI veneer)
 **Audience:** the agent-side session working on `crates/tt-station-agentd` and `crates/tt-station`
 **Context:** built the macOS `TTStation` menu-bar app (a veneer over `tt-station --json`) and ran the
-full loop against the live agent at `qb2-lab.local:8765` (p300x2, `4xBH`). The contract holds
+full loop against the live agent at `mybox.local:8765` (p300x2, `4xBH`). The contract holds
 end-to-end — discover → models → pair → status → endpoint → `/v1` inference all work, and every
 client decoder matches the agent's JSON exactly. Two agent/CLI changes would materially improve
 the client; one item is just a confirmation.
@@ -50,7 +50,7 @@ No change needed.
 ## 4. `tt-station run` returns an endpoint before the model is actually healthy (agentd)
 
 **Observed:** `tt-station run meta-llama/Llama-3.3-70B-Instruct` returned an `Endpoint`
-(`http://qb2-lab.local:8003/v1`) and `/status` immediately reported
+(`http://mybox.local:8003/v1`) and `/status` immediately reported
 `serving:…Llama-3.3-70B`, but `:8003` was **connection-refused** — the vLLM server had not
 finished coming up (a 70B on p300x2 is slow to load / may have OOM'd). So a client that
 copies the endpoint and hits `/v1` gets a connection error even though the box says "serving".
