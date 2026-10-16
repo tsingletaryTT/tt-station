@@ -281,6 +281,7 @@ async fn the_first_device_is_an_owner_and_members_cannot_manage_the_box() {
             format!("{base}/power"),
             json!({ "action": "reboot" }),
         ),
+        (M::POST, format!("{base}/power/wake-on-lan"), json!({})),
         (M::POST, format!("{base}/reset"), json!({})),
         (
             M::PUT,

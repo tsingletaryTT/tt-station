@@ -15,7 +15,8 @@
 //! `Retry-After` for API clients) instead of failing. Models take minutes to
 //! load, so the request isn't held open.
 //!
-//! - `GET /idle`, `PUT /idle {enabled, after_minutes, wake_on_request}`, `POST /idle/wake`
+//! - `GET /idle`, `PUT /idle {enabled, after_minutes, wake_on_request}`, `POST /idle/wake`,
+//!   `POST /idle/sleep` (put the model to sleep now, as idle sleep would; it wakes the same ways)
 
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
@@ -380,6 +381,51 @@ pub(crate) async fn post_wake(
         .await
         .map_err(|e| (StatusCode::CONFLICT, Json(json!({ "error": e }))))?;
     Ok(Json(json!({ "waking": a.label })))
+}
+
+/// `POST /idle/sleep`: put the served model to sleep now, the same as idle
+/// sleep does after a quiet spell: stop it and remember it, so `POST
+/// /idle/wake` (and, with `wake_on_request`, the next Chat, Tori, `/v1` or
+/// Code request) starts it again. The machine stays on and reachable, unlike
+/// suspend. `409` when nothing is serving.
+pub(crate) async fn post_sleep(
+    State(state): State<AppState>,
+    _auth: BearerAuth,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let nothing = || {
+        (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "Nothing is serving, so there's nothing to put to sleep." })),
+        )
+    };
+    if state.lifecycle().phase != Phase::Serving {
+        return Err(nothing());
+    }
+    let target = current_target(&state).await.ok_or_else(nothing)?;
+    set_asleep(&state, Some(&target));
+    if let Err(e) = state.stop_serving().await {
+        set_asleep(&state, None);
+        crate::audit::record(&state, "model_sleep", &target.target, "failed");
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({ "error": format!("{} couldn't be stopped: {e:#}", target.label) })),
+        ));
+    }
+    crate::audit::record(&state, "model_sleep", &target.target, "ok");
+    let s = settings(&state);
+    state.notifier().record(crate::notify::Draft {
+        kind: "power",
+        title: format!("{} is asleep", target.label),
+        body: if s.wake_on_request {
+            "It starts again when something asks for it, or when you wake it.".to_string()
+        } else {
+            "Wake it when you need it.".to_string()
+        },
+    });
+    Ok(Json(json!({
+        "asleep": target.label,
+        "wake_on_request": s.wake_on_request,
+    })))
 }
 
 #[cfg(test)]
