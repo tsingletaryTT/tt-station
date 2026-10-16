@@ -1673,6 +1673,24 @@ pub enum ResetLease {
     Forced { note: String, overrode: String },
 }
 
+/// A live lease this agent holds for a SERVE (not one of its short utility
+/// leases, a reset or a Lab run), as the clause a refusal names -- or `None`.
+/// A board reset under it would pull the chips out from under this box's own
+/// running model; the owner stops the model first. `STALE` leases (their
+/// owner is gone) don't count: `gozer reconcile` clears them. Checked by
+/// `POST /power reset-chips` (`AppState::run_power_command`); the backend's
+/// own `POST /reset` stops its serve and gives its lease back first, so it
+/// doesn't ask.
+pub fn own_serve_lease(snapshot: &LeaseSnapshot, own_service_port: u16) -> Option<String> {
+    snapshot
+        .leases
+        .iter()
+        .filter(|l| l.state != "FREE" && l.state != "STALE")
+        .filter_map(|l| l.who.as_deref())
+        .filter(|who| !is_utility_who(who))
+        .find_map(|who| own_lease_clause(who, own_service_port))
+}
+
 /// Take the short whole-box lease a `tt-smi -r` runs under.
 ///
 /// 1. Someone else holds chips (or gozer cannot say): refuse with the reason

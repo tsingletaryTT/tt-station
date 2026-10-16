@@ -1450,6 +1450,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn chips_arent_reset_under_the_box_s_own_running_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("reset-ran");
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_power_config(
+            vec!["touch".into(), marker.display().to_string()],
+            vec!["/bin/true".into()],
+            vec!["/bin/true".into()],
+            vec!["/bin/true".into()],
+        );
+        for phase in [Phase::Starting, Phase::Serving, Phase::Stopping] {
+            state.set_lifecycle(phase, Some("m".into()), None, None);
+            for force in [false, true] {
+                let e = state
+                    .run_power_command(crate::power::PowerAction::ResetChips, force)
+                    .unwrap_err();
+                assert!(format!("{e:#}").contains("stop it first"), "{e:#}");
+                assert!(e.chain().any(|c| c.is::<crate::gozer::Contention>()));
+            }
+        }
+        assert!(!marker.exists(), "no reset ran");
+        state.set_lifecycle(Phase::Idle, None, None, None);
+        state
+            .run_power_command(crate::power::PowerAction::ResetChips, false)
+            .unwrap();
+        assert!(marker.exists());
+    }
+
     #[tokio::test]
     async fn a_start_during_the_reconcile_probe_isnt_healed_to_idle() {
         let (go, wait) = std::sync::mpsc::channel();
