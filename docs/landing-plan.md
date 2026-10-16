@@ -1,85 +1,79 @@
-# Landing plan: `jberkowitz/mobile-voice` → `main`
+# Landing plan: reviewing `jberkowitz/mobile-voice`
 
-`jberkowitz/mobile-voice` (at `8d1725c`) is **~94K changed lines over `origin/main` (`8daa46e`,
-v0.11.0)**: 299 files, +93,795 / −642. Most of it arrived as three squash commits
-(`6f39e94` agentd box services, `156b01c` desktop app, `86347d7` iOS app), followed by
-merges of a few feature branches (`device-sessions`, `security-fixes`, `agentd-hardening`,
-`code-page`, `reliability-eval`, ...). Nobody can review that as one PR. This plan splits it
-into ~17 PRs of 2–8K lines each, in dependency order, by module area.
+`jberkowitz/mobile-voice` is about 167K changed lines over `origin/main` (`8daa46e`,
+v0.11.0). It lives in `tsingletaryTT/tt-station`, a personal repository, and has not been
+pushed. Nobody can review that as one diff, so it is cut into **17 stacked review branches**,
+`review/00-…` to `review/16-…`, one area each.
 
-Sizes below are added + removed lines from `git diff --numstat 8daa46e..8d1725c`, grouped by
-path. Each PR carries its own tests and its own `docs/reference/*.md` page.
+## How the stack works
 
-## How to cut each PR
+- Each branch is the previous one plus one area's files, taken verbatim from
+  `jberkowitz/mobile-voice`. The last branch's tree is identical to `jberkowitz/mobile-voice`,
+  so approving every slice approves the whole branch, and nothing is left out.
+- Review a slice as its diff against the previous slice:
+  `git diff review/04-box-care review/05-assistant-gateway`. Opened as pull requests, each
+  slice's base is the previous slice.
+- `scripts/review-slices.py` holds the assignment of every file to a slice.
+  - `--list` prints sizes and fails if any changed file has no slice.
+  - `--build <worktree>` recreates the branches after `jberkowitz/mobile-voice` moves.
+  - Change the plan there, not by hand.
 
-The squash commits can't be cherry-picked apart, so each PR is built by path:
+## What builds where
 
-1. `git switch -c <owner>/<area> origin/main` (or the previous PR's branch while it is in review).
-2. `git checkout jberkowitz/mobile-voice -- <the PR's files>`.
-3. Hand-split the **hub files**: `crates/tt-station-agentd/src/router.rs` (each PR adds only its
-   own `.route(...)` lines), `src/state.rs` (its own `Inner` fields, `with_*` builders and
-   `PerAgent` members) and `src/main.rs` (its own flags and startup tasks), plus the `mod` lines in
-   `src/lib.rs` and `src/handlers/mod.rs`. Handlers are already one file per area under
-   `src/handlers/` (or in the feature's own module), so a PR takes whole files rather than hunks of
-   one. `git add -p` works for the hubs; so does checking out the final file and deleting what
-   belongs to later PRs.
-4. `cargo build`/`cargo test` with the hardware stubs (see `CLAUDE.md`, "Run / test") must pass at
-   every step, so a later PR's routes can't be left referenced.
-5. When the last PR merges, `git diff origin/main jberkowitz/mobile-voice` should be empty
-   (apart from anything deliberately dropped). That is the completeness check.
+The agent's modules depend on one another through shared state, routing and startup, so it
+can't be built a piece at a time without a large restructuring. Each review track is
+therefore checked where it becomes complete, and lands as a unit once all its slices are
+approved.
 
-The hub-file split is the main cost; PR 1 should land the scaffolding (`state.rs` with
-`state/serving.rs`, `state/tokens.rs` and `state/hardware.rs`, `auth.rs`, `error.rs`, the
-`routes.rs` re-exports and the first `router.rs`) so later PRs only append routes, `AppState`
-fields and `PerAgent` members.
+| Track | Slices | Builds and passes tests at | Land as |
+|---|---|---|---|
+| Build and CI | 00 | read-only (it references the later code) | with the agent |
+| CLI and client library | 01 | `01` (`cargo build -p tt-station -p mock-box`) | with the agent (the agent uses the library) |
+| Box agent | 02–10 | `10`: full `cargo build`/`cargo test` with the hardware stubs, `clippy`, `fmt` | one merge of `review/10-code` |
+| Desktop app | 11–12 | `12`: `npm run typecheck`, `npm test`, `npm run build` | one merge, after the agent |
+| iPhone app | 13–14 | `14`: Xcode build plus the iOS tests (CI `ios` job, needs a Mac) | one merge, after the agent |
+| Docs and data | 15–16 | nothing to build | last |
 
-## Gates for every PR
+## The slices
 
-- CI green: version check, Rust build + tests (stubbed hardware), docs-route check, desktop
-  typecheck/test/build, cargo-deny licenses/bans/sources.
-- Clippy and `cargo fmt` are report-only today. **Don't** fold the repo-wide reformat into these
-  PRs; it lands once, after the last one (PR 13).
-- One reviewer who owns the area, plus a second for PRs marked *security review*.
-- Docs: the PR's `docs/reference` page is included and `scripts/check-doc-routes.py` passes.
-- No live-box step is required to merge, but PRs marked *box check* list a manual check on a
-  QuietBox in the PR description (run by the owner, not CI).
+Lines are added plus removed, tests and docs included.
 
-## The PRs
+| # | Branch | Lines | Look at | Extra review |
+|---|---|---:|---|---|
+| 00 | `review/00-hygiene` | 3.2K | CI jobs, `.deb` packaging, `deploy/` (firewall, SSH hardening, bring-up containment), release signing scripts, licenses | security (deploy scripts run as root) |
+| 01 | `review/01-cli` | 2.7K | CLI over HTTPS with the box's certificate pinned; client library; mock box | security (certificate pinning) |
+| 02 | `review/02-agent-core` | 16.3K | The wiring (`main.rs`, `state.rs`, `router.rs`) plus sign-in, pairing, TLS, sessions, owner and member roles, audit log, app keys | **security**. The largest slice: about half is the wiring every later slice plugs into |
+| 03 | `review/03-serving-chips` | 14.5K | Starting and stopping models, chip leasing through gozer, liveness, telemetry, model modes | box check: start and stop a model |
+| 04 | `review/04-box-care` | 8.3K | Power, sleep and Wake-on-LAN, signed updates, export and import, doctor | security (privileged commands, update signatures) |
+| 05 | `review/05-assistant-gateway` | 13.4K | OpenAI and Anthropic `/v1` gateway, assistant tools and approvals, memories, documents, library | security (web content steering tools, key handling) |
+| 06 | `review/06-household` | 8.5K | Notifications and APNs, voice, meeting recorder, transcription jobs, schedules | privacy (recording indicator, retention) |
+| 07 | `review/07-research-routines` | 13.6K | Deep research, routines, model check-ups and reliability evals | — |
+| 08 | `review/08-apps` | 7.1K | Store apps, desktop launches, community models | security, and **legal sign-off on the app catalog** (n8n's license) |
+| 09 | `review/09-bringup-lab` | 12.4K | Orchard, Lab, model bring-up agents and their Landlock sandbox | security (agents with shell access) |
+| 10 | `review/10-code` | 11.1K | Code workspace: sandboxed sessions, safe git, model picker, speed | security (sandbox escape paths). **The agent builds from here** |
+| 11 | `review/11-desktop-shell` | 14.6K | Electron main process and preload, token store, API client, shared UI (3.9K is `package-lock.json`) | security (window navigation, IPC) |
+| 12 | `review/12-desktop-pages` | 9.9K | Every page: Chat, Code, Models, Studio, Research, Settings… | design |
+| 13 | `review/13-ios-core` | 10.2K | API client, discovery, pairing, box control, power, settings, iOS tests | box check on a phone |
+| 14 | `review/14-ios-features` | 8.6K | Chat and voice, studios, research, Lab, Orchard, notification extension, Live Activity | — |
+| 15 | `review/15-docs` | 0.8K | Presentations and notes | — |
+| 16 | `review/16-benchmark-data` | 15.1K | Raw logs and JSON from the 2026-10-15 Code serving benchmark | skim only, or drop it and keep the README |
 
-| # | PR | Paths (agentd = `crates/tt-station-agentd`) | Size | Depends on | Extra gates | Owner |
-|---|---|---|---|---|---|---|
-| 0 | **Engineering hygiene** (this branch, `jberkowitz/eng-hygiene`) | CI jobs, `deny.toml`, `NOTICE`, `THIRD_PARTY_LICENSES.md`, `scripts/`, `.gitattributes`, doc fixes, crate `license` fields | ~1.5K (≈1K generated) | none (can go to `main` first) | legal review of the flagged licenses | _TBD_ |
-| 1 | **Auth and pairing foundation**: per-device sessions, hashed tokens, TLS, LAN Host checks, QR pairing, WS token transport | agentd `sessions.rs`, `tls.rs`, `web.rs`, `pairqr.rs`, `pairing.rs`, `config.rs`, `lib.rs`; scaffolding (`state.rs`, `state/`, `auth.rs`, `error.rs`, `router.rs`, `routes.rs`), `handlers/{status,pairing,devices,security}.rs`; `crates/libttstation`, `crates/tt-station`, `crates/mock-box`; `Cargo.toml`/`Cargo.lock`; `deploy/`; tests `ws_auth`, `devices`, `pair_offer`, `token_persistence`, `pairing`, `config`; `docs/security-faq.md`, `docs/reference/box-hardening.md` | ~3.1K + hub share | 0 | *security review*, *box check* (pair a phone over HTTPS) | _TBD_ |
-| 2a | **Serving lifecycle and model management**: `/serve`, `tt` CLI models and pulls, downloads, native vLLM, discovery, metrics history, prefs/favorites | agentd `serving/`, `served.rs`, `localhttp.rs`, `handlers/{serving,ttcli,telemetry,logs}.rs`, `ttcli.rs`, `tttools.rs`, `download.rs`, `native_vllm.rs`, `discover.rs`, `history.rs`, `inference.rs`, `telemetry.rs`, `gozer.rs`, `prefs.rs`, `favorites.rs`; tests `serve`, `runpy`, `ttcli`, `metrics`, `serving`, `gozer`, `leases`, `logs*`, `reset`; `docs/reference/tt-cli.md`, `tt-inference-server-docker.md` | ~5.4K | 1 | *box check* (serve and stop a model) | _TBD_ |
-| 2b | **Box operations**: co-serve, modes, idle sleep, doctor, updates, power | agentd `coserve.rs`, `modes.rs`, `idle.rs`, `doctor.rs`, `updates.rs`, `power.rs`, `handlers/{power,ssh}.rs`; tests `coserve`, `modes`; `docs/reference/box-care.md`, `alerts-and-power.md` (power half) | ~3.9K | 2a | *security review* (runs privileged commands), *box check* | _TBD_ |
-| 3 | **OpenAI/Anthropic gateway**: `/v1/*`, app keys, `/connect`, `/bench`, creations | agentd `gateway.rs`, `anthropic.rs`, `bench.rs`, `creations.rs`, `handlers/media.rs`; tests `gateway`, `anthropic`; `docs/reference/gateway.md` | ~3.3K | 2a | *security review* (key handling) | _TBD_ |
-| 4 | **Assistant core**: chat, tools, confirmations, memories, documents, embeddings, people | agentd `assistant.rs`, `memory.rs`, `docs.rs`, `embeddings.rs`, `people.rs`, `approvals.rs`, `skills.rs`, `handlers/{assistant,memories,docs}.rs`; tests `assistant`, `people`; `docs/reference/assistant.md`, `household-schedules-remote.md` (people) | ~6.9K, the largest backend PR; split `assistant.rs` tools out if review stalls | 2a, 3 | *security review* (`read_webpage`, tool approvals) | _TBD_ |
-| 5 | **Household and voice**: notifications/APNs, schedules, transcription jobs, recorder, voice, Tori | agentd `notify.rs`, `apns.rs`, `schedules.rs`, `jobs.rs`, `recorder.rs`, `voice.rs`, `tori.rs`; tests `notify`, `jobs`; `docs/reference/jobs.md`, `alerts-and-power.md`, `voice-and-desktop.md` (voice half) | ~5.1K | 4 | *box check* (voice round trip) | _TBD_ |
-| 6 | **Apps and desktop backend**: app catalogue (Docker apps), desktop launcher, `/app` UI serving, Hermes, community models, library, tt-toplike terminal | agentd `apps.rs`, `desktop.rs`, `app_ui.rs`, `hermes.rs`, `community.rs`, `library.rs`, `toplike_term.rs` | ~4.3K | 2a, 4 | *security review* (Docker/apps, terminal); **legal sign-off on n8n** before the catalogue ships it | _TBD_ |
-| 7 | **Research, routines, evals** | agentd `research.rs`, `routines.rs`, `evals.rs`, `reliability.rs`, `examples/agent_reliability.rs`; `docs/notes/agent-reliability-*` (the JSON is `linguist-generated`) | ~4.6K + 5.5K JSON | 4 | none | _TBD_ |
-| 8a | **Orchard and Lab** | agentd `orchard.rs`, `orchard_progress.rs`, `orchard_lab.rs`, `orchard_bridge.py`, `lab.rs`, `lease_run.py`; tests `orchard` + `tests/fixtures/fake-orchard`; `docs/reference/orchard.md`, `lab.md`, `chip-leasing.md` | ~4.6K | 2b | *box check* | _TBD_ |
-| 8b | **Model bring-up agents** (Claude/Codex runs, approvals) | agentd `bringup.rs`, `claude_bringup.py`, `codex_bringup.py`, `permission_mcp.py` | ~2.7K | 8a | *security review* (agent shell access, path containment) | _TBD_ |
-| 8c | **Code workspace** (sessions, safe git, coding terminals, code speed) | agentd `workspace.rs`, `code_session.py`, `code_holder.py`, `safegit.rs`, `coding.rs`, `codespeed.rs` | ~3.6K | 8b | *security review* (terminal and git on the box) | _TBD_ |
-| 9 | **Desktop app shell**: Electron main/preload, build, Vesper theme, API client, Home/Settings/Connect, tests | `desktop/electron`, `desktop/package*.json`, `desktop/src/{App,api,ui}.tsx`, `app.css`, shell pages, `desktop/test`, `desktop/mac`, `desktop/gnome-extension` | ~9K (3.9K is `package-lock.json`) | 1, 2a | desktop CI job; *security review* (CSP, bridge) | _TBD_ |
-| 10 | **Desktop feature pages**, one PR per backend area or grouped: Chat/Tori/Voice (4–5), Models/Studio (2a, 3), Orchard/Bringup (8a–b), Code/Terminals (8c), Research/Routines/Evals (7) | `desktop/src/pages/*`, `desktop/src/*.tsx` | ~10.5K total; 1.5–3K each | 9 + the backend PR | desktop CI job | _TBD_ |
-| 11 | **iOS app core**: project, API client, pairing, discovery, session, brand + fonts, dashboard | `ios/project.yml`, `ios/Sources/{AgentAPI,BoxSession,Discovery,PairSheet,Brand,Telemetry,Dashboard*,BoxesView}.swift`, `ios/Resources`, `ios/Assets.xcassets`, `ios/Info.plist` | ~6.5K | 1, 2a | iOS CI job green at least once (currently allowed to fail); fix `deploymentTarget` nesting in `project.yml` | _TBD_ |
-| 12 | **iOS feature screens**: chat/voice, models, create, Orchard, jobs, alerts (APNs), Live Activity | remaining `ios/Sources`, `ios/ActivityExtension`, `ios/Shared` | ~9K; split by backend area like PR 10 | 11 + the backend PR | iOS CI job; *box check* on a device | _TBD_ |
-| 13 | **Cleanup**: repo-wide `cargo fmt`, clippy to zero, then make both CI gates blocking (`-D warnings`, drop `continue-on-error`) | whole tree | mechanical | all of the above | none beyond CI | _TBD_ |
+## Gates for every slice
 
-Remaining docs (`docs/presentations/`, `docs/tasks-framework.md`, `docs/notes/*.md`) go with the
-PR they describe or in a final docs PR. `CLAUDE.md` is updated in each PR for its own area.
+- One reviewer who owns the area, plus a second for slices marked security or privacy.
+- Comments are fixed on `jberkowitz/mobile-voice`, then the stack is rebuilt with
+  `scripts/review-slices.py --build`, so the slices never drift from the real branch.
+- At each track's build point, CI must be green:
+  - Rust build and tests with the hardware stubs, `clippy -D warnings`, `fmt`
+  - the docs-route check and `cargo-deny`
+  - the Python helper tests
+  - desktop typecheck, tests and build
+  - the iOS build
+- Box checks are run by the owner on a QuietBox and noted in the review.
 
-## Order and parallelism
+## Before any of it merges
 
-```
-0 ─┬─ 1 ─ 2a ─┬─ 2b ─ 8a ─ 8b ─ 8c
-   │          ├─ 3 ─ 4 ─┬─ 5
-   │          │         ├─ 6
-   │          │         └─ 7
-   │          └─ 9 ─ 10 (page PRs follow their backend PR)
-   │                └─ 11 ─ 12
-   └─────────────────────────────────── 13 (last)
-```
-
-After PR 2a, three tracks can run in parallel (ops/Orchard, assistant/gateway, clients). The
-hub-file conflicts among them are append-only route lines and resolve mechanically.
+- Move to an org-owned repository and release channel. Releases and updates point at the
+  current personal repo.
+- Name who holds the release signing key; no key is pinned yet.
+- Get legal sign-off on the store app catalog.
