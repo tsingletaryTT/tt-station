@@ -576,6 +576,28 @@ fn working(what: Option<&str>) {
     *WORK.lock().expect("updates") = what.map(str::to_string);
 }
 
+/// The one update going at a time: taken with a single test-and-set on
+/// [`WORK`] before anything is awaited or spawned, and given back (WORK
+/// cleared) when dropped, however the update ends.
+struct Busy(());
+
+impl Busy {
+    fn claim(what: &str) -> Option<Busy> {
+        let mut w = WORK.lock().expect("updates");
+        if w.is_some() {
+            return None;
+        }
+        *w = Some(what.to_string());
+        Some(Busy(()))
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        working(None);
+    }
+}
+
 /// The package's sha256 (hex), or why there isn't a usable one: a release
 /// without one isn't installed, since nothing would show the download is the
 /// file the release lists.
@@ -685,7 +707,12 @@ async fn fetch(release: &Release, channel: &Channel) -> Result<String, String> {
         None => return Err(missing_signature(asset)),
     };
     std::fs::create_dir_all(root().join("downloads")).map_err(|e| e.to_string())?;
-    let deb = root().join("downloads").join(&asset.name);
+    // Names of this download's own: nothing else's half-written file is
+    // picked up, and nothing else writes into this one.
+    let unique = crate::fsio::random_suffix();
+    let deb = root()
+        .join("downloads")
+        .join(format!(".{}.{unique}.part", asset.name));
     let mut resp = reqwest::Client::new()
         .get(&asset.url)
         .header("user-agent", format!("tt-station/{VERSION}"))
@@ -729,13 +756,22 @@ async fn fetch(release: &Release, channel: &Channel) -> Result<String, String> {
         }
     };
     working(Some(&format!("Unpacking {}", release.version)));
-    let tmp = versions_dir().join(format!(".{}.partial", release.version));
-    let _ = std::fs::remove_dir_all(&tmp);
+    let tmp = versions_dir().join(format!(".{}.partial-{unique}", release.version));
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+    let result = unpack(&deb, &tmp, &dest).await;
+    let _ = std::fs::remove_file(&deb);
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    result.map(|()| verified)
+}
+
+/// Unpack `deb` into `tmp`, check the agent in it starts, and move it to `dest`.
+async fn unpack(deb: &Path, tmp: &Path, dest: &Path) -> Result<(), String> {
     let out = tokio::process::Command::new("dpkg-deb")
         .arg("-x")
-        .arg(&deb)
-        .arg(&tmp)
+        .arg(deb)
+        .arg(tmp)
         .output()
         .await
         .map_err(|e| format!("Couldn't unpack it: {e}"))?;
@@ -761,9 +797,7 @@ async fn fetch(release: &Release, channel: &Channel) -> Result<String, String> {
             String::from_utf8_lossy(&probe.stderr).trim()
         ));
     }
-    std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&deb);
-    Ok(verified)
+    std::fs::rename(tmp, dest).map_err(|e| e.to_string())
 }
 
 fn label(v: &Option<String>, base: &str) -> String {
@@ -998,9 +1032,8 @@ pub(crate) async fn post_install(
     Json(b): Json<InstallBody>,
 ) -> Reply {
     refuse_source()?;
-    if WORK.lock().expect("updates").is_some() {
-        return Err(err(StatusCode::CONFLICT, "An update is already going."));
-    }
+    let busy = Busy::claim("Checking releases")
+        .ok_or_else(|| err(StatusCode::CONFLICT, "An update is already going."))?;
     let channel = channel(&state.config_dir()).map_err(|e| err(StatusCode::CONFLICT, e))?;
     let list = releases(&channel.repo, true)
         .await
@@ -1057,7 +1090,7 @@ pub(crate) async fn post_install(
             });
             save_history(&h);
         }
-        working(None);
+        drop(busy);
     });
     Ok(Json(json!({ "started": true })))
 }
@@ -1099,6 +1132,16 @@ pub(crate) async fn post_undo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_one_update_can_claim_the_updater() {
+        let first = Busy::claim("Getting 1").expect("free");
+        assert!(Busy::claim("Getting 2").is_none(), "one at a time");
+        drop(first);
+        assert!(WORK.lock().unwrap().is_none(), "given back when done");
+        let again = Busy::claim("Getting 3").expect("free again");
+        drop(again);
+    }
 
     #[test]
     fn only_plain_versions_reach_the_watchdog() {

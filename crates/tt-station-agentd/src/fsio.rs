@@ -41,7 +41,7 @@ fn unix_now() -> u64 {
 }
 
 /// A name for a temp file nobody can guess.
-fn random_suffix() -> String {
+pub(crate) fn random_suffix() -> String {
     format!("{:016x}", rand::random::<u64>())
 }
 
