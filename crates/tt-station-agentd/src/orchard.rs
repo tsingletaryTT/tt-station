@@ -1791,6 +1791,10 @@ pub async fn stop_harvest(state: &AppState) {
         .stderr(Stdio::null())
         .status()
         .await;
+    // The unit is stopped, so its lease can go -- and be reset (see
+    // `gozer::lease_gated_unit`).
+    let ids = crate::gozer::holder_lease_file(&state.config_dir()).take();
+    crate::gozer::release_after_stop(state, ids).await;
 }
 
 pub(crate) async fn post_serve(
@@ -1860,6 +1864,15 @@ pub(crate) async fn post_serve(
     let port = state.serving_port();
     let log = o.log_path(&format!("{name}-serve"));
     let _ = std::fs::create_dir_all(log.parent().unwrap_or(Path::new("/tmp")));
+    // With gozer: leased to the unit's own main process (`gozer::lease_gated_unit`).
+    let gate = crate::gozer::unit_gate(&state, "harvest");
+    let serve: Vec<String> = ["bash", "run.sh", "--port", &port.to_string()]
+        .map(String::from)
+        .to_vec();
+    let serve = match &gate {
+        Some(fifo) => crate::gozer::gated_argv(fifo, &serve),
+        None => serve,
+    };
     let status = Command::new("systemd-run")
         .args(["--user", "--collect", "--quiet"])
         .arg(format!("--unit={HARVEST_UNIT}"))
@@ -1878,7 +1891,7 @@ pub(crate) async fn post_serve(
             "--setenv=PATH={}",
             std::env::var("PATH").unwrap_or_default()
         ))
-        .args(["bash", "run.sh", "--port", &port.to_string()])
+        .args(&serve)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1890,6 +1903,12 @@ pub(crate) async fn post_serve(
                 String::from_utf8_lossy(&status.stderr).trim()
             ),
         ));
+    }
+    if let Some(fifo) = gate {
+        let lease = crate::gozer::lease_started_unit(&state, HARVEST_UNIT, fifo, &model)
+            .await
+            .map_err(|why| err(StatusCode::CONFLICT, format!("couldn't start it: {why}")))?;
+        crate::gozer::holder_lease_file(&state.config_dir()).add(&lease);
     }
     adopt_when_serving(&state, port, model);
     Ok((

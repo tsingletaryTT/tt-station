@@ -42,7 +42,7 @@ BDFs as part of handing them back, which is why:
   reading `/proc/<pid>/fd`, which is unreadable for a root-owned serving container.
 - a lease that is **reaped** rather than released is **not** reset (`--fresh` is gozer's protected
   path), so agentd prefers an explicit release everywhere — including for a lease inherited from
-  a previous agentd process (see §5).
+  a previous agentd process, or one whose workload exited on its own (see §5).
 
 ---
 
@@ -205,27 +205,108 @@ first place.
 
 ---
 
-## 5. Restarts, and leases that outlive them
+## 5. Who owns a lease, restarts, and the reconciler
 
-Every lease this agent takes is tied to agentd's own pid (`gozer acquire --owner-pid`), so gozer
-never reaps one out from under a healthy serve.
+### Leases are owned by the workload, not by agentd
 
-At startup agentd does one **sweep**: for every lease whose `who` begins `tt-station:`, if nothing
-is serving on the service port that `who` names, release it (which resets and returns the board).
-A neighbour's lease is never touched, and a lease whose id cannot be resolved is reported in the
-journal and left alone rather than guessed at.
+gozer judges a non-detached lease by one thing: whether its `--owner-pid` is alive
+(`/proc/<pid>` exists -- true for a root-owned container process too, even though its fds are
+unreadable). A lease owned by agentd's own pid therefore ended with agentd, not with the serve:
+every agentd restart left it `STALE`, the next `gozer acquire` anywhere on the box reaped it
+(without a reset) and could hand a live container's chips to someone else. Adoption could only
+remember the id; it could not fix the owner (the `UNOWNED LEASE` journal lines).
 
-A lease whose port **is** still serving is kept — and, if that port is this agent's own, **adopted**,
-so the next `tt-station stop` releases it explicitly (resetting its chips) instead of leaving it to gozer's
-reap, which would not. The journal says which:
+So every lease is now owned by the process that actually uses the chips:
+
+| Workload | How the lease is taken | Owner |
+|---|---|---|
+| `runpy` / `docker` serve (a container) | agentd acquires (it needs the grant to pick `--device-id`/`--device`), launches, and once the serve is healthy **hands the lease off** to the container's main pid (`docker inspect --format {{.State.Pid}}`) | the container's main process |
+| native vLLM, a served bring-up (Orchard harvest), a community package (`tt-model serve`) -- the `tt-orchard-serve` holder unit | the unit starts behind a **gate** (`sh -c 'go=$(timeout 120 head -n1 FIFO) ...; exec "$@"'`); agentd acquires with `--owner-pid` = the unit's `MainPID`, then opens the gate and the server `exec`s in place (same pid) | the unit's main process |
+| bring-up (`lease_run.py` → `gozer run`), Orchard's own runs | `gozer run` | `gozer run`, the workload is its child |
+| `POST /reset`, `power reset-chips`, the pre-launch reset | no lease; guarded by the foreign-lease refusal (§4) | -- |
+| Lab (`tt-lab`) | no lease (unchanged; the agent refuses serves while it runs) | -- |
+
+Holder-unit lease ids are kept in `<config>/holder-leases.json` (community ones in
+`community/leases.json`) and released right **after** the unit is stopped, so the chips are reset.
+
+**The hand-off.** gozer has no way to change a lease's owner yet, so the interim is: if
+`gozer transfer` exists, use it (atomic); otherwise `gozer release <id> --no-reset --force` (no
+hardware is touched; `--force` only skips gozer's own-fd check) and immediately
+`gozer acquire --exact <bdf>` (one board) or `--chips all` (the whole box) with
+`--owner-pid <container pid>`, checking the same chips came back. The chips are unlocked for the
+length of one gozer call, so the hand-off is **not attempted while anyone is queued** (the queue
+head would win that window); the lease then stays agentd's and the reconciler retries. If the
+re-take fails, the journal says `WARNING: ... serving WITHOUT a lease`.
+
+### Restarts
+
+At startup agentd still does one **sweep**: for every lease whose `who` begins `tt-station:`, if
+its owner is dead (`STALE`) and nothing is serving on the service port that `who` names, release
+it. A lease whose owner is alive is a live workload's and is always kept -- including a holder
+unit's, which publishes no docker port. A kept lease on this agent's own port is **adopted** (the
+backend's, or left to the community/holder-unit stop that owns it), so the next `tt-station stop`
+releases it explicitly.
+
+### The reconciler
+
+Right after startup and then every 60 s (never during a start or stop), agentd compares its own
+leases (`tt-station:<own port>:`) with the container publishing its serving port:
+
+| Lease owner | Workload on the port | Action |
+|---|---|---|
+| dead | alive | **re-attach**: hand the lease to the workload's pid (no reset) |
+| dead | none | **release** (resets the chips -- a reap would not) |
+| this agent | alive | **hand off** (finishes a deferred hand-off) |
+| any other live pid | any | nothing: it is a workload's |
+
+Nothing is done when `docker ps`/`docker inspect`/`gozer status` cannot be read. Each action is
+journalled as `tt-station-agentd: lease reconcile: ...`, and the trackers (backend slot, lease
+files) follow the new ids. Release on workload exit is therefore: explicit release on every stop
+path; otherwise within 60 s by the reconciler (with a reset); gozer's own reap (no reset) only as
+the last resort.
+
+### gozer follow-up (proposed)
+
+Add an atomic owner change, mirroring `renew`:
 
 ```
-tt-station-agentd: adopted lease 'ab12ef' (tt-station:8003:Qwen/Qwen3-32B) from a previous agentd process -- ...
-tt-station-agentd: WARNING: UNOWNED LEASE 'ab12ef' (...) -- ... Clear it by hand with `gozer release ab12ef` ...
+gozer transfer <lease> --owner-pid <pid> [--json]
 ```
 
-An adopted lease's `--owner-pid` names the dead process, so gozer may reap it first; that is
-exactly why it is released explicitly at the first opportunity.
+Under the gatekeeper mutex: refuse (exit 13) if the lease no longer holds its units, refuse if
+`<pid>` is not alive; set the lease's `pid`, `pgid` and `detached=false`, rewrite the lease record
+and each unit's lock copy (`update_unit_lease`), and log a `transferred` history event. agentd
+already calls it first and falls back only on argparse's "invalid choice" (exit 2), so no
+tt-station change is needed when it lands. Exposing `lease_id` in `gozer status --json` (known
+limitation 4 in `gozer.rs`) remains the other small fix.
+
+### The runpy `--device-id` mapping (verified from source)
+
+tt-inference-server's `run.py --device-id 2,3` does exactly one thing with the list
+(`workflows/run_docker_server.py`): `docker run --device /dev/tenstorrent/2:/dev/tenstorrent/2
+--device /dev/tenstorrent/3:/dev/tenstorrent/3`. gozer's `dev_indices` are the same
+`/dev/tenstorrent/<n>` numbers (from sysfs `tenstorrent!N`), so a leased container gets exactly the
+granted device nodes and cannot open others. run.py does **not** forward its environment into the
+container, so the grant's `TT_VISIBLE_DEVICES` (which agentd passes to run.py) only affects
+run.py's host-side `tt-smi -s` checks.
+
+### Still to check on hardware (needs idle chips; do not run during someone else's lease)
+
+1. **Container pinning.** Serve one board leased (`gozer acquire --exact <bdf>` held by a
+   neighbour first, then `tt-station run`). Then, read-only:
+   `docker inspect --format '{{json .HostConfig.Devices}}' <ctr>` must list only the leased
+   `/dev/tenstorrent/N`, and `docker exec <ctr> ls /dev/tenstorrent` only those nodes.
+2. **Host checks on a half-box lease.** In the same serve's run.py log: the system-software
+   validation must pass. If `TT_VISIBLE_DEVICES=<bdfs>` makes `tt-smi -s` list only the leased
+   chips, `run_system_software_validation.py` indexes that list by `/dev` index
+   (`fw_bundle_versions[i] for i in device_id`) and would fail on `--device-id 2,3`; the fix is
+   then to stop forwarding `TT_VISIBLE_DEVICES` to run.py.
+3. **Hand-off.** After that serve is healthy: `gozer status --json` shows its chips `CLAIMED`
+   with `pid` = `docker inspect --format {{.State.Pid}} <ctr>`; `systemctl --user restart
+   tt-station-agentd` leaves them `CLAIMED` with the same pid and no `lease reconcile` action.
+4. **Holder unit.** Start a native vLLM bundle: `systemctl --user show -p MainPID
+   tt-orchard-serve` equals the lease's `pid` in `gozer status --json` both before and after the
+   server is up (the gate `exec`s in place); `tt-station stop` releases it with a reset.
 
 ---
 

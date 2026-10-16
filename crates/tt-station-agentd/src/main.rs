@@ -665,16 +665,20 @@ async fn sweep_stale_leases_at_startup(
             let mut adopted = 0usize;
             // A community package's leases are released by the package's own
             // stop (`community::stop_package`), not the serving backend's.
-            let community: Vec<String> = std::fs::read(config_dir().join("community/leases.json"))
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .unwrap_or_default();
+            let mut community: Vec<String> =
+                std::fs::read(config_dir().join("community/leases.json"))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default();
+            // So are a holder unit's (native vLLM, a served bring-up): stopping
+            // the unit releases them (`orchard::stop_harvest`).
+            community.extend(gozer::holder_lease_file(&config_dir()).ids());
             let mut theirs = 0usize;
             for lease in &report.adoptable {
                 if community.contains(&lease.lease_id) {
                     theirs += 1;
                     eprintln!(
-                        "tt-station-agentd: lease '{}' ({}) is the community model's; its stop releases it",
+                        "tt-station-agentd: lease '{}' ({}) belongs to the community model or a serving unit; its stop releases it",
                         lease.lease_id, lease.who
                     );
                     continue;
@@ -683,9 +687,8 @@ async fn sweep_stale_leases_at_startup(
                     adopted += 1;
                     eprintln!(
                         "tt-station-agentd: adopted lease '{}' ({}) from a previous agentd \
-                         process -- `/stop` will release it (and reset its chips). NOTE its \
-                         --owner-pid names the dead process, so gozer may reap it first; a \
-                         reaped lease is not reset.",
+                         process -- `/stop` will release it (and reset its chips); the lease \
+                         reconciler re-attaches it to its container if its owner is gone.",
                         lease.lease_id, lease.who
                     );
                 } else {
@@ -1426,6 +1429,9 @@ async fn main() -> Result<()> {
     tokio::spawn(tt_station_agentd::orchard::watch_forever(state.clone()));
     tokio::spawn(tt_station_agentd::bringup::watch_forever(state.clone()));
     tokio::spawn(tt_station_agentd::community::readopt(state.clone()));
+    // Keep this agent's chip leases owned by the workloads using them, and
+    // give back the ones whose workload is gone (see `gozer::reconcile_own_leases`).
+    tokio::spawn(gozer::reconcile_forever(state.clone()));
     tt_station_agentd::research::resume(&state);
     tokio::spawn(tt_station_agentd::coding::watch_forever(state.clone()));
     // Puts the last good model back after a stuck start is stopped.

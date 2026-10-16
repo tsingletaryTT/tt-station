@@ -1453,33 +1453,27 @@ impl ServingBackend for RunPyBackend {
         // is deliberately OVERRIDDEN, since it could name chips gozer just
         // handed to somebody else.
         //
-        // !!! UNVERIFIED ASSUMPTION, DELIBERATELY CARRIED !!!
-        // gozer's `dev_indices` are `/dev/tenstorrent/<n>` numbering.
-        // run.py's `--device-id` takes a "logical index list". `tt-smi`
-        // treats *UMD logical id* and `/dev/tenstorrent/<id>` as DIFFERENT
-        // namespaces (`tt_smi/device_input.py`), and nothing in run.py's or
-        // gozer's source establishes which one `--device-id` means. This
-        // line assumes they match, because settling it requires launching a
-        // real serve on a box with live hardware and checking which
-        // `/dev/tenstorrent/N` the container actually opens.
-        // IF THE ASSUMPTION IS WRONG: the container is pinned to ANOTHER
-        // TENANT'S CHIPS, the serve comes up healthy, and nothing detects
-        // it -- not gozer (its lease looks satisfied), not tt-station, not
-        // the neighbour, until their workload corrupts or hangs. Treat the
-        // mapping as unverified until someone runs that single-chip serve.
+        // VERIFIED FROM SOURCE (tt-inference-server `run.py` +
+        // `workflows/run_docker_server.py`): `--device-id` is a list of
+        // `/dev/tenstorrent/<n>` indices -- run.py's own help says "PCI
+        // indices (e.g. '0' for /dev/tenstorrent/0)" -- and the ONLY thing
+        // run.py does with it is build the container's device list:
+        //     for d in device_id: --device /dev/tenstorrent/{d}:/dev/tenstorrent/{d}
+        // (with no `--device-id` it maps the whole `/dev/tenstorrent`). gozer's
+        // `dev_indices` are the same namespace: it reads `N` from the kernel's
+        // own `/sys/bus/pci/devices/<bdf>/tenstorrent/tenstorrent!N`. So the
+        // container is handed exactly the granted device nodes and no others;
+        // whatever UMD numbers them as inside (logical 0..n over the nodes it
+        // can see) cannot reach a chip that was not granted. `tt-smi`'s
+        // "logical id vs /dev index" distinction does not apply: run.py never
+        // passes these to `tt-smi` or UMD on the host.
         //
-        // PARTLY MITIGATED, and the mitigation is also the experiment: the
-        // grant carries `env: {"TT_VISIBLE_DEVICES": "<bdf>,<bdf>"}` -- BDFs,
-        // so no namespace question at all -- and this backend now forwards
-        // every entry of `Grant::env` to the child (see the `child_env` build
-        // just before `run_in_dir_with_env` below). The ambiguous index list
-        // is therefore no longer the only pin. It does NOT settle the
-        // question: whether run.py propagates the variable into the container
-        // it builds is still unverified, so if run.py drops it AND reads
-        // `--device-id` in the other namespace, the hazard above stands.
-        // `docker inspect --format '{{.Config.Env}}'` on a leased serve's
-        // container is what closes it. Recorded in `crate::gozer`'s
-        // known-limitations section, which is where this whole list lives.
+        // What does NOT reach the container: the grant's
+        // `TT_VISIBLE_DEVICES=<bdf>,...` forwarded below. run.py builds the
+        // container environment from its own `docker_env_vars` and the
+        // secrets-only `--env-file`, never from its own environment, so that
+        // variable only affects run.py's HOST-side checks (`tt-smi -s`). See
+        // `docs/reference/chip-leasing.md` §5 for the one hardware check left.
         //
         // NOTE the DOCKER backend's `--device /dev/tenstorrent/<n>` mapping
         // is NOT in the same doubt -- gozer reads `dev_index` from the
@@ -1602,12 +1596,12 @@ impl ServingBackend for RunPyBackend {
         // Everything the GRANT says a leased workload should run with, then
         // `MODEL_SOURCE` last so this backend's own variable always wins a
         // (never-expected) collision. Today the grant carries exactly
-        // `TT_VISIBLE_DEVICES=<bdf>,<bdf>` -- BDFs, so no namespace question,
-        // unlike the `--device-id` indices above. Whether run.py forwards it
-        // into the container it builds is unverified; if it does, the
-        // ambiguity above stops being the only pin, and if it does not,
-        // nothing is worse. Empty (hence a no-op) without a lease, so the
-        // unleased child environment is unchanged. See `gozer::Grant::env`.
+        // `TT_VISIBLE_DEVICES=<bdf>,<bdf>`. run.py does NOT pass it into the
+        // container (verified from source; the container is pinned by
+        // `--device-id` alone, see above) -- it reaches only run.py's own
+        // host-side `tt-smi -s` checks. Empty (hence a no-op) without a
+        // lease, so the unleased child environment is unchanged. See
+        // `gozer::Grant::env`.
         let mut child_env: Vec<(&str, &str)> = match &lease {
             Some(guard) => guard
                 .grant()
@@ -1938,6 +1932,7 @@ impl ServingBackend for RunPyBackend {
         // hand the id to the backend, where `stop`/`reset` release it. This
         // is the ONLY exit from `start` that doesn't release.
         if let Some(guard) = lease {
+            let chips = guard.grant().chips.clone();
             let mut held = self.lease.lock().expect("lease mutex poisoned");
             if let Some(previous) = held.as_deref() {
                 // Nothing should be able to reach here holding a lease --
@@ -1949,7 +1944,8 @@ impl ServingBackend for RunPyBackend {
                      will not be released until this agent exits; check `gozer status`"
                 );
             }
-            *held = Some(guard.into_lease_id());
+            let lease_id = guard.into_lease_id();
+            *held = Some(lease_id.clone());
             drop(held);
 
             // Narrow race, closed here: a `/stop` can land between the
@@ -1969,6 +1965,24 @@ impl ServingBackend for RunPyBackend {
                          stop raced failed: {err:#}"
                     );
                 }
+            } else if let Some(capability) = &self.gozer {
+                // Hand the lease to the container, so it is owned by the
+                // process actually driving the chips rather than by this
+                // agent -- see `gozer::hand_off`.
+                let port = self.config.service_port;
+                let outcome = crate::gozer::hand_off_to_container(
+                    self.runner.as_ref(),
+                    capability,
+                    &lease_id,
+                    &chips,
+                    &format!("tt-station:{port}:{model}"),
+                    &format!("serving {model} via tt-station-agentd"),
+                    artifacts.container_id.as_deref(),
+                    port,
+                );
+                crate::gozer::record_handoff(&outcome, &lease_id, model, |old, new| {
+                    self.swap_held_lease(old, new)
+                });
             }
         }
 
@@ -1990,6 +2004,19 @@ impl ServingBackend for RunPyBackend {
     /// alone is everything `stop` needs.
     fn adopt_lease(&self, lease_id: &str, _who: &str) -> bool {
         self.adopt_lease_id(lease_id)
+    }
+
+    fn held_lease(&self) -> Option<String> {
+        self.observed_lease()
+    }
+
+    fn swap_held_lease(&self, old: &str, new: Option<&str>) -> bool {
+        let mut slot = self.lease.lock().expect("lease mutex poisoned");
+        if slot.as_deref() != Some(old) {
+            return false;
+        }
+        *slot = new.map(str::to_string);
+        true
     }
 
     fn stop(&self, _model: &str) -> Result<()> {

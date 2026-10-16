@@ -1385,6 +1385,14 @@ async fn launch(
     // doesn't forward; a container that does want it still finds
     // `$HF_HOME/token` in the Hugging Face cache tt-model mounts.
     cmd.args(crate::serving::secrets::launch_hf_token_args());
+    // With gozer: start `tt-model serve` behind a gate and lease the chips to
+    // its own process before it runs (`gozer::lease_gated_unit`), instead of
+    // waiting to adopt them -- which a root-owned container's chips never
+    // allow, since gozer cannot see its fds.
+    let gate = crate::gozer::unit_gate(state, "community");
+    if let Some(fifo) = &gate {
+        cmd.args(crate::gozer::gated_argv(fifo, &[]));
+    }
     cmd.arg(bin).args([
         "serve",
         id,
@@ -1407,6 +1415,14 @@ async fn launch(
             "Couldn't start it: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
+    }
+    if let Some(fifo) = gate {
+        let lease =
+            crate::gozer::lease_started_unit(state, crate::orchard::HARVEST_UNIT, fifo, &short)
+                .await
+                .map_err(|why| format!("Couldn't start it: {why}"))?;
+        let file = crate::gozer::LeaseFile(leases_file(state));
+        file.add(&lease);
     }
     set_serving(state, Some((id.to_string(), model.clone())));
     crate::orchard::adopt_when_serving(state, state.serving_port(), model);
@@ -1768,6 +1784,12 @@ fn model_short(pkg: &Value) -> String {
 
 fn leases_file(state: &AppState) -> PathBuf {
     state.config_dir().join("community/leases.json")
+}
+
+/// Replace (or drop) one of the community package's lease ids -- the lease
+/// reconciler re-attaching or releasing it. `false` when `old` isn't one.
+pub(crate) fn swap_lease(state: &AppState, old: &str, new: Option<&str>) -> bool {
+    crate::gozer::LeaseFile(leases_file(state)).swap(old, new)
 }
 
 fn take_leases(state: &AppState) -> Vec<String> {

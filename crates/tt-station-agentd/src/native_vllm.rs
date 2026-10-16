@@ -620,6 +620,13 @@ pub async fn serve_dir(state: &AppState, dir: &Path, label: &str, stop_serving: 
         home().join(".local/bin").display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    // With gozer: start behind a gate, lease the chips to the unit's own main
+    // process, then let it run (see `gozer::lease_gated_unit`).
+    let gate = crate::gozer::unit_gate(state, "vllm-native");
+    let argv = match &gate {
+        Some(fifo) => crate::gozer::gated_argv(fifo, &argv),
+        None => argv,
+    };
     let mut cmd = Command::new("systemd-run");
     cmd.args(["--user", "--collect", "--quiet"])
         .arg(format!("--unit={}", crate::orchard::HARVEST_UNIT))
@@ -660,6 +667,13 @@ pub async fn serve_dir(state: &AppState, dir: &Path, label: &str, stop_serving: 
         ));
     }
     let model = meta["hf_weights"].as_str().unwrap_or(label).to_string();
+    if let Some(fifo) = gate {
+        let lease =
+            crate::gozer::lease_started_unit(state, crate::orchard::HARVEST_UNIT, fifo, &model)
+                .await
+                .map_err(|why| err(StatusCode::CONFLICT, format!("couldn't start it: {why}")))?;
+        crate::gozer::holder_lease_file(&state.config_dir()).add(&lease);
+    }
     *mine(state).serving.lock().expect("native") = Some((label.to_string(), model.clone()));
     crate::orchard::adopt_when_serving(state, port, model);
     Ok(Json(
