@@ -1,5 +1,5 @@
 [Unit]
-Description=tt-station box agent (QuietBox control plane)
+Description=tt-station box agent (Tenstorrent box control plane)
 After=network-online.target
 Wants=network-online.target
 

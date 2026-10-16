@@ -25,7 +25,7 @@ use crate::handlers::pairing::{pair_complete, pair_init, pair_offer, pair_qr};
 use crate::handlers::power::{power, power_info, reset, wake_on_lan};
 use crate::handlers::security::{get_security, post_security};
 use crate::handlers::serving::{get_serve, post_serve, run_model, stop_model};
-use crate::handlers::ssh::{ssh_authorize, ssh_info, ssh_revoke};
+use crate::handlers::ssh::{ssh_authorize, ssh_host_keys, ssh_info, ssh_revoke};
 use crate::handlers::status::{
     get_config, get_endpoint, get_leases, get_models, get_serving, get_status,
 };
@@ -86,6 +86,7 @@ pub fn app(state: AppState) -> Router {
         .route("/leases", get(get_leases))
         .route("/ssh/authorize", post(ssh_authorize).delete(ssh_revoke))
         .route("/ssh/info", get(ssh_info))
+        .route("/ssh/host-keys", get(ssh_host_keys))
         .route("/discover", get(crate::discover::get_discover))
         .route("/assistant", post(assistant_chat))
         .route("/assistant/confirm", post(assistant_confirm))

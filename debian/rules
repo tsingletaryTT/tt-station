@@ -56,6 +56,12 @@ override_dh_auto_install:
 	install -d debian/tt-station/usr/share/doc/tt-station
 	install -m 644 README.md \
 	    debian/tt-station/usr/share/doc/tt-station/README.md
+	# The licenses travel with the binaries: Apache-2.0, its NOTICE, and the
+	# licenses of every crate and bundled app dependency.
+	for f in LICENSE NOTICE THIRD_PARTY_LICENSES.md; do \
+	    test -f $$f || { echo "$$f is missing from the source tree" >&2; exit 1; }; \
+	    install -m 644 $$f debian/tt-station/usr/share/doc/tt-station/$$f; \
+	done
 	# The app the agent serves at /app (app_ui.rs looks in /usr/share/tt-station/app).
 	# Built before packaging by build-deb.sh, since the package build is offline;
 	# a package without it would install a box with no app, so that's an error.

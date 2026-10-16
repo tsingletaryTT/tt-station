@@ -84,7 +84,10 @@ The agent trusts:
 
 `GET /updates` shows the channel: `repo`, where it came from (`default`,
 `channel file`, `environment`), every trusted key's name, origin and
-fingerprint, and `unsigned_allowed`.
+fingerprint, and `unsigned_allowed`. Its `signing_ready` is `true` only when the
+channel trusts at least one key; while it's `false`, `POST /updates/install`
+refuses with "Updates aren't available for this build yet: it has no release
+signing key." (unless the escape hatch below is set).
 
 ### Escape hatch (developers only)
 

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! SSH access to the box: `POST`/`DELETE /ssh/authorize` and `GET /ssh/info`.
+//! SSH access to the box: `POST`/`DELETE /ssh/authorize`, `GET /ssh/info`
+//! and the public `GET /ssh/host-keys`.
 
 use axum::{http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
@@ -92,6 +93,54 @@ pub(crate) fn qr_svg(text: &str) -> Option<String> {
     Some(format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {size} {size}\" shape-rendering=\"crispEdges\"><rect width=\"{size}\" height=\"{size}\" fill=\"#fff\"/><path d=\"{path}\" fill=\"#000\"/></svg>"
     ))
+}
+
+/// The SSH server's host public keys in `dir` (`ssh_host_*_key.pub`), each
+/// as `"<type> <base64>"` with the comment dropped, sorted by file name.
+/// Lines that don't look like a key are skipped; no files is an empty list.
+pub fn host_keys_in(dir: &std::path::Path) -> Vec<String> {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("ssh_host_") && n.ends_with("_key.pub"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files
+        .iter()
+        .filter_map(|p| {
+            let text = std::fs::read_to_string(p).ok()?;
+            let mut words = text.split_whitespace();
+            let (kind, b64) = (words.next()?, words.next()?);
+            let kind_ok = !kind.is_empty()
+                && kind
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '@'));
+            let b64_ok = b64.len() >= 16
+                && b64
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='));
+            (kind_ok && b64_ok).then(|| format!("{kind} {b64}"))
+        })
+        .collect()
+}
+
+/// `GET /ssh/host-keys` (public): `{"keys": ["ssh-ed25519 AAAA...", ...]}`,
+/// this box's SSH host keys from `/etc/ssh`. The desktop app reads them over
+/// the box's pinned HTTPS and hands them to `ssh` as known hosts, so it never
+/// has to trust whichever key answers first before it sends a password.
+/// Public keys only, so no token: the app needs them before it's signed in.
+pub(crate) async fn ssh_host_keys() -> Json<serde_json::Value> {
+    let keys = tokio::task::spawn_blocking(|| host_keys_in(std::path::Path::new("/etc/ssh")))
+        .await
+        .unwrap_or_default();
+    Json(serde_json::json!({ "keys": keys }))
 }
 
 /// `GET /ssh/info` (authed): how an SSH app (Termius, a terminal) reaches this
@@ -219,4 +268,31 @@ pub(crate) async fn ssh_revoke(
     crate::audit::record(&state, "ssh_key_remove", &what, "ok");
 
     Ok(Json(SshRevokeResponse { revoked: true }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_keys_are_type_and_key_without_the_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = |n: &str, body: &str| std::fs::write(dir.path().join(n), body).unwrap();
+        w(
+            "ssh_host_ed25519_key.pub",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHVuaXQ root@qb2-lab\n",
+        );
+        w("ssh_host_rsa_key.pub", "ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB\n");
+        w("ssh_host_ed25519_key", "PRIVATE KEY, never read");
+        w("ssh_host_bad_key.pub", "not a key line at all; nope\n");
+        w("other.pub", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOTHER\n");
+        assert_eq!(
+            host_keys_in(dir.path()),
+            vec![
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHVuaXQ".to_string(),
+                "ssh-rsa AAAAB3NzaC1yc2EAAAADAQAB".to_string(),
+            ]
+        );
+        assert!(host_keys_in(&dir.path().join("missing")).is_empty());
+    }
 }

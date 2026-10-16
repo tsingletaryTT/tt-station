@@ -18,7 +18,7 @@ use libttstation::model::{txt_encode, BoxRecord, ServingStatus};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 use tt_station_agentd::config;
-use tt_station_agentd::device::detect_device_mesh;
+use tt_station_agentd::device::{chips_label, detect_device_mesh};
 use tt_station_agentd::gozer;
 use tt_station_agentd::net;
 use tt_station_agentd::routes::{app, AppState, StatusAdvertiser};
@@ -71,20 +71,19 @@ enum Command {
 #[derive(Parser)]
 #[command(
     name = "tt-station-agentd",
-    about = "Box-side daemon for a Tenstorrent QuietBox"
+    about = "Box-side daemon for a Tenstorrent box: a QuietBox, Galaxy server or workstation with Tenstorrent cards"
 )]
 struct Cli {
     /// Box name; used as both the mDNS instance name and the `name` TXT/JSON key.
     ///
     /// `Option` because it can also come from `[global].name` in the config
-    /// file -- `resolve` enforces that ONE of the two is present, so this
-    /// remains effectively required for an operator not using a config file.
+    /// file; with neither, `resolve` uses this machine's short hostname.
     #[arg(long)]
     name: Option<String>,
 
     /// Control-plane HTTP port to listen on and advertise in the `ctrl` TXT key.
     ///
-    /// `Option` for the same reason as `--name` -- see its doc comment.
+    /// `Option` for the same reason as `--name`; defaults to 8765.
     #[arg(long = "ctrl-port")]
     ctrl_port: Option<u16>,
 
@@ -100,8 +99,9 @@ struct Cli {
     /// Chip inventory string advertised in the `chips` TXT key and returned
     /// from `/status`.
     ///
-    /// No clap default: `resolve` supplies `"4xBH"` when this and
-    /// `[global].chips` are both absent.
+    /// An override: when this and `[global].chips` are both absent, the label
+    /// comes from the startup `tt-smi -s` scan ("4xBH", "32xWH", ...), and is
+    /// empty if that scan finds nothing.
     #[arg(long)]
     chips: Option<String>,
 
@@ -501,7 +501,9 @@ const STARTUP_DEVICE_MESH_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// `eprintln!` note, so a box without `tt-smi` on `$PATH` (or mid-reset, or
 /// an unrecognized fleet, or a wedged `tt-smi`) still boots normally --
 /// `/status` just reports `"device_mesh": null`.
-async fn detect_startup_device_mesh(tt_smi_bin: &str) -> Option<String> {
+/// Returns `(device_mesh, chips_label)` from the one `tt-smi -s` run; the
+/// label (`device::chips_label`) degrades to `None` the same way.
+async fn detect_startup_device_mesh(tt_smi_bin: &str) -> (Option<String>, Option<String>) {
     let bin = tt_smi_bin.to_string();
     let run_result = tokio::time::timeout(
         STARTUP_DEVICE_MESH_TIMEOUT,
@@ -521,7 +523,7 @@ async fn detect_startup_device_mesh(tt_smi_bin: &str) -> Option<String> {
                     "tt-station-agentd: '{tt_smi_bin} -s' output didn't map to a known device mesh; device_mesh will report null"
                 );
             }
-            mesh
+            (mesh, chips_label(&stdout))
         }
         // Ran to completion within the timeout, but `tt-smi` itself failed
         // (missing binary, non-zero exit, etc).
@@ -529,14 +531,14 @@ async fn detect_startup_device_mesh(tt_smi_bin: &str) -> Option<String> {
             eprintln!(
                 "tt-station-agentd: failed to run '{tt_smi_bin} -s' for device-mesh detection: {err:#}; device_mesh will report null"
             );
-            None
+            (None, None)
         }
         // The `spawn_blocking` task panicked.
         Ok(Err(join_err)) => {
             eprintln!(
                 "tt-station-agentd: device-mesh detection task panicked: {join_err}; device_mesh will report null"
             );
-            None
+            (None, None)
         }
         // Blew past STARTUP_DEVICE_MESH_TIMEOUT -- likely a hung/wedged
         // `tt-smi`. The spawned blocking task keeps running in the
@@ -547,7 +549,7 @@ async fn detect_startup_device_mesh(tt_smi_bin: &str) -> Option<String> {
                 "tt-station-agentd: '{tt_smi_bin} -s' timed out after {:?}; skipping device-mesh detection, device_mesh will report null",
                 STARTUP_DEVICE_MESH_TIMEOUT
             );
-            None
+            (None, None)
         }
     }
 }
@@ -1093,14 +1095,31 @@ async fn main() -> Result<()> {
             config_dir().display()
         ));
     }
+    // Detect this box's device mesh and chip inventory ONCE at startup (not
+    // per-request): run `tt-smi -s` through the exact same command seam
+    // `GET /telemetry` uses (`RealCommandRunner`, see `collect_snapshot` in
+    // state.rs) and map its stdout through `device::detect_device_mesh` and
+    // `device::chips_label`. Reported on `/status` and mDNS so a client can
+    // rank models by hardware fit without its own `tt-smi` access. ANY
+    // failure here (binary missing, non-zero exit, unrecognized/mixed fleet,
+    // OR a hang) degrades to `None` -- bounded to
+    // `STARTUP_DEVICE_MESH_TIMEOUT` (~10s) via `tokio::time::timeout` around
+    // a `spawn_blocking`'d call, so a hung/wedged `tt-smi` can delay the
+    // socket bind below by at most that ceiling, never indefinitely; startup
+    // then proceeds regardless of the outcome. See
+    // `detect_startup_device_mesh`'s doc comment.
+    let (device_mesh, detected_chips) = detect_startup_device_mesh(&rc.tt_smi_bin).await;
+    // `--chips`/`[global].chips` is an explicit override; otherwise what
+    // tt-smi found, or empty (the apps then show just the device mesh).
+    let chips = rc.chips.clone().or(detected_chips).unwrap_or_default();
     let state = match &rc.token_store {
-        None => AppState::new(rc.name.clone(), rc.chips.clone(), backend),
+        None => AppState::new(rc.name.clone(), chips.clone(), backend),
         Some(path) => {
             println!(
                 "tt-station-agentd: persisting bearer tokens to {}",
                 path.display()
             );
-            AppState::new_persisting(rc.name.clone(), rc.chips.clone(), backend, path.clone())
+            AppState::new_persisting(rc.name.clone(), chips.clone(), backend, path.clone())
         }
     };
 
@@ -1304,19 +1323,7 @@ async fn main() -> Result<()> {
         state
     };
 
-    // Detect this box's device mesh ONCE at startup (not per-request): run
-    // `tt-smi -s` through the exact same command seam `GET /telemetry` uses
-    // (`RealCommandRunner`, see `collect_snapshot` in state.rs) and map its
-    // stdout through `device::detect_device_mesh`. Reported on `/status` so
-    // a client (Task 3's `tt-station --json status`) can rank models by hardware fit
-    // without its own `tt-smi` access. ANY failure here (binary missing,
-    // non-zero exit, unrecognized/mixed fleet, OR a hang) degrades to `None`
-    // -- bounded to `STARTUP_DEVICE_MESH_TIMEOUT` (~10s) via
-    // `tokio::time::timeout` around a `spawn_blocking`'d call, so a hung/
-    // wedged `tt-smi` can delay the socket bind below by at most that
-    // ceiling, never indefinitely; startup then proceeds regardless of the
-    // outcome. See `detect_startup_device_mesh`'s doc comment.
-    let device_mesh = detect_startup_device_mesh(&rc.tt_smi_bin).await;
+    // The mesh detected above, before `AppState` was built.
     let state = state.with_device_mesh(device_mesh.clone());
 
     // Record the `gozer` capability probed ONCE at startup, up in
@@ -1361,13 +1368,13 @@ async fn main() -> Result<()> {
     // sharing the same underlying daemon, which gets attached to `state` so
     // `/run`/`/stop` can re-publish `status` whenever it changes instead of
     // it going stale after boot (see `StatusAdvertiser`'s doc comment).
-    let (_mdns_guard, status_advertiser) = advertise(&rc, state.status(), device_mesh, mac)
+    let (_mdns_guard, status_advertiser) = advertise(&rc, &chips, state.status(), device_mesh, mac)
         .context("failed to start mDNS advertisement")?;
     let state = state.with_status_advertiser(Arc::new(status_advertiser));
 
     println!(
         "tt-station-agentd: '{}' serving on port {} (backend={}, chips={})",
-        rc.name, rc.ctrl_port, rc.backend, rc.chips
+        rc.name, rc.ctrl_port, rc.backend, chips
     );
 
     // Serve until a shutdown signal arrives, then return normally so
@@ -1678,6 +1685,7 @@ fn virtual_interface(name: &str) -> bool {
 /// record's `status` key truthful after boot.
 fn advertise(
     rc: &config::ResolvedConfig,
+    chips: &str,
     status: ServingStatus,
     device_mesh: Option<String>,
     mac: Option<String>,
@@ -1687,7 +1695,7 @@ fn advertise(
         name: rc.name.clone(),
         host: host.clone(),
         ctrl_port: rc.ctrl_port,
-        chips: rc.chips.clone(),
+        chips: chips.to_string(),
         status,
         apiver: rc.apiver,
         device_mesh: device_mesh.clone(),
@@ -1747,7 +1755,7 @@ fn advertise(
         name: record.name,
         host,
         ctrl_port: rc.ctrl_port,
-        chips: rc.chips.clone(),
+        chips: chips.to_string(),
         apiver: rc.apiver,
         device_mesh,
         mac,

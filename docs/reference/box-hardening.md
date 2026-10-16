@@ -50,3 +50,8 @@ sudo rm /etc/fail2ban/jail.d/tt-station.local && sudo systemctl restart fail2ban
 3. The box issues a 256-bit token for that device. Every later request is HTTPS
    (TLS 1.3) to that exact certificate (pinned; no certificate authority can
    vouch for an impostor).
+4. Before an SSH connection that sends a password, the app reads the box's SSH
+   host keys from `GET /ssh/host-keys` (public; `{"keys": ["ssh-ed25519 AAAA…"]}`,
+   type and key from `/etc/ssh/ssh_host_*_key.pub`, empty if there are none)
+   over that pinned HTTPS and gives them to `ssh` as the known host keys, so it
+   never trusts whichever key answers first.

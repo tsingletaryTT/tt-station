@@ -21,6 +21,55 @@ pub fn detect_device_mesh(tt_smi_json: &str) -> Option<String> {
     mesh_for(&board_types[0], count).map(str::to_string)
 }
 
+/// The box's chip inventory label (`"4xBH"`, `"2xWH"`, `"32xWH"`) from a
+/// verbatim `tt-smi -s` snapshot: one count per ASIC (`device_info` entry,
+/// the same unit `mesh_for` counts) and the architecture its `board_type`
+/// names. A mixed fleet lists each architecture (`"2xBH+1xWH"`). `None` when
+/// the snapshot is unreadable, empty, or names a board this table doesn't
+/// know -- callers report an empty label then rather than guess.
+pub fn chips_label(tt_smi_json: &str) -> Option<String> {
+    let board_types = board_types(tt_smi_json)?;
+    if board_types.is_empty() {
+        return None;
+    }
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for b in &board_types {
+        let arch = arch_for(b)?;
+        match counts.iter_mut().find(|(a, _)| *a == arch) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((arch, 1)),
+        }
+    }
+    Some(
+        counts
+            .iter()
+            .map(|(arch, n)| format!("{n}x{arch}"))
+            .collect::<Vec<_>>()
+            .join("+"),
+    )
+}
+
+/// `board_type` -> architecture code the apps expand (`BH` Blackhole, `WH`
+/// Wormhole, `GS` Grayskull). Blackhole boards are the p-series
+/// (p100/p150/p300) and Blackhole Galaxy; Wormhole boards are the n-series
+/// (n150/n300) and Wormhole Galaxy; Grayskull is the e-series (e75/e150).
+fn arch_for(board_type: &str) -> Option<&'static str> {
+    let b = board_type.to_ascii_lowercase();
+    if b.contains("bh") || b.contains("blackhole") || b.starts_with('p') {
+        Some("BH")
+    } else if b.contains("wh")
+        || b.contains("wormhole")
+        || b.contains("galaxy")
+        || b.starts_with('n')
+    {
+        Some("WH")
+    } else if b.contains("grayskull") || b.starts_with('e') {
+        Some("GS")
+    } else {
+        None
+    }
+}
+
 /// Every entry's lowercased `board_info.board_type` from a `tt-smi -s`
 /// snapshot, in the order `device_info` lists them. `None` when the snapshot
 /// isn't parseable JSON or has no `device_info` array.
@@ -123,6 +172,43 @@ pub fn mesh_for(board_type: &str, count: usize) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot(boards: &[&str]) -> String {
+        let entries: Vec<String> = boards
+            .iter()
+            .map(|b| format!(r#"{{"board_info":{{"board_type":"{b}"}}}}"#))
+            .collect();
+        format!(r#"{{"device_info":[{}]}}"#, entries.join(","))
+    }
+
+    #[test]
+    fn chips_label_counts_asics_by_architecture() {
+        assert_eq!(
+            chips_label(&snapshot(&["p300c"; 4])).as_deref(),
+            Some("4xBH")
+        );
+        assert_eq!(chips_label(&snapshot(&["p150a"])).as_deref(), Some("1xBH"));
+        assert_eq!(
+            chips_label(&snapshot(&["n300"; 2])).as_deref(),
+            Some("2xWH")
+        );
+        assert_eq!(
+            chips_label(&snapshot(&["tt-galaxy-wh"; 32])).as_deref(),
+            Some("32xWH")
+        );
+        assert_eq!(
+            chips_label(&snapshot(&["p150", "p150", "n150"])).as_deref(),
+            Some("2xBH+1xWH")
+        );
+    }
+
+    #[test]
+    fn chips_label_is_none_when_detection_tells_nothing() {
+        assert_eq!(chips_label(""), None); // the test stub's empty output
+        assert_eq!(chips_label("not json"), None);
+        assert_eq!(chips_label(r#"{"device_info":[]}"#), None);
+        assert_eq!(chips_label(&snapshot(&["mystery"])), None);
+    }
 
     #[test]
     fn maps_four_p300c_to_p300x2() {

@@ -22,7 +22,6 @@ These are not blockers to building, but need a decision before TT Station ships 
 |---|---|---|---|
 | IBM Plex Mono (`IBMPlexMono-*.ttf`) | iOS app bundle (`ios/Resources/Fonts`); desktop app via `@fontsource/ibm-plex-mono` (WOFF/WOFF2 in the Vite build) | OFL-1.1 | © 2017 IBM Corp., Reserved Font Name "Plex" |
 | Inter Tight (`InterTight-*.ttf`) | iOS app bundle (`ios/Resources/Fonts`); desktop app via `@fontsource/inter-tight` | OFL-1.1 | © 2022 The Inter Project Authors |
-| SwiftTerm | iOS app (Swift Package, `ios/project.yml`) | MIT | © Miguel de Icaza and contributors |
 
 The OFL requires that the license text travel with the fonts. The iOS bundle ships
 `OFL-IBMPlexMono.txt` and `OFL-InterTight.txt` next to the font files, the
@@ -99,7 +98,7 @@ all target platforms, as `cargo tree` resolves features. 283 crates.
 | crc32fast | 1.5.2 | MIT OR Apache-2.0 | https://github.com/srijs/rust-crc32fast |
 | critical-section | 1.2.0 | MIT OR Apache-2.0 | https://github.com/rust-embedded/critical-section |
 | crossbeam-deque | 0.8.6 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
-| crossbeam-epoch | 0.9.18 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
+| crossbeam-epoch | 0.9.21 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crossbeam-utils | 0.8.21 | MIT OR Apache-2.0 | https://github.com/crossbeam-rs/crossbeam |
 | crossterm | 0.29.0 | MIT | https://github.com/crossterm-rs/crossterm |
 | crossterm_winapi | 0.9.1 | MIT | https://github.com/crossterm-rs/crossterm-winapi |
@@ -136,7 +135,7 @@ all target platforms, as `cargo tree` resolves features. 283 crates.
 | generic-array | 0.14.7 | MIT | https://github.com/fizyk20/generic-array |
 | getrandom | 0.2.17 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
 | getrandom | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-random/getrandom |
-| h2 | 0.4.15 | MIT | https://github.com/hyperium/h2 |
+| h2 | 0.4.20 | MIT | https://github.com/hyperium/h2 |
 | hashbrown | 0.16.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | heck | 0.5.0 | MIT OR Apache-2.0 | https://github.com/withoutboats/heck |
@@ -222,9 +221,9 @@ all target platforms, as `cargo tree` resolves features. 283 crates.
 | ring | 0.17.14 | Apache-2.0 AND ISC | https://github.com/briansmith/ring |
 | rustc_version | 0.4.1 | MIT OR Apache-2.0 | https://github.com/djc/rustc-version-rs |
 | rustix | 1.1.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://github.com/bytecodealliance/rustix |
-| rustls | 0.23.41 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls |
+| rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT | https://github.com/rustls/rustls |
 | rustls-pki-types | 1.15.0 | MIT OR Apache-2.0 | https://github.com/rustls/pki-types |
-| rustls-webpki | 0.103.13 | ISC | https://github.com/rustls/webpki |
+| rustls-webpki | 0.103.15 | ISC | https://github.com/rustls/webpki |
 | rustversion | 1.0.22 | MIT OR Apache-2.0 | https://github.com/dtolnay/rustversion |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 | https://github.com/dtolnay/ryu |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 | https://github.com/bluss/scopeguard |
@@ -248,7 +247,7 @@ all target platforms, as `cargo tree` resolves features. 283 crates.
 | smallvec | 1.15.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-smallvec |
 | socket-pktinfo | 0.4.0 | MIT | https://github.com/pixsper/socket-pktinfo |
 | socket2 | 0.6.4 | MIT OR Apache-2.0 | https://github.com/rust-lang/socket2 |
-| spin | 0.9.8 | MIT | https://github.com/mvdnes/spin-rs |
+| spin | 0.9.9 | MIT | https://github.com/mvdnes/spin-rs |
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 | https://github.com/storyyeller/stable_deref_trait |
 | static_assertions | 1.1.0 | MIT OR Apache-2.0 | https://github.com/nvzqz/static-assertions-rs |
 | strsim | 0.11.1 | MIT | https://github.com/rapidfuzz/strsim-rs |
@@ -492,6 +491,29 @@ build toolchain and test tools). 136 packages.
 | vfile | 6.0.3 | MIT | vfile/vfile |
 | vfile-message | 4.0.3 | MIT | vfile/vfile-message |
 | zwitch | 2.0.4 | MIT | wooorm/zwitch |
+
+## Desktop app (Mac and Linux)
+
+The desktop apps (the Mac zip from `desktop/mac/build-mac.sh`, the Linux `tt-station-desktop`
+package from `desktop/linux/build-deb.sh`) package only the Electron shell (`desktop/electron/`,
+`desktop/assets/`): their screens come from the box. They redistribute Electron and the shell's
+runtime npm packages, installed by the build scripts from their own `package.json`
+(`bonjour-service` and its dependencies), not from `desktop/package-lock.json`.
+
+| Package | Version | License | Repository |
+|---|---|---|---|
+| electron | 44.7.0 | MIT | https://github.com/electron/electron |
+| bonjour-service | 1.3.0 | MIT | https://github.com/onlxltd/bonjour-service |
+| multicast-dns | 7.2.5 | MIT | https://github.com/mafintosh/multicast-dns |
+| dns-packet | 5.6.1 | MIT | https://github.com/mafintosh/dns-packet |
+| @leichtgewicht/ip-codec | 2.0.5 | MIT | https://github.com/martinheidegger/ip-codec |
+| thunky | 1.1.0 | MIT | https://github.com/mafintosh/thunky |
+| fast-deep-equal | 3.1.3 | MIT | https://github.com/epoberezkin/fast-deep-equal |
+
+Electron includes Chromium, Node.js and their dependencies, under their own licenses. Electron's
+`LICENSE` and Chromium's `LICENSES.chromium.html` travel with the app (the Linux package installs
+them in `/opt/tt-station-desktop/`), and each npm package above carries its own `LICENSE` in the
+app's `node_modules`.
 
 ## SIL Open Font License 1.1
 

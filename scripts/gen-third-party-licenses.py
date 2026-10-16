@@ -13,7 +13,8 @@ Sources:
         cd desktop && npm ci --omit=dev --ignore-scripts
         scripts/gen-third-party-licenses.py
     or point at another install with --node-modules DIR.
-  * Bundled assets (fonts, the iOS SwiftPM package) are described by hand below,
+  * Bundled assets (fonts) and the desktop shell's own runtime (Electron and the
+    packages the Mac and Linux builds install) are described by hand below,
     and the SIL Open Font License text is copied from ios/Resources/Fonts/.
 
 Usage: scripts/gen-third-party-licenses.py [--node-modules DIR] [--check]
@@ -45,6 +46,31 @@ These are not blockers to building, but need a decision before TT Station ships 
 | **`webpki-roots`** (Rust crate) | Transitive dependency of the TLS stack (`reqwest`/`rustls`) | CDLA-Permissive-2.0 | A data license (Mozilla's root CA list), not a software license; requires keeping the license text with redistributions. |
 """
 
+DESKTOP_SHELL = """\
+## Desktop app (Mac and Linux)
+
+The desktop apps (the Mac zip from `desktop/mac/build-mac.sh`, the Linux `tt-station-desktop`
+package from `desktop/linux/build-deb.sh`) package only the Electron shell (`desktop/electron/`,
+`desktop/assets/`): their screens come from the box. They redistribute Electron and the shell's
+runtime npm packages, installed by the build scripts from their own `package.json`
+(`bonjour-service` and its dependencies), not from `desktop/package-lock.json`.
+
+| Package | Version | License | Repository |
+|---|---|---|---|
+| electron | 44.7.0 | MIT | https://github.com/electron/electron |
+| bonjour-service | 1.3.0 | MIT | https://github.com/onlxltd/bonjour-service |
+| multicast-dns | 7.2.5 | MIT | https://github.com/mafintosh/multicast-dns |
+| dns-packet | 5.6.1 | MIT | https://github.com/mafintosh/dns-packet |
+| @leichtgewicht/ip-codec | 2.0.5 | MIT | https://github.com/martinheidegger/ip-codec |
+| thunky | 1.1.0 | MIT | https://github.com/mafintosh/thunky |
+| fast-deep-equal | 3.1.3 | MIT | https://github.com/epoberezkin/fast-deep-equal |
+
+Electron includes Chromium, Node.js and their dependencies, under their own licenses. Electron's
+`LICENSE` and Chromium's `LICENSES.chromium.html` travel with the app (the Linux package installs
+them in `/opt/tt-station-desktop/`), and each npm package above carries its own `LICENSE` in the
+app's `node_modules`.
+"""
+
 BUNDLED = """\
 ## Bundled assets
 
@@ -52,7 +78,6 @@ BUNDLED = """\
 |---|---|---|---|
 | IBM Plex Mono (`IBMPlexMono-*.ttf`) | iOS app bundle (`ios/Resources/Fonts`); desktop app via `@fontsource/ibm-plex-mono` (WOFF/WOFF2 in the Vite build) | OFL-1.1 | © 2017 IBM Corp., Reserved Font Name "Plex" |
 | Inter Tight (`InterTight-*.ttf`) | iOS app bundle (`ios/Resources/Fonts`); desktop app via `@fontsource/inter-tight` | OFL-1.1 | © 2022 The Inter Project Authors |
-| SwiftTerm | iOS app (Swift Package, `ios/project.yml`) | MIT | © Miguel de Icaza and contributors |
 
 The OFL requires that the license text travel with the fonts. The iOS bundle ships
 `OFL-IBMPlexMono.txt` and `OFL-InterTight.txt` next to the font files, the
@@ -153,6 +178,7 @@ build toolchain and test tools). {len(npm)} packages.
 
 {table(npm)}
 
+{DESKTOP_SHELL}
 ## SIL Open Font License 1.1
 
 {chr(10).join(ofl)}

@@ -412,7 +412,8 @@ pub const APPS: &[AppDef] = &[
         extra_args: &[],
         show_key: false,
         // The box as its model provider; memory search off (it would need embeddings the box doesn't serve).
-        files: &[("/home/node/.openclaw/openclaw.json", "{\n  \"gateway\": { \"mode\": \"local\" },\n  \"models\": { \"providers\": { \"tt\": { \"baseUrl\": \"{base}\", \"apiKey\": \"{key}\", \"api\": \"openai-completions\", \"models\": [ { \"id\": \"quietbox\", \"name\": \"QuietBox\", \"contextWindow\": 131072, \"maxTokens\": 8192 } ] } } },\n  \"agents\": { \"defaults\": { \"model\": { \"primary\": \"tt/quietbox\" } } },\n  \"memory\": { \"search\": { \"provider\": \"none\" } }\n}\n")],
+        // `quietbox` is the gateway's catch-all model name (any name reaches the served model).
+        files: &[("/home/node/.openclaw/openclaw.json", "{\n  \"gateway\": { \"mode\": \"local\" },\n  \"models\": { \"providers\": { \"tt\": { \"baseUrl\": \"{base}\", \"apiKey\": \"{key}\", \"api\": \"openai-completions\", \"models\": [ { \"id\": \"quietbox\", \"name\": \"TT Station\", \"contextWindow\": {context}, \"maxTokens\": 8192 } ] } } },\n  \"agents\": { \"defaults\": { \"model\": { \"primary\": \"tt/quietbox\" } } },\n  \"memory\": { \"search\": { \"provider\": \"none\" } }\n}\n")],
     },
     AppDef {
         id: "lightrag",
@@ -933,6 +934,10 @@ fn install_blocking(
         .map(|e| e.model)
         .unwrap_or_else(|| "quietbox".into());
     let dims = crate::embeddings::embed_dims(state).to_string();
+    // The served model's context when it's been checked, else a common 128K.
+    let context = crate::coding::known_context(&model)
+        .unwrap_or(131072)
+        .to_string();
     // The box only, unless its owner opened it to the network.
     let open = is_open(state, def);
     let bind = publish_host(def, open);
@@ -971,7 +976,9 @@ fn install_blocking(
             let host = dir.join(name);
             std::fs::write(
                 &host,
-                fill(contents, &base, &key, &token, &model).replace("{embed_dim}", &dims),
+                fill(contents, &base, &key, &token, &model)
+                    .replace("{embed_dim}", &dims)
+                    .replace("{context}", &context),
             )
             .map_err(|e| e.to_string())?;
             cmd.args(["-v", &format!("{}:{inside}", host.display())]);

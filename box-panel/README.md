@@ -1,6 +1,6 @@
 # tt-station box panel
 
-A tiny GTK4 control surface that runs **on the QuietBox** — the physical box's
+A tiny GTK4 control surface that runs **on the Tenstorrent box** (QuietBox, Galaxy server or workstation) — the physical box's
 little face for tt-station. Not a dashboard (that's a different tool); just
 enough to know "hey, it's working," pair a client, and start/stop the agent.
 
@@ -71,7 +71,7 @@ resolves, or set the env vars below.
 | `TTS_SERVICE_NAME` | `tt-station-agentd.service` | the systemd `--user` unit to start/stop/restart/poll — matches the Rust `console::names::ToolNames::service_name` default |
 | `TTS_AGENT_BIN` | `tt-station-agentd` | binary name/path baked into a profile drop-in's `ExecStart=` line — matches `ToolNames::agent_bin`; **not** used to launch a process directly anymore |
 | `TTS_TT_BIN` | `./target/release/tt-station` | `tt-station` CLI, used for `tt-station console --snapshot` (state) and `tt-station reset` |
-| `TTS_NAME` | `qb2-lab` | box name, shown in the window title |
+| `TTS_NAME` | this machine's hostname | box name, shown in the window title |
 | `TTS_CTRL_PORT` | `8765` | `--ctrl-port` passed to `tt-station console --snapshot` and used for `tt-station reset --host` |
 | `TTS_SERVING_HOST` | `<name>.local` | fallback endpoint host, used only when the snapshot has no `endpoint` yet |
 | `TTS_SERVING_PORT` | `8003` | fallback endpoint port (see above) |

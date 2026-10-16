@@ -129,6 +129,9 @@ pub struct Facts {
     /// Set while a Lab run or an Orchard bring-up has the chips: tt-smi isn't
     /// read then, and their containers aren't strays.
     pub chips_lent_to: Option<String>,
+    /// The tt-inference-server checkout the run.py backend serves from, when
+    /// it isn't there (`None` when it is, or another backend is in use).
+    pub inference_repo_missing: Option<String>,
 }
 
 /// Parse `tt-smi -s` JSON into chips and the driver version.
@@ -428,6 +431,17 @@ pub fn checks(f: &Facts) -> Vec<Check> {
             ));
         }
     }
+    if let Some(path) = &f.inference_repo_missing {
+        out.push(
+            Check::new(
+                "inference_repo",
+                "Model-serving code is missing",
+                Status::Fail,
+                format!("TT Station starts models with Tenstorrent's tt-inference-server, and expects a copy of it at {path}. There isn't one, so no model can start. Download it with the command below, then start a model again."),
+            )
+            .command(format!("git clone https://github.com/tenstorrent/tt-inference-server {path}")),
+        );
+    }
     if f.headless_power == Some(false) {
         out.push(Check::new(
             "power",
@@ -475,12 +489,13 @@ pub async fn gather(state: &AppState) -> Facts {
         .ok()
         .and_then(Result::ok);
     let parsed = snapshot.as_deref().and_then(parse_tt_smi);
+    // Every count in the chips label ("4xBH", "2xBH+1xWH"); none (it's
+    // empty when startup detection found nothing) means "nothing to compare".
     let expected_chips = state
         .chips()
-        .split(|c: char| !c.is_ascii_digit())
-        .next()
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(4);
+        .split('+')
+        .filter_map(|part| part.split('x').next()?.trim().parse::<usize>().ok())
+        .sum();
 
     let life = state.lifecycle();
     let since = std::time::SystemTime::now()
@@ -669,6 +684,10 @@ pub async fn gather(state: &AppState) -> Facts {
         iommu_translated,
         driver_hangs,
         stuck_start: crate::community::stalled_s(state),
+        inference_repo_missing: state
+            .tt_inference_repo()
+            .filter(|p| !p.is_dir())
+            .map(|p| p.display().to_string()),
     }
 }
 
@@ -1132,7 +1151,21 @@ mod tests {
             iommu_translated: None,
             driver_hangs: 0,
             stuck_start: None,
+            inference_repo_missing: None,
         }
+    }
+
+    #[test]
+    fn a_missing_inference_checkout_says_how_to_get_it() {
+        let mut f = healthy();
+        f.inference_repo_missing = Some("/home/u/code/tt-inference-server".into());
+        let c = checks(&f);
+        let c = c.iter().find(|c| c.id == "inference_repo").unwrap();
+        assert_eq!(c.status, Status::Fail);
+        assert_eq!(
+            c.command.as_deref(),
+            Some("git clone https://github.com/tenstorrent/tt-inference-server /home/u/code/tt-inference-server")
+        );
     }
 
     #[test]

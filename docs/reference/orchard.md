@@ -20,7 +20,8 @@ The first two go through `src/orchard_bridge.py` (embedded with `include_str!`, 
 ## Setup on the box (once)
 
 The agent looks for `~/code/tt-orchard` (`$TT_ORCHARD_DIR`) and runs it with `python3.12`
-(`$TT_ORCHARD_PYTHON`). `POST /orchard/setup` clones it if missing and runs
+(`$TT_ORCHARD_PYTHON`). `POST /orchard/setup` clones it if missing, checks out the pinned commit (`orchard.rs` `PIN`; refuses
+if it can't be fetched or the checkout has local changes) and runs
 `python3.12 -m orchard.setup_machine --yes`: gozer, the reference venv, the `tt-orchard` link, the
 QuietBox 2 config (`config/bringup.toml`, `config/tiers.toml`, written only once gozer reports two
 p300 boards), `ollama pull qwen3-coder:30b` and `tt-model pull` of the coder (~160 GB). Two steps

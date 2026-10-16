@@ -160,6 +160,17 @@ pub fn valid_repo(r: &str) -> bool {
     matches!(r.split('/').collect::<Vec<_>>()[..], [o, n] if ok(o) && ok(n))
 }
 
+/// Why an install is refused on a channel with no trusted key.
+pub const NO_SIGNING_KEY: &str =
+    "Updates aren't available for this build yet: it has no release signing key.";
+
+/// The channel can verify a release: it trusts at least one key (compiled in,
+/// or from the channel file and approved by an owner). With none, every
+/// signed package would be refused, so the apps shouldn't offer an update.
+pub fn signing_ready(channel: &Channel) -> bool {
+    !channel.keys.is_empty()
+}
+
 fn unsigned_allowed() -> bool {
     matches!(
         std::env::var(ALLOW_UNSIGNED_ENV).as_deref(),
@@ -1171,6 +1182,7 @@ pub(crate) async fn get_updates(State(state): State<AppState>, _auth: BearerAuth
         "history": h.iter().rev().take(10).collect::<Vec<_>>(),
         "undo": if can_undo { h.last().map(|c| json!({ "to": c.from, "label": c.from_label })) } else { None },
         "working": WORK.lock().expect("updates").clone(),
+        "signing_ready": channel.as_ref().is_ok_and(signing_ready),
         "channel": channel.ok(),
         "problem": problem,
     }))
@@ -1206,6 +1218,10 @@ pub(crate) async fn post_install(
     let busy = Busy::claim("Checking releases")
         .ok_or_else(|| err(StatusCode::CONFLICT, "An update is already going."))?;
     let channel = channel(&state.config_dir()).map_err(|e| err(StatusCode::CONFLICT, e))?;
+    // The developer override (`ALLOW_UNSIGNED_ENV`) is the one way past this.
+    if !signing_ready(&channel) && !channel.unsigned_allowed {
+        return Err(err(StatusCode::CONFLICT, NO_SIGNING_KEY));
+    }
     let list = releases(&channel.repo, true)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;

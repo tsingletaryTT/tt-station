@@ -32,8 +32,7 @@ named but that isn't there is treated as a mistake, not "use defaults."
 
 Format is TOML. All fields in every section are optional; a field absent
 everywhere falls through to the precedence chain below and, ultimately, a
-built-in default (or, for `name`/`ctrl_port`, a hard error if never set at
-all — see "Precedence").
+built-in default — see "Precedence".
 
 ### Top level
 
@@ -45,9 +44,9 @@ all — see "Precedence").
 
 | Key | Type | Meaning |
 |---|---|---|
-| `name` | string | Box name; the mDNS instance name and the `name` TXT/JSON key. Required overall (via this, `--name`, or nothing — see "Precedence"). |
-| `ctrl_port` | integer (u16) | Control-plane HTTP port to bind/advertise. Required overall (via this, `--ctrl-port`, or nothing). |
-| `chips` | string | Chip inventory string advertised in the `chips` TXT key / `/status`. Default `"4xBH"`. |
+| `name` | string | Box name; the mDNS instance name and the `name` TXT/JSON key. Default: this machine's short hostname, lowercased, with anything but letters, digits and `-` turned into `-`. |
+| `ctrl_port` | integer (u16) | Control-plane HTTP port to bind/advertise. Default `8765`. |
+| `chips` | string | Chip inventory string advertised in the `chips` TXT key / `/status`. An override: by default it's derived from the startup `tt-smi -s` scan (ASIC count × architecture, e.g. `"4xBH"`, `"2xWH"`, `"32xWH"`), and empty when that scan finds nothing. |
 | `apiver` | integer (u8) | API version advertised in the `apiver` TXT key. Default `1`. |
 | `token_store` | string (path) | Where to persist issued bearer tokens. Default `~/.config/tt-station/agentd-tokens.json`. Ignored when `no_token_persistence` is set. |
 | `no_token_persistence` | bool | Opt out of persisting bearer tokens across restarts (in-memory only). Default `false`. |
@@ -89,7 +88,7 @@ time — see "Errors" below.
 default_profile = "stable"
 
 [global]
-name = "qb2-lab"
+name = "mybox"
 ctrl_port = 8765
 chips = "4xBH"
 token_store = "~/.config/tt-station/agentd-tokens.json"
@@ -104,7 +103,7 @@ backend = "runpy"
 tt_inference_repo = "~/code/tt-inference-server"
 serving_image = "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.14.0-80180b9-7678b70"
 tt_device = "p300x2"
-serving_host = "qb2-lab.local"
+serving_host = "mybox.local"
 serving_port = 8003
 auto_image = false
 host_hf_cache = "~/.cache/huggingface"
@@ -134,11 +133,11 @@ explicit CLI flag  >  active profile (serving-scoped) or [global] (global-scoped
 - Every overridable CLI flag is `Option<T>` with **no clap default** — clap
   reports `None` when the operator didn't pass it, so "not passed" can be
   told apart from "passed the same value as the default." The hardcoded
-  defaults (`"4xBH"`, `8000`, `"runpy"`, etc.) live in the resolver
+  defaults (`8765`, `8000`, `"runpy"`, etc.) live in the resolver
   (`config::resolve`), applied only after flag/profile/global all miss.
-- `name` and `ctrl_port` have **no built-in default** — one of `--name`/
-  `[global].name` and `--ctrl-port`/`[global].ctrl_port` must resolve to a
-  value or the agent hard-errors at startup.
+- `name` defaults to the machine's hostname and `ctrl_port` to `8765`, so the
+  packaged unit (`/usr/bin/tt-station-agentd`, no flags, no config file)
+  starts as is.
 - `[global]` only supplies global-scoped settings; the active profile only
   supplies serving-scoped settings — there is no cross-scope fallback.
 
@@ -201,7 +200,7 @@ was actually resolved at boot:
   "active_profile": "stable",
   "available_profiles": ["bleeding", "stable"],
   "backend": "runpy",
-  "serving_host": "qb2-lab.local",
+  "serving_host": "mybox.local",
   "serving_port": 8003,
   "serving_image": "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.14.0-80180b9-7678b70",
   "tt_inference_repo": "/home/operator/code/tt-inference-server",
@@ -250,5 +249,5 @@ half-serving:
 | `--profile X` (or `default_profile = "X"`) names a profile absent from the file | Hard error listing the available profile names. |
 | `--profile` given but the file defines no `[profile.*]` at all | Hard error. |
 | A serving-scoped key under `[global]`, or a global-scoped key under `[profile.*]` | Unknown-key rejection at parse (same as any other typo). |
-| `name`/`ctrl_port` unresolved after flag/`[global]` | Hard error (no built-in default for either). |
+| `name`/`ctrl_port` unresolved after flag/`[global]` | Not an error — hostname and `8765`. |
 | `GET /config` on an agent with no config file | Not an error — returns the implicit-default summary (`active_profile: null`, `available_profiles: []`). |

@@ -290,7 +290,7 @@ fn may_claim(state: &AppState, who: &Who, person: &str) -> Result<(), ApiError> 
             .unwrap_or_else(|| "That person".into());
         return Err(err(
             StatusCode::FORBIDDEN,
-            format!("{name} already has a phone or computer on this box. To make this device {name}'s too, ask an owner: Settings → Pairing and security → Devices."),
+            format!("{name} already has a phone or computer on this box. To make this device {name}'s too, ask an owner: Settings → Devices and pairing."),
         ));
     }
     Ok(())

@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail};
+use anyhow::bail;
 use serde::Deserialize;
 
 /// Parsed form of agentd.toml. `deny_unknown_fields` on every struct so a
@@ -106,7 +106,9 @@ pub struct ResolvedConfig {
     // global
     pub name: String,
     pub ctrl_port: u16,
-    pub chips: String,
+    /// `--chips`/`[global].chips` when the operator set one; `None` means
+    /// "use what `tt-smi -s` finds at startup".
+    pub chips: Option<String>,
     pub apiver: u8,
     pub token_store: Option<PathBuf>, // None iff persistence disabled
     pub telemetry_interval_ms: u64,
@@ -191,6 +193,36 @@ pub fn default_tt_inference_repo() -> String {
     format!("{home}/code/tt-inference-server")
 }
 
+/// The control-plane port when neither `--ctrl-port` nor `[global].ctrl_port`
+/// says otherwise (what the apps and docs assume).
+pub const DEFAULT_CTRL_PORT: u16 = 8765;
+
+/// Turn a hostname into a box name: the short form (up to the first `.`),
+/// lowercased, with anything but ASCII letters, digits and `-` replaced by
+/// `-` (an mDNS label and a `<name>.local` host both stay valid). Falls back
+/// to `tt-station` when nothing usable is left.
+pub fn sanitize_box_name(hostname: &str) -> String {
+    let short = hostname.trim().split('.').next().unwrap_or_default();
+    let mut out = String::new();
+    for c in short.chars() {
+        let c = if c.is_ascii_alphanumeric() {
+            c.to_ascii_lowercase()
+        } else {
+            '-'
+        };
+        if !(c == '-' && out.ends_with('-')) {
+            out.push(c);
+        }
+    }
+    let out: String = out.trim_matches('-').chars().take(63).collect();
+    let out = out.trim_end_matches('-');
+    if out.is_empty() {
+        "tt-station".into()
+    } else {
+        out.to_string()
+    }
+}
+
 pub fn default_host_hf_cache() -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     format!("{home}/.cache/huggingface")
@@ -257,15 +289,22 @@ pub fn resolve(
         layers.iter().find_map(|o| (*o).clone())
     }
 
-    // --- required (no built-in default) ---
+    // --- identity: defaults so the packaged unit starts with no config ---
+    // The .deb's systemd unit runs the binary bare, so `name` falls back to
+    // this machine's hostname and `ctrl_port` to the documented 8765.
     let name = pick([&cli.name, &g.name, &None])
-        .ok_or_else(|| anyhow!("`name` is required (pass --name or set [global].name)"))?;
-    let ctrl_port = pick([&cli.ctrl_port, &g.ctrl_port, &None]).ok_or_else(|| {
-        anyhow!("`ctrl_port` is required (pass --ctrl-port or set [global].ctrl_port)")
-    })?;
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| {
+            sanitize_box_name(
+                &std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default(),
+            )
+        });
+    let ctrl_port = pick([&cli.ctrl_port, &g.ctrl_port, &None]).unwrap_or(DEFAULT_CTRL_PORT);
 
     // --- global-scoped with built-in defaults ---
-    let chips = pick([&cli.chips, &g.chips, &None]).unwrap_or_else(|| "4xBH".into());
+    // An explicit override only: when absent, `main` derives the label from
+    // the startup `tt-smi -s` scan (`device::chips_label`).
+    let chips = pick([&cli.chips, &g.chips, &None]).filter(|c| !c.trim().is_empty());
     let apiver = pick([&cli.apiver, &g.apiver, &None]).unwrap_or(1);
     let telemetry_interval_ms =
         pick([&cli.telemetry_interval_ms, &g.telemetry_interval_ms, &None]).unwrap_or(1000);
@@ -510,14 +549,14 @@ mod resolve_tests {
         assert!(r.available_profiles.is_empty());
         assert_eq!(r.backend, "runpy");
         assert_eq!(r.serving_port, 8000); // built-in default
-        assert_eq!(r.chips, "4xBH");
+        assert_eq!(r.chips, None); // detected at startup, not defaulted here
     }
 
     #[test]
     fn global_supplies_value_below_default() {
         let f = file_with("[global]\nchips = \"8xBH\"\n");
         let r = resolve(base_cli(), None, Some(f), None).unwrap();
-        assert_eq!(r.chips, "8xBH");
+        assert_eq!(r.chips.as_deref(), Some("8xBH"));
     }
 
     #[test]
@@ -528,7 +567,7 @@ mod resolve_tests {
         let r = resolve(base_cli(), None, Some(f), None).unwrap();
         assert_eq!(r.active_profile.as_deref(), Some("p"));
         assert_eq!(r.serving_port, 8003); // from profile
-        assert_eq!(r.chips, "8xBH"); // from global
+        assert_eq!(r.chips.as_deref(), Some("8xBH")); // from global
     }
 
     #[test]
@@ -578,10 +617,30 @@ mod resolve_tests {
     }
 
     #[test]
-    fn missing_name_or_ctrl_port_errors() {
-        let mut cli = base_cli();
-        cli.name = None;
-        assert!(resolve(cli, None, None, None).is_err());
+    fn name_and_ctrl_port_default_when_absent() {
+        // The packaged unit runs the binary with no flags and no config file.
+        let r = resolve(CliOverrides::default(), None, None, None).unwrap();
+        assert_eq!(r.ctrl_port, DEFAULT_CTRL_PORT);
+        let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+        assert_eq!(r.name, sanitize_box_name(&host));
+        assert!(!r.name.is_empty());
+
+        // Explicit values still win: config file, then the flag above it.
+        let f = file_with("[global]\nname = \"lab\"\nctrl_port = 9001\n");
+        let r = resolve(CliOverrides::default(), None, Some(f), None).unwrap();
+        assert_eq!((r.name.as_str(), r.ctrl_port), ("lab", 9001));
+        let f = file_with("[global]\nname = \"lab\"\nctrl_port = 9001\n");
+        let r = resolve(base_cli(), None, Some(f), None).unwrap();
+        assert_eq!((r.name.as_str(), r.ctrl_port), ("box", 8765));
+    }
+
+    #[test]
+    fn hostnames_become_box_names() {
+        assert_eq!(sanitize_box_name("qb2-lab\n"), "qb2-lab");
+        assert_eq!(sanitize_box_name("Galaxy01.corp.example.com"), "galaxy01");
+        assert_eq!(sanitize_box_name("my_box  two"), "my-box-two");
+        assert_eq!(sanitize_box_name("--"), "tt-station");
+        assert_eq!(sanitize_box_name(""), "tt-station");
     }
 
     #[test]

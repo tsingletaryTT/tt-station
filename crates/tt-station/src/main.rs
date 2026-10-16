@@ -133,7 +133,7 @@ enum Command {
         host: Option<String>,
 
         /// A `ttstation://pair?...` link from the box (TT Station on the box:
-        /// Settings → Pairing and security → Pair another computer). Carries
+        /// Settings → Devices and pairing → Pair a device). Carries
         /// the address, the code and the certificate fingerprint.
         #[arg(long, conflicts_with_all = ["code", "fp"])]
         link: Option<String>,

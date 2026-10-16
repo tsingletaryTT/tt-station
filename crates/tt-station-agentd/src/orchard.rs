@@ -54,7 +54,32 @@ use crate::routes::{AppState, BearerAuth, Phase};
 
 const BRIDGE: &str = include_str!("orchard_bridge.py");
 const REPO: &str = "https://github.com/tsingletaryTT/tt-orchard.git";
+/// The tt-orchard commit `POST /orchard/setup` checks out and runs. Its setup
+/// runs as the box account, so it's never "whatever HEAD is today": bump this
+/// deliberately, after reading what changed, and only to a commit the bridge
+/// (`orchard_bridge.py`) has been run against. Today it's the head of
+/// tt-orchard PR #3 (`refs/pull/3/head`), not on `main` yet: setup fetches
+/// it by hash.
+const PIN: &str = "dedf904a3b0593837802c5242e33f364bfbecb89";
 const SETUP_UNIT: &str = "tt-orchard-setup";
+/// `sh -c` for setup: `$1` checkout, `$2` python, `$3` repo URL, `$4` [`PIN`].
+const SETUP_SCRIPT: &str = r#"set -e
+test -d "$1/.git" || git clone --quiet "$3" "$1"
+cd "$1"
+if [ "$(git rev-parse HEAD)" != "$4" ]; then
+    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+        echo "tt-orchard in $1 has local changes; commit or stash them, then run setup again." >&2
+        exit 1
+    fi
+    git cat-file -e "$4^{commit}" 2>/dev/null || git fetch --quiet origin "$4" || true
+    if ! git cat-file -e "$4^{commit}" 2>/dev/null; then
+        echo "tt-orchard commit $4 isn't in $3; refusing to run any other version." >&2
+        exit 1
+    fi
+    echo "Moving tt-orchard in $1 to $4"
+    git -c advice.detachedHead=false checkout --quiet --detach "$4"
+fi
+exec "$2" -m orchard.setup_machine --yes"#;
 
 /// tt-orchard's own names for its stages (`orchard/lexicon.py`).
 pub const STAGES: [(&str, &str); 9] = [
@@ -721,9 +746,12 @@ impl Orchard {
         Ok(launch)
     }
 
+    /// Clone (if missing), move the checkout to [`PIN`] and run tt-orchard's
+    /// setup. The only place the checkout is changed, and only on an explicit
+    /// `POST /orchard/setup`: refuses when the commit can't be had, or when
+    /// an existing checkout has local changes that a checkout would clobber.
     pub fn setup_blocking(&self) -> anyhow::Result<()> {
-        let script = "test -d \"$1/.git\" || git clone --quiet \"$3\" \"$1\" || exit 1; \
-                      cd \"$1\" && exec \"$2\" -m orchard.setup_machine --yes";
+        let script = SETUP_SCRIPT;
         let argv: Vec<String> = vec![
             "/bin/sh".into(),
             "-c".into(),
@@ -732,6 +760,7 @@ impl Orchard {
             self.checkout.display().to_string(),
             self.python.display().to_string(),
             REPO.into(),
+            PIN.into(),
         ];
         let log = self.log_path("setup");
         let _ = std::fs::remove_file(&log);
@@ -1679,6 +1708,60 @@ pub(crate) async fn post_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Setup moves a checkout to the pin, and refuses a commit it can't get
+    /// or a checkout with local changes. A local repo stands in for GitHub.
+    #[test]
+    fn setup_checks_out_the_pinned_commit_or_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let out = Command::new("git")
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        git(&["init", "-q"], &src);
+        git(&["commit", "-q", "--allow-empty", "-m", "one"], &src);
+        let pinned = git(&["rev-parse", "HEAD"], &src);
+        git(&["commit", "-q", "--allow-empty", "-m", "two"], &src);
+        let python = dir.path().join("python");
+        std::fs::write(&python, "#!/bin/sh\necho setup ran\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let checkout = dir.path().join("tt-orchard");
+        let run = |pin: &str| {
+            Command::new("/bin/sh")
+                .args(["-c", SETUP_SCRIPT, "sh"])
+                .arg(&checkout)
+                .arg(&python)
+                .arg(&src)
+                .arg(pin)
+                .output()
+                .unwrap()
+        };
+
+        let out = run(&pinned);
+        assert!(out.status.success(), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("setup ran"));
+        assert_eq!(git(&["rev-parse", "HEAD"], &checkout), pinned);
+
+        let out = run(&"1".repeat(40));
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("refusing to run any other version"));
+
+        std::fs::write(checkout.join("f"), "x").unwrap();
+        git(&["add", "f"], &checkout);
+        let newer = git(&["rev-parse", "HEAD"], &src);
+        let out = run(&newer);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("local changes"));
+        assert_eq!(git(&["rev-parse", "HEAD"], &checkout), pinned);
+    }
 
     #[test]
     fn model_ids_and_run_names() {

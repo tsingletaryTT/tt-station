@@ -152,7 +152,7 @@ impl FromRequestParts<AppState> for LocalOrPaired {
 
 /// What a member hears when it asks for something only an owner may do.
 pub(crate) const OWNER_ONLY: &str =
-    "Only an owner of this box can do that. An owner can make this device one in Settings → Pairing and security → Devices.";
+    "Only an owner of this box can do that. An owner can make this device one in Settings → Devices and pairing.";
 
 /// Who is making a request: the box's own user (plain HTTP from its own
 /// account, see `only_local`), a paired device, or both (the desktop app on
@@ -315,6 +315,8 @@ pub const PUBLIC_ROUTES: &[(&str, &str)] = &[
     // Up or not, nothing more (`crate::health`): for supervisors and load balancers.
     ("GET", "/healthz"),
     ("GET", "/tls"),
+    // The SSH server's public host keys, for apps to pin before signing in.
+    ("GET", "/ssh/host-keys"),
     ("POST", "/pair/init"),
     ("POST", "/pair/complete"),
     // Checks the local secret itself.

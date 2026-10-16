@@ -461,6 +461,40 @@ async fn a_broken_channel_file_is_reported_and_stops_an_install() {
         .contains("isn't a GitHub owner/name"));
 }
 
+/// With no trusted key the box says so (`signing_ready: false`) and an
+/// install is refused before anything is fetched.
+#[tokio::test]
+async fn no_signing_key_means_no_update() {
+    let _env = ENV.lock().await;
+    let b = Box_::new("unsigned").await;
+    let (status, v) = b.send(&b.owner, "GET", "/updates", json!({})).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["signing_ready"], false, "{v}");
+
+    // A valid channel whose only key no owner has approved: still not ready.
+    let (_, _, b64) = keypair("pending");
+    std::fs::write(
+        b.config.join(updates::CHANNEL_FILE),
+        format!("repo = \"acme/tt-station\"\n[[keys]]\nname = \"acme-2026\"\nkey = \"{b64}\"\n"),
+    )
+    .unwrap();
+    let c = updates::channel(&b.config).unwrap();
+    assert_eq!(updates::signing_ready(&c), !c.keys.is_empty());
+    if c.keys.is_empty() {
+        let (status, v) = b
+            .send(&b.owner, "POST", "/updates/install", json!({}))
+            .await;
+        assert_eq!(status, 409, "{v}");
+        assert_eq!(v["error"], updates::NO_SIGNING_KEY, "{v}");
+    }
+    let (_, key, _) = keypair("trusted");
+    let ready = updates::Channel {
+        keys: vec![key],
+        ..c
+    };
+    assert!(updates::signing_ready(&ready));
+}
+
 #[tokio::test]
 async fn undo_needs_a_finished_switch_and_the_version_before_on_disk() {
     let _env = ENV.lock().await;

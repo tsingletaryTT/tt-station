@@ -37,7 +37,7 @@ any box:
                      (see C1 in the final-review report), so a
                      bare TTS_AGENT_BIN alone is not enough.
   TTS_TT_BIN        path to tt-station (for --snapshot and Reset)  (default: ./target/release/tt-station)
-  TTS_NAME          box name, shown in the window title    (default: qb2-lab)
+  TTS_NAME          box name, shown in the window title    (default: hostname)
   TTS_CTRL_PORT     --ctrl-port passed to `tt-station console`     (default: 8765)
   TTS_SERVING_HOST  fallback endpoint host, used only if   (default: <hostname>.local)
                      the snapshot doesn't carry one yet
@@ -50,7 +50,7 @@ any box:
                                                              ~/.config/tt-station/agentd.toml)
 """
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 import json
 import os
@@ -83,7 +83,7 @@ AGENT_BIN = os.environ.get("TTS_AGENT_BIN", "tt-station-agentd")
 # Rust side's `console::names::ToolNames::service_name` default exactly.
 SERVICE_NAME = os.environ.get("TTS_SERVICE_NAME", "tt-station-agentd.service")
 TT_BIN = os.environ.get("TTS_TT_BIN", "./target/release/tt-station")
-NAME = os.environ.get("TTS_NAME", "qb2-lab")
+NAME = os.environ.get("TTS_NAME") or socket.gethostname().split(".")[0] or "tt-station"
 CTRL_PORT = os.environ.get("TTS_CTRL_PORT", "8765")
 SERVING_HOST = os.environ.get("TTS_SERVING_HOST", f"{NAME}.local")
 SERVING_PORT = os.environ.get("TTS_SERVING_PORT", "8003")
@@ -953,7 +953,7 @@ def install_desktop_icon():
             "[Desktop Entry]\n"
             "Type=Application\n"
             "Name=tt-station panel\n"
-            "Comment=Tenstorrent QuietBox agent control panel\n"
+            "Comment=Tenstorrent box agent control panel\n"
             f"Exec=python3 {script}\n"
             f"Path={repo_root}\n"
             f"Icon={APP_ID}\n"

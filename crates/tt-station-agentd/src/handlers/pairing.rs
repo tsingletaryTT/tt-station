@@ -181,9 +181,9 @@ pub(crate) async fn pair_complete(
         kind: "devices",
         title: format!("New device paired: {what}"),
         body: if session.owner {
-            "It's an owner: it can use this box and manage it. If you don't recognize it, remove it in Settings → Pairing and security → Devices.".to_string()
+            "It's an owner: it can use this box and manage it. If you don't recognize it, remove it in Settings → Devices and pairing.".to_string()
         } else {
-            "It's a member: it can use this box, but not manage it. If you don't recognize it, remove it in Settings → Pairing and security → Devices.".to_string()
+            "It's a member: it can use this box, but not manage it. If you don't recognize it, remove it in Settings → Devices and pairing.".to_string()
         },
     });
 

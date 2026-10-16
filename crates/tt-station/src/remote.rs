@@ -128,7 +128,7 @@ where
                  SHA-256 {}\n  HTTPS port {}\n\
                  From now on this computer talks to it only over HTTPS and only with that \
                  certificate. If the box shows a different fingerprint (TT Station on the box: \
-                 Settings → Pairing and security), run `tt-station pair {key}` again.",
+                 Settings → Devices and pairing), run `tt-station pair {key}` again.",
                 cert.sha256, cert.port
             );
             Ok(Conn {
@@ -228,7 +228,7 @@ pub async fn prepare_pair(
         if expected.is_some() {
             " -- matches the pairing link"
         } else {
-            " -- the box shows this in TT Station → Settings → Pairing and security; check it matches"
+            " -- the box shows this in TT Station → Settings → Devices and pairing; check it matches"
         }
     );
     Ok(PairTarget {

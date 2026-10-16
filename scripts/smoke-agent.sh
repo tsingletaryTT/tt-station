@@ -14,11 +14,20 @@
 # agent's output, if it exits first -- which is how a router panic at start
 # (axum's "Overlapping method route") shows up. Used by CI's Rust job and by
 # the packaging job against the installed .deb.
+#
+# SMOKE_BARE=1 starts the agent with no flags at all, the way the packaged
+# systemd unit does (name from the hostname, port 8765), and ignores PORT.
+# Only for a clean container, where 8765/8766 are free.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${1:-$ROOT/target/release/tt-station-agentd}"
 PORT="${2:-18765}"
+ARGS=(--name smoke --ctrl-port "$PORT")
+if [ "${SMOKE_BARE:-0}" = 1 ]; then
+    PORT=8765
+    ARGS=()
+fi
 WAIT_SECS="${SMOKE_WAIT_SECS:-60}"
 
 [ -x "$BIN" ] || { echo "smoke: $BIN isn't an executable" >&2; exit 1; }
@@ -42,10 +51,10 @@ for cmd in tt-smi docker systemctl systemd-run tt; do
     chmod +x "$WORK/stubs/$cmd"
 done
 
-echo "smoke: starting $BIN on port $PORT"
+echo "smoke: starting $BIN ${ARGS[*]:-(no flags)} on port $PORT"
 HOME="$WORK/home" TT_CONFIG_DIR="$WORK/home/.config/tt-station" \
     PATH="$WORK/stubs:/usr/local/bin:/usr/bin:/bin" \
-    "$BIN" --name smoke --ctrl-port "$PORT" > "$WORK/agent.log" 2>&1 &
+    "$BIN" "${ARGS[@]}" > "$WORK/agent.log" 2>&1 &
 PID=$!
 
 fail() {

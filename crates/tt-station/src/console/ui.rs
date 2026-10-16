@@ -80,7 +80,12 @@ const TEAL: Color = Color::Rgb(0x4f, 0xd1, 0xc5);
 pub fn header_lines(s: &BoxLifecycleSnapshot) -> Vec<String> {
     let name = s.name.clone().unwrap_or_else(|| "tt-station".into());
     let svc = service_label(&s.service);
-    let mesh = s.chips.clone().unwrap_or_else(|| "unknown chips".into());
+    // An empty label: the box couldn't read its chips at startup.
+    let mesh = s
+        .chips
+        .clone()
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| "unknown chips".into());
     let profile = s
         .config
         .as_ref()

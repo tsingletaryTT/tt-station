@@ -247,3 +247,18 @@ async fn revoke_without_bearer_is_rejected() {
         .expect("DELETE /ssh/authorize failed");
     assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
+
+/// `GET /ssh/host-keys` needs no token and answers `{"keys": [...]}`, each a
+/// bare `"<type> <base64>"` (no comment), from the box's `/etc/ssh`.
+#[tokio::test]
+async fn host_keys_are_public_and_comment_free() {
+    let (_state, base) = spawn(temp_authorized_keys("host-keys")).await;
+    let resp = reqwest::get(format!("{base}/ssh/host-keys")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let keys = body["keys"].as_array().expect("keys is a list");
+    for k in keys {
+        let k = k.as_str().unwrap();
+        assert_eq!(k.split_whitespace().count(), 2, "{k}");
+    }
+}

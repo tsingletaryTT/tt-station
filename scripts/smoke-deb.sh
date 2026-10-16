@@ -10,7 +10,7 @@
 # DIR holds tt-station_*.deb (and tt-station-panel_*.deb). In a fresh IMAGE:
 # installs tt-station with apt (so its Depends must resolve), checks the files
 # the updater and systemd rely on, runs scripts/smoke-agent.sh against
-# /usr/bin/tt-station-agentd, checks the panel's Depends resolve (simulated:
+# /usr/bin/tt-station-agentd with no flags (as the unit runs it), checks the panel's Depends resolve (simulated:
 # GTK is too big to install for this), then purges the package. Needs docker.
 set -euo pipefail
 
@@ -36,9 +36,11 @@ docker run --rm \
         test -f /usr/lib/systemd/user/tt-station-agentd.service
         grep -q "^ExecStart=/usr/bin/tt-station-agentd" /usr/lib/systemd/user/tt-station-agentd.service
         test -f /usr/share/tt-station/app/index.html
+        for f in LICENSE NOTICE THIRD_PARTY_LICENSES.md; do test -f /usr/share/doc/tt-station/$f; done
         tt-station-agentd --help >/dev/null
         echo "== smoke-testing the installed agent"
-        SMOKE_APP=1 bash /smoke-agent.sh /usr/bin/tt-station-agentd
+        # No flags and no agentd.toml, exactly as the packaged unit starts it.
+        SMOKE_APP=1 SMOKE_BARE=1 bash /smoke-agent.sh /usr/bin/tt-station-agentd
         for panel in /tmp/tt-station-panel_*.deb; do
             [ -e "$panel" ] || continue
             echo "== checking $(basename "$panel") would install"
