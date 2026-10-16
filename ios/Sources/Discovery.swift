@@ -124,19 +124,27 @@ final class Discovery {
     /// URL, so in that case use the box's mDNS name instead: the agent advertises its
     /// addresses under "<name>.local", which iOS resolves on its own.
     private static func usableHost(_ host: NWEndpoint.Host, boxName: String) -> String {
+        let text: String
         switch host {
         case let .name(name, _):
-            return name
+            text = name
         case let .ipv4(address):
-            return "\(address)"
+            text = "\(address)"
         case let .ipv6(address):
-            let text = "\(address)"
-            if text.lowercased().hasPrefix("fe80") || text.contains("%") {
-                return "\(boxName).local"
-            }
-            return text
+            text = "\(address)"
         @unknown default:
             return "\(boxName).local"
         }
+        return usableHost(text, boxName: boxName)
+    }
+
+    /// Any address scoped to one interface ("…%en0", link-local fe80::) can't be
+    /// saved or put in a URL, however iOS handed it back: use "<name>.local".
+    static func usableHost(_ text: String, boxName: String) -> String {
+        let lower = text.lowercased()
+        if text.contains("%") || lower.hasPrefix("fe80") || lower.hasPrefix("[fe80") {
+            return "\(boxName).local"
+        }
+        return text
     }
 }

@@ -162,3 +162,17 @@ final class AddressTests: XCTestCase {
         XCTAssertTrue(AgentError.insecure.errorDescription?.hasPrefix("Pair again") ?? false)
     }
 }
+
+final class DiscoveryHostTests: XCTestCase {
+    func testScopedAndLinkLocalAddressesBecomeTheLocalName() {
+        XCTAssertEqual(Discovery.usableHost("fe80::1c2b:3aff:fe4d:5e6f%en0", boxName: "tt-quietbox"), "tt-quietbox.local")
+        XCTAssertEqual(Discovery.usableHost("FE80::1", boxName: "tt-quietbox"), "tt-quietbox.local")
+        XCTAssertEqual(Discovery.usableHost("[fe80::1]", boxName: "tt-quietbox"), "tt-quietbox.local")
+    }
+
+    func testRoutableAddressesAndNamesStay() {
+        XCTAssertEqual(Discovery.usableHost("10.0.0.122", boxName: "tt-quietbox"), "10.0.0.122")
+        XCTAssertEqual(Discovery.usableHost("tt-quietbox.local", boxName: "tt-quietbox"), "tt-quietbox.local")
+        XCTAssertEqual(Discovery.usableHost("2001:db8::2", boxName: "tt-quietbox"), "2001:db8::2")
+    }
+}

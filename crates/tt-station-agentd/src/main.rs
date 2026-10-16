@@ -1647,6 +1647,15 @@ impl StatusAdvertiser for MdnsStatusAdvertiser {
     }
 }
 
+/// Interfaces no other device can reach the box on: loopback, Docker and
+/// libvirt bridges and the veth pairs behind containers.
+fn virtual_interface(name: &str) -> bool {
+    name == "lo"
+        || ["docker", "br-", "veth", "virbr"]
+            .iter()
+            .any(|p| name.starts_with(p))
+}
+
 /// Build a [`BoxRecord`] from CLI flags plus the box's current `status`,
 /// encode it into mDNS TXT records via `libttstation`'s `txt_encode` (the
 /// exact same helper `mock-box` uses, so the keys can't drift from what
@@ -1694,6 +1703,23 @@ fn advertise(
         .collect();
 
     let daemon = Arc::new(ServiceDaemon::new().context("failed to start mDNS daemon")?);
+    // Phones save the address they resolve, so advertise only ones they can
+    // use: IPv4 on real interfaces. A link-local IPv6 address ("fe80::…%en0")
+    // doesn't survive being put in a URL, and Docker's bridges aren't reachable
+    // from the network.
+    if let Err(e) = daemon.disable_interface(mdns_sd::IfKind::IPv6) {
+        eprintln!("tt-station-agentd: mDNS: couldn't leave out IPv6: {e}");
+    }
+    let names = std::fs::read_dir("/sys/class/net")
+        .map(|d| {
+            d.flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for name in names.into_iter().filter(|n| virtual_interface(n)) {
+        let _ = daemon.disable_interface(mdns_sd::IfKind::Name(name));
+    }
 
     // Empty address + enable_addr_auto() lets mdns-sd discover this host's
     // real LAN address(es) instead of us hardcoding one.
@@ -1949,5 +1975,20 @@ mod startup_wiring_tests {
             None,
             "without a capability the backend must be in its pre-leasing state"
         );
+    }
+}
+
+#[cfg(test)]
+mod mdns_interface_tests {
+    use super::virtual_interface;
+
+    #[test]
+    fn only_real_interfaces_are_advertised() {
+        for skip in ["lo", "docker0", "br-9c378a7e0a16", "veth1a2b3c", "virbr0"] {
+            assert!(virtual_interface(skip), "{skip}");
+        }
+        for keep in ["wlp9s0", "enp10s0", "eth0", "tailscale0", "wlan0"] {
+            assert!(!virtual_interface(keep), "{keep}");
+        }
     }
 }
