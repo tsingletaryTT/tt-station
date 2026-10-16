@@ -173,11 +173,34 @@ impl AppState {
         action: crate::power::PowerAction,
         force: bool,
     ) -> anyhow::Result<()> {
+        self.run_power_command_noted(action, force).map(|_| ())
+    }
+
+    /// [`AppState::run_power_command`], also handing back what a `force`d
+    /// `reset-chips` overrode (the holders, for the activity log) -- `None`
+    /// when nothing was overridden.
+    ///
+    /// **With gozer, `reset-chips` runs under a short whole-box lease**
+    /// ([`crate::gozer::take_reset_lease`]): `gozer acquire --chips all` as
+    /// `tt-station:<port>:reset-chips`, the configured command, then
+    /// `gozer release --no-reset` (the command just reset them). Other gozer
+    /// users see the chips held for the length of the reset rather than FREE
+    /// chips being reset under them. When the lease can't be taken because
+    /// the chips are this agent's own (a serve) or untracked work, the reset
+    /// runs unleased as before; a forced reset past someone else's lease is
+    /// unleased too (a lease can't be taken over theirs) and is logged.
+    pub fn run_power_command_noted(
+        &self,
+        action: crate::power::PowerAction,
+        force: bool,
+    ) -> anyhow::Result<Option<String>> {
         use crate::power::PowerAction;
 
         if let Some(holder) = self.chips_holder() {
             anyhow::bail!("{holder}");
         }
+        let mut lease: Option<(crate::gozer::Capability, crate::gozer::Grant)> = None;
+        let mut overrode = None;
         if matches!(action, PowerAction::ResetChips) {
             if let Some(capability) = &self.inner.gozer {
                 let runner = RealCommandRunner;
@@ -193,17 +216,32 @@ impl AppState {
                         Err(e) => eprintln!("tt-station-agentd: reset-chips: gozer reconcile failed: {e}"),
                     }
                 }
-                let verdict =
-                    crate::gozer::foreign_leases(&runner, capability, self.inner.serving_port);
-                // The SAME decision `RunPyBackend::reset_forcing` makes, made
+                // The SAME refusal `RunPyBackend::reset_forcing` makes, made
                 // by the same `ForeignLeases::resolve` so the two paths cannot
                 // drift: refuse when someone else holds chips AND when that
                 // could not be determined at all -- unless the operator forced
                 // it, in which case proceed and log the override, which is the
                 // only trace a deliberate stomp leaves behind.
-                match verdict.resolve(force) {
-                    Ok(None) => {}
-                    Ok(Some(note)) => eprintln!("tt-station-agentd: reset-chips: {note}"),
+                match crate::gozer::take_reset_lease(
+                    &runner,
+                    capability,
+                    self.inner.serving_port,
+                    force,
+                    "TT Station: resetting the chips",
+                ) {
+                    Ok(crate::gozer::ResetLease::Held(grant)) => {
+                        lease = Some((capability.clone(), grant));
+                    }
+                    Ok(crate::gozer::ResetLease::Unleased(why)) => {
+                        eprintln!("tt-station-agentd: reset-chips: {why}");
+                    }
+                    Ok(crate::gozer::ResetLease::Forced {
+                        note,
+                        overrode: what,
+                    }) => {
+                        eprintln!("tt-station-agentd: reset-chips: {note}");
+                        overrode = Some(what);
+                    }
                     Err(reason) => {
                         return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
                             "refusing reset-chips: it would run a WHOLE-BOX board reset -- \
@@ -225,6 +263,30 @@ impl AppState {
             }
         }
 
+        let ran = self.run_configured_power_command(action);
+        // Give the reset's lease back however the reset went -- without a
+        // second reset: the command just did that.
+        if let Some((capability, grant)) = lease {
+            if let Err(e) =
+                crate::gozer::release_no_reset(&RealCommandRunner, &capability, &grant.lease_id)
+            {
+                eprintln!(
+                    "tt-station-agentd: reset-chips: couldn't release the reset's lease '{}': {e:#}",
+                    grant.lease_id
+                );
+            }
+        }
+        ran.map(|()| overrode)
+    }
+
+    /// Run the configured command for `action` and nothing else: no lease, no
+    /// refusal, no serving stop. A chip reset pauses tt-smi readings while it
+    /// runs. Lab calls this for its reset, under its own lease.
+    pub(crate) fn run_configured_power_command(
+        &self,
+        action: crate::power::PowerAction,
+    ) -> anyhow::Result<()> {
+        use crate::power::PowerAction;
         let cmd = match action {
             PowerAction::ResetChips => &self.inner.power_reset_chips_cmd,
             PowerAction::Suspend => &self.inner.power_suspend_cmd,
