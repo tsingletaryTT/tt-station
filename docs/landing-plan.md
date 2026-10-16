@@ -1,9 +1,9 @@
 # Landing plan: reviewing `jberkowitz/mobile-voice`
 
-`jberkowitz/mobile-voice` is about 167K changed lines over `origin/main` (`8daa46e`,
+`jberkowitz/mobile-voice` is about 152K changed lines over `origin/main` (`8daa46e`,
 v0.11.0). It lives in `tsingletaryTT/tt-station`, a personal repository, and has not been
-pushed. Nobody can review that as one diff, so it is cut into **17 stacked review branches**,
-`review/00-…` to `review/16-…`, one area each.
+pushed. Nobody can review that as one diff, so it is cut into **16 stacked review branches**,
+`review/00-…` to `review/15-…`, one area each.
 
 ## How the stack works
 
@@ -32,7 +32,7 @@ approved.
 | Box agent | 02–10 | `10`: full `cargo build`/`cargo test` with the hardware stubs, `clippy`, `fmt` | one merge of `review/10-code` |
 | Desktop app | 11–12 | `12`: `npm run typecheck`, `npm test`, `npm run build` | one merge, after the agent |
 | iPhone app | 13–14 | `14`: Xcode build plus the iOS tests (CI `ios` job, needs a Mac) | one merge, after the agent |
-| Docs and data | 15–16 | nothing to build | last |
+| Docs | 15 | nothing to build | last |
 
 ## The slices
 
@@ -55,8 +55,7 @@ Lines are added plus removed, tests and docs included.
 | 12 | `review/12-desktop-pages` | 9.9K | Every page: Chat, Code, Models, Studio, Research, Settings… | design |
 | 13 | `review/13-ios-core` | 10.2K | API client, discovery, pairing, box control, power, settings, iOS tests | box check on a phone |
 | 14 | `review/14-ios-features` | 8.6K | Chat and voice, studios, research, Lab, Orchard, notification extension, Live Activity | — |
-| 15 | `review/15-docs` | 0.8K | Presentations and notes | — |
-| 16 | `review/16-benchmark-data` | 15.1K | Raw logs and JSON from the 2026-10-15 Code serving benchmark | skim only, or drop it and keep the README |
+| 15 | `review/15-docs` | 0.9K | Presentations, notes and the 2026-10-15 Code serving benchmark summary (its raw logs were dropped) | — |
 
 ## Gates for every slice
 

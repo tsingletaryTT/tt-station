@@ -6,8 +6,8 @@ B′ (`p150x4-throughput`) is incomplete: only its warm load time (182 s) was me
 Package `tt-hous/gpt-oss-20b-p150`, image `tt-model/gpt-oss-20b-p150:e0046b6a0e80-hub1` (2026-10-09-e0046b6a0e80-hub1),
 vLLM 0.26.0.dev4. Each config was started with `tt-model serve tt-hous/gpt-oss-20b-p150 --local-only --no-update-check --port 8003 --profile <p>`
 under gozer leases on both boards (owner pid: a keeper process), after resets of both boards. Protocol: warm-up, then 3 reps; median (IQR).
-S4/S6 not run. Scripts: `bench.py` (S1–S3, S7), `run_config.sh`, `summarize.py`. Raw results: `results-*.json`, `load-*.json`, `s5-*.json`/`s5-*.log`.
-Baseline as found: `baseline-state.txt`, `baseline-docker-inspect.json` (secrets redacted).
+S4/S6 not run. The scripts (`bench.py`, `run_config.sh`, `summarize.py`), raw results, container logs and the baseline
+were removed from the tree to keep review small; they are in git history at `52932a7` (`docs/notes/code-serving-benchmark-2026-10-15/`).
 
 ## Results (measured configs only)
 
@@ -62,9 +62,9 @@ about 18% better. That is under the 25% bar, and it is one seed with B′ missin
 - S3's short-request series is closed-loop: the first short request waits for the whole cold 64K read on every config. So n=1 per rep,
   and its "p95" is just that one TTFT. The chat stream's longest gap is the reliable S3 number: A 8.8 s, A′ 2.2 s, B 3.6 s.
 - B′ attempt 1 failed at boot in `ttnn.get_num_devices()` (`IndexError: unordered_map::at`) after per-board `gozer reset`s
-  (`container-B2-failed.log`). This is the failure `community.rs` works around with a full `tt-smi -r`.
+ . This is the failure `community.rs` works around with a full `tt-smi -r`.
   Attempt 2, after a full reset, loaded in 182 s. Then at 20:14:10 a paired client switched TT Station to Qwen3-32B with `--force`
-  (audit `model_switch`), which stopped the B′ container during S1 (`container-B2-attempt2-crash.log`). That client stopped the
+  (audit `model_switch`), which stopped the B′ container during S1. That client stopped the
   switch at 20:16. The run was then cancelled.
 - TT Station's agent polls `tt-smi -s` all the time, including during resets and serving (as in normal operation).
 - Restore: full `tt-smi -r`, then gpt-oss-20b started again on `p150x2-throughput` with the recorded invocation. Image, Cmd and Labels

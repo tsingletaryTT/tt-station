@@ -144,10 +144,8 @@ SLICES = [
         "ios/Sources/*", "ios/ActivityExtension/*", "ios/NotificationService/*",
         "docs/reference/mobile-parity.md",
     ]),
-    ("15-docs", "Presentations and notes", [
+    ("15-docs", "Presentations, notes and the benchmark summary", [
         "docs/presentations/*", "docs/notes/flux-*", "docs/notes/tt-media-*",
-    ]),
-    ("16-benchmark-data", "Raw benchmark data (skim, not line review)", [
         "docs/notes/code-serving-benchmark-2026-10-15/*",
     ]),
 ]
