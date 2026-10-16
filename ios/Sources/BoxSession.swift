@@ -593,9 +593,6 @@ final class BoxSession {
         try await client.decideBringup(run: run, approval: approval, decision: decision)
     }
 
-    func toplikeSocket(mode: String, cols: Int, rows: Int) -> URLSessionWebSocketTask? {
-        client.toplikeSocket(mode: mode, cols: cols, rows: rows)
-    }
     func setVoice(_ id: String) async throws { try await client.setVoice(id) }
     func speak(_ text: String, voice: String?, pcm: Bool = true) async throws -> Data {
         try await client.speak(text, voice: voice, pcm: pcm)

@@ -157,7 +157,7 @@ struct HistoryCharts: View {
                         }
                         selectionRule
                     }
-                    .chartForegroundStyleScale(range: Toplike.chipPalette)
+                    .chartForegroundStyleScale(range: ChipStyle.chipPalette)
                     .chartYScale(domain: .automatic(includesZero: false))
                 }
                 ChartCard(title: "Power", unit: "W", selected: selected,

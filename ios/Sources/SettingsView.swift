@@ -5,7 +5,6 @@ import SwiftUI
 /// power, the assistant's memory and documents, and how the app looks.
 struct SettingsView: View {
     @Environment(AppModel.self) private var app
-    @AppStorage("tt.mobile.dashboardStyle") private var style: DashboardStyle = .clean
     @AppStorage(Temp.key) private var tempUnit = "c"
     @State private var open: Sheet?
 
@@ -75,12 +74,6 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Picker(selection: $style) {
-                        Text("Clean").tag(DashboardStyle.clean)
-                        Text("tt-toplike").tag(DashboardStyle.toplike)
-                    } label: {
-                        row("sparkles.tv", "Box dashboard")
-                    }
                     Picker(selection: $tempUnit) {
                         Text("Celsius").tag("c")
                         Text("Fahrenheit").tag("f")

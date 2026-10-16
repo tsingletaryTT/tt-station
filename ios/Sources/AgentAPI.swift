@@ -1176,19 +1176,6 @@ struct AgentClient {
         return session.webSocketTask(with: request)
     }
 
-    /// The real tt-toplike, streamed: a WebSocket to `/toplike/term` (see the agent's
-    /// `toplike_term.rs`), over `wss://` on the pinned session. The token goes in
-    /// the `Authorization` header (`webSocket`), never the URL.
-    func toplikeSocket(mode: String, cols: Int, rows: Int) -> URLSessionWebSocketTask? {
-        guard token != nil else { return nil }
-        let task = webSocket("/toplike/term", query: [
-            URLQueryItem(name: "mode", value: mode),
-            URLQueryItem(name: "cols", value: String(cols)), URLQueryItem(name: "rows", value: String(rows)),
-        ])
-        task?.maximumMessageSize = 8 << 20
-        return task
-    }
-
     /// The box's own voice (Kokoro on its CPU).
     func voice() async throws -> BoxVoiceStatus {
         try await send("GET", "/voice", authed: true, timeout: 15)

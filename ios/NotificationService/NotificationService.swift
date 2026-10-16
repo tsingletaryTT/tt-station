@@ -37,7 +37,7 @@ final class NotificationService: UNNotificationServiceExtension {
                 content.subtitle = box.name
                 if let approval = event.data?.approval {
                     // The app's ApprovalActions answer these (same keys and categories).
-                    content.categoryIdentifier = approval.canAlways ? "TT_APPROVAL_ALWAYS" : "TT_APPROVAL"
+                    content.categoryIdentifier = approval.canAlways == true ? "TT_APPROVAL_ALWAYS" : "TT_APPROVAL"
                     content.userInfo["tt.approval"] = approval.id
                     content.userInfo["tt.box"] = box.id
                 }

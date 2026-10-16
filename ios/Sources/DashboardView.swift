@@ -7,7 +7,6 @@ import SwiftUI
 /// connections, notifications and preferences live in Settings.
 struct DashboardView: View {
     @Environment(AppModel.self) private var app
-    @AppStorage("tt.mobile.dashboardStyle") private var style: DashboardStyle = .clean
 
     var body: some View {
         NavigationStack {
@@ -19,9 +18,7 @@ struct DashboardView: View {
                                            description: Text("Add or pick a box in Settings."))
                 }
             }
-            .background {
-                if style == .toplike { Color.black.ignoresSafeArea() } else { Brand.backdrop }
-            }
+            .background { Brand.backdrop }
             .navigationTitle(app.activeBox?.name ?? "Box")
             .toolbar {
                 if app.store.boxes.count > 1 {
@@ -30,11 +27,6 @@ struct DashboardView: View {
             }
         }
     }
-}
-
-/// How the Box tab draws: calm glass cards, or tt-toplike's hardware-reactive views.
-enum DashboardStyle: String {
-    case clean, toplike
 }
 
 /// Switch boxes without leaving the Box tab.
@@ -67,12 +59,10 @@ private struct BoxHome: View {
     let session: BoxSession
     let telemetry: TelemetryFeed
     @Environment(AppModel.self) private var app
-    @State private var logLines: [String] = []
     @State private var confirming: BoxControl?
     @State private var working: BoxControl?
     @State private var controlError: String?
     @State private var showPower = false
-    @AppStorage("tt.mobile.dashboardStyle") private var style: DashboardStyle = .clean
     // Read so a unit change redraws every temperature.
     @AppStorage(Temp.key) private var tempUnit = "c"
 
@@ -97,35 +87,21 @@ private struct BoxHome: View {
                 BoxGlanceCard(session: session, telemetry: telemetry)
                 WaitingCard(session: session)
                 HappeningNow(session: session)
-                if style == .toplike {
-                    ToplikeDashboard(session: session, telemetry: telemetry, logLines: logLines)
-                } else {
-                    NavigationLink {
-                        HardwareView(session: session, telemetry: telemetry)
-                    } label: {
-                        ChipsSummary(telemetry: telemetry)
-                    }
-                    .buttonStyle(.plain)
+                NavigationLink {
+                    HardwareView(session: session, telemetry: telemetry)
+                } label: {
+                    ChipsSummary(telemetry: telemetry)
                 }
+                .buttonStyle(.plain)
                 DoctorCard(session: session)
                 ExploreGrid(session: session)
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 32)
             .readableWidth()
-            .animation(.easeInOut(duration: 0.3), value: style)
         }
         .scrollIndicators(.hidden)
-        // The tt-toplike modes need the full frame (memory channels, processes, the served model).
-        .onChange(of: style, initial: true) { _, style in telemetry.setDetailed(style == .toplike) }
         .refreshable { await session.refreshStatus() }
-        .task(id: "\(session.box.id)-\(style.rawValue)") {
-            // The serving log is part of the show in tt-toplike style.
-            while style == .toplike && !Task.isCancelled {
-                logLines = (try? await session.logs(tail: 40)) ?? logLines
-                try? await Task.sleep(for: .seconds(10))
-            }
-        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
@@ -136,11 +112,6 @@ private struct BoxHome: View {
                         .disabled(working != nil || (session.access != nil && !session.isOwner))
                     Divider()
                     Button("Sleep and power…", systemImage: "power") { showPower = true }
-                    Divider()
-                    Picker("Style", selection: $style) {
-                        Label("Clean", systemImage: "square.grid.2x2").tag(DashboardStyle.clean)
-                        Label("tt-toplike", systemImage: "sparkles.tv").tag(DashboardStyle.toplike)
-                    }
                 } label: {
                     if working != nil { ProgressView() } else { Image(systemName: "ellipsis.circle") }
                 }
@@ -209,7 +180,7 @@ private struct ChipsSummary: View {
                                 .overlay(alignment: .leading) {
                                     GeometryReader { g in
                                         Capsule().fill(Brand.accent)
-                                            .frame(width: g.size.width * CGFloat(Toplike.activity(chip)))
+                                            .frame(width: g.size.width * CGFloat(ChipStyle.activity(chip)))
                                     }
                                 }
                                 .frame(height: 4)
