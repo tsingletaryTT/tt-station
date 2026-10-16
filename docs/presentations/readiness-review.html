@@ -110,10 +110,10 @@ const AREAS = ["Security", "Privacy", "Reliability", "Performance", "Product", "
 const SUMMARY = {
   Security: ["amber", "Roles, host execution for owners only, deny-by-default auth, an audit log, signed updates and pinned dependencies are in. Open: SSO, picking the release key holder, member-written folders."],
   Privacy: ["green", "Pushes carry no content and reach only the person concerned; recording is visible in the room; audio is deleted after transcription; data exports exclude secrets."],
-  Reliability: ["amber", "Liveness checks, safe starts, durable and exportable state, resumable work and packaging gates are in. Open: moving this box to the .deb, workload-owned chip leases."],
-  Performance: ["amber", "Prefix caching now works on both Code paths, startup JS is 77% smaller and a hidden app stops polling. Open: a low-latency serving setup for Code."],
+  Reliability: ["green", "Liveness checks, safe starts, durable and exportable state, resumable work, workload-owned leases, and this box on the packaged install. Open: hardware checks for lease hand-off."],
+  Performance: ["green", "Prefix caching works on both Code paths, startup JS is 77% smaller, a hidden app stops polling, and Code can run on any working model and profile."],
   Product: ["green", "First-run checklist, simple navigation with developer tools behind a switch, offline handling, consistent confirms and an accessibility pass are in. Not yet seen on a real box."],
-  Engineering: ["amber", "CI now builds, tests, formats, lints and license-checks everything; 951 Rust and 106 desktop tests pass. Open: reviewing ~100K lines as 17 PRs, splitting the largest files."],
+  Engineering: ["amber", "CI blocks on build, 1,259 Rust tests, desktop and Python tests, formatting, lints, licenses and docs; the largest files are split. Open: human review of the branch as ~17 PRs."],
 };
 // stage: done | flight | next | later
 const ITEMS = [
@@ -144,6 +144,10 @@ const ITEMS = [
   ["Security", "med", "An owner who later runs unsandboxed Code in a folder a member's sandbox wrote to runs whatever was left there", "Owners are warned and must confirm before running as the box in a folder a member's sandbox wrote to", "M", "done"],
   ["Reliability", "med", "The .deb didn't include the app the agent serves", "Packaged and smoke-tested at /app/", "S", "done"],
   ["Security", "high", "A routine's stop endpoint accepted encoded path segments, reaching other state files", "Run ids validated; found by the new tests along with 8 other bugs", "S", "done"],
+  ["Privacy", "med", "Any paired device could read and delete everyone's research reports", "Reports are per person with sharing; owners see all", "S", "done"],
+  ["Security", "med", "Members could reset the chips through the Doctor, stop stray containers and download diagnostics", "Owner-only; found by the new tests", "S", "done"],
+  ["Security", "med", "Any member could stop or switch the model for everyone", "An owner setting decides: anyone (default) or owners only, applied to every start and stop path", "M", "done"],
+  ["Security", "med", "Bring-up agents run as the box's account, so they could answer their own approval prompts over the box's local connection", "Real containment needs a separate account or network namespace for bring-up runs", "L", "later"],
   // Privacy
   ["Privacy", "high", "Any device can claim to be any person and read their memories", "Bind people at creation or with owner confirmation; scoped deletes", "M", "done"],
   ["Privacy", "high", "/telemetry needs no sign-in and sends full process command lines to the network", "Require the box or a paired device; redact command lines for non-owners", "S", "done"],
@@ -156,10 +160,10 @@ const ITEMS = [
   ["Privacy", "low", "Routines let web text drive memory and pre-approved actions", "Actions queued for approval once web text enters a run", "M", "done"],
   ["Privacy", "low", "No durable audit trail of security-relevant actions", "Append-only audit log with actor device; owner-only Activity log", "M", "done"],
   // Reliability
-  ["Reliability", "high", "This box runs the agent from the source checkout; a crash-looping build shipped 23 times", "Agent and .deb smoke tests now gate CI and releases; switch this box with docs/reference/installing.md", "S", "next"],
+  ["Reliability", "high", "This box runs the agent from the source checkout; a crash-looping build shipped 23 times", "This box now runs the signed-update-ready .deb; CI gates the agent and the package", "S", "done"],
   ["Reliability", "high", "A hung model shows as \"serving\" (the gpt-oss container is Docker-unhealthy right now)", "Inference liveness probe with a degraded state and a Restart action", "M", "done"],
   ["Reliability", "high", "Two clients can start a model at the same moment", "Atomic serve state transition; second caller gets a clear 409", "S", "done"],
-  ["Reliability", "high", "Chip leases are owned by the agent's process; two unowned leases in a week", "Hand lease ownership to the workload; verify chip mapping on hardware", "M", "later"],
+  ["Reliability", "high", "Chip leases are owned by the agent's process; two unowned leases in a week", "Leases owned by the running workload, with a reconciler for orphaned leases; device mapping verified from source. Four hardware checks documented", "M", "done"],
   ["Reliability", "med", "State files written non-atomically; a corrupt token file would unpair every device", "Shared atomic write and corruption backup helpers", "M", "done"],
   ["Reliability", "med", "No export or restore of user data", "Owner-only export and import with a dry-run preview; secrets never included", "M", "done"],
   ["Reliability", "med", "Evals and jobs restart from zero after an agent restart", "Check-ups resume per category, transcription jobs per chunk", "M", "done"],
@@ -170,7 +174,7 @@ const ITEMS = [
   ["Reliability", "low", "After a power loss the box comes back with no model serving", "Opt-in: start the last model after a reboot", "S", "done"],
   // Performance
   ["Performance", "high", "One Code launch path put a per-request header at the top of the prompt, so prefix caching never hit", "Share the cache-safe launch settings across both paths", "S", "done"],
-  ["Performance", "high", "Code runs on a throughput server config: about 71 tok/s, against 152–158 measured with 4 chips at low latency", "A low-latency 4-chip config for Code; investigate why cached prompts still cost 0.6–1 s", "L", "later"],
+  ["Performance", "high", "Code runs on a throughput server config: about 71 tok/s, against 152–158 measured with 4 chips at low latency", "People pick any working model and profile for Code; the picker lists every source with speed and reliability per setup", "L", "done"],
   ["Performance", "med", "The agent spawns tt-smi 18 times a minute and runs docker ps uncached on every /status", "Shared sampler, 30 s history, short caches", "S", "done"],
   ["Performance", "med", "The desktop polls the box about 91 times a minute while idle, even when hidden", "Pause when hidden, share one /serve poll", "S", "done"],
   ["Performance", "med", "1.8 MB desktop bundle, every page loaded up front", "Lazy routes: Home loads about 64% less", "S", "done"],
@@ -189,10 +193,10 @@ const ITEMS = [
   // Engineering
   ["Engineering", "high", "No Rust code was built or tested in CI", "Rust build/test, cargo-deny and docs-route jobs; iOS build job", "S", "done"],
   ["Engineering", "high", "~94K lines on one branch have never been reviewed", "Land as ~17 PRs in dependency order (docs/landing-plan.md)", "L", "later"],
-  ["Engineering", "med", "Two god files (routes.rs 5.5K lines, assistant.rs 3.6K) and 80 process-wide globals", "Split by area; move globals onto AppState", "L", "flight"],
-  ["Engineering", "med", "Duplicated logic: six model-discovery probes, 24 error helpers, 33 HTTP clients", "Shared served-model probe, one client, one ApiError, tracing", "M", "flight"],
+  ["Engineering", "med", "Two god files (routes.rs 5.5K lines, assistant.rs 3.6K) and 80 process-wide globals", "routes.rs split from 6,637 lines into state, auth, router, error and 14 handler files; 17 modules' globals moved onto AppState", "L", "done"],
+  ["Engineering", "med", "Duplicated logic: six model-discovery probes, 24 error helpers, 33 HTTP clients", "One served-model probe, one local HTTP client, one error type across 14 modules", "M", "done"],
   ["Engineering", "med", "Docs described a WireGuard feature that doesn't exist; auth docs drifted", "Corrected; CI checks every documented endpoint exists", "S", "done"],
-  ["Engineering", "med", "Large untested modules (apps, voice, routines, updates, coding, Python helpers); iOS has no tests", "Done: apps, updates, routines, voice, native vLLM, schedules, library, gozer, the Python helpers, and a first iOS test target (9 bugs found and fixed). In progress: bring-up, workspace, check-ups, community, research, doctor", "L", "flight"],
+  ["Engineering", "med", "Large untested modules (apps, voice, routines, updates, coding, Python helpers); iOS has no tests", "About 230 new tests across every major module, the Python helpers and a first iOS target; 24 bugs found and fixed", "L", "done"],
   ["Engineering", "low", "1,300 formatting differences and 38 clippy warnings", "Format and clean after the in-flight merges; then make both blocking", "S", "done"],
   ["Engineering", "low", "No NOTICE or third-party license file; n8n's license needs legal review", "NOTICE, THIRD_PARTY_LICENSES.md and a generator script added", "S", "done"],
   ["Engineering", "low", "CLI config and logs commands sent no token (401 from other machines)", "Send the stored pairing token, in a header", "S", "done"],
@@ -202,9 +206,7 @@ const DECISIONS = [
   ["Where this lands", "All work is local commits on jberkowitz/mobile-voice; the remote is a personal fork (tsingletaryTT/tt-station). Releases and updates also point there.", "Move to an org-owned repo and release channel; land via the 17-PR plan with a named reviewer per area."],
   ["Identity for company boxes", "Sign-in is per-box pairing. No SSO, MFA or central revocation. A full design is in docs/design/enterprise-identity.md (about 10–13 engineer-weeks).", "Org mode: OIDC sign-in mapped to owner/member groups, MFA from the IdP, sessions re-proven every 8 h. Decide the IdP and offline grace first."],
   ["Store app catalog", "Third-party images, some from personal accounts; n8n's Sustainable Use License isn't open source.", "Legal and security sign-off; pin by digest; hide unapproved apps on company boxes."],
-  ["Code's serving setup", "The throughput setup serving gpt-oss-20b uses only chips 0–1; chips 2–3 sit idle. A 4-chip profile ships in the same package (docs/design/code-serving.md).", "Approve a one-day benchmark on an exclusive box, then default developer boxes to the faster 4-chip profile and shared boxes to 4-chip throughput."],
   ["Release signing", "Updates now require signatures from pinned keys, but no key is pinned yet, so tagged releases won't publish.", "Name who holds the release key, pin its public key, and require a reviewer on the release environment."],
-  ["Who may start and stop models", "Any member can stop the model for everyone on the box.", "Owner-only on shared boxes; anyone on personal boxes (a per-box setting)."],
   ["Restarting the live model and apps", "Binding fixes and cached-token reporting take effect only when the model server and Local Deep Research restart.", "Schedule a short maintenance window to restart them; Docker log rotation (restarts Docker) can go in the same window."],
   ["Older paired devices", "13 devices migrated as \"Paired before device tracking\" with unknown origin.", "Ask the owner to review the Devices list and remove unknown ones; force re-pairing after 30 days."],
 ];
