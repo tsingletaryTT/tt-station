@@ -5,23 +5,6 @@ import Foundation
 // `crates/libttstation/src/model.rs` and `crates/tt-station-agentd/src/routes.rs`;
 // the assistant routes are documented in `docs/reference/assistant.md`.
 
-struct BoxStatus: Decodable, Equatable {
-    let name: String
-    let chips: String
-    /// `idle` or `serving:<model>` — the same string form the mDNS TXT record uses.
-    let status: String
-    let deviceMesh: String?
-
-    enum CodingKeys: String, CodingKey {
-        case name, chips, status
-        case deviceMesh = "device_mesh"
-    }
-
-    var servingModel: String? {
-        status.hasPrefix("serving:") ? String(status.dropFirst("serving:".count)) : nil
-    }
-}
-
 struct ModelInfo: Decodable, Hashable {
     let name: String
     let devices: [String]
@@ -236,6 +219,9 @@ struct DoctorReport: Decodable, Equatable {
     }
     let status: String
     let checks: [Check]
+    /// This device is an owner (resetting the chips and stopping leftover
+    /// servers are an owner's); `nil` from agents that predate roles.
+    var owner: Bool? = nil
 }
 
 /// `GET /software`: tt and its tools.
@@ -536,37 +522,6 @@ struct PushRegistration: Decodable, Equatable {
     }
 }
 
-/// `GET /power/info`: what the phone can do with the box's power.
-struct PowerInfo: Decodable, Equatable {
-    struct Nic: Decodable, Equatable {
-        let name: String
-        let mac: String
-        let connected: Bool
-        let wakeEnabled: Bool
-        enum CodingKeys: String, CodingKey {
-            case name, mac, connected
-            case wakeEnabled = "wake_enabled"
-        }
-    }
-    struct Step: Decodable, Equatable, Hashable {
-        let why: String
-        let command: String
-    }
-    let canPowerOff: String
-    let canReboot: String
-    let canSuspend: String
-    let startsAtBoot: Bool
-    let wired: [Nic]
-    let setup: [Step]
-    enum CodingKeys: String, CodingKey {
-        case wired, setup
-        case canPowerOff = "can_power_off", canReboot = "can_reboot", canSuspend = "can_suspend"
-        case startsAtBoot = "starts_at_boot"
-    }
-    /// Wake-on-LAN can work: a cabled NIC allowed to wake the machine.
-    var canWake: Bool { wired.contains { $0.connected && $0.wakeEnabled } }
-}
-
 /// A fact the assistant remembers about the user (`/memories`).
 struct MemoryItem: Decodable, Identifiable, Equatable {
     let id: String
@@ -677,29 +632,6 @@ struct ConfirmResponse: Decodable {
 
 private struct ErrorBody: Decodable { let error: String }
 private struct Ignored: Decodable {}
-
-enum AgentError: LocalizedError {
-    case http(Int, String)
-    case notPaired
-    case badHost(String)
-    case unreachable(address: String, reason: String)
-    /// A box saved before TT Station used HTTPS: it has no pinned certificate,
-    /// and the app never falls back to plain HTTP.
-    case insecure
-
-    var errorDescription: String? {
-        switch self {
-        case .http(401, _): return "This phone isn't paired with the box any more. Pair again."
-        case .insecure:
-            return "Pair again to connect securely: scan the pairing code shown in TT Station on the box (Settings → Devices and pairing)."
-        case .http(_, let message): return message
-        case .notPaired: return "Pair with the box first."
-        case .badHost(let host): return "Can't make an address from \"\(host)\"."
-        case let .unreachable(address, reason):
-            return "Couldn't reach the box at \(address). \(reason) Make sure this phone is on the same network as the box, and that Local Network access is on in Settings → TT Station."
-        }
-    }
-}
 
 /// Async client for one box's control plane: always HTTPS on the box's TLS port
 /// (`https://host:tlsPort`), pinned to the certificate learned from the pairing QR.
@@ -869,7 +801,7 @@ struct AgentClient {
                         for try await line in bytes.lines { body += line }
                         let message = (try? JSONDecoder().decode(ErrorBody.self, from: Data(body.utf8)))?.error
                             ?? HTTPURLResponse.localizedString(forStatusCode: code)
-                        throw AgentError.http(code, message)
+                        throw failure(code, message)
                     }
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data:") else { continue }
@@ -1081,7 +1013,7 @@ struct AgentClient {
         guard (200..<300).contains(code) else {
             let message = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error
                 ?? HTTPURLResponse.localizedString(forStatusCode: code)
-            throw AgentError.http(code, message)
+            throw failure(code, message)
         }
         return try JSONDecoder().decode(BoxJob.self, from: data)
     }
@@ -1323,7 +1255,7 @@ struct AgentClient {
                         for try await line in bytes.lines { body += line }
                         let message = (try? JSONDecoder().decode(ErrorBody.self, from: Data(body.utf8)))?.error
                             ?? HTTPURLResponse.localizedString(forStatusCode: code)
-                        throw AgentError.http(code, message)
+                        throw failure(code, message)
                     }
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data:") else { continue }
@@ -1395,8 +1327,8 @@ struct AgentClient {
 
     /// An authed request whose body may not be JSON (video bytes): returns the body
     /// and its content type, mapping errors like `send` does.
-    private func raw<B: Encodable>(_ method: String, _ path: String, query: [URLQueryItem] = [], body: B?,
-                                   timeout: TimeInterval) async throws -> (Data, String) {
+    func raw<B: Encodable>(_ method: String, _ path: String, query: [URLQueryItem] = [], body: B?,
+                           timeout: TimeInterval) async throws -> (Data, String) {
         guard let token else { throw AgentError.notPaired }
         var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)
         if !query.isEmpty { components?.queryItems = query }
@@ -1420,20 +1352,20 @@ struct AgentClient {
         guard (200..<300).contains(code) else {
             let message = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error
                 ?? HTTPURLResponse.localizedString(forStatusCode: code)
-            throw AgentError.http(code, message)
+            throw failure(code, message)
         }
         return (data, http?.value(forHTTPHeaderField: "Content-Type") ?? "")
     }
 
-    private func send<T: Decodable>(_ method: String, _ path: String, query: [URLQueryItem] = [],
-                                    authed: Bool = false, timeout: TimeInterval) async throws -> T {
+    func send<T: Decodable>(_ method: String, _ path: String, query: [URLQueryItem] = [],
+                            authed: Bool = false, timeout: TimeInterval) async throws -> T {
         try await send(method, path, query: query, body: Optional<[String: String]>.none,
                        authed: authed, timeout: timeout)
     }
 
-    private func send<T: Decodable, B: Encodable>(_ method: String, _ path: String, query: [URLQueryItem] = [],
-                                                  body: B?, authed: Bool = false,
-                                                  timeout: TimeInterval) async throws -> T {
+    func send<T: Decodable, B: Encodable>(_ method: String, _ path: String, query: [URLQueryItem] = [],
+                                          body: B?, authed: Bool = false,
+                                          timeout: TimeInterval) async throws -> T {
         var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)
         if !query.isEmpty { components?.queryItems = query }
         guard let url = components?.url else { throw AgentError.badHost(address) }
@@ -1461,9 +1393,24 @@ struct AgentClient {
             let message = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error
                 ?? String(data: data, encoding: .utf8).flatMap { $0.isEmpty ? nil : $0 }
                 ?? HTTPURLResponse.localizedString(forStatusCode: code)
-            throw AgentError.http(code, message)
+            throw failure(code, message)
         }
         return try JSONDecoder().decode(T.self, from: data.isEmpty ? Data("{}".utf8) : data)
+    }
+
+    /// Posted (on any thread) when the box answers `401`: it no longer knows
+    /// this phone's token. The object is the box's base URL, as a string; the
+    /// box's session turns it into the "Pair again" flow.
+    static let unauthorized = Notification.Name("tt.agent.unauthorized")
+
+    /// The error for a refused request, telling the app first when the refusal
+    /// means this phone has to pair again (a token it sent was refused; a
+    /// pairing code that expired isn't that).
+    func failure(_ code: Int, _ message: String) -> AgentError {
+        if code == 401, token != nil {
+            NotificationCenter.default.post(name: Self.unauthorized, object: baseURL.absoluteString)
+        }
+        return AgentError.http(code, message)
     }
 }
 
@@ -1951,108 +1898,6 @@ struct BoxJob: Decodable, Equatable, Identifiable {
 
 
 // MARK: - Waiting for the person, Code, Routines
-
-/// Something waiting for the person's OK (`/approvals`): a Code session's
-/// command or edit, or a routine's action.
-struct Approval: Decodable, Identifiable, Equatable {
-    let id: String
-    let kind: String // code | routine
-    let place: String
-    let summary: String
-    let canAlways: Bool
-    let session: String?
-    let run: String?
-    enum CodingKeys: String, CodingKey {
-        case id, kind, summary, session, run
-        case place = "where"
-        case canAlways = "can_always"
-    }
-}
-
-/// A Code session (`/code`).
-struct CodeSession: Decodable, Identifiable, Equatable {
-    let id: String
-    let folder: String
-    let title: String
-    let last: Double
-    let sandbox: Bool
-    let running: Bool
-    let busy: Bool
-    let waiting: Int
-    let changes: Int
-}
-
-/// One thing that happened in a Code session (`/code/sessions/{id}`).
-struct CodeEvent: Decodable, Identifiable, Equatable {
-    let seq: Int
-    let kind: String // user | text | tool | tool_result | approval | decided | done | error | notice | ...
-    let text: String?
-    let name: String?
-    let summary: String?
-    let output: String?
-    let isError: Bool?
-    let ok: Bool?
-    let input: ToolInput?
-    var id: Int { seq }
-    enum CodingKeys: String, CodingKey {
-        case seq, kind, text, name, summary, output, ok, input
-        case isError = "is_error"
-    }
-
-    /// The parts of a tool's input worth showing.
-    struct ToolInput: Decodable, Equatable {
-        let command: String?
-        let filePath: String?
-        let path: String?
-        let pattern: String?
-        let description: String?
-        enum CodingKeys: String, CodingKey {
-            case command, path, pattern, description
-            case filePath = "file_path"
-        }
-    }
-}
-
-struct CodeSessionDetail: Decodable {
-    let session: CodeSession
-    let events: [CodeEvent]
-}
-
-/// A routine (`/routines`).
-struct Routine: Decodable, Identifiable, Equatable {
-    struct LastRun: Decodable, Equatable {
-        let id: String
-        let status: String
-        let started: Double
-        let finished: Double?
-        let headline: String?
-    }
-    let id: String
-    let name: String
-    let goal: String
-    let when: String
-    let enabled: Bool
-    let nextRun: Double?
-    let last: LastRun?
-    enum CodingKeys: String, CodingKey {
-        case id, name, goal, when, enabled, last
-        case nextRun = "next_run"
-    }
-}
-
-/// One run of a routine (`/routines/runs/{id}`).
-struct RoutineRun: Decodable, Identifiable, Hashable {
-    struct Pending: Decodable, Hashable { let summary: String }
-    let id: String
-    let routine: String
-    let name: String
-    let started: Double
-    let finished: Double?
-    let status: String // running | waiting | done | failed | stopped
-    let report: String?
-    let pending: Pending?
-    let activity: String?
-}
 
 extension AgentClient {
     func approvals() async throws -> [Approval] {

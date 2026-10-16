@@ -67,9 +67,16 @@ More:
   or fail, the box comes online, or chips run hot; the app asks when you start a download or
   a model. The box sends them through APNs once it has the app's push key (see
   `docs/reference/alerts-and-power.md`); until then the app checks for them itself.
-- **Power.** Box tab → Power: sleep, restart, shut down, and wake (Wake-on-LAN); the
-  setup sheet lists the one-time commands to run on the box, and the smart-plug route
-  for turning it on over Wi-Fi.
+- **Sleep and wake.** Box tab → ⋯ → Sleep and power: put the model to sleep (the box
+  stays reachable, over Wi-Fi too) or wake it, and the idle-sleep rule; owners sleep,
+  restart or shut down the whole box. Wake (Wake-on-LAN) is offered only when it can work
+  (cable in, Wake-on-LAN on, phone on the same network) and says why not otherwise; owners
+  can turn Wake-on-LAN on from the phone. See `docs/reference/sleep-and-wake.md`.
+- **Owners and members.** Settings → Devices and security: paired devices and their roles,
+  the activity log, and who may start and stop models. Controls a member can't use are
+  disabled with the reason, and the box's own refusal ("Only owners can …") is shown as is.
+  What the phone can and can't do compared with the desktop app:
+  `docs/reference/mobile-parity.md`.
 - **Jobs.** Box tab → Jobs: transcribe recordings of any length on the box, now or overnight; you're notified when it's done, and the transcript joins Documents for the assistant.
 - **SSH.** Settings → SSH key: this iPhone's own Ed25519 key (made on the phone, kept
   in its Keychain, never synced). See its fingerprint and the `ssh` command, send it to
@@ -91,7 +98,7 @@ assistant is offline until the new model is ready; the status bar says so.
 | `Sources/VideoStudio.swift` | Text-to-video jobs: submit, poll (survives relaunch), download, cancel |
 | `Sources/Gallery.swift` | On-device store of creations (`Documents/Creations`) |
 | `Sources/DashboardView.swift` | **Box** tab: serving hero, Happening now (Orchard run, transcriptions with progress), chip summary → Hardware page (chip cards, health, inference, energy, history, benchmark, log), Box Doctor, Explore grid (Orchard, Transcribe, Lab, Benchmark); stop/reset/power and style in the ⋯ menu; box switcher |
-| `Sources/SettingsView.swift` | **Settings** tab: Boxes, Connect apps, Notifications, Power and wake, Box Doctor, Software, Memories, Documents, appearance (dashboard style, °C/°F), about |
+| `Sources/SettingsView.swift` | **Settings** tab: Boxes, household, schedules, SSH key, energy, Devices and security, Connect apps, Notifications, Sleep and wake, Box Doctor, Software, Updates, Memories, Documents, appearance (dashboard style, °C/°F), about |
 | `Sources/SettingsPages.swift` | Settings pages: You and your household (people), Schedules, SSH key (this iPhone's key: fingerprint, send/remove, export), Energy (by day and month) |
 | `Sources/VoiceMode.swift` | Hands-free voice on one always-running `AVAudioEngine` (`VoiceEngine`): on-device recognition with audio-level endpointing, the reply rendered with `AVSpeechSynthesizer.write` and queued gaplessly on one player node (first sentence alone, then batched), normal media volume (no `.voiceChat` processing), a level-driven Vesper orb, voice picker, haptics, route-change and interruption recovery |
 | `Sources/LiveActivities.swift` | Lock Screen / Dynamic Island Live Activities for a model loading, an Orchard run and a transcription, updated while the app runs (no push) |
@@ -108,7 +115,16 @@ assistant is offline until the new model is ready; the status bar says so.
 | `Sources/BenchView.swift` | Benchmark card: one-tap speed/throughput/image/energy test, shareable as an image |
 | `Sources/Intents.swift` | App Intents for Siri, Spotlight, Shortcuts and the Action button: Ask My Box, Box Status, Make an Image |
 | `Sources/Alerts.swift` | App delegate (APNs token), alert center (registers with the box; fallback polling + local notifications), in-app banner, Notifications screen |
-| `Sources/Power.swift` | Power card (sleep/restart/shut down/wake), Wake-on-LAN sender, remote power setup sheet |
+| `Sources/Power.swift` | The whole box's power (sleep/restart/shut down, owners), Wake-on-LAN (sender, the phone's own network, turning it on), remote power setup sheet |
+| `Sources/SleepViews.swift` | Model sleep: sleep now, wake, the idle-sleep rule |
+| `Sources/GlanceViews.swift` | The Box tab's "right now" card (model state, chips, what runs and who started it), the unreachable banner (Retry, Wake), the update-needed banner |
+| `Sources/ServeAnyView.swift` | Everything the box can serve (`GET /code/models`: catalog, community profiles, native bundles), with load progress and the model-control rule |
+| `Sources/ResearchViews.swift` | Research: start, follow, read with sources, share, stop |
+| `Sources/RecordingViews.swift` | Record in the room on the box (Transcribe → On the box) |
+| `Sources/CodeNewSession.swift` | New sandboxed Code session: recent folders, or browse the box |
+| `Sources/DevicesViews.swift` | Devices and security (roles, remove, sign out, model-control rule), activity log, updates |
+| `Sources/BoxControlModels.swift`, `Sources/BoxControlLogic.swift` | Foundation-only wire types and decisions (versions, wake planning, grouping), tested in `Tests/BoxControlTests.swift` |
+| `Sources/BoxControlAPI.swift` | The agent routes behind those controls, and the session's way to them |
 | `Sources/BoxCare.swift` | Mode picker ("What do you want to do?"), Box Doctor (fixes, diagnostics share), Software |
 | `Sources/LabView.swift` | Silicon check: tt-lab runs of gpt-oss on bare silicon -- prepare models, stream output (Harmony thinking/answer), bit-exact checks, per-stage profile chart, history |
 | `Sources/JobsView.swift` | Jobs: upload recordings to transcribe (now / tonight), live progress, "switch now", transcript viewer (share text/SRT, ask the assistant) |
@@ -120,7 +136,7 @@ assistant is offline until the new model is ready; the status bar says so.
 | `Sources/DashboardCharts.swift` | Box tab charts: history (temp/power/throughput/clock), inference, energy, health |
 | `Sources/BoxSession.swift` | Per-box state: status polling, conversation, confirmations, direct controls |
 | `Sources/Telemetry.swift` | Live chip readings from the agent's `/telemetry?view=lite` WebSocket |
-| `Sources/AgentAPI.swift` | Wire types + async `AgentClient` for the agent's HTTP API |
+| `Sources/AgentAPI.swift` | Wire types + async `AgentClient` for the agent's HTTP API (token on every request; a refused token posts `AgentClient.unauthorized`, which offers "Pair again") |
 | `Sources/Discovery.swift` | `_tenstorrent._tcp` browsing via `NWBrowser`; IPv4 first, `<name>.local` for link-local |
 | `Sources/BoxStore.swift` | Paired boxes (UserDefaults) and their bearer tokens (Keychain) |
 | `Sources/Brand.swift` | Vesper design tokens (`Vesper`: stone/teal/brand colors, radii), `Brand` roles, the dot-grid backdrop, `Font.tt` / `Font.ttMono`, glass cards with hairline borders, Status Indicator |

@@ -47,6 +47,7 @@ fn switching_routes() -> Vec<(M, &'static str, Value)> {
         (M::PUT, "/preferences/models", json!({})),
         (M::PUT, "/idle", json!({})),
         (M::POST, "/idle/wake", json!({})),
+        (M::POST, "/idle/sleep", json!({})),
         (
             M::POST,
             "/schedules",
@@ -67,6 +68,8 @@ fn harmless_routes() -> Vec<(M, &'static str, Value)> {
         "/jobs/abc123/run",
         "/schedules/abc",
         "/coserve",
+        // Nothing serves in these tests: refused (409) before it stops anything.
+        "/idle/sleep",
     ];
     switching_routes()
         .into_iter()
@@ -262,4 +265,20 @@ async fn the_boxs_own_user_is_an_owner_here_too() {
     let status = r.status().as_u16();
     let v: Value = r.json().await.unwrap_or(Value::Null);
     assert!(!(status == 403 && v["error"] == REFUSED), "{status}: {v}");
+}
+
+/// Putting the model to sleep by hand: nothing to stop on an idle box says so
+/// plainly (`409`) and remembers nothing to wake.
+#[tokio::test]
+async fn sleeping_an_idle_box_is_refused_plainly() {
+    let b = the_box().await;
+    let (status, v) = b.call(M::POST, "/idle/sleep", &b.owner, json!({})).await;
+    assert_eq!(status, 409, "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("Nothing is serving"),
+        "{v}"
+    );
+    let (status, v) = b.call(M::GET, "/idle", &b.owner, json!(null)).await;
+    assert_eq!(status, 200);
+    assert!(v["asleep"].is_null(), "{v}");
 }

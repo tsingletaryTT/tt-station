@@ -69,11 +69,18 @@ while open, and in background refreshes iOS grants now and then (`BGAppRefreshTa
 |---|---|
 | `can_power_off` / `can_reboot` / `can_suspend` | logind's answer for the agent (`yes`, `challenge`, `no`). |
 | `starts_at_boot` | `loginctl` Linger: without it the agent (a user service) only runs while someone is logged in, so a box that was turned on remotely is unreachable. |
-| `wired: [{name, mac, connected, wake_enabled}]` | Physical, non-wireless NICs. Wake-on-LAN needs one with a cable and `power/wakeup` enabled; Wi-Fi can't wake a sleeping or powered-off computer. |
-| `setup: [{why, command}]` | The missing steps: `sudo loginctl enable-linger <user>`; installing the polkit rule (the agent stages `deploy/tt-station-power.rules` at `$TT_CONFIG_DIR/tt-station-power.rules`); plugging in the cable; `nmcli … wake-on-lan magic && ethtool -s <nic> wol g`. |
+| `wired: [{name, mac, connected, wake_enabled, wake_supported}]` | Physical, non-wireless NICs. Wake-on-LAN needs one with a cable and `power/wakeup` enabled; Wi-Fi can't wake a sleeping or powered-off computer. |
+| `wake_on_lan` | Whether a phone can wake the box, the wired MAC and the box's broadcast addresses, what's missing in plain words, and the one-time command: see [sleep-and-wake.md](sleep-and-wake.md). |
+| `setup: [{why, command}]` | The missing steps: `sudo loginctl enable-linger <user>`; installing the polkit rule (the agent stages `deploy/tt-station-power.rules` at `$TT_CONFIG_DIR/tt-station-power.rules`); `sudo nmcli connection modify <connection> 802-3-ethernet.wake-on-lan magic` (or `ethtool -s <nic> wol g` without NetworkManager); plugging in the cable. |
+
+`POST /power/wake-on-lan` (owners) turns Wake-on-LAN on itself where polkit lets the agent's
+account, else answers with that command ([sleep-and-wake.md](sleep-and-wake.md)).
 
 **Turning it on.** The app sends a Wake-on-LAN magic packet to the remembered wired MAC
-(broadcast, subnet broadcast, last address). iOS only lets apps with Apple's multicast
-entitlement send broadcasts, so this may not leave the phone; the dependable alternative
-is a Home-app smart plug plus the BIOS's "restore on AC power loss: on", then a Shortcut
-that toggles the plug. Siri intents: Power My Box (sleep/restart/shut down), Wake My Box.
+(the phone's and the box's broadcasts, `255.255.255.255`, last address), and only when
+`wake_on_lan` said it could work and the phone is on the box's network; otherwise it says
+why and points at model sleep (`POST /idle/sleep`), which keeps the box reachable. iOS only
+lets apps with Apple's multicast entitlement send broadcasts, so this may not leave the
+phone; the dependable alternative is a Home-app smart plug plus the BIOS's "restore on AC
+power loss: on", then a Shortcut that toggles the plug. Siri intents: Power My Box
+(sleep/restart/shut down), Wake My Box.

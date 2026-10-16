@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! Chip resets and machine power: `POST /reset`, `POST /power` and
-//! `GET /power/info`.
+//! Chip resets and machine power: `POST /reset`, `POST /power`,
+//! `GET /power/info` and `POST /power/wake-on-lan`.
 
 use axum::{http::StatusCode, Json};
 use serde::Deserialize;
@@ -241,6 +241,36 @@ pub(crate) async fn power_info(
             .await
             .unwrap_or_else(|_| crate::power::readiness_blocking("ttuser", &std::env::temp_dir())),
     )
+}
+
+/// `POST /power/wake-on-lan` (owners): turn Wake-on-LAN on for good on the
+/// box's wired port, so a phone can wake it from sleep. The agent changes the
+/// NetworkManager setting itself only where polkit already lets its account
+/// (it never asks for a password); otherwise the answer carries the exact
+/// command for the owner to run once (`applied: false`). `409` when the box has
+/// no wired port that can wake it. See `crate::power::enable_wake_on_lan`.
+pub(crate) async fn wake_on_lan(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    _owner: OwnerAuth,
+) -> Result<Json<crate::power::WolEnable>, (StatusCode, Json<ErrorResponse>)> {
+    let outcome = tokio::task::spawn_blocking(|| {
+        let wol = crate::power::wake_on_lan_blocking(&crate::power::wired_nics_blocking());
+        crate::power::enable_wake_on_lan(&wol, &crate::power::run_quiet).map(|done| (wol, done))
+    })
+    .await
+    .map_err(|join_err| backend_error(anyhow::anyhow!("wake-on-lan task panicked: {join_err}")))?;
+    match outcome {
+        Ok((wol, done)) => {
+            crate::audit::record(
+                &state,
+                "wake_on_lan",
+                wol.nic.as_deref().unwrap_or(""),
+                if done.applied { "ok" } else { "needs_setup" },
+            );
+            Ok(Json(done))
+        }
+        Err(why) => Err((StatusCode::CONFLICT, Json(ErrorResponse { error: why }))),
+    }
 }
 
 #[cfg(test)]

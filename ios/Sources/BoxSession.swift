@@ -34,8 +34,16 @@ final class BoxSession {
     private(set) var catalogError: String?
     /// Whether (and with which models) the box can run chat and images at once.
     private(set) var coserve: CoserveInfo?
+    /// Whether this app and the box speak the same API (from `/status`).
+    private(set) var compat: ClientCompat = .ok
+    /// What this phone may do on the box: owner or member, and whether it may
+    /// start and stop models. `nil` until the box has said.
+    var access: BoxAccess?
+    /// The model's sleep settings and what's asleep (`GET /idle`); `nil` from
+    /// agents without idle sleep.
+    var idle: IdleInfo?
 
-    private let client: AgentClient
+    let client: AgentClient
     /// Called when the user starts something slow (a download, a model load) --
     /// the moment to offer notifications for when it's done.
     @ObservationIgnored var onLongOperation: (() -> Void)?
@@ -43,11 +51,20 @@ final class BoxSession {
     private var streamTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
     private var pullPollTask: Task<Void, Never>?
+    @ObservationIgnored private var unauthorizedObserver: NSObjectProtocol?
 
     init(box: SavedBox, token: String, conversations: ConversationStore) throws {
         self.box = box
         self.client = try AgentClient(box: box, token: token)
         self.conversations = conversations
+        // Any request this box refuses with 401 (from any screen) means it forgot
+        // this phone: offer to pair again instead of failing call after call.
+        let base = client.baseURL.absoluteString
+        unauthorizedObserver = NotificationCenter.default.addObserver(
+            forName: AgentClient.unauthorized, object: nil, queue: .main) { [weak self] note in
+            guard (note.object as? String) == base else { return }
+            Task { @MainActor in self?.needsRepair = true }
+        }
         // Pick up where you left off: the most recent conversation with this box.
         if let latest = conversations.conversations(for: box.id).first {
             conversationID = latest.id
@@ -125,8 +142,13 @@ final class BoxSession {
     func startPolling() {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
+            var tick = 0
             while !Task.isCancelled {
                 await self?.refreshStatus()
+                // Who this phone is on the box, and the model's sleep, change
+                // rarely: every half minute (and right away at the start).
+                if tick % 6 == 0, self?.statusError == nil { await self?.refreshAccess(learnWake: tick == 0) }
+                tick += 1
                 // Faster while a model is coming up, so "ready" shows promptly.
                 let busy = self?.startingModel != nil
                 try? await Task.sleep(for: .seconds(busy ? 2 : 5))
@@ -137,6 +159,8 @@ final class BoxSession {
     func stopPolling() {
         pollTask?.cancel()
         pollTask = nil
+        if let unauthorizedObserver { NotificationCenter.default.removeObserver(unauthorizedObserver) }
+        unauthorizedObserver = nil
         pullPollTask?.cancel()
         pullPollTask = nil
     }
@@ -147,6 +171,7 @@ final class BoxSession {
             let wasStarting = startingModel
             status = latest
             statusError = nil
+            compat = ClientCompat.check(latest)
             if let next = try? await client.serveState() {
                 let previous = serve
                 serve = next
@@ -192,7 +217,7 @@ final class BoxSession {
     }
 
     /// Any authed call that comes back 401 means the box forgot this phone.
-    private func noteAuthFailure(_ error: Error) {
+    func noteAuthFailure(_ error: Error) {
         if case AgentError.http(401, _) = error { needsRepair = true }
     }
 
@@ -609,9 +634,7 @@ final class BoxSession {
     func powerInfo() async throws -> PowerInfo {
         let info = try await client.powerInfo()
         // Remember how to wake it, for when it's asleep and can't be asked.
-        if let nic = info.wired.first(where: \.connected) ?? info.wired.first {
-            WakeOnLAN.remember(mac: nic.mac, for: box)
-        }
+        if let target = WakeTarget(info) { WakeOnLAN.remember(target, for: box) }
         return info
     }
     func power(_ action: String) async throws { try await client.power(action) }

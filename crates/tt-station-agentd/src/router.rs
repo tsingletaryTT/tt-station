@@ -22,7 +22,7 @@ use crate::handlers::media::{
 };
 use crate::handlers::memories::{clear_memories, delete_memory, get_creation, list_memories};
 use crate::handlers::pairing::{pair_complete, pair_init, pair_offer, pair_qr};
-use crate::handlers::power::{power, power_info, reset};
+use crate::handlers::power::{power, power_info, reset, wake_on_lan};
 use crate::handlers::security::{get_security, post_security};
 use crate::handlers::serving::{get_serve, post_serve, run_model, stop_model};
 use crate::handlers::ssh::{ssh_authorize, ssh_info, ssh_revoke};
@@ -115,6 +115,7 @@ pub fn app(state: AppState) -> Router {
         .route("/creations/{id}", get(get_creation))
         .route("/memories", get(list_memories).delete(clear_memories))
         .route("/power/info", get(power_info))
+        .route("/power/wake-on-lan", post(wake_on_lan))
         .route("/tls", get(crate::tls::get_tls))
         .route("/jobs", get(crate::jobs::get_jobs))
         .route(
@@ -398,6 +399,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/idle/wake",
             post(crate::idle::post_wake).route_layer(models()),
+        )
+        .route(
+            "/idle/sleep",
+            post(crate::idle::post_sleep).route_layer(models()),
         )
         .route("/updates", get(crate::updates::get_updates))
         .route("/updates/install", post(crate::updates::post_install))

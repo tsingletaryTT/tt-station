@@ -96,13 +96,15 @@ struct CodeListView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var sessions: [CodeSession]?
     @State private var error: String?
+    @State private var creating = false
+    @State private var started: CodeSession?
 
     var body: some View {
         NavigationStack {
             List {
                 if let sessions, sessions.isEmpty {
                     ContentUnavailableView("No Code sessions", systemImage: "chevron.left.forwardslash.chevron.right",
-                                           description: Text("Start one in TT Station on your computer: pick a project folder and say what to build or fix."))
+                                           description: Text("Start one with + (in the box's sandbox), or in TT Station on your computer: pick a project folder and say what to build or fix."))
                 }
                 ForEach(sessions ?? []) { s in
                     NavigationLink {
@@ -131,7 +133,18 @@ struct CodeListView: View {
                 }
             }
             .navigationTitle("Code")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("New session", systemImage: "plus") { creating = true }
+                }
+            }
+            .sheet(isPresented: $creating) {
+                NewCodeSessionSheet(session: session, recent: RecentFolders.from(sessions ?? [])) { started = $0 }
+            }
+            .navigationDestination(item: $started) { code in
+                CodeThreadView(session: session, code: code)
+            }
             .refreshable { await load() }
             .task {
                 while !Task.isCancelled {
@@ -205,9 +218,26 @@ struct CodeThreadView: View {
         .navigationTitle(live.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if live.busy {
+            if live.busy || live.running {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Stop", systemImage: "stop.fill") { Task { try? await session.interruptCode(code.id) } }
+                    Menu {
+                        if live.busy {
+                            Button("Stop this turn", systemImage: "stop.fill") { Task { try? await session.interruptCode(code.id) } }
+                        }
+                        Button("Stop the agent", systemImage: "power") {
+                            Task {
+                                do { try await session.stopCode(code.id); problem = nil } catch { problem = error.localizedDescription }
+                                await poll()
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "stop.circle")
+                    } primaryAction: {
+                        Task {
+                            if live.busy { try? await session.interruptCode(code.id) } else { try? await session.stopCode(code.id) }
+                        }
+                    }
+                    .accessibilityLabel("Stop")
                 }
             }
         }
@@ -445,13 +475,19 @@ private struct RoutineView: View {
     let routine: Routine
     @State private var problem: String?
     @State private var started: RoutineRun?
+    @State private var enabled: Bool?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text(routine.goal).font(.tt(.body))
-                Label(routine.enabled ? routine.when : "\(routine.when) (off)", systemImage: "clock")
+                Label(routine.when, systemImage: "clock")
                     .font(.tt(.footnote)).foregroundStyle(.secondary)
+                if routine.schedule != nil {
+                    Toggle(isOn: Binding(get: { enabled ?? routine.enabled }, set: { on in Task { await setEnabled(on) } })) {
+                        Text((enabled ?? routine.enabled) ? "Runs on its schedule" : "Paused").font(.tt(.subheadline))
+                    }
+                }
                 Button {
                     Task {
                         do { started = try await session.runRoutine(routine.id); problem = nil }
@@ -474,6 +510,16 @@ private struct RoutineView: View {
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(item: $started) { run in
             RoutineRunView(session: session, runID: run.id, title: run.name)
+        }
+    }
+
+    private func setEnabled(_ on: Bool) async {
+        do {
+            try await session.setRoutine(routine, enabled: on)
+            enabled = on
+            problem = nil
+        } catch {
+            problem = error.localizedDescription
         }
     }
 }

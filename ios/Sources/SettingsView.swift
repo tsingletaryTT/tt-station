@@ -41,14 +41,19 @@ struct SettingsView: View {
                         NavigationLink { EnergyView(session: session) } label: {
                             row("bolt", "Energy", detail: "kWh and cost by day and month")
                         }
+                        NavigationLink { DevicesView(session: session) } label: {
+                            row("lock.shield", "Devices and security",
+                                detail: session.access.map { $0.owner ? "You're an owner" : "You're a member" }
+                                    ?? "Paired devices, roles, activity")
+                        }
                     }
                     Section {
                         sheetRow(.connect, "point.3.connected.trianglepath.dotted", "Connect apps",
                                  detail: "Use the box as a private OpenAI API from your laptop")
                         sheetRow(.notifications, "bell.badge", "Notifications",
                                  detail: "Downloads, models ready, bring-ups, transcripts")
-                        sheetRow(.power, "power", "Power and wake",
-                                 detail: "Sleep, restart, shut down, wake from the phone")
+                        sheetRow(.power, "power", "Sleep and wake",
+                                 detail: "Sleep the model or the box, wake it, restart, shut down")
                     } header: {
                         Text(session.box.name)
                     }
@@ -57,6 +62,9 @@ struct SettingsView: View {
                         sheetRow(.doctor, "stethoscope", "Box Doctor", detail: "Health checks and one-tap fixes")
                         sheetRow(.software, "shippingbox", "Software",
                                  detail: "tt, tt-smi, firmware and driver versions")
+                        NavigationLink { UpdatesView(session: session) } label: {
+                            row("arrow.down.circle", "Updates", detail: "TT Station on the box")
+                        }
                     }
 
                     Section("Assistant") {
