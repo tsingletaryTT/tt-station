@@ -19,6 +19,13 @@
 //!   the agent's tt-smi telemetry pauses, and model starts and chip resets are
 //!   refused -- tt-lab owns the devices exclusively.
 //!
+//! With gozer installed, a run holds a whole-box lease (`gozer acquire --chips
+//! all`, `who` `tt-station:<port>:lab`, owned by this agent) from before its
+//! chip reset until tt-lab exits, then releases it (gozer resets the chips).
+//! Chips held by anyone else refuse the run with a 409 naming the holder.
+//! Without gozer, Lab runs unleased as it always has, and `GET /lab`'s
+//! `leasing` says so.
+//!
 //! Preparing and running are an owner's (`routes::OwnerAuth`): tt-lab runs as
 //! the box's own account, with the chips opened directly.
 
@@ -36,6 +43,7 @@ use serde_json::{json, Value};
 use tokio::io::AsyncBufReadExt;
 
 use crate::routes::{AppState, BearerAuth, ErrorResponse, Phase};
+use crate::serving::docker::RealCommandRunner;
 
 /// A model tt-lab can run.
 #[derive(Debug, Clone, Copy)]
@@ -433,6 +441,14 @@ pub(crate) async fn get_lab(
     let lab = lab(&state)?;
     let mut status = lab.status();
     let life = state.lifecycle();
+    status["leasing"] = if state.gozer().is_some() {
+        json!({ "gozer": true, "note": "Runs hold every chip under a gozer lease." })
+    } else {
+        json!({
+            "gozer": false,
+            "note": "gozer isn't installed, so runs take no chip lease (other gozer users won't see the chips as held).",
+        })
+    };
     status["serving"] = json!(match life.phase {
         Phase::Idle | Phase::Failed => None,
         _ => life
@@ -468,6 +484,75 @@ struct Busy(AppState);
 impl Drop for Busy {
     fn drop(&mut self) {
         self.0.set_lab_busy(false);
+    }
+}
+
+/// A Lab run's lease: the gozer it came from and what was granted.
+type LabLease = Option<(crate::gozer::Capability, crate::gozer::Grant)>;
+
+/// Take the whole-box lease a Lab run holds (`gozer acquire --chips all` as
+/// `tt-station:<port>:lab`, owned by this agent, which is tt-lab's parent).
+/// `None` without gozer: Lab runs unleased, as it always has. Chips held by
+/// anyone are a 409 naming the holder; a gozer that can't be run is a 500
+/// rather than an unleased run.
+async fn take_lab_lease(
+    state: &AppState,
+    m: &LabModel,
+) -> Result<LabLease, (StatusCode, Json<ErrorResponse>)> {
+    let Some(capability) = state.gozer().cloned() else {
+        return Ok(None);
+    };
+    let port = state.serving_port();
+    let reason = format!("TT Station Lab: {} silicon check", m.title);
+    let cap = capability.clone();
+    let (outcome, holder) = tokio::task::spawn_blocking(move || {
+        let runner = RealCommandRunner;
+        let outcome = crate::gozer::acquire_owned(
+            &runner,
+            &cap,
+            crate::gozer::DEFAULT_LEASE_CHIPS,
+            None,
+            std::process::id(),
+            &crate::gozer::own_who(port, crate::gozer::LAB_LEASE_TAG),
+            &reason,
+        );
+        let holder = matches!(outcome, crate::gozer::Outcome::Unavailable { .. })
+            .then(|| crate::gozer::contention_detail(&runner, &cap, port))
+            .flatten();
+        (outcome, holder)
+    })
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match outcome {
+        crate::gozer::Outcome::Granted(grant) => Ok(Some((capability, grant))),
+        crate::gozer::Outcome::Unavailable { .. } => Err(err(
+            StatusCode::CONFLICT,
+            format!(
+                "The silicon check needs every chip, and {}.",
+                holder.unwrap_or_else(|| "some of them are in use".to_string())
+            ),
+        )),
+        crate::gozer::Outcome::Failed(message) => Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("couldn't take a chip lease for the silicon check: {message}"),
+        )),
+    }
+}
+
+/// Release a Lab run's lease (gozer resets the chips as it does).
+async fn give_back(lease: LabLease) {
+    let Some((capability, grant)) = lease else {
+        return;
+    };
+    let released = tokio::task::spawn_blocking(move || {
+        crate::gozer::release(&RealCommandRunner, &capability, &grant.lease_id)
+            .map_err(|e| format!("couldn't release the Lab lease '{}': {e:#}", grant.lease_id))
+    })
+    .await;
+    match released {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("tt-station-agentd: lab: {e}"),
+        Err(e) => eprintln!("tt-station-agentd: lab: lease release task failed: {e}"),
     }
 }
 
@@ -530,6 +615,24 @@ pub(crate) async fn post_run(
     if let Some(holder) = state.chips_holder() {
         return Err(err(StatusCode::CONFLICT, holder));
     }
+    // Someone else's chip lease refuses the run before anything is stopped:
+    // tt-lab opens every chip.
+    if let Some(capability) = state.gozer().cloned() {
+        let port = state.serving_port();
+        let verdict = tokio::task::spawn_blocking(move || {
+            crate::gozer::foreign_leases(&RealCommandRunner, &capability, port)
+        })
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let crate::gozer::ForeignLeases::Held { holders, .. } = verdict {
+            return Err(err(
+                StatusCode::CONFLICT,
+                format!(
+                    "The silicon check needs every chip, and {holders}. Wait for that to finish."
+                ),
+            ));
+        }
+    }
     // The chips must be idle: stop what's serving only when the user said so.
     let life = state.lifecycle();
     let previous = life.model.clone().or(life.served_id.clone());
@@ -554,21 +657,6 @@ pub(crate) async fn post_run(
             )
         })?;
     }
-    // tt-lab needs freshly reset chips after another runtime (TT-Metal) used
-    // them -- otherwise its firmware never starts ("BRISC command did not
-    // finish"; seen live after a Wan2.2 serve).
-    let reset_state = state.clone();
-    tokio::task::spawn_blocking(move || {
-        reset_state.run_power_command(crate::power::PowerAction::ResetChips, false)
-    })
-    .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    .map_err(|e| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("couldn't reset the chips: {e:#}"),
-        )
-    })?;
     if !state.try_set_lab_busy() {
         return Err(err(
             StatusCode::CONFLICT,
@@ -576,6 +664,29 @@ pub(crate) async fn post_run(
         ));
     }
     let busy = Busy(state.clone());
+    // With gozer, the whole run -- the reset below included -- holds a
+    // whole-box lease, so other gozer users see the chips taken.
+    let lease = take_lab_lease(&state, m).await?;
+    // tt-lab needs freshly reset chips after another runtime (TT-Metal) used
+    // them -- otherwise its firmware never starts ("BRISC command did not
+    // finish"; seen live after a Wan2.2 serve). The configured reset runs
+    // as is: under the Lab's own lease with gozer (no second lease), and
+    // exactly as before without it. `busy` already keeps every other reset,
+    // serve and tt-smi reading off the chips.
+    let reset_state = state.clone();
+    let reset = tokio::task::spawn_blocking(move || {
+        reset_state.run_configured_power_command(crate::power::PowerAction::ResetChips)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))
+    .and_then(|r| r);
+    if let Err(e) = reset {
+        give_back(lease).await;
+        return Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("couldn't reset the chips: {e:#}"),
+        ));
+    }
 
     let mut args: Vec<String> = vec!["run".into(), "-m".into(), gguf.display().to_string()];
     args.extend(["--device".into(), "--tiles".into(), tiles.to_string()]);
@@ -587,7 +698,7 @@ pub(crate) async fn post_run(
     if req.profile {
         args.push("--profile".into());
     }
-    let mut child = tokio::process::Command::new(&lab.binary)
+    let spawned = tokio::process::Command::new(&lab.binary)
         .args(&args)
         .current_dir(
             lab.binary
@@ -599,15 +710,20 @@ pub(crate) async fn post_run(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            err(
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) => {
+            give_back(lease).await;
+            return Err(err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("couldn't start tt-lab: {e}"),
-            )
-        })?;
+            ));
+        }
+    };
     *lab.running.lock().expect("lab mutex poisoned") = Some(json!({
         "model": m.id, "tiles": tiles, "prompt": prompt, "since": unix_now(), "check": req.check,
+        "lease": lease.as_ref().map(|(_, grant)| grant.lease_id.clone()),
     }));
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
@@ -673,6 +789,9 @@ pub(crate) async fn post_run(
             tail: lines.iter().rev().take(12).rev().cloned().collect(),
         });
         *lab_done.running.lock().expect("lab mutex poisoned") = None;
+        // Hand the chips back (gozer resets them for the next tenant) before
+        // the agent lets serves and readings near them again.
+        give_back(lease).await;
         drop(busy);
         let _ = tx.send(json!({
             "type": "done",

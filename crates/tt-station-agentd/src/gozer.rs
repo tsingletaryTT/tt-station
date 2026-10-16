@@ -1078,7 +1078,9 @@ pub fn startup_sweep(
             // `Restart=on-failure` case. The freshly-built backend has no
             // record of it, so hand it back to the caller to adopt or nothing
             // will ever release it, and a REAPED lease is never reset.
-            if port == own_service_port {
+            // A reset's or a Lab run's lease is not a serve's: never adopted
+            // as one (gozer reaps it once its owner is gone).
+            if port == own_service_port && !is_utility_who(&who) {
                 report.adoptable.push(AdoptableLease {
                     lease_id: lease_id.clone(),
                     who: who.clone(),
@@ -1576,6 +1578,156 @@ impl Drop for LeaseGuard<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// Short leases: chip resets and Lab runs
+// ---------------------------------------------------------------------------
+//
+// A `tt-smi -r` and a tt-lab run both open every chip on the box, so both take
+// a whole-box lease (`--chips all`) for as long as they run. Other gozer users
+// then see the chips held -- named `tt-station:<port>:reset-chips` or
+// `tt-station:<port>:lab` -- instead of FREE chips that are about to be reset
+// or opened exclusively under them.
+//
+// These leases are owned by this agent's pid (the agent itself runs the reset,
+// and is tt-lab's parent), never handed to a workload: [`plan_reconcile`]
+// leaves them alone while their owner lives.
+
+/// The `<model>` half of a reset's `who`: `tt-station:<port>:reset-chips`.
+pub const RESET_LEASE_TAG: &str = "reset-chips";
+/// The `<model>` half of a Lab run's `who`: `tt-station:<port>:lab`.
+pub const LAB_LEASE_TAG: &str = "lab";
+
+/// This agent's `who` for a lease tagged `tag` (a model id, or one of the
+/// utility tags above).
+pub fn own_who(own_service_port: u16, tag: &str) -> String {
+    format!("{WHO_PREFIX}{own_service_port}:{tag}")
+}
+
+/// Whether `who` is one of this agent's short utility leases (a reset or a Lab
+/// run) rather than a serve's -- never handed to a workload.
+pub fn is_utility_who(who: &str) -> bool {
+    split_who(who).is_some_and(|(_, tag)| tag == RESET_LEASE_TAG || tag == LAB_LEASE_TAG)
+}
+
+/// Give a lease back WITHOUT gozer's reset: `gozer release <id> --no-reset
+/// --json`. For a reset lease, whose holder has just run `tt-smi -r` itself --
+/// a second reset on release would only double the wait. No such lease (13)
+/// is success, as for [`release`].
+pub fn release_no_reset(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+    lease_id: &str,
+) -> Result<()> {
+    let args = [
+        capability.path.as_str(),
+        "release",
+        lease_id,
+        "--no-reset",
+        "--json",
+    ];
+    let captured = runner.run_capturing(&args).with_context(|| {
+        format!(
+            "could not run '{} release {lease_id} --no-reset'",
+            capability.path
+        )
+    })?;
+    match captured.code {
+        0 | EXIT_NO_LEASE => Ok(()),
+        code => Err(anyhow::anyhow!(
+            "gozer refused to release lease '{lease_id}' (exit {code}): {}",
+            if captured.stderr.is_empty() {
+                captured.stdout.trim()
+            } else {
+                captured.stderr.trim()
+            }
+        )),
+    }
+}
+
+impl ForeignLeases {
+    /// A short "what was overridden" for the activity log: the holders, or
+    /// that nobody could tell. `None` when nothing foreign was held.
+    pub fn overrode(&self) -> Option<String> {
+        match self {
+            ForeignLeases::None => None,
+            ForeignLeases::Held { holders, .. } => Some(holders.clone()),
+            ForeignLeases::Undetermined => Some("chip leases that could not be read".to_string()),
+        }
+    }
+}
+
+/// What a whole-box reset runs under -- see [`take_reset_lease`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResetLease {
+    /// A whole-box lease this agent took for the reset. Run the reset, then
+    /// [`release_no_reset`] it.
+    Held(Grant),
+    /// No lease could be taken, but nobody else holds chips: they are busy with
+    /// this agent's own session or with untracked work (`BUSY-UNTRACKED`, which
+    /// is deliberately not a refusal). Reset unleased, as before gozer. Carries
+    /// the line to log.
+    Unleased(String),
+    /// The owner forced the reset past another tenant's lease (or past a gozer
+    /// that could not be read). Reset unleased -- a lease cannot be taken over
+    /// someone else's -- and record it: `note` for the journal, `overrode` for
+    /// the activity log.
+    Forced { note: String, overrode: String },
+}
+
+/// Take the short whole-box lease a `tt-smi -r` runs under.
+///
+/// 1. Someone else holds chips (or gozer cannot say): refuse with the reason
+///    (the caller answers 409), unless `force` -- then [`ResetLease::Forced`].
+/// 2. Otherwise `gozer acquire --chips all --owner-pid <this agent> --who
+///    tt-station:<port>:reset-chips --no-queue`: granted is
+///    [`ResetLease::Held`].
+/// 3. Not granted: ask again who holds what, since a tenant may have taken a
+///    board in between -- refused (or forced) as in 1 if so; otherwise the
+///    chips are this agent's own or untracked, and the reset goes ahead
+///    unleased ([`ResetLease::Unleased`]), exactly as it did before.
+pub fn take_reset_lease(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+    own_service_port: u16,
+    force: bool,
+    reason: &str,
+) -> std::result::Result<ResetLease, String> {
+    let decide = |verdict: ForeignLeases| -> std::result::Result<Option<ResetLease>, String> {
+        match verdict.resolve(force) {
+            Err(reason) => Err(reason),
+            Ok(Some(note)) => Ok(Some(ResetLease::Forced {
+                note,
+                overrode: verdict.overrode().unwrap_or_default(),
+            })),
+            Ok(None) => Ok(None),
+        }
+    };
+    if let Some(forced) = decide(foreign_leases(runner, capability, own_service_port))? {
+        return Ok(forced);
+    }
+    let who = own_who(own_service_port, RESET_LEASE_TAG);
+    let why = match acquire_owned(
+        runner,
+        capability,
+        DEFAULT_LEASE_CHIPS,
+        None,
+        std::process::id(),
+        &who,
+        reason,
+    ) {
+        Outcome::Granted(grant) => return Ok(ResetLease::Held(grant)),
+        Outcome::Unavailable { .. } => "not every chip is free".to_string(),
+        Outcome::Failed(message) => message,
+    };
+    if let Some(forced) = decide(foreign_leases(runner, capability, own_service_port))? {
+        return Ok(forced);
+    }
+    Ok(ResetLease::Unleased(format!(
+        "no whole-box lease for the reset ({why}); the chips are held only by this agent's own \
+         session or by untracked work, so resetting without one, as before"
+    )))
+}
+
+// ---------------------------------------------------------------------------
 // Workload ownership: hand the lease to the process that uses the chips
 // ---------------------------------------------------------------------------
 //
@@ -1863,6 +2015,19 @@ pub fn plan_reconcile(
         let owner = lease
             .owner_pid
             .map_or("no pid".to_string(), |p| format!("pid {p}"));
+        // A reset's or a Lab run's lease is never a serve's: never hand it to
+        // the serving container. Once its owner is gone it is released only
+        // when nothing serves -- a reset under a live (forced, unleased)
+        // container would be worse than gozer's own reap.
+        if is_utility_who(&lease.who) {
+            if !lease.owner_alive && workload_pid.is_none() {
+                actions.push(ReconcileAction::Release {
+                    lease_id: lease.lease_id.clone(),
+                    why: format!("its owner ({owner}) is dead and nothing is serving"),
+                });
+            }
+            continue;
+        }
         match (lease.owner_alive, workload_pid) {
             (false, Some(pid)) => actions.push(ReconcileAction::Rebind {
                 lease_id: lease.lease_id.clone(),

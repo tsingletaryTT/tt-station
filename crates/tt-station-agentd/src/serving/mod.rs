@@ -234,6 +234,14 @@ pub trait ServingBackend: Send + Sync {
         self.reset_forcing(true)
     }
 
+    /// [`ServingBackend::reset_forcing`], also handing back what a `force`d
+    /// reset overrode (another tenant's lease, or unreadable lease state) for
+    /// the activity log -- `None` when nothing was. `POST /reset` calls this.
+    /// Only a backend that runs a lease-checked reset overrides it.
+    fn reset_noting(&self, force: bool) -> Result<Option<String>> {
+        self.reset_forcing(force).map(|()| None)
+    }
+
     /// Enumerate the models this backend can serve, so a caller (`GET
     /// /models`, `tt-station models`) never has to guess or hardcode a model id --
     /// see `libttstation::model::ModelsResponse`.

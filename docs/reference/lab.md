@@ -20,7 +20,7 @@ The agent looks for `~/code/tt-lab/_out/tt-lab` (`$TT_LAB_BIN`) and models in `~
 
 | Route | |
 |---|---|
-| `GET /lab` | `installed`, `models: [{id, title, download_gb, tiles, downloaded, ready, preparing}]`, `job`, `running`, `history` (last 20, newest first), `serving` |
+| `GET /lab` | `installed`, `models: [{id, title, download_gb, tiles, downloaded, ready, preparing}]`, `job`, `running` (with its gozer `lease` id, or `null`), `history` (last 20, newest first), `serving`, `leasing: {gozer, note}` |
 | `POST /lab/prepare {model}` | `202`; background `curl -C -` of the GGUF, then `tt-lab requant` (20b: 12.1 GB download, 23.9 GB sidecar, ~4.5 min requant) |
 | `POST /lab/run {model, prompt, tokens, tiles, check, profile, stop_serving}` | Server-sent events: `{type:"text", stream, text}` as tt-lab prints, then `{type:"done", ok, exit_code, seconds, stats, previous}` |
 
@@ -33,6 +33,16 @@ not touch them meanwhile), model starts and chip resets are refused. `stats` par
 output: `decode_tps`, `prefill_tps`, `ms_per_token` (check runs: `avg … s/token`; profiled
 runs: host command time), `preload_s`, `dram_gib`, `tokens`, `check` (`exact`/`mismatch`),
 and `profile` (per-stage share of BRISC cycles).
+
+**Chip lease.** With `gozer` installed, a run holds a whole-box lease for its whole length:
+`gozer acquire --chips all --no-queue --owner-pid <agentd>` as `tt-station:<port>:lab`, taken
+after any serve is stopped and before the reset, released (gozer resets the chips) once tt-lab
+exits, before `lab_busy` clears. Other gozer users see every chip held instead of FREE chips that
+tt-lab has open. Chips held by anyone else refuse the run with `409` naming the holder -- checked
+before the serve is stopped -- and a gozer that can't be run is a `500`, never an unleased run.
+Without gozer, Lab runs unleased exactly as before, and `GET /lab`'s `leasing` says so
+(`{"gozer": false, "note": "gozer isn't installed, ..."}`). See
+[`chip-leasing.md` §5](chip-leasing.md#5-who-owns-a-lease-restarts-and-the-reconciler).
 
 ## Measured on this QuietBox (2026-10-07, gpt-oss-20b)
 

@@ -876,7 +876,16 @@ pub(crate) async fn post_fix(
             })
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+            .map_err(|e| {
+                // Someone else's chip lease is a 409 naming the holder.
+                let held = e.chain().any(|c| c.is::<crate::gozer::Contention>());
+                let status = if held {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+                err(status, format!("{e:#}"))
+            })?;
         }
         other => {
             return Err(err(

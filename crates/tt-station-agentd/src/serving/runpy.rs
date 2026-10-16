@@ -2086,8 +2086,19 @@ impl ServingBackend for RunPyBackend {
     /// `gozer reconcile` a STALE one) are still the better first move and the
     /// refusal still names them.
     fn reset_forcing(&self, force: bool) -> Result<()> {
+        self.reset_noting(force).map(|_| ())
+    }
+
+    /// The reset itself -- see [`RunPyBackend::reset_forcing`]'s doc. With
+    /// gozer, the whole-box `tt-smi -r` runs under a short whole-box lease
+    /// (`tt-station:<port>:reset-chips`, [`crate::gozer::take_reset_lease`]),
+    /// released `--no-reset` afterwards. So this backend's own serve lease is
+    /// now handed back BEFORE the board reset (it used to follow it): the
+    /// reset lease needs every chip free.
+    fn reset_noting(&self, force: bool) -> Result<Option<String>> {
         // Refuse FIRST, act second: a reset that stopped containers and then
         // refused would be worse than either outcome on its own.
+        let mut overrode = None;
         if let Some(capability) = &self.gozer {
             let verdict = crate::gozer::foreign_leases(
                 self.runner.as_ref(),
@@ -2100,7 +2111,10 @@ impl ServingBackend for RunPyBackend {
             // forced, in which case proceed and log the override.
             match verdict.resolve(force) {
                 Ok(None) => {}
-                Ok(Some(note)) => eprintln!("tt-station-agentd: /reset: {note}"),
+                Ok(Some(note)) => {
+                    eprintln!("tt-station-agentd: /reset: {note}");
+                    overrode = verdict.overrode();
+                }
                 Err(reason) => {
                     return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
                         "refusing to reset this box: it would run a WHOLE-BOX `tt-smi -r` -- \
@@ -2114,8 +2128,57 @@ impl ServingBackend for RunPyBackend {
         self.stop_serving_containers()
             .context("failed to stop serving container during reset")?;
 
+        // Hand back any lease this backend still holds -- AFTER its container
+        // stopped (release resets the chips), BEFORE the whole-box reset
+        // below takes its own lease. Best-effort and non-fatal: `/reset`'s
+        // job is to leave the box clean, and a release that gozer refuses
+        // must not stop it from clearing serving state. Logged, and the lease
+        // stays recorded so a later `/stop` retries.
+        if let Err(err) = self.release_lease() {
+            eprintln!("releasing chip lease during reset failed: {err:#} -- continuing");
+        }
+
         // Reset the board best-effort: log on failure, don't fail /reset.
+        //
+        // NOTE this is still the WHOLE-BOX `reset_cmd`, unlike `start`'s
+        // lease-scoped one. `/reset` is an explicit operator "return this box
+        // to a fresh state" action that also unpairs, so its blast radius is
+        // deliberately unchanged -- what guards it is the foreign-lease check
+        // above, and (with gozer) the whole-box lease it runs under.
         if self.config.reset_before_serve {
+            let mut lease = None;
+            // Not when already forced past a holder: no lease can be taken
+            // over theirs, and the override is already logged.
+            if let (Some(capability), None) = (&self.gozer, &overrode) {
+                match crate::gozer::take_reset_lease(
+                    self.runner.as_ref(),
+                    capability,
+                    self.config.service_port,
+                    force,
+                    "TT Station: resetting the box",
+                ) {
+                    Ok(crate::gozer::ResetLease::Held(grant)) => lease = Some(grant),
+                    Ok(crate::gozer::ResetLease::Unleased(why)) => {
+                        eprintln!("tt-station-agentd: /reset: {why}")
+                    }
+                    Ok(crate::gozer::ResetLease::Forced {
+                        note,
+                        overrode: what,
+                    }) => {
+                        eprintln!("tt-station-agentd: /reset: {note}");
+                        overrode = Some(what);
+                    }
+                    // A tenant took a board since the check above. Their
+                    // chips must not be reset; the serving state is cleared.
+                    Err(reason) => {
+                        *self.status.lock().expect("status mutex poisoned") = ServingStatus::Idle;
+                        return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
+                            "stopped serving, but refusing the WHOLE-BOX `tt-smi -r` -- \
+                             {reason}"
+                        ))));
+                    }
+                }
+            }
             let reset_cmd_str = self.config.reset_cmd.join(" ");
             eprintln!("resetting board during reset: {reset_cmd_str}");
             let reset_refs: Vec<&str> = self.config.reset_cmd.iter().map(String::as_str).collect();
@@ -2124,28 +2187,19 @@ impl ServingBackend for RunPyBackend {
                     "board reset ({reset_cmd_str}) failed during reset: {err:#} -- continuing"
                 );
             }
-        }
-
-        // Hand back any lease this backend still holds. Best-effort and
-        // non-fatal, matching the board reset immediately above: `/reset`'s
-        // job is to leave the box clean, and a release that gozer refuses
-        // must not stop it from clearing serving state. Logged, and the
-        // lease stays recorded so a later `/stop` retries.
-        //
-        // NOTE the board reset above is still the WHOLE-BOX `reset_cmd`,
-        // unlike `start`'s (now lease-scoped) one. `/reset` is an explicit
-        // operator "return this box to a fresh state" action that also
-        // unpairs, so its blast radius is deliberately unchanged -- what
-        // guards it instead is the foreign-lease check at the TOP of this
-        // method, which means the whole-box form runs either when no other
-        // tenant holds chips, or when the operator explicitly forced it
-        // (in which case the override is in the journal).
-        if let Err(err) = self.release_lease() {
-            eprintln!("releasing chip lease during reset failed: {err:#} -- continuing");
+            if let (Some(capability), Some(grant)) = (&self.gozer, lease) {
+                if let Err(err) = crate::gozer::release_no_reset(
+                    self.runner.as_ref(),
+                    capability,
+                    &grant.lease_id,
+                ) {
+                    eprintln!("releasing the reset's lease failed: {err:#} -- continuing");
+                }
+            }
         }
 
         *self.status.lock().expect("status mutex poisoned") = ServingStatus::Idle;
-        Ok(())
+        Ok(overrode)
     }
 
     fn status(&self) -> Result<ServingStatus> {

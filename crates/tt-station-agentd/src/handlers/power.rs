@@ -54,22 +54,22 @@ pub(crate) async fn reset(
     // `reset`/`reset_forced` rather than one call with a bool, for the same
     // reason `/run` splits: the unforced path is byte-for-byte the call it
     // always was.
-    tokio::task::spawn_blocking(move || {
-        if force {
-            backend.reset_forced()
-        } else {
-            backend.reset()
-        }
-    })
-    .await
-    .map_err(|join_err| backend_error(anyhow::anyhow!("reset task panicked: {join_err}")))?
-    // A reset REFUSED because another tenant holds chips is a 409, and
-    // (note the `?`) it aborts the route before the token clearing
-    // below: a refusal must leave the box, and the pairing, untouched.
-    .map_err(contention_aware_error)?;
+    let overrode = tokio::task::spawn_blocking(move || backend.reset_noting(force))
+        .await
+        .map_err(|join_err| backend_error(anyhow::anyhow!("reset task panicked: {join_err}")))?
+        // A reset REFUSED because another tenant holds chips is a 409, and
+        // (note the `?`) it aborts the route before the token clearing
+        // below: a refusal must leave the box, and the pairing, untouched.
+        .map_err(contention_aware_error)?;
 
-    // Sign out every paired device (the caller's own too -- expected).
-    crate::audit::record(&state, "reset", if force { "forced" } else { "" }, "ok");
+    // Sign out every paired device (the caller's own too -- expected). A
+    // forced reset past someone else's lease names what it overrode.
+    match overrode {
+        Some(what) => {
+            crate::audit::record(&state, "reset", &format!("forced over {what}"), "forced")
+        }
+        None => crate::audit::record(&state, "reset", if force { "forced" } else { "" }, "ok"),
+    }
     state.clear_tokens();
 
     // Best-effort: also revoke every keyless-SSH key the pair flow ever
@@ -185,15 +185,17 @@ pub(crate) async fn power(
     }
     let s = state.clone();
     let force = req.force;
-    let ran = tokio::task::spawn_blocking(move || s.run_power_command(action, force))
+    let ran = tokio::task::spawn_blocking(move || s.run_power_command_noted(action, force))
         .await
         .map_err(|join_err| backend_error(anyhow::anyhow!("power task panicked: {join_err}")))?;
-    crate::audit::record(
-        &state,
-        "power",
-        &req.action,
-        if ran.is_ok() { "ok" } else { "failed" },
-    );
+    // A forced reset past someone else's lease names what it overrode: that
+    // entry is how the holder finds out why their chips went down.
+    let (target, result) = match &ran {
+        Ok(Some(overrode)) => (format!("{} (forced over {overrode})", req.action), "forced"),
+        Ok(None) => (req.action.clone(), "ok"),
+        Err(_) => (req.action.clone(), "failed"),
+    };
+    crate::audit::record(&state, "power", &target, result);
     ran.map_err(|e| {
             // A permission failure (no polkit rule) is the operator's to fix --
             // distinguish it from a generic 500 with a pointer to the doc.
