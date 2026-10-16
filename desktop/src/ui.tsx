@@ -11,11 +11,12 @@ import { addToast } from "@tenstorrent/vesper/toast";
 import { bytes, duration, get, type Chip, type FrameExtras, type Serve, watchTelemetry } from "./api";
 import { PollSource, sharedSource } from "./poll";
 
-export function Page({ title, subtitle, actions, children }: {
-  title: string; subtitle?: ReactNode; actions?: ReactNode; children: ReactNode;
+/** A titled page. `fill`: it takes the page area's full height and its last child (a terminal, a reader) takes the rest, scrolling on its own (useFullHeight). */
+export function Page({ title, subtitle, actions, children, fill = false }: {
+  title: string; subtitle?: ReactNode; actions?: ReactNode; children: ReactNode; fill?: boolean;
 }) {
   return (
-    <div className="page">
+    <div className={`page ${fill ? "page-fill" : ""}`}>
       <header className="page-head">
         <div>
           <Typography as="h1" variant="heading-lg">{title}</Typography>

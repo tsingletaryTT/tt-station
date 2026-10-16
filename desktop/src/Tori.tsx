@@ -18,6 +18,7 @@ import { type ActionReport, clientKind, get, post, runConfirmed, runOnClient, sh
 import { toastError } from "./ui";
 import { Orb, type Phase } from "./VoiceMode";
 import { Listener, Speaker, type VoiceStatus } from "./voice";
+import { smoothBehavior } from "./stickToBottom";
 
 interface Turn { role: "user" | "assistant"; content: string; actions?: ActionReport[]; error?: string }
 interface Brain { where: "chips" | "cpu" | null; model: string | null }
@@ -204,7 +205,7 @@ export function ToriWindow() {
   summonRef.current = summon;
 
   useEffect(() => { localStorage.setItem(STORE, JSON.stringify(turns.slice(-30))); }, [turns]);
-  useEffect(() => { scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }, [turns]);
+  useEffect(() => { scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: smoothBehavior() }); }, [turns]);
   // Space: hold to talk, let go to send. A quick tap starts hands-free listening
   // (or interrupts Tori). Space types normally once there's text in the box.
   const spaceDown = useRef(0);
