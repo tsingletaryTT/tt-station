@@ -42,7 +42,7 @@ SLICES = [
     ("00-hygiene", "Build, CI, packaging and licenses", [
         ".github/*", "scripts/*", "deny.toml", "NOTICE", "THIRD_PARTY_LICENSES.md",
         ".gitattributes", ".gitignore", "debian/*", "build-deb.sh", "deploy/*",
-        "README.md", "Cargo.toml", "Cargo.lock", "CLAUDE.md", "docs/landing-plan.md",
+        "README.md", "Cargo.toml", "Cargo.lock", "CLAUDE.md", "box-panel/*", "docs/landing-plan.md",
         *docs("installing", "releases", "pinned-dependencies", "box-hardening"),
     ]),
     ("01-cli", "CLI and client library", [
@@ -60,7 +60,7 @@ SLICES = [
              "handlers/security.rs", "handlers/ssh.rs"),
         *tests("access_control.rs", "devices.rs", "error_bodies.rs", "pairing.rs",
                "pair_offer.rs", "token_persistence.rs", "ws_auth.rs", "status.rs",
-               "config.rs", "model_control.rs", "people.rs", "support/*",
+               "config.rs", "model_control.rs", "people.rs", "ssh_authorize.rs", "support/*",
                "fixtures/proc_net_*"),
         "docs/security-faq.md", "docs/design/enterprise-identity.md",
         *docs("agentd-config"),
@@ -130,7 +130,7 @@ SLICES = [
     ]),
     ("12-desktop-pages", "Desktop pages", ["desktop/src/pages/*"]),
     ("13-ios-core", "iPhone app: connection, pairing, box control", [
-        "ios/project.yml", "ios/Info.plist", "ios/*.entitlements", "ios/README.md",
+        "ios/project.yml", "ios/Info.plist", "ios/PrivacyInfo.xcprivacy", "ios/*.entitlements", "ios/README.md",
         "ios/Assets.xcassets/*", "ios/Resources/*", "ios/Shared/*", "ios/Tests/*",
         *["ios/Sources/" + n + ".swift" for n in (
             "AgentAPI", "AppModel", "BoxSession", "BoxStore", "BoxesView", "Discovery",
@@ -146,6 +146,7 @@ SLICES = [
     ]),
     ("15-docs", "Presentations, notes and the benchmark summary", [
         "docs/presentations/*", "docs/notes/flux-*", "docs/notes/tt-media-*",
+        "docs/client-agent-integration-findings.md",
         "docs/notes/code-serving-benchmark-2026-10-15/*",
     ]),
 ]
