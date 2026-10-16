@@ -40,6 +40,10 @@ ufw default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
 ufw allow 22/tcp comment 'SSH (keys only)' >/dev/null
 ufw allow 8766/tcp comment 'TT Station HTTPS for paired devices' >/dev/null
+# Phones and computers find the box over mDNS, then connect to its advertised
+# port (8765) to resolve it; the agent itself refuses plain HTTP from other
+# machines, so this lets discovery work without exposing anything.
+ufw allow 8765/tcp comment 'TT Station discovery (agent refuses plain HTTP from other machines)' >/dev/null
 ufw allow 5353/udp comment 'mDNS: find the box on the network' >/dev/null
 for net in $(docker network ls -q | xargs docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' | tr ' ' '\n' | grep -E '^[0-9.]+/[0-9]+$' | sort -u); do
   ufw allow from "$net" comment 'Docker networks on this box' >/dev/null

@@ -9,7 +9,7 @@ apply it: `sudo deploy/harden-box.sh` (safe to run again).
 |---|---|---|
 | SSH | Key sign-in only; no passwords, no keyboard-interactive | Nothing for password guessing to try. Paired computers already have a key (pairing installs one, labelled `ttstation:<computer>` in `~/.ssh/authorized_keys`). |
 | SSH | No root sign-in, 3 tries per connection, 30 s to sign in | Smaller target, slower guessing. |
-| Firewall (ufw) | Incoming denied except SSH (22/tcp), TT Station HTTPS (8766/tcp) and mDNS (5353/udp) | Paired devices need only HTTPS and discovery. Plain HTTP (8765) serves only the box itself. |
+| Firewall (ufw) | Incoming denied except SSH (22/tcp), TT Station (8765/tcp, 8766/tcp) and mDNS (5353/udp) | Paired devices use HTTPS (8766). Discovery connects to the advertised port (8765) to resolve the box; the agent refuses plain HTTP from other machines itself. |
 | Firewall (ufw) | Everything allowed from the box's own Docker networks | Containers (the Code sandbox gate, apps) reach the agent and the model through the Docker bridge. |
 | Lockout (fail2ban) | An address is banned for an hour after 5 failed SSH sign-ins in 10 minutes | Stops scanning and key guessing. Watches `ssh.service` (Ubuntu's name), counting key refusals too. |
 
