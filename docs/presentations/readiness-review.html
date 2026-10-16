@@ -2,7 +2,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
-/* Layout: a readiness scorecard up top, then the decisions that need an owner, then the ranked backlog by stage (in flight, next, later), filterable by area. Vesper forest-teal palette, both themes. */
+/* Layout: what TT Station is (one diagram), what people do with it (cards), readiness at a glance (numbers + six areas), the four decisions, and the full findings list folded away. Vesper forest-teal palette, both themes. */
 :root {
   --bg: #f8fcfb; --surface: #eef6f6; --surface-2: #e8f2f1; --line: #d0e1e0;
   --fg: #050f0e; --muted: #344b49; --faint: #51706d;
@@ -24,218 +24,270 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--display); font-size: 15px; line-height: 1.55; }
-.wrap { max-width: 1120px; margin: 0 auto; padding-inline: 16px; padding-block: 32px 64px; display: grid; gap: 36px; }
-header { display: grid; gap: 10px; }
+.wrap { max-width: 1080px; margin: 0 auto; padding-inline: 16px; padding-block: 36px 64px; display: grid; gap: 48px; }
+header { display: grid; gap: 12px; }
 .eyebrow, th, .label { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
-h1 { font-weight: 500; font-size: clamp(28px, 4.2vw, 40px); line-height: 1.08; margin: 0; text-wrap: balance; }
+h1 { font-weight: 500; font-size: clamp(30px, 4.6vw, 44px); line-height: 1.06; margin: 0; text-wrap: balance; max-width: 22ch; }
 h2 { font-weight: 500; font-size: 22px; margin: 0; text-wrap: balance; }
 h3 { font-weight: 600; font-size: 15px; margin: 0; }
-p { margin: 0; color: var(--muted); max-width: 75ch; }
+p { margin: 0; color: var(--muted); max-width: 70ch; }
+.lede { font-size: 17px; }
 b { color: var(--fg); font-weight: 600; }
-code { font-family: var(--mono); font-size: .9em; background: var(--surface-2); padding: .05em .35em; border-radius: 4px; }
-section { display: grid; gap: 14px; }
+section { display: grid; gap: 16px; }
 
-.score { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-@media (max-width: 760px) { .score { grid-template-columns: minmax(0, 1fr); } }
-.dim { background: var(--surface); padding: 16px 18px; display: grid; gap: 8px; align-content: start; }
-.dim-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.dim p { font-size: 13.5px; }
+/* Ecosystem diagram */
+.eco { display: grid; grid-template-columns: minmax(0, 1fr) 96px minmax(0, 1.5fr) 72px minmax(0, .8fr); align-items: stretch; }
+.col { display: grid; gap: 10px; align-content: center; }
+.node { border: 1px solid var(--line); background: var(--surface); border-radius: 12px; padding: 12px 14px; display: grid; gap: 2px; }
+.node .label { font-size: 10px; }
+.node p { font-size: 13px; }
+.box { border: 1.5px solid var(--accent); border-radius: 16px; padding: 14px; display: grid; gap: 10px; background: var(--bg); }
+.box-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.mods { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.mod { background: var(--surface); border-radius: 10px; padding: 9px 11px; font-size: 13px; color: var(--muted); }
+.mod b { display: block; font-size: 13.5px; }
+.link { display: grid; place-items: center; position: relative; }
+.link::before { content: ""; position: absolute; left: 6px; right: 6px; top: 50%; border-top: 2px dashed var(--accent); }
+.link span { position: relative; background: var(--bg); font-family: var(--mono); font-size: 10.5px; color: var(--accent); text-align: center; padding: 4px 2px; line-height: 1.35; }
+.chips { border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 8px; background: var(--surface); align-content: center; }
+.chipgrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+.chipgrid i { aspect-ratio: 1; border-radius: 6px; background: repeating-linear-gradient(45deg, var(--fill), var(--fill) 3px, var(--accent) 3px, var(--accent) 6px); opacity: .85; }
+@media (max-width: 820px) {
+  .eco { grid-template-columns: minmax(0, 1fr); }
+  .link { height: 56px; }
+  .link::before { left: 50%; right: auto; top: 6px; bottom: 6px; border-top: 0; border-left: 2px dashed var(--accent); }
+  .chipgrid { grid-template-columns: repeat(4, 1fr); max-width: 220px; }
+}
+
+/* What people do */
+.uses { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.use { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: grid; gap: 6px; align-content: start; }
+.use p { font-size: 13.5px; }
+.use .label { color: var(--accent); }
+
+/* Readiness */
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 760px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.kpi { background: var(--surface); border-radius: 12px; padding: 14px 16px; display: grid; gap: 2px; }
+.kpi strong { font-weight: 500; font-size: 30px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.kpi span { font-size: 13px; color: var(--muted); }
+.areas { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+@media (max-width: 760px) { .areas { grid-template-columns: minmax(0, 1fr); } }
+.area { background: var(--bg); padding: 14px 16px; display: grid; gap: 7px; align-content: start; }
+.area-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.area p { font-size: 13px; }
 .state { font-family: var(--mono); font-size: 11px; font-weight: 500; padding: 2px 9px; border-radius: 99px; border: 1px solid currentColor; white-space: nowrap; }
-.s-red { color: var(--bad); } .s-amber { color: var(--warn); } .s-green { color: var(--good); }
-.bar { height: 6px; border-radius: 3px; background: var(--surface-2); display: flex; overflow: hidden; }
-.bar i { display: block; height: 100%; }
-.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--faint); }
-.legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 2px; background: var(--c); margin-right: 6px; vertical-align: -1px; }
+.s-amber { color: var(--warn); } .s-green { color: var(--good); }
+.bar { height: 5px; border-radius: 3px; background: var(--surface-2); display: flex; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--good); }
 
 .decisions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 760px) { .decisions { grid-template-columns: minmax(0, 1fr); } }
-.decision { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 6px; background: var(--bg); }
-.decision .rec { font-size: 13px; color: var(--fg); }
-.decision .rec::before { content: "Recommendation: "; color: var(--accent); font-weight: 600; }
+.decision { border-left: 3px solid var(--warn); background: var(--surface); border-radius: 0 10px 10px 0; padding: 12px 16px; display: grid; gap: 4px; }
+.decision p { font-size: 13.5px; }
+.decision .rec { color: var(--fg); }
+.decision .rec::before { content: "Ask: "; color: var(--accent); font-weight: 600; }
 
-.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+details { border: 1px solid var(--line); border-radius: 12px; }
+summary { cursor: pointer; padding: 14px 16px; font-weight: 500; list-style-position: inside; }
+summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 12px; }
+.inner { padding: 0 16px 16px; display: grid; gap: 12px; }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; }
 .filters button { font: 500 13px var(--display); color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 99px; padding: 5px 12px; cursor: pointer; }
 .filters button[aria-pressed="true"] { background: var(--fill); color: var(--on-fill); border-color: var(--fill); }
 .filters button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
-table { border-collapse: collapse; width: 100%; min-width: 760px; font-size: 14px; }
-th { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; }
-td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--muted); }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+table { border-collapse: collapse; width: 100%; min-width: 680px; font-size: 13.5px; }
+th { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--surface); }
+td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--muted); }
 tr:last-child td { border-bottom: 0; }
-td.item b { display: block; margin-bottom: 2px; }
-.sev { font-family: var(--mono); font-size: 11px; font-weight: 500; white-space: nowrap; }
-.sev-crit { color: var(--bad); } .sev-high { color: var(--bad); } .sev-med { color: var(--warn); } .sev-low { color: var(--faint); }
-.stage { font-family: var(--mono); font-size: 11px; white-space: nowrap; padding: 2px 8px; border-radius: 6px; background: var(--surface-2); color: var(--fg); }
-.stage.done { color: var(--good); } .stage.flight { color: var(--accent); } .stage.next { color: var(--info); } .stage.later { color: var(--faint); }
-.area { font-size: 12px; color: var(--faint); white-space: nowrap; }
-.effort { font-family: var(--mono); font-size: 12px; text-align: center; }
-.note { font-size: 13px; color: var(--faint); }
+td b { display: block; }
+.sev { font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+.sev-crit, .sev-high { color: var(--bad); } .sev-med { color: var(--warn); } .sev-low { color: var(--faint); }
+.stage { font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+.stage.done { color: var(--good); } .stage.next { color: var(--info); } .stage.later { color: var(--faint); }
+.tag { font-size: 12px; color: var(--faint); }
 </style>
 
 <div class="wrap">
   <header>
     <div class="eyebrow">TT Station · QuietBox 2 · Readiness review · October 2026</div>
-    <h1>What stands between TT Station and a company-wide rollout</h1>
-    <p>Five independent reviews of the platform (security and privacy, reliability and operations, product and UX, performance, engineering health), each grounded in the code, the box's logs and live measurements. Below: where each area stands, the decisions that need an owner, and every finding ranked, with what's already fixed and what's in flight.</p>
+    <h1>A private AI workstation the whole team can use</h1>
+    <p class="lede">TT Station turns a Tenstorrent QuietBox 2 into a shared, secure AI service: open-weight models run on its four Blackhole chips, and people use them from a desktop app, an iPhone app, or any OpenAI-compatible tool. Models run on the box, so prompts and files stay on company hardware.</p>
   </header>
 
-  <section aria-labelledby="sc-h">
-    <h2 id="sc-h">Where each area stands</h2>
-    <div class="score" id="score"></div>
-    <div class="legend"><span style="--c: var(--good)">Fixed</span><span style="--c: var(--accent)">In progress</span><span style="--c: var(--info)">Next, no decision needed</span><span style="--c: var(--line)">Later or needs a decision</span></div>
+  <section aria-labelledby="eco-h">
+    <h2 id="eco-h">How it fits together</h2>
+    <div class="eco" role="img" aria-label="Phones, computers and tools connect over pinned HTTPS to the TT Station agent on the QuietBox, which shares four Blackhole chips between models, coding, research and apps.">
+      <div class="col">
+        <div class="node"><span class="label">iPhone app</span><p>Chat, voice, approvals, start and stop models, sleep and wake the box</p></div>
+        <div class="node"><span class="label">Desktop app</span><p>Mac and Linux: the full workspace, from chat to Code to hardware</p></div>
+        <div class="node"><span class="label">Any OpenAI tool</span><p>CLI, IDEs, scripts: one <b>/v1</b> endpoint</p></div>
+      </div>
+      <div class="link"><span>pair once<br>pinned TLS 1.3<br>owner / member</span></div>
+      <div class="box">
+        <div class="box-head"><h3>TT Station agent</h3><span class="label">runs on the QuietBox</span></div>
+        <div class="mods">
+          <div class="mod"><b>Models</b>Starts, checks and restarts the model being served</div>
+          <div class="mod"><b>Chip scheduler</b>Every workload leases its chips (gozer); none collide</div>
+          <div class="mod"><b>Sandboxed Code</b>Coding agents run in a container by default</div>
+          <div class="mod"><b>Approvals</b>Risky actions wait for a person, on any device</div>
+          <div class="mod"><b>Apps</b>Vetted workflow tools, box-only unless shared</div>
+          <div class="mod"><b>Audit and updates</b>Activity log; signed releases</div>
+        </div>
+      </div>
+      <div class="link"><span>leases</span></div>
+      <div class="chips"><span class="label">4 × Blackhole</span><div class="chipgrid"><i></i><i></i><i></i><i></i></div><p style="font-size:12.5px">Two P300 boards, ~150 tok/s on a 20B model</p></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="use-h">
+    <h2 id="use-h">What people do with it</h2>
+    <div class="uses">
+      <div class="use"><span class="label">Everyone</span><h3>Chat and voice</h3><p>Private chat with models on the box, hands-free voice on phone and desktop, memory kept per person.</p></div>
+      <div class="use"><span class="label">Engineers</span><h3>Code</h3><p>A coding agent on whichever model works best on the box. Its requests show up as notifications to approve.</p></div>
+      <div class="use"><span class="label">Everyone</span><h3>Research</h3><p>Deep-research reports from the web and the team library, private by default and shareable.</p></div>
+      <div class="use"><span class="label">Everyone</span><h3>Studio</h3><p>Image and video generation running on the same chips.</p></div>
+      <div class="use"><span class="label">Teams</span><h3>Routines and meetings</h3><p>Scheduled jobs, and meeting notes recorded with a visible indicator in the room and audio deleted after transcription.</p></div>
+      <div class="use"><span class="label">Owners</span><h3>Run the box from anywhere</h3><p>Models, devices, sleep and wake, health and updates from the phone or the desktop.</p></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="ready-h">
+    <h2 id="ready-h">Readiness</h2>
+    <p>Five reviews (security and privacy, reliability, product, performance, engineering health), grounded in the code, the box's logs and live measurements.</p>
+    <div class="kpis" id="kpis"></div>
+    <div class="areas" id="areas"></div>
   </section>
 
   <section aria-labelledby="dec-h">
-    <h2 id="dec-h">Decisions that need an owner</h2>
-    <p>These can't be settled in code alone. Each has a recommendation.</p>
+    <h2 id="dec-h">What we need from leadership</h2>
+    <p>The remaining blockers can't be settled in code.</p>
     <div class="decisions" id="decisions"></div>
   </section>
 
-  <section aria-labelledby="bl-h">
-    <h2 id="bl-h">Every finding, ranked</h2>
-    <div class="filters" role="group" aria-label="Filter by area" id="filters"></div>
-    <div class="tablewrap">
-      <table>
-        <thead><tr><th style="width:9%">Severity</th><th style="width:40%">Finding</th><th>Fix</th><th style="width:7%">Effort</th><th style="width:11%">Status</th></tr></thead>
-        <tbody id="rows"></tbody>
-      </table>
+  <details>
+    <summary id="all-sum">Every finding</summary>
+    <div class="inner">
+      <div class="filters" role="group" aria-label="Filter by area" id="filters"></div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:10%">Severity</th><th style="width:42%">Finding</th><th>Fix</th><th style="width:9%">Status</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
     </div>
-    <p class="note">Effort: S is hours, M is days, L is a week or more. "In progress" items are being built on separate branches now and are merged only after their tests pass.</p>
-  </section>
+  </details>
 </div>
 
 <script>
 (() => {
 const AREAS = ["Security", "Privacy", "Reliability", "Performance", "Product", "Engineering"];
 const SUMMARY = {
-  Security: ["amber", "Roles, host execution for owners only, deny-by-default auth, an audit log, signed updates and pinned dependencies are in. Open: SSO, picking the release key holder, member-written folders."],
-  Privacy: ["green", "Pushes carry no content and reach only the person concerned; recording is visible in the room; audio is deleted after transcription; data exports exclude secrets."],
-  Reliability: ["green", "Liveness checks, safe starts, durable and exportable state, resumable work, workload-owned leases, and this box on the packaged install. Open: hardware checks for lease hand-off."],
-  Performance: ["green", "Prefix caching works on both Code paths, startup JS is 77% smaller, a hidden app stops polling, and Code can run on any working model and profile."],
-  Product: ["green", "First-run checklist, simple navigation with developer tools behind a switch, offline handling, consistent confirms and an accessibility pass are in. Not yet seen on a real box."],
-  Engineering: ["amber", "CI blocks on build, 1,259 Rust tests, desktop and Python tests, formatting, lints, licenses and docs; the largest files are split. Open: human review of the branch as ~17 PRs."],
+  Security: ["amber", "Key-only SSH and a firewall, pinned HTTPS, owner and member roles, deny-by-default access, an audit log and signed updates. Open: company sign-in (SSO)."],
+  Privacy: ["green", "Notifications carry no content, data is per person, recording is visible in the room, and exports leave secrets out."],
+  Reliability: ["green", "Runs from a package with health checks, safe restarts, backups and chip leases owned by each workload."],
+  Performance: ["green", "Prompt caching on every Code path, a much lighter desktop app, and any working model available to Code."],
+  Product: ["green", "First-run setup, plain navigation, offline handling, notifications and full phone control, in use on the box and an iPhone."],
+  Engineering: ["amber", "CI blocks on builds, about 1,300 Rust tests plus desktop, Python and iOS tests, lints and licenses. Open: human review of the branch."],
 };
-// stage: done | flight | next | later
+// stage: done | next | later
 const ITEMS = [
-  // Security
-  ["Security", "crit", "A Code sandbox could get commands run on the box through git hooks and config", "Sandbox .git read-only; host git pins every program-running setting off", "S", "done"],
-  ["Security", "high", "Web pages could steer the assistant's acting tools", "Recording, approvals, opening URLs always ask; after a web read every acting tool asks", "S", "done"],
-  ["Security", "high", "Desktop windows holding the box token could navigate to any site", "Exact-origin checks, navigation locked, IPC callers checked", "S", "done"],
-  ["Security", "high", "Every paired device has full owner power; no roles", "Owner role on sessions; owner-only devices, SSH keys, app keys, reset, power, updates, security", "M", "done"],
-  ["Security", "high", "Any process on the box counts as the owner (can mint a device token)", "Trust local requests only from the agent's own OS user (socket owner check)", "S", "done"],
-  ["Security", "high", "Bring-up's approval gate lets most shell commands run, so a poisoned model card could send keys off the box", "Network egress limited to documentation hosts, or network-shaped commands always ask", "M", "done"],
-  ["Security", "high", "Hermes installs by piping an unpinned script into bash", "Versioned installer checked against a pinned sha256", "S", "done"],
-  ["Security", "high", "Store apps (Langflow, n8n, Flowise, LightRAG) open on the network without sign-in", "Box-only by default; opt-in sharing turns the app's own sign-in on or is refused", "M", "done"],
-  ["Security", "med", "Auth is opt-in on each of 206 routes; 44 handlers have none", "Deny-by-default middleware, explicit public list, a test that walks every route", "M", "done"],
-  ["Security", "med", "App API keys stored raw, no expiry; device tokens accepted over plain HTTP on /v1", "Hash keys, optional expiry, app keys only on plain-HTTP /v1", "S", "done"],
-  ["Security", "med", "Updates aren't signed; checksum optional; downgrades allowed; repo is a personal account", "Ed25519-signed releases from pinned keys, checksum required, owner-only downgrades. Decision left: org repo and who holds the key", "M", "done"],
-  ["Security", "med", "Store app images use :latest, some from personal accounts", "Pin by digest; legal and security sign-off on the catalog", "S", "done"],
-  ["Security", "med", "The box can open URLs and launch apps on the client computer without asking", "Every action a box takes on your computer asks first (links, apps, recording, file search, settings), remembered per box", "S", "done"],
-  ["Security", "med", "SSRF guard bypass, open log/config routes, secrets in process lists, tokens in URLs, no CSP", "All fixed with tests in the first review round", "S", "done"],
-  ["Security", "low", "SSH password login open to the network, no firewall, no lockout", "Key-only SSH, ufw, fail2ban; deploy/harden-box.sh", "S", "done"],
-  ["Security", "low", "Sessions never expired and couldn't be revoked one at a time", "Hashed per-device sessions, 90-day idle expiry, Devices list", "M", "done"],
-  ["Security", "low", "6 known advisories in rustls, h2 and crossbeam-epoch", "cargo update of the three crates", "S", "done"],
-  ["Security", "low", "Power rule lets any process in the sudo group reboot without a prompt", "Scope the polkit rule to the agent's service", "S", "done"],
-  ["Security", "high", "Members who run Code outside the sandbox act as the box's account, so they can read the local secret and become owners", "Host execution (unsandboxed Code, terminals, bring-up, Orchard, Lab, desktop launches) is owner-only; member folders restricted; two sandbox link escapes closed", "M", "done"],
-  ["Security", "med", "The model container's HF token is visible to anyone who can run docker inspect", "Mounted secret file with HF_TOKEN_PATH for TT Station's launches; run.py and tt serve still need an upstream change", "S", "done"],
-  ["Privacy", "med", "Push notifications go to every paired phone, not just the person they concern", "Pushes and the event feed follow the person each event concerns; signed-out phones get nothing", "S", "done"],
-  ["Reliability", "med", "Docker marks the model unhealthy because the image's healthcheck probes port 8000 while the model serves on 8003", "The agent's own check reports correctly; the fix belongs in the gpt-oss package (PR text written)", "S", "next"],
-  ["Security", "med", "A Code sandbox accepted paths that only looked like the model API (/v1/../…)", "The gate refuses dot segments and encoded slashes", "S", "done"],
-  ["Security", "med", "An owner who later runs unsandboxed Code in a folder a member's sandbox wrote to runs whatever was left there", "Owners are warned and must confirm before running as the box in a folder a member's sandbox wrote to", "M", "done"],
-  ["Reliability", "med", "The .deb didn't include the app the agent serves", "Packaged and smoke-tested at /app/", "S", "done"],
-  ["Security", "high", "A routine's stop endpoint accepted encoded path segments, reaching other state files", "Run ids validated; found by the new tests along with 8 other bugs", "S", "done"],
-  ["Privacy", "med", "Any paired device could read and delete everyone's research reports", "Reports are per person with sharing; owners see all", "S", "done"],
-  ["Security", "med", "Members could reset the chips through the Doctor, stop stray containers and download diagnostics", "Owner-only; found by the new tests", "S", "done"],
-  ["Security", "med", "Any member could stop or switch the model for everyone", "An owner setting decides: anyone (default) or owners only, applied to every start and stop path", "M", "done"],
-  ["Security", "med", "Bring-up agents run as the box's account, so they could answer their own approval prompts over the box's local connection", "Real containment needs a separate account or network namespace for bring-up runs", "L", "later"],
-  // Privacy
-  ["Privacy", "high", "Any device can claim to be any person and read their memories", "Bind people at creation or with owner confirmation; scoped deletes", "M", "done"],
-  ["Privacy", "high", "/telemetry needs no sign-in and sends full process command lines to the network", "Require the box or a paired device; redact command lines for non-owners", "S", "done"],
-  ["Privacy", "med", "Push notifications carry research summaries, approval commands and meeting titles through Apple, to every phone", "Generic alerts; details fetched in the app (notification service extension)", "M", "done"],
-  ["Privacy", "med", "Pairing codes were pushed through Apple", "Push says only that a computer is asking; code shown in the app", "S", "done"],
-  ["Privacy", "med", "Any paired phone can record up to 4 hours with no indicator in the room", "Chime and an on-screen banner in the room, a push to other phones, audited", "M", "done"],
-  ["Privacy", "med", "Recordings kept forever, auto-added to the shared Library, unscoped", "Audio deleted after transcription, Library opt-in, per-person jobs, owner-set retention", "M", "done"],
-  ["Privacy", "med", "Reports, transcripts and creations written readable by other local accounts", "Config folder 0700, sensitive files 0600", "S", "done"],
-  ["Privacy", "med", "Web text could leak data through a later fetch's URL", "Per-turn URL provenance; new addresses need approval", "M", "done"],
-  ["Privacy", "low", "Routines let web text drive memory and pre-approved actions", "Actions queued for approval once web text enters a run", "M", "done"],
-  ["Privacy", "low", "No durable audit trail of security-relevant actions", "Append-only audit log with actor device; owner-only Activity log", "M", "done"],
-  // Reliability
-  ["Reliability", "high", "This box runs the agent from the source checkout; a crash-looping build shipped 23 times", "This box now runs the signed-update-ready .deb; CI gates the agent and the package", "S", "done"],
-  ["Reliability", "high", "A hung model shows as \"serving\" (the gpt-oss container is Docker-unhealthy right now)", "Inference liveness probe with a degraded state and a Restart action", "M", "done"],
-  ["Reliability", "high", "Two clients can start a model at the same moment", "Atomic serve state transition; second caller gets a clear 409", "S", "done"],
-  ["Reliability", "high", "Chip leases are owned by the agent's process; two unowned leases in a week", "Leases owned by the running workload, with a reconciler for orphaned leases; device mapping verified from source. Four hardware checks documented", "M", "done"],
-  ["Reliability", "med", "State files written non-atomically; a corrupt token file would unpair every device", "Shared atomic write and corruption backup helpers", "M", "done"],
-  ["Reliability", "med", "No export or restore of user data", "Owner-only export and import with a dry-run preview; secrets never included", "M", "done"],
-  ["Reliability", "med", "Evals and jobs restart from zero after an agent restart", "Check-ups resume per category, transcription jobs per chunk", "M", "done"],
-  ["Reliability", "med", "Helper processes leak across restarts (415 unclean terminations in a week)", "Run helpers in their own systemd scopes", "S", "done"],
-  ["Reliability", "med", "317 GB of reclaimable Docker images; container logs unbounded; no space check before downloads", "Opt-in log rotation, reclaim-space action, pre-download check", "S", "done"],
-  ["Reliability", "med", "No version handshake between agent and apps", "agent_version, api_version, min_client in /status", "S", "done"],
-  ["Reliability", "low", "No health endpoint; logs have no levels", "/healthz and levelled logs", "S", "done"],
-  ["Reliability", "low", "After a power loss the box comes back with no model serving", "Opt-in: start the last model after a reboot", "S", "done"],
-  // Performance
-  ["Performance", "high", "One Code launch path put a per-request header at the top of the prompt, so prefix caching never hit", "Share the cache-safe launch settings across both paths", "S", "done"],
-  ["Performance", "high", "Code runs on a throughput server config: about 71 tok/s, against 152–158 measured with 4 chips at low latency", "People pick any working model and profile for Code; the picker lists every source with speed and reliability per setup", "L", "done"],
-  ["Performance", "med", "The agent spawns tt-smi 18 times a minute and runs docker ps uncached on every /status", "Shared sampler, 30 s history, short caches", "S", "done"],
-  ["Performance", "med", "The desktop polls the box about 91 times a minute while idle, even when hidden", "Pause when hidden, share one /serve poll", "S", "done"],
-  ["Performance", "med", "1.8 MB desktop bundle, every page loaded up front", "Lazy routes: Home loads about 64% less", "S", "done"],
-  ["Performance", "med", "Chat re-sorts and saves every conversation on every streamed token", "Batch per frame, save on done, memoized messages", "S", "done"],
-  ["Performance", "med", "Cache hits are invisible (server doesn't report cached tokens)", "--enable-prompt-tokens-details for community and native vLLM launches (next model start); run.py/Docker launches still to check", "S", "done"],
-  ["Performance", "low", "Code speed strip could show a different compaction point than the session uses", "One window function for launch and display", "S", "done"],
-  // Product
-  ["Product", "high", "No first-run path; Home hard-codes hardware and buries \"Start a model\"", "First-run checklist, hardware from the box, mode cards deep-link to their model", "M", "done"],
-  ["Product", "high", "Internal tools and jargon (gozer, Orchard, Codex) in the main navigation", "Developer tools switch; plain names and a glossary", "M", "done"],
-  ["Product", "high", "No offline state: \"Failed to fetch\" and endless \"Connecting…\"", "App-wide connectivity banner, friendly errors, light/dark offline page", "M", "done"],
-  ["Product", "high", "Destructive actions confirmed inconsistently; Enter confirms a red Delete; Home Stop affects everyone silently", "One confirm/undo policy, Cancel focused by default, shared-impact warnings", "S", "done"],
-  ["Product", "med", "Keyboard and screen-reader gaps; temperature by color only; reduced motion ignored in places", "Accessibility pass across shared components", "M", "done"],
-  ["Product", "med", "Overlapping places for schedules, energy and pairing", "Schedules are routines that switch the box's mode; energy lives on Hardware; one place for pairing", "M", "done"],
-  ["Product", "med", "The phone's \"Waiting for you\" approvals inbox has no desktop equivalent", "Needs you: one desktop inbox for Code, routine, bring-up and pairing requests, with keyboard shortcuts", "M", "done"],
-  ["Product", "low", "Literal colors and 255 inline font sizes", "Tokens and Typography variants on touched pages", "M", "done"],
-  // Engineering
-  ["Engineering", "high", "No Rust code was built or tested in CI", "Rust build/test, cargo-deny and docs-route jobs; iOS build job", "S", "done"],
-  ["Engineering", "high", "~94K lines on one branch have never been reviewed", "Land as ~17 PRs in dependency order (docs/landing-plan.md)", "L", "later"],
-  ["Engineering", "med", "Two god files (routes.rs 5.5K lines, assistant.rs 3.6K) and 80 process-wide globals", "routes.rs split from 6,637 lines into state, auth, router, error and 14 handler files; 17 modules' globals moved onto AppState", "L", "done"],
-  ["Engineering", "med", "Duplicated logic: six model-discovery probes, 24 error helpers, 33 HTTP clients", "One served-model probe, one local HTTP client, one error type across 14 modules", "M", "done"],
-  ["Engineering", "med", "Docs described a WireGuard feature that doesn't exist; auth docs drifted", "Corrected; CI checks every documented endpoint exists", "S", "done"],
-  ["Engineering", "med", "Large untested modules (apps, voice, routines, updates, coding, Python helpers); iOS has no tests", "About 230 new tests across every major module, the Python helpers and a first iOS target; 24 bugs found and fixed", "L", "done"],
-  ["Engineering", "low", "1,300 formatting differences and 38 clippy warnings", "Format and clean after the in-flight merges; then make both blocking", "S", "done"],
-  ["Engineering", "low", "No NOTICE or third-party license file; n8n's license needs legal review", "NOTICE, THIRD_PARTY_LICENSES.md and a generator script added", "S", "done"],
-  ["Engineering", "low", "CLI config and logs commands sent no token (401 from other machines)", "Send the stored pairing token, in a header", "S", "done"],
-  ["Engineering", "med", "The CLI talks to the box over plain HTTP, which the box no longer serves to other machines", "HTTPS with the box's pinned certificate; old pairings move over on first use", "M", "done"],
+  ["Security", "crit", "A Code sandbox could get commands run on the box through git hooks and config", "Sandbox .git read-only; host git pins every program-running setting off", "done"],
+  ["Security", "high", "Web pages could steer the assistant's acting tools", "Recording, approvals, opening URLs always ask; after a web read every acting tool asks", "done"],
+  ["Security", "high", "Desktop windows holding the box token could navigate to any site", "Exact-origin checks, navigation locked, IPC callers checked", "done"],
+  ["Security", "high", "Every paired device had full owner power; no roles", "Owner and member roles; owner-only devices, keys, reset, power, updates, security", "done"],
+  ["Security", "high", "Any process on the box counted as the owner", "Local requests trusted only from the agent's own OS user", "done"],
+  ["Security", "high", "A poisoned model card could steer bring-up into sending keys off the box", "Network limited to documentation hosts; network-shaped commands always ask", "done"],
+  ["Security", "high", "An installer piped an unpinned script into bash", "Versioned installer checked against a pinned sha256", "done"],
+  ["Security", "high", "Store apps opened on the network without sign-in", "Box-only by default; sharing turns the app's own sign-in on or is refused", "done"],
+  ["Security", "high", "Members running Code outside the sandbox could read the box's secret and become owners", "Running on the host is owner-only; sandbox link escapes closed", "done"],
+  ["Security", "high", "A routine endpoint accepted encoded paths, reaching other state files", "Run ids validated; found by new tests with 8 other bugs", "done"],
+  ["Security", "med", "Sign-in was opt-in on each of 206 routes; 44 had none", "Deny-by-default, an explicit public list, and a test that walks every route", "done"],
+  ["Security", "med", "App keys stored raw with no expiry", "Hashed keys with optional expiry", "done"],
+  ["Security", "med", "Updates weren't signed and could be downgraded", "Ed25519-signed releases from pinned keys, owner-only downgrades", "done"],
+  ["Security", "med", "Store app images used :latest, some from personal accounts", "Pinned by digest", "done"],
+  ["Security", "med", "The box could open links and apps on a client computer without asking", "Every such action asks first, remembered per box", "done"],
+  ["Security", "med", "SSRF bypass, open log routes, secrets in process lists, tokens in URLs, no CSP", "All fixed with tests", "done"],
+  ["Security", "med", "The model's Hugging Face token was visible through docker inspect", "Mounted as a secret file", "done"],
+  ["Security", "med", "Members could reset chips, stop containers, or switch the model for everyone", "Owner-only, or an owner setting for model control", "done"],
+  ["Security", "med", "Bring-up agents ran with the box's full account", "Landlock containment: secrets unreadable, writes limited to the run's folders", "done"],
+  ["Security", "low", "SSH password sign-in open to the network, no firewall, no lockout", "Key-only SSH, firewall, lockout after failed sign-ins", "done"],
+  ["Security", "low", "Sessions never expired and couldn't be revoked one at a time", "Per-device sessions, idle expiry, a Devices list", "done"],
+  ["Security", "low", "Known advisories in three dependencies", "Updated", "done"],
+  ["Privacy", "high", "Any device could claim to be any person and read their memories", "People bound at creation or by owner confirmation", "done"],
+  ["Privacy", "high", "Telemetry needed no sign-in and exposed process command lines", "Sign-in required; command lines redacted for members", "done"],
+  ["Privacy", "med", "Notifications carried summaries and commands through Apple to every phone", "Generic alerts, details fetched in the app, sent only to the person concerned", "done"],
+  ["Privacy", "med", "A phone could record for hours with no indicator in the room", "Chime and banner in the room, a push to other phones, audited", "done"],
+  ["Privacy", "med", "Recordings kept forever in a shared library", "Audio deleted after transcription; library opt-in; owner-set retention", "done"],
+  ["Privacy", "med", "Anyone could read everyone's research reports", "Reports are per person with sharing", "done"],
+  ["Privacy", "med", "Web text could leak data through a later fetch", "New addresses need approval", "done"],
+  ["Privacy", "low", "No durable record of security-relevant actions", "Append-only audit log; owner-only Activity view", "done"],
+  ["Reliability", "high", "The box ran the agent from a source checkout; a crash-looping build shipped 23 times", "Packaged install; CI gates the agent and the package", "done"],
+  ["Reliability", "high", "A hung model showed as \"serving\"", "Liveness probe with a degraded state and a Restart action", "done"],
+  ["Reliability", "high", "Two people could start a model at the same moment", "Atomic start; the second gets a clear message", "done"],
+  ["Reliability", "high", "Chip leases belonged to the agent, not the work; Lab and resets skipped them", "Every chip user takes a lease owned by its workload, with a reconciler", "done"],
+  ["Reliability", "med", "A corrupt state file could unpair every device", "Atomic writes with corruption backups", "done"],
+  ["Reliability", "med", "No export or restore of user data", "Owner export and import with a preview; secrets never included", "done"],
+  ["Reliability", "med", "Long jobs restarted from zero after a restart", "Resume per category and per chunk", "done"],
+  ["Reliability", "med", "Helper processes leaked; disk filled with images and logs", "Helpers in their own scopes; log rotation, reclaim space, pre-download check", "done"],
+  ["Reliability", "low", "No health endpoint or version handshake between box and apps", "/healthz, levelled logs, version checks", "done"],
+  ["Reliability", "med", "Docker marks the model unhealthy (the image checks the wrong port)", "The agent's own check is correct; fix belongs upstream (PR text written)", "next"],
+  ["Performance", "high", "Prompt caching never hit on one Code path", "Shared cache-safe launch settings", "done"],
+  ["Performance", "high", "Code ran on a throughput config at ~71 tok/s vs ~155 possible", "Code can use any working model and profile, with speed shown per setup", "done"],
+  ["Performance", "med", "The agent ran tt-smi 18 times a minute; the desktop polled 91 times a minute", "Shared sampler and caches; polling pauses when hidden", "done"],
+  ["Performance", "med", "1.8 MB desktop bundle; chat re-saved on every token", "Lazy pages (Home 64% lighter); batched rendering", "done"],
+  ["Product", "high", "No first-run path; \"Start a model\" buried", "First-run checklist; cards go straight to their model", "done"],
+  ["Product", "high", "Internal tools and jargon in the main navigation", "Developer tools behind a switch; plain names", "done"],
+  ["Product", "high", "No offline state: \"Failed to fetch\" and endless \"Connecting…\"", "Connectivity banner and friendly errors", "done"],
+  ["Product", "high", "Destructive actions confirmed inconsistently", "One confirm and undo policy; shared-impact warnings", "done"],
+  ["Product", "high", "The phone couldn't fully run the box", "Phone parity: models, devices, approvals, sleep and Wake-on-LAN", "done"],
+  ["Product", "med", "Approvals had no desktop inbox", "A Notifications menu for Code, routine, bring-up and pairing requests", "done"],
+  ["Product", "med", "The whole window scrolled with long chats", "Only the conversation scrolls; sidebars scroll on their own", "done"],
+  ["Product", "med", "Phones found the box at an address they couldn't use", "Box advertises its usable address; app falls back to its name", "done"],
+  ["Product", "med", "Keyboard, screen-reader and reduced-motion gaps", "Accessibility pass across shared components", "done"],
+  ["Engineering", "high", "No Rust code was built or tested in CI", "Rust, dependency-audit, docs and iOS build jobs", "done"],
+  ["Engineering", "med", "Giant files and 80 process-wide globals", "Router split into 18 files; globals moved onto app state", "done"],
+  ["Engineering", "med", "Large untested modules; no iOS tests", "About 230 new tests; 24 bugs found and fixed", "done"],
+  ["Engineering", "low", "No license notices", "NOTICE and third-party licenses with a generator", "done"],
+  ["Engineering", "med", "The CLI used plain HTTP the box no longer serves", "HTTPS with the box's pinned certificate", "done"],
+  ["Engineering", "high", "~165K lines on one branch have not had human review", "Land as ~17 PRs in dependency order with a reviewer per area", "later"],
 ];
 const DECISIONS = [
-  ["Where this lands", "All work is local commits on jberkowitz/mobile-voice; the remote is a personal fork (tsingletaryTT/tt-station). Releases and updates also point there.", "Move to an org-owned repo and release channel; land via the 17-PR plan with a named reviewer per area."],
-  ["Identity for company boxes", "Sign-in is per-box pairing. No SSO, MFA or central revocation. A full design is in docs/design/enterprise-identity.md (about 10–13 engineer-weeks).", "Org mode: OIDC sign-in mapped to owner/member groups, MFA from the IdP, sessions re-proven every 8 h. Decide the IdP and offline grace first."],
-  ["Store app catalog", "Third-party images, some from personal accounts; n8n's Sustainable Use License isn't open source.", "Legal and security sign-off; pin by digest; hide unapproved apps on company boxes."],
-  ["Release signing", "Updates now require signatures from pinned keys, but no key is pinned yet, so tagged releases won't publish.", "Name who holds the release key, pin its public key, and require a reviewer on the release environment."],
-  ["Restarting the live model and apps", "Binding fixes and cached-token reporting take effect only when the model server and Local Deep Research restart.", "Schedule a short maintenance window to restart them; Docker log rotation (restarts Docker) can go in the same window."],
-  ["Older paired devices", "13 devices migrated as \"Paired before device tracking\" with unknown origin.", "Ask the owner to review the Devices list and remove unknown ones; force re-pairing after 30 days."],
+  ["A home for the code", "Everything sits on one branch of a personal fork; releases point there too.", "Move to an org-owned repo and name a reviewer per area to land it as ~17 PRs."],
+  ["Company sign-in", "Today each device pairs with one box. There's no SSO, MFA or central revocation. A design exists (10–13 engineer-weeks).", "Choose the identity provider so SSO with MFA can start."],
+  ["Release key", "Updates require a signature, but no one holds the key yet, so releases can't publish.", "Name the key holder and a release approver."],
+  ["App catalog", "Third-party workflow apps; one (n8n) isn't open-source licensed.", "Legal and security sign-off on which apps company boxes offer."],
 ];
 
-const stageLabel = { done: "Fixed", flight: "In progress", next: "Next", later: "Later" };
 const sevLabel = { crit: "Critical", high: "High", med: "Medium", low: "Low" };
+const stageLabel = { done: "Fixed", next: "Next", later: "Later" };
 const order = { crit: 0, high: 1, med: 2, low: 3 };
-const stageOrder = { flight: 0, next: 1, later: 2, done: 3 };
+const stageOrder = { next: 0, later: 1, done: 2 };
+const done = ITEMS.filter((i) => i[4] === "done").length;
+const ready = Object.values(SUMMARY).filter(([s]) => s === "green").length;
 
-const score = document.getElementById("score");
-for (const a of AREAS) {
+document.getElementById("kpis").innerHTML = [
+  [`${done}/${ITEMS.length}`, "findings fixed"],
+  [`${ready}/${AREAS.length}`, "areas ready"],
+  ["~1,300", "automated tests, run on every change"],
+  ["~150", "tokens/s on a 20B model"],
+].map(([n, t]) => `<div class="kpi"><strong>${n}</strong><span>${t}</span></div>`).join("");
+
+document.getElementById("areas").innerHTML = AREAS.map((a) => {
   const items = ITEMS.filter((i) => i[0] === a);
-  const n = (s) => items.filter((i) => i[5] === s).length;
+  const fixed = items.filter((i) => i[4] === "done").length;
   const [state, text] = SUMMARY[a];
-  const label = { red: "Not ready", amber: "Close", green: "Ready" }[state];
-  const pct = (k) => (n(k) / items.length) * 100;
-  score.insertAdjacentHTML("beforeend", `
-    <div class="dim">
-      <div class="dim-head"><h3>${a}</h3><span class="state s-${state}">${label}</span></div>
-      <div class="bar" role="img" aria-label="${n("done")} fixed, ${n("flight")} in progress, ${n("next")} next, ${n("later")} later, of ${items.length}">
-        <i style="width:${pct("done")}%;background:var(--good)"></i><i style="width:${pct("flight")}%;background:var(--accent)"></i><i style="width:${pct("next")}%;background:var(--info)"></i>
-      </div>
-      <p>${text}</p>
-      <span class="label">${n("done")} fixed · ${n("flight")} in progress · ${n("next") + n("later")} to do</span>
-    </div>`);
-}
+  return `<div class="area">
+    <div class="area-head"><h3>${a}</h3><span class="state s-${state}">${state === "green" ? "Ready" : "Close"}</span></div>
+    <div class="bar" role="img" aria-label="${fixed} of ${items.length} fixed"><i style="width:${(fixed / items.length) * 100}%"></i></div>
+    <p>${text}</p></div>`;
+}).join("");
 
-document.getElementById("decisions").innerHTML = DECISIONS.map(([t, why, rec]) =>
-  `<div class="decision"><h3>${t}</h3><p style="font-size:13.5px">${why}</p><p class="rec">${rec}</p></div>`).join("");
+document.getElementById("decisions").innerHTML = DECISIONS.map(([t, why, ask]) =>
+  `<div class="decision"><h3>${t}</h3><p>${why}</p><p class="rec">${ask}</p></div>`).join("");
+
+document.getElementById("all-sum").textContent = `Every finding (${ITEMS.length}: ${done} fixed, ${ITEMS.length - done} open)`;
 
 let filter = "All";
 try { filter = localStorage.getItem("readiness.filter") || "All"; } catch (e) {}
@@ -243,11 +295,11 @@ const filters = document.getElementById("filters");
 const render = () => {
   filters.innerHTML = ["All", ...AREAS].map((a) => `<button type="button" aria-pressed="${a === filter}" data-a="${a}">${a}</button>`).join("");
   const rows = ITEMS.filter((i) => filter === "All" || i[0] === filter)
-    .sort((x, y) => stageOrder[x[5]] - stageOrder[y[5]] || order[x[1]] - order[y[1]]);
-  document.getElementById("rows").innerHTML = rows.map(([area, sev, finding, fix, effort, stage]) => `
+    .sort((x, y) => stageOrder[x[4]] - stageOrder[y[4]] || order[x[1]] - order[y[1]]);
+  document.getElementById("rows").innerHTML = rows.map(([area, sev, finding, fix, stage]) => `
     <tr><td><span class="sev sev-${sev}">${sevLabel[sev]}</span></td>
-    <td class="item"><b>${finding}</b><span class="area">${area}</span></td>
-    <td>${fix}</td><td class="effort">${effort}</td><td><span class="stage ${stage}">${stageLabel[stage]}</span></td></tr>`).join("");
+    <td><b>${finding}</b><span class="tag">${area}</span></td>
+    <td>${fix}</td><td><span class="stage ${stage}">${stageLabel[stage]}</span></td></tr>`).join("");
 };
 filters.addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
