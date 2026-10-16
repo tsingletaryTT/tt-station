@@ -142,9 +142,15 @@ app; `ask` sends every request; `auto` keeps the runner's unattended
 behaviour. Claude's WebFetch reads documentation pages on a few hosts without
 asking; any other address, a query string, or a path that isn't a page's shape
 asks. This is a guard, not containment (a script the agent writes can still
-reach the network); a network namespace for the stage is the follow-up. The
+reach the network). What contains a stage is its sandbox: a Landlock launcher
+(`sandbox_exec.py`) that hides TT Station's folder and the account's keys and
+leaves only the run's folder, the repo and caches writable, the systemd
+properties a user manager applies, and no local trust for anything in the
+run's unit; see [bringup-containment.md](bringup-containment.md), which also
+covers what needs root (`deploy/contain-bringup.sh`). Approvals are answered
+from an owner's paired device only, never by local trust. The
 run's secret (`TT_STATION_RUN_SECRET`) is removed from the environment the
-stage inherits; `HF_TOKEN` isn't set in it, but the stage reads
+stage inherits, works only while the run is live, and is new at every launch; `HF_TOKEN` isn't set in it, but the stage reads
 `~/.cache/huggingface/token` through `HOME`, which it needs to download gated
 weights.
 Stop and Resume (resume continues the stage's Codex thread via
