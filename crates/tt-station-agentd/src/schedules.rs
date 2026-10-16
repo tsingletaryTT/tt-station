@@ -233,20 +233,37 @@ impl Schedules {
         removed
     }
 
-    /// Everything here, leaving the store empty (for `crate::routines`). The
-    /// file they came from is kept beside it as `schedules.json.migrated`.
-    pub fn take_all(&self) -> Vec<Schedule> {
+    /// Drop `handed` (schedules `crate::routines` has already saved as
+    /// routines) from the store. What they were is kept first beside the file,
+    /// as `schedules.json.migrated-<unix-seconds>` (never overwriting an
+    /// earlier one); a schedule added or changed meanwhile stays. Fails, and
+    /// keeps everything, when the copy or the store can't be written.
+    pub fn hand_over(&self, handed: &[Schedule]) -> std::io::Result<()> {
         let mut items = self.items.lock().expect("schedules mutex");
-        if items.is_empty() {
-            return vec![];
+        let left: Vec<Schedule> = items
+            .iter()
+            .filter(|s| !handed.contains(s))
+            .cloned()
+            .collect();
+        if left.len() == items.len() {
+            return Ok(());
         }
-        let taken = std::mem::take(&mut *items);
         if let Some(path) = &self.path {
-            let kept = path.with_extension("json.migrated");
-            crate::fsio::save_json(&kept, &taken, crate::fsio::PRIVATE);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let mut kept = path.with_extension(format!("json.migrated-{now}"));
+            let mut n = 1;
+            while kept.exists() {
+                kept = path.with_extension(format!("json.migrated-{now}-{n}"));
+                n += 1;
+            }
+            crate::fsio::write_json(&kept, handed, crate::fsio::PRIVATE)?;
+            crate::fsio::write_json(path, &left, crate::fsio::PRIVATE)?;
         }
-        self.save(&items);
-        taken
+        *items = left;
+        Ok(())
     }
 
     #[cfg(test)]

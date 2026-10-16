@@ -247,13 +247,29 @@ fn with_routines<T>(state: &AppState, f: impl FnOnce(&mut Vec<Routine>) -> T) ->
     let list = held.get_or_insert_with(|| {
         crate::fsio::read_json_or_backup(&dir(state).join("routines.json")).unwrap_or_default()
     });
-    let before = serde_json::to_vec(&*list).unwrap_or_default();
     // Schedules (the old Settings → Schedules, an older phone app, an import)
-    // become routines here.
-    let incoming = state.schedules().take_all();
+    // become routines here: saved as routines first, and only then taken out
+    // of the schedules, so a failed save loses nothing (it's tried again).
+    let incoming = state.schedules().list();
     if !incoming.is_empty() {
-        absorb_into(list, incoming, now());
+        let mut next = list.clone();
+        absorb_into(&mut next, incoming.clone(), now());
+        let path = dir(state).join("routines.json");
+        match crate::fsio::write_json(&path, &next, crate::fsio::PRIVATE) {
+            Ok(()) => {
+                *list = next;
+                if let Err(e) = state.schedules().hand_over(&incoming) {
+                    // Saved as routines already; absorbing them again is harmless.
+                    crate::log::error(format!("couldn't empty schedules.json: {e}"));
+                }
+            }
+            Err(e) => crate::log::error(format!(
+                "couldn't save {} with the schedules in it (kept as schedules): {e}",
+                path.display()
+            )),
+        }
     }
+    let before = serde_json::to_vec(&*list).unwrap_or_default();
     let out = f(list);
     if serde_json::to_vec(&*list).unwrap_or_default() != before {
         crate::fsio::save_json(
@@ -2381,25 +2397,54 @@ mod tests {
     }
 
     #[test]
-    fn the_store_hands_its_schedules_over_once_and_keeps_a_copy() {
+    fn schedules_become_routines_only_once_the_routines_are_saved() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("schedules.json");
         let store = crate::schedules::Schedules::open(&path);
         store.add("images", "07:30", vec![1, 2]).unwrap();
-        let reopened = crate::schedules::Schedules::open(&path);
-        let taken = reopened.take_all();
-        assert_eq!(taken.len(), 1);
-        assert!(reopened.list().is_empty());
-        assert!(reopened.take_all().is_empty(), "only once");
-        assert!(
-            crate::schedules::Schedules::open(&path).list().is_empty(),
-            "the file is emptied"
-        );
-        let kept: Vec<crate::schedules::Schedule> = serde_json::from_slice(
-            &std::fs::read(tmp.path().join("schedules.json.migrated")).unwrap(),
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
         )
-        .unwrap();
-        assert_eq!(kept, taken);
+        .with_config_dir(tmp.path().to_path_buf())
+        .with_schedules(crate::schedules::Schedules::open(&path));
+        // routines/ can't be made: the save fails, and the schedule stays.
+        std::fs::write(tmp.path().join("routines"), b"in the way").unwrap();
+        absorb_schedules(&state);
+        assert_eq!(state.schedules().list().len(), 1, "kept as a schedule");
+        assert_eq!(
+            crate::schedules::Schedules::open(&path).list().len(),
+            1,
+            "schedules.json untouched"
+        );
+        *mine(&state).routines.lock().unwrap() = None;
+        std::fs::remove_file(tmp.path().join("routines")).unwrap();
+        absorb_schedules(&state);
+        assert!(state.schedules().list().is_empty());
+        assert!(crate::schedules::Schedules::open(&path).list().is_empty());
+        assert_eq!(list(&state).len(), 1, "saved as a routine");
+        let copies: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("schedules.json.migrated-"))
+            .collect();
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        // A second hand-over keeps its own copy beside the first.
+        state.schedules().add("images", "08:30", vec![3]).unwrap();
+        absorb_schedules(&state);
+        let n = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("schedules.json.migrated-")
+            })
+            .count();
+        assert_eq!(n, 2);
+        assert_eq!(list(&state).len(), 2);
     }
 
     #[test]
