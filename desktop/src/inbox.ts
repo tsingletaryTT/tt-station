@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-// "Needs you": everything on the box that's waiting for this person, in one
+// Notifications: everything on the box that's waiting for this person, in one
 // list -- the desktop's version of the phone's "Waiting for you".
 //
 // It gathers what each feature already exposes and doesn't ask the box for

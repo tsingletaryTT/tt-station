@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-// Needs you: everything waiting for this person -- a Code session's question,
+// Notifications: everything waiting for this person -- a Code session's question,
 // a routine's action, and for owners a bring-up's command and someone asking
 // to pair -- each answered right here or opened where it came from. The
 // desktop's version of the phone's "Waiting for you" (`inbox.ts`). The bell at
@@ -47,13 +47,13 @@ export function Inbox() {
 
   const what = owner ? "Code, routines, bring-up and pairing" : "Code and routines";
   return (
-    <Page title="Needs you" subtitle={`Everything waiting for your OK, from ${what}, in one place. Answer here, or open it where it came from.`}>
+    <Page title="Notifications" subtitle={`Everything waiting for your OK, from ${what}, in one place. Answer here, or open it where it came from.`}>
       <div className="sr-only" role="status" aria-live="polite">{said}</div>
       {error && <Admonition variant="warning" subtle size="sm">Couldn't check what's waiting: {error}. Trying again.</Admonition>}
       {!loaded ? (
         <div className="page-loading" role="status" aria-label="Loading" />
       ) : shown.length === 0 ? (
-        <Empty title="Nothing needs you right now">
+        <Empty title="You're all caught up">
           When {owner ? "Code, a routine, a bring-up or someone pairing a device" : "Code or a routine"} needs your OK, it shows up here and under the bell at the top right, with a count, and as a notification.
         </Empty>
       ) : (

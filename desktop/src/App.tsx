@@ -3,7 +3,7 @@
 
 // The app's frame: a sidebar of places, the box's live state at the bottom of
 // it, and the current place on the right under a slim top bar with the
-// notifications bell (Needs you). Routes live under /app/.
+// notifications bell (Notifications). Routes live under /app/.
 
 import { type ComponentType, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -62,7 +62,7 @@ const PLACES: { route: Route; label: string; icon: IconKind; group: number }[] =
   { route: "settings", label: "Settings", icon: "gear", group: 2 },
 ];
 
-/** Places with an address but no sidebar entry: Needs you opens from the bell's "See everything". */
+/** Places with an address but no sidebar entry: Notifications opens from the bell's "See everything". */
 const UNLISTED: Route[] = ["inbox"];
 
 function routeFromPath(): Route {

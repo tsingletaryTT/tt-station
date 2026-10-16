@@ -12,7 +12,7 @@ const run: BringupRunLite = {
 };
 const pairing = (at: number, seq = 7): BoxEvent => ({ seq, at, kind: "pairing", title: "Pairing code for Jane's MacBook: 123 456", body: "Type it on that device." });
 
-describe("Needs you", () => {
+describe("Notifications", () => {
   it("lists Code and routine approvals for everyone, each opening where it came from", () => {
     const items = gather({ approvals: [code, routine], bringup: [run], events: [pairing(NOW - 10)], owner: false, now: NOW });
     expect(items.map((i) => i.kind)).toEqual(["routine", "code"]);

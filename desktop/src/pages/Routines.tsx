@@ -5,7 +5,7 @@
 // in plain words and when to run it; the served model works out the steps,
 // looks things up freely, asks before changing the box (unless the routine
 // was given that action ahead of time), and ends with a report. Runs that
-// need an answer show here, in Needs you, and as a notification.
+// need an answer show here, in Notifications, and as a push notification.
 //
 // A routine can also just switch the box's mode at set times (what Settings →
 // Schedules used to do): no model plans it, and it never interrupts a silicon
@@ -89,7 +89,7 @@ const STATUS: Record<string, { label: string; tone: "mint" | "info" | "warning" 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-/** `#run-<id>` (from Needs you): the run to open. */
+/** `#run-<id>` (from Notifications): the run to open. */
 const runFromHash = () => { const h = location.hash.replace("#", ""); return h.startsWith("run-") ? h.slice(4) : null; };
 
 const when = (t: number) => {
@@ -126,7 +126,7 @@ export function Routines() {
     try { await del(`/routines/${r.id}`); detail.close(); void data.refresh(); } catch (e) { toastError(e); }
   };
   const opened = routines.find((r) => r.id === open) ?? null;
-  // Opened from Needs you: show that run once its routine is known.
+  // Opened from Notifications: show that run once its routine is known.
   const [wanted, setWanted] = useState<string | null>(runFromHash);
   useEffect(() => {
     const onHash = () => setWanted(runFromHash());

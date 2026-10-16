@@ -1060,7 +1060,7 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .folder-open:hover .grow { text-decoration: underline; text-underline-offset: 3px; }
 .folder-open:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
 
-/* Needs you (the inbox) */
+/* Notifications (the inbox) */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .inbox-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .inbox-item {
@@ -1087,7 +1087,7 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .day-toggle:focus-visible, .routine-select:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
 .anchor { scroll-margin-top: 16px; }
 
-/* ---------------------------------------------------------------- Notifications bell (Needs you) */
+/* ---------------------------------------------------------------- Notifications bell */
 .bell { position: relative; -webkit-app-region: no-drag; }
 .bell-button { color: var(--vesper-text-secondary); }
 .bell-button svg { width: 20px; height: 20px; }

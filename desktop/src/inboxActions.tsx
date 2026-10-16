@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-// What the notifications dropdown and the full Needs you page share: how an
+// What the notifications dropdown and the full Notifications page share: how an
 // item looks (icon, age, where Open goes), answering one (hidden at once,
 // before the box's next poll confirms it), and the keys on a row.
 

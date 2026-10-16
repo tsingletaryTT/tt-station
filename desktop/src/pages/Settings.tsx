@@ -36,7 +36,7 @@ export function Settings() {
     try { return sectionFrom(localStorage.getItem("tt.settings.section")) ?? "general"; } catch { return "general"; }
   });
   useEffect(() => { try { localStorage.setItem("tt.settings.section", section); } catch { /* private */ } }, [section]);
-  // A link to a section while Settings is open (Needs you, the box switcher).
+  // A link to a section while Settings is open (Notifications, the box switcher).
   useEffect(() => {
     const onHash = () => { const s = sectionFrom(location.hash); if (s) setSection(s); };
     window.addEventListener("hashchange", onHash);

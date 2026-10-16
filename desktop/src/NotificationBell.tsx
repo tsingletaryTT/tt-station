@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 // The bell at the top right of the window: how many things are waiting for
-// this person (Needs you, `inbox.ts`), and a dropdown of them, newest first,
+// this person (Notifications, `inbox.ts`), and a dropdown of them, newest first,
 // answered right there or opened where they came from. "See everything" opens
-// the full Needs you page.
+// the full Notifications page.
 //
 // The dropdown closes on Escape, a click outside, focus leaving it, or going
 // somewhere; focus goes into it on open and back to the bell on close. In it,
@@ -109,7 +109,7 @@ export function NotificationBell() {
       {open && (
         <div id="bell-panel" ref={panel} className="bell-panel" role="dialog" aria-label="Notifications" tabIndex={-1}>
           <div className="bell-head">
-            <span className="bell-title">Needs you</span>
+            <span className="bell-title">Notifications</span>
             {count > 0 && <span className="muted">{count} waiting</span>}
           </div>
           {error && <div className="bell-error">Couldn't check what's waiting. Trying again.</div>}
@@ -155,7 +155,7 @@ export function NotificationBell() {
             </ul>
           )}
           <div className="bell-foot">
-            <button className="bell-all" onClick={all}>See everything in Needs you</button>
+            <button className="bell-all" onClick={all}>See all notifications</button>
             {count > 0 && <span className="muted bell-keys" aria-hidden><span className="kbd">A</span> allow · <span className="kbd">D</span> deny · <span className="kbd">Enter</span> open</span>}
           </div>
         </div>
