@@ -181,20 +181,30 @@ private struct ChatContent: View {
                 ListeningBar(voice: voice, onCancel: endVoice)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             } else {
-                Composer(draft: $draft, focused: $inputFocused,
-                         enabled: session.canChat,
-                         busy: session.isThinking,
-                         speaking: speaker.isSpeaking,
-                         placeholder: placeholder,
-                         onSend: send,
-                         onStop: { session.stopGenerating() },
-                         onMic: { showVoice = true },
-                         onHush: endVoice)
+                VStack(alignment: .trailing, spacing: 6) {
+                    // The composer's Return adds a line, so typing gets its own way
+                    // to put the keyboard away. It sits in this inset, above the text
+                    // box, rather than on the keyboard's toolbar: iOS lays that bar out
+                    // separately and it sometimes landed on top of the composer.
+                    if inputFocused {
+                        HideKeyboardButton { inputFocused = false }
+                            .padding(.horizontal, 12)
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
+                    Composer(draft: $draft, focused: $inputFocused,
+                             enabled: session.canChat,
+                             busy: session.isThinking,
+                             speaking: speaker.isSpeaking,
+                             placeholder: placeholder,
+                             onSend: send,
+                             onStop: { session.stopGenerating() },
+                             onMic: { showVoice = true },
+                             onHush: endVoice)
+                }
+                .animation(.snappy, value: inputFocused)
             }
         }
         .animation(.snappy, value: voice.isListening)
-        // The composer's Return adds a line, so the keyboard gets its own Done.
-        .keyboardDoneButton()
         .alert("Voice", isPresented: Binding(
             get: { if case .denied = voice.state { true } else { false } },
             set: { if !$0 { voice.clearError() } })

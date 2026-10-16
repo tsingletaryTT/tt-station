@@ -180,6 +180,7 @@ struct CodeThreadView: View {
     @State private var info: CodeSession?
     @State private var waiting: [Approval] = []
     @State private var draft = ""
+    @FocusState private var draftFocused: Bool
     @State private var sending = false
     @State private var problem: String?
 
@@ -256,13 +257,20 @@ struct CodeThreadView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // In the layout, not on the keyboard's toolbar, which can cover a
+            // text box pinned to the bottom (see `HideKeyboardButton`).
+            if draftFocused {
+                HideKeyboardButton { draftFocused = false }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
             if let problem {
                 Text(problem).font(.tt(.caption)).foregroundStyle(.orange)
             }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField(live.busy ? "Add to what it's doing…" : "Tell it what to do next…", text: $draft, axis: .vertical)
                     .lineLimit(1...5)
-                    .keyboardDoneButton()
+                    .focused($draftFocused)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .glassEffect(.regular, in: .rect(cornerRadius: 20))
@@ -288,6 +296,7 @@ struct CodeThreadView: View {
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
+        .animation(.snappy, value: draftFocused)
     }
 
     private func send(interrupt: Bool) {

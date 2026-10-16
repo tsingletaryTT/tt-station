@@ -8,6 +8,8 @@ extension View {
     /// A Done button above the keyboard that puts it away. For screens whose
     /// text boxes take more than one line: Return adds a line there, so
     /// there's no other way to close the keyboard. Attach once per screen.
+    /// Not for a text box pinned to the bottom edge (Chat): the keyboard's bar
+    /// can land on top of it there, so use `HideKeyboardButton` in the layout.
     func keyboardDoneButton() -> some View {
         toolbar {
             ToolbarItemGroup(placement: .keyboard) {
@@ -18,5 +20,24 @@ extension View {
                 .accessibilityLabel("Hide keyboard")
             }
         }
+    }
+}
+
+/// Puts the keyboard away, as a small button in the layout itself. For text
+/// boxes pinned to the bottom of the screen, where the keyboard's own toolbar
+/// can cover them. Show it only while the box has focus.
+struct HideKeyboardButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label("Done", systemImage: "keyboard.chevron.compact.down")
+                .font(.tt(.subheadline).weight(.semibold))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .accessibilityLabel("Hide keyboard")
     }
 }
