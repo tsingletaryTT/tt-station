@@ -556,11 +556,31 @@ pub fn plan(job: &Job, whisper_serving: bool, phase: Phase, go_ahead: bool, hour
 /// Owner go-aheads (`POST /jobs/{id}/run`), by job id.
 static GO_AHEAD: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// Drop go-aheads for jobs that are gone or finished (cancelled, failed,
+/// deleted, expired): only a waiting job can use one.
+fn pending_only(go: &mut Vec<String>, jobs: &Jobs) {
+    go.retain(|id| {
+        jobs.get(id).is_some_and(|j| {
+            !matches!(
+                j.status,
+                JobStatus::Done | JobStatus::Failed | JobStatus::Cancelled
+            )
+        })
+    });
+}
+
+/// An id `GET /jobs/{id}/result` reads a folder by: the same rule an import
+/// lets a job's folder be named by (`crate::export::safe_id`).
+fn readable_id(id: &str) -> bool {
+    crate::export::safe_id(id)
+}
+
 /// The queue runner: every few seconds, move the oldest job along.
 pub async fn run_forever(state: AppState) {
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
         let Some(jobs) = state.jobs() else { continue };
+        pending_only(&mut GO_AHEAD.lock().expect("go mutex"), &jobs);
         let Some(job) = jobs.next() else {
             continue;
         };
@@ -1153,7 +1173,13 @@ pub(crate) async fn post_run_now(
 ) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
     let jobs = queue(&state)?;
     job_for(&jobs, &id, &caller)?;
-    GO_AHEAD.lock().expect("go mutex").push(id.clone());
+    {
+        let mut go = GO_AHEAD.lock().expect("go mutex");
+        if !go.contains(&id) {
+            go.push(id.clone());
+        }
+        pending_only(&mut go, &jobs);
+    }
     jobs.update(&id, |j| {
         if j.status == JobStatus::Waiting {
             j.status = JobStatus::Queued;
@@ -1195,7 +1221,7 @@ pub(crate) async fn get_result(
     let Ok(jobs) = queue(&state) else {
         return err(StatusCode::CONFLICT, "No job queue.").into_response();
     };
-    if job_for(&jobs, &id, &caller).is_err() || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+    if job_for(&jobs, &id, &caller).is_err() || !readable_id(&id) {
         return err(StatusCode::NOT_FOUND, "No such job.").into_response();
     }
     let (file, content_type) = match q.format.as_deref() {
@@ -1430,6 +1456,28 @@ mod tests {
         imported.status = JobStatus::Queued;
         crate::fsio::write_json(&tmp.path().join("imp2/job.json"), &imported, 0o600).unwrap();
         assert!(jobs.adopt("imp2").is_none());
+        // An imported job's result is readable by the id it was imported by.
+        assert!(readable_id("imp") && readable_id("1-imp_x") && readable_id("aaaa1111"));
+        assert!(!readable_id("../imp") && !readable_id("") && !readable_id("a/b"));
+    }
+
+    #[test]
+    fn go_aheads_for_finished_or_deleted_jobs_are_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jobs = Jobs::open(tmp.path());
+        for id in ["wait", "done", "gone"] {
+            jobs.add(id.into(), "transcribe", "t", When::Now, true);
+        }
+        jobs.update("done", |j| j.status = JobStatus::Done);
+        jobs.remove("gone");
+        let mut go = vec![
+            "wait".to_string(),
+            "done".into(),
+            "gone".into(),
+            "never".into(),
+        ];
+        pending_only(&mut go, &jobs);
+        assert_eq!(go, vec!["wait".to_string()]);
     }
 
     #[test]
