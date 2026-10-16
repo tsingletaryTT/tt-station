@@ -158,13 +158,13 @@ urlopen('http://127.0.0.1:8000/health')` (and `EXPOSE 8000`), baked in by the pa
 own `container/` Dockerfile (the image's source label is
 `https://huggingface.co/tt-hous/gpt-oss-20b-p150`; its `entrypoint.py` also hard-codes
 `--port 8000`, which `tt-model serve --port 8003` overrides by appending a later `--port`).
-Served on 8003, the check always fails, so Docker reports `unhealthy` while the model
-serves fine. Neither tt-inference-server's images (no `HEALTHCHECK` in any of them) nor
-tt-model (`tt_kernel/container.py` builds the `docker run`, with no health flags) define it,
-and `tt-model serve` has no passthrough for docker flags, so the agent can't pass
-`--health-cmd`/`--no-healthcheck` on this path. Fix belongs in the package (probe
-`${PORT:-8000}` or read `--port` from the server's argv) or in tt-model's `compose_run`
-(add `--health-cmd` with the port it publishes). The agent's own readiness checks hit the
+Served on 8003, that check always failed, so Docker reported `unhealthy` while the model
+served fine. Neither tt-inference-server's images (no `HEALTHCHECK` in any of them) nor
+`tt-model serve` had a passthrough for docker flags, so the fix went into tt-model's
+`compose_run` (branch `jberkowitz/health-port` of `~/code/tt-model-manager`, the editable
+install the box runs): every `tt-model serve` now passes `--health-cmd` checking the port it
+publishes, which replaces the image's check. A container started before that change keeps the
+old check until the model is restarted. The agent's own readiness checks hit the
 serving port directly and don't read Docker's health status. The Docker backend's images
 have no healthcheck, and they listen on 8000 inside the container, so nothing needs
 overriding there.

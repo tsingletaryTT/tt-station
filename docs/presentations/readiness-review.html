@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <title>TT Station Readiness Review</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
@@ -111,7 +112,7 @@ td b { display: block; }
 
 <div class="wrap">
   <header>
-    <div class="eyebrow">TT Station · QuietBox 2 · Readiness review · October 2026</div>
+    <div class="eyebrow">TT Station &middot; QuietBox 2 &middot; Readiness review &middot; October 2026</div>
     <h1>A private AI workstation the whole team can use</h1>
     <p class="lede">TT Station turns a Tenstorrent QuietBox 2 into a shared, secure AI service: open-weight models run on its four Blackhole chips, and people use them from a desktop app, an iPhone app, or any OpenAI-compatible tool. Models run on the box, so prompts and files stay on company hardware.</p>
   </header>
@@ -122,22 +123,22 @@ td b { display: block; }
       <div class="col">
         <div class="node"><span class="label">iPhone app</span><p>Chat, voice, approvals, start and stop models, sleep and wake the box</p></div>
         <div class="node"><span class="label">Desktop app</span><p>Mac and Linux: the full workspace, from chat to Code to hardware</p></div>
-        <div class="node"><span class="label">Any OpenAI tool</span><p>CLI, IDEs, scripts: one <b>/v1</b> endpoint</p></div>
+        <div class="node"><span class="label">Any OpenAI tool</span><p>Command line, code editors and scripts, through one standard API</p></div>
       </div>
-      <div class="link"><span>pair once<br>pinned TLS 1.3<br>owner / member</span></div>
+      <div class="link"><span>paired once<br>encrypted<br>owner or member</span></div>
       <div class="box">
         <div class="box-head"><h3>TT Station agent</h3><span class="label">runs on the QuietBox</span></div>
         <div class="mods">
           <div class="mod"><b>Models</b>Starts, checks and restarts the model being served</div>
-          <div class="mod"><b>Chip scheduler</b>Every workload leases its chips (gozer); none collide</div>
+          <div class="mod"><b>Chip scheduler</b>Every workload books its chips, so none collide</div>
           <div class="mod"><b>Sandboxed Code</b>Coding agents run in a container by default</div>
           <div class="mod"><b>Approvals</b>Risky actions wait for a person, on any device</div>
           <div class="mod"><b>Apps</b>Vetted workflow tools, box-only unless shared</div>
           <div class="mod"><b>Audit and updates</b>Activity log; signed releases</div>
         </div>
       </div>
-      <div class="link"><span>leases</span></div>
-      <div class="chips"><span class="label">4 × Blackhole</span><div class="chipgrid"><i></i><i></i><i></i><i></i></div><p style="font-size:12.5px">Two P300 boards, ~150 tok/s on a 20B model</p></div>
+      <div class="link"><span>books chips</span></div>
+      <div class="chips"><span class="label">4 Blackhole chips</span><div class="chipgrid"><i></i><i></i><i></i><i></i></div><p style="font-size:12.5px">Two P300 boards, about 150 tokens a second on a 20B model</p></div>
     </div>
   </section>
 
@@ -193,25 +194,25 @@ const SUMMARY = {
 };
 // stage: done | next | later
 const ITEMS = [
-  ["Security", "crit", "A Code sandbox could get commands run on the box through git hooks and config", "Sandbox .git read-only; host git pins every program-running setting off", "done"],
+  ["Security", "crit", "A Code sandbox could get commands run on the box through git settings", "The sandbox can no longer change the git settings the box acts on", "done"],
   ["Security", "high", "Web pages could steer the assistant's acting tools", "Recording, approvals, opening URLs always ask; after a web read every acting tool asks", "done"],
-  ["Security", "high", "Desktop windows holding the box token could navigate to any site", "Exact-origin checks, navigation locked, IPC callers checked", "done"],
+  ["Security", "high", "Desktop windows holding the box token could navigate to any site", "Windows locked to the box; every internal call checked", "done"],
   ["Security", "high", "Every paired device had full owner power; no roles", "Owner and member roles; owner-only devices, keys, reset, power, updates, security", "done"],
   ["Security", "high", "Any process on the box counted as the owner", "Local requests trusted only from the agent's own OS user", "done"],
   ["Security", "high", "A poisoned model card could steer bring-up into sending keys off the box", "Network limited to documentation hosts; network-shaped commands always ask", "done"],
-  ["Security", "high", "An installer piped an unpinned script into bash", "Versioned installer checked against a pinned sha256", "done"],
+  ["Security", "high", "An installer piped an unpinned script into bash", "A fixed installer version, checked against a known fingerprint", "done"],
   ["Security", "high", "Store apps opened on the network without sign-in", "Box-only by default; sharing turns the app's own sign-in on or is refused", "done"],
   ["Security", "high", "Members running Code outside the sandbox could read the box's secret and become owners", "Running on the host is owner-only; sandbox link escapes closed", "done"],
-  ["Security", "high", "A routine endpoint accepted encoded paths, reaching other state files", "Run ids validated; found by new tests with 8 other bugs", "done"],
-  ["Security", "med", "Sign-in was opt-in on each of 206 routes; 44 had none", "Deny-by-default, an explicit public list, and a test that walks every route", "done"],
+  ["Security", "high", "A routine endpoint accepted encoded paths, reaching other state files", "Closed; found by new tests along with 8 other bugs", "done"],
+  ["Security", "med", "Sign-in had to be added to each of 206 endpoints; 44 had none", "Sign-in required by default, with a short public list and a test covering every endpoint", "done"],
   ["Security", "med", "App keys stored raw with no expiry", "Hashed keys with optional expiry", "done"],
-  ["Security", "med", "Updates weren't signed and could be downgraded", "Ed25519-signed releases from pinned keys, owner-only downgrades", "done"],
-  ["Security", "med", "Store app images used :latest, some from personal accounts", "Pinned by digest", "done"],
+  ["Security", "med", "Updates weren't signed and could be downgraded", "Signed releases from known keys; only owners can downgrade", "done"],
+  ["Security", "med", "Store apps pulled whatever version was newest, some from personal accounts", "Each app pinned to an exact, verified version", "done"],
   ["Security", "med", "The box could open links and apps on a client computer without asking", "Every such action asks first, remembered per box", "done"],
-  ["Security", "med", "SSRF bypass, open log routes, secrets in process lists, tokens in URLs, no CSP", "All fixed with tests", "done"],
-  ["Security", "med", "The model's Hugging Face token was visible through docker inspect", "Mounted as a secret file", "done"],
+  ["Security", "med", "Smaller leaks: open log pages, secrets visible in process lists and links, no browser content policy", "All fixed with tests", "done"],
+  ["Security", "med", "The model download token was visible to other programs on the box", "Kept in a protected secret file", "done"],
   ["Security", "med", "Members could reset chips, stop containers, or switch the model for everyone", "Owner-only, or an owner setting for model control", "done"],
-  ["Security", "med", "Bring-up agents ran with the box's full account", "Landlock containment: secrets unreadable, writes limited to the run's folders", "done"],
+  ["Security", "med", "Bring-up agents ran with the box's full account", "Contained: secrets unreadable, changes limited to the run's own folders", "done"],
   ["Security", "low", "SSH password sign-in open to the network, no firewall, no lockout", "Key-only SSH, firewall, lockout after failed sign-ins", "done"],
   ["Security", "low", "Sessions never expired and couldn't be revoked one at a time", "Per-device sessions, idle expiry, a Devices list", "done"],
   ["Security", "low", "Known advisories in three dependencies", "Updated", "done"],
@@ -223,39 +224,39 @@ const ITEMS = [
   ["Privacy", "med", "Anyone could read everyone's research reports", "Reports are per person with sharing", "done"],
   ["Privacy", "med", "Web text could leak data through a later fetch", "New addresses need approval", "done"],
   ["Privacy", "low", "No durable record of security-relevant actions", "Append-only audit log; owner-only Activity view", "done"],
-  ["Reliability", "high", "The box ran the agent from a source checkout; a crash-looping build shipped 23 times", "Packaged install; CI gates the agent and the package", "done"],
+  ["Reliability", "high", "The box ran from a developer copy; a broken build restarted itself 23 times", "Packaged install; CI gates the agent and the package", "done"],
   ["Reliability", "high", "A hung model showed as \"serving\"", "Liveness probe with a degraded state and a Restart action", "done"],
-  ["Reliability", "high", "Two people could start a model at the same moment", "Atomic start; the second gets a clear message", "done"],
-  ["Reliability", "high", "Chip leases belonged to the agent, not the work; Lab and resets skipped them", "Every chip user takes a lease owned by its workload, with a reconciler", "done"],
-  ["Reliability", "med", "A corrupt state file could unpair every device", "Atomic writes with corruption backups", "done"],
+  ["Reliability", "high", "Two people could start a model at the same moment", "Only one start at a time; the second person gets a clear message", "done"],
+  ["Reliability", "high", "Chip bookings belonged to the agent, not the work, and some tools skipped them", "Every chip user books its chips, and stale bookings are cleaned up", "done"],
+  ["Reliability", "med", "A corrupt state file could unpair every device", "Safe writes with automatic backups", "done"],
   ["Reliability", "med", "No export or restore of user data", "Owner export and import with a preview; secrets never included", "done"],
   ["Reliability", "med", "Long jobs restarted from zero after a restart", "Resume per category and per chunk", "done"],
-  ["Reliability", "med", "Helper processes leaked; disk filled with images and logs", "Helpers in their own scopes; log rotation, reclaim space, pre-download check", "done"],
-  ["Reliability", "low", "No health endpoint or version handshake between box and apps", "/healthz, levelled logs, version checks", "done"],
-  ["Reliability", "med", "Docker marks the model unhealthy (the image checks the wrong port)", "The agent's own check is correct; fix belongs upstream (PR text written)", "next"],
+  ["Reliability", "med", "Helper processes leaked; disk filled with images and logs", "Helpers cleaned up; log rotation, a reclaim-space button, a check before downloads", "done"],
+  ["Reliability", "low", "No health endpoint or version handshake between box and apps", "Health checks, clearer logs, version checks", "done"],
+  ["Reliability", "med", "Docker marked a working model unhealthy (the image checked the wrong port)", "Model containers now get a check on the port they actually serve on", "done"],
   ["Performance", "high", "Prompt caching never hit on one Code path", "Shared cache-safe launch settings", "done"],
-  ["Performance", "high", "Code ran on a throughput config at ~71 tok/s vs ~155 possible", "Code can use any working model and profile, with speed shown per setup", "done"],
-  ["Performance", "med", "The agent ran tt-smi 18 times a minute; the desktop polled 91 times a minute", "Shared sampler and caches; polling pauses when hidden", "done"],
-  ["Performance", "med", "1.8 MB desktop bundle; chat re-saved on every token", "Lazy pages (Home 64% lighter); batched rendering", "done"],
+  ["Performance", "high", "Code ran at about 71 tokens a second when 155 was possible", "Code can use any working model and profile, with speed shown per setup", "done"],
+  ["Performance", "med", "The agent ran tt-smi 18 times a minute; the desktop polled 91 times a minute", "One shared reader and short caches; the app goes quiet when hidden", "done"],
+  ["Performance", "med", "Slow desktop start-up; chat re-saved on every word", "Lazy pages (Home 64% lighter); batched rendering", "done"],
   ["Product", "high", "No first-run path; \"Start a model\" buried", "First-run checklist; cards go straight to their model", "done"],
   ["Product", "high", "Internal tools and jargon in the main navigation", "Developer tools behind a switch; plain names", "done"],
-  ["Product", "high", "No offline state: \"Failed to fetch\" and endless \"Connecting…\"", "Connectivity banner and friendly errors", "done"],
+  ["Product", "high", "No offline state: \"Failed to fetch\" and endless \"Connecting...\"", "Connectivity banner and friendly errors", "done"],
   ["Product", "high", "Destructive actions confirmed inconsistently", "One confirm and undo policy; shared-impact warnings", "done"],
   ["Product", "high", "The phone couldn't fully run the box", "Phone parity: models, devices, approvals, sleep and Wake-on-LAN", "done"],
   ["Product", "med", "Approvals had no desktop inbox", "A Notifications menu for Code, routine, bring-up and pairing requests", "done"],
   ["Product", "med", "The whole window scrolled with long chats", "Only the conversation scrolls; sidebars scroll on their own", "done"],
   ["Product", "med", "Phones found the box at an address they couldn't use", "Box advertises its usable address; app falls back to its name", "done"],
   ["Product", "med", "Keyboard, screen-reader and reduced-motion gaps", "Accessibility pass across shared components", "done"],
-  ["Engineering", "high", "No Rust code was built or tested in CI", "Rust, dependency-audit, docs and iOS build jobs", "done"],
-  ["Engineering", "med", "Giant files and 80 process-wide globals", "Router split into 18 files; globals moved onto app state", "done"],
+  ["Engineering", "high", "No Rust code was built or tested in CI", "Every change is built and tested, including the iPhone app", "done"],
+  ["Engineering", "med", "Giant files and shared global state", "Split into small files with clear owners", "done"],
   ["Engineering", "med", "Large untested modules; no iOS tests", "About 230 new tests; 24 bugs found and fixed", "done"],
   ["Engineering", "low", "No license notices", "NOTICE and third-party licenses with a generator", "done"],
   ["Engineering", "med", "The CLI used plain HTTP the box no longer serves", "HTTPS with the box's pinned certificate", "done"],
-  ["Engineering", "high", "~165K lines on one branch have not had human review", "Land as ~17 PRs in dependency order with a reviewer per area", "later"],
+  ["Engineering", "high", "About 165,000 lines on one branch have not had human review", "Land as about 17 pull requests in order, with a reviewer per area", "later"],
 ];
 const DECISIONS = [
-  ["A home for the code", "Everything sits on one branch of a personal fork; releases point there too.", "Move to an org-owned repo and name a reviewer per area to land it as ~17 PRs."],
-  ["Company sign-in", "Today each device pairs with one box. There's no SSO, MFA or central revocation. A design exists (10–13 engineer-weeks).", "Choose the identity provider so SSO with MFA can start."],
+  ["A home for the code", "Everything sits on one branch of a personal fork; releases point there too.", "Move to an org-owned repo and name a reviewer per area to land it as about 17 pull requests."],
+  ["Company sign-in", "Today each device pairs with one box. There's no SSO, MFA or central revocation. A design exists (10 to 13 engineer-weeks).", "Choose the identity provider so SSO with MFA can start."],
   ["Release key", "Updates require a signature, but no one holds the key yet, so releases can't publish.", "Name the key holder and a release approver."],
   ["App catalog", "Third-party workflow apps; one (n8n) isn't open-source licensed.", "Legal and security sign-off on which apps company boxes offer."],
 ];
@@ -270,8 +271,8 @@ const ready = Object.values(SUMMARY).filter(([s]) => s === "green").length;
 document.getElementById("kpis").innerHTML = [
   [`${done}/${ITEMS.length}`, "findings fixed"],
   [`${ready}/${AREAS.length}`, "areas ready"],
-  ["~1,300", "automated tests, run on every change"],
-  ["~150", "tokens/s on a 20B model"],
+  ["1,300+", "automated tests, run on every change"],
+  ["150", "tokens a second on a 20B model"],
 ].map(([n, t]) => `<div class="kpi"><strong>${n}</strong><span>${t}</span></div>`).join("");
 
 document.getElementById("areas").innerHTML = AREAS.map((a) => {

@@ -14,12 +14,11 @@
 //! and the apps offer "Restart model" (`POST /doctor/fix/restart_model`), so a
 //! person decides.
 //!
-//! Docker's own healthcheck is deliberately ignored. The tt-inference-server
-//! images bake in a check against `127.0.0.1:8000/health`, but the box serves on
-//! other ports (gpt-oss on 8003), so the container shows `unhealthy` (a failing
-//! streak in the hundreds) while it answers requests fine. The check is the
-//! image's, not ours to change, and it says nothing about inference anyway: a
-//! hung engine can still answer `/health`.
+//! Docker's own healthcheck is deliberately ignored: it says nothing about
+//! inference (a hung engine still accepts connections and answers `/health`).
+//! Some package images baked one in against port 8000 while the box serves on
+//! others, which showed working models as `unhealthy`; tt-model now replaces it
+//! with a check on the served port (docs/reference/tt-inference-server-docker.md).
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
