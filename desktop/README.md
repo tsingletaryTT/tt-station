@@ -63,3 +63,9 @@ npm run build            # → dist/, served by the agent at /app
 
 `npm run dev` serves the screens with hot reload at `localhost:5173` (proxied to
 the agent); `npm start` opens the shell.
+
+## On other computers
+
+The same shell, packaged to connect to a box over the network: a Mac app
+(`mac/build-mac.sh`, see [mac/README.md](mac/README.md)) and a Linux `.deb`
+(`linux/build-deb.sh`, see [linux/README.md](linux/README.md)).

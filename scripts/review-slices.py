@@ -122,7 +122,7 @@ SLICES = [
         *docs("code-models"), "docs/design/code-serving.md", "docs/notes/tool-call-*",
     ]),
     ("11-desktop-shell", "Desktop app shell and shared pieces", [
-        "desktop/electron/*", "desktop/test/*", "desktop/mac/*", "desktop/gnome-extension/*",
+        "desktop/electron/*", "desktop/test/*", "desktop/mac/*", "desktop/linux/*", "desktop/gnome-extension/*",
         "desktop/assets/*", "desktop/public/*", "desktop/*.json", "desktop/*.ts",
         "desktop/*.html", "desktop/*.sh", "desktop/*.md", "desktop/.gitignore",
         "desktop/src/*.ts", "desktop/src/*.tsx", "desktop/src/app.css",

@@ -989,9 +989,15 @@ function listenForSummons() {
   app.on("will-quit", () => { try { fs.rmSync(SUMMON_SOCKET, { force: true }); } catch { /* gone */ } });
 }
 
+// How to start this app again: an installed copy (the Linux .deb) is just its
+// binary; run from a checkout, it's Electron plus the app's folder.
+function selfCommand() {
+  return app.isPackaged ? process.execPath : `${process.execPath} ${app.getAppPath()}`;
+}
+
 // The shortcut opens Tori's window in the running app, else starts the app.
 function summonCommand(arg) {
-  const launch = `${process.execPath} ${app.getAppPath()} --ozone-platform-hint=auto ${arg}`;
+  const launch = `${selfCommand()} --ozone-platform-hint=auto ${arg}`;
   return `sh -c 'echo talk | nc -NU "${SUMMON_SOCKET}" 2>/dev/null || exec ${launch}'`;
 }
 
@@ -1174,7 +1180,7 @@ async function pollEvents() {
 const AUTOSTART = path.join(os.homedir(), ".config", "autostart", "tt-station.desktop");
 
 function launchCommand() {
-  return `${process.execPath} ${app.getAppPath()} --ozone-platform-hint=auto --hidden`;
+  return `${selfCommand()} --ozone-platform-hint=auto --hidden`;
 }
 
 function setStartAtLogin(on) {
