@@ -6,7 +6,8 @@
 // where they're the agent's API or a tool's real name.
 
 export const TERMS = {
-  /** The QuietBox itself. Never "device", "machine" or "server" in copy. */
+  /** The computer with the Tenstorrent chips (a QuietBox, a Galaxy server, a workstation
+   *  with Tenstorrent cards). Never "device", "machine" or "server" in copy. */
   box: "box",
   /** A phone or computer paired with the box. Only these are "devices". */
   device: "device",
@@ -39,7 +40,7 @@ export const TERMS = {
 
 /** One line each, for a "What do these words mean?" list. */
 export const GLOSSARY: { term: string; means: string }[] = [
-  { term: "Box", means: "Your QuietBox: the computer with the Tenstorrent chips that runs the models." },
+  { term: "Box", means: "The computer with the Tenstorrent chips that runs the models: a QuietBox, a Galaxy server, a workstation with Tenstorrent cards." },
   { term: "Device", means: "A phone or computer you've paired with the box." },
   { term: "Mode", means: "A one-click setup of the whole box for one kind of work, like Chat or Images." },
   { term: "Assistant (Tori)", means: "The assistant you call up over anything you're doing, by voice or by typing." },

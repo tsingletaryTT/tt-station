@@ -71,7 +71,7 @@ const TEMPLATES: { name: string; goal: string; schedule: Schedule; allowed: stri
   },
   {
     name: "Weekly model news",
-    goal: "Research what's new this week for running open models on Tenstorrent hardware (new community packages, tt-metal releases, notable model releases that would fit a QuietBox 2). Summarize the five most useful items with links.",
+    goal: "Research what's new this week for running open models on Tenstorrent hardware (new community packages, tt-metal releases, notable model releases that would fit this box). Summarize the five most useful items with links.",
     schedule: { kind: "weekdays", time: "09:00" },
     allowed: [],
   },

@@ -59,7 +59,7 @@ struct WelcomeView: View {
                     .card(tint: Brand.accent.opacity(0.2))
 
                     VStack(alignment: .leading, spacing: 12) {
-                        Step(number: 1, text: "Run tt-station-agentd on your QuietBox.")
+                        Step(number: 1, text: "Run tt-station-agentd on your Tenstorrent box (a QuietBox, a Galaxy server, a workstation with Tenstorrent cards).")
                         Step(number: 2, text: "Keep this phone on the same Wi-Fi as the box.")
                         Step(number: 3, text: "Scan the pairing code TT Station shows on the box.")
                     }

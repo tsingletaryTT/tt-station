@@ -272,7 +272,7 @@ export function Chat() {
               : <IconButton icon={<Icon kind="arrow-up" />} aria-label="Send" disabled={!draft.trim() || !canChat} onClick={() => send(draft)} />}
           </div>
           <div className="composer-hint">
-            <span>Runs on {serve.data ? "your QuietBox" : "the box"}: nothing leaves your network.</span>
+            <span>Runs on your box: nothing leaves your network.</span>
             <span><span className="kbd">Enter</span> send · <span className="kbd">Shift Enter</span> new line · <span className="kbd">{toriKeys}</span> Tori, from anywhere</span>
           </div>
         </div>

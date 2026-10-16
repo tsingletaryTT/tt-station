@@ -193,7 +193,7 @@ private struct RecipeList: View {
             client = OpenAI(base_url="\(baseURL)", api_key="\(key)")
             reply = client.chat.completions.create(
                 model="\(chatModel)",
-                messages=[{"role": "user", "content": "Hello from my QuietBox"}])
+                messages=[{"role": "user", "content": "Hello from TT Station"}])
             print(reply.choices[0].message.content)
             """),
             ("curl", """
@@ -203,7 +203,7 @@ private struct RecipeList: View {
             """),
             ("Continue (VS Code)", """
             models:
-              - name: QuietBox
+              - name: TT Station
                 provider: openai
                 model: \(chatModel)
                 apiBase: \(baseURL)

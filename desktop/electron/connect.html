@@ -67,7 +67,7 @@
     <div class="card">
       <div class="eyebrow">Or type its address</div>
       <div class="row">
-        <input id="addr" placeholder="10.0.0.122 or my-galaxy.local" spellcheck="false" autocapitalize="off">
+        <input id="addr" placeholder="192.168.1.20 or my-box.local" spellcheck="false" autocapitalize="off">
         <button class="primary" id="go">Connect</button>
       </div>
       <div class="error" id="addr-error"></div>
@@ -90,7 +90,7 @@
     <div class="card" id="login" hidden>
       <div class="eyebrow">Your account on <span id="login-name">it</span></div>
       <div class="stack-form">
-        <input id="user" placeholder="Username" value="ttuser" spellcheck="false" autocapitalize="off" autocomplete="username">
+        <input id="user" placeholder="Username (ttuser on a QuietBox)" spellcheck="false" autocapitalize="off" autocomplete="username">
         <input id="password" type="password" placeholder="Password" autocomplete="current-password">
       </div>
       <p class="hint">The password goes straight to the box over SSH, only to let this computer in. TT Station doesn't keep it. Boxes set up to accept SSH keys only need a pairing code instead.</p>
@@ -136,7 +136,7 @@
     const el = $("found");
     el.innerHTML = "";
     if (!boxes.length) {
-      el.innerHTML = '<div class="muted">None found. Type the box\'s address below (on the box: TT Station → Settings → Devices and pairing → Pair a device → Another computer shows it), or check this computer is on the same network. macOS may ask to let TT Station find boxes on your local network: allow it.</div>';
+      el.innerHTML = '<div class="muted">None found. Type the box\'s address below (on the box: TT Station → Settings → Devices and pairing → Pair a device → Another computer shows it), or check this computer is on the same network. Your computer may ask to let TT Station find boxes on your local network: allow it.</div>';
       return;
     }
     for (const b of boxes) {
@@ -171,8 +171,9 @@
     show("account");
     // Someone who already SSHes in gets connected with no typing at all.
     $("trying").hidden = false; $("login").hidden = true;
-    $("trying-text").textContent = `Trying your SSH keys for ${$("user").value}@${host}…`;
-    const r = await tt.pairAccount(target, $("user").value.trim() || "ttuser", null);
+    $("trying-text").textContent = `Trying your SSH keys for ${host}…`;
+    // No username yet: the box tries the likely ones (this computer's, then a QuietBox's).
+    const r = await tt.pairAccount(target, $("user").value.trim(), null);
     if (r.ok) return; // the window moves on to the box
     $("trying").hidden = true; $("login").hidden = false;
     // A missing key is the usual case, not an error worth showing.

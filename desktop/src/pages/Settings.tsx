@@ -270,7 +270,7 @@ function Voice() {
     preview ??= new Speaker();
     preview.voice = voice;
     preview.begin();
-    preview.finish("Hi, I'm Tori. Ask me anything, and I'll answer right here, on your QuietBox.");
+    preview.finish("Hi, I'm Tori. Ask me anything, and I'll answer right here, on your box.");
   };
   const choose = async (body: { voice?: string; speed?: number }) => {
     try { await put("/voice", body); status.refresh(); } catch (e) { toastError(e); }
@@ -430,7 +430,7 @@ function Pairing() {
         <Card>
           <Eyebrow>Another box</Eyebrow>
           <div className="row-between wrap" style={{ gap: 12 }}>
-            <Typography variant="copy-sm" className="muted">Use another QuietBox from this app too. Switch between them from the box name at the top of the sidebar.</Typography>
+            <Typography variant="copy-sm" className="muted">Use another box from this app too. Switch between them from the box name at the top of the sidebar.</Typography>
             <Button size="sm" variant="subtle" onClick={() => void window.ttDesktop!.showConnect!()}>Add another box…</Button>
           </div>
         </Card>

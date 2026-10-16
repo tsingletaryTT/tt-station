@@ -1018,9 +1018,9 @@ private struct VoicePicker: View {
                         ProgressView()
                     }
                 } header: {
-                    Text("Tori's voice (on your QuietBox)")
+                    Text("Tori's voice (on your box)")
                 } footer: {
-                    Text("Natural voices that run on your QuietBox, not on the phone.")
+                    Text("Natural voices that run on your box, not on the phone.")
                 }
                 Section {
                     ForEach(VoiceEngine.bestVoices(), id: \.identifier) { voice in

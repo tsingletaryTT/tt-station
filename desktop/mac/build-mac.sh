@@ -35,7 +35,7 @@ cat > "$STAGE/package.json" <<EOF
   "name": "tt-station",
   "productName": "TT Station",
   "version": "$VERSION",
-  "description": "TT Station for your QuietBox, on your Mac.",
+  "description": "TT Station for your Tenstorrent box, on your Mac.",
   "license": "Apache-2.0",
   "main": "electron/main.cjs",
   "dependencies": { "bonjour-service": "1.3.0" }

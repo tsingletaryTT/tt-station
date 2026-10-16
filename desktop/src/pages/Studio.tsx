@@ -105,7 +105,7 @@ function Images({ serve, onSwitched }: { serve: Serve | null; onSwitched: () => 
       {!canMake && <NeedsMode what="images" mode="images" serve={serve} onSwitched={onSwitched} />}
       <Card>
         <TextArea value={prompt} onChange={(e) => setPrompt(e.target.value)} height={96} disabled={!canMake || busy}
-          placeholder="A QuietBox on a desk at night, glowing teal, cinematic"
+          placeholder="A workstation on a desk at night, glowing teal, cinematic"
           onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) make(); }} />
         <div className="row-between">
           <div className="row">

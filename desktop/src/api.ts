@@ -53,7 +53,7 @@ declare global {
 }
 
 let token: string | null = null;
-export let boxName = "QuietBox";
+export let boxName = "the box";
 
 export async function signIn(): Promise<boolean> {
   if (window.ttDesktop) {

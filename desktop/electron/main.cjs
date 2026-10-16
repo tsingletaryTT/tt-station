@@ -489,7 +489,8 @@ async function sshReady() {
     const pub = fs.readFileSync(`${SSH_KEY}.pub`, "utf8").trim();
     const r = await call(c.base, "POST", "/ssh/authorize", { token: c.token, body: { public_key: pub, label: `tt-station-${deviceName().replace(/[^A-Za-z0-9._-]+/g, "-")}` } });
     if (!r.ok) throw new Error(r.json?.error || `The box wouldn't add this computer's key (${r.status}).`);
-    box.sshUser = r.json?.ssh_user || "ttuser";
+    if (!r.json?.ssh_user) throw new Error("The box didn't say which account to use for SSH. Update TT Station on it.");
+    box.sshUser = r.json.ssh_user;
     saveBoxes();
   }
   if (!validUser(box.sshUser)) throw new Error("The box named an account this computer can't use for SSH.");
@@ -1279,7 +1280,19 @@ handle("probe", async (_e, host, tls) => {
 });
 handle("pair-account", async (_e, p, user, password) => {
   try {
-    const id = await pairWithAccount({ host: String(p.host), tls: Number(p.tls), fp: String(p.fp), name: String(p.name) }, String(user || "ttuser"), password ? String(password) : null);
+    const target = { host: String(p.host), tls: Number(p.tls), fp: String(p.fp), name: String(p.name) };
+    if (password && !user) throw new Error("Enter your username on the box.");
+    // Keys only and no username given: try this computer's own username, then
+    // a QuietBox's. Any box works; these are just the likely accounts.
+    const users = user ? [String(user)] : [...new Set([os.userInfo().username, "ttuser"])];
+    let id, last;
+    for (const u of users) {
+      try { id = await pairWithAccount(target, u, password ? String(password) : null); break; } catch (e) {
+        last = e;
+        if (e.kind !== "auth") throw e;
+      }
+    }
+    if (!id) throw last;
     switchBox(id);
     return { ok: true, id };
   } catch (e) { return { ok: false, error: String(e.message || e), kind: e.kind || null }; }

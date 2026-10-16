@@ -246,7 +246,7 @@ function HermesGuide({ s, refresh }: { s: Hermes; refresh: () => void }) {
             <div><Button size="sm" disabled={busy === "open" || !s.has_session || !owner} title={owner ? undefined : OWNER_ONLY_HOST} onClick={() => act("open", () => post("/hermes/open"))}>Open Hermes</Button></div>
           </>}
       </Step>
-      <Step n={4} title="Connect it to your QuietBox" done={connected} active={step === 4}>
+      <Step n={4} title="Connect it to your box" done={connected} active={step === 4}>
         {connected ? <span className="muted" style={{ fontSize: 13 }}>Hermes is set to use this box.</span>
           : <>
             <ol className="guide-list">
@@ -264,7 +264,7 @@ function HermesGuide({ s, refresh }: { s: Hermes; refresh: () => void }) {
       <Step n={5} title="Say hello" done={talked} active={step === 5}>
         <span className="muted" style={{ fontSize: 13 }}>{talked ? `Hermes is talking to your box (${s.key_requests} requests so far).` : "Send Hermes a message. This ticks off when your box answers it."}</span>
       </Step>
-      {step === 6 && <Admonition variant="success" subtle size="sm">Hermes Agent is set up, running on your QuietBox's {shortName(s.serving_model)}.</Admonition>}
+      {step === 6 && <Admonition variant="success" subtle size="sm">Hermes Agent is set up, running on your box's {shortName(s.serving_model)}.</Admonition>}
     </div>
   );
 }
@@ -508,7 +508,7 @@ claude`}</CodeBlock>
     steps: (base, model) => <>
       <span className="muted" style={{ fontSize: 13 }}>In Continue's <code>config.yaml</code>, add a model:</span>
       <CodeBlock lang={shellscript} copyOnHover>{`models:
-  - name: QuietBox
+  - name: TT Station
     provider: openai
     model: ${model}
     apiBase: ${base}
@@ -542,9 +542,9 @@ claude`}</CodeBlock>
   "provider": {
     "quietbox": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "QuietBox",
+      "name": "TT Station",
       "options": { "baseURL": "${base}", "apiKey": "<your app key>" },
-      "models": { "${model}": { "name": "QuietBox", "limit": { "context": 131072, "output": 8192 } } }
+      "models": { "${model}": { "name": "TT Station", "limit": { "context": 131072, "output": 8192 } } }
     }
   }
 }`}</CodeBlock>
@@ -921,7 +921,7 @@ export function Connect() {
 client = OpenAI(base_url="${base}", api_key="ttq-…")
 reply = client.chat.completions.create(
     model="${model}",
-    messages=[{"role": "user", "content": "Hello from my QuietBox"}],
+    messages=[{"role": "user", "content": "Hello from TT Station"}],
 )
 print(reply.choices[0].message.content)`}</CodeBlock>
           <CodeBlock lang={shellscript} copyOnHover>{`curl ${base}/chat/completions \\

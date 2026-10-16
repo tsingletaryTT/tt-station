@@ -1,9 +1,10 @@
 # TT Station for Linux
 
-TT Station on a Linux computer, connected to your Tenstorrent devices over the
-network: everything the device's own app has (Chat, Tori, Studio, Research,
+TT Station on a Linux computer, connected over the network to any Tenstorrent
+box running TT Station (a QuietBox, a Galaxy server, a workstation with
+Tenstorrent cards): everything the box's own app has (Chat, Tori, Studio, Research,
 Code, Library, Routines, Models, Hardware, Connect, Settings). The screens
-come from the device itself, so they're always its current version.
+come from the box itself, so they're always its current version.
 
 ## Install
 
@@ -20,16 +21,17 @@ command on your path, a launcher and icons, and an AppArmor profile
 (`/etc/apparmor.d/tt-station-desktop`) that Ubuntu 24.04 needs before
 Chromium's sandbox can start.
 
-## Connect a device
+## Connect a box
 
-The computer must be on the same network as the device.
+The computer must be on the same network as the box.
 
-1. TT Station lists the devices it finds (or type the device's address).
+1. TT Station lists the boxes it finds (or type the box's address).
 2. Pick yours. If this computer already SSHes into it with a key, you're in.
-3. Otherwise choose **Use a pairing code**: the device shows a code in TT
-   Station on its screen and on any phone paired with it. A QuietBox set up
-   with `deploy/harden-box.sh` doesn't take SSH passwords, so the code is the
-   way in for a new computer.
+3. Otherwise sign in with your account on the box (its SSH username and
+   password), or choose **Use a pairing code**: the box shows a code in TT
+   Station on its screen and on any phone paired with it. A box set up with
+   `deploy/harden-box.sh` doesn't take SSH passwords, so the code is the way
+   in for a new computer there.
 
 New computers join as members; an owner can change that in Settings → Devices.
 

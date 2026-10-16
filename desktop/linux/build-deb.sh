@@ -43,7 +43,7 @@ cat > "$APP/package.json" <<EOF
   "name": "tt-station",
   "productName": "TT Station",
   "version": "$VERSION",
-  "description": "TT Station for your QuietBox, on Linux.",
+  "description": "TT Station for your Tenstorrent box, on Linux.",
   "license": "Apache-2.0",
   "main": "electron/main.cjs",
   "dependencies": { "bonjour-service": "1.3.0" }
@@ -62,13 +62,13 @@ install -D -m 644 /dev/stdin "$ROOT/usr/share/applications/tt-station.desktop" <
 [Desktop Entry]
 Type=Application
 Name=TT Station
-GenericName=QuietBox control
-Comment=Run, watch and connect everything on your QuietBox
+GenericName=Tenstorrent box control
+Comment=Run, watch and connect everything on your Tenstorrent box
 Exec=$PKG %U
 Icon=tt-station
 Terminal=false
 Categories=Development;Utility;System;
-Keywords=Tenstorrent;QuietBox;AI;LLM;Blackhole;
+Keywords=Tenstorrent;QuietBox;Galaxy;Wormhole;Blackhole;AI;LLM;
 StartupWMClass=tt-station
 StartupNotify=true
 Actions=tori;
@@ -108,9 +108,11 @@ Recommends: netcat-openbsd
 Section: utils
 Priority: optional
 Homepage: https://github.com/tsingletaryTT/tt-station
-Description: TT Station for your QuietBox, on Linux
- Find a QuietBox on your network, pair once, and use everything on it from
- this computer: chat, Code, Studio, Research, models, hardware and settings.
+Description: TT Station for your Tenstorrent box, on Linux
+ Find a Tenstorrent box on your network (a QuietBox, a Galaxy server, a
+ workstation with Tenstorrent cards: anything running TT Station), pair once,
+ and use everything on it from this computer: chat, Code, Studio, Research,
+ models, hardware and settings.
  The screens come from the box itself, so they always match its version.
 EOF
 echo "/etc/apparmor.d/$PKG" > "$ROOT/DEBIAN/conffiles"
