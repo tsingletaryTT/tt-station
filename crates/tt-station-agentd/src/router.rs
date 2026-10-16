@@ -8,7 +8,7 @@
 //! touches the outside world.
 
 use axum::{
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 
@@ -218,9 +218,10 @@ pub fn app(state: AppState) -> Router {
         .route("/toplike", get(crate::toplike_term::get_toplike))
         .route("/toplike/term", get(crate::toplike_term::term_ws))
         .route("/coding/term", get(crate::coding::term_ws))
+        // Which model the box prefers to serve: the model-control setting applies.
         .route(
             "/preferences/models",
-            get(crate::prefs::get_prefs).put(crate::prefs::put_prefs),
+            get(crate::prefs::get_prefs).merge(put(crate::prefs::put_prefs).route_layer(models())),
         )
         .route("/desktop/apps", get(crate::desktop::get_apps))
         .route("/desktop/open", post(crate::desktop::post_open))
@@ -389,11 +390,15 @@ pub fn app(state: AppState) -> Router {
             get(crate::coding::get_folders).post(crate::coding::post_folder),
         )
         .route("/skills/{id}/hermes", post(crate::skills::post_hermes))
+        // Idle sleep stops the model and waking starts it: the model-control setting applies.
         .route(
             "/idle",
-            get(crate::idle::get_idle).put(crate::idle::put_idle),
+            get(crate::idle::get_idle).merge(put(crate::idle::put_idle).route_layer(models())),
         )
-        .route("/idle/wake", post(crate::idle::post_wake))
+        .route(
+            "/idle/wake",
+            post(crate::idle::post_wake).route_layer(models()),
+        )
         .route("/updates", get(crate::updates::get_updates))
         .route("/updates/install", post(crate::updates::post_install))
         .route("/updates/undo", post(crate::updates::post_undo))

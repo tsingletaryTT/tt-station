@@ -44,6 +44,9 @@ fn switching_routes() -> Vec<(M, &'static str, Value)> {
         (M::POST, "/jobs/abc123/run", json!({})),
         (M::POST, "/evals", json!({})),
         (M::POST, "/evals/stop", json!({})),
+        (M::PUT, "/preferences/models", json!({})),
+        (M::PUT, "/idle", json!({})),
+        (M::POST, "/idle/wake", json!({})),
         (
             M::POST,
             "/schedules",
