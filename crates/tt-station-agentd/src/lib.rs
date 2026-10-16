@@ -73,6 +73,7 @@ pub mod router;
 pub mod routes;
 pub mod routines;
 pub mod safegit;
+pub mod sandbox;
 pub mod schedules;
 pub mod scope;
 pub mod served;
