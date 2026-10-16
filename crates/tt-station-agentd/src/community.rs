@@ -744,6 +744,9 @@ pub struct IdBody {
     /// Start even though its weights aren't all on the box (they download inside the model).
     #[serde(default)]
     pub anyway: bool,
+    /// The serve profile to start (`tt-model serve --profile`); none for the box's pick.
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 /// `POST /community/pull`: download a package and its weights, in the background.
@@ -1076,6 +1079,9 @@ pub(crate) async fn post_serve(
                 .to_string(),
         ));
     }
+    if let Some(p) = &body.profile {
+        crate::codemodels::profile_ok(&body.id, p).map_err(|e| err(StatusCode::CONFLICT, e))?;
+    }
     if let Some(holder) = state.chips_holder() {
         return Err(err(StatusCode::CONFLICT, holder));
     }
@@ -1134,6 +1140,7 @@ pub(crate) async fn post_serve(
             },
             launched: false,
             error: None,
+            profile: body.profile.clone(),
         }),
     );
     // The rest takes a minute or more (a stop, a chip reset): answer now, and
@@ -1167,6 +1174,8 @@ struct Prep {
     step: String,
     launched: bool,
     error: Option<String>,
+    /// The profile asked for (`IdBody::profile`), if one was.
+    profile: Option<String>,
 }
 
 fn preparing(state: &AppState) -> Option<Prep> {
@@ -1350,6 +1359,10 @@ async fn launch(
         .and_then(Result::ok)
         .and_then(|o| profile_for_this_box(&String::from_utf8_lossy(&o.stdout)))
     };
+    let profile = preparing(state)
+        .filter(|p| p.id == id)
+        .and_then(|p| p.profile)
+        .or(profile);
     // Small files (tokenizer, config) as real copies rather than cache links:
     // some packages' servers check their tokenizer files and refuse a link.
     {
@@ -1445,6 +1458,7 @@ pub async fn restarter(state: AppState) {
             id: back.clone(),
             stop_serving: true,
             anyway: false,
+            profile: None,
         };
         let ok = post_serve(State(state.clone()), BearerAuth, Json(body))
             .await

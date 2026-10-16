@@ -89,6 +89,7 @@ fn stub_tt(dir: &Path, catalog: &Value) -> Vec<String> {
 }
 
 async fn harness(setup: Setup) -> Station {
+    support::home_without_models();
     let config = tempfile::tempdir().unwrap();
     let mut state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
         .with_config_dir(config.path().to_path_buf());
@@ -357,16 +358,16 @@ async fn the_model_list_puts_the_served_model_first_and_says_what_choosing_does(
             .iter()
             .map(|m| m["name"].as_str().unwrap())
             .collect();
-        assert_eq!(
-            names,
-            vec!["Stub-Served", "stub-alpha-notools", "Stub-Beta-Tools"],
-            "{list}"
-        );
-        let [now, alpha, beta] = &list["models"].as_array().unwrap()[..] else {
+        // Not one that can't make tool calls: Code can't work on it.
+        assert_eq!(names, vec!["Stub-Served", "Stub-Beta-Tools"], "{list}");
+        let [now, beta] = &list["models"].as_array().unwrap()[..] else {
             panic!("{list}");
         };
         assert_eq!(now["served_id"], served);
         assert_eq!(now["choice"], json!({ "action": "in_use" }));
+        assert_eq!(now["source"], "catalog");
+        assert_eq!(now["tools"]["verified"], true);
+        assert_eq!(now["serve"], Value::Null, "nothing to start");
         // The server's own window, not the catalog's.
         assert_eq!(now["context"], 40_960);
         assert_eq!(now["prefix_cache"]["state"], "on");
@@ -374,16 +375,13 @@ async fn the_model_list_puts_the_served_model_first_and_says_what_choosing_does(
         assert_eq!(now["speed"]["ttft_s"], 0.5);
         assert_eq!(now["speed"]["steps"], 3);
 
-        assert_eq!(alpha["choice"]["action"], "unavailable", "{alpha}");
-        assert!(alpha["choice"]["why"]
-            .as_str()
-            .unwrap()
-            .contains("tool calls"));
-        assert_eq!(alpha["speed"], Value::Null);
-        assert_eq!(alpha["prefix_cache"]["state"], "unknown");
-        assert_eq!(alpha["context"], 65_536);
-
         assert_eq!(beta["choice"], json!({ "action": "switch" }));
+        assert_eq!(beta["context"], 65_536);
+        // Switching is the catalog's own start, as from Models.
+        assert_eq!(
+            beta["serve"],
+            json!({ "route": "/serve", "body": { "model": "Stub-Beta-Tools", "force": true } })
+        );
         assert_eq!(beta["served_id"], Value::Null);
         assert_eq!(beta["speed"]["steps"], 1);
         assert_eq!(beta["speed"]["decode_tps"], 40.0);
@@ -410,7 +408,11 @@ async fn the_model_list_without_a_catalog_or_a_served_model() {
         "{list}"
     );
     assert_eq!(list["models"].as_array().unwrap().len(), 1);
-    assert_eq!(list["models"][0]["name"], served);
+    // Served some way the list doesn't know: still shown, as what Code runs on.
+    assert_eq!(list["models"][0]["model"], served);
+    assert_eq!(list["models"][0]["name"], "stub-lonely");
+    assert_eq!(list["models"][0]["source"], "running");
+    assert_eq!(list["models"][0]["choice"]["action"], "in_use");
     assert_eq!(list["models"][0]["context"], 8_192);
 
     // Nothing serving: every ready chat model is a start.
@@ -435,11 +437,7 @@ async fn the_model_list_without_a_catalog_or_a_served_model() {
         .collect();
     assert_eq!(
         choices,
-        vec![
-            ("stub-alpha-notools", "unavailable"),
-            ("Stub-Beta-Tools", "switch"),
-            ("Stub-Served", "switch"),
-        ]
+        vec![("Stub-Beta-Tools", "switch"), ("Stub-Served", "switch")]
     );
     // Unpaired: nothing.
     let r = b

@@ -22,6 +22,7 @@ mod support;
 
 #[tokio::test]
 async fn what_an_earlier_run_measured_is_shown_and_new_steps_are_kept() {
+    support::home_without_models();
     let config = tempfile::tempdir().unwrap();
     // As an earlier run left it.
     let book = config.path().join("code-speed.json");
@@ -83,10 +84,12 @@ async fn what_an_earlier_run_measured_is_shown_and_new_steps_are_kept() {
             .unwrap_or_else(|| panic!("no {name}: {list}"))
     };
     let remembered = by_name(&list, "Stub-Remembered");
-    // The median of what it measured, matched across spellings.
+    // The median of what it measured, matched across spellings. The earlier
+    // run didn't record which setup it measured, and the list says so.
     assert_eq!(
         remembered["speed"],
-        json!({ "decode_tps": 13.0, "ttft_s": 0.9, "steps": 3, "at": 1_700_000_000u64 })
+        json!({ "decode_tps": 13.0, "ttft_s": 0.9, "steps": 3, "at": 1_700_000_000u64,
+                "setup_unrecorded": true })
     );
     assert_eq!(remembered["prefix_cache"]["state"], "off");
     assert_eq!(
@@ -114,6 +117,7 @@ async fn what_an_earlier_run_measured_is_shown_and_new_steps_are_kept() {
     assert_eq!(saved["Stub-Fresh"]["decode_tps"], json!([50.0]), "{saved}");
     assert_eq!(saved["Stub-Fresh"]["ttft_ms"], json!([250]));
     assert_eq!(saved["Stub-Fresh"]["steps"], 1);
+    assert_eq!(saved["Stub-Fresh"]["recorded_setup"], true);
     assert_eq!(saved["org/stub-remembered"]["steps"], 3, "{saved}");
     // No temporary file left beside it.
     assert!(!config.path().join("code-speed.json.tmp").exists());
