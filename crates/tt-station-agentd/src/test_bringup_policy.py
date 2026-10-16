@@ -96,6 +96,11 @@ ASK = [
     "tt-smi -r",
     "rm -rf ~/.ssh",
     "docker run x",
+    "systemd-run --user cat ~/.config/tt-station/local-secret",
+    "busctl --user call org.freedesktop.systemd1 x",
+    "dbus-send --session --dest=x /x x.y",
+    "gdbus call --session -d x -o /x -m x",
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus python3 x.py",
 ]
 
 

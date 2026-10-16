@@ -186,7 +186,7 @@ pub fn token_digest(token: &str) -> String {
 
 /// Equal-length byte strings compared without an early exit, so how long a
 /// comparison takes says nothing about how much of a digest matched.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

@@ -58,9 +58,9 @@ NET_CODE = re.compile(
 # has read off the box. A command can always be spelled so that no pattern sees
 # it (a script it wrote, a variable, another language): what actually contains
 # a bring-up is the account it runs as, the chips it leases, and `ask` for
-# anything that matters. Real containment is a network namespace for the stage
-# (no route out but a proxy to the model and documentation hosts); that's the
-# follow-up, not this list.
+# anything that matters. The stage also runs in a sandbox (sandbox_exec.py:
+# TT Station's folder and keys unreadable, few paths writable); real network
+# containment needs a separate account (deploy/contain-bringup.sh).
 RISKY = [
     (re.compile(r"\btt-smi\b.*\s-r\b|\btt-smi\s+-r\b|\breset\b.*\bboard"), "resets chips"),
     (re.compile(r"\bsudo\b"), "uses sudo"),
@@ -70,6 +70,9 @@ RISKY = [
     (re.compile(r"""(>|\btee\s+(-a\s+)?)\s*["']?(~|\$HOME\b|\$\{HOME\})/\."""), "changes a settings file in your home folder"),
     (re.compile(r"\b(pip3?|uv|npm|pnpm|yarn|bun|apt|apt-get|conda|mamba|gem|cargo)\s+(install|add)\b|\bpip3?\s+download\b|\bgo\s+(get|install)\b"), "installs packages"),
     (re.compile(r"\b(docker|systemctl)\b"), "changes services or containers"),
+    # The ways out of the sandbox as the same account: a new unit outside it, the user's bus.
+    (re.compile(r"(?<![\w.-])(systemd-run|busctl|dbus-send|gdbus|loginctl|machinectl)(?![\w./=-])|/run/user/\d+/(bus|systemd)"),
+     "starts something outside the bring-up's sandbox"),
     (re.compile(r"\b(shutdown|reboot|mkfs|dd\s+if=)\b"), "could damage the system"),
     (re.compile(r"\bcurl\b.*\|\s*(ba)?sh\b"), "runs a downloaded script"),
     # Talking to another machine. Not a word inside a path or a flag (~/.ssh, -nc).

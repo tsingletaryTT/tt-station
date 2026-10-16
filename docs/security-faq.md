@@ -122,7 +122,20 @@ every route in the router to check that each one is either on the list above or 
 **The box's own user.** A program on the box that connects over plain HTTP is trusted
 without pairing (the console, the panel, tt-toplike) only if it runs as the agent's own
 account: the agent looks the connection up in `/proc/net/tcp` and checks its owner's uid.
-Another account on the box, root, or a container on the host network gets no such trust.
+Another account on the box, root, or a container on the host network gets no such trust,
+and neither does a process inside a bring-up, Orchard or Code run (`tt-*-bringup-*`,
+`tt-orchard-*`, `tt-code-*` units): they run as the box's account, so the agent also
+checks which unit's cgroup holds the connection's socket, and gives those the model API
+(with an app key) and a bring-up driver's own routes (with its run secret), nothing else.
+
+**Bring-up runs** are sandboxed: TT Station's folder (`~/.config/tt-station`), SSH and
+GnuPG keys and the keyring are unreadable to them, and only the run's folder, the
+tt-metal checkout and caches are writable (Landlock, plus the systemd properties a user
+manager can apply). A bring-up's requests for permission are answered only from an
+owner's paired device, never by the box's own local trust, and a stopped run's secret
+stops working. The same account can still reach the docker socket and the user's
+systemd bus; closing those takes a separate account (`deploy/contain-bringup.sh`). See
+`docs/reference/bringup-containment.md`.
 
 ## Owners and members
 
@@ -131,7 +144,7 @@ Each paired device is an **owner** or a **member**.
 - **Owners** manage the box: they see and remove other devices, make other devices owners
   (or members again), add and remove SSH keys, make/change/revoke app keys, use power
   (sleep, restart, shut down, reset chips), install or undo updates, reset the box, change
-  the security settings, answer bring-up approvals, rename or remove people, read the
+  the security settings, answer bring-up approvals (from a paired device only), rename or remove people, read the
   activity log, stop containers the box didn't start (the Doctor's "stop stray
   containers"), build and download the Doctor's support bundle (it carries the agent's and
   the serving logs, redacted), and choose who may start and stop models.

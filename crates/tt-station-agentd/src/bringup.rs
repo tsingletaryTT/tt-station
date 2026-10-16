@@ -24,7 +24,10 @@
 //!
 //! Starting, stopping, resuming and deleting runs, and signing Claude Code in,
 //! are an owner's (`routes::OwnerAuth`): the engines run commands on the box as
-//! its own account, outside any sandbox.
+//! its own account. Each stage runs confined (`crate::sandbox`: Landlock and
+//! the unit properties a user manager applies), gets no local trust when it
+//! calls the agent (`crate::localpeer`), and its requests are answered only
+//! from an owner's paired device (`auth::DeviceOwnerAuth`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -511,6 +514,31 @@ pub struct Approval {
     pub grant_root: Option<String>,
     pub created: u64,
     pub decision: Option<String>,
+    /// When it was answered (or cancelled): answered requests are dropped
+    /// [`ANSWERED_TTL`] later ([`evict`]).
+    #[serde(default)]
+    pub decided: Option<u64>,
+}
+
+/// How long an answer waits for its driver to collect it (a driver asks
+/// again at least every 30 s while it's alive).
+pub const ANSWERED_TTL: u64 = 600;
+
+/// Drop what no driver will ask about again: answers older than
+/// [`ANSWERED_TTL`], and every request of a run that isn't live (its driver
+/// is gone; a resumed run asks afresh).
+pub fn evict(all: &mut Vec<(String, Approval)>, live: &[String], now: u64) {
+    all.retain(|(run, a)| {
+        live.contains(run)
+            && a.decided
+                .is_none_or(|at| now.saturating_sub(at) < ANSWERED_TTL)
+    });
+}
+
+/// Answer `a` (an owner's decision, or `cancel`).
+fn answer(a: &mut Approval, decision: &str) {
+    a.decision = Some(decision.to_string());
+    a.decided = Some(unix_now());
 }
 
 static APPROVALS: Mutex<Vec<(String, Approval)>> = Mutex::new(Vec::new());
@@ -1466,6 +1494,7 @@ fn launch(
         ("claude_bringup.py", CLAUDE_DRIVER),
         ("permission_mcp.py", PERMISSION_MCP),
         ("lease_run.py", LEASE_RUN),
+        ("sandbox_exec.py", crate::sandbox::LAUNCHER),
     ] {
         std::fs::write(dir.join(name), body).map_err(|e| e.to_string())?;
     }
@@ -1533,9 +1562,36 @@ fn launch(
         q(&exit_file.display().to_string())
     );
     let log = log_dir.join("runner.log");
+    // The stage runs confined (`crate::sandbox`): TT Station's folder, keys
+    // and the keyring unreadable, only its own folder, the repo and caches
+    // writable, and no local trust when it calls the agent.
+    let drivers: Vec<PathBuf> = [
+        "codex_bringup.py",
+        "claude_bringup.py",
+        "permission_mcp.py",
+        "lease_run.py",
+    ]
+    .iter()
+    .map(|n| dir.join(n))
+    .collect();
+    let confinement = crate::sandbox::Confinement::for_bringup(
+        &home,
+        &state.config_dir(),
+        log_dir,
+        &env.repo,
+        &drivers,
+        &crate::sandbox::extra_writable(),
+    );
+    let mount_ns = crate::sandbox::mount_namespaces_work(&dir);
+    let mut command: Vec<String> = Vec::new();
+    if !crate::sandbox::landlock_disabled() {
+        command = confinement.wrap(&env.python, &dir.join("sandbox_exec.py"));
+    }
+    command.extend(["sh".to_string(), "-c".to_string(), script]);
     let out = Command::new("systemd-run")
         .args(["--user", "--collect", "--quiet"])
         .arg(format!("--unit={}", run.unit))
+        .args(confinement.unit_properties(mount_ns))
         .arg(format!(
             "--property=WorkingDirectory={}",
             env.repo.display()
@@ -1559,7 +1615,8 @@ fn launch(
         // The value from systemd-run's environment, not its command line.
         .arg("--setenv=TT_STATION_RUN_SECRET")
         .env("TT_STATION_RUN_SECRET", &run.secret)
-        .args(["sh", "-c", &script])
+        .arg("--setenv=PYTHONDONTWRITEBYTECODE=1")
+        .args(&command)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| e.to_string())?;
@@ -1853,7 +1910,7 @@ pub(crate) async fn post_action(
             runs[i].finished = Some(unix_now());
             for (r, a) in APPROVALS.lock().expect("approvals").iter_mut() {
                 if r == &id && a.decision.is_none() {
-                    a.decision = Some("cancel".into());
+                    answer(a, "cancel");
                 }
             }
             approvals_changed();
@@ -1944,7 +2001,7 @@ pub(crate) async fn post_action(
                     .await;
                     for (r, a) in APPROVALS.lock().expect("approvals").iter_mut() {
                         if r == &id && a.decision.is_none() {
-                            a.decision = Some("cancel".into());
+                            answer(a, "cancel");
                         }
                     }
                     approvals_changed();
@@ -2001,6 +2058,8 @@ pub(crate) async fn post_action(
             run.finished = None;
             run.exit = None;
             run.restore = restore.or(run.restore.clone());
+            // A new secret for the new launch: the old one stays dead.
+            run.secret = crate::pairing::issue_pair_id();
             let (st, r, e) = (state.clone(), run.clone(), env.clone());
             let n = tokio::task::spawn_blocking(move || relaunch(&st, &e, &r))
                 .await
@@ -2023,6 +2082,7 @@ pub(crate) async fn post_action(
             {
                 return Err(err(StatusCode::CONFLICT, "A bring-up is already running."));
             }
+            runs[i].secret = crate::pairing::issue_pair_id();
             let run = runs[i].clone();
             let manifest = read_manifest(&run.log_dir);
             if manifest.get("stage_9_terminal_status").map(String::as_str) != Some("complete") {
@@ -2307,7 +2367,7 @@ pub fn status_line(state: &AppState) -> (Value, String) {
 pub fn decide_waiting(decision: &str) -> Option<(String, String)> {
     let mut all = APPROVALS.lock().expect("approvals");
     let (_, a) = all.iter_mut().find(|(_, a)| a.decision.is_none())?;
-    a.decision = Some(decision.to_string());
+    answer(a, decision);
     let what = a.command.clone().unwrap_or_else(|| a.kind.clone());
     drop(all);
     approvals_changed();
@@ -2421,7 +2481,15 @@ fn driver_auth(
         .unwrap_or("");
     load_runs(state)
         .into_iter()
-        .find(|r| r.id == id && !secret.is_empty() && r.secret == secret)
+        // A stopped or finished run's secret is dead: whatever is left of it
+        // can't raise requests or wait on them. (Each launch gets a new one.)
+        .find(|r| {
+            r.id == id
+                && !secret.is_empty()
+                && crate::sessions::constant_time_eq(r.secret.as_bytes(), secret.as_bytes())
+                && !r.stopped
+                && r.finished.is_none()
+        })
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "not this run's driver"))
 }
 
@@ -2444,6 +2512,7 @@ pub(crate) async fn post_approval(
         grant_root: s("grant_root"),
         created: unix_now(),
         decision: None,
+        decided: None,
     };
     APPROVALS
         .lock()
@@ -2511,8 +2580,9 @@ pub struct DecideBody {
 /// `POST /bringup/codex/runs/{id}/approvals/{aid}` (authed): a person decides.
 pub(crate) async fn post_decide(
     State(state): State<AppState>,
-    // Bring-up runs commands on the box itself, root ones too: an owner's call.
-    _owner: crate::routes::OwnerAuth,
+    // Bring-up runs commands on the box itself, root ones too: an owner's call,
+    // from a paired device. Never local trust: the run itself is on the box.
+    _owner: crate::auth::DeviceOwnerAuth,
     UrlPath((id, aid)): UrlPath<(String, String)>,
     Json(body): Json<DecideBody>,
 ) -> Reply {
@@ -2532,7 +2602,7 @@ pub(crate) async fn post_decide(
             "That request is gone (the run stopped?).",
         ));
     };
-    a.decision = Some(decision.clone());
+    answer(a, &decision);
     let what = format!("{id}: {}", a.command.as_deref().unwrap_or(&a.why));
     drop(all);
     crate::audit::record(&state, "bringup_approval", &what, &decision);
@@ -2562,6 +2632,16 @@ pub async fn watch_forever(state: AppState) {
         .await
         .unwrap_or_default();
         state.set_bringup_busy(!live.is_empty());
+        {
+            let mut all = APPROVALS.lock().expect("approvals");
+            let before = all.len();
+            evict(&mut all, &live, unix_now());
+            let evicted = all.len() != before;
+            drop(all);
+            if evicted {
+                approvals_changed();
+            }
+        }
         let mut changed = false;
         let mut restore = None;
         let restarting = mine(&state).restarting.lock().expect("restarting").clone();
@@ -2738,6 +2818,35 @@ mod tests {
     }
 
     #[test]
+    fn answered_requests_and_gone_runs_are_evicted() {
+        let a = |id: &str, decided: Option<u64>| Approval {
+            id: id.into(),
+            kind: "command".into(),
+            why: String::new(),
+            command: None,
+            cwd: None,
+            reason: None,
+            grant_root: None,
+            created: 1_000,
+            decision: decided.map(|_| "accept".to_string()),
+            decided,
+        };
+        let now = 10_000;
+        let mut all = vec![
+            ("live".to_string(), a("open", None)),
+            ("live".to_string(), a("fresh", Some(now - 30))),
+            ("live".to_string(), a("stale", Some(now - ANSWERED_TTL))),
+            ("gone".to_string(), a("orphan", None)),
+            ("gone".to_string(), a("orphan-answered", Some(now))),
+        ];
+        evict(&mut all, &["live".to_string()], now);
+        let kept: Vec<&str> = all.iter().map(|(_, a)| a.id.as_str()).collect();
+        // Waiting, or answered and not yet collected: kept. Answered long ago,
+        // or the run's driver is gone: dropped.
+        assert_eq!(kept, ["open", "fresh"]);
+    }
+
+    #[test]
     fn unanswered_approvals_survive_a_restart() {
         let path = std::env::temp_dir().join(format!("tt-approvals-{}.json", std::process::id()));
         let ask = |id: &str, decision: Option<&str>| Approval {
@@ -2750,6 +2859,7 @@ mod tests {
             grant_root: None,
             created: 1,
             decision: decision.map(str::to_string),
+            decided: decision.map(|_| 1),
         };
         load_approvals(path.clone(), &[]); // sets the file
         APPROVALS.lock().unwrap().extend([
