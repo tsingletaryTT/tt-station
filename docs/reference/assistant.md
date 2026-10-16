@@ -135,6 +135,11 @@ Response `200`:
 `status` is `cancelled` (`approve: false`), `started` (`run_model`, backgrounded) or
 `done` (`stop_model`, `reset_chips`).
 
+`reset_chips` is an owner's (`403`). `run_model`, `stop_model` and `switch_mode` follow who
+may start and stop models (`model_control`, `docs/reference/your-data.md`): with `owners`, a
+member's turn is told "Only owners can start or stop models on this box." instead of getting
+a card, and approving a card offered before the change is `403` with that message.
+
 ## More tools: the web, memory, pictures
 
 All run immediately (no confirmation) and show as a chip in the client.

@@ -895,6 +895,8 @@ async fn ids_that_could_leave_the_evals_folder_are_refused() {
     let s = station(None).await;
     let d = s.evals_dir();
     evals::save_in(&d, &saved("1-keep", MODEL, 1, &["tools"]));
+    evals::save_trials(&d, "1-keep", &[]);
+    evals::save_trials(&d, "2-other", &[]);
     // A file one level up that a traversal would reach.
     std::fs::write(
         s.config.path().join("secret.json"),
@@ -954,6 +956,11 @@ async fn ids_that_could_leave_the_evals_folder_are_refused() {
         .await;
     assert_eq!((status, &v["deleted"]), (200, &json!(true)));
     assert!(!d.join("1-keep.json").exists());
+    assert!(
+        !d.join("raw/1-keep.json").exists(),
+        "its agent reliability trials go with it"
+    );
+    assert!(d.join("raw/2-other.json").exists(), "not another's");
     assert_eq!(s.get("/evals/1-keep").await.0, 404);
     assert!(s.get("/evals").await.1["evals"]
         .as_array()
@@ -987,6 +994,60 @@ async fn every_check_up_route_needs_a_paired_device_and_members_can_read_results
         .call(reqwest::Method::GET, "/evals/1-seen", Some(&s.member), None)
         .await;
     assert_eq!((status, &v["eval"]["id"]), (200, &json!("1-seen")));
+}
+
+#[tokio::test]
+async fn starting_and_stopping_check_ups_follows_who_may_start_and_stop_models() {
+    let s = station(None).await;
+    // Anyone may (the default): a member's start gets past the gate (and is
+    // refused only because nothing is serving).
+    let (status, v) = s
+        .call(
+            reqwest::Method::POST,
+            "/evals",
+            Some(&s.member),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(status, 409, "{v}");
+    let (status, _) = s
+        .call(
+            reqwest::Method::PUT,
+            "/data/settings",
+            Some(&s.owner),
+            Some(json!({ "model_control": "owners" })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    for path in ["/evals", "/evals/stop"] {
+        let (status, v) = s
+            .call(
+                reqwest::Method::POST,
+                path,
+                Some(&s.member),
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!(status, 403, "{path}: {v}");
+        assert_eq!(
+            v["error"],
+            "Only owners can start or stop models on this box."
+        );
+    }
+    let (status, _) = s
+        .call(
+            reqwest::Method::POST,
+            "/evals/stop",
+            Some(&s.owner),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(status, 200, "an owner's still works");
+    // Reading results stays open.
+    let (status, _) = s
+        .call(reqwest::Method::GET, "/evals", Some(&s.member), None)
+        .await;
+    assert_eq!(status, 200);
 }
 
 // ---------------------------------------------------------------- where Code compacts

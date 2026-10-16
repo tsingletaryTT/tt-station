@@ -194,6 +194,29 @@ tokio::task_local! {
     pub static HOST_OK: bool;
 }
 
+/// Tools that start, stop or switch the served model: refused to a member
+/// when only owners may (`crate::model_control`), before a confirm card is
+/// offered and again on confirm.
+pub const MODEL_TOOLS: [&str; 3] = ["run_model", "stop_model", "switch_mode"];
+
+tokio::task_local! {
+    /// Whether the request being answered may use [`MODEL_TOOLS`] (set by the
+    /// routes, `routes::assistant_*`). Unset: whoever the request's caller is
+    /// (`crate::model_control::allows_now`), or the box's own work.
+    pub static MODELS_OK: bool;
+}
+
+/// What the model hears when a member's turn calls one of [`MODEL_TOOLS`]
+/// while only owners may.
+const MODELS_REFUSED: &str = "Only owners can start or stop models on this box. Tell the person so; don't offer to do it another way.";
+
+/// Whether the turn being answered may start, stop or switch models.
+pub fn models_ok(state: &AppState) -> bool {
+    MODELS_OK
+        .try_with(|ok| *ok)
+        .unwrap_or_else(|_| crate::model_control::allows_now(state))
+}
+
 /// What the model hears when a member's turn calls one of [`HOST_TOOLS`].
 const HOST_REFUSED: &str = "Only an owner of this box can do that on the box itself. Tell the person so; an owner can make their device one in Settings.";
 
@@ -3136,6 +3159,9 @@ pub(crate) async fn propose(
         .args
         .clone()
         .map_err(|raw| format!("arguments were not a JSON object: {raw}"))?;
+    if MODEL_TOOLS.contains(&call.name.as_str()) && !models_ok(state) {
+        return Err(MODELS_REFUSED.to_string());
+    }
 
     let args = match call.name.as_str() {
         "run_model" => {

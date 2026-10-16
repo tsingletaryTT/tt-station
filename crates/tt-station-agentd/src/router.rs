@@ -54,6 +54,10 @@ pub fn local_http_app(state: AppState) -> Router {
 }
 
 pub fn app(state: AppState) -> Router {
+    // Routes that start, stop or switch serving: refused to members when an
+    // owner says only owners may (`crate::model_control`).
+    let models =
+        || axum::middleware::from_fn_with_state(state.clone(), crate::model_control::require);
     Router::new()
         .route("/status", get(get_status))
         .route("/healthz", get(crate::health::healthz))
@@ -66,8 +70,8 @@ pub fn app(state: AppState) -> Router {
         .route("/pair/init", post(pair_init))
         .route("/pair/complete", post(pair_complete))
         .route("/pair/offer", post(pair_offer))
-        .route("/run", post(run_model))
-        .route("/stop", post(stop_model))
+        .route("/run", post(run_model).route_layer(models()))
+        .route("/stop", post(stop_model).route_layer(models()))
         .route("/reset", post(reset))
         .route("/devices", get(get_devices))
         .route("/devices/{id}", axum::routing::delete(delete_device))
@@ -94,7 +98,10 @@ pub fn app(state: AppState) -> Router {
         .route("/tt/pulls", get(tt_pulls))
         .route("/tt/pull", post(tt_pull))
         .route("/tt/pull/cancel", post(tt_pull_cancel))
-        .route("/serve", get(get_serve).post(post_serve))
+        .route(
+            "/serve",
+            get(get_serve).merge(post(post_serve).route_layer(models())),
+        )
         .route(
             "/keys",
             get(crate::gateway::list_keys).post(crate::gateway::create_key),
@@ -117,7 +124,10 @@ pub fn app(state: AppState) -> Router {
             )),
         )
         .route("/jobs/{id}", axum::routing::delete(crate::jobs::delete_job))
-        .route("/jobs/{id}/run", post(crate::jobs::post_run_now))
+        .route(
+            "/jobs/{id}/run",
+            post(crate::jobs::post_run_now).route_layer(models()),
+        )
         .route("/jobs/{id}/result", get(crate::jobs::get_result))
         .route("/jobs/{id}/share", post(crate::jobs::post_share))
         .route(
@@ -158,7 +168,10 @@ pub fn app(state: AppState) -> Router {
             "/community/pull/cancel",
             post(crate::community::post_cancel),
         )
-        .route("/community/serve", post(crate::community::post_serve))
+        .route(
+            "/community/serve",
+            post(crate::community::post_serve).route_layer(models()),
+        )
         .route(
             "/community/{ns}/{name}",
             axum::routing::delete(crate::community::delete_package),
@@ -169,7 +182,10 @@ pub fn app(state: AppState) -> Router {
         .route("/hermes/key", post(crate::hermes::post_key))
         .route("/vllm/native", get(crate::native_vllm::get_native))
         .route("/vllm/native/setup", post(crate::native_vllm::post_setup))
-        .route("/vllm/native/serve", post(crate::native_vllm::post_serve))
+        .route(
+            "/vllm/native/serve",
+            post(crate::native_vllm::post_serve).route_layer(models()),
+        )
         .route("/bringup/survey", post(crate::bringup::post_survey))
         .route(
             "/bringup/claude/login",
@@ -231,13 +247,17 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/record/start", post(crate::recorder::post_start))
         .route("/record/stop", post(crate::recorder::post_stop))
+        // A schedule switches the box's mode at set times, as the box (they
+        // keep no author), so writing one is for whoever may switch models.
         .route(
             "/schedules",
-            get(crate::schedules::get_schedules).post(crate::schedules::post_schedule),
+            get(crate::schedules::get_schedules)
+                .merge(post(crate::schedules::post_schedule).route_layer(models())),
         )
         .route(
             "/schedules/{id}",
             axum::routing::patch(crate::schedules::patch_schedule)
+                .route_layer(models())
                 .delete(crate::schedules::delete_schedule),
         )
         .route(
@@ -291,6 +311,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/research/{id}/stop", post(crate::research::post_stop))
         .route("/research/{id}/rename", post(crate::research::post_rename))
+        .route("/research/{id}/share", post(crate::research::post_share))
         .route(
             "/research/{id}/explain",
             post(crate::research::post_explain),
@@ -380,9 +401,12 @@ pub fn app(state: AppState) -> Router {
         .route("/approvals/answer", post(crate::approvals::post_answer))
         .route(
             "/evals",
-            get(crate::evals::get_evals).post(crate::evals::post_eval),
+            get(crate::evals::get_evals).merge(post(crate::evals::post_eval).route_layer(models())),
         )
-        .route("/evals/stop", post(crate::evals::post_stop))
+        .route(
+            "/evals/stop",
+            post(crate::evals::post_stop).route_layer(models()),
+        )
         .route(
             "/evals/{id}",
             get(crate::evals::get_eval).delete(crate::evals::delete_eval),
@@ -422,7 +446,10 @@ pub fn app(state: AppState) -> Router {
         .route("/lab/prepare", post(crate::lab::post_prepare))
         .route("/lab/run", post(crate::lab::post_run))
         .route("/modes", get(crate::modes::get_modes))
-        .route("/modes/{id}", post(crate::modes::post_mode))
+        .route(
+            "/modes/{id}",
+            post(crate::modes::post_mode).route_layer(models()),
+        )
         .route("/software", get(crate::tttools::get_software))
         .route(
             "/software/cli-update",
@@ -461,7 +488,8 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/images/generations", post(crate::gateway::v1_images))
         .route(
             "/coserve",
-            get(crate::coserve::get_coserve).post(crate::coserve::post_coserve),
+            get(crate::coserve::get_coserve)
+                .merge(post(crate::coserve::post_coserve).route_layer(models())),
         )
         .route("/metrics/history", get(metrics_history))
         .route("/metrics/now", get(metrics_now))

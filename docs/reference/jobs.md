@@ -17,7 +17,7 @@ ones; owners see every job. Someone else's job answers `404` everywhere.
 | `POST /jobs/transcribe?name=meeting.m4a&when=now\|tonight&documents=true&keep_audio=true&shared=true` | Body: the recording (anything ffmpeg reads; streamed to disk, ≤ 4 GB). `201` with the job. `documents` and `keep_audio` default to the household's data settings (both off); `shared` to off. |
 | `GET /jobs` | Newest first, the ones this caller may see: `{id, kind, title, when, status, done, total, duration_s, created, started, finished, error, to_documents, keep_audio, restore, started_by?, started_by_name?, shared}` |
 | `POST /jobs/{id}/share` `{shared}` | Share a job and its transcript with everyone on the box, or stop (its starter or an owner). Audited. |
-| `POST /jobs/{id}/run` | The owner's go-ahead to switch the box now. |
+| `POST /jobs/{id}/run` | The go-ahead to switch the box now. Follows who may start and stop models (`model_control`, `docs/reference/your-data.md`): with `owners`, a member's is `403`. The queue starting Whisper by itself when nothing is serving isn't refused. |
 | `GET /jobs/{id}/result?format=txt\|srt\|json` | The transcript (also the partial one while running). |
 | `DELETE /jobs/{id}` | Cancel a running job or delete a finished one. |
 
@@ -77,3 +77,19 @@ say takes the household's data settings when the job finishes.
 
 The desktop app shows it in Studio → Transcribe, on Home while recording, and
 in the tray ("Record a meeting").
+
+## Research reports (`/research`, `src/research.rs`)
+
+Research jobs are scoped the same way: each records the device that started it
+(`started_by`, `started_by_name`) and `shared`. Members see their own and the shared ones;
+owners see all; anything else is `404` (reading, `explain`, a follow-up's `parent`).
+Renaming, stopping, deleting and sharing is for the starter or an owner (`403` for someone
+a shared report is only shown to); `GET /research/{id}` says which with `can_change`.
+Reports from before starters were kept, and ones the box started (a routine with nobody
+behind it), are the owners' until shared. A routine run for a person starts research as
+that person.
+
+| Route | |
+|---|---|
+| `GET /research` | `{jobs, check, owner}`: the reports this caller may see, newest first. |
+| `POST /research/{id}/share` `{shared}` | Share a report with everyone on the box, or stop (its starter or an owner). Audited (`research_share`). |

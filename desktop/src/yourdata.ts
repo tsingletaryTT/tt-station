@@ -9,7 +9,24 @@ export interface DataSettings {
   transcripts_to_library: boolean;
   retention_days: number | null;
   restart_last_model: boolean;
+  /** Who may start, stop and switch the model the box serves for everyone. */
+  model_control?: ModelControl;
 }
+
+/** Everyone paired, or owners only (members get "Only owners can start or stop models on this box."). */
+export type ModelControl = "anyone" | "owners";
+
+/** The choices for who may start and stop models. */
+export const MODEL_CONTROL_CHOICES: { value: ModelControl; label: string }[] = [
+  { value: "anyone", label: "Anyone on the box" },
+  { value: "owners", label: "Owners only" },
+];
+
+/** What a change of it says once saved. */
+export const modelControlSaved = (v: ModelControl) =>
+  v === "owners"
+    ? "Saved. Only owners can start, stop or switch models now."
+    : "Saved. Anyone on the box can start, stop or switch models.";
 
 export interface ImportCounts { added: number; overwritten: number; unchanged: number }
 

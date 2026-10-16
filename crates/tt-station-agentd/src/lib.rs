@@ -50,6 +50,7 @@ pub mod localpeer;
 pub mod log;
 pub mod logs;
 pub mod memory;
+pub mod model_control;
 pub mod modes;
 pub mod native_vllm;
 pub mod net;

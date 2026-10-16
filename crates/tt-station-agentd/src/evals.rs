@@ -25,7 +25,11 @@
 //! `evaluate_model` tool.
 //!
 //! - `GET /evals`, `POST /evals`, `POST /evals/stop`
-//! - `GET /evals/{id}`, `DELETE /evals/{id}`
+//! - `GET /evals/{id}`, `DELETE /evals/{id}` (with its trials file)
+//!
+//! A check-up holds the served model for minutes (about fifteen with agent
+//! reliability), so starting and stopping one follows who may start and stop
+//! models (`crate::model_control`, applied in the router).
 //!
 //! An evaluation in progress is saved after each step (the speed benchmark,
 //! then each category). If the agent restarts mid-way, [`resume`] picks it up
@@ -1485,7 +1489,7 @@ pub(crate) async fn get_eval(
     Ok(Json(json!({ "eval": e })))
 }
 
-/// `DELETE /evals/{id}`
+/// `DELETE /evals/{id}`: the check-up and its trials (`raw/<id>.json`).
 pub(crate) async fn delete_eval(
     State(state): State<AppState>,
     _auth: BearerAuth,
@@ -1496,6 +1500,8 @@ pub(crate) async fn delete_eval(
     }
     std::fs::remove_file(dir(&state).join(format!("{id}.json")))
         .map_err(|_| err(StatusCode::NOT_FOUND, "No such evaluation."))?;
+    // Its agent reliability trials, if it had any.
+    let _ = std::fs::remove_file(dir(&state).join("raw").join(format!("{id}.json")));
     Ok(Json(json!({ "deleted": true })))
 }
 

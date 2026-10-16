@@ -131,10 +131,13 @@ Each paired device is an **owner** or a **member**.
 - **Owners** manage the box: they see and remove other devices, make other devices owners
   (or members again), add and remove SSH keys, make/change/revoke app keys, use power
   (sleep, restart, shut down, reset chips), install or undo updates, reset the box, change
-  the security settings, answer bring-up approvals, rename or remove people, and read the
-  activity log.
-- **Members** use the box: chat, research, Code, the studio, the library, their own
-  memories, Code and routine approvals, starting and stopping models.
+  the security settings, answer bring-up approvals, rename or remove people, read the
+  activity log, stop containers the box didn't start (the Doctor's "stop stray
+  containers"), build and download the Doctor's support bundle (it carries the agent's and
+  the serving logs, redacted), and choose who may start and stop models.
+- **Members** use the box: chat, their own research, Code, the studio, the library, their
+  own memories and transcripts, Code and routine approvals, reading the Doctor's verdicts,
+  and starting and stopping models unless an owner has said only owners may (below).
 
 Who is an owner: the first device the box ever pairs, the desktop app on the box itself and
 anything paired with `tt-station-agentd pair` (both use the box user's local secret), and any
@@ -146,6 +149,36 @@ Being a person on the box (Settings → People) means seeing that person's memor
 member can only claim a person no other device belongs to yet; sharing a person between
 devices is an owner's call (Settings → Devices and pairing). A member's "forget
 everything" forgets its own memories, not the household's.
+
+**Who may start and stop models.** The served model is shared: stopping or switching it
+changes it for everyone. An owner chooses who may (Settings → Models → Who can start and
+stop models; `model_control` in `PUT /data/settings`): **anyone** on the box (the default,
+so boxes that had no such setting work as they did) or **owners only**. With owners only, a
+member gets `403` "Only owners can start or stop models on this box." from everything that
+starts, stops or switches serving: `POST /run`, `/stop`, `/serve` (Models, Code's model
+picker), `/modes/{id}`, `/coserve`, `/community/serve`, `/vllm/native/serve`, the go-ahead to
+switch for a transcription (`/jobs/{id}/run`), writing a mode schedule (`POST`/`PATCH
+/schedules`), starting or stopping a check-up (`POST /evals`, `/evals/stop`: it holds the
+model for minutes, about fifteen with agent reliability), and the Doctor's `restart_model`.
+Tori's `run_model`, `stop_model` and `switch_mode` are refused before a confirm card is
+offered (Tori says why), and a card offered earlier is refused on confirm. A routine acts
+for whoever ran it by hand, or, when it runs on its schedule, whoever last wrote it: run for
+a member, it doesn't take `start_model`, `stop_model` or `evaluate_model` (or a mode
+switch) on its own, even when it was given them ahead of time, and a member can't approve
+one of those (or `reset_chips`, an owner's) when a run asks. Routines from before this was
+kept act as the box. Each refusal, and each change of the setting (`model_control`, "anyone
+-> owners"), is in the activity log. What the box does by itself isn't a person's say-so
+and isn't refused: starting the last model after a power cut, the idle sleep and wake, and
+the transcription queue starting Whisper when nothing is serving.
+
+**Research reports are per person.** Each report records the device that started it.
+Members see their own reports and the ones shared with everyone on the box; owners see all.
+Someone else's report is `404` everywhere (reading, explaining, following up on it), so a
+member doesn't learn its id. Its starter or an owner renames, stops, deletes or shares it
+(`POST /research/{id}/share`, audited as `research_share`); reading a shared report doesn't
+make it yours to change. Reports from before this was kept, and the box's own, have no
+starter: they're the owners' until an owner shares them. Transcription jobs work the same
+way (`docs/reference/jobs.md`), except that anyone who can see a shared job may delete it.
 
 **A folder a member's sandbox worked in.** Code in the sandbox can write anything into its
 project folder, and some of what it leaves there runs later by itself: git hooks, a
@@ -167,8 +200,9 @@ and chat streams at once.
 The box keeps an append-only log of who did what (`~/.config/tt-station/audit.jsonl`,
 `0600`, rotated at 10 MB, five files kept): pairing, removed devices, owner changes, resets,
 SSH and app keys, power, security settings, updates, answered approvals, model starts and
-stops, meeting recordings started and stopped, and every owner-only request a member was
-refused. It records device ids and names,
+stops, who may start and stop models, research reports shared or unshared, meeting
+recordings started and stopped, and every owner-only request a member was refused (and
+every model start or stop refused to one). It records device ids and names,
 never tokens or keys. Owners read it in Settings → Security and activity → Activity log, or
 `GET /audit`.
 

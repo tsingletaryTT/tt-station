@@ -230,6 +230,19 @@ impl Harness {
 
     /// Like `idle`, with an image server (at `media`) serving beside chat.
     async fn idle_with_media(script: Vec<Value>, media: Option<String>) -> Self {
+        Self::build(script, media, None).await
+    }
+
+    /// Like `idle`, keeping the box's settings in `config`.
+    async fn idle_in(script: Vec<Value>, config: std::path::PathBuf) -> Self {
+        Self::build(script, None, Some(config)).await
+    }
+
+    async fn build(
+        script: Vec<Value>,
+        media: Option<String>,
+        config: Option<std::path::PathBuf>,
+    ) -> Self {
         let llm = StubLlm::new(script);
         let llm_base = llm.serve().await;
         let calls: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -252,6 +265,10 @@ impl Harness {
             )
             .with_docs(tt_station_agentd::docs::DocStore::open(temp_docs_dir()))
             .with_creations(tt_station_agentd::creations::Creations::new(temp_docs_dir()));
+        let state = match config {
+            Some(dir) => state.with_config_dir(dir),
+            None => state,
+        };
         let state = match media {
             Some(base_url) => {
                 let state = state.with_companion(tt_station_agentd::coserve::Companion::new(
@@ -1554,4 +1571,89 @@ async fn opening_an_address_and_recording_always_wait() {
             .contains("isn't waiting"),
         "{tool_msg}"
     );
+}
+
+/// When an owner says only owners may start and stop models, a member's turn
+/// is told so instead of getting a confirm card, and a card offered before
+/// the change is refused on confirm (`403`) -- an owner's still works.
+#[tokio::test]
+async fn members_cannot_switch_models_through_the_assistant_when_only_owners_may() {
+    let config = tempfile::tempdir().unwrap();
+    let h = Harness::idle_in(
+        vec![
+            calls("stop_model", json!({})),
+            calls("stop_model", json!({})),
+            says("I can't do that."),
+        ],
+        config.path().to_path_buf(),
+    )
+    .await;
+    let resp = h
+        .client
+        .post(format!("{}/run", h.base))
+        .bearer_auth(&h.token)
+        .json(&json!({ "model": SERVED }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let member = pair(&h.client, &h.state, &h.base).await;
+
+    // Offered while anyone may.
+    let body: Value = h.ask("stop").await.json().await.unwrap();
+    let id = body["actions"][0]["id"].as_str().unwrap().to_string();
+
+    let resp = h
+        .client
+        .put(format!("{}/data/settings", h.base))
+        .bearer_auth(&h.token)
+        .json(&json!({ "model_control": "owners" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // A member's turn: refused before any card.
+    let body: Value = h
+        .client
+        .post(format!("{}/assistant", h.base))
+        .bearer_auth(&member)
+        .json(&json!({ "messages": [{ "role": "user", "content": "stop the model" }] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        body["actions"]
+            .as_array()
+            .is_none_or(|a| a.iter().all(|x| x["status"] != "needs_confirmation")),
+        "{body}"
+    );
+    let told = h.llm.requests()[2]["messages"].to_string();
+    assert!(
+        told.contains("Only owners can start or stop models on this box."),
+        "{told}"
+    );
+
+    // The card from before: a member's yes is refused; an owner's works.
+    let resp = h
+        .client
+        .post(format!("{}/assistant/confirm", h.base))
+        .bearer_auth(&member)
+        .json(&json!({ "action_id": id, "approve": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let err: Value = resp.json().await.unwrap();
+    assert_eq!(
+        err["error"],
+        "Only owners can start or stop models on this box."
+    );
+    assert_eq!(h.backend_calls(), vec![format!("start:{SERVED}")]);
+    let c: Value = h.confirm(&id, true).await.json().await.unwrap();
+    assert_eq!(c["status"], "done", "{c}");
+    assert_eq!(h.status().await, "idle");
 }

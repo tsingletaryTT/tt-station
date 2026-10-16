@@ -135,6 +135,11 @@ pub struct Routine {
     /// model plans anything (see the module doc).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    /// The paired device that last wrote it (created or edited it): its
+    /// scheduled runs act on that person's behalf (`crate::model_control`).
+    /// `None` for the box itself and routines from before this was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
 
 fn yes() -> bool {
@@ -204,6 +209,10 @@ pub struct Run {
     /// Steps queued for the person (see the module doc).
     #[serde(default)]
     pub queued: Vec<Queued>,
+    /// The paired device it runs on behalf of: whoever ran it by hand, or for
+    /// a scheduled run whoever last wrote the routine; `None` for the box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
 
 // ---------------------------------------------------------------- storage
@@ -328,6 +337,7 @@ pub(crate) fn from_schedule(s: &crate::schedules::Schedule, at: u64) -> Routine 
         created: at,
         last_run: None,
         mode: Some(s.mode.clone()),
+        by: None,
     }
 }
 
@@ -667,6 +677,40 @@ fn action_summary(tool: &str, args: &Value) -> String {
     }
 }
 
+/// Tools that start, stop or hold the served model (`crate::model_control`).
+const MODEL_TOOLS: [&str; 3] = ["start_model", "stop_model", "evaluate_model"];
+
+/// Why a run on behalf of the paired device `by` may not do `tool` without
+/// someone who may saying yes (`None`: it may). Starting, stopping or
+/// evaluating models follows `crate::model_control`; resetting the chips is
+/// an owner's, as on `POST /power`.
+fn refused(state: &AppState, by: Option<&str>, tool: &str) -> Option<String> {
+    if MODEL_TOOLS.contains(&tool) && !crate::model_control::allows_device(state, by) {
+        return Some(format!(
+            "{} This routine runs for a member, so it can't.",
+            crate::model_control::OWNERS_ONLY
+        ));
+    }
+    let owner = by.is_none_or(|id| state.sessions().get(id).is_some_and(|s| s.owner));
+    (tool == "reset_chips" && !owner).then(|| {
+        "Only an owner of this box can reset the chips. This routine runs for a member, so it can't."
+            .to_string()
+    })
+}
+
+/// Whether the caller answering may say yes to `tool` (`403` when not):
+/// the same rules as [`refused`], for the person approving.
+fn may_approve(state: &AppState, tool: &str) -> Result<(), ApiError> {
+    if MODEL_TOOLS.contains(&tool) {
+        crate::model_control::check_now(state, &format!("approve routine {tool}"))?;
+    }
+    if tool == "reset_chips" && crate::auth::current_caller().is_some_and(|c| !c.owner()) {
+        crate::audit::record(state, "denied", "approve routine reset_chips", "denied");
+        return Err(err(StatusCode::FORBIDDEN, crate::routes::OWNER_ONLY));
+    }
+    Ok(())
+}
+
 fn cut(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -752,7 +796,21 @@ async fn run_tool(state: &AppState, run_id: &str, name: &str, args: &Value) -> (
                 name: other.into(),
                 args: Ok(args.clone()),
             };
-            let (result, _) = crate::assistant::run_read_only(state, &call).await;
+            // As whom the run is for (a research report is theirs), else the box.
+            let device = load_run(state, run_id)
+                .and_then(|r| r.by)
+                .and_then(|id| state.sessions().get(&id));
+            let (result, _) = match device {
+                Some(d) => {
+                    let caller = crate::auth::Caller {
+                        local: false,
+                        device: Some(d),
+                    };
+                    crate::auth::as_caller(caller, crate::assistant::run_read_only(state, &call))
+                        .await
+                }
+                None => crate::assistant::run_read_only(state, &call).await,
+            };
             let ok = result.get("error").is_none();
             (ok, result.to_string())
         }
@@ -1051,8 +1109,9 @@ The routine, \"{}\":\n{}",
     )
 }
 
-/// Starts a run of `r` in the background; refuses if one is going.
-fn start(state: &AppState, r: &Routine, trigger: &str) -> Result<Run, String> {
+/// Starts a run of `r` in the background, on behalf of the paired device
+/// `by` (`None`: the box); refuses if one is going.
+fn start(state: &AppState, r: &Routine, trigger: &str, by: Option<String>) -> Result<Run, String> {
     let mut current = mine(state).current.lock().expect("routines");
     if let Some(id) = current.as_ref() {
         let name = load_run(state, id).map(|r| r.name).unwrap_or_default();
@@ -1073,6 +1132,7 @@ fn start(state: &AppState, r: &Routine, trigger: &str) -> Result<Run, String> {
         pending: None,
         activity: Some("Starting".into()),
         queued: vec![],
+        by,
     };
     save_run(state, &run);
     *current = Some(run.id.clone());
@@ -1085,7 +1145,8 @@ fn start(state: &AppState, r: &Routine, trigger: &str) -> Result<Run, String> {
     let (st, rt, id) = (state.clone(), r.clone(), run.id.clone());
     tokio::spawn(async move {
         if let Some(mode) = rt.mode.clone() {
-            finish_switch(&st, &rt, &id, &mode).await;
+            let by = load_run(&st, &id).and_then(|r| r.by);
+            finish_switch(&st, &rt, &id, &mode, by.as_deref()).await;
             return;
         }
         let outcome = execute(&st, &rt, &id).await;
@@ -1157,12 +1218,14 @@ pub(crate) fn switch_outcome(
 
 /// A mode-switching routine's run: no model thinks; the runner switches,
 /// unless the chips are busy with something a switch mustn't interrupt.
-async fn finish_switch(state: &AppState, r: &Routine, run_id: &str, mode: &str) {
+async fn finish_switch(state: &AppState, r: &Routine, run_id: &str, mode: &str, by: Option<&str>) {
     let title = crate::modes::mode_title(mode).unwrap_or(mode).to_string();
     let time = r.schedule.time.clone().unwrap_or_default();
     let began = Instant::now();
     let blocker = crate::schedules::blocker(state);
-    let started = if blocker.is_none() {
+    let started = if let Some(why) = refused(state, by, "start_model") {
+        Some(Err(why))
+    } else if blocker.is_none() {
         set_activity(state, run_id, &format!("Switching to {title}"));
         Some(crate::modes::start(state, mode).await)
     } else {
@@ -1220,6 +1283,8 @@ async fn execute(state: &AppState, r: &Routine, run_id: &str) -> Result<String, 
     turn.person_said(&r.goal);
     let tools = tools();
     let client = crate::localhttp::local();
+    // Whom it acts for: what they may not do, it doesn't do unasked.
+    let by = load_run(state, run_id).and_then(|r| r.by);
     for round in 0..=MAX_ROUNDS {
         if stopping(state, run_id) {
             return Err("Stopped by you.".into());
@@ -1315,6 +1380,8 @@ async fn execute(state: &AppState, r: &Routine, run_id: &str) -> Result<String, 
                     ),
                     None => return Err("Stopped while waiting for your OK.".into()),
                 }
+            } else if let Some(why) = refused(state, by.as_deref(), &call.name) {
+                (false, why)
             } else {
                 run_tool(state, run_id, &call.name, &args).await
             };
@@ -1447,6 +1514,9 @@ pub(crate) fn answer_queued(
             "It isn't waiting for an answer any more.",
         ));
     }
+    if allow {
+        may_approve(state, &q.tool)?;
+    }
     let status = if now() >= q.since + QUEUE_TTL {
         "expired"
     } else if allow {
@@ -1566,7 +1636,7 @@ pub async fn schedule_forever(state: AppState) {
                 .collect()
         });
         for r in due {
-            let started = start(&state, &r, "schedule");
+            let started = start(&state, &r, "schedule", r.by.clone());
             with_routines(&state, |list| {
                 if let Some(x) = list.iter_mut().find(|x| x.id == r.id) {
                     x.next_run = next_after(&x.schedule, now());
@@ -1713,6 +1783,7 @@ fn check(b: &RoutineBody) -> Result<(), ApiError> {
 pub(crate) async fn post_routine(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    crate::routes::CallerAuth(caller): crate::routes::CallerAuth,
     Json(b): Json<RoutineBody>,
 ) -> Reply {
     let b = normalized(b);
@@ -1728,6 +1799,7 @@ pub(crate) async fn post_routine(
         created: now(),
         last_run: None,
         mode: b.mode,
+        by: caller.device_id(),
     };
     with_routines(&state, |l| l.push(r.clone()));
     Ok(Json(json!({ "routine": view(&state, &r) })))
@@ -1737,6 +1809,7 @@ pub(crate) async fn post_routine(
 pub(crate) async fn put_routine(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    crate::routes::CallerAuth(caller): crate::routes::CallerAuth,
     UrlPath(id): UrlPath<String>,
     Json(b): Json<RoutineBody>,
 ) -> Reply {
@@ -1752,6 +1825,7 @@ pub(crate) async fn put_routine(
         r.schedule = b.schedule;
         r.allowed = b.allowed;
         r.mode = b.mode;
+        r.by = caller.device_id();
         if let Some(e) = b.enabled {
             r.enabled = e;
         }
@@ -1796,6 +1870,7 @@ pub(crate) async fn delete_routine(
 pub(crate) async fn post_run(
     State(state): State<AppState>,
     _auth: BearerAuth,
+    crate::routes::CallerAuth(caller): crate::routes::CallerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
     let r = with_routines(&state, |l| l.iter().find(|r| r.id == id).cloned())
@@ -1809,7 +1884,9 @@ pub(crate) async fn post_run(
             "No model is serving, and a routine needs one to think with. Start one in Models.",
         ));
     }
-    let run = start(&state, &r, "manual").map_err(|e| err(StatusCode::CONFLICT, e))?;
+    // By hand: on behalf of whoever ran it (the box's own user acts as the box).
+    let by = caller.device_id();
+    let run = start(&state, &r, "manual", by).map_err(|e| err(StatusCode::CONFLICT, e))?;
     Ok(Json(json!({ "run": run })))
 }
 
@@ -1854,6 +1931,12 @@ pub(crate) async fn post_approve(
     UrlPath(run): UrlPath<String>,
     Json(d): Json<Decision>,
 ) -> Reply {
+    if d.allow {
+        let pending = load_run(&state, &run).and_then(|r| r.pending);
+        if let Some(p) = pending {
+            may_approve(&state, &p.tool)?;
+        }
+    }
     let tx = mine(&state)
         .decisions
         .lock()
@@ -1946,6 +2029,52 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_run_for_a_member_does_not_switch_models_or_reset_chips_unasked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_config_dir(tmp.path().to_path_buf());
+        let session = |id: &str, owner| crate::sessions::Session {
+            id: id.into(),
+            token_sha256: format!("sha-{id}"),
+            name: id.into(),
+            platform: None,
+            created: None,
+            last_used: crate::sessions::unix_now(),
+            owner,
+        };
+        state.sessions().insert_for_test(session("owner", true));
+        state.sessions().insert_for_test(session("member", false));
+        // Anyone may switch models (the default); resetting is an owner's.
+        assert_eq!(refused(&state, Some("member"), "stop_model"), None);
+        assert!(refused(&state, Some("member"), "reset_chips").is_some());
+        assert_eq!(refused(&state, Some("owner"), "reset_chips"), None);
+        assert_eq!(refused(&state, None, "reset_chips"), None, "the box's own");
+        let owners = crate::export::DataSettings {
+            model_control: crate::model_control::ModelControl::Owners,
+            ..Default::default()
+        };
+        crate::fsio::write_json(
+            &tmp.path().join(crate::export::SETTINGS_FILE),
+            &owners,
+            crate::fsio::PRIVATE,
+        )
+        .unwrap();
+        for tool in ["start_model", "stop_model", "evaluate_model"] {
+            let why = refused(&state, Some("member"), tool).unwrap();
+            assert!(why.starts_with(crate::model_control::OWNERS_ONLY), "{why}");
+            assert_eq!(refused(&state, Some("owner"), tool), None);
+            assert_eq!(refused(&state, None, tool), None);
+            assert!(refused(&state, Some("removed"), tool).is_some());
+        }
+        assert_eq!(refused(&state, Some("member"), "download_model"), None);
+        assert_eq!(refused(&state, Some("member"), "box_status"), None);
     }
 
     #[test]

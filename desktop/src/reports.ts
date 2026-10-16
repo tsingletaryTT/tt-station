@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 // Research reports as files: their names, and "Download all" as one zip.
+// And whose a report is: who started it, and whether it's shared.
 
 import { strToU8, zipSync } from "fflate";
 
@@ -31,3 +32,25 @@ export function reportFiles(reports: ReportText[]): Record<string, Uint8Array> {
 
 /** The files as a zip archive. */
 export const zipFiles = (files: Record<string, Uint8Array>) => zipSync(files);
+
+/** Whose a report is, as the box says (`GET /research`). */
+export interface Ownership { started_by?: string | null; started_by_name?: string | null; shared?: boolean }
+
+/**
+ * The small line under a report in the list: "Shared", who started it (for
+ * an owner, who sees everyone's), or nothing for one's own private report.
+ * `owner` is whether this device is an owner; `mine` whether it started it.
+ */
+export function ownershipLabel(r: Ownership, mine: boolean, owner: boolean): string | null {
+  const by = !mine && owner ? (r.started_by_name ?? (r.started_by ? "another device" : "the box")) : null;
+  if (r.shared) return by ? `Shared · ${by}` : "Shared";
+  return by ? `By ${by}` : null;
+}
+
+/** The share action for a report this caller may change; `null` when it may not. */
+export function shareAction(r: Ownership, canChange: boolean): { label: string; shared: boolean } | null {
+  if (!canChange) return null;
+  return r.shared
+    ? { label: "Stop sharing", shared: false }
+    : { label: "Share with everyone on the box", shared: true };
+}

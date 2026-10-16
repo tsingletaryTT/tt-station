@@ -7,8 +7,9 @@
 //! - `GET /data/settings`, `PUT /data/settings` (owners): the household's data
 //!   settings ([`DataSettings`]) -- whether recordings are kept after they're
 //!   transcribed, whether transcripts go into the shared Library, how many days
-//!   transcripts and research reports are kept, and whether the box starts its
-//!   last model again after a power cut (`crate::boot`).
+//!   transcripts and research reports are kept, whether the box starts its
+//!   last model again after a power cut (`crate::boot`), and who may start and
+//!   stop models (`crate::model_control`).
 //! - `POST /export` (owners): a `.tar.gz` of the person's data, with a
 //!   `manifest.json` (format and agent versions, counts, each file's size and
 //!   SHA-256).
@@ -99,6 +100,9 @@ pub struct DataSettings {
     /// (`crate::boot`).
     #[serde(default)]
     pub restart_last_model: bool,
+    /// Who may start, stop and switch the served model (`crate::model_control`).
+    #[serde(default)]
+    pub model_control: crate::model_control::ModelControl,
 }
 
 /// Longest retention the setting takes (ten years).
@@ -112,13 +116,18 @@ pub fn settings(state: &AppState) -> DataSettings {
     settings_in(&state.config_dir())
 }
 
-/// `GET /data/settings` (authed): the settings, and whether this caller may
-/// change them.
+/// `GET /data/settings` (authed): the settings, whether this caller may
+/// change them, and whether it may start and stop models
+/// (`crate::model_control`).
 pub(crate) async fn get_settings(
     axum::extract::State(state): axum::extract::State<AppState>,
     CallerAuth(caller): CallerAuth,
 ) -> Json<Value> {
-    Json(json!({ "settings": settings(&state), "owner": caller.owner() }))
+    Json(json!({
+        "settings": settings(&state),
+        "owner": caller.owner(),
+        "may_control_models": crate::model_control::allows(&state, &caller),
+    }))
 }
 
 /// `PUT /data/settings` body: any of the fields; `retention_days: null` (or 0)
@@ -130,6 +139,7 @@ pub struct SettingsPatch {
     #[serde(default, deserialize_with = "some_or_null")]
     pub retention_days: Option<Option<u32>>,
     pub restart_last_model: Option<bool>,
+    pub model_control: Option<crate::model_control::ModelControl>,
 }
 
 /// Tells a missing field (`None`) from an explicit `null` (`Some(None)`).
@@ -164,6 +174,10 @@ pub(crate) async fn put_settings(
     if let Some(v) = patch.restart_last_model {
         s.restart_last_model = v;
     }
+    let was_control = s.model_control;
+    if let Some(v) = patch.model_control {
+        s.model_control = v;
+    }
     crate::fsio::write_json(
         &state.config_dir().join(SETTINGS_FILE),
         &s,
@@ -180,6 +194,15 @@ pub(crate) async fn put_settings(
         on_off(s.restart_last_model)
     );
     crate::audit::record_as(&state, &caller.actor(), "data_settings", &summary, "ok");
+    if s.model_control != was_control {
+        crate::audit::record_as(
+            &state,
+            &caller.actor(),
+            "model_control",
+            &format!("{} -> {}", was_control.as_str(), s.model_control.as_str()),
+            "ok",
+        );
+    }
     Ok(Json(s))
 }
 

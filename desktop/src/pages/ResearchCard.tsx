@@ -16,6 +16,8 @@ export type Depth = "quick" | "standard" | "deep";
 export interface Job {
   id: string; question: string; depth: Depth; parent: string | null; created: number; state: string; step: string;
   finished: number | null; error: string | null; model: string | null; search: string | null; summary: string | null; title?: string | null;
+  /** The device that started it (none: the box, or from before this was kept), and whether everyone on the box sees it. */
+  started_by?: string | null; started_by_name?: string | null; shared?: boolean;
 }
 export interface Check { ok: boolean; level: "ok" | "warn" | "block" | "wait"; why: string; model: string | null; context: number | null; search: string; search_note: string }
 
