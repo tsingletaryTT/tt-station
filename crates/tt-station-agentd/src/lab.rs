@@ -664,6 +664,18 @@ pub(crate) async fn post_run(
         ));
     }
     let busy = Busy(state.clone());
+    // Busy first, then the check: a `/run` that slipped in after the check
+    // above is seen here, and one that comes after this sees the Lab holding
+    // the chips (`chips_holder`, checked again as its start begins).
+    if !matches!(state.lifecycle().phase, Phase::Idle | Phase::Failed)
+        || crate::coserve::is_split(&state)
+    {
+        drop(busy);
+        return Err(err(
+            StatusCode::CONFLICT,
+            "A model started meanwhile; the silicon check needs all the chips. Stop it first?",
+        ));
+    }
     // With gozer, the whole run -- the reset below included -- holds a
     // whole-box lease, so other gozer users see the chips taken.
     let lease = take_lab_lease(&state, m).await?;
