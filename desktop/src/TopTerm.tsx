@@ -70,7 +70,7 @@ export function TopTerm() {
   }, [installed, view]);
 
   if (installed === false) {
-    return <div className="muted">tt-toplike isn't installed on this box. Install it from github.com/tsingletaryTT/tt-toplike to see its views here.</div>;
+    return <div className="muted">This hardware view isn't installed on this box.</div>;
   }
   return (
     <div className="stack" style={{ gap: 10 }}>

@@ -32,7 +32,7 @@ const STAGES: { emoji: string; name: string; plain: string }[] = [
   { emoji: "🧪", name: "soil test", plain: "CPU reference: what correct output looks like" },
   { emoji: "🌱", name: "graft", plain: "The new weights on one board, checked against the reference" },
   { emoji: "🌳", name: "trunk", plain: "Full model (new architectures only)" },
-  { emoji: "🌿", name: "rows", plain: "Each chip configuration: 1, 2 and 4 chips" },
+  { emoji: "🌿", name: "rows", plain: "Each chip configuration it tests on the box" },
   { emoji: "🚪", name: "farm gate", plain: "Serving check (new architectures only)" },
   { emoji: "🍯", name: "taste test", plain: "Quality and speed (new architectures only)" },
   { emoji: "📦", name: "crate", plain: "A package that starts like any other model" },

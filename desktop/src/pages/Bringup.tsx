@@ -163,7 +163,7 @@ function StartBringup({ initial, engines, canClose, onClose, onStarted }: {
               ) : (
                 <div className="start-go">
                   <div className="muted" style={{ fontSize: 13 }}>
-                    {name} writes the port to <span className="mono">{survey.model_dir}</span> in tt-metal, through eleven checked stages. It holds all four chips while it runs; expect several hours.
+                    {name} writes the port to <span className="mono">{survey.model_dir}</span> in tt-metal, through eleven checked stages. It holds all the box's chips while it runs; expect several hours.
                   </div>
                   <div className="row wrap" style={{ gap: 10 }}>
                     <Button disabled={launching} onClick={() => startAgent()}>{launching ? "Starting…" : `Bring it up with ${name}`}</Button>

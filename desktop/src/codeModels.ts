@@ -92,7 +92,8 @@ export function serveRequest(m: CodeModel): ServeCall | null {
 /** What choosing `m` does, beyond stopping what serves: its chips. */
 export function chipsLine(m: CodeModel): string | null {
   if (!m.chips) return null;
-  return m.chips >= 4 ? "It uses all 4 of the box's chips." : `It uses ${m.chips} of the box's 4 chips.`;
+  // Boxes differ (one card, a QuietBox, a Galaxy): the count, not a share of a total.
+  return `It uses ${m.chips} ${m.chips === 1 ? "chip" : "chips"} on the box.`;
 }
 
 /** Valid tool calls within a retry, as a share: "97% of 120". */

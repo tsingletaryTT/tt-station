@@ -53,7 +53,7 @@ const TEMPLATES: { name: string; goal: string; schedule: Schedule; allowed: stri
   },
   {
     name: "Try a community model overnight",
-    goal: "Download the community model sjettTT/qwen3.8-flash-next_p150x4 if it isn't on the box yet, start it, and once it's ready ask it three short questions (a coding task, a reasoning puzzle, a summary of a paragraph). Report its speed (tokens per second, time to first token) and how good its answers were. Then put the model that was serving before back.",
+    goal: "Pick one community chat model from the catalog that fits this box's chips and isn't on the box yet (community_models): say which and why. Download it, start it, and once it's ready ask it three short questions (a coding task, a reasoning puzzle, a summary of a paragraph). Report its speed (tokens per second, time to first token) and how good its answers were. Then put the model that was serving before back.",
     schedule: { kind: "manual" },
     allowed: ["download_model", "start_model"],
   },
@@ -65,7 +65,7 @@ const TEMPLATES: { name: string; goal: string; schedule: Schedule; allowed: stri
   },
   {
     name: "Keep a model serving",
-    goal: "Make sure a chat model is serving and answering. If nothing is serving, or the model doesn't answer a short question, start Qwen3.8-27B (mando2222/qwen3.8-27b-dflash2-p300x2-q4kv) and check it answers. Report only what you had to fix.",
+    goal: "Make sure a chat model is serving and answering. If nothing is serving, or the model doesn't answer a short question, start the chat model that served most recently (if you can't tell, a chat model whose weights are on the box and that fits its chips) and check it answers. Report only what you had to fix.",
     schedule: { kind: "hourly", every_hours: 2 },
     allowed: ["start_model"],
   },

@@ -214,11 +214,11 @@ function Sidebar({ route, places }: { route: Route; places: typeof PLACES }) {
         </div>
       </div>
       {window.ttDesktop && (
-        <button className="ask-tori" onClick={() => window.ttDesktop!.showTori("talk")} title={`The assistant, Tori: talk or type, from anywhere (${shortcut})`}
-          aria-label={`Ask Tori, the assistant (${shortcut})`}>
+        <button className="ask-tori" onClick={() => window.ttDesktop!.showTori("talk")} title={shortcut ? `The assistant, Tori: talk or type, from anywhere (${shortcut})` : "The assistant, Tori: talk or type"}
+          aria-label={shortcut ? `Ask Tori, the assistant (${shortcut})` : "Ask Tori, the assistant"}>
           <span className="ask-tori-orb" aria-hidden />
           <span className="grow">Ask Tori</span>
-          <span className="kbd" aria-hidden>{shortcut}</span>
+          {shortcut && <span className="kbd" aria-hidden>{shortcut}</span>}
         </button>
       )}
       <BoxTerminalButton />

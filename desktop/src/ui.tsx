@@ -358,16 +358,16 @@ export function readable(binding: string): string[] {
   return [...mods, key === "space" ? "Space" : key.length === 1 ? key.toUpperCase() : key];
 }
 
-/** Tori's shortcut as people read it ("Ctrl Alt Space"); follows changes made in Settings. */
+/** Tori's shortcut as people read it ("Ctrl Alt Space"), "" while it's off; follows changes made in Settings. */
 export function useToriShortcut(): string {
-  const [binding, setBinding] = useState("<Control><Alt>space");
+  const [binding, setBinding] = useState("");
   useEffect(() => {
-    window.ttDesktop?.toriShortcut?.().then((r) => setBinding(r.binding)).catch(() => {});
+    window.ttDesktop?.toriShortcut?.().then((r) => setBinding(r.installed ? r.binding : "")).catch(() => {});
     const changed = (e: Event) => setBinding((e as CustomEvent<string>).detail);
     window.addEventListener("tt:shortcut", changed);
     return () => window.removeEventListener("tt:shortcut", changed);
   }, []);
-  return readable(binding).join(" ");
+  return binding ? readable(binding).join(" ") : "";
 }
 
 /** Whether `text` matches a search box `query`, ignoring case, spaces and

@@ -23,31 +23,46 @@ device's current version.
 The Mac must be on the same network as the device.
 
 1. TT Station lists the devices it finds (or type the device's address).
-2. Pick yours. If you already SSH into it with a key, that's it: you're in.
+2. Pick yours. If you already SSH into it with a key under your Mac's
+   username, that's it: you're in.
 3. Otherwise, sign in with your account on the device (the username and
-   password you'd SSH in with; `ttuser` on a QuietBox). The password goes
-   straight to the device and isn't kept.
+   password you'd SSH in with). The password goes straight to the device and
+   isn't kept.
 
-How it works: over SSH, the device's own TT Station pairs this Mac, and the
-Mac checks the device's certificate matches the one it sees on the network.
+How it works: TT Station first asks the device for its SSH identity (its host
+keys) over its secure connection, pinned to the certificate it showed, so ssh
+talks only to that device. Over SSH, the device's own TT Station then pairs
+this Mac, and the Mac checks the device's certificate matches the one it sees
+on the network. A device too old to say its SSH identity can still let in an
+SSH key, but not a password: use a pairing code there.
 It works the same on a QuietBox, a Galaxy server or a workstation with
 Tenstorrent cards, with or without a screen.
 
 No login for it? **Use a pairing code instead**: the device shows a code as
 a notification in TT Station on its screen and on any phone paired with it.
 
-More devices: click the device name at the top left → **Add another device…**
-(or **Device → Add Another Device…** in the menu bar). Switch between them
+Signing in with the device's account makes this Mac one of its owners; a
+pairing code makes it a member (an owner can change that in Settings →
+Devices).
+
+More devices: click the device name at the top left → **Add another box…**
+(or **Box → Add Another Box…** in the menu bar). Switch between them
 from the same place.
 
 ## The command line
 
-- **Open Terminal** (sidebar, or **Device → Open Terminal on Device**, ⇧⌘T):
+- **Open Terminal** (sidebar, or **Box → Open Terminal on Box**, ⇧⌘T):
   the device's shell in Terminal, over SSH. The first time, TT Station makes
   a key just for this (`~/.ssh/tt-station_ed25519`) and the device lets it
   in — no passwords.
-- **Device → Open Device in VS Code**: VS Code's Remote-SSH, on the device.
+- **Box → Open Box in VS Code**: VS Code's Remote-SSH, on the device.
 - Connect → SSH → **Copy the ssh command**, for any other SSH app.
+
+## Tori's shortcut
+
+Off until you turn it on in **Settings → Assistant (Tori) and voice**. Its
+default, ⌃⌥Space, is also macOS's shortcut for switching input sources: pick
+another there if you use that.
 
 ## On your Mac, not on the device
 
@@ -65,4 +80,6 @@ Some things act on the computer you're using:
 
 ## Build it
 
-`desktop/mac/build-mac.sh` (Linux or macOS) → `desktop/mac/dist/`.
+`desktop/mac/build-mac.sh` (Linux or macOS) → `desktop/mac/dist/`. The zip
+holds the app and its licenses (`Licenses/`, also inside the app's
+`Contents/Resources/Licenses`).

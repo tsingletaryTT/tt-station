@@ -1,7 +1,8 @@
 # TT Station desktop
 
-The QuietBox's own desktop app: a native window with its own dock icon, tray,
-notifications, global shortcut and start-at-login, built with Electron and
+TT Station's desktop app, for any Tenstorrent box running TT Station: a native
+window with its own dock icon, tray, notifications, an optional global shortcut
+and start-at-login, built with Electron and
 Tenstorrent's Vesper design system (`@tenstorrent/vesper`, React).
 
 ## How it fits together
@@ -17,7 +18,8 @@ Tenstorrent's Vesper design system (`@tenstorrent/vesper`, React).
   `electron/offline.html` and retries.
 - **Desktop integration:** tray (status, mode switches, stop, quit), system
   notifications from the box's events while the window isn't in front,
-  `Ctrl+Alt+Space` to ask the box from anywhere, start at login
+  a shortcut to ask the box from anywhere (off until turned on in Settings →
+  Assistant; `Ctrl+Alt+Space` unless changed), start at login
   (`~/.config/autostart/tt-station.desktop`), and connected apps (Open WebUI,
   LobeChat, Jupyter, …) open in their own windows.
 

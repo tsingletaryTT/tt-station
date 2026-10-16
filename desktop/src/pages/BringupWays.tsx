@@ -34,14 +34,14 @@ const WAYS: { id: Way | "community"; emoji: string; title: string; tag: string; 
   {
     id: "orchard", emoji: "🌱", title: "Quick port", tag: "Graft",
     when: "Its architecture already runs here: a fine-tune or post-train of a model in Models.",
-    how: "Grafts the new weights onto the model that runs, then tests them on 1, 2 and 4 chips against a CPU reference. Its agents run on this box's own models: no account.",
+    how: "Grafts the new weights onto the model that runs, then tests them on the box's chip configurations against a CPU reference. Its agents run on this box's own models: no account.",
     takes: "A few hours",
   },
   {
     id: "agent", emoji: "🤖", title: "Agent port", tag: "Coding agent",
     when: "A new architecture: nothing like it runs here yet.",
     how: "An agent writes the model code in tt-metal through eleven checked stages, and asks you about risky steps. Needs an account with OpenAI (for Codex) or Anthropic (for Claude Code).",
-    takes: "Many hours, all four chips",
+    takes: "Many hours, all the box's chips",
   },
   {
     id: "community", emoji: "📦", title: "Community package", tag: "Already done",

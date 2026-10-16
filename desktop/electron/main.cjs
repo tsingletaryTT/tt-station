@@ -14,7 +14,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { validHost, validUser, cleanName, sameOrigin, webAddress, shq } = require("./validate.cjs");
+const { validHost, validUser, cleanName, sameOrigin, webAddress, shq, hostKey, knownHostsLines, homeFolder } = require("./validate.cjs");
 const tokenstore = require("./tokenstore.cjs");
 const clientactions = require("./clientactions.cjs");
 
@@ -24,6 +24,8 @@ app.setAppUserModelId?.("tt-station");
 process.env.CHROME_DESKTOP = "tt-station.desktop";
 
 const IS_MAC = process.platform === "darwin";
+// Developer tools only when run from a checkout (npm start), never in a shipped build.
+const DEVTOOLS = !app.isPackaged;
 // On the box itself this is the agent's own config folder (its local secret signs
 // this app in); on a Mac, the app's own folder: it only ever pairs with boxes.
 const CONFIG_DIR = process.env.TT_CONFIG_DIR || (IS_MAC ? path.join(app.getPath("appData"), "TT Station") : path.join(os.homedir(), ".config", "tt-station"));
@@ -385,21 +387,66 @@ try:
 except Exception as e:
     print(json.dumps({"error": "TT Station's agent on the box didn't answer (%s). Is it running? systemctl --user status tt-station-agentd" % e}))
     sys.exit(0)
-print(json.dumps({"name": s.get("name"), "pair_id": offer.get("pair_id"), "code": offer.get("code"), "tls": offer.get("tls"), "user": os.environ.get("USER")}))
+print(json.dumps({"name": s.get("name"), "pair_id": offer.get("pair_id"), "code": offer.get("code"), "tls": offer.get("tls"), "user": os.environ.get("USER"), "home": os.path.expanduser("~")}))
 `;
 
-/** SSH to the device and pair there. No password: the person's own keys (or none and it fails fast). */
-function sshPair(host, user, password) {
+/**
+ * The box's SSH host keys (["ssh-ed25519 AAAA…"]), asked over its HTTPS with
+ * the certificate pinned (`fp`), so ssh trusts the box the person checked and
+ * not whatever first answers on port 22. [] from a box too old to say; throws
+ * when the box can't be reached that way.
+ */
+async function boxHostKeys(host, tls, fp) {
+  if (!validHost(host)) throw new Error("That box address isn't valid.");
+  const mine = !pinnedBox(host);
+  if (mine) pairing.set(host, { host, fp });
+  let r;
+  try {
+    r = await call(hostUrl(host, tls), "GET", "/ssh/host-keys", { timeout: 8000 });
+  } catch {
+    throw new Error(`Couldn't check ${host}'s SSH identity over its secure connection, so this computer didn't sign in to it.`);
+  } finally {
+    if (mine) pairing.delete(host);
+  }
+  if (!r.ok || !Array.isArray(r.json?.keys)) return [];
+  return [...new Set(r.json.keys.map(hostKey).filter(Boolean))];
+}
+
+/** ssh options that trust exactly `keys` for `host` (written to a private file), or null with none to trust. */
+function knownHostsOptions(host, keys, file) {
+  const lines = knownHostsLines(host, keys);
+  if (!lines.length) return null;
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o600 });
+  const where = /\s/.test(file) ? `"${file}"` : file;
+  return ["-o", `UserKnownHostsFile=${where}`, "-o", "GlobalKnownHostsFile=/dev/null", "-o", "StrictHostKeyChecking=yes", "-o", "CheckHostIP=no", "-o", "UpdateHostKeys=no"];
+}
+
+/**
+ * SSH to the device and pair there. No password: the person's own keys (or
+ * none and it fails fast). `hostKeys` are the box's own, from boxHostKeys():
+ * ssh then accepts only those. Without them (an older box) only a key attempt
+ * goes ahead, trusting the first key seen; a password never goes to an
+ * unproven box.
+ */
+function sshPair(host, user, password, hostKeys = []) {
   return new Promise((resolve, reject) => {
     if (!validHost(host)) return reject(new Error("That box address isn't valid."));
     if (!validUser(user)) return reject(Object.assign(new Error("That isn't a username."), { kind: "auth" }));
-    const args = ["-o", "ConnectTimeout=8", "-o", "StrictHostKeyChecking=accept-new", "-o", "NumberOfPasswordPrompts=1"];
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tt-station-ssh-"));
+    const cleanup = () => fs.rmSync(tmp, { recursive: true, force: true });
+    const pinned = knownHostsOptions(host, hostKeys, path.join(tmp, "known_hosts"));
+    if (!pinned && password) {
+      cleanup();
+      return reject(Object.assign(new Error("This box can't prove its SSH identity yet; pair with a code instead."), { kind: "host-keys" }));
+    }
+    const args = ["-o", "ConnectTimeout=8", ...(pinned || ["-o", "StrictHostKeyChecking=accept-new"]), "-o", "NumberOfPasswordPrompts=1"];
     const env = { ...process.env };
     let askpass = null;
     if (password) {
       // ssh asks this program for the password (no terminal here); it hands over
       // what the person typed, from the environment, and is deleted after.
-      askpass = path.join(os.tmpdir(), `tt-station-askpass-${process.pid}-${Date.now()}`);
+      askpass = path.join(tmp, "askpass");
       fs.writeFileSync(askpass, '#!/bin/sh\nprintf "%s\\n" "$TT_STATION_PW"\n', { mode: 0o700 });
       Object.assign(env, { SSH_ASKPASS: askpass, SSH_ASKPASS_REQUIRE: "force", DISPLAY: env.DISPLAY || ":0", TT_STATION_PW: password });
       args.push("-o", "PreferredAuthentications=keyboard-interactive,password,publickey");
@@ -411,18 +458,20 @@ function sshPair(host, user, password) {
     child.stdout.on("data", (d) => { out += d; });
     child.stderr.on("data", (d) => { err += d; });
     const timer = setTimeout(() => child.kill(), 30000);
-    child.on("error", (e) => { clearTimeout(timer); reject(new Error(`Couldn't run ssh: ${e.message}`)); });
+    child.on("error", (e) => { clearTimeout(timer); cleanup(); reject(new Error(`Couldn't run ssh: ${e.message}`)); });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (askpass) fs.rmSync(askpass, { force: true });
+      cleanup();
       const last = out.trim().split("\n").pop() || "";
       let r = null;
       try { r = JSON.parse(last); } catch { /* not ours */ }
       if (r) return r.error ? reject(Object.assign(new Error(r.error), { kind: "device" })) : resolve(r);
       const e = err.toLowerCase();
-      // A hardened box (deploy/harden-box.sh) offers keys only: "Permission denied (publickey)".
+      // A box that only accepts SSH keys says "Permission denied (publickey)".
       if (password && e.includes("permission denied (publickey)")) return reject(Object.assign(new Error("This box doesn't accept passwords over SSH, only keys. Use a pairing code instead."), { kind: "keys-only" }));
       if (e.includes("permission denied")) return reject(Object.assign(new Error(password ? "That username and password didn't work." : "No SSH key of yours is let in."), { kind: "auth" }));
+      if (pinned && (e.includes("host key verification failed") || e.includes("remote host identification has changed")))
+        return reject(new Error(`What answered SSH at ${host} isn't the box: its SSH identity doesn't match the one the box reports over its secure connection, so nothing was sent. Something between this computer and the box may be pretending to be it.`));
       if (e.includes("host key verification failed") || e.includes("remote host identification has changed"))
         return reject(new Error(`${host}'s SSH identity changed since this computer last saw it. If that's expected, remove its line from ~/.ssh/known_hosts and try again.`));
       if (e.includes("connection refused")) return reject(new Error(`${host} doesn't accept SSH (port 22). Turn SSH on there, or use a pairing code.`));
@@ -436,13 +485,20 @@ function sshPair(host, user, password) {
 
 /** Pairs with a device by signing in to it ({host, tls, fp, name} from the probe). */
 async function pairWithAccount(p, user, password) {
-  const r = await sshPair(p.host, user, password);
+  const hostKeys = await boxHostKeys(p.host, p.tls, p.fp);
+  const r = await sshPair(p.host, user, password, hostKeys);
   const fp = String(r.tls?.sha256 || "").toLowerCase();
   if (!fp || fp !== String(p.fp).toLowerCase())
     throw new Error("The box's certificate over SSH doesn't match the one on the network, so this wasn't saved. Something between this computer and the box may be pretending to be it.");
   const id = await pairFinish({ host: p.host, tls: Number(r.tls?.port) || p.tls, fp, name: r.name || p.name, pair: r.pair_id, code: String(r.code) });
   const box = boxes.boxes.find((b) => b.id === id);
-  if (box) { box.loginUser = validUser(r.user) ? r.user : user; saveBoxes(); }
+  if (box) {
+    box.loginUser = validUser(r.user) ? r.user : user;
+    // Where VS Code opens, for that account.
+    box.loginHome = homeFolder(r.home);
+    if (hostKeys.length) box.hostKeys = hostKeys;
+    saveBoxes();
+  }
   return id;
 }
 
@@ -466,6 +522,10 @@ async function pairStart(host, tls, fp) {
 // authorized_keys over the paired connection, once per box.
 
 const SSH_KEY = path.join(os.homedir(), ".ssh", "tt-station_ed25519");
+// The host keys of the boxes that said them over their pinned HTTPS, one file
+// per box (ssh, Terminal and VS Code read it), so they're trusted, not first-seen.
+const hostKeysAsked = new Set();
+const knownHostsFile = (box) => path.join(os.homedir(), ".ssh", `tt-station_known_hosts_${String(box.id).replace(/[^A-Za-z0-9]/g, "")}`);
 
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
@@ -494,10 +554,21 @@ async function sshReady() {
     saveBoxes();
   }
   if (!validUser(box.sshUser)) throw new Error("The box named an account this computer can't use for SSH.");
+  // Its host keys, asked once a run (a reinstalled box has new ones); the saved ones if it doesn't answer.
+  if (!hostKeysAsked.has(box.id)) {
+    const keys = await boxHostKeys(box.host, box.tls, box.fp).catch(() => null);
+    if (keys) hostKeysAsked.add(box.id);
+    if (keys?.length && keys.join() !== (box.hostKeys || []).join()) { box.hostKeys = keys; saveBoxes(); }
+  }
   return box;
 }
 
-const sshArgs = (box) => ["-i", SSH_KEY, "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new", `${box.sshUser}@${box.host}`];
+/** How ssh trusts the box: its own host keys when it said them, else the first one seen (an older box). */
+function hostKeyArgs(box) {
+  return (box.hostKeys?.length && knownHostsOptions(box.host, box.hostKeys, knownHostsFile(box))) || ["-o", "StrictHostKeyChecking=accept-new"];
+}
+
+const sshArgs = (box) => ["-i", SSH_KEY, "-o", "IdentitiesOnly=yes", ...hostKeyArgs(box), `${box.sshUser}@${box.host}`];
 
 /** "terminal": the box's shell in a new Terminal window; "command": the ssh command; "vscode": the box in VS Code. */
 async function sshAction(what) {
@@ -512,9 +583,14 @@ async function sshAction(what) {
     try { text = fs.readFileSync(cfg, "utf8"); } catch { /* none yet */ }
     const begin = `# >>> TT Station: ${alias}`, end = `# <<< TT Station: ${alias}`;
     text = text.replace(new RegExp(`\\n?${begin}[\\s\\S]*?${end}\\n?`), "\n");
-    text = `${text.trimEnd()}\n\n${begin}\nHost ${alias}\n  HostName ${box.host}\n  User ${box.sshUser}\n  IdentityFile ${SSH_KEY}\n  IdentitiesOnly yes\n  StrictHostKeyChecking accept-new\n${end}\n`;
+    // The same host-key options as the other ssh calls, as config lines ("-o Key=value" → "Key value").
+    const trust = hostKeyArgs(box).filter((a) => a !== "-o").map((a) => `  ${a.replace("=", " ")}\n`).join("");
+    text = `${text.trimEnd()}\n\n${begin}\nHost ${alias}\n  HostName ${box.host}\n  User ${box.sshUser}\n  IdentityFile ${SSH_KEY}\n  IdentitiesOnly yes\n${trust}${end}\n`;
     fs.writeFileSync(cfg, text.trimStart(), { mode: 0o600 });
-    await shell.openExternal(`vscode://vscode-remote/ssh-remote+${alias}/home/${box.sshUser}`);
+    // The account's home folder when the box said it (signing in with that account);
+    // else no folder, and VS Code asks which to open: homes aren't always /home/<user>.
+    const home = box.loginHome && box.loginUser === box.sshUser ? homeFolder(box.loginHome) : null;
+    await shell.openExternal(`vscode://vscode-remote/ssh-remote+${alias}${home || ""}`);
     return { alias };
   }
   // A .command file opens in Terminal and runs (no automation permission needed).
@@ -813,6 +889,7 @@ function createWindow() {
       contextIsolation: true,
       sandbox: true,
       spellcheck: true,
+      devTools: DEVTOOLS,
     },
   });
   win.once("ready-to-show", () => win.show());
@@ -922,7 +999,7 @@ function createTori(mode) {
     alwaysOnTop: true,
     skipTaskbar: true,
     show: false,
-    webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: true },
+    webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: true, devTools: DEVTOOLS },
   });
   overlay.setAlwaysOnTop(true, "floating");
   if (mode !== null) overlay.once("ready-to-show", () => { overlay.show(); overlay.focus(); });
@@ -951,6 +1028,27 @@ function savePrefs(next) {
   fs.writeFileSync(PREFS_FILE, JSON.stringify({ ...prefs(), ...next }, null, 2));
 }
 function toriBinding() { return prefs().toriShortcut || DEFAULT_BINDING; }
+
+/**
+ * Whether Tori's shortcut is on: off until the person turns it on in Settings
+ * (on a Mac, ⌃⌥Space is the input-source switch). Before this was a setting it
+ * was always on; people who had changed it, or installed it in GNOME, keep it.
+ */
+function shortcutOn() {
+  const p = prefs();
+  if (typeof p.toriShortcutOn === "boolean") return p.toriShortcutOn;
+  return !!p.toriShortcut || gnomeShortcutInstalled();
+}
+
+let registered = null; // the accelerator Electron holds for Tori, if any
+
+/** Electron's own global shortcut (a Mac, X11), matching the setting. */
+function registerShortcut() {
+  if (registered) { try { globalShortcut.unregister(registered); } catch { /* gone */ } registered = null; }
+  if (!shortcutOn()) return;
+  const acc = accelerator(toriBinding());
+  try { if (globalShortcut.register(acc, () => showTori("talk"))) registered = acc; } catch { /* bad binding, or Wayland */ }
+}
 
 /** "<Control><Alt>space" → "Control+Alt+Space" (Electron's spelling, for X11). */
 function accelerator(binding) {
@@ -1015,17 +1113,37 @@ function customList() {
   }
 }
 
-function shortcutsInstalled() {
-  // On a Mac the shortcut is Electron's own, always on.
-  if (IS_MAC) return true;
+function gnomeShortcutInstalled() {
+  if (IS_MAC) return false;
   const list = customList();
   return list ? SHORTCUTS.every((k) => list.includes(`${KEY_BASE}/${k.id}/`)) : false;
 }
 
+/** Whether the shortcut works now: on, and (in GNOME) in its keyboard settings. */
+function shortcutsInstalled() {
+  if (!shortcutOn()) return false;
+  // On a Mac, and on a Linux desktop without GNOME's settings, the shortcut is Electron's own.
+  if (IS_MAC || !customList()) return true;
+  return gnomeShortcutInstalled();
+}
+
+/** Turns Tori's shortcut on or off, and remembers it. */
 function setShortcuts(on) {
-  if (IS_MAC) return true;
+  savePrefs({ toriShortcutOn: on });
+  registerShortcut();
+  if (IS_MAC) return on;
+  if (!customList()) {
+    if (on && process.env.XDG_SESSION_TYPE === "wayland") throw new Error("This desktop doesn't use GNOME's keyboard shortcuts.");
+    return on;
+  }
+  gnomeShortcuts(on);
+  return on;
+}
+
+/** Our entries in GNOME's custom shortcuts (Wayland runs them for us). */
+function gnomeShortcuts(on) {
   const list = customList();
-  if (!list) throw new Error("This desktop doesn't use GNOME's keyboard shortcuts.");
+  if (!list) return;
   const ours = SHORTCUTS.map((k) => `${KEY_BASE}/${k.id}/`);
   const rest = list.filter((p) => !ours.includes(p) && !RETIRED.some((id) => p === `${KEY_BASE}/${id}/`));
   if (on) {
@@ -1064,7 +1182,7 @@ function openAppWindow(url, title) {
     // The system's light or dark, so the first frame doesn't flash the other one.
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#050f0e" : "#f8fcfb",
     autoHideMenuBar: true,
-    webPreferences: { contextIsolation: true, sandbox: true },
+    webPreferences: { contextIsolation: true, sandbox: true, devTools: DEVTOOLS },
   });
   // No bridge in here, but its pop-ups still go to the browser, not bare windows.
   w.webContents.setWindowOpenHandler(({ url: link }) => {
@@ -1106,7 +1224,7 @@ async function refreshTray() {
     click: () => call(auth.base, "POST", `/modes/${m.id}`, { token: auth.token, body: {} }),
   }));
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: "Ask Tori…", accelerator: accelerator(toriBinding()), click: () => showTori("talk") },
+    { label: "Ask Tori…", ...(shortcutOn() ? { accelerator: accelerator(toriBinding()) } : {}), click: () => showTori("talk") },
     { type: "separator" },
     { label: line, enabled: false },
     { label: "Open TT Station", click: show },
@@ -1193,7 +1311,8 @@ function setStartAtLogin(on) {
     fs.mkdirSync(path.dirname(AUTOSTART), { recursive: true });
     fs.writeFileSync(AUTOSTART, [
       "[Desktop Entry]", "Type=Application", "Name=TT Station", `Exec=${launchCommand()}`,
-      `Icon=${ICON}`, "X-GNOME-Autostart-enabled=true", "NoDisplay=true", "",
+      // Inside an app.asar (the .deb) the PNG isn't a real file: the installed icon by name.
+      `Icon=${ICON.includes(".asar") ? "tt-station" : ICON}`, "X-GNOME-Autostart-enabled=true", "NoDisplay=true", "",
     ].join("\n"));
   } else {
     fs.rmSync(AUTOSTART, { force: true });
@@ -1282,17 +1401,9 @@ handle("pair-account", async (_e, p, user, password) => {
   try {
     const target = { host: String(p.host), tls: Number(p.tls), fp: String(p.fp), name: String(p.name) };
     if (password && !user) throw new Error("Enter your username on the box.");
-    // Keys only and no username given: try this computer's own username, then
-    // a QuietBox's. Any box works; these are just the likely accounts.
-    const users = user ? [String(user)] : [...new Set([os.userInfo().username, "ttuser"])];
-    let id, last;
-    for (const u of users) {
-      try { id = await pairWithAccount(target, u, password ? String(password) : null); break; } catch (e) {
-        last = e;
-        if (e.kind !== "auth") throw e;
-      }
-    }
-    if (!id) throw last;
+    // Keys only and no username given: this computer's own username, once (every
+    // failed sign-in counts against this computer on a box running fail2ban).
+    const id = await pairWithAccount(target, user ? String(user) : os.userInfo().username, password ? String(password) : null);
     switchBox(id);
     return { ok: true, id };
   } catch (e) { return { ok: false, error: String(e.message || e), kind: e.kind || null }; }
@@ -1365,10 +1476,8 @@ handle("tori-shortcut", (_e, binding) => {
     if (!/^(<(Control|Alt|Shift|Super|Primary)>)*[A-Za-z0-9_]+$/.test(binding) || binding.length > 60) throw new Error("That isn't a shortcut.");
     if (!/<(Control|Alt|Super|Primary)>/.test(binding) && !/^F\d{1,2}$/.test(binding.replace(/<\w+>/g, "")))
       throw new Error("Use Ctrl, Alt or Super with it, so it doesn't get in the way of typing.");
-    const old = toriBinding();
+    // Picking a shortcut turns it on.
     savePrefs({ toriShortcut: binding });
-    try { globalShortcut.unregister(accelerator(old)); } catch { /* wasn't registered */ }
-    try { globalShortcut.register(accelerator(binding), () => showTori("talk")); } catch { /* Wayland */ }
     setShortcuts(true);
   }
   return { binding: toriBinding(), installed: shortcutsInstalled(), dropdown: false };
@@ -1378,7 +1487,9 @@ handle("tori-shortcut", (_e, binding) => {
 
 /** The Mac's menu bar: the usual menus, and a Box menu (Terminal, switching, pairing). */
 function buildMenu() {
-  if (!IS_MAC) return;
+  // Linux: no menu bar in a shipped build (Electron's default one has developer
+  // tools and links to electronjs.org); from a checkout, that default one.
+  if (!IS_MAC) { if (app.isPackaged) Menu.setApplicationMenu(null); return; }
   const list = boxList();
   const sshItem = (label, what, accelerator) => ({ label, accelerator, enabled: list.current !== "local" && list.boxes.length > 0, click: async () => {
     const r = await sshAction(what).then((x) => ({ ok: true, ...x }), (e) => ({ ok: false, error: e.message }));
@@ -1395,7 +1506,14 @@ function buildMenu() {
       { type: "separator" },
       { label: "Add Another Box…", click: showConnect },
     ] },
-    { role: "viewMenu" },
+    // A shipped build's View menu, without Toggle Developer Tools.
+    DEVTOOLS ? { role: "viewMenu" } : { label: "View", submenu: [
+      { role: "reload" },
+      { type: "separator" },
+      { role: "resetZoom" }, { role: "zoomIn" }, { role: "zoomOut" },
+      { type: "separator" },
+      { role: "togglefullscreen" },
+    ] },
     { role: "windowMenu" },
   ]));
 }
@@ -1413,11 +1531,13 @@ app.whenReady().then(() => {
   refreshTray();
   setInterval(refreshTray, 10000);
   setInterval(pollEvents, 5000);
-  // These work on X11; on Wayland, GNOME runs them for us (Settings → Shortcuts).
-  try { globalShortcut.register(accelerator(toriBinding()), () => showTori("talk")); } catch { /* bad binding */ }
+  // Settle the shortcut setting once (see shortcutOn), so it no longer depends on GNOME's.
+  if (typeof prefs().toriShortcutOn !== "boolean") { try { savePrefs({ toriShortcutOn: shortcutOn() }); } catch { /* read-only config */ } }
+  // Only once it's turned on. These work on a Mac and X11; on Wayland, GNOME runs them for us (Settings → Shortcuts).
+  registerShortcut();
   listenForSummons();
   // Keep the GNOME shortcut pointing at the fast path if it's installed.
-  try { if (shortcutsInstalled()) setShortcuts(true); } catch { /* not GNOME */ }
+  try { if (shortcutOn() && gnomeShortcutInstalled()) gnomeShortcuts(true); } catch { /* not GNOME */ }
   if (process.argv.includes("--tori") || process.argv.includes("--talk")) {
     win.webContents.once("did-finish-load", () => showTori("talk"));
     win.once("ready-to-show", () => win.hide());

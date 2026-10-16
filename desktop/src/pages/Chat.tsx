@@ -273,7 +273,7 @@ export function Chat() {
           </div>
           <div className="composer-hint">
             <span>Runs on your box: nothing leaves your network.</span>
-            <span><span className="kbd">Enter</span> send · <span className="kbd">Shift Enter</span> new line · <span className="kbd">{toriKeys}</span> Tori, from anywhere</span>
+            <span><span className="kbd">Enter</span> send · <span className="kbd">Shift Enter</span> new line{toriKeys && <> · <span className="kbd">{toriKeys}</span> Tori, from anywhere</>}</span>
           </div>
         </div>
         {voice && <VoiceMode canChat={canChat} onClose={() => { setVoice(false); history.replaceState(null, "", "/app/chat"); }} ask={(t, h) => void send(t, h)} />}

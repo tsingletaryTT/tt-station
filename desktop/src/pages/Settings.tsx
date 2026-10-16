@@ -166,7 +166,12 @@ function Shortcuts() {
       const binding = bindingOf(e);
       if (!binding) return; // still holding modifiers
       setCapturing(false);
-      try { setInfo(await window.ttDesktop!.toriShortcut(binding)); window.dispatchEvent(new CustomEvent("tt:shortcut", { detail: binding })); toastOk(`Tori now opens with ${readable(binding).join(" + ")}.`); }
+      try {
+        const next = await window.ttDesktop!.toriShortcut(binding);
+        setInfo(next);
+        window.dispatchEvent(new CustomEvent("tt:shortcut", { detail: next.installed ? binding : "" }));
+        toastOk(`Tori now opens with ${readable(binding).join(" + ")}.`);
+      }
       catch (err) { toastError(err); }
     };
     window.addEventListener("keydown", key, true);
@@ -179,7 +184,8 @@ function Shortcuts() {
         <div>
           <b>Tori's shortcut</b>
           <div className="muted" style={{ fontSize: 12 }}>
-            Opens Tori's window from anywhere.
+            {info.installed ? "Opens Tori's window from anywhere." : "Off. Turn it on to open Tori's window from anywhere."}
+            {window.ttDesktop?.platform === "darwin" && info.binding === "<Control><Alt>space" && " On a Mac, ⌃⌥Space also switches input sources: change it if you use that."}
           </div>
         </div>
         <div className="row" style={{ gap: 8 }}>
@@ -189,11 +195,18 @@ function Shortcuts() {
           <Button size="sm" variant="subtle" onClick={() => setCapturing((c) => !c)}>{capturing ? "Cancel" : "Change"}</Button>
         </div>
       </div>
-      {!info.installed && (
-        <Button size="sm" variant="ghost" onClick={async () => { try { await window.ttDesktop!.shortcuts(true); setInfo(await window.ttDesktop!.toriShortcut()); } catch (e) { toastError(e); } }}>
-          Turn the shortcut on
+      <div>
+        <Button size="sm" variant="ghost" onClick={async () => {
+          try {
+            await window.ttDesktop!.shortcuts(!info.installed);
+            const next = await window.ttDesktop!.toriShortcut();
+            setInfo(next);
+            window.dispatchEvent(new CustomEvent("tt:shortcut", { detail: next.installed ? next.binding : "" }));
+          } catch (e) { toastError(e); }
+        }}>
+          {info.installed ? "Turn the shortcut off" : "Turn the shortcut on"}
         </Button>
-      )}
+      </div>
     </div>
   );
 }
@@ -332,7 +345,7 @@ function Power() {
         <Button size="sm" variant="subtle" disabled={!owner || info.data?.can_suspend !== "yes"} onClick={() => ask("suspend", "Sleep", "The box sleeps; wake it from the phone app or its power button.")}>Sleep</Button>
         <Button size="sm" variant="subtle" disabled={!owner || info.data?.can_reboot !== "yes"} onClick={() => ask("reboot", "Restart", "The box restarts. TT Station reconnects in a minute or two.")}>Restart</Button>
         <Button size="sm" variant="ghost" disabled={!owner || info.data?.can_power_off !== "yes"} onClick={() => ask("shutdown", "Shut down", "The box turns off.")}>Shut down</Button>
-        <Button size="sm" variant="ghost" disabled={!owner} onClick={() => ask("reset_chips", "Reset the chips", "Stops serving and resets the four Blackhole chips.")}>Reset chips</Button>
+        <Button size="sm" variant="ghost" disabled={!owner} onClick={() => ask("reset_chips", "Reset the chips", "Stops serving and resets all the box's chips.")}>Reset chips</Button>
       </div>
       {!owner && <Typography variant="copy-xs" className="muted">{OWNER_ONLY}</Typography>}
       <Modal ref={modal.ref} title={`${action?.label ?? ""}?`} description={action?.detail ?? ""}
@@ -609,6 +622,8 @@ interface Updates {
   working: string | null;
   problem: string | null;
   base: string;
+  /** False when this build has no release signing key, so the box refuses installs (absent on older boxes: ready). */
+  signing_ready?: boolean;
 }
 
 /** TT Station's own updates: install the newest release, and undo it. */
@@ -618,7 +633,7 @@ function Updates() {
   const d = u.data;
   const [busy, setBusy] = useState(false);
   const install = async () => {
-    if (!d?.update) return;
+    if (!d?.update || d.signing_ready === false) return;
     if (!(await ask(`Update TT Station to ${d.update.version}?`, { body: "It downloads the release, then restarts the agent on it: the app reconnects in a few seconds, and a model that's serving keeps serving. If the new version doesn't start properly, the current one comes back on its own. You can undo it afterwards.", confirm: "Update" }))) return;
     setBusy(true);
     try { await post("/updates/install", {}); toastOk("Updating…"); void u.refresh(); } catch (e) { toastError(e); } finally { setBusy(false); }
@@ -644,6 +659,8 @@ function Updates() {
           Built from source ({src.repo.replace(/^\/home\/[^/]+/, "~")}{src.branch ? `, ${src.branch}` : ""}{src.changed_files ? `, ${src.changed_files} uncommitted changes` : ""}). Update it with git and a rebuild.
           {d.latest && <> The newest release is {d.latest.version}.</>}
         </span>
+      ) : d.signing_ready === false ? (
+        <span className="muted" style={{ fontSize: 13 }}>Updates aren't available for this build yet.</span>
       ) : d.update ? (
         <div className="stack" style={{ gap: 8 }}>
           <span><b>{d.update.version}</b> is out{d.update.published ? ` (${new Date(d.update.published).toLocaleDateString()})` : ""}.</span>
@@ -686,7 +703,7 @@ function IdleCard() {
       <div className="row-between" style={{ gap: 12 }}>
         <div className="stack" style={{ gap: 2 }}>
           <span>Stop the model after it's been idle</span>
-          <span className="muted" style={{ fontSize: 12 }}>Four chips serving draw about 200 W even when nobody asks anything. Anything that uses the model counts: the apps, Code, routines, other computers.</span>
+          <span className="muted" style={{ fontSize: 12 }}>A serving model keeps the chips drawing power even when nobody asks anything. Anything that uses the model counts: the apps, Code, routines, other computers.</span>
         </div>
         <Switch checked={s.enabled} aria-label="Stop the model when idle" onChange={(e) => save({ enabled: e.target.checked })} />
       </div>

@@ -1,8 +1,8 @@
 {
   "name": "tt-station",
   "productName": "TT Station",
-  "version": "0.1.0",
-  "description": "The QuietBox 2's own desktop app: run, watch and connect everything on the box.",
+  "version": "0.12.0",
+  "description": "TT Station's desktop app: run, watch and connect everything on your Tenstorrent box.",
   "private": true,
   "license": "Apache-2.0",
   "main": "electron/main.cjs",

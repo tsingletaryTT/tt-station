@@ -5,7 +5,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 const { execFileSync } = require("node:child_process");
-const { validHost, validUser, cleanName, sameOrigin, webAddress, shq } = require("../electron/validate.cjs");
+const { validHost, validUser, cleanName, sameOrigin, webAddress, shq, hostKey, knownHostsLines, homeFolder } = require("../electron/validate.cjs");
 
 test("device addresses: hostnames and IPs only", () => {
   for (const h of ["quietbox", "quietbox.local", "192.168.1.20", "fe80::1", "::1", "2001:db8::2", "my-box-2.lan"]) assert.ok(validHost(h), h);
@@ -37,4 +37,20 @@ test("shq quotes anything for bash", () => {
   for (const evil of [`"; touch /tmp/x; "`, "$(id)", "`id`", "it's", "a\\b", "TT Station → box\nrm -rf ~"]) {
     assert.equal(execFileSync("bash", ["-c", `printf %s ${shq(evil)}`], { encoding: "utf8" }), evil);
   }
+});
+
+test("SSH host keys: a known type and base64, nothing an ssh option could hide in", () => {
+  const ed = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+  assert.equal(hostKey(`${ed} root@box`), ed);
+  assert.equal(hostKey(`  ${ed}\n`), ed);
+  for (const k of ["", "ssh-dss AAAAB3NzaC1kc3MAAACBAP", "ssh-ed25519", "ssh-ed25519 AAAA\nevil", "ssh-ed25519 AAAA;rm -rf", "@revoked ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA", null, 7]) assert.equal(hostKey(k), null, JSON.stringify(k));
+  assert.deepEqual(knownHostsLines("Box.local", [ed, "junk"]), [`box.local ${ed}`]);
+  assert.deepEqual(knownHostsLines("10.0.0.2", [ed], 2222), [`[10.0.0.2]:2222 ${ed}`]);
+  assert.deepEqual(knownHostsLines("10.0.0.2", null), []);
+});
+
+test("home folders: absolute plain paths only", () => {
+  assert.equal(homeFolder("/home/ttuser"), "/home/ttuser");
+  assert.equal(homeFolder("/Users/jane/"), "/Users/jane");
+  for (const d of ["", "home/x", "/home/a b", "/home/../etc", "/home/x?y", "/home/x#y", "/", null]) assert.equal(homeFolder(d), null, JSON.stringify(d));
 });

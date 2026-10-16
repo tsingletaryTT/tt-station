@@ -96,7 +96,7 @@ describe("Model for Code", () => {
     const confirm = host.querySelector(".code-model-confirm")!;
     expect(confirm.textContent).toContain("Switch the box to gpt-oss-20b (4 chips · low latency)?");
     expect(confirm.textContent).toContain("gpt-oss-20b stops for everyone using the box");
-    expect(confirm.textContent).toContain("It uses all 4 of the box's chips.");
+    expect(confirm.textContent).toContain("It uses 4 chips on the box.");
     // Focus lands on the confirm; Escape backs out without starting anything.
     expect(document.activeElement?.textContent).toBe("Stop gpt-oss-20b and switch");
     await act(async () => { confirm.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });

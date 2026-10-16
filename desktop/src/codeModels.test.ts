@@ -45,8 +45,8 @@ describe("Code's model list", () => {
   });
 
   it("puts chips and reliability in words", () => {
-    expect(chipsLine(option({ key: "a", chips: 2 }))).toBe("It uses 2 of the box's 4 chips.");
-    expect(chipsLine(option({ key: "b", chips: 4 }))).toBe("It uses all 4 of the box's chips.");
+    expect(chipsLine(option({ key: "a", chips: 2 }))).toBe("It uses 2 chips on the box.");
+    expect(chipsLine(option({ key: "b", chips: 1 }))).toBe("It uses 1 chip on the box.");
     expect(chipsLine(option({ key: "c" }))).toBeNull();
     expect(reliabilityText({ window: 65536, valid: 99, trials: 100, at: 0, setup_unrecorded: false })).toBe("99% valid tool calls (99/100) · holds up to 64K");
   });

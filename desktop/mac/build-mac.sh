@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 #
 # build-mac.sh — TT Station for macOS (the desktop app, for a Mac that connects
-# to a QuietBox over the network). Builds on Linux or macOS.
+# to a Tenstorrent box over the network). Builds on Linux or macOS.
 #
 # The app is the same Electron shell the box runs; its screens come from the
 # box itself (/app), so only the shell is packaged: electron/, assets/ and
@@ -12,12 +12,16 @@
 #   desktop/mac/build-mac.sh            # Apple Silicon and Intel
 #   desktop/mac/build-mac.sh arm64      # one architecture
 #
-# Output: desktop/mac/dist/TT-Station-<version>-mac-<arch>.zip
+# Output: desktop/mac/dist/TT-Station-<version>-mac-<arch>.zip (the app, and
+# its licenses in Licenses/ beside it and in the app's Contents/Resources/Licenses)
+# Fuses: the app runs only its own app.asar (no ELECTRON_RUN_AS_NODE,
+# NODE_OPTIONS or --inspect), with its cookies encrypted; flipped before signing.
 # Signing: ad hoc (rcodesign on Linux, codesign on macOS) — not notarized, so
 # the first open needs right-click → Open (see README.md).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DESKTOP="$(dirname "$HERE")"
+REPO="$(dirname "$DESKTOP")"
 ARCHES=("${@:-arm64 x64}")
 read -r -a ARCHES <<< "${ARCHES[*]}"
 ELECTRON_VERSION="$(node -p "require('$DESKTOP/node_modules/electron/package.json').version")"
@@ -60,6 +64,24 @@ for arch in "${ARCHES[@]}"; do
     --extend-info="$HERE/Info.extra.plist" --asar --overwrite --out="$HERE/.build" --quiet
   APP="$HERE/.build/TT Station-darwin-$arch/TT Station.app"
 
+  echo "→ licenses"
+  # TT Station's license, notice and third-party list, and Electron's and Chromium's
+  # (the packager leaves those beside the app; else this checkout's Electron's).
+  LIC="$HERE/.build/Licenses-$arch"
+  rm -rf "$LIC" && mkdir -p "$LIC"
+  for f in LICENSE NOTICE THIRD_PARTY_LICENSES.md; do cp "$REPO/$f" "$LIC/$f"; done
+  ELECTRON_LIC="$(dirname "$APP")"
+  [ -f "$ELECTRON_LIC/LICENSES.chromium.html" ] || ELECTRON_LIC="$DESKTOP/node_modules/electron/dist"
+  cp "$ELECTRON_LIC/LICENSE" "$LIC/LICENSE.electron"
+  cp "$ELECTRON_LIC/LICENSES.chromium.html" "$LIC/LICENSES.chromium.html"
+  rm -rf "$APP/Contents/Resources/Licenses" && cp -R "$LIC" "$APP/Contents/Resources/Licenses"
+
+  echo "→ fuses"
+  # Before signing: flipping them changes the framework binary.
+  npx --yes @electron/fuses@1.8.0 write --app "$APP" \
+    RunAsNode=off EnableNodeCliInspectArguments=off EnableNodeOptionsEnvironmentVariable=off \
+    EnableCookieEncryption=on OnlyLoadAppFromAsar=on >/dev/null
+
   echo "→ signing (ad hoc)"
   if command -v codesign >/dev/null; then
     codesign --force --deep --sign - "$APP"
@@ -70,6 +92,7 @@ for arch in "${ARCHES[@]}"; do
   ZIP="$OUT/TT-Station-$VERSION-mac-$arch.zip"
   rm -f "$ZIP"
   # -y keeps the frameworks' symlinks as symlinks (the bundle breaks otherwise).
-  (cd "$(dirname "$APP")" && zip -qry "$ZIP" "TT Station.app")
+  rm -rf "$(dirname "$APP")/Licenses" && cp -R "$LIC" "$(dirname "$APP")/Licenses"
+  (cd "$(dirname "$APP")" && zip -qry "$ZIP" "TT Station.app" Licenses)
   echo "✓ $ZIP ($(du -h "$ZIP" | cut -f1))"
 done

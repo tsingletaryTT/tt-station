@@ -90,7 +90,7 @@
     <div class="card" id="login" hidden>
       <div class="eyebrow">Your account on <span id="login-name">it</span></div>
       <div class="stack-form">
-        <input id="user" placeholder="Username (ttuser on a QuietBox)" spellcheck="false" autocapitalize="off" autocomplete="username">
+        <input id="user" placeholder="Username on the box" spellcheck="false" autocapitalize="off" autocomplete="username">
         <input id="password" type="password" placeholder="Password" autocomplete="current-password">
       </div>
       <p class="hint">The password goes straight to the box over SSH, only to let this computer in. TT Station doesn't keep it. Boxes set up to accept SSH keys only need a pairing code instead.</p>
@@ -172,7 +172,7 @@
     // Someone who already SSHes in gets connected with no typing at all.
     $("trying").hidden = false; $("login").hidden = true;
     $("trying-text").textContent = `Trying your SSH keys for ${host}…`;
-    // No username yet: the box tries the likely ones (this computer's, then a QuietBox's).
+    // No username yet: one try with this computer's own username.
     const r = await tt.pairAccount(target, $("user").value.trim(), null);
     if (r.ok) return; // the window moves on to the box
     $("trying").hidden = true; $("login").hidden = false;

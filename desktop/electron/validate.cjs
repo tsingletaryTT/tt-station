@@ -39,7 +39,31 @@ function webAddress(url) {
   try { return ["http:", "https:"].includes(new URL(url).protocol); } catch { return false; }
 }
 
+const HOST_KEY_TYPES = new Set([
+  "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+  "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com",
+]);
+
+/** A box's SSH host public key ("ssh-ed25519 AAAA…", a comment dropped) as "<type> <base64>", else null. */
+function hostKey(key) {
+  if (typeof key !== "string" || key.length > 4096) return null;
+  const [type, blob] = key.trim().split(/\s+/);
+  if (!HOST_KEY_TYPES.has(type) || !/^[A-Za-z0-9+/]{16,}={0,3}$/.test(blob || "")) return null;
+  return `${type} ${blob}`;
+}
+
+/** known_hosts lines for `host`'s keys (ssh looks the name up lowercased; `[host]:port` off port 22). */
+function knownHostsLines(host, keys, port = 22) {
+  const name = Number(port) && Number(port) !== 22 ? `[${host.toLowerCase()}]:${Number(port)}` : host.toLowerCase();
+  return (keys || []).map(hostKey).filter(Boolean).map((k) => `${name} ${k}`);
+}
+
+/** A home folder the box reported, safe in a vscode:// link: an absolute path of plain characters. */
+function homeFolder(dir) {
+  return typeof dir === "string" && dir.length < 256 && /^\/[A-Za-z0-9._@+/-]*$/.test(dir) && !dir.split("/").includes("..") ? dir.replace(/\/+$/, "") || null : null;
+}
+
 /** One argument for bash, in single quotes. */
 const shq = (a) => `'${String(a).replace(/'/g, "'\\''")}'`;
 
-module.exports = { validHost, validUser, cleanName, sameOrigin, webAddress, shq };
+module.exports = { validHost, validUser, cleanName, sameOrigin, webAddress, shq, hostKey, knownHostsLines, homeFolder };

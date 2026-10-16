@@ -10,7 +10,18 @@
     <string>_tenstorrent._tcp</string>
   </array>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Tori listens when you talk to it, and meetings you record are transcribed on your Tenstorrent device.</string>
+  <string>TT Station records meetings and voice questions with your microphone and sends them to your box to transcribe.</string>
+  <!-- Electron's own Info.plist asks for these with generic wording ("This app needs
+       access to…"). TT Station uses none of them; these replace that wording, and
+       keep macOS from closing the app if a page ever asks. -->
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>TT Station doesn't record other apps' sound.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>TT Station doesn't use the camera.</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>TT Station doesn't use Bluetooth.</string>
+  <key>NSBluetoothPeripheralUsageDescription</key>
+  <string>TT Station doesn't use Bluetooth.</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
 </dict>
