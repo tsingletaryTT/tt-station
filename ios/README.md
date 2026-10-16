@@ -104,8 +104,6 @@ assistant is offline until the new model is ready; the status bar says so.
 | `Sources/LiveActivities.swift` | Lock Screen / Dynamic Island Live Activities for a model loading, an Orchard run and a transcription, updated while the app runs (no push) |
 | `Shared/BoxActivity.swift`, `ActivityExtension/` | The Live Activity's attributes (shared) and the widget extension that draws it |
 | `Resources/Fonts/` | Vesper's typefaces: Inter Tight (static cuts from the variable font) and IBM Plex Mono, OFL |
-| `Sources/ToplikeView.swift` | tt-toplike style: mode bar, terminal header, Tensix glyph starfield, warp field, readouts, sparklines, scanlines |
-| `Sources/ToplikeModes.swift` | tt-toplike's other views from the full telemetry frame: Insights (per-chip panels, DDR training, processes), Memory Castle, Memory Flow, Defrag, Arcade (with the `@` hero), Inference monitor (hungry snake / compile→load→ready / READY with tok/s) |
 | `Sources/ModelsView.swift` | **Models** tab: the box's tt catalog — download (with progress, cancel), start, recommended picks |
 | `Sources/BoxesView.swift` | First-run onboarding, and Settings → Boxes (`BoxesList`): paired boxes, nearby, how to pair (scan the box's QR) |
 | `Sources/PairSheet.swift` | Pairing help: where to find the box's pairing QR (QR links are handled in `AppModel.handle(url:)`, over pinned HTTPS) |
