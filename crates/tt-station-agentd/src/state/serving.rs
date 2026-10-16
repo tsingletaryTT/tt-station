@@ -429,6 +429,12 @@ impl AppState {
                 // (never worse than today's behavior).
                 .unwrap_or_else(|| stored.clone())
         };
+        // The probe took a while: a start or stop meanwhile (a fresh /run
+        // whose model isn't up yet) makes what it found about the old serve
+        // irrelevant. Heal, or cache, only if nothing changed.
+        if self.serve_key() != key {
+            return self.status();
+        }
         RECONCILED.put(&key, reconciled.clone());
         if matches!(reconciled, ServingStatus::Idle) {
             // Stale-positive: the serve is gone. Heal the stored state

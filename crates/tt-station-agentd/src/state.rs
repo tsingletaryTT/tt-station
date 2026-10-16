@@ -1430,6 +1430,69 @@ mod pair_init_tests {
 mod tests {
     use super::*;
 
+    /// A backend whose reconcile probe says Idle, but only once the test lets
+    /// it answer.
+    struct SlowProbe(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
+
+    impl crate::serving::ServingBackend for SlowProbe {
+        fn start_forcing(&self, _: &str, _: bool) -> anyhow::Result<Endpoint> {
+            Err(anyhow::anyhow!("not here"))
+        }
+        fn stop(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn status(&self) -> anyhow::Result<ServingStatus> {
+            Ok(ServingStatus::Idle)
+        }
+        fn reconciled_status(&self) -> anyhow::Result<ServingStatus> {
+            let _ = self.0.lock().unwrap().recv();
+            Ok(ServingStatus::Idle)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_start_during_the_reconcile_probe_isnt_healed_to_idle() {
+        let (go, wait) = std::sync::mpsc::channel();
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(SlowProbe(std::sync::Mutex::new(wait))),
+        );
+        let ep = |m: &str| Endpoint {
+            base_url: "http://127.0.0.1:8000/v1".into(),
+            model: m.into(),
+            requires_key: false,
+        };
+        state.set_serving(ep("old-model-reconcile-race"));
+        state.set_lifecycle(
+            Phase::Serving,
+            Some("old-model-reconcile-race".into()),
+            None,
+            None,
+        );
+        let probing = {
+            let s = state.clone();
+            tokio::spawn(async move { s.reconciled_status().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Meanwhile a new model is started.
+        state.set_serving(ep("new-model-reconcile-race"));
+        state.set_lifecycle(
+            Phase::Starting,
+            Some("new-model-reconcile-race".into()),
+            None,
+            None,
+        );
+        go.send(()).unwrap();
+        let got = probing.await.unwrap();
+        assert_eq!(
+            got,
+            ServingStatus::Serving("new-model-reconcile-race".into())
+        );
+        assert_eq!(state.lifecycle().phase, Phase::Starting);
+        assert!(state.endpoint().is_some(), "the new serve wasn't cleared");
+    }
+
     #[tokio::test]
     async fn cached_snapshot_dedupes_tt_smi_within_ttl() {
         // Stub `tt-smi`: a script that records one run (appends a byte to a
