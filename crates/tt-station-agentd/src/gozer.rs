@@ -31,12 +31,14 @@
 //! containers run as root, so their fds are invisible to gozer running as
 //! the box's normal user. A lease acquired without a supervising pid is
 //! *detached* and gozer reaps it ~900s after it stops seeing an fd -- for a
-//! root-owned container, that's immediately and forever. Any future caller
-//! that builds a `gozer acquire` invocation through this module's
-//! `CommandRunner` seam MUST pass `--owner-pid <std::process::id()>` (this
-//! agent's own pid), or the lease silently evaporates under a healthy
-//! session. `acquire` below is the one place that builds that call, and it
-//! always passes the flag.
+//! root-owned container, that's immediately and forever. So every acquire
+//! here passes an owner (`acquire_owned` is the one place that builds the
+//! call). It starts as this agent's pid -- the agent must take the lease
+//! before it knows which chips to launch on -- and is then HANDED TO THE
+//! WORKLOAD (`hand_off`, `lease_gated_unit`): gozer judges liveness by
+//! `/proc/<pid>` existing, which holds for a root-owned container process
+//! too. See the "Workload ownership" section below and
+//! `docs/reference/chip-leasing.md` §5.
 //!
 //! # Known limitations
 //!
@@ -45,28 +47,18 @@
 //! fixed by tightening the code below; each is a real boundary of what this
 //! version knows.
 //!
-//! 1. **`--device-id`'s namespace is UNVERIFIED for the runpy backend.**
-//!    run.py's `--device-id` takes a *logical* index list; gozer's
-//!    `dev_index` is `/dev/tenstorrent/<n>`. `tt-smi` treats those as
-//!    different namespaces, and no reading of either codebase settles which
-//!    one run.py means. If they differ, a leased serve pins the WRONG chips,
-//!    comes up healthy, and nothing detects it. See the long comment at the
-//!    `--device-id` construction in `serving/runpy.rs::start`.
-//!    **The docker backend's `--device /dev/tenstorrent/<n>` mapping is NOT
-//!    in doubt** -- gozer reads `dev_index` from the kernel's own
-//!    `/sys/bus/pci/devices/<bdf>/tenstorrent/tenstorrent!N`, confirmed on
-//!    hardware. Only the runpy half is open; do not conflate the two.
-//!    *Partly mitigated, and the mitigation is the experiment:* gozer's grant
-//!    carries `env: {"TT_VISIBLE_DEVICES": "<bdf>,<bdf>"}` -- BDFs, no
-//!    ambiguity -- and `RunPyBackend::start` now FORWARDS every entry of
-//!    `Grant::env` to the run.py child alongside `MODEL_SOURCE`. That makes
-//!    the leased serve carry one ambiguous pin plus one unambiguous one. It
-//!    does NOT settle the question: whether run.py propagates the variable
-//!    into the container it builds is still unverified, so if run.py both
-//!    drops the variable AND reads `--device-id` in the other namespace, the
-//!    hazard above is unchanged. Checking `docker inspect --format
-//!    '{{.Config.Env}}'` on a leased serve's container is what closes it, and
-//!    is far cheaper than the single-chip serve.
+//! 1. **`--device-id`'s namespace (runpy backend) -- VERIFIED from source.**
+//!    tt-inference-server's run.py turns `--device-id 2,3` into
+//!    `docker run --device /dev/tenstorrent/2:/dev/tenstorrent/2 --device
+//!    /dev/tenstorrent/3:...` and nothing else (`workflows/run_docker_server.py`),
+//!    and gozer's `dev_index` is the kernel's `/dev/tenstorrent/<n>` number
+//!    (`tenstorrent!N` in sysfs), so a leased serve's container gets exactly
+//!    the granted nodes. The grant's `TT_VISIBLE_DEVICES` (BDFs), which
+//!    `RunPyBackend::start` forwards to the run.py child, does NOT reach the
+//!    container -- run.py never passes its own environment through -- so it
+//!    only affects run.py's host-side `tt-smi -s` checks; whether those cope
+//!    with a narrowed device list on a half-box lease is the one thing left to
+//!    check on hardware (see `docs/reference/chip-leasing.md` §5).
 //! 2. **A lease REAPED rather than released never resets its chips**
 //!    (inherited from gozer: `--fresh` is the protected path). The next
 //!    plain `acquire` then gets un-reset silicon. So agentd prefers an
@@ -178,12 +170,10 @@ pub struct Grant {
     pub lease_id: String,
     /// PCI BDFs, gozer's own chip identifiers (e.g. `"0000:01:00.0"`).
     pub chips: Vec<String>,
-    /// UMD-style logical device indices. NOT necessarily the same namespace
-    /// as `/dev/tenstorrent/<n>` -- the design doc flags that mapping as an
-    /// open question yet to be verified against real hardware, so this
-    /// field is stored exactly as gozer reports it, uninterpreted. See the
-    /// design doc's "Which backend, and what a grant actually pins" section
-    /// for how a later task is expected to apply this per serving backend.
+    /// `/dev/tenstorrent/<n>` indices -- gozer reads them from the kernel's
+    /// `tenstorrent!N` sysfs link -- which is also what run.py's
+    /// `--device-id` and the docker backend's `--device` take (known
+    /// limitation 1).
     pub dev_indices: Vec<u32>,
     /// Serving-backend-facing unit labels (e.g. board names), when gozer's
     /// response includes them. Defaults to empty rather than failing to
@@ -198,14 +188,10 @@ pub struct Grant {
     /// `{"TT_VISIBLE_DEVICES": "<bdf>,<bdf>"}`. Defaults to empty for a gozer
     /// version whose payload omits it.
     ///
-    /// **Why this is worth carrying:** it names the granted chips as BDFs, so
-    /// unlike `dev_indices` there is no namespace question about it at all
-    /// (see known limitation 1 in this module's doc). `RunPyBackend` forwards
-    /// it to the `run.py` child alongside `MODEL_SOURCE`, which turns one
-    /// ambiguous pin into one ambiguous plus one unambiguous: if run.py
-    /// forwards the variable into the container it builds, the namespace
-    /// hazard closes without a single-chip serve on real hardware; if it does
-    /// not, nothing is worse than before.
+    /// `RunPyBackend` forwards it to the `run.py` child alongside
+    /// `MODEL_SOURCE`. run.py does not pass it on to the container (known
+    /// limitation 1): it only scopes run.py's own host-side `tt-smi` checks.
+    /// The container's pin is `--device-id`, from `dev_indices`.
     ///
     /// A `BTreeMap` rather than a `HashMap` so the forwarded order is
     /// deterministic, which keeps a test's view of the child environment
@@ -457,12 +443,42 @@ pub fn acquire(
     who: &str,
     reason: &str,
 ) -> Outcome {
-    let owner_pid = std::process::id().to_string();
-    let args = [
-        capability.path.as_str(),
-        "acquire",
-        "--chips",
+    acquire_owned(
+        runner,
+        capability,
         chips,
+        None,
+        std::process::id(),
+        who,
+        reason,
+    )
+}
+
+/// [`acquire`] with an explicit owner: the lease lives exactly as long as
+/// `owner_pid` does. This is how a lease is handed to the WORKLOAD rather
+/// than to this agent -- the serving container's main process
+/// ([`hand_off`]), or a holder unit's main process ([`open_gate`]) -- so an
+/// agent restart no longer orphans it. gozer refuses a pid that is not alive
+/// at acquire time, so a workload that died meanwhile gets no lease.
+///
+/// `exact` (a BDF) pins the grant to the one unit that chip belongs to --
+/// the re-take half of [`hand_off`], which must get back exactly the chips
+/// the workload is already driving.
+pub fn acquire_owned(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+    chips: &str,
+    exact: Option<&str>,
+    owner_pid: u32,
+    who: &str,
+    reason: &str,
+) -> Outcome {
+    let owner_pid = owner_pid.to_string();
+    let mut args = vec![capability.path.as_str(), "acquire", "--chips", chips];
+    if let Some(exact) = exact {
+        args.extend(["--exact", exact]);
+    }
+    args.extend([
         "--owner-pid",
         owner_pid.as_str(),
         "--who",
@@ -471,7 +487,7 @@ pub fn acquire(
         reason,
         "--no-queue",
         "--json",
-    ];
+    ]);
 
     match runner.run_capturing(&args) {
         Ok(captured) => Outcome::from_captured(&captured),
@@ -573,6 +589,11 @@ struct StatusChip {
     dev_index: Option<u32>,
     #[serde(default)]
     reason: Option<String>,
+    /// The lease's OWNER pid (`--owner-pid`, or the adopted holder's) -- what
+    /// gozer judges the lease's liveness by. The reconciler compares it with
+    /// the workload's own pid.
+    #[serde(default)]
+    pid: Option<i64>,
 }
 
 /// `gozer status --json`'s top-level payload. `grain` (`"board"` or
@@ -891,6 +912,27 @@ struct HistoryRecord {
     lease_id: Option<String>,
     #[serde(default)]
     who: Option<String>,
+    /// The granted BDFs (on `granted`/`adopted`), so a lease can be matched
+    /// to its chips in `gozer status` -- which reports owners per chip but no
+    /// lease id.
+    ///
+    /// Lenient: anything but a list of strings reads as "unknown" rather than
+    /// failing the whole history parse.
+    #[serde(default, deserialize_with = "lenient_bdfs")]
+    chips: Vec<String>,
+}
+
+fn lenient_bdfs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// `gozer history --json`'s top-level payload.
@@ -979,6 +1021,11 @@ pub fn startup_sweep(
         return report;
     };
     let mut live_who: Vec<String> = Vec::new();
+    // `who`s with at least one chip whose OWNER is still alive (any state but
+    // `STALE`). Leases are owned by their workload now (see [`hand_off`]), so
+    // a live owner IS a live workload -- even one that publishes no docker
+    // port (a holder unit's vLLM), which `ports_in_use` cannot see.
+    let mut owned_who: Vec<String> = Vec::new();
     for lease in &snapshot.leases {
         if lease.state == "FREE" {
             continue;
@@ -988,6 +1035,9 @@ pub fn startup_sweep(
         };
         if who.starts_with(WHO_PREFIX) && !live_who.iter().any(|seen| seen == who) {
             live_who.push(who.to_string());
+        }
+        if lease.state != "STALE" && !owned_who.iter().any(|seen| seen == who) {
+            owned_who.push(who.to_string());
         }
     }
     if live_who.is_empty() {
@@ -1013,10 +1063,15 @@ pub fn startup_sweep(
             report.unresolved.push(who);
             continue;
         };
-        if ports_in_use.contains(&port) {
+        let owner_alive = owned_who.contains(&who);
+        if ports_in_use.contains(&port) || owner_alive {
             eprintln!(
-                "tt-station-agentd: leaving lease '{lease_id}' ({who}) alone -- something is \
-                 still serving on port {port}"
+                "tt-station-agentd: leaving lease '{lease_id}' ({who}) alone -- {}",
+                if owner_alive {
+                    "its owning workload is still alive".to_string()
+                } else {
+                    format!("something is still serving on port {port}")
+                }
             );
             // A kept lease on OUR OWN serving port is one a previous process
             // of this agent took for a serve that is still up -- the
@@ -1072,6 +1127,23 @@ fn open_leases_from_history(
     runner: &dyn CommandRunner,
     capability: &Capability,
 ) -> Vec<(String, String)> {
+    open_lease_records(runner, capability)
+        .into_iter()
+        .map(|open| (open.lease_id, open.who))
+        .collect()
+}
+
+/// One still-open lease reconstructed from `gozer history --json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenLease {
+    lease_id: String,
+    who: String,
+    chips: Vec<String>,
+}
+
+/// Every lease `gozer history --json` shows as still open -- see
+/// [`open_leases_from_history`], which is this without the chips.
+fn open_lease_records(runner: &dyn CommandRunner, capability: &Capability) -> Vec<OpenLease> {
     let Ok(captured) = runner.run_capturing(&[
         capability.path.as_str(),
         "history",
@@ -1096,7 +1168,7 @@ fn open_leases_from_history(
         return Vec::new();
     };
 
-    let mut open: Vec<(String, String)> = Vec::new();
+    let mut open: Vec<OpenLease> = Vec::new();
     for record in report.history {
         let Some(lease_id) = record.lease_id else {
             continue;
@@ -1104,12 +1176,20 @@ fn open_leases_from_history(
         match record.event.as_deref() {
             Some("granted") | Some("adopted") => {
                 let who = record.who.unwrap_or_default();
-                match open.iter_mut().find(|(id, _)| *id == lease_id) {
-                    Some(existing) => existing.1 = who,
-                    None => open.push((lease_id, who)),
+                let chips = record.chips;
+                match open.iter_mut().find(|o| o.lease_id == lease_id) {
+                    Some(existing) => {
+                        existing.who = who;
+                        existing.chips = chips;
+                    }
+                    None => open.push(OpenLease {
+                        lease_id,
+                        who,
+                        chips,
+                    }),
                 }
             }
-            Some("released") | Some("reaped") => open.retain(|(id, _)| *id != lease_id),
+            Some("released") | Some("reaped") => open.retain(|o| o.lease_id != lease_id),
             // `queued`/`refused`/anything else leaves the lease as it was.
             _ => {}
         }
@@ -1493,4 +1573,865 @@ impl Drop for LeaseGuard<'_> {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Workload ownership: hand the lease to the process that uses the chips
+// ---------------------------------------------------------------------------
+//
+// A lease taken with `--owner-pid <this agent>` lives exactly as long as the
+// agent, not as long as the serve: every agent restart left it owned by a dead
+// pid, so the next `gozer acquire` anywhere on the box reaped it (unreset) and
+// handed a live container's chips to whoever asked -- and the startup adoption
+// could only ever remember the id, never fix the owner ("UNOWNED LEASE").
+//
+// So a lease is owned by its WORKLOAD:
+//
+// * a serving CONTAINER: the agent takes the lease (it must: the grant decides
+//   which chips the container gets), launches, and then [`hand_off`]s the lease
+//   to the container's main pid (`docker inspect --format {{.State.Pid}}`). gozer
+//   judges liveness by `/proc/<pid>` existing, which works for a root-owned
+//   container process even though its fds are unreadable.
+// * a HOLDER UNIT (a systemd user unit running the server on the host): the
+//   unit starts behind a gate ([`gated_argv`]), the lease is acquired with the
+//   unit's main pid, and only then does the gate `exec` the server -- same pid,
+//   so the lease is the server's from its first instruction ([`lease_gated_unit`]).
+// * `gozer run` workloads (bring-up, Orchard's own runs) already are: gozer run
+//   owns the lease and the workload is its child.
+//
+// [`reconcile_own_leases`] then keeps it that way: it releases a lease whose
+// owner and workload are both gone, and re-attaches one whose workload is alive
+// but whose owner died.
+
+/// argparse's exit status for an unknown sub-command -- how a gozer without
+/// `transfer` answers [`hand_off`]'s first attempt.
+const EXIT_USAGE: i32 = 2;
+
+/// The main pid of a running container, or `None` when docker cannot say
+/// (no such container, not running, docker unreadable).
+pub fn container_pid(runner: &dyn CommandRunner, container: &str) -> Option<u32> {
+    let out = runner
+        .run(&["docker", "inspect", "--format", "{{.State.Pid}}", container])
+        .ok()?;
+    out.trim().parse::<u32>().ok().filter(|pid| *pid > 0)
+}
+
+/// The container publishing `port`, if any. The outer `None` means docker
+/// could not be read -- which must never be mistaken for "nothing is serving"
+/// when the consequence is a chip reset.
+pub fn serving_container(runner: &dyn CommandRunner, port: u16) -> Option<Option<String>> {
+    let filter = format!("publish={port}");
+    let out = runner
+        .run(&["docker", "ps", "--filter", &filter, "-q"])
+        .ok()?;
+    Some(out.split_whitespace().next().map(str::to_string))
+}
+
+/// One `gozer status --json`, parsed; `None` on any failure.
+fn read_status(runner: &dyn CommandRunner, capability: &Capability) -> Option<StatusReport> {
+    let captured = runner
+        .run_capturing(&[capability.path.as_str(), "status", "--json"])
+        .ok()?;
+    if captured.code != 0 {
+        return None;
+    }
+    serde_json::from_str(&captured.stdout).ok()
+}
+
+/// How many tenants are waiting in gozer's queue, or `None` if unreadable.
+fn queue_len(runner: &dyn CommandRunner, capability: &Capability) -> Option<usize> {
+    #[derive(Deserialize)]
+    struct Queue {
+        #[serde(default)]
+        queue: Vec<serde_json::Value>,
+    }
+    let captured = runner
+        .run_capturing(&[capability.path.as_str(), "queue", "--json"])
+        .ok()?;
+    if captured.code != 0 {
+        return None;
+    }
+    serde_json::from_str::<Queue>(&captured.stdout)
+        .ok()
+        .map(|q| q.queue.len())
+}
+
+/// What [`hand_off`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Handoff {
+    /// The lease is now owned by the workload. `lease_id` is the id to track
+    /// from here on -- unchanged after a `transfer`, NEW after a re-take.
+    Moved { lease_id: String },
+    /// Nothing changed: the lease is still held, by its previous owner. Says
+    /// why; the reconciler tries again later.
+    Kept(String),
+    /// The old lease is gone and the chips could not be re-taken: the workload
+    /// is running UNLEASED. Says why. The caller must stop tracking the old id.
+    Lost(String),
+}
+
+/// Hand `lease_id` (granted `chips`) to the workload `pid`, so the lease lives
+/// exactly as long as the workload instead of as long as this agent.
+///
+/// 1. **`gozer transfer <id> --owner-pid <pid>`** -- the atomic operation this
+///    needs. gozer does not have it yet (see `docs/reference/chip-leasing.md`
+///    §5, "gozer follow-up"); an unknown sub-command exits 2 and this falls
+///    through. When gozer grows it, this path is used with no change here.
+/// 2. **Interim: release `--no-reset`, then re-acquire the SAME chips with
+///    `--owner-pid <pid>`.** `--no-reset` because the workload is driving
+///    them; `--force` only because a host workload's own open fd would
+///    otherwise refuse the release (a container's are invisible anyway) -- with
+///    `--no-reset` the release touches no hardware. Between the two calls the
+///    chips are briefly unlocked, so:
+///    * it is not attempted while anyone is QUEUED (a queued tenant is
+///      exactly who would win that window -- release opens a claim window
+///      for the queue head), and the lease is [`Handoff::Kept`] instead;
+///    * it re-takes exactly those chips (`--exact` for one unit, `all` for
+///      the whole box) and refuses any other shape ([`Handoff::Kept`]);
+///    * a grant that comes back different is released again (those chips
+///      are idle) and reported [`Handoff::Lost`].
+pub fn hand_off(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+    lease_id: &str,
+    chips: &[String],
+    who: &str,
+    reason: &str,
+    pid: u32,
+) -> Handoff {
+    let path = capability.path.as_str();
+    let pid_arg = pid.to_string();
+
+    // 1. The atomic path, when gozer has it.
+    let mut gone = false;
+    match runner.run_capturing(&[
+        path,
+        "transfer",
+        lease_id,
+        "--owner-pid",
+        &pid_arg,
+        "--json",
+    ]) {
+        Ok(c) if c.code == 0 => {
+            return Handoff::Moved {
+                lease_id: lease_id.to_string(),
+            }
+        }
+        Ok(c) if c.code == EXIT_NO_LEASE => gone = true,
+        Ok(c) if c.code == EXIT_USAGE => {}
+        Ok(c) => {
+            return Handoff::Kept(format!(
+                "gozer transfer exited {}: {}",
+                c.code,
+                c.stderr.trim()
+            ))
+        }
+        Err(err) => return Handoff::Kept(format!("could not run gozer transfer: {err:#}")),
+    }
+
+    // 2. Interim: release --no-reset, re-acquire the same chips for `pid`.
+    let Some(status) = read_status(runner, capability) else {
+        return Handoff::Kept("`gozer status` could not be read".into());
+    };
+    let mut wanted: Vec<&str> = chips.iter().map(String::as_str).collect();
+    wanted.sort_unstable();
+    let mut all: Vec<&str> = status
+        .chips
+        .iter()
+        .filter_map(|c| c.bdf.as_deref())
+        .collect();
+    all.sort_unstable();
+    let boards: std::collections::BTreeSet<&str> = status
+        .chips
+        .iter()
+        .filter(|c| c.bdf.as_deref().is_some_and(|b| wanted.contains(&b)))
+        .filter_map(|c| c.board.as_deref())
+        .collect();
+    let chip_grain = status.grain.as_deref() == Some("chip");
+    let (spec, exact) = if wanted.is_empty() {
+        return Handoff::Kept(format!("lease '{lease_id}' names no chips"));
+    } else if wanted == all {
+        ("all", None)
+    } else if (chip_grain && wanted.len() == 1) || (!chip_grain && boards.len() == 1) {
+        ("1", Some(wanted[0]))
+    } else {
+        return Handoff::Kept(format!(
+            "lease '{lease_id}' spans several units but not the whole box, which cannot be \
+             re-taken exactly"
+        ));
+    };
+    if !gone {
+        match queue_len(runner, capability) {
+            Some(0) => {}
+            Some(n) => {
+                return Handoff::Kept(format!(
+                    "{n} tenant(s) are queued for chips; re-taking the lease now could hand \
+                     them this workload's chips"
+                ))
+            }
+            None => return Handoff::Kept("`gozer queue` could not be read".into()),
+        }
+        let released =
+            runner.run_capturing(&[path, "release", lease_id, "--no-reset", "--force", "--json"]);
+        match released {
+            Ok(c) if c.code == 0 || c.code == EXIT_NO_LEASE => {}
+            Ok(c) => {
+                return Handoff::Kept(format!(
+                    "gozer release --no-reset exited {}: {}",
+                    c.code,
+                    c.stdout.trim()
+                ))
+            }
+            Err(err) => return Handoff::Kept(format!("could not run gozer release: {err:#}")),
+        }
+    }
+    match acquire_owned(runner, capability, spec, exact, pid, who, reason) {
+        Outcome::Granted(grant) => {
+            let mut got: Vec<&str> = grant.chips.iter().map(String::as_str).collect();
+            got.sort_unstable();
+            if got == wanted {
+                return Handoff::Moved {
+                    lease_id: grant.lease_id,
+                };
+            }
+            // Not the chips the workload is on: give them straight back.
+            // Nothing runs there, so the reset the release does is harmless.
+            let _ = release(runner, capability, &grant.lease_id);
+            Handoff::Lost(format!(
+                "re-acquire granted [{}] instead of [{}]",
+                got.join(","),
+                wanted.join(",")
+            ))
+        }
+        Outcome::Unavailable { holder, .. } => Handoff::Lost(format!(
+            "the chips were taken in between ({})",
+            holder.unwrap_or_else(|| "holder unknown".into())
+        )),
+        Outcome::Failed(message) => Handoff::Lost(message),
+    }
+}
+
+/// One of this agent's own leases (`tt-station:<own port>:`), as the
+/// reconciler sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnLease {
+    pub lease_id: String,
+    pub who: String,
+    pub chips: Vec<String>,
+    /// The pid gozer judges the lease by, when it reports one.
+    pub owner_pid: Option<u32>,
+    /// Whether gozer considers that owner alive (any state but `STALE`).
+    pub owner_alive: bool,
+}
+
+/// What the reconciler decided for one lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconcileAction {
+    /// No live owner and no workload: give it back (which resets its chips --
+    /// better than gozer's reap, which does not).
+    Release { lease_id: String, why: String },
+    /// The workload `to_pid` is alive but does not own the lease: hand it over.
+    Rebind {
+        lease_id: String,
+        who: String,
+        chips: Vec<String>,
+        to_pid: u32,
+        why: String,
+    },
+}
+
+/// Decide what to do about this agent's own leases, given the serving
+/// workload's pid (the container publishing the serving port), if any.
+///
+/// * owner dead, workload alive -> **Rebind** to the workload ("workload alive
+///   but lease owner dead": an agent restart before the hand-off, or a lease
+///   from before this change).
+/// * owner dead, no workload -> **Release** ("lease with no live owner").
+/// * owner is this agent, workload alive -> **Rebind** (a hand-off that was
+///   deferred, e.g. while a tenant was queued).
+/// * any other live owner -> nothing: it is a workload (a holder unit, a
+///   container the lease was already handed to).
+///
+/// Pure, so the whole table is tested without a gozer or a docker.
+pub fn plan_reconcile(
+    leases: &[OwnLease],
+    workload_pid: Option<u32>,
+    agent_pid: u32,
+) -> Vec<ReconcileAction> {
+    let mut actions = Vec::new();
+    for lease in leases {
+        let owner = lease
+            .owner_pid
+            .map_or("no pid".to_string(), |p| format!("pid {p}"));
+        match (lease.owner_alive, workload_pid) {
+            (false, Some(pid)) => actions.push(ReconcileAction::Rebind {
+                lease_id: lease.lease_id.clone(),
+                who: lease.who.clone(),
+                chips: lease.chips.clone(),
+                to_pid: pid,
+                why: format!("its owner ({owner}) is dead but its workload (pid {pid}) is alive"),
+            }),
+            (false, None) => actions.push(ReconcileAction::Release {
+                lease_id: lease.lease_id.clone(),
+                why: format!("its owner ({owner}) is dead and nothing is serving"),
+            }),
+            (true, Some(pid))
+                if lease.owner_pid == Some(agent_pid) && lease.owner_pid != Some(pid) =>
+            {
+                actions.push(ReconcileAction::Rebind {
+                    lease_id: lease.lease_id.clone(),
+                    who: lease.who.clone(),
+                    chips: lease.chips.clone(),
+                    to_pid: pid,
+                    why: format!(
+                        "it is still owned by this agent, not by its workload (pid {pid})"
+                    ),
+                })
+            }
+            (true, _) => {}
+        }
+    }
+    actions
+}
+
+/// What one [`reconcile_own_leases`] pass changed. The caller updates whatever
+/// tracks these ids (the serving backend's slot, the community and holder
+/// lease files) from `released` and `rebound`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconcileReport {
+    /// Lease ids given back.
+    pub released: Vec<String>,
+    /// `(old id, new id)` -- the same id after a `transfer`.
+    pub rebound: Vec<(String, String)>,
+    /// Lease ids whose hand-off released them and could not re-take the chips.
+    pub lost: Vec<String>,
+    /// `who`s gozer shows as ours that history could not put an id to.
+    pub unresolved: Vec<String>,
+}
+
+/// Bring this agent's own leases in line with what is running: see
+/// [`plan_reconcile`] for the rules. `None` -- and NOTHING done -- when docker
+/// or gozer could not be read, since "I could not tell" must never act like
+/// "nothing is there" when the action is a chip reset.
+pub fn reconcile_own_leases(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+    own_service_port: u16,
+    agent_pid: u32,
+) -> Option<ReconcileReport> {
+    let workload_pid = match serving_container(runner, own_service_port)? {
+        // A container that publishes the port but whose pid cannot be read is
+        // NOT "no workload".
+        Some(id) => Some(container_pid(runner, &id)?),
+        None => None,
+    };
+    let status = read_status(runner, capability)?;
+    let prefix = format!("{WHO_PREFIX}{own_service_port}:");
+    let ours: Vec<&StatusChip> = status
+        .chips
+        .iter()
+        .filter(|c| c.state.as_deref() != Some("FREE"))
+        .filter(|c| c.who.as_deref().is_some_and(|w| w.starts_with(&prefix)))
+        .collect();
+    let mut report = ReconcileReport::default();
+    if ours.is_empty() {
+        return Some(report);
+    }
+
+    let mut leases: Vec<OwnLease> = Vec::new();
+    let mut matched: Vec<&str> = Vec::new();
+    for open in open_lease_records(runner, capability) {
+        // Its chips as gozer sees them now, held under the same `who`.
+        let mine: Vec<&&StatusChip> = ours
+            .iter()
+            .filter(|c| c.who.as_deref() == Some(open.who.as_str()))
+            .filter(|c| {
+                open.chips.is_empty() || c.bdf.as_ref().is_some_and(|b| open.chips.contains(b))
+            })
+            .collect();
+        if mine.is_empty() {
+            continue;
+        }
+        for c in &mine {
+            matched.extend(c.bdf.as_deref());
+        }
+        leases.push(OwnLease {
+            lease_id: open.lease_id,
+            who: open.who,
+            chips: mine.iter().filter_map(|c| c.bdf.clone()).collect(),
+            owner_pid: mine
+                .iter()
+                .find_map(|c| c.pid)
+                .and_then(|p| u32::try_from(p).ok()),
+            owner_alive: mine.iter().any(|c| c.state.as_deref() != Some("STALE")),
+        });
+    }
+    for chip in &ours {
+        if !chip.bdf.as_deref().is_some_and(|b| matched.contains(&b)) {
+            let who = chip.who.clone().unwrap_or_default();
+            if !report.unresolved.contains(&who) {
+                eprintln!(
+                    "tt-station-agentd: lease reconcile: '{who}' holds chips with no lease id in \
+                     `gozer history`; leaving it alone"
+                );
+                report.unresolved.push(who);
+            }
+        }
+    }
+
+    for action in plan_reconcile(&leases, workload_pid, agent_pid) {
+        match action {
+            ReconcileAction::Release { lease_id, why } => {
+                eprintln!("tt-station-agentd: lease reconcile: releasing '{lease_id}' -- {why}");
+                match release(runner, capability, &lease_id) {
+                    Ok(()) => report.released.push(lease_id),
+                    Err(err) => eprintln!(
+                        "tt-station-agentd: lease reconcile: could not release '{lease_id}': \
+                         {err:#}"
+                    ),
+                }
+            }
+            ReconcileAction::Rebind {
+                lease_id,
+                who,
+                chips,
+                to_pid,
+                why,
+            } => {
+                let reason = format!("workload pid {to_pid} (re-attached by tt-station-agentd)");
+                match hand_off(runner, capability, &lease_id, &chips, &who, &reason, to_pid) {
+                    Handoff::Moved { lease_id: new } => {
+                        eprintln!(
+                            "tt-station-agentd: lease reconcile: '{lease_id}' -> '{new}' now \
+                             owned by workload pid {to_pid} -- {why}"
+                        );
+                        report.rebound.push((lease_id, new));
+                    }
+                    Handoff::Kept(reason) => eprintln!(
+                        "tt-station-agentd: lease reconcile: '{lease_id}' left as is ({why}): \
+                         {reason}; will retry"
+                    ),
+                    Handoff::Lost(reason) => {
+                        eprintln!(
+                            "tt-station-agentd: WARNING: lease reconcile: '{lease_id}' could not \
+                             be re-attached to workload pid {to_pid}: {reason}. That workload is \
+                             now serving WITHOUT a lease."
+                        );
+                        report.lost.push(lease_id);
+                    }
+                }
+            }
+        }
+    }
+    Some(report)
+}
+
+// ---------------------------------------------------------------------------
+// Holder units: lease the unit's own main process
+// ---------------------------------------------------------------------------
+
+/// The gate a holder unit starts behind: wait (up to two minutes) for one line
+/// on the FIFO `$0`; `go` execs the real command in place -- same pid, so the
+/// lease taken on that pid meanwhile is the server's -- anything else (or
+/// nothing, if the agent died) exits 75 without having touched a chip.
+pub const GATE_SCRIPT: &str =
+    r#"go=$(timeout 120 head -n 1 -- "$0"); [ "$go" = go ] || exit 75; exec "$@""#;
+
+/// `argv` behind the gate on `fifo`: `sh -c GATE_SCRIPT <fifo> argv...`.
+pub fn gated_argv(fifo: &std::path::Path, argv: &[String]) -> Vec<String> {
+    let mut gated = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        GATE_SCRIPT.to_string(),
+        fifo.display().to_string(),
+    ];
+    gated.extend(argv.iter().cloned());
+    gated
+}
+
+/// Make a fresh owner-only FIFO at `path` for [`gated_argv`].
+pub fn make_gate(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let _ = std::fs::remove_file(path);
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    // SAFETY: `c` is a valid NUL-terminated path for the duration of the call.
+    if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Open the gate (`go`) or tell it to give up. Waits up to 10 s for the gate's
+/// reader to appear (a non-blocking open fails until then).
+pub fn signal_gate(path: &std::path::Path, go: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+        {
+            Ok(mut f) => {
+                f.write_all(if go { b"go\n" } else { b"no\n" })?;
+                let _ = std::fs::remove_file(path);
+                return Ok(());
+            }
+            Err(e)
+                if std::time::Instant::now() < deadline
+                    && e.raw_os_error() == Some(libc::ENXIO) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// A systemd user unit's main pid, waiting briefly for it to be assigned.
+pub fn unit_main_pid(unit: &str) -> Option<u32> {
+    for _ in 0..50 {
+        let pid = std::process::Command::new("systemctl")
+            .args(["--user", "show", "-p", "MainPID", "--value", unit])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+            })
+            .filter(|p| *p > 0);
+        if pid.is_some() {
+            return pid;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    None
+}
+
+/// Lease the chips for a holder unit started with [`gated_argv`] on `fifo`,
+/// OWNED BY THE UNIT'S MAIN PROCESS (`pid`, see [`unit_main_pid`]), then open
+/// the gate. On any failure the gate is told to give up -- the unit exits
+/// without opening a chip -- and the reason is returned.
+///
+/// The lease lives exactly as long as the server: the agent restarting changes
+/// nothing, and the server exiting (crash or `systemctl stop`) makes it
+/// reapable at once. Callers still RELEASE it explicitly after stopping the
+/// unit, because a release resets the chips and a reap does not.
+pub fn lease_gated_unit(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+    fifo: &std::path::Path,
+    pid: Option<u32>,
+    who: &str,
+    reason: &str,
+) -> std::result::Result<Grant, String> {
+    let refuse = |why: String| {
+        let _ = signal_gate(fifo, false);
+        Err(why)
+    };
+    let Some(pid) = pid else {
+        return refuse("the serving unit's main pid could not be read".into());
+    };
+    match acquire_owned(
+        runner,
+        capability,
+        DEFAULT_LEASE_CHIPS,
+        None,
+        pid,
+        who,
+        reason,
+    ) {
+        Outcome::Granted(grant) => {
+            if let Err(e) = signal_gate(fifo, true) {
+                // The server never started: give the chips straight back.
+                let _ = release(runner, capability, &grant.lease_id);
+                return Err(format!("couldn't start the serving unit: {e}"));
+            }
+            Ok(grant)
+        }
+        Outcome::Unavailable { holder, .. } => refuse(format!(
+            "the chips are leased to someone else{}",
+            holder.map(|h| format!(" ({h})")).unwrap_or_default()
+        )),
+        Outcome::Failed(message) => refuse(format!("gozer acquire failed: {message}")),
+    }
+}
+
+/// A JSON list of lease ids kept in a file -- how leases on holder units are
+/// remembered across agent restarts (`<config>/holder-leases.json`).
+pub struct LeaseFile(pub std::path::PathBuf);
+
+impl LeaseFile {
+    pub fn ids(&self) -> Vec<String> {
+        std::fs::read(&self.0)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    fn write(&self, ids: &[String]) {
+        if ids.is_empty() {
+            let _ = std::fs::remove_file(&self.0);
+            return;
+        }
+        if let Some(dir) = self.0.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&self.0, serde_json::to_vec(ids).unwrap_or_default());
+    }
+
+    pub fn add(&self, id: &str) {
+        let mut ids = self.ids();
+        if !ids.iter().any(|i| i == id) {
+            ids.push(id.to_string());
+        }
+        self.write(&ids);
+    }
+
+    /// Every id, and the file emptied.
+    pub fn take(&self) -> Vec<String> {
+        let ids = self.ids();
+        self.write(&[]);
+        ids
+    }
+
+    /// Replace `old` with `new` (or drop it); `false` when `old` isn't here.
+    pub fn swap(&self, old: &str, new: Option<&str>) -> bool {
+        let mut ids = self.ids();
+        let Some(i) = ids.iter().position(|id| id == old) else {
+            return false;
+        };
+        match new {
+            Some(new) => ids[i] = new.to_string(),
+            None => {
+                ids.remove(i);
+            }
+        }
+        self.write(&ids);
+        true
+    }
+}
+
+/// Where holder-unit leases are remembered, under the agent's config dir.
+pub fn holder_lease_file(config_dir: &std::path::Path) -> LeaseFile {
+    LeaseFile(config_dir.join("holder-leases.json"))
+}
+
+/// [`hand_off`] to a serving CONTAINER: `container` if the caller knows it,
+/// else whatever publishes `port`. [`Handoff::Kept`] when its pid cannot be
+/// read -- the lease simply stays with this agent, and the reconciler retries.
+#[allow(clippy::too_many_arguments)]
+pub fn hand_off_to_container(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+    lease_id: &str,
+    chips: &[String],
+    who: &str,
+    reason: &str,
+    container: Option<&str>,
+    port: u16,
+) -> Handoff {
+    let container = match container {
+        Some(c) => Some(c.to_string()),
+        None => serving_container(runner, port).flatten(),
+    };
+    let Some(pid) = container.as_deref().and_then(|c| container_pid(runner, c)) else {
+        return Handoff::Kept("the serving container's pid could not be read".into());
+    };
+    hand_off(runner, capability, lease_id, chips, who, reason, pid)
+}
+
+/// Apply a [`Handoff`] to a backend's lease slot (compare-and-swap through
+/// `swap`), logging what happened. `swap(old, new)` must only replace `old`.
+pub fn record_handoff(
+    outcome: &Handoff,
+    lease_id: &str,
+    model: &str,
+    swap: impl FnOnce(&str, Option<&str>) -> bool,
+) {
+    match outcome {
+        Handoff::Moved { lease_id: new } => {
+            if new != lease_id && !swap(lease_id, Some(new)) {
+                eprintln!(
+                    "tt-station-agentd: lease '{new}' (was '{lease_id}') changed hands while it \
+                     was being handed to '{model}'s container; check `gozer status`"
+                );
+            }
+            eprintln!(
+                "tt-station-agentd: lease '{new}' for '{model}' is now owned by its serving \
+                 container -- it survives agent restarts and ends with the container"
+            );
+        }
+        Handoff::Kept(why) => eprintln!(
+            "tt-station-agentd: lease '{lease_id}' for '{model}' stays owned by this agent for \
+             now ({why}); the lease reconciler will hand it over"
+        ),
+        Handoff::Lost(why) => {
+            swap(lease_id, None);
+            eprintln!(
+                "tt-station-agentd: WARNING: handing lease '{lease_id}' to '{model}'s container \
+                 failed after the old lease was let go ({why}). '{model}' is serving WITHOUT a \
+                 lease; `gozer status` shows its chips as free."
+            );
+        }
+    }
+}
+
+/// How often [`reconcile_forever`] checks this agent's leases against what is
+/// running. A dead workload's lease is released (and its chips reset) within
+/// this long -- gozer's own reap, which does not reset, is the fallback.
+pub const RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Point every lease tracker at the reconciler's changes: the serving
+/// backend's slot, the community package's lease file, and the holder-unit
+/// lease file. Each is compare-and-swap, so only the one that tracked `old`
+/// changes.
+pub fn apply_reconcile(state: &crate::routes::AppState, report: &ReconcileReport) {
+    let backend = state.backend();
+    let holder = holder_lease_file(&state.config_dir());
+    let swap = |old: &str, new: Option<&str>| {
+        let _ = backend.swap_held_lease(old, new)
+            || crate::community::swap_lease(state, old, new)
+            || holder.swap(old, new);
+    };
+    for id in report.released.iter().chain(&report.lost) {
+        swap(id, None);
+    }
+    for (old, new) in &report.rebound {
+        swap(old, Some(new));
+    }
+}
+
+/// The lease reconciler: once at startup (right after the sweep and
+/// adoption), then every [`RECONCILE_INTERVAL`], run
+/// [`reconcile_own_leases`] -- never while a start or stop is in flight, which
+/// own their lease until they finish. A no-op without gozer.
+pub async fn reconcile_forever(state: crate::routes::AppState) {
+    let Some(capability) = state.gozer().cloned() else {
+        return;
+    };
+    let port = state.serving_port();
+    loop {
+        let phase = state.lifecycle().phase;
+        if !matches!(
+            phase,
+            crate::routes::Phase::Starting | crate::routes::Phase::Stopping
+        ) {
+            let cap = capability.clone();
+            let report = tokio::task::spawn_blocking(move || {
+                reconcile_own_leases(
+                    &crate::serving::docker::RealCommandRunner,
+                    &cap,
+                    port,
+                    std::process::id(),
+                )
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(report) = report {
+                apply_reconcile(&state, &report);
+            }
+        }
+        tokio::time::sleep(RECONCILE_INTERVAL).await;
+    }
+}
+
+/// For a holder unit about to be started: the gate FIFO to start it behind
+/// ([`gated_argv`]), freshly made under the agent's config dir -- or `None`
+/// when gozer is absent (the unit starts ungated, unleased, exactly as
+/// before) or the FIFO cannot be made (logged; same fallback).
+pub fn unit_gate(state: &crate::routes::AppState, name: &str) -> Option<std::path::PathBuf> {
+    // Only the box's own agent runs real units (a test's state never does).
+    if !state.manages_units() {
+        return None;
+    }
+    state.gozer()?;
+    let fifo = state.config_dir().join(format!("{name}.gate"));
+    match make_gate(&fifo) {
+        Ok(()) => Some(fifo),
+        Err(e) => {
+            eprintln!(
+                "tt-station-agentd: couldn't make the lease gate {}: {e}; starting the unit \
+                 without a lease",
+                fifo.display()
+            );
+            None
+        }
+    }
+}
+
+/// After `systemd-run` started `unit` behind `fifo`: lease the chips to the
+/// unit's main process and let it run. The lease id is returned for the caller
+/// to remember (and release after stopping the unit). On failure the gate
+/// makes the unit exit before it touches a chip, the unit is stopped to be
+/// sure, and the reason is returned.
+pub async fn lease_started_unit(
+    state: &crate::routes::AppState,
+    unit: &str,
+    fifo: std::path::PathBuf,
+    model: &str,
+) -> std::result::Result<String, String> {
+    let Some(capability) = state.gozer().cloned() else {
+        return Err("gozer is not available".into());
+    };
+    let who = format!("{WHO_PREFIX}{}:{model}", state.serving_port());
+    let reason = format!("serving {model} in {unit} via tt-station-agentd");
+    let u = unit.to_string();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let pid = unit_main_pid(&u);
+        lease_gated_unit(
+            &crate::serving::docker::RealCommandRunner,
+            &capability,
+            &fifo,
+            pid,
+            &who,
+            &reason,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    match outcome {
+        Ok(grant) => {
+            eprintln!(
+                "tt-station-agentd: leased {} chip(s) as lease {} to {unit}'s main process",
+                grant.chips.len(),
+                grant.lease_id
+            );
+            Ok(grant.lease_id)
+        }
+        Err(why) => {
+            let _ = tokio::process::Command::new("systemctl")
+                .args(["--user", "stop", unit])
+                .stdin(std::process::Stdio::null())
+                .status()
+                .await;
+            Err(why)
+        }
+    }
+}
+
+/// Release `ids` after the unit that owned them has been stopped -- the
+/// release resets the chips, which gozer's reap of a dead owner would not.
+pub async fn release_after_stop(state: &crate::routes::AppState, ids: Vec<String>) {
+    let Some(capability) = state.gozer().cloned() else {
+        return;
+    };
+    if ids.is_empty() {
+        return;
+    }
+    let _ = tokio::task::spawn_blocking(move || {
+        for id in ids {
+            if let Err(err) = release(&crate::serving::docker::RealCommandRunner, &capability, &id)
+            {
+                eprintln!("tt-station-agentd: couldn't release lease '{id}': {err:#}");
+            }
+        }
+    })
+    .await;
 }

@@ -1336,6 +1336,7 @@ impl ServingBackend for DockerBackend {
         // and hand the id to the backend, where `stop` releases it. This is
         // the ONLY exit from `start` that doesn't release.
         if let Some(guard) = lease {
+            let chips = guard.grant().chips.clone();
             let mut held = self.lease.lock().expect("lease mutex poisoned");
             if let Some(previous) = held.as_ref() {
                 // Nothing should be able to reach here holding a lease --
@@ -1352,10 +1353,29 @@ impl ServingBackend for DockerBackend {
             // what makes `stop` safe: it must stop the container this lease
             // belongs to before releasing, and it cannot trust its own
             // `model` argument to name it. See `HeldLease`.
+            let lease_id = guard.into_lease_id();
             *held = Some(HeldLease {
-                lease_id: guard.into_lease_id(),
+                lease_id: lease_id.clone(),
                 container_name: container_name.clone(),
             });
+            drop(held);
+            // Hand the lease to the container -- see `gozer::hand_off`.
+            if let Some(capability) = &self.gozer {
+                let port = self.config.host_port;
+                let outcome = crate::gozer::hand_off_to_container(
+                    self.runner.as_ref(),
+                    capability,
+                    &lease_id,
+                    &chips,
+                    &format!("tt-station:{port}:{model}"),
+                    &format!("serving {model} via tt-station-agentd"),
+                    Some(&container_name),
+                    port,
+                );
+                crate::gozer::record_handoff(&outcome, &lease_id, model, |old, new| {
+                    self.swap_held_lease(old, new)
+                });
+            }
         }
 
         Ok(Endpoint {
@@ -1475,6 +1495,30 @@ impl ServingBackend for DockerBackend {
     /// the container name to stop before releasing is reconstructed.
     fn adopt_lease(&self, lease_id: &str, who: &str) -> bool {
         self.adopt_lease_id(lease_id, who)
+    }
+
+    fn held_lease(&self) -> Option<String> {
+        self.lease
+            .lock()
+            .expect("lease mutex poisoned")
+            .as_ref()
+            .map(|held| held.lease_id.clone())
+    }
+
+    fn swap_held_lease(&self, old: &str, new: Option<&str>) -> bool {
+        let mut slot = self.lease.lock().expect("lease mutex poisoned");
+        if slot.as_ref().map(|held| held.lease_id.as_str()) != Some(old) {
+            return false;
+        }
+        match new {
+            Some(new) => {
+                if let Some(held) = slot.as_mut() {
+                    held.lease_id = new.to_string();
+                }
+            }
+            None => *slot = None,
+        }
+        true
     }
 
     fn status(&self) -> Result<ServingStatus> {

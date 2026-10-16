@@ -93,13 +93,12 @@ pub trait ServingBackend: Send + Sync {
     /// `DockerBackend` needs to reconstruct the container name it must stop
     /// before releasing.
     ///
-    /// **The adopted lease's `--owner-pid` names the DEAD process**, so gozer
-    /// may reap it out from under this one at any point. That is precisely
-    /// the argument for adopting it and releasing it explicitly on the next
-    /// `/stop` rather than waiting for the reap: an explicit release resets
-    /// the chips, a reap does not. It is not an argument for re-acquiring --
-    /// that would mean releasing (and resetting) a board a live container is
-    /// still driving.
+    /// A lease handed to its container (`gozer::hand_off`) is still owned
+    /// by that container after the restart. One from before the hand-off
+    /// existed names the DEAD agent as owner; the lease reconciler
+    /// (`gozer::reconcile_own_leases`) re-attaches it to the container --
+    /// WITHOUT a reset -- and updates this backend's id through
+    /// `swap_held_lease`.
     ///
     /// Default: adopt nothing and say so, correct for a backend that does not
     /// lease (`DstackBackend`). A caller that gets `false` for a lease on its
@@ -107,6 +106,22 @@ pub trait ServingBackend: Send + Sync {
     /// is an operator-visible problem and the log line is what explains it.
     fn adopt_lease(&self, lease_id: &str, who: &str) -> bool {
         let _ = (lease_id, who);
+        false
+    }
+
+    /// The gozer lease id this backend currently tracks for a running serve.
+    /// Default `None`: a backend that does not lease.
+    fn held_lease(&self) -> Option<String> {
+        None
+    }
+
+    /// Compare-and-swap the tracked lease: if it is `old`, replace it with
+    /// `new` (a re-attached lease's new id) or forget it (`None`, released or
+    /// lost). Returns whether `old` was the tracked lease. Used by the lease
+    /// reconciler (`gozer::reconcile_own_leases`), which changes lease ids
+    /// out from under the backend.
+    fn swap_held_lease(&self, old: &str, new: Option<&str>) -> bool {
+        let _ = (old, new);
         false
     }
 

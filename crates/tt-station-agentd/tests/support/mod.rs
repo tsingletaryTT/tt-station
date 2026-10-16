@@ -233,6 +233,18 @@ impl FakeRunner {
             .push((matcher.to_string(), output.to_string()));
     }
 
+    /// Like `set_run_output`, but REPLACES an existing canned answer for the
+    /// same `matcher` (first-match canning can't otherwise change one) --
+    /// e.g. a container that was publishing the port and is now gone.
+    #[allow(dead_code)]
+    pub fn replace_run_output(&self, matcher: &str, output: &str) {
+        let mut outputs = self.run_outputs.lock().expect("run_outputs mutex poisoned");
+        match outputs.iter_mut().find(|(m, _)| m == matcher) {
+            Some(entry) => entry.1 = output.to_string(),
+            None => outputs.push((matcher.to_string(), output.to_string())),
+        }
+    }
+
     /// Make any future `run` call whose space-joined argv contains `matcher`
     /// return `Err` with `message` instead of succeeding -- e.g.
     /// `fail_run("tt-smi -r", "board reset timed out")` to exercise a
@@ -353,7 +365,22 @@ struct GozerBoxState {
     next_lease: u32,
     /// `(event, lease_id, who)` in order, as `gozer history --json` replays.
     history: Vec<(String, String, String)>,
+    /// lease id -> its `--owner-pid` (absent: no pid reported).
+    owners: std::collections::HashMap<String, u32>,
+    /// Pids this box considers DEAD: a lease owned by one reports `STALE`.
+    dead: std::collections::HashSet<u32>,
+    /// Whether `gozer transfer` exists (it does not in gozer 0.3.x).
+    transfer: bool,
+    /// How many tenants `gozer queue --json` reports waiting.
+    queued: usize,
+    /// `(lease_id, reset)` for every successful `release`, in order.
+    releases: Vec<(String, bool)>,
 }
+
+/// The owner pid `preexisting_lease` gives a lease: a previous agentd process
+/// that is gone.
+#[allow(dead_code)]
+pub const DEAD_AGENT_PID: u32 = 999_999;
 
 #[allow(dead_code)]
 impl FakeGozerBox {
@@ -378,6 +405,11 @@ impl FakeGozerBox {
                 boards,
                 next_lease: 0,
                 history: Vec::new(),
+                owners: Default::default(),
+                dead: [DEAD_AGENT_PID].into_iter().collect(),
+                transfer: false,
+                queued: 0,
+                releases: Vec::new(),
             })),
         }
     }
@@ -412,13 +444,60 @@ impl FakeGozerBox {
     /// Returns the lease id.
     pub fn preexisting_lease(&self, who: &str) -> String {
         let mut state = self.state.lock().expect("gozer box mutex poisoned");
-        Self::grant_locked(&mut state, who).expect("a free board to pre-hold")
+        let id = Self::grant_locked(&mut state, who, None).expect("a free board to pre-hold");
+        state.owners.insert(id.clone(), DEAD_AGENT_PID);
+        id
     }
 
-    /// Grant the first free board to `who`, recording the history event.
-    /// `None` when every board is taken.
-    fn grant_locked(state: &mut GozerBoxState, who: &str) -> Option<String> {
-        let index = state.boards.iter().position(|b| b.holder.is_none())?;
+    /// The pid a lease is owned by, if it is held.
+    pub fn owner_of(&self, lease_id: &str) -> Option<u32> {
+        let state = self.state.lock().expect("gozer box mutex poisoned");
+        state.owners.get(lease_id).copied()
+    }
+
+    /// From now on, `pid` is dead: leases it owns report `STALE`.
+    pub fn kill(&self, pid: u32) {
+        self.state
+            .lock()
+            .expect("gozer box mutex poisoned")
+            .dead
+            .insert(pid);
+    }
+
+    /// Give this gozer the `transfer` verb (the proposed follow-up).
+    pub fn with_transfer(self) -> Self {
+        self.state
+            .lock()
+            .expect("gozer box mutex poisoned")
+            .transfer = true;
+        self
+    }
+
+    /// Report `n` tenants waiting in gozer's queue.
+    pub fn set_queued(&self, n: usize) {
+        self.state.lock().expect("gozer box mutex poisoned").queued = n;
+    }
+
+    /// `(lease_id, reset)` for every successful release so far.
+    pub fn releases(&self) -> Vec<(String, bool)> {
+        self.state
+            .lock()
+            .expect("gozer box mutex poisoned")
+            .releases
+            .clone()
+    }
+
+    /// Grant the first free board to `who` (or the board holding `exact`, if
+    /// it is free), recording the history event. `None` when none fits.
+    fn grant_locked(state: &mut GozerBoxState, who: &str, exact: Option<&str>) -> Option<String> {
+        let index = match exact {
+            Some(bdf) => state
+                .boards
+                .iter()
+                .position(|b| b.chips.iter().any(|c| c == bdf))
+                .filter(|&i| state.boards[i].holder.is_none())?,
+            None => state.boards.iter().position(|b| b.holder.is_none())?,
+        };
         state.next_lease += 1;
         let lease_id = format!("lease-{}", state.next_lease);
         state.boards[index].holder = Some((lease_id.clone(), who.to_string()));
@@ -446,8 +525,21 @@ impl FakeGozerBox {
             Some("--version") => ok("gozer 0.1.0".to_string()),
             Some("acquire") => {
                 let who = flag("--who").unwrap_or_default();
-                match Self::grant_locked(&mut state, &who) {
+                let exact = flag("--exact");
+                let owner = flag("--owner-pid").and_then(|p| p.parse::<u32>().ok());
+                // Like the real gozer: a dead owner is refused outright.
+                if owner.is_some_and(|p| state.dead.contains(&p)) {
+                    return CapturedOutput {
+                        code: 2,
+                        stdout: String::new(),
+                        stderr: "gozer: --owner-pid is not alive".to_string(),
+                    };
+                }
+                match Self::grant_locked(&mut state, &who, exact.as_deref()) {
                     Some(lease_id) => {
+                        if let Some(owner) = owner {
+                            state.owners.insert(lease_id.clone(), owner);
+                        }
                         let board = state
                             .boards
                             .iter()
@@ -484,6 +576,9 @@ impl FakeGozerBox {
                         state
                             .history
                             .push(("released".to_string(), lease_id.to_string(), who));
+                        state.owners.remove(lease_id);
+                        let reset = !args.contains(&"--no-reset");
+                        state.releases.push((lease_id.to_string(), reset));
                         ok(r#"{"released":true,"message":"released"}"#.to_string())
                     }
                     // Exit 13: "no such lease" -- release's idempotent case.
@@ -494,20 +589,54 @@ impl FakeGozerBox {
                     },
                 }
             }
+            Some("transfer") if state.transfer => {
+                let lease_id = args.get(2).copied().unwrap_or_default().to_string();
+                let owner = flag("--owner-pid").and_then(|p| p.parse::<u32>().ok());
+                let held = state
+                    .boards
+                    .iter()
+                    .any(|b| b.holder.as_ref().is_some_and(|(id, _)| *id == lease_id));
+                match (held, owner) {
+                    (true, Some(owner)) => {
+                        state.owners.insert(lease_id, owner);
+                        ok(r#"{"transferred":true}"#.to_string())
+                    }
+                    _ => CapturedOutput {
+                        code: 13,
+                        stdout: r#"{"transferred":false}"#.to_string(),
+                        stderr: String::new(),
+                    },
+                }
+            }
+            Some("queue") => ok(serde_json::json!({
+                "queue": (0..state.queued)
+                    .map(|i| serde_json::json!({"ticket": format!("t{i}"), "who": "claude:waiting"}))
+                    .collect::<Vec<_>>()
+            })
+            .to_string()),
             Some("status") => {
+                let owners = state.owners.clone();
+                let dead = state.dead.clone();
                 let chips: Vec<serde_json::Value> = state
                     .boards
                     .iter()
                     .flat_map(|board| {
+                        let owners = owners.clone();
+                        let dead = dead.clone();
                         board
                             .chips
                             .iter()
                             .zip(&board.dev_indices)
                             .map(move |(bdf, index)| match &board.holder {
-                                Some((_, who)) => serde_json::json!({
-                                    "dev_index": index, "bdf": bdf, "board": board.serial,
-                                    "state": "CLAIMED", "who": who, "reason": "serving",
-                                }),
+                                Some((id, who)) => {
+                                    let pid = owners.get(id).copied();
+                                    let alive = pid.is_none_or(|p| !dead.contains(&p));
+                                    serde_json::json!({
+                                        "dev_index": index, "bdf": bdf, "board": board.serial,
+                                        "state": if alive { "CLAIMED" } else { "STALE" },
+                                        "who": who, "reason": "serving", "pid": pid,
+                                    })
+                                }
                                 None => serde_json::json!({
                                     "dev_index": index, "bdf": bdf, "board": board.serial,
                                     "state": "FREE",
@@ -522,7 +651,15 @@ impl FakeGozerBox {
                     .history
                     .iter()
                     .map(|(event, lease_id, who)| {
-                        serde_json::json!({"event": event, "lease_id": lease_id, "who": who})
+                        // `granted` carries its chips, like the real log.
+                        let chips: Vec<String> = state
+                            .boards
+                            .iter()
+                            .filter(|b| b.holder.as_ref().is_some_and(|(id, _)| id == lease_id))
+                            .flat_map(|b| b.chips.clone())
+                            .collect();
+                        serde_json::json!({"event": event, "lease_id": lease_id, "who": who,
+                                           "chips": chips})
                     })
                     .collect();
                 ok(serde_json::json!({"history": records}).to_string())

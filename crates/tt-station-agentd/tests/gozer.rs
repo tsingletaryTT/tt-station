@@ -423,13 +423,14 @@ fn snapshot_leases_returns_none_on_malformed_json() {
 // ---------------------------------------------------------------------
 
 /// `gozer status --json` with one board held by a tt-station lease for
-/// service port 8080, and one board free.
+/// service port 8080, and one board free. The lease is `STALE`: its owner
+/// (a previous agentd process) is dead -- what a restarted agent finds.
 const STATUS_JSON_TT_STATION_HELD: &str = r#"{"grain":"board","chips":[
     {"dev_index":0,"bdf":"0000:01:00.0","board":"0100014311601055","card":"p300",
-     "state":"CLAIMED","who":"tt-station:8080:meta-llama/Llama-3.3-70B-Instruct",
+     "state":"STALE","who":"tt-station:8080:meta-llama/Llama-3.3-70B-Instruct",
      "pid":4242,"reason":"serving via tt-station-agentd","pids_holding":[],"overstayed":false},
     {"dev_index":1,"bdf":"0000:02:00.0","board":"0100014311601055","card":"p300",
-     "state":"CLAIMED","who":"tt-station:8080:meta-llama/Llama-3.3-70B-Instruct",
+     "state":"STALE","who":"tt-station:8080:meta-llama/Llama-3.3-70B-Instruct",
      "pid":4242,"reason":"serving via tt-station-agentd","pids_holding":[],"overstayed":false},
     {"dev_index":2,"bdf":"0000:03:00.0","board":"0100014311601048","card":"p300",
      "state":"FREE","who":null,"pid":null,"reason":null,"pids_holding":[],"overstayed":false}],
@@ -1000,4 +1001,32 @@ fn startup_sweep_tolerates_duplicate_reaped_records() {
         runner.commands()
     );
     assert!(report.released.is_empty());
+}
+
+/// A tt-station lease whose OWNER IS ALIVE is a live workload's (a holder
+/// unit's vLLM, which publishes no docker port), so the sweep keeps it even
+/// though `docker ps` shows nothing on its port -- and offers it for
+/// adoption, since it is on our own port.
+#[test]
+fn startup_sweep_keeps_a_lease_whose_owner_is_alive_even_with_no_container() {
+    // Same lease, but `CLAIMED`: gozer sees its owning pid alive.
+    let runner = FakeRunner::new(0);
+    runner.set_run_output("docker ps", "");
+    runner.set_run_capturing(
+        "gozer status",
+        0,
+        &STATUS_JSON_TT_STATION_HELD.replace("STALE", "CLAIMED"),
+        "",
+    );
+    runner.set_run_capturing("gozer history", 0, HISTORY_JSON_OPEN_TT_STATION_LEASE, "");
+
+    let report = gozer::startup_sweep(&runner, &sweep_capability(), SWEEP_SERVING_PORT);
+
+    assert!(
+        released_lease_ids(&runner).is_empty(),
+        "a lease with a live owner must not be released: {:?}",
+        runner.commands()
+    );
+    assert_eq!(report.kept, vec!["ab12ef".to_string()]);
+    assert_eq!(report.adoptable.len(), 1, "{report:?}");
 }
