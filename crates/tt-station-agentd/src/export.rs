@@ -38,7 +38,10 @@
 //! and routines merge by id into what the box already has; everything else is
 //! written file by file (atomically), replacing a file at the same path.
 //! Jobs, reports and runs that weren't finished aren't imported, so an import
-//! never starts work.
+//! never starts work. A run's or an evaluation's `id` must be its file's name.
+//! Code sessions are exported (as a record) but never imported: a
+//! `session.json` names the folder the session works in and what it may do
+//! without asking, which an archive mustn't be able to set.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
@@ -877,8 +880,13 @@ fn finished(path: &str, kind: Kind, bytes: &[u8], id_dir: Option<&str>) -> Resul
             FINISHED_RESEARCH.contains(&v["state"].as_str().unwrap_or(""))
                 && v["id"].as_str() == id_dir
         }
-        Kind::RoutineRuns => !v["finished"].is_null(),
-        Kind::Evals if !path.starts_with("evals/raw/") => v["status"] != "running",
+        // A run's and an evaluation's id names its file, and the agent later
+        // deletes `<dir>/<id>.json` by that id: it must be a plain id and the
+        // file's own name, or an import could aim a delete anywhere.
+        Kind::RoutineRuns => !v["finished"].is_null() && id_is_stem(path, &v),
+        Kind::Evals if !path.starts_with("evals/raw/") => {
+            v["status"] != "running" && id_is_stem(path, &v)
+        }
         _ => true,
     };
     if ok {
@@ -886,6 +894,17 @@ fn finished(path: &str, kind: Kind, bytes: &[u8], id_dir: Option<&str>) -> Resul
     } else {
         Err(format!("{path}: not finished work, so not imported"))
     }
+}
+
+/// `v["id"]` is a [`safe_id`] and `path`'s file name is `<id>.json`.
+fn id_is_stem(path: &str, v: &Value) -> bool {
+    let stem = path
+        .rsplit('/')
+        .next()
+        .and_then(|f| f.strip_suffix(".json"));
+    v["id"]
+        .as_str()
+        .is_some_and(|id| safe_id(id) && Some(id) == stem)
 }
 
 fn open_archive(
@@ -971,6 +990,17 @@ pub fn inspect(archive: &Path, config: &Path, current: &Current) -> Result<Plan,
             );
             continue;
         };
+        if kind == Kind::Code {
+            // A Code session's record carries its folder and what it may do
+            // unasked; taken from an archive as-is it would hand those to
+            // whoever made the archive. It's in an export as a record, and
+            // isn't brought back.
+            push_capped(
+                &mut skipped,
+                format!("{path}: Code sessions aren't imported"),
+            );
+            continue;
+        }
         if size > kind.cap() {
             return Err(format!("{path} is too big ({size} bytes)"));
         }
@@ -1720,6 +1750,60 @@ mod tests {
         assert!(skipped.contains("not finished"), "{skipped}");
     }
 
+    #[test]
+    fn runs_and_evals_whose_id_isnt_their_file_name_and_code_sessions_are_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("box");
+        let reg = tar::EntryType::Regular;
+        let files: Vec<(&str, &[u8])> = vec![
+            // An id that walks out of runs/: pruning would delete it.
+            (
+                "routines/runs/1-evil.json",
+                br#"{"id":"../../memories","routine":"r","name":"n","trigger":"manual","started":1,"finished":2,"status":"done"}"#,
+            ),
+            // A plain id that isn't the file's name.
+            (
+                "routines/runs/2-a.json",
+                br#"{"id":"2-b","routine":"r","name":"n","trigger":"manual","started":1,"finished":2,"status":"done"}"#,
+            ),
+            (
+                "routines/runs/3-ok.json",
+                br#"{"id":"3-ok","routine":"r","name":"n","trigger":"manual","started":1,"finished":2,"status":"done"}"#,
+            ),
+            (
+                "evals/4-e.json",
+                br#"{"id":"../x","model":"m","started":1,"status":"done"}"#,
+            ),
+            (
+                "code/5-c/session.json",
+                br#"{"id":"other","folder":"/","sandbox":false,"policy":"always","always":["Bash"]}"#,
+            ),
+        ];
+        let listed: Vec<Value> = files
+            .iter()
+            .map(|(p, b)| json!({ "path": p, "sha256": sha256_of(*b).unwrap().0 }))
+            .collect();
+        let manifest =
+            serde_json::to_vec(&json!({ "format": FORMAT, "format_version": 1, "files": listed }))
+                .unwrap();
+        let mut entries: Vec<(&str, tar::EntryType, &[u8])> = vec![(MANIFEST, reg, &manifest)];
+        entries.extend(files.iter().map(|(p, b)| (*p, reg, *b)));
+        let out = tmp.path().join("a.tar.gz");
+        raw_archive(&out, &entries);
+        let plan = inspect(&out, &config, &Current::default()).unwrap();
+        let mut planned: Vec<&String> = plan.files.keys().collect();
+        planned.sort();
+        assert_eq!(planned, vec!["routines/runs/3-ok.json"]);
+        let skipped = plan.preview.skipped.join("\n");
+        assert!(skipped.contains("1-evil.json"), "{skipped}");
+        assert!(skipped.contains("2-a.json"), "{skipped}");
+        assert!(skipped.contains("4-e.json"), "{skipped}");
+        assert!(
+            skipped.contains("Code sessions aren't imported"),
+            "{skipped}"
+        );
+    }
+
     fn state_at(root: &Path) -> AppState {
         AppState::new(
             "t".into(),
@@ -1771,7 +1855,6 @@ mod tests {
             "jobs/aaaa1111/transcript.txt",
             "jobs/bbbb2222/input.m4a",
             "research/1-r/report.md",
-            "code/1-a/session.json",
             "creations/0123abcd.txt",
             "evals/1-e.json",
             "model-prefs.json",
@@ -1783,6 +1866,10 @@ mod tests {
             );
         }
         assert!(!b.join("jobs/aaaa1111/input.ogg").exists());
+        assert!(
+            !b.join("code/1-a/session.json").exists(),
+            "Code sessions aren't imported"
+        );
         // Merged by id: the box's own memory stays beside the imported one.
         let texts: Vec<String> = state
             .memories()

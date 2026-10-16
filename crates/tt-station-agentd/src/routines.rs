@@ -435,12 +435,16 @@ pub(crate) fn remove_mode_routine(state: &AppState, id: &str) -> bool {
     })
 }
 
-fn run_path(state: &AppState, id: &str) -> PathBuf {
-    dir(state).join("runs").join(format!("{id}.json"))
+/// `runs/<id>.json`, for a plain id only: run ids come back from disk (and
+/// from imports), and a path built from anything else could point anywhere.
+fn run_path(state: &AppState, id: &str) -> Option<PathBuf> {
+    crate::export::safe_id(id).then(|| dir(state).join("runs").join(format!("{id}.json")))
 }
 
 fn save_run(state: &AppState, run: &Run) {
-    crate::fsio::save_json(&run_path(state, &run.id), run, crate::fsio::PRIVATE);
+    if let Some(p) = run_path(state, &run.id) {
+        crate::fsio::save_json(&p, run, crate::fsio::PRIVATE);
+    }
     mine(state)
         .live
         .lock()
@@ -465,7 +469,7 @@ fn load_run(state: &AppState, id: &str) -> Option<Run> {
     if let Some(r) = mine(state).live.lock().expect("routines").get(id) {
         return Some(r.clone());
     }
-    crate::fsio::read_json_or_backup(&run_path(state, id))
+    crate::fsio::read_json_or_backup(&run_path(state, id)?)
 }
 
 /// All runs on disk, newest first.
@@ -476,7 +480,12 @@ fn all_runs(state: &AppState) -> Vec<Run> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
-        .filter_map(|p| crate::fsio::read_json_or_backup::<Run>(&p))
+        .filter_map(|p| {
+            let r = crate::fsio::read_json_or_backup::<Run>(&p)?;
+            // Only a run whose id names its own file: that's the file a
+            // prune or a delete removes.
+            (run_path(state, &r.id).as_deref() == Some(p.as_path())).then_some(r)
+        })
         .map(|r| {
             mine(state)
                 .live
@@ -494,7 +503,9 @@ fn all_runs(state: &AppState) -> Vec<Run> {
 /// Oldest runs beyond what's kept.
 fn prune_runs(state: &AppState) {
     for old in all_runs(state).iter().skip(KEEP_RUNS) {
-        let _ = std::fs::remove_file(run_path(state, &old.id));
+        if let Some(p) = run_path(state, &old.id) {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
 
@@ -1862,7 +1873,9 @@ pub(crate) async fn delete_routine(
         return Err(err(StatusCode::NOT_FOUND, "No such routine."));
     }
     for run in all_runs(&state).into_iter().filter(|r| r.routine == id) {
-        let _ = std::fs::remove_file(run_path(&state, &run.id));
+        if let Some(p) = run_path(&state, &run.id) {
+            let _ = std::fs::remove_file(p);
+        }
         mine(&state).live.lock().expect("routines").remove(&run.id);
     }
     Ok(Json(json!({ "deleted": true })))
@@ -2256,6 +2269,36 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn a_run_whose_id_isnt_its_file_name_is_ignored_and_never_deletes_elsewhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_config_dir(tmp.path().to_path_buf());
+        let runs = tmp.path().join("routines/runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        let victim = tmp.path().join("memories.json");
+        std::fs::write(&victim, b"[]").unwrap();
+        std::fs::write(
+            runs.join("0-evil.json"),
+            br#"{"id":"../../memories","routine":"r","name":"n","trigger":"manual","started":0,"finished":1,"status":"done"}"#,
+        )
+        .unwrap();
+        for n in 1..=(KEEP_RUNS as u64 + 1) {
+            let run: Run = serde_json::from_value(json!({ "id": format!("{n}-ok"), "routine": "r", "name": "n", "trigger": "manual", "started": n, "status": "done" })).unwrap();
+            save_run(&state, &run);
+        }
+        let all = all_runs(&state);
+        assert!(all.iter().all(|r| r.id.ends_with("-ok")));
+        prune_runs(&state);
+        assert!(victim.exists(), "a pruned run never deletes outside runs/");
+        assert!(!runs.join("1-ok.json").exists(), "the oldest real run went");
+        assert!(run_path(&state, "../x").is_none());
     }
 
     fn sched(

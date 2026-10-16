@@ -172,6 +172,9 @@ fn save(state: &AppState, e: &Eval) {
 
 /// Writes an evaluation where [`all`] finds it (`evals/<id>.json`).
 pub fn save_in(d: &std::path::Path, e: &Eval) {
+    if !valid_id(&e.id) {
+        return;
+    }
     crate::fsio::save_json(&d.join(format!("{}.json", e.id)), e, crate::fsio::PRIVATE);
 }
 
@@ -197,7 +200,9 @@ pub fn all(state: &AppState) -> Vec<Eval> {
 }
 
 /// Every evaluation saved in `d` (one `<id>.json` each), newest first. A file
-/// that won't parse is moved aside rather than dropped (`crate::fsio`).
+/// that won't parse is moved aside rather than dropped (`crate::fsio`). One
+/// whose id isn't its file's name (an import, a hand edit) is skipped: the id
+/// is what a later save or delete builds its path from.
 pub fn all_in(d: &std::path::Path) -> Vec<Eval> {
     let mut out: Vec<Eval> = std::fs::read_dir(d)
         .into_iter()
@@ -205,7 +210,11 @@ pub fn all_in(d: &std::path::Path) -> Vec<Eval> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
-        .filter_map(|p| crate::fsio::read_json_or_backup(&p))
+        .filter_map(|p| {
+            let e: Eval = crate::fsio::read_json_or_backup(&p)?;
+            let stem = p.file_stem().and_then(|s| s.to_str());
+            (valid_id(&e.id) && stem == Some(e.id.as_str())).then_some(e)
+        })
         .collect();
     out.sort_by_key(|e: &Eval| std::cmp::Reverse(e.started));
     out
@@ -1665,6 +1674,25 @@ mod tests {
         save_trials(&d, "1-abc", &[]);
         std::fs::write(d.join(".2-x.json.tmp-00ff"), b"{").unwrap();
         std::fs::write(d.join("3-bad.json"), b"{\"id\":").unwrap();
+        // Ids that aren't the file's name, or would walk out of evals/.
+        std::fs::write(
+            d.join("4-x.json"),
+            br#"{"id":"4-y","model":"m","started":9,"status":"done"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("5-x.json"),
+            br#"{"id":"../5-x","model":"m","started":9,"status":"done"}"#,
+        )
+        .unwrap();
+        save_in(
+            &d,
+            &Eval {
+                id: "../escape".into(),
+                ..Default::default()
+            },
+        );
+        assert!(!tmp.path().join("escape.json").exists());
         let all = all_in(&d);
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].id, "1-abc");
