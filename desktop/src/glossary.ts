@@ -25,7 +25,7 @@ export const TERMS = {
   checkUp: "Check-up",
   /** A one-click setup of the whole box (Chat, Images, Transcribe…). */
   mode: "mode",
-  /** Developer tools: Bring-up, Terminals, the silicon check and chip leases. */
+  /** Developer tools: Bring-up, the silicon check and chip leases. */
   developerTools: "Developer tools",
   /** A job the box does on its own, on a timetable or when run; switching modes at set times is one. Never "schedule" in copy. */
   routine: "routine",

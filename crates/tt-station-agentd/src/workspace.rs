@@ -30,9 +30,8 @@
 //! in a project (git hooks, a Makefile, npm scripts, `.claude` settings) runs
 //! as the box's account the next time something outside the sandbox works
 //! there. So the box remembers which folders members' sandboxed sessions used,
-//! who and when, and an owner starting Code outside the sandbox -- or a coding
-//! session or terminal (`crate::coding`) -- in one of them, inside one, or
-//! around one gets `409` with `needs_confirm: "shared_folder"` until they say
+//! who and when, and an owner starting Code outside the sandbox in one of them,
+//! inside one, or around one gets `409` with `needs_confirm: "shared_folder"` until they say
 //! `confirm_shared: true` ([`shared_check`]).
 //!
 //! A session's conversation is kept by Claude Code (`--resume`), so it

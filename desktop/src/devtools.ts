@@ -2,19 +2,18 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 // Developer tools: the places and cards for people who port models and work on
-// the chips themselves (Bring-up, Terminals, the silicon check, who holds the
-// chips). Off for a new install, so the app opens on what most people need;
+// the chips themselves (Bring-up, the silicon check, who holds the chips). Off for a new install, so the app opens on what most people need;
 // on by itself for someone who has used bring-up here before. Settings →
 // General → This app turns it either way, and the choice is remembered.
 
 import { useSyncExternalStore } from "react";
 
 export const DEV_KEY = "tt.devtools";
-/** Set by Bring-up and Terminals when they're used: a cheap sign someone is a developer. */
-const USED_HINTS = ["tt.bringup.way", "tt.terminals.agent"];
+/** Set by Bring-up when it's used: a cheap sign someone is a developer. */
+const USED_HINTS = ["tt.bringup.way"];
 
 /** Places and cards only shown with developer tools on. */
-export const DEV_ROUTES = ["bringup", "orchard", "terminals"] as const;
+export const DEV_ROUTES = ["bringup", "orchard"] as const;
 
 export type DevChoice = "on" | "off" | null;
 
@@ -26,7 +25,7 @@ export function storedChoice(storage: Pick<Storage, "getItem"> | null = safeStor
   } catch { return null; }
 }
 
-/** Whether this app has seen bring-up or Terminals used before (from its own remembered state). */
+/** Whether this app has seen bring-up used before (from its own remembered state). */
 export function usedBefore(storage: Pick<Storage, "getItem"> | null = safeStorage()): boolean {
   try { return USED_HINTS.some((k) => !!storage?.getItem(k)); } catch { return false; }
 }

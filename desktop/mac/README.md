@@ -47,8 +47,6 @@ from the same place.
   a key just for this (`~/.ssh/tt-station_ed25519`) and the device lets it
   in — no passwords.
 - **Device → Open Device in VS Code**: VS Code's Remote-SSH, on the device.
-- **Device → Command Line in TT Station**: a terminal inside the app
-  (Terminal sessions; pick *Terminal*).
 - Connect → SSH → **Copy the ssh command**, for any other SSH app.
 
 ## On your Mac, not on the device

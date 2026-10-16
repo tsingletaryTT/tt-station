@@ -281,7 +281,7 @@ IdP is up gets no grace.
   man's switch" that works with any IdP);
 - another owner can re-home it.
 
-The shared "Coding sessions" key (`coding.rs`) belongs to the box (`subject = box`), and an
+The shared "Code" key (`coding.rs`) belongs to the box (`subject = box`), and an
 app key never grants owner routes.
 
 **SSH keys from `/ssh/authorize`.** Their tag gains the subject: `ttstation:<label>:<sub>`.

@@ -311,7 +311,7 @@ mod tests {
 
     /// A user manager's cgroup tree and a /proc with sockets, as fixtures:
     /// a bring-up unit (pid 4242, holding socket 912345, with a child cgroup
-    /// holding 912346), a Code terminal in a nested slice (pid 6000, socket
+    /// holding 912346), a Code session in a nested slice (pid 6000, socket
     /// 600), and an ordinary terminal (pid 5151, socket 777).
     fn fixture() -> tempfile::TempDir {
         let t = tempfile::tempdir().unwrap();

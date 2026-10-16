@@ -30,7 +30,7 @@ import { ask, askText } from "../dialog";
 import { startConfirmingSharedFolder } from "../sharedFolder";
 import { reuse } from "../render";
 import { navigate } from "../App";
-import { FolderBrowser } from "./Terminals";
+import { FolderBrowser } from "../FolderBrowser";
 import { CodeModelButton, SpeedStrip } from "./CodeSpeed";
 import { useFullHeight } from "../layout";
 import { JumpToLatest, useStickToBottom } from "../stickToBottom";

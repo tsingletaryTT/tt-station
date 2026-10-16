@@ -218,7 +218,6 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/toplike", get(crate::toplike_term::get_toplike))
         .route("/toplike/term", get(crate::toplike_term::term_ws))
-        .route("/coding/term", get(crate::coding::term_ws))
         // Which model the box prefers to serve: the model-control setting applies.
         .route(
             "/preferences/models",
@@ -375,17 +374,6 @@ pub fn app(state: AppState) -> Router {
             get(crate::codespeed::get_speed),
         )
         .route("/code/models", get(crate::codemodels::get_models))
-        .route("/coding", get(crate::coding::get_coding))
-        .route("/coding/sessions", post(crate::coding::post_session))
-        .route(
-            "/coding/sessions/{id}",
-            axum::routing::delete(crate::coding::delete_session),
-        )
-        .route("/coding/sessions/{id}/stop", post(crate::coding::post_stop))
-        .route(
-            "/coding/sessions/{id}/changes",
-            get(crate::coding::get_changes),
-        )
         .route(
             "/coding/folders",
             get(crate::coding::get_folders).post(crate::coding::post_folder),

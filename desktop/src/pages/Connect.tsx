@@ -40,9 +40,6 @@ import { Card, copyText, Eyebrow, Page, Spark, toastError, toastOk, usePoll, wri
 import { Switch } from "@tenstorrent/vesper/switch";
 import { ask } from "../dialog";
 import { OWNER_ONLY, OWNER_ONLY_HOST, useOwner } from "../role";
-import { navigate } from "../App";
-import { useDevTools } from "../devtools";
-import { AGENT_KEY } from "./Terminals";
 
 interface BoxApp {
   id: string; name: string; blurb: string; category: string; port: number; local_only: boolean; homepage: string;
@@ -294,7 +291,6 @@ function SshCard({ ssh }: { ssh: SshInfo }) {
 
 /** In the desktop app on another computer: open the box's shell there, no setup. */
 function FromThisComputer() {
-  const devTools = useDevTools();
   const [here, setHere] = useState(false);
   const [command, setCommand] = useState<string | null>(null);
   useEffect(() => { void onAnotherComputer().then(setHere); }, []);
@@ -314,7 +310,6 @@ function FromThisComputer() {
         <Button size="sm" onClick={() => run("terminal")}>Open Terminal</Button>
         <Button size="sm" variant="subtle" onClick={() => run("vscode")}>Open in VS Code</Button>
         <Button size="sm" variant="ghost" onClick={copy}>Copy the ssh command</Button>
-        {devTools && <Button size="sm" variant="ghost" onClick={() => navigate("terminals")}>Command line in TT Station</Button>}
       </div>
       {command && <code className="pair-link" title={command}>{command}</code>}
     </div>
@@ -468,7 +463,7 @@ const CATS: { id: Cat; label: string; about: string }[] = [
   { id: "media", label: "Images & video", about: "Make and edit images and video." },
   { id: "build", label: "Build", about: "Notebooks and visual builders for your own AI apps." },
   { id: "automate", label: "Automate", about: "Wire the box's model into email, calendars and other services." },
-  { id: "code", label: "Code", about: "Coding agents on the box's model: open one in its own terminal on the box, or set it up on your computer. TT Station's own Code page does this in the window, in a sandbox." },
+  { id: "code", label: "Code", about: "Coding agents on your computer, on the box's model. TT Station's own Code page does this in the window, in a sandbox." },
   { id: "skills", label: "Skills", about: "Skill packs trending on GitHub: instructions that make the agents on your box (Hermes, OpenCode, Pi, Claude Code) better at their jobs." },
   { id: "terminal", label: "Terminal", about: "A shell on the box from your other devices." },
   { id: "cloud", label: "Cloud", about: "Hosted services with the same API, for when the chips are busy or you're away." },
@@ -489,9 +484,9 @@ function catOf(category: string): Cat {
 // ---------------------------------------------------------------- editor and terminal tools
 
 /** Coding tools that point at any OpenAI-compatible server: how to set each one up. */
-const CODE_TOOLS: { id: string; name: string; blurb: string; homepage: string; cat?: Cat; badge?: string; onBox?: string; steps: (base: string, model: string) => ReactNode }[] = [
+const CODE_TOOLS: { id: string; name: string; blurb: string; homepage: string; cat?: Cat; badge?: string; steps: (base: string, model: string) => ReactNode }[] = [
   {
-    id: "claudecode", name: "Claude Code", homepage: "https://claude.com/claude-code", onBox: "claude",
+    id: "claudecode", name: "Claude Code", homepage: "https://claude.com/claude-code",
     blurb: "Anthropic's coding agent, on the box's model: the box speaks its API, so no Anthropic account is needed. TT Station's Code page uses it too, in a sandbox.",
     steps: (base) => <>
       <span className="muted" style={{ fontSize: 13 }}>On your computer (Claude Code installed), point it at the box for a session:</span>
@@ -525,7 +520,7 @@ claude`}</CodeBlock>
     </ol>,
   },
   {
-    id: "aider", name: "Aider", homepage: "https://aider.chat", onBox: "aider",
+    id: "aider", name: "Aider", homepage: "https://aider.chat",
     blurb: "Pair programming in your terminal: it edits the files in your git repo and commits each change.",
     steps: (base, model) => <>
       <span className="muted" style={{ fontSize: 13 }}>Run it in your repository:</span>
@@ -533,7 +528,7 @@ claude`}</CodeBlock>
     </>,
   },
   {
-    id: "opencode", name: "OpenCode", homepage: "https://opencode.ai", onBox: "opencode",
+    id: "opencode", name: "OpenCode", homepage: "https://opencode.ai",
     blurb: "The open-source coding agent for your terminal (trending #6 on GitHub this year), with any model provider.",
     steps: (base, model) => <>
       <span className="muted" style={{ fontSize: 13 }}>Install it: <code>curl -fsSL https://opencode.ai/install | bash</code>. Then add the box in <code>~/.config/opencode/opencode.jsonc</code> (or a project's <code>opencode.json</code>) and pick it with <code>/models</code>:</span>
@@ -604,7 +599,6 @@ tradingagents`}</CodeBlock>
 
 /** A tool you set up yourself: what to paste, and a key made for it. */
 function CodeToolTile({ t, base, model }: { t: (typeof CODE_TOOLS)[number]; base: string; model: string }) {
-  const devTools = useDevTools();
   const guide = useSheet();
   const owner = useOwner();
   const [key, setKey] = useState<string | null>(null);
@@ -620,8 +614,7 @@ function CodeToolTile({ t, base, model }: { t: (typeof CODE_TOOLS)[number]; base
       <div><Typography variant="heading-xs">{t.name}</Typography><Typography variant="copy-sm" className="muted">{t.blurb}</Typography></div>
       <div className="grow" />
       <div className="row">
-        {t.onBox && devTools && <Button size="sm" disabled={!owner} title={owner ? "Its own terminal app, running on the box, shown in TT Station" : OWNER_ONLY_HOST} onClick={() => { try { localStorage.setItem(AGENT_KEY, t.onBox!); } catch { /* private */ } navigate("terminals"); }}>Open on the box</Button>}
-        <Button size="sm" variant="subtle" onClick={guide.open}>{t.onBox ? "On your computer" : "Set it up"}</Button>
+        <Button size="sm" variant="subtle" onClick={guide.open}>Set it up</Button>
         <Button size="sm" variant="ghost" onClick={() => openExternal(t.homepage)}>Website</Button>
       </div>
       <Sheet ref={guide.ref} popover title={`Use ${t.name} with your box`} description="It runs on your computer and talks to the box's model.">

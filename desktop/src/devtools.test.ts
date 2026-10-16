@@ -6,8 +6,8 @@ import { DEV_KEY, placeVisible, resolveDevTools, storedChoice, usedBefore } from
 const mem = (v: Record<string, string>) => ({ getItem: (k: string) => v[k] ?? null });
 
 describe("which places show", () => {
-  it("hides Bring-up and Terminals without developer tools, and nothing else", () => {
-    const all = ["home", "chat", "studio", "research", "code", "library", "routines", "models", "bringup", "hardware", "discover", "connect", "settings", "terminals", "orchard"];
+  it("hides Bring-up without developer tools, and nothing else", () => {
+    const all = ["home", "chat", "studio", "research", "code", "library", "routines", "models", "bringup", "hardware", "discover", "connect", "settings", "orchard"];
     expect(all.filter((r) => placeVisible(r, false))).toEqual(["home", "chat", "studio", "research", "code", "library", "routines", "models", "hardware", "discover", "connect", "settings"]);
     expect(all.filter((r) => placeVisible(r, true))).toEqual(all);
   });
@@ -17,9 +17,8 @@ describe("whether developer tools are on", () => {
   it("is off for a new install", () => {
     expect(resolveDevTools(storedChoice(mem({})), usedBefore(mem({})), false)).toBe(false);
   });
-  it("is on for someone who has used bring-up or Terminals in this app", () => {
+  it("is on for someone who has used bring-up in this app", () => {
     expect(usedBefore(mem({ "tt.bringup.way": "orchard" }))).toBe(true);
-    expect(usedBefore(mem({ "tt.terminals.agent": "claude" }))).toBe(true);
     expect(resolveDevTools(null, true, false)).toBe(true);
   });
   it("is on when the box has bring-up runs", () => {

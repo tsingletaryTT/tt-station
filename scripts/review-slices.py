@@ -116,7 +116,7 @@ SLICES = [
         *docs("orchard", "lab", "bringup-containment"),
     ]),
     ("10-code", "Code workspace (the agent builds from here)", [
-        *src("workspace.rs", "code_session.py", "code_holder.py", "safegit.rs",
+        *src("workspace.rs", "code_holder.py", "safegit.rs",
              "coding.rs", "codespeed.rs", "codemodels.rs"),
         *tests("workspace_*", "code_*"),
         *docs("code-models"), "docs/design/code-serving.md", "docs/notes/tool-call-*",

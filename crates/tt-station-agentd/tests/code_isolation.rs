@@ -2,15 +2,12 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 //! What runs as the box's own account is an owner's: Code outside the
-//! sandbox, terminal sessions, bring-ups, Orchard, the lab and the desktop
-//! launches. Members get Code in the sandbox, in a folder that isn't the box's
-//! own; a session someone started outside the sandbox stays out of their reach.
+//! sandbox, bring-ups, Orchard, the lab and the desktop launches. Members get
+//! Code in the sandbox, in a folder that isn't the box's own; a session someone started outside the sandbox stays out of their reach.
 
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::Error as WsError;
 use tt_station_agentd::routes::{app, AppState};
 use tt_station_agentd::serving::dstack::DstackBackend;
 
@@ -136,14 +133,6 @@ async fn running_things_as_the_box_is_for_owners() {
     let b = harness().await;
     use reqwest::Method as M;
     let refused = [
-        (
-            M::POST,
-            "/coding/sessions",
-            json!({ "agent": "nope", "folder": "/" }),
-        ),
-        (M::POST, "/coding/sessions/x/stop", json!({})),
-        (M::DELETE, "/coding/sessions/x", json!({})),
-        (M::GET, "/coding/sessions/x/changes", json!({})),
         (M::POST, "/bringup/codex/runs", json!({ "model": "a/b" })),
         (M::POST, "/bringup/codex/runs/x/resume", json!({})),
         (M::POST, "/bringup/claude/login", json!({})),
@@ -173,53 +162,6 @@ async fn running_things_as_the_box_is_for_owners() {
             "{said}"
         );
     }
-    // An owner gets past the gate (to the route's own answer).
-    let (status, said) = b
-        .call(
-            M::POST,
-            "/coding/sessions",
-            &b.owner,
-            json!({ "agent": "nope", "folder": "/" }),
-        )
-        .await;
-    assert_eq!(status, 400, "{said}");
-
-    // A member's Terminals list is empty; an owner's says it's theirs.
-    let (_, coding) = b.call(M::GET, "/coding", &b.member, json!({})).await;
-    assert_eq!(coding["owner"], false);
-    assert_eq!(coding["sessions"], json!([]));
-
-    // The terminal itself.
-    let ws = b.base.replace("http://", "ws://");
-    let term = |token: &str| {
-        let mut req = format!("{ws}/coding/term?session=nope")
-            .into_client_request()
-            .unwrap();
-        req.headers_mut()
-            .insert("authorization", format!("Bearer {token}").parse().unwrap());
-        req
-    };
-    let refused = |r: Result<_, WsError>| match r {
-        Ok(_) => 101,
-        Err(WsError::Http(r)) => r.status().as_u16(),
-        Err(e) => panic!("{e}"),
-    };
-    assert_eq!(
-        refused(
-            tokio_tungstenite::connect_async(term(&b.member))
-                .await
-                .map(|_| ())
-        ),
-        403
-    );
-    assert_eq!(
-        refused(
-            tokio_tungstenite::connect_async(term(&b.owner))
-                .await
-                .map(|_| ())
-        ),
-        404
-    );
 }
 
 #[tokio::test]

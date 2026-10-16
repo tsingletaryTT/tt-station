@@ -47,7 +47,7 @@ pub const LAUNCHER: &str = include_str!("sandbox_exec.py");
 
 /// Unit-name prefixes of the processes that never get the box's own local
 /// trust (`crate::localpeer::confined_unit`): bring-up runs, Orchard runs
-/// and model servers it starts, and Code terminals.
+/// and model servers it starts, and Code's sessions.
 pub const CONFINED_UNIT_PREFIXES: &[&str] = &[
     "tt-codex-bringup-",
     "tt-claude-bringup-",

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! WebSockets that take a token (`/coding/term`, `/toplike/term`) read it
+//! WebSockets that take a token (`/toplike/term`) read it
 //! from a header -- `Authorization`, or a `tt-token.<token>` subprotocol for
 //! a browser -- never from the URL.
 
@@ -67,7 +67,8 @@ async fn a_terminal_websocket_takes_its_token_from_a_header_not_the_url() {
     // test, so nothing else sees the variable).
     std::env::set_var("TT_TOPLIKE_BIN", "/bin/true");
     let (ws, token) = harness().await;
-    let term = format!("{ws}/coding/term?session=nope");
+    // An unknown view: past auth, the route's own answer is 400.
+    let term = format!("{ws}/toplike/term?mode=nope");
     // In the URL: not accepted any more.
     assert_eq!(status(format!("{term}&token={token}"), None).await, 401);
     assert_eq!(status(term.clone(), None).await, 401);
@@ -82,14 +83,14 @@ async fn a_terminal_websocket_takes_its_token_from_a_header_not_the_url() {
         .await,
         401
     );
-    // In a header, it gets past auth (to "no such session").
+    // In a header, it gets past auth (to "unknown view").
     assert_eq!(
         status(
             term.clone(),
             Some(("authorization", format!("Bearer {token}")))
         )
         .await,
-        404
+        400
     );
     assert_eq!(
         status(
@@ -100,10 +101,10 @@ async fn a_terminal_websocket_takes_its_token_from_a_header_not_the_url() {
             ))
         )
         .await,
-        404
+        400
     );
-    // Same for tt-toplike's view, which opens -- the handshake answering with
-    // the `tt-station` subprotocol a browser insists on.
+    // A real view opens -- the handshake answering with the `tt-station`
+    // subprotocol a browser insists on.
     let top = format!("{ws}/toplike/term?mode=starfield");
     assert_eq!(status(format!("{top}&token={token}"), None).await, 401);
     let mut req = top.into_client_request().unwrap();

@@ -19,7 +19,7 @@ import { Sheet, useSheet } from "@tenstorrent/vesper/sheet";
 import { ago, del, get, post } from "../api";
 import { Card, Empty, Eyebrow, MoreMenu, Page, toastError, toastOk, usePoll } from "../ui";
 import { ask } from "../dialog";
-import { FolderBrowser } from "./Terminals";
+import { FolderBrowser } from "../FolderBrowser";
 import { navigate } from "../App";
 
 interface Source { id: string; path: string; added: number; last_indexed: number | null; files: number; skipped: number; activity?: string; error?: string }

@@ -68,7 +68,6 @@ only**: deliberately left to a computer (needs a keyboard, a terminal or a file 
 | Stop a session's agent | `POST /code/sessions/{id}/stop` | Lacks | Has |
 | Start a sandboxed session (recent folder, or browse the box) | `POST /code/sessions`, `GET /coding/folders` | Lacks | Has |
 | Review changes, commit, discard; rename; outside-the-sandbox sessions | `GET /code/sessions/{id}/changes`, `POST /code/sessions/{id}/commit`, `POST /code/sessions/{id}/discard`, `POST /code/sessions/{id}/rename` | Lacks | Desktop only |
-| Agent terminals (Claude Code, Codex CLIs) | `/coding`, `/coding/term` | Lacks | Desktop only |
 
 ## Research, transcripts, recordings
 

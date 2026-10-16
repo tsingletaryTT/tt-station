@@ -642,14 +642,6 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .agent-pick:disabled { opacity: .5; cursor: not-allowed; }
 .agent-pick-name { font-weight: 600; font-size: 14px; }
 .example-chip.on { color: var(--vesper-text-primary); border-color: var(--vesper-teal-600); }
-.codeterm-wrap { position: relative; }
-/* Terminals, filling the window: the terminal takes what's left under its session's header. */
-.term-session { display: flex; flex-direction: column; }
-.term-session > * { flex: none; }
-.page-fill .term-session > .codeterm-wrap { flex: 1 1 0; min-height: 160px; }
-.page-fill .term-session .codeterm { height: 100%; min-height: 0; }
-.codeterm { height: min(68vh, 720px); min-height: 360px; padding: 8px; border-radius: 12px; background: var(--vesper-background-static-black); border: 1px solid var(--line); overflow: hidden; }
-.codeterm-state { position: absolute; top: 10px; right: 14px; font-size: 11px; color: var(--vesper-stone-500); font-family: var(--mono); }
 .diff { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto;
   padding: 10px; border-radius: 10px; background: var(--vesper-background-primary, #0b1211); border: 1px solid var(--line); }
 .diff .add { color: var(--vesper-mint-600); }
@@ -1097,7 +1089,7 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
 
-/* ---------------------------------------------------------------- Folder browser (Terminals) */
+/* ---------------------------------------------------------------- Folder browser (Code, Library) */
 .folder-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: 6px; }
 .folder-open:hover .grow { text-decoration: underline; text-underline-offset: 3px; }
 .folder-open:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }

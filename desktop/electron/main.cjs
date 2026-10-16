@@ -1389,7 +1389,6 @@ function buildMenu() {
     { role: "editMenu" },
     { label: "Box", submenu: [
       sshItem("Open Terminal on Box", "terminal", "CmdOrCtrl+Shift+T"),
-      { label: "Command Line in TT Station", click: () => { show(); win?.webContents.send("navigate", "/terminals"); } },
       sshItem("Open Box in VS Code", "vscode"),
       { type: "separator" },
       ...list.boxes.map((b) => ({ label: b.name, type: "radio", checked: b.id === list.current, click: () => switchBox(b.id) })),

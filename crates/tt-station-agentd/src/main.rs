@@ -1433,7 +1433,6 @@ async fn main() -> Result<()> {
     // give back the ones whose workload is gone (see `gozer::reconcile_own_leases`).
     tokio::spawn(gozer::reconcile_forever(state.clone()));
     tt_station_agentd::research::resume(&state);
-    tokio::spawn(tt_station_agentd::coding::watch_forever(state.clone()));
     // Puts the last good model back after a stuck start is stopped.
     tokio::spawn(tt_station_agentd::community::restarter(state.clone()));
     // Routines that run on a schedule.

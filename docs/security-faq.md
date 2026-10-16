@@ -198,7 +198,7 @@ project folder, and some of what it leaves there runs later by itself: git hooks
 Makefile, npm scripts, `.claude` settings. Run outside the sandbox, as an owner can, those
 would run as the box's own account. So the box remembers which folders members' sandboxed
 sessions used, and who (`<config>/code/shared-folders.json`, 0600), and before an owner
-starts Code without the sandbox, or a terminal agent, in one of them (or a folder inside or
+starts Code without the sandbox in one of them (or a folder inside or
 around one) it answers `409 {needs_confirm: "shared_folder", used_by, folder}`. The desktop
 app says who worked there and asks; going ahead sends `confirm_shared: true`, is written to
 the activity log (`shared_folder_confirmed`), and clears those uses until a member works there

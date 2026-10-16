@@ -35,7 +35,6 @@ const Models = named(() => import("./pages/Models"), "Models");
 const BringupPage = named(() => import("./pages/BringupWays"), "BringupPage");
 const Research = named(() => import("./pages/Research"), "Research");
 const Code = named(() => import("./pages/Code"), "Code");
-const Terminals = named(() => import("./pages/Terminals"), "Terminals");
 const Hardware = named(() => import("./pages/Hardware"), "Hardware");
 const Connect = named(() => import("./pages/Connect"), "Connect");
 const Discover = named(() => import("./pages/Discover"), "Discover");
@@ -45,7 +44,7 @@ const Library = named(() => import("./pages/Library"), "Library");
 const Inbox = named(() => import("./pages/Inbox"), "Inbox");
 const ToriWindow = named(() => import("./Tori"), "ToriWindow");
 
-export type Route = "home" | "inbox" | "chat" | "studio" | "research" | "code" | "terminals" | "models" | "bringup" | "orchard" | "hardware" | "discover" | "connect" | "routines" | "library" | "settings";
+export type Route = "home" | "inbox" | "chat" | "studio" | "research" | "code" | "models" | "bringup" | "orchard" | "hardware" | "discover" | "connect" | "routines" | "library" | "settings";
 
 const PLACES: { route: Route; label: string; icon: IconKind; group: number }[] = [
   { route: "home", label: "Home", icon: "quietbox", group: 0 },
@@ -57,7 +56,6 @@ const PLACES: { route: Route; label: string; icon: IconKind; group: number }[] =
   { route: "routines", label: "Routines", icon: "clock", group: 0 },
   { route: "models", label: "Models", icon: "ai-model", group: 1 },
   { route: "bringup", label: "Bring-up", icon: "ai-task", group: 1 },
-  { route: "terminals", label: "Terminals", icon: "ai-agent", group: 1 },
   { route: "hardware", label: "Hardware", icon: "blackhole", group: 1 },
   { route: "discover", label: "What's new", icon: "globe", group: 2 },
   { route: "connect", label: "Connect", icon: "link", group: 2 },
@@ -169,7 +167,6 @@ function Shell() {
     case "studio": page = <Studio />; break;
     case "research": page = <Research />; break;
     case "code": page = <Code />; break;
-    case "terminals": page = <Terminals />; break;
     case "models": page = <Models />; break;
     case "bringup":
     case "orchard": page = <BringupPage />; break;
