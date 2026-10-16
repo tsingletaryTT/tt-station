@@ -489,6 +489,63 @@ async fn a_member_cannot_reset_the_chips_through_the_doctor() {
 }
 
 #[tokio::test]
+async fn members_read_verdicts_but_repairs_and_bundles_are_owners() {
+    let s = station(Some(healthy())).await;
+    let (status, v) = s
+        .call(reqwest::Method::GET, "/doctor", Some(&s.member))
+        .await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["owner"], false);
+    assert_eq!(v["may_control_models"], true, "anyone may, by default");
+    // Stopping containers the box didn't start: an owner's.
+    let (status, v) = s.fix("stop_stray_containers", &s.member).await;
+    assert_eq!(status, 403, "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("Only an owner"),
+        "{v}"
+    );
+    // The support bundle carries logs (redacted): an owner's to build and fetch.
+    let (status, v) = s
+        .call(reqwest::Method::POST, "/diagnostics", Some(&s.member))
+        .await;
+    assert_eq!(status, 403, "{v}");
+    assert!(!s.dir.path().join("config/diagnostics").exists());
+    let (status, v) = s
+        .call(reqwest::Method::POST, "/diagnostics", Some(&s.owner))
+        .await;
+    assert_eq!(status, 200, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+    let (status, _) = s
+        .call(
+            reqwest::Method::GET,
+            &format!("/diagnostics/{id}"),
+            Some(&s.member),
+        )
+        .await;
+    assert_eq!(status, 403);
+    // Restarting the model follows who may start and stop models.
+    let put = s
+        .client
+        .put(format!("{}/data/settings", s.base))
+        .bearer_auth(&s.owner)
+        .json(&json!({ "model_control": "owners" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 200);
+    let (status, v) = s.fix("restart_model", &s.member).await;
+    assert_eq!(status, 403, "{v}");
+    assert_eq!(
+        v["error"],
+        "Only owners can start or stop models on this box."
+    );
+    let (_, v) = s
+        .call(reqwest::Method::GET, "/doctor", Some(&s.member))
+        .await;
+    assert_eq!(v["may_control_models"], false);
+}
+
+#[tokio::test]
 async fn stopping_strays_stops_only_inference_containers_the_box_didnt_start() {
     let s = station(Some(healthy())).await;
     let (status, v) = s.fix("stop_stray_containers", &s.owner).await;

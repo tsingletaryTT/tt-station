@@ -895,6 +895,8 @@ async fn ids_that_could_leave_the_evals_folder_are_refused() {
     let s = station(None).await;
     let d = s.evals_dir();
     evals::save_in(&d, &saved("1-keep", MODEL, 1, &["tools"]));
+    evals::save_trials(&d, "1-keep", &[]);
+    evals::save_trials(&d, "2-other", &[]);
     // A file one level up that a traversal would reach.
     std::fs::write(
         s.config.path().join("secret.json"),
@@ -954,6 +956,11 @@ async fn ids_that_could_leave_the_evals_folder_are_refused() {
         .await;
     assert_eq!((status, &v["deleted"]), (200, &json!(true)));
     assert!(!d.join("1-keep.json").exists());
+    assert!(
+        !d.join("raw/1-keep.json").exists(),
+        "its agent reliability trials go with it"
+    );
+    assert!(d.join("raw/2-other.json").exists(), "not another's");
     assert_eq!(s.get("/evals/1-keep").await.0, 404);
     assert!(s.get("/evals").await.1["evals"]
         .as_array()

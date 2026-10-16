@@ -891,13 +891,13 @@ pub(crate) async fn post_fix(
     ))
 }
 
-/// `POST /diagnostics` (authed): bundle what support needs -- the Doctor's
+/// `POST /diagnostics` (owners): bundle what support needs -- the Doctor's
 /// report, tt-smi, versions, recent events, the agent's log and the serving
 /// logs (secrets redacted) -- into a .tar.gz, kept on the box. Answers its id;
 /// `GET /diagnostics/{id}` downloads it.
 pub(crate) async fn post_diagnostics(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
 ) -> Result<Json<Value>, ApiError> {
     let (status, checks) = examine(&state).await;
     let snapshot = state.cached_snapshot().await.unwrap_or_default();
@@ -1020,10 +1020,10 @@ pub(crate) async fn post_diagnostics(
     Ok(Json(json!({ "id": id, "bytes": built })))
 }
 
-/// `GET /diagnostics/{id}` (authed): the bundle.
+/// `GET /diagnostics/{id}` (owners): the bundle.
 pub(crate) async fn get_diagnostics(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _owner: crate::routes::OwnerAuth,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
