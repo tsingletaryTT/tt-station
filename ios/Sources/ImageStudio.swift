@@ -25,6 +25,7 @@ struct ImageStudio: View {
             VStack(spacing: 18) {
                 header
                 composer
+                    .keyboardDoneButton()
                 if let error {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.tt(.footnote))

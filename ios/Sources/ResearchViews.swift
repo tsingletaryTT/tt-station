@@ -20,6 +20,7 @@ struct ResearchListView: View {
                 Section {
                     TextField("What should it find out?", text: $question, axis: .vertical)
                         .lineLimit(2...6)
+                        .keyboardDoneButton()
                     Picker("How deep", selection: $depth) {
                         Text("Quick").tag("quick")
                         Text("Standard").tag("standard")

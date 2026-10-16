@@ -262,6 +262,7 @@ struct CodeThreadView: View {
             HStack(alignment: .bottom, spacing: 8) {
                 TextField(live.busy ? "Add to what it's doing…" : "Tell it what to do next…", text: $draft, axis: .vertical)
                     .lineLimit(1...5)
+                    .keyboardDoneButton()
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .glassEffect(.regular, in: .rect(cornerRadius: 20))

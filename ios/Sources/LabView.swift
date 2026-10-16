@@ -124,6 +124,7 @@ struct LabView: View {
             SectionTitle(text: "Run")
             TextField("Prompt", text: $prompt, axis: .vertical)
                 .lineLimit(2...6)
+                .keyboardDoneButton()
                 .padding(12)
                 .card(radius: 14)
             if let model, model.tiles.count > 1 {

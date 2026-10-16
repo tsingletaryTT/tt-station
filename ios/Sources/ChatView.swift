@@ -169,6 +169,9 @@ private struct ChatContent: View {
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
             .scrollIndicators(.hidden)
+            // A short conversation has nothing to drag, so a tap anywhere in it
+            // also puts the keyboard away (buttons in messages still work).
+            .simultaneousGesture(TapGesture().onEnded { inputFocused = false })
             .onChange(of: session.items.count) {
                 withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
             }
@@ -190,6 +193,8 @@ private struct ChatContent: View {
             }
         }
         .animation(.snappy, value: voice.isListening)
+        // The composer's Return adds a line, so the keyboard gets its own Done.
+        .keyboardDoneButton()
         .alert("Voice", isPresented: Binding(
             get: { if case .denied = voice.state { true } else { false } },
             set: { if !$0 { voice.clearError() } })

@@ -35,6 +35,7 @@ struct VideoStudio: View {
                 .padding(.top, 4)
 
                 composer
+                    .keyboardDoneButton()
 
                 if let error {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
