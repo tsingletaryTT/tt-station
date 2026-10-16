@@ -911,6 +911,17 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .code-model-facts dd.cache-on { color: var(--vesper-text-success); }
 .code-model-facts dd.cache-off { color: var(--vesper-text-warning); }
 .code-model-note { font-size: 12px; }
+.code-model-count { font-size: 12px; }
+.code-model-options { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.code-model-option { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--vesper-background-primary); }
+.code-model-option.on { border-color: var(--vesper-border-accent-base); }
+.code-model-option-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 28px; }
+.code-model-option-title { font-weight: 500; }
+.code-model-origin { font-size: 12px; overflow-wrap: anywhere; }
+.code-model-unverified { display: inline-flex; border-radius: 6px; }
+.code-model-unverified:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--vesper-border-focus); }
+.code-model-facts.inline { display: flex; flex-wrap: wrap; gap: 2px 14px; }
+.code-model-facts.inline > div { display: inline-flex; gap: 4px; }
 .code-models-empty { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .code-models-foot { font-size: 11px; }
 .code-menu { position: relative; }

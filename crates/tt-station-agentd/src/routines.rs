@@ -767,6 +767,7 @@ async fn run_tool(state: &AppState, run_id: &str, name: &str, args: &Value) -> (
                 id: id.clone(),
                 stop_serving: false,
                 anyway: false,
+                profile: None,
             };
             match crate::community::post_pull(State(state.clone()), BearerAuth, Json(body)).await {
                 Ok(_) => (
@@ -841,6 +842,7 @@ pub(crate) async fn start_model(state: &AppState, model: &str) -> (bool, String)
             id: id.clone(),
             stop_serving: true,
             anyway: false,
+            profile: None,
         };
         return match crate::community::post_serve(State(state.clone()), BearerAuth, Json(body))
             .await

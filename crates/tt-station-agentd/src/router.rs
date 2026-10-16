@@ -372,7 +372,7 @@ pub fn app(state: AppState) -> Router {
             "/code/sessions/{id}/speed",
             get(crate::codespeed::get_speed),
         )
-        .route("/code/models", get(crate::codespeed::get_models))
+        .route("/code/models", get(crate::codemodels::get_models))
         .route("/coding", get(crate::coding::get_coding))
         .route("/coding/sessions", post(crate::coding::post_session))
         .route(

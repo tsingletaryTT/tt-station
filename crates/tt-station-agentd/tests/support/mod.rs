@@ -878,3 +878,38 @@ pub async fn pair(base: &str, state: &tt_station_agentd::routes::AppState) -> St
         .unwrap();
     done["token"].as_str().unwrap().to_string()
 }
+
+/// A scratch `HOME` with no models in it, set once for the test binary: the
+/// Code model list (`codemodels.rs`) reads tt-model's packages, native vLLM
+/// bundles and the Hugging Face cache from the home folder, and the box
+/// running the tests has real ones. Env changes are process-wide, so call it
+/// before the first agent starts.
+#[allow(dead_code)]
+pub fn home_without_models() -> &'static std::path::Path {
+    static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        // One per process; those left by earlier runs go once their process has.
+        let prefix = "tt-station-no-models-";
+        for e in std::fs::read_dir(std::env::temp_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if let Some(pid) = name.strip_prefix(prefix) {
+                if pid.parse::<u32>().is_ok() && !std::path::Path::new("/proc").join(pid).exists() {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("{prefix}{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        std::env::set_var("HOME", &dir);
+        std::env::set_var("HF_HOME", dir.join(".cache/huggingface"));
+        for v in ["HF_HUB_CACHE", "TT_KERNEL_BUNDLES_DIR"] {
+            std::env::remove_var(v);
+        }
+        dir
+    })
+}

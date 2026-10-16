@@ -15,6 +15,7 @@ pub mod bench;
 pub mod boot;
 pub mod bringup;
 pub mod chime;
+pub mod codemodels;
 pub mod codespeed;
 pub mod coding;
 pub mod community;

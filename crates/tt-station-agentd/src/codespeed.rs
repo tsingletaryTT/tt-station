@@ -8,8 +8,9 @@
 //! conversation so far), how much of that the server had cached, the time to
 //! its first token and its decode speed. A session keeps its last few steps,
 //! for the speed strip in the Code window. The box also keeps a small book of
-//! what it measured per model, so the "Model for Code" picker can say how fast
-//! a model it has run before actually was here.
+//! what it measured per model and setup (a community package's profile, see
+//! [`current_setup`]), so the "Model for Code" picker can say how fast a model
+//! it has run before actually was here, in the setup it ran in.
 //!
 //! Whether the server caches prompt prefixes matters more than anything else
 //! for an agent: each step re-sends the whole conversation, so without the
@@ -20,9 +21,8 @@
 //! - `GET /code/sessions/{id}/speed` (authed; for a member, sandboxed sessions
 //!   only): a session's recent steps, its context against the compaction point
 //!   and the window, and the prefix cache.
-//! - `GET /code/models` (authed): the models Code can use on this box, each with
-//!   its window, prefix caching, measured speed, and what choosing it would do.
-//!   Choosing one that isn't serving goes through `POST /serve`, like Models.
+//!
+//! `GET /code/models`, the picker's list, is [`crate::codemodels`].
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -141,7 +141,7 @@ pub fn record(session: &str, step: Step) {
         }
     }
     if let Some(model) = &step.model {
-        book_add(model, &step);
+        book_add(&book_key(model, current_setup(model).as_deref()), &step);
     }
 }
 
@@ -159,7 +159,7 @@ pub fn steps(session: &str) -> Vec<Step> {
 
 /// What the box measured for one model in Code.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-struct Measured {
+pub(crate) struct Measured {
     decode_tps: VecDeque<f64>,
     ttft_ms: VecDeque<u64>,
     steps: u64,
@@ -170,6 +170,10 @@ struct Measured {
     #[serde(default)]
     prefix_cache: Option<bool>,
     at: u64,
+    /// Kept under its setup (see [`book_key`]). False for an entry from before
+    /// the box did: it may have been measured in any setup of the model.
+    #[serde(default)]
+    recorded_setup: bool,
 }
 
 static BOOK: LazyLock<Mutex<HashMap<String, Measured>>> =
@@ -180,7 +184,7 @@ static BOOK_PATH: OnceLock<PathBuf> = OnceLock::new();
 static BOOK_SAVED: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// Load the book from disk the first time a route needs it.
-fn attach(state: &AppState) {
+pub(crate) fn attach(state: &AppState) {
     let path = state.config_dir().join("code-speed.json");
     if BOOK_PATH.set(path.clone()).is_ok() {
         if let Some(saved) = std::fs::read(&path)
@@ -195,10 +199,20 @@ fn attach(state: &AppState) {
     }
 }
 
-fn book_add(model: &str, step: &Step) {
+/// The book's key for `model` served in `setup`: the model alone when no
+/// community package serves it, else `<model> @ <package>#<profile>`.
+pub fn book_key(model: &str, setup: Option<&str>) -> String {
+    match setup {
+        Some(s) => format!("{model} @ {s}"),
+        None => model.to_string(),
+    }
+}
+
+fn book_add(key: &str, step: &Step) {
     {
         let mut book = BOOK.lock().expect("book");
-        let m = book.entry(model.to_string()).or_default();
+        let m = book.entry(key.to_string()).or_default();
+        m.recorded_setup = true;
         if let Some(t) = step.decode_tps {
             m.decode_tps.push_back(t);
         }
@@ -218,10 +232,11 @@ fn book_add(model: &str, step: &Step) {
     save_book(false);
 }
 
-fn book_prefix(model: &str, on: bool) {
+fn book_prefix(key: &str, on: bool) {
     let changed = {
         let mut book = BOOK.lock().expect("book");
-        let m = book.entry(model.to_string()).or_default();
+        let m = book.entry(key.to_string()).or_default();
+        m.recorded_setup = true;
         let changed = m.prefix_cache != Some(on);
         m.prefix_cache = Some(on);
         changed
@@ -264,21 +279,43 @@ fn median_u(v: &VecDeque<u64>) -> Option<u64> {
     s.get(s.len() / 2).copied()
 }
 
-/// The book's entry for `model`, matched like model names are elsewhere.
+/// The book's entry for `model` with no community setup, matched like model
+/// names are elsewhere.
 fn measured(model: &str) -> Option<Measured> {
     BOOK.lock()
         .expect("book")
         .iter()
-        .find(|(k, _)| same_model(k, model))
+        .find(|(k, _)| !k.contains(" @ ") && same_model(k, model))
         .map(|(_, v)| v.clone())
 }
 
-fn speed_json(m: &Measured) -> Value {
+/// What the box measured for `model` in `setup`. For a setup with nothing of
+/// its own, an entry from before setups were kept may stand in: it says so
+/// (`recorded_setup` false), and the picker says it.
+pub(crate) fn measured_in(model: &str, setup: Option<&str>) -> Option<Measured> {
+    let Some(setup) = setup else {
+        return measured(model);
+    };
+    let book = BOOK.lock().expect("book");
+    book.iter()
+        .find(|(k, _)| {
+            k.split_once(" @ ")
+                .is_some_and(|(m, s)| s == setup && same_model(m, model))
+        })
+        .or_else(|| {
+            book.iter()
+                .find(|(k, v)| !v.recorded_setup && !k.contains(" @ ") && same_model(k, model))
+        })
+        .map(|(_, v)| v.clone())
+}
+
+pub(crate) fn speed_json(m: &Measured) -> Value {
     json!({
         "decode_tps": median_f(&m.decode_tps),
         "ttft_s": median_u(&m.ttft_ms).map(|ms| (ms as f64 / 100.0).round() / 10.0),
         "steps": m.steps,
         "at": m.at,
+        "setup_unrecorded": !m.recorded_setup,
     })
 }
 
@@ -313,7 +350,7 @@ pub struct PrefixCache {
 }
 
 impl PrefixCache {
-    fn new(state: Cache, how: &str) -> Self {
+    pub(crate) fn new(state: Cache, how: &str) -> Self {
         PrefixCache {
             state,
             how: how.to_string(),
@@ -404,7 +441,7 @@ pub fn find_server(
 
 /// Every process's command line (containers' too: they share the host's `/proc`).
 /// Only read for flags here; never sent anywhere, since a command line can hold secrets.
-fn cmdlines() -> Vec<Vec<String>> {
+pub(crate) fn cmdlines() -> Vec<Vec<String>> {
     let Ok(dir) = std::fs::read_dir("/proc") else {
         return vec![];
     };
@@ -451,7 +488,8 @@ pub async fn prefix_cache(model: &str, base_url: &str) -> PrefixCache {
     }
     let found = detect(model, base_url).await;
     if found.state != Cache::Unknown {
-        book_prefix(model, found.state == Cache::On);
+        let setup = current_setup(model);
+        book_prefix(&book_key(model, setup.as_deref()), found.state == Cache::On);
     }
     DETECTED
         .lock()
@@ -490,17 +528,71 @@ async fn detect(model: &str, base_url: &str) -> PrefixCache {
     .unwrap_or_else(|| PrefixCache::new(Cache::Unknown, "the server doesn't say"))
 }
 
-/// What the box last found for a model that isn't serving now.
-fn remembered_cache(model: &str) -> PrefixCache {
-    match measured(model) {
+/// What the box last found for a model (in a setup) that isn't serving now.
+pub(crate) fn remembered_cache(model: &str, setup: Option<&str>) -> Option<PrefixCache> {
+    match measured_in(model, setup) {
         Some(m) if m.cached_seen || m.prefix_cache == Some(true) => {
-            PrefixCache::new(Cache::On, "seen when it last served here")
+            Some(PrefixCache::new(Cache::On, "seen when it last served here"))
         }
-        Some(m) if m.prefix_cache == Some(false) => {
-            PrefixCache::new(Cache::Off, "seen when it last served here")
-        }
-        _ => PrefixCache::new(Cache::Unknown, "not seen serving here yet"),
+        Some(m) if m.prefix_cache == Some(false) => Some(PrefixCache::new(
+            Cache::Off,
+            "seen when it last served here",
+        )),
+        _ => None,
     }
+}
+
+// ---------------------------------------------------------------- the setup
+
+/// The `tt-model serve` running on the box, from command lines: the package
+/// and the `--profile` it was given (none: the package's default).
+pub fn tt_model_serve(cmdlines: &[Vec<String>]) -> Option<(String, Option<String>)> {
+    cmdlines.iter().find_map(|a| {
+        // `tt-model …`, or its interpreter running it: `python …/tt-model …`.
+        let name = |x: &String| x.rsplit('/').next().unwrap_or("").to_string();
+        let at = match a.first().map(name).as_deref() {
+            Some("tt-model") => 0,
+            Some(p)
+                if p.starts_with("python") && a.get(1).map(name).as_deref() == Some("tt-model") =>
+            {
+                1
+            }
+            _ => return None,
+        };
+        if a.get(at + 1).map(String::as_str) != Some("serve") {
+            return None;
+        }
+        let id = a.get(at + 2).filter(|x| !x.starts_with('-'))?.clone();
+        let mut profile = None;
+        for (i, x) in a.iter().enumerate() {
+            if x == "--profile" {
+                profile = a.get(i + 1).cloned();
+            } else if let Some(v) = x.strip_prefix("--profile=") {
+                profile = Some(v.to_string());
+            }
+        }
+        Some((id, profile))
+    })
+}
+
+/// The setup serving `model` now, when it's a community package:
+/// `<package>#<profile>`. None for any other serve path. A few seconds' cache:
+/// it reads `/proc` and tt-model's index, and every Code step asks.
+pub fn current_setup(model: &str) -> Option<String> {
+    type Found = Option<(Instant, String, Option<String>)>;
+    static LAST: Mutex<Found> = Mutex::new(None);
+    if let Some((at, m, setup)) = LAST.lock().expect("setup").as_ref() {
+        if at.elapsed() < Duration::from_secs(15) && m == model {
+            return setup.clone();
+        }
+    }
+    let setup = tt_model_serve(&cmdlines()).and_then(|(id, profile)| {
+        let (weights, default) = crate::codemodels::package_model(&id)?;
+        same_model(&weights, model).then_some(())?;
+        Some(format!("{id}#{}", profile.or(default)?))
+    });
+    *LAST.lock().expect("setup") = Some((Instant::now(), model.to_string(), setup.clone()));
+    setup
 }
 
 // ---------------------------------------------------------------- the window
@@ -510,7 +602,7 @@ type Known = (Instant, Option<u64>);
 static CONTEXT: LazyLock<Mutex<HashMap<String, Known>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-async fn served_context(model: &str, base_url: &str) -> Option<u64> {
+pub(crate) async fn served_context(model: &str, base_url: &str) -> Option<u64> {
     if let Some(c) = crate::coding::known_context(model) {
         return Some(c);
     }
@@ -576,6 +668,12 @@ pub fn decide(c: &Candidate, s: &Serving) -> Choice {
     if s.code_model.is_some_and(|m| same_model(m, c.name)) {
         return Choice::InUse;
     }
+    switch_now(c, s)
+}
+
+/// For a choice that isn't what Code runs on now (two setups of one model can
+/// share a name, so the caller knows which is in use): can it switch to it now?
+pub fn switch_now(c: &Candidate, s: &Serving) -> Choice {
     if !c.on_box {
         return Choice::Unavailable(
             "Its weights aren't on the box. Download it in Models first.".into(),
@@ -639,95 +737,6 @@ pub(crate) async fn get_speed(
         "prefix_cache": cache,
         "steps": steps(&id),
     })))
-}
-
-/// `GET /code/models`.
-pub(crate) async fn get_models(State(state): State<AppState>, _auth: BearerAuth) -> Json<Value> {
-    attach(&state);
-    let endpoint = crate::gateway::llm_endpoint(&state, None, true).await;
-    let life = state.lifecycle();
-    let device = state.device_mesh().map(str::to_string);
-    let catalog = match state.tt_cli() {
-        Some(tt) => tokio::task::spawn_blocking(move || {
-            tt.catalog(device.as_deref(), false)
-                .map_err(|e| e.to_string())
-        })
-        .await
-        .unwrap_or_else(|e| Err(e.to_string())),
-        None => Err("The box has no model catalog (the tt CLI isn't set up).".to_string()),
-    };
-    let code_model = endpoint.as_ref().map(|e| e.model.clone());
-    let changing = matches!(life.phase, Phase::Starting | Phase::Stopping)
-        .then(|| life.model.clone())
-        .flatten();
-    let serving = Serving {
-        code_model: code_model.as_deref(),
-        phase: life.phase,
-        changing: changing.as_deref(),
-        holder: state.chips_holder(),
-    };
-
-    let mut models: Vec<Value> = Vec::new();
-    // What Code runs on now comes first, from the server itself: its real window.
-    if let Some(e) = &endpoint {
-        let context = served_context(&e.model, &e.base_url).await;
-        let cache = prefix_cache(&e.model, &e.base_url).await;
-        let listed = catalog
-            .as_ref()
-            .ok()
-            .and_then(|c| c.models.iter().find(|m| same_model(&m.name, &e.model)));
-        models.push(json!({
-            "name": listed.map(|m| m.name.clone()).unwrap_or_else(|| e.model.clone()),
-            "served_id": e.model,
-            "context": context.or(listed.and_then(|m| m.max_context)),
-            "prefix_cache": cache,
-            "speed": measured(&e.model).map(|m| speed_json(&m)),
-            "params_b": listed.and_then(|m| m.param_count),
-            "choice": Choice::InUse,
-            "eta_s": Value::Null,
-        }));
-    }
-    if let Ok(cat) = &catalog {
-        let mut rest: Vec<&crate::ttcli::CatalogModel> = cat
-            .models
-            .iter()
-            .filter(|m| m.supported && matches!(m.model_type.as_str(), "llm" | "vlm"))
-            .filter(|m| m.weights.ready())
-            .filter(|m| {
-                !code_model
-                    .as_deref()
-                    .is_some_and(|c| same_model(c, &m.name))
-            })
-            .collect();
-        rest.sort_by_key(|m| m.name.to_lowercase());
-        for m in rest {
-            let choice = decide(
-                &Candidate {
-                    name: &m.name,
-                    on_box: m.weights.ready(),
-                    tools: m.tool_call_parser.is_some(),
-                },
-                &serving,
-            );
-            models.push(json!({
-                "name": m.name,
-                "served_id": Value::Null,
-                "context": m.max_context,
-                "prefix_cache": remembered_cache(&m.name),
-                "speed": measured(&m.name).map(|s| speed_json(&s)),
-                "params_b": m.param_count,
-                "choice": choice,
-                "eta_s": state.load_times().estimate(&m.name),
-            }));
-        }
-    }
-    Json(json!({
-        "code_model": code_model,
-        "serve": { "phase": life.phase, "model": life.model, "since": life.since, "error": life.error,
-                   "eta_s": (life.phase == Phase::Starting).then(|| life.model.as_deref().and_then(|m| state.load_times().estimate(m))).flatten() },
-        "catalog_error": catalog.err(),
-        "models": models,
-    }))
 }
 
 #[cfg(test)]
@@ -1006,6 +1015,68 @@ mod tests {
         let m = measured("test-ring-model").unwrap();
         assert_eq!(m.decode_tps.len(), SAMPLES);
         assert_eq!(median_f(&m.decode_tps), Some(19.0));
+    }
+
+    #[test]
+    fn the_running_package_and_profile_come_from_tt_model_serve() {
+        // As on this box today.
+        let lines = vec![
+            args("python -m vllm.entrypoints.openai.api_server --served-model-name openai/gpt-oss-20b"),
+            args("/home/u/tt-model-manager/.venv/bin/python /home/u/.local/bin/tt-model serve tt-hous/gpt-oss-20b-p150 --local-only --no-update-check --port 8003 --profile p150x2-throughput"),
+        ];
+        assert_eq!(
+            tt_model_serve(&lines),
+            Some((
+                "tt-hous/gpt-oss-20b-p150".into(),
+                Some("p150x2-throughput".into())
+            ))
+        );
+        // No --profile: the package's default (resolved by the caller).
+        assert_eq!(
+            tt_model_serve(&[args("tt-model serve a/b --port 1")]),
+            Some(("a/b".into(), None))
+        );
+        assert_eq!(
+            tt_model_serve(&[args("tt-model serve a/b --profile=x")]),
+            Some(("a/b".into(), Some("x".into())))
+        );
+        // Other tt-model commands, and other programs, aren't a serve.
+        assert_eq!(tt_model_serve(&[args("tt-model pull a/b")]), None);
+        assert_eq!(tt_model_serve(&[args("grep tt-model serve a/b")]), None);
+    }
+
+    #[test]
+    fn speeds_are_kept_per_setup() {
+        let t0 = Instant::now();
+        let step = Step::measured(
+            Some("test-setup/model-a".into()),
+            t0,
+            Some(t0),
+            t0 + Duration::from_secs(1),
+            100,
+            None,
+            31,
+        );
+        book_add(&book_key("test-setup/model-a", Some("pkg/a#x4")), &step);
+        assert_eq!(book_key("m", Some("pkg/a#x4")), "m @ pkg/a#x4");
+        let x4 = measured_in("model-a", Some("pkg/a#x4")).unwrap();
+        assert!(x4.recorded_setup);
+        assert_eq!(median_f(&x4.decode_tps), Some(30.0));
+        // Another profile has nothing of its own, and the model alone isn't that setup.
+        assert!(measured_in("model-a", Some("pkg/a#x2")).is_none());
+        assert!(measured_in("model-a", None).is_none());
+        // An entry from before setups were kept stands in, marked.
+        BOOK.lock().unwrap().insert(
+            "test-setup/model-a".into(),
+            Measured {
+                steps: 3,
+                ..Default::default()
+            },
+        );
+        let old = measured_in("model-a", Some("pkg/a#x2")).unwrap();
+        assert!(!old.recorded_setup);
+        assert_eq!(speed_json(&old)["setup_unrecorded"], true);
+        assert_eq!(measured_in("model-a", Some("pkg/a#x4")).unwrap().steps, 1);
     }
 
     #[test]
