@@ -20,6 +20,8 @@
 //!   one), for the config dir at startup.
 //! * [`private_temp_file`] is a temp file only this user can read, with an
 //!   unpredictable name (no `/tmp/<name>-<pid>` for someone else to pre-create).
+//!   [`private_temp_file_in`] is the same in a given `0700` directory, for
+//!   files too big for `$XDG_RUNTIME_DIR`'s tmpfs.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -39,7 +41,7 @@ fn unix_now() -> u64 {
 }
 
 /// A name for a temp file nobody can guess.
-fn random_suffix() -> String {
+pub(crate) fn random_suffix() -> String {
     format!("{:016x}", rand::random::<u64>())
 }
 
@@ -209,6 +211,19 @@ pub fn private_temp_file(prefix: &str, suffix: &str) -> io::Result<(File, PathBu
         .map(PathBuf::from)
         .filter(|d| d.is_dir())
         .unwrap_or_else(std::env::temp_dir);
+    new_in(&dir, prefix, suffix)
+}
+
+/// Like [`private_temp_file`], but in `dir` (created, and made `0700`): for
+/// big files (an export, an upload) that mustn't fill `$XDG_RUNTIME_DIR`, a
+/// small tmpfs other things depend on. Pass a directory on the data disk, such
+/// as the config dir's `tmp/`.
+pub fn private_temp_file_in(dir: &Path, prefix: &str, suffix: &str) -> io::Result<(File, PathBuf)> {
+    ensure_private_dir(dir)?;
+    new_in(dir, prefix, suffix)
+}
+
+fn new_in(dir: &Path, prefix: &str, suffix: &str) -> io::Result<(File, PathBuf)> {
     for _ in 0..8 {
         let path = dir.join(format!("{prefix}{}{suffix}", random_suffix()));
         match open_new(&path, PRIVATE) {
@@ -321,5 +336,11 @@ mod tests {
         assert_eq!(mode(&a), 0o600);
         let _ = std::fs::remove_file(a);
         let _ = std::fs::remove_file(b);
+
+        let big = cfg.join("tmp");
+        let (_h, c) = private_temp_file_in(&big, "tt-import-", ".tar.gz").unwrap();
+        assert_eq!(c.parent(), Some(big.as_path()));
+        assert_eq!(mode(&big), 0o700);
+        assert_eq!(mode(&c), 0o600);
     }
 }

@@ -329,6 +329,37 @@ async fn reset_chips_is_refused_when_someone_holds_the_chips() {
     assert!(!calls(dir.path()).iter().any(|c| c.starts_with("acquire")));
 }
 
+/// The box's own model holds the chips (its serve lease): a reset would pull
+/// them out from under it, so it's refused -- forced or not -- until the
+/// owner stops it.
+#[tokio::test]
+async fn reset_chips_is_refused_over_the_box_s_own_serve_lease() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path(), true);
+    // The default serving port (8000), as a serve's lease names it.
+    std::fs::write(
+        dir.path().join("held"),
+        gozer::own_who(8000, "llama3") + "\n",
+    )
+    .unwrap();
+    let base = serve(state.clone()).await;
+    let token = support::pair(&base, &state).await;
+
+    for force in [false, true] {
+        let (status, body) = post(
+            &base,
+            &token,
+            "/power",
+            serde_json::json!({ "action": "reset-chips", "force": force }),
+        )
+        .await;
+        assert_eq!(status, 409, "{body}");
+        assert!(body.contains("stop it first"), "{body}");
+    }
+    assert_eq!(reset_ran(dir.path()), None);
+    assert!(!calls(dir.path()).iter().any(|c| c.starts_with("acquire")));
+}
+
 #[tokio::test]
 async fn a_forced_reset_over_a_holder_is_audited() {
     let dir = tempfile::tempdir().unwrap();

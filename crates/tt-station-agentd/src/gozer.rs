@@ -1673,6 +1673,24 @@ pub enum ResetLease {
     Forced { note: String, overrode: String },
 }
 
+/// A live lease this agent holds for a SERVE (not one of its short utility
+/// leases, a reset or a Lab run), as the clause a refusal names -- or `None`.
+/// A board reset under it would pull the chips out from under this box's own
+/// running model; the owner stops the model first. `STALE` leases (their
+/// owner is gone) don't count: `gozer reconcile` clears them. Checked by
+/// `POST /power reset-chips` (`AppState::run_power_command`); the backend's
+/// own `POST /reset` stops its serve and gives its lease back first, so it
+/// doesn't ask.
+pub fn own_serve_lease(snapshot: &LeaseSnapshot, own_service_port: u16) -> Option<String> {
+    snapshot
+        .leases
+        .iter()
+        .filter(|l| l.state != "FREE" && l.state != "STALE")
+        .filter_map(|l| l.who.as_deref())
+        .filter(|who| !is_utility_who(who))
+        .find_map(|who| own_lease_clause(who, own_service_port))
+}
+
 /// Take the short whole-box lease a `tt-smi -r` runs under.
 ///
 /// 1. Someone else holds chips (or gozer cannot say): refuse with the reason
@@ -1822,13 +1840,26 @@ pub enum Handoff {
     Lost(String),
 }
 
+/// What a failed gozer call said: its stderr, or (gozer `--json` reports
+/// errors on stdout, with stderr empty) the `message` of its JSON answer, or
+/// the stdout as it is.
+fn failure_text(c: &CapturedOutput) -> String {
+    let err = c.stderr.trim();
+    if !err.is_empty() {
+        return err.to_string();
+    }
+    serde_json::from_str::<serde_json::Value>(c.stdout.trim())
+        .ok()
+        .and_then(|v| v["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| c.stdout.trim().to_string())
+}
+
 /// Hand `lease_id` (granted `chips`) to the workload `pid`, so the lease lives
 /// exactly as long as the workload instead of as long as this agent.
 ///
 /// 1. **`gozer transfer <id> --owner-pid <pid>`** -- the atomic operation this
-///    needs. gozer does not have it yet (see `docs/reference/chip-leasing.md`
-///    §5, "gozer follow-up"); an unknown sub-command exits 2 and this falls
-///    through. When gozer grows it, this path is used with no change here.
+///    needs (gozer 0.3.4 and later). An older gozer answers the unknown
+///    sub-command with exit 2 and this falls through to 2.
 /// 2. **Interim: release `--no-reset`, then re-acquire the SAME chips with
 ///    `--owner-pid <pid>`.** `--no-reset` because the workload is driving
 ///    them; `--force` only because a host workload's own open fd would
@@ -1875,7 +1906,7 @@ pub fn hand_off(
             return Handoff::Kept(format!(
                 "gozer transfer exited {}: {}",
                 c.code,
-                c.stderr.trim()
+                failure_text(&c)
             ))
         }
         Err(err) => return Handoff::Kept(format!("could not run gozer transfer: {err:#}")),
@@ -2084,6 +2115,19 @@ pub fn reconcile_own_leases(
     own_service_port: u16,
     agent_pid: u32,
 ) -> Option<ReconcileReport> {
+    reconcile_own_leases_while(runner, capability, own_service_port, agent_pid, &|| true)
+}
+
+/// [`reconcile_own_leases`], asking `proceed` before each release or
+/// hand-over and stopping (with what it did so far) the first time it says
+/// no -- a start or stop has begun, so the leases are theirs again.
+pub fn reconcile_own_leases_while(
+    runner: &dyn CommandRunner,
+    capability: &Capability,
+    own_service_port: u16,
+    agent_pid: u32,
+    proceed: &dyn Fn() -> bool,
+) -> Option<ReconcileReport> {
     let workload_pid = match serving_container(runner, own_service_port)? {
         // A container that publishes the port but whose pid cannot be read is
         // NOT "no workload".
@@ -2145,6 +2189,13 @@ pub fn reconcile_own_leases(
     }
 
     for action in plan_reconcile(&leases, workload_pid, agent_pid) {
+        if !proceed() {
+            eprintln!(
+                "tt-station-agentd: lease reconcile: a start or stop began; leaving the rest \
+                 for the next pass"
+            );
+            break;
+        }
         match action {
             ReconcileAction::Release { lease_id, why } => {
                 eprintln!("tt-station-agentd: lease reconcile: releasing '{lease_id}' -- {why}");
@@ -2329,10 +2380,22 @@ pub fn lease_gated_unit(
 
 /// A JSON list of lease ids kept in a file -- how leases on holder units are
 /// remembered across agent restarts (`<config>/holder-leases.json`).
+///
+/// Every read-change-write runs under one process-wide lock (the handle is
+/// made afresh wherever it's needed, so the lock can't live in it), and the
+/// file is replaced atomically (`crate::fsio::write_atomic`): two changes at
+/// once can't drop an id, and a crash can't leave half a list.
 pub struct LeaseFile(pub std::path::PathBuf);
+
+static LEASE_FILES: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl LeaseFile {
     pub fn ids(&self) -> Vec<String> {
+        let _held = LEASE_FILES.lock().unwrap_or_else(|p| p.into_inner());
+        self.read()
+    }
+
+    fn read(&self) -> Vec<String> {
         std::fs::read(&self.0)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
@@ -2344,41 +2407,51 @@ impl LeaseFile {
             let _ = std::fs::remove_file(&self.0);
             return;
         }
-        if let Some(dir) = self.0.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        let bytes = serde_json::to_vec(ids).unwrap_or_default();
+        if let Err(e) = crate::fsio::write_atomic(&self.0, &bytes, crate::fsio::PRIVATE) {
+            crate::log::error(format!("couldn't save {}: {e}", self.0.display()));
         }
-        let _ = std::fs::write(&self.0, serde_json::to_vec(ids).unwrap_or_default());
+    }
+
+    /// Change the list under the lock.
+    fn change<T>(&self, f: impl FnOnce(&mut Vec<String>) -> T) -> T {
+        let _held = LEASE_FILES.lock().unwrap_or_else(|p| p.into_inner());
+        let mut ids = self.read();
+        let before = ids.clone();
+        let out = f(&mut ids);
+        if ids != before {
+            self.write(&ids);
+        }
+        out
     }
 
     pub fn add(&self, id: &str) {
-        let mut ids = self.ids();
-        if !ids.iter().any(|i| i == id) {
-            ids.push(id.to_string());
-        }
-        self.write(&ids);
+        self.change(|ids| {
+            if !ids.iter().any(|i| i == id) {
+                ids.push(id.to_string());
+            }
+        });
     }
 
     /// Every id, and the file emptied.
     pub fn take(&self) -> Vec<String> {
-        let ids = self.ids();
-        self.write(&[]);
-        ids
+        self.change(std::mem::take)
     }
 
     /// Replace `old` with `new` (or drop it); `false` when `old` isn't here.
     pub fn swap(&self, old: &str, new: Option<&str>) -> bool {
-        let mut ids = self.ids();
-        let Some(i) = ids.iter().position(|id| id == old) else {
-            return false;
-        };
-        match new {
-            Some(new) => ids[i] = new.to_string(),
-            None => {
-                ids.remove(i);
+        self.change(|ids| {
+            let Some(i) = ids.iter().position(|id| id == old) else {
+                return false;
+            };
+            match new {
+                Some(new) => ids[i] = new.to_string(),
+                None => {
+                    ids.remove(i);
+                }
             }
-        }
-        self.write(&ids);
-        true
+            true
+        })
     }
 }
 
@@ -2472,39 +2545,107 @@ pub fn apply_reconcile(state: &crate::routes::AppState, report: &ReconcileReport
     }
 }
 
+/// Keeps the lease reconciler and serve starts/stops apart. A start or stop
+/// [`ServeOps::begin`]s (counted for as long as it runs, after waiting out a
+/// reconcile pass already going); a reconcile pass holds [`ServeOps::pass`]
+/// for its whole length, runs only when no start or stop is counted, and
+/// checks again before each action ([`ServeOps::quiet`]), stopping at the
+/// first sign of one.
+#[derive(Debug, Default)]
+pub struct ServeOps {
+    in_flight: std::sync::atomic::AtomicUsize,
+    pass: tokio::sync::Mutex<()>,
+}
+
+/// A start or stop in flight; uncounted when dropped.
+pub struct ServeOp<'a>(&'a ServeOps);
+
+impl ServeOps {
+    /// Count a start or stop from now, once any reconcile pass going has
+    /// finished. Counted first, so the pass stops before its next action.
+    pub async fn begin(&self) -> ServeOp<'_> {
+        self.in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let op = ServeOp(self);
+        drop(self.pass.lock().await);
+        op
+    }
+
+    /// No start or stop is in flight.
+    pub fn quiet(&self) -> bool {
+        self.in_flight.load(std::sync::atomic::Ordering::SeqCst) == 0
+    }
+
+    /// Held for a reconcile pass.
+    pub async fn pass(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.pass.lock().await
+    }
+}
+
+impl Drop for ServeOp<'_> {
+    fn drop(&mut self) {
+        self.0
+            .in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// The lease reconciler: once at startup (right after the sweep and
 /// adoption), then every [`RECONCILE_INTERVAL`], run
 /// [`reconcile_own_leases`] -- never while a start or stop is in flight, which
-/// own their lease until they finish. A no-op without gozer.
+/// own their lease until they finish: the pass holds the serve-operation lock
+/// ([`ServeOps`]) throughout, and before each release or hand-over checks
+/// that no start or stop has begun and the phase is what it was. A no-op
+/// without gozer.
 pub async fn reconcile_forever(state: crate::routes::AppState) {
     let Some(capability) = state.gozer().cloned() else {
         return;
     };
     let port = state.serving_port();
     loop {
-        let phase = state.lifecycle().phase;
-        if !matches!(
-            phase,
-            crate::routes::Phase::Starting | crate::routes::Phase::Stopping
-        ) {
-            let cap = capability.clone();
-            let report = tokio::task::spawn_blocking(move || {
-                reconcile_own_leases(
-                    &crate::serving::docker::RealCommandRunner,
-                    &cap,
-                    port,
-                    std::process::id(),
-                )
-            })
-            .await
-            .ok()
-            .flatten();
-            if let Some(report) = report {
-                apply_reconcile(&state, &report);
-            }
-        }
+        reconcile_pass(
+            &state,
+            &capability,
+            port,
+            std::sync::Arc::new(crate::serving::docker::RealCommandRunner),
+        )
+        .await;
         tokio::time::sleep(RECONCILE_INTERVAL).await;
     }
+}
+
+/// One reconcile pass under the serve-operation lock (see
+/// [`reconcile_forever`]). `None` when it was skipped (a start or stop in
+/// flight) or docker/gozer couldn't be read.
+pub async fn reconcile_pass(
+    state: &crate::routes::AppState,
+    capability: &Capability,
+    port: u16,
+    runner: std::sync::Arc<dyn CommandRunner>,
+) -> Option<ReconcileReport> {
+    let ops = state.serve_ops();
+    // Held across the blocking pass below: a start or stop waits for it.
+    let _pass = ops.pass().await;
+    let phase = state.lifecycle().phase;
+    if !ops.quiet()
+        || matches!(
+            phase,
+            crate::routes::Phase::Starting | crate::routes::Phase::Stopping
+        )
+    {
+        return None;
+    }
+    let st = state.clone();
+    let proceed = move || st.serve_ops().quiet() && st.lifecycle().phase == phase;
+    let cap = capability.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        reconcile_own_leases_while(&*runner, &cap, port, std::process::id(), &proceed)
+    })
+    .await
+    .ok()
+    .flatten()?;
+    apply_reconcile(state, &report);
+    Some(report)
 }
 
 /// For a holder unit about to be started: the gate FIFO to start it behind

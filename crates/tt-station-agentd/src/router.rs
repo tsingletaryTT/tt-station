@@ -407,6 +407,10 @@ pub fn app(state: AppState) -> Router {
         .route("/updates", get(crate::updates::get_updates))
         .route("/updates/install", post(crate::updates::post_install))
         .route("/updates/undo", post(crate::updates::post_undo))
+        .route(
+            "/updates/channel/approve",
+            post(crate::updates::post_approve_key),
+        )
         .route("/approvals", get(crate::approvals::get_approvals))
         .route("/approvals/answer", post(crate::approvals::post_answer))
         .route(

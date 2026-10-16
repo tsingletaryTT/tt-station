@@ -204,14 +204,13 @@ impl AppKeys {
         }
     }
 
-    /// Loaded from (and saved to) `path`; a missing file is no keys. Keys
-    /// kept in the clear by older versions are hashed and the file rewritten.
+    /// Loaded from (and saved to) `path`; a missing file is no keys. One
+    /// that won't parse is moved aside first (`crate::fsio`), so the next save
+    /// can't overwrite the keys in it. Keys kept in the clear by older
+    /// versions are hashed and the file rewritten.
     pub fn open(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let mut keys: Vec<AppKey> = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let mut keys: Vec<AppKey> = crate::fsio::read_json_or_backup(&path).unwrap_or_default();
         let mut converted = 0;
         for k in &mut keys {
             if let Some(raw) = k.key.take() {
@@ -1335,6 +1334,25 @@ mod tests {
         assert!(
             AppKeys::open(&path).check("ttq-0123456789abcdef0123456789abcdef", 20),
             "and after a restart"
+        );
+    }
+
+    #[test]
+    fn a_damaged_key_file_is_set_aside_not_overwritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app-keys.json");
+        std::fs::write(&path, b"[{\"id\": \"k1\", ").unwrap();
+        let keys = AppKeys::open(&path);
+        keys.create("new", 1).unwrap();
+        let aside: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("app-keys.json.corrupt-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        assert_eq!(
+            std::fs::read(tmp.path().join(&aside[0])).unwrap(),
+            b"[{\"id\": \"k1\", "
         );
     }
 

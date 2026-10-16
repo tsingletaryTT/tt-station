@@ -214,13 +214,26 @@ fn save_job(state: &AppState, job: &Job) {
 }
 
 /// [`save_job`] for the runner, keeping what people chose while it ran (a
-/// name, sharing) over its own copy.
+/// name, sharing) over its own copy. Under the same lock as [`patch_job`], so
+/// a rename can't land between the read and the write and be lost.
 fn save_progress(state: &AppState, job: &mut Job) {
+    let _files = mine(state).job_files.lock().expect("research");
     if let Some(saved) = load_job(state, &job.id) {
         job.title = saved.title;
         job.shared = saved.shared;
     }
     save_job(state, job);
+}
+
+/// Change a saved job in place: read it fresh, change it, save it, all under
+/// one lock, so a person's change (a name, sharing, a stop) and the runner's
+/// progress never overwrite each other with stale copies.
+fn patch_job(state: &AppState, id: &str, f: impl FnOnce(&mut Job)) -> Option<Job> {
+    let _files = mine(state).job_files.lock().expect("research");
+    let mut job = load_job(state, id)?;
+    f(&mut job);
+    save_job(state, &job);
+    Some(job)
 }
 
 fn sources(state: &AppState, id: &str) -> Vec<Source> {
@@ -471,6 +484,9 @@ fn strings(v: &Value, key: &str, max: usize) -> Vec<String> {
 pub(crate) struct PerAgent {
     /// Jobs asked to stop.
     stops: Mutex<HashSet<String>>,
+    /// Held across a read-change-write of a `job.json` ([`patch_job`],
+    /// [`save_progress`]).
+    job_files: Mutex<()>,
     /// One job on the model at a time.
     runner: Arc<tokio::sync::Mutex<()>>,
     /// Explanations written at once, across everyone; the rest wait a moment, then are told the box is busy.
@@ -481,6 +497,7 @@ impl Default for PerAgent {
     fn default() -> Self {
         PerAgent {
             stops: Mutex::new(HashSet::new()),
+            job_files: Mutex::new(()),
             runner: Arc::new(tokio::sync::Mutex::new(())),
             explaining: Arc::new(tokio::sync::Semaphore::new(2)),
         }
@@ -1088,12 +1105,13 @@ pub(crate) async fn post_stop(
     CallerAuth(caller): CallerAuth,
     UrlPath(id): UrlPath<String>,
 ) -> Reply {
-    let mut job = job_to_change(&state, &id, &caller)?;
-    if job.state == "queued" {
-        job.state = "stopped".into();
-        job.step = "Stopped".into();
-        save_job(&state, &job);
-    }
+    job_to_change(&state, &id, &caller)?;
+    patch_job(&state, &id, |job| {
+        if job.state == "queued" {
+            job.state = "stopped".into();
+            job.step = "Stopped".into();
+        }
+    });
     mine(&state).stops.lock().expect("research").insert(id);
     Ok(Json(json!({ "stopping": true })))
 }
@@ -1127,7 +1145,7 @@ pub(crate) async fn post_rename(
     UrlPath(id): UrlPath<String>,
     Json(b): Json<Rename>,
 ) -> Reply {
-    let mut job = job_to_change(&state, &id, &caller)?;
+    job_to_change(&state, &id, &caller)?;
     let title = b.title.trim().to_string();
     if title.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "Give it a name."));
@@ -1138,8 +1156,8 @@ pub(crate) async fn post_rename(
             "Keep the name under 120 characters.",
         ));
     }
-    job.title = Some(title.clone());
-    save_job(&state, &job);
+    let job = patch_job(&state, &id, |j| j.title = Some(title))
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
     Ok(Json(json!({ "job": job })))
 }
 
@@ -1157,9 +1175,9 @@ pub(crate) async fn post_share(
     UrlPath(id): UrlPath<String>,
     Json(b): Json<ShareBody>,
 ) -> Reply {
-    let mut job = job_to_change(&state, &id, &caller)?;
-    job.shared = b.shared;
-    save_job(&state, &job);
+    job_to_change(&state, &id, &caller)?;
+    let job = patch_job(&state, &id, |j| j.shared = b.shared)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "No such report."))?;
     crate::audit::record_as(
         &state,
         &caller.actor(),
@@ -1674,6 +1692,18 @@ mod tests {
         assert_eq!(saved.title.as_deref(), Some("Changes"));
         assert_eq!(saved.step, "Reading");
         assert_eq!(saved.started_by.as_deref(), Some("phone"));
+
+        // A rename made from a copy read before the runner's last step only
+        // changes the name: the step it read isn't written back.
+        let stale = load_job(&state, "1-abcdef").unwrap();
+        running.step = "Writing".into();
+        save_progress(&state, &mut running);
+        assert_eq!(stale.step, "Reading");
+        patch_job(&state, &stale.id, |j| j.title = Some("Renamed".into())).unwrap();
+        let saved = load_job(&state, "1-abcdef").unwrap();
+        assert_eq!(saved.step, "Writing", "the runner's progress stays");
+        assert_eq!(saved.title.as_deref(), Some("Renamed"));
+        assert!(saved.shared);
     }
 
     #[test]

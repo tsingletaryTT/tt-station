@@ -299,6 +299,9 @@ struct Inner {
     /// polled far more casually) spawn a `gozer status` subprocess on every
     /// single request." `None` until the first call populates it.
     gozer_leases_cache: tokio::sync::Mutex<Option<(Instant, crate::gozer::LeaseSnapshot)>>,
+    /// Starts and stops in flight, and the lease reconciler's pass: the two
+    /// never overlap (see [`crate::gozer::ServeOps`]).
+    serve_ops: crate::gozer::ServeOps,
     /// Disruptive actions the `POST /assistant` chat proposed but did NOT
     /// run, waiting for the human to approve or deny them via
     /// `POST /assistant/confirm`: `action_id -> PendingAction`. Same
@@ -556,6 +559,7 @@ impl AppState {
                 power_shutdown_cmd: vec!["systemctl".to_string(), "poweroff".to_string()],
                 gozer: None,
                 gozer_leases_cache: tokio::sync::Mutex::new(None),
+                serve_ops: crate::gozer::ServeOps::default(),
                 pending_actions: Mutex::new(HashMap::new()),
                 tt_cli: None,
                 lifecycle: Mutex::new(Lifecycle::default()),
@@ -1238,6 +1242,11 @@ impl AppState {
         self.inner.gozer.as_ref()
     }
 
+    /// Starts and stops against the lease reconciler.
+    pub(crate) fn serve_ops(&self) -> &crate::gozer::ServeOps {
+        &self.inner.serve_ops
+    }
+
     pub fn name(&self) -> &str {
         &self.inner.name
     }
@@ -1429,6 +1438,102 @@ mod pair_init_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A backend whose reconcile probe says Idle, but only once the test lets
+    /// it answer.
+    struct SlowProbe(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
+
+    impl crate::serving::ServingBackend for SlowProbe {
+        fn start_forcing(&self, _: &str, _: bool) -> anyhow::Result<Endpoint> {
+            Err(anyhow::anyhow!("not here"))
+        }
+        fn stop(&self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn status(&self) -> anyhow::Result<ServingStatus> {
+            Ok(ServingStatus::Idle)
+        }
+        fn reconciled_status(&self) -> anyhow::Result<ServingStatus> {
+            let _ = self.0.lock().unwrap().recv();
+            Ok(ServingStatus::Idle)
+        }
+    }
+
+    #[test]
+    fn chips_arent_reset_under_the_box_s_own_running_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("reset-ran");
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+        )
+        .with_power_config(
+            vec!["touch".into(), marker.display().to_string()],
+            vec!["/bin/true".into()],
+            vec!["/bin/true".into()],
+            vec!["/bin/true".into()],
+        );
+        for phase in [Phase::Starting, Phase::Serving, Phase::Stopping] {
+            state.set_lifecycle(phase, Some("m".into()), None, None);
+            for force in [false, true] {
+                let e = state
+                    .run_power_command(crate::power::PowerAction::ResetChips, force)
+                    .unwrap_err();
+                assert!(format!("{e:#}").contains("stop it first"), "{e:#}");
+                assert!(e.chain().any(|c| c.is::<crate::gozer::Contention>()));
+            }
+        }
+        assert!(!marker.exists(), "no reset ran");
+        state.set_lifecycle(Phase::Idle, None, None, None);
+        state
+            .run_power_command(crate::power::PowerAction::ResetChips, false)
+            .unwrap();
+        assert!(marker.exists());
+    }
+
+    #[tokio::test]
+    async fn a_start_during_the_reconcile_probe_isnt_healed_to_idle() {
+        let (go, wait) = std::sync::mpsc::channel();
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(SlowProbe(std::sync::Mutex::new(wait))),
+        );
+        let ep = |m: &str| Endpoint {
+            base_url: "http://127.0.0.1:8000/v1".into(),
+            model: m.into(),
+            requires_key: false,
+        };
+        state.set_serving(ep("old-model-reconcile-race"));
+        state.set_lifecycle(
+            Phase::Serving,
+            Some("old-model-reconcile-race".into()),
+            None,
+            None,
+        );
+        let probing = {
+            let s = state.clone();
+            tokio::spawn(async move { s.reconciled_status().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Meanwhile a new model is started.
+        state.set_serving(ep("new-model-reconcile-race"));
+        state.set_lifecycle(
+            Phase::Starting,
+            Some("new-model-reconcile-race".into()),
+            None,
+            None,
+        );
+        go.send(()).unwrap();
+        let got = probing.await.unwrap();
+        assert_eq!(
+            got,
+            ServingStatus::Serving("new-model-reconcile-race".into())
+        );
+        assert_eq!(state.lifecycle().phase, Phase::Starting);
+        assert!(state.endpoint().is_some(), "the new serve wasn't cleared");
+    }
 
     #[tokio::test]
     async fn cached_snapshot_dedupes_tt_smi_within_ttl() {

@@ -38,7 +38,10 @@
 //! and routines merge by id into what the box already has; everything else is
 //! written file by file (atomically), replacing a file at the same path.
 //! Jobs, reports and runs that weren't finished aren't imported, so an import
-//! never starts work.
+//! never starts work. A run's or an evaluation's `id` must be its file's name.
+//! Code sessions are exported (as a record) but never imported: a
+//! `session.json` names the folder the session works in and what it may do
+//! without asking, which an archive mustn't be able to set.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
@@ -71,6 +74,13 @@ pub const MAX_AUDIO_BYTES: u64 = crate::jobs::MAX_UPLOAD_BYTES as u64;
 pub const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 /// Most entries in an archive.
 pub const MAX_ENTRIES: usize = 100_000;
+
+/// Where an export or an upload is spooled: on the data disk, under the
+/// config dir (`0700`), not in `$XDG_RUNTIME_DIR` (a small tmpfs a 6 GB
+/// archive would fill).
+fn temp_dir(config: &Path) -> PathBuf {
+    config.join("tmp")
+}
 
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -613,7 +623,8 @@ pub(crate) async fn post_export(
     let config = state.config_dir();
     let box_name = state.name().to_string();
     let made = tokio::task::spawn_blocking(move || -> std::io::Result<(std::fs::File, Value)> {
-        let (file, path) = crate::fsio::private_temp_file("tt-export-", ".tar.gz")?;
+        let (file, path) =
+            crate::fsio::private_temp_file_in(&temp_dir(&config), "tt-export-", ".tar.gz")?;
         let result = (|| {
             let manifest = write_archive(&collect(&config), &box_name, &file)?;
             let back = std::fs::File::open(&path)?;
@@ -877,8 +888,13 @@ fn finished(path: &str, kind: Kind, bytes: &[u8], id_dir: Option<&str>) -> Resul
             FINISHED_RESEARCH.contains(&v["state"].as_str().unwrap_or(""))
                 && v["id"].as_str() == id_dir
         }
-        Kind::RoutineRuns => !v["finished"].is_null(),
-        Kind::Evals if !path.starts_with("evals/raw/") => v["status"] != "running",
+        // A run's and an evaluation's id names its file, and the agent later
+        // deletes `<dir>/<id>.json` by that id: it must be a plain id and the
+        // file's own name, or an import could aim a delete anywhere.
+        Kind::RoutineRuns => !v["finished"].is_null() && id_is_stem(path, &v),
+        Kind::Evals if !path.starts_with("evals/raw/") => {
+            v["status"] != "running" && id_is_stem(path, &v)
+        }
         _ => true,
     };
     if ok {
@@ -886,6 +902,17 @@ fn finished(path: &str, kind: Kind, bytes: &[u8], id_dir: Option<&str>) -> Resul
     } else {
         Err(format!("{path}: not finished work, so not imported"))
     }
+}
+
+/// `v["id"]` is a [`safe_id`] and `path`'s file name is `<id>.json`.
+fn id_is_stem(path: &str, v: &Value) -> bool {
+    let stem = path
+        .rsplit('/')
+        .next()
+        .and_then(|f| f.strip_suffix(".json"));
+    v["id"]
+        .as_str()
+        .is_some_and(|id| safe_id(id) && Some(id) == stem)
 }
 
 fn open_archive(
@@ -971,6 +998,17 @@ pub fn inspect(archive: &Path, config: &Path, current: &Current) -> Result<Plan,
             );
             continue;
         };
+        if kind == Kind::Code {
+            // A Code session's record carries its folder and what it may do
+            // unasked; taken from an archive as-is it would hand those to
+            // whoever made the archive. It's in an export as a record, and
+            // isn't brought back.
+            push_capped(
+                &mut skipped,
+                format!("{path}: Code sessions aren't imported"),
+            );
+            continue;
+        }
         if size > kind.cap() {
             return Err(format!("{path} is too big ({size} bytes)"));
         }
@@ -1154,7 +1192,36 @@ fn file_change(target: &Path, sha: &str) -> Change {
 /// directory, merge the merged kinds into the box's stores, and pick up the
 /// imported jobs. The archive is read again (it's the agent's own private
 /// temp file, checked by [`inspect`]).
-pub fn apply(state: &AppState, archive: &Path, plan: &Plan) -> Result<Preview, String> {
+///
+/// `actor` (who imported it) is recorded in the activity log for a setting
+/// that is logged when changed by hand: who may start and stop models.
+pub fn apply(
+    state: &AppState,
+    archive: &Path,
+    plan: &Plan,
+    actor: &crate::audit::Actor,
+) -> Result<Preview, String> {
+    let config = state.config_dir();
+    let was_control = settings_in(&config).model_control;
+    let result = apply_files(state, archive, plan);
+    let control = settings_in(&config).model_control;
+    if control != was_control {
+        crate::audit::record_as(
+            state,
+            actor,
+            "model_control",
+            &format!(
+                "{} -> {} (imported)",
+                was_control.as_str(),
+                control.as_str()
+            ),
+            "ok",
+        );
+    }
+    result
+}
+
+fn apply_files(state: &AppState, archive: &Path, plan: &Plan) -> Result<Preview, String> {
     let config = state.config_dir();
     let mut ar = open_archive(archive).map_err(|e| e.to_string())?;
     let mut jobs_written: HashSet<String> = HashSet::new();
@@ -1244,8 +1311,9 @@ pub(crate) async fn post_import(
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
     let dry_run = q.dry_run.unwrap_or(false);
-    let (file, path) = crate::fsio::private_temp_file("tt-import-", ".tar.gz")
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (file, path) =
+        crate::fsio::private_temp_file_in(&temp_dir(&state.config_dir()), "tt-import-", ".tar.gz")
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     // Removed however this ends.
     struct Cleanup(PathBuf);
     impl Drop for Cleanup {
@@ -1278,12 +1346,13 @@ pub(crate) async fn post_import(
     }
     let current = Current::of(&state);
     let st = state.clone();
+    let actor = caller.actor();
     let result = tokio::task::spawn_blocking(move || {
         let plan = inspect(&path, &st.config_dir(), &current)?;
         if dry_run {
             return Ok(plan.preview);
         }
-        apply(&st, &path, &plan)
+        apply(&st, &path, &plan, &actor)
     })
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1444,7 +1513,11 @@ mod tests {
             r#"{"id":"1-live","routine":"r1","name":"n","trigger":"manual","started":1,"status":"running"}"#,
         );
         write(root, "model-prefs.json", r#"{"chat":"Qwen3-32B"}"#);
-        write(root, SETTINGS_FILE, r#"{"keep_audio":true}"#);
+        write(
+            root,
+            SETTINGS_FILE,
+            r#"{"keep_audio":true,"model_control":"owners"}"#,
+        );
         write(
             root,
             "evals/1-e.json",
@@ -1720,6 +1793,60 @@ mod tests {
         assert!(skipped.contains("not finished"), "{skipped}");
     }
 
+    #[test]
+    fn runs_and_evals_whose_id_isnt_their_file_name_and_code_sessions_are_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("box");
+        let reg = tar::EntryType::Regular;
+        let files: Vec<(&str, &[u8])> = vec![
+            // An id that walks out of runs/: pruning would delete it.
+            (
+                "routines/runs/1-evil.json",
+                br#"{"id":"../../memories","routine":"r","name":"n","trigger":"manual","started":1,"finished":2,"status":"done"}"#,
+            ),
+            // A plain id that isn't the file's name.
+            (
+                "routines/runs/2-a.json",
+                br#"{"id":"2-b","routine":"r","name":"n","trigger":"manual","started":1,"finished":2,"status":"done"}"#,
+            ),
+            (
+                "routines/runs/3-ok.json",
+                br#"{"id":"3-ok","routine":"r","name":"n","trigger":"manual","started":1,"finished":2,"status":"done"}"#,
+            ),
+            (
+                "evals/4-e.json",
+                br#"{"id":"../x","model":"m","started":1,"status":"done"}"#,
+            ),
+            (
+                "code/5-c/session.json",
+                br#"{"id":"other","folder":"/","sandbox":false,"policy":"always","always":["Bash"]}"#,
+            ),
+        ];
+        let listed: Vec<Value> = files
+            .iter()
+            .map(|(p, b)| json!({ "path": p, "sha256": sha256_of(*b).unwrap().0 }))
+            .collect();
+        let manifest =
+            serde_json::to_vec(&json!({ "format": FORMAT, "format_version": 1, "files": listed }))
+                .unwrap();
+        let mut entries: Vec<(&str, tar::EntryType, &[u8])> = vec![(MANIFEST, reg, &manifest)];
+        entries.extend(files.iter().map(|(p, b)| (*p, reg, *b)));
+        let out = tmp.path().join("a.tar.gz");
+        raw_archive(&out, &entries);
+        let plan = inspect(&out, &config, &Current::default()).unwrap();
+        let mut planned: Vec<&String> = plan.files.keys().collect();
+        planned.sort();
+        assert_eq!(planned, vec!["routines/runs/3-ok.json"]);
+        let skipped = plan.preview.skipped.join("\n");
+        assert!(skipped.contains("1-evil.json"), "{skipped}");
+        assert!(skipped.contains("2-a.json"), "{skipped}");
+        assert!(skipped.contains("4-e.json"), "{skipped}");
+        assert!(
+            skipped.contains("Code sessions aren't imported"),
+            "{skipped}"
+        );
+    }
+
     fn state_at(root: &Path) -> AppState {
         AppState::new(
             "t".into(),
@@ -1766,12 +1893,18 @@ mod tests {
         );
 
         let plan = inspect(&out, &b, &Current::of(&state)).unwrap();
-        apply(&state, &out, &plan).unwrap();
+        apply(&state, &out, &plan, &crate::audit::Actor::the_box()).unwrap();
+        // Who may start models changed with it, and the activity log says so.
+        let (log, _) = state.audit().page(0, 50);
+        assert!(
+            log.iter()
+                .any(|e| e.action == "model_control" && e.target == "anyone -> owners (imported)"),
+            "{log:?}"
+        );
         for rel in [
             "jobs/aaaa1111/transcript.txt",
             "jobs/bbbb2222/input.m4a",
             "research/1-r/report.md",
-            "code/1-a/session.json",
             "creations/0123abcd.txt",
             "evals/1-e.json",
             "model-prefs.json",
@@ -1783,6 +1916,10 @@ mod tests {
             );
         }
         assert!(!b.join("jobs/aaaa1111/input.ogg").exists());
+        assert!(
+            !b.join("code/1-a/session.json").exists(),
+            "Code sessions aren't imported"
+        );
         // Merged by id: the box's own memory stays beside the imported one.
         let texts: Vec<String> = state
             .memories()

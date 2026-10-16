@@ -199,6 +199,21 @@ impl AppState {
         if let Some(holder) = self.chips_holder() {
             anyhow::bail!("{holder}");
         }
+        // A board reset under this box's own model -- starting, serving or
+        // stopping -- pulls the chips out from under it: the owner stops it
+        // first, `force` or not (`force` is for other tenants' leases). Every
+        // caller that resets on the way to a start stops the model first.
+        if matches!(action, PowerAction::ResetChips)
+            && matches!(
+                self.lifecycle().phase,
+                Phase::Starting | Phase::Serving | Phase::Stopping
+            )
+        {
+            return Err(anyhow::Error::new(crate::gozer::Contention::new(
+                "refusing reset-chips: this box's own model is running on the chips -- stop it \
+                 first (`tt-station stop`)",
+            )));
+        }
         let mut lease: Option<(crate::gozer::Capability, crate::gozer::Grant)> = None;
         let mut overrode = None;
         if matches!(action, PowerAction::ResetChips) {
@@ -215,6 +230,17 @@ impl AppState {
                         Ok(_) => eprintln!("tt-station-agentd: reset-chips: cleared stale chip leases (gozer reconcile)"),
                         Err(e) => eprintln!("tt-station-agentd: reset-chips: gozer reconcile failed: {e}"),
                     }
+                }
+                // This box's own model holds chips (its serve lease): a
+                // reset would pull them out from under it -- stop it first,
+                // `force` or not.
+                if let Some(own) = crate::gozer::snapshot_leases(&runner, capability)
+                    .as_ref()
+                    .and_then(|s| crate::gozer::own_serve_lease(s, self.inner.serving_port))
+                {
+                    return Err(anyhow::Error::new(crate::gozer::Contention::new(format!(
+                        "refusing reset-chips: {own}"
+                    ))));
                 }
                 // The SAME refusal `RunPyBackend::reset_forcing` makes, made
                 // by the same `ForeignLeases::resolve` so the two paths cannot
@@ -253,6 +279,10 @@ impl AppState {
         }
 
         if action.is_machine_op() {
+            // On purpose: the next boot mustn't start the model again
+            // (`crate::boot`). Suspend too -- a resume isn't a boot, but the
+            // model is stopped either way.
+            crate::boot::note_owner_stop(&self.config_dir());
             if let Some(ep) = self.endpoint() {
                 if let Err(e) = self.backend().stop(&ep.model) {
                     eprintln!(

@@ -293,6 +293,12 @@ async fn the_first_device_is_an_owner_and_members_cannot_manage_the_box() {
         (M::POST, format!("{base}/updates/undo"), json!({})),
         (
             M::POST,
+            format!("{base}/updates/channel/approve"),
+            json!({ "fingerprint": "0123456789abcdef" }),
+        ),
+        (M::DELETE, format!("{base}/apps/n8n"), json!({})),
+        (
+            M::POST,
             format!("{base}/software/cli-update"),
             json!({ "dry_run": true }),
         ),

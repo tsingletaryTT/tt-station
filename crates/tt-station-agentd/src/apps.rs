@@ -21,7 +21,8 @@
 //!
 //! - `GET /apps`: the catalogue and each app's state.
 //! - `POST /apps/{id}/start`: install (in the background: pull, key, run) or start.
-//! - `POST /apps/{id}/stop`; `DELETE /apps/{id}` (the container; the data stays).
+//! - `POST /apps/{id}/stop`; `DELETE /apps/{id}` (owners: the container and its
+//!   network sharing; the data stays).
 //! - `PUT /apps/{id}/network {open}`: Open to the network, or back to box-only.
 
 use std::collections::HashMap;
@@ -1156,9 +1157,12 @@ pub(crate) async fn put_network(
     done
 }
 
+/// `DELETE /apps/{id}`: remove the app's container, and its network sharing
+/// with it (installed again, it's back on the box only until an owner opens
+/// it). Owners only: removing an app takes it away from everyone.
 pub(crate) async fn delete_app(
     axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
+    _auth: crate::routes::OwnerAuth,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Reply {
     let def = app(&id).ok_or_else(|| err(StatusCode::NOT_FOUND, "No such app."))?;
@@ -1171,6 +1175,11 @@ pub(crate) async fn delete_app(
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
     .map_err(|e| err(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if opened(&state).iter().any(|x| x == def.id) {
+        set_open(&state, def.id, false).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        crate::audit::record(&state, "app_network_close", def.id, "ok");
+    }
+    crate::audit::record(&state, "app_delete", def.id, "ok");
     Ok(Json(json!({ "state": "not_installed" })))
 }
 

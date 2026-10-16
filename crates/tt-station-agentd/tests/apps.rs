@@ -412,6 +412,28 @@ async fn only_an_owner_opens_an_app_to_the_network() {
 }
 
 #[tokio::test]
+async fn only_an_owner_removes_an_app_and_its_network_sharing_goes_with_it() {
+    let b = Box_::new("remove").await;
+    let (status, _) = b.network(&b.owner, "openclaw", true).await;
+    assert_eq!(status, 200);
+    let member = support::pair(&b.base, &b.state).await;
+    let delete = |token: String| {
+        b.c.delete(format!("{}/apps/openclaw", b.base))
+            .bearer_auth(token)
+            .send()
+    };
+    assert_eq!(delete(member).await.unwrap().status(), 403);
+    assert!(!calls_for("tt-app-openclaw").contains(&"rm -f tt-app-openclaw".to_string()));
+    assert_eq!(delete(b.owner.clone()).await.unwrap().status(), 200);
+    let saved: Vec<String> =
+        serde_json::from_slice(&std::fs::read(b.config.join("apps/network.json")).unwrap())
+            .unwrap();
+    assert!(saved.is_empty(), "{saved:?}");
+    let tile = b.tile("openclaw").await;
+    assert_eq!(tile["network"]["open"], false, "{tile}");
+}
+
+#[tokio::test]
 async fn a_stopped_container_made_for_another_setting_is_made_again_with_its_token() {
     let b = Box_::new("langflow").await;
     // Made box-only, before its owner opened it.

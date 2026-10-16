@@ -22,6 +22,12 @@
 //! (the older ones shift up) and [`KEEP`] files in all are kept, so the log
 //! stays bounded at about 50 MB. `GET /audit` (owners) reads it newest first.
 //!
+//! Refusals are throttled per device: in a minute, at most
+//! [`DENIALS_PER_TARGET`] of the same request and [`DENIALS_PER_MINUTE`] in all
+//! are written one by one; past that they're counted, and one summary line
+//! (`"N more refused requests (last: …)"`) is written once the minute is over.
+//! A member can't flush the log by being refused over and over.
+//!
 //! Never write a token, key or code here: entries name devices, keys and
 //! people by their ids and names only.
 //!
@@ -29,6 +35,7 @@
 //! runs each request's handler inside [`ACTOR`], so a handler records an
 //! action with one line, `audit::record(&state, "power", &target, "ok")`.
 
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -43,6 +50,22 @@ pub const KEEP: usize = 5;
 const MEMORY_CAP: usize = 1000;
 /// Longest target kept; a target is a name or an id, not a document.
 const MAX_TARGET: usize = 200;
+/// Refusals written one by one per device per minute; the rest are summed up.
+pub const DENIALS_PER_MINUTE: u32 = 30;
+/// Refusals of the same request written one by one per device per minute.
+pub const DENIALS_PER_TARGET: u32 = 3;
+
+/// One device's refusals in the current minute.
+#[derive(Debug)]
+struct Denials {
+    minute: u64,
+    count: u32,
+    /// By request, this minute.
+    per_target: HashMap<String, u32>,
+    suppressed: u32,
+    device_name: String,
+    last_target: String,
+}
 
 /// Who made the request being handled.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -85,6 +108,8 @@ pub struct AuditLog {
     path: Option<PathBuf>,
     /// Serializes appends and rotation; in memory, holds the entries.
     memory: Mutex<Vec<Entry>>,
+    /// Refusals this minute, by device (`None`: the box itself).
+    denials: Mutex<HashMap<Option<String>, Denials>>,
 }
 
 impl std::fmt::Debug for AuditLog {
@@ -101,6 +126,7 @@ impl AuditLog {
         AuditLog {
             path: None,
             memory: Mutex::new(Vec::new()),
+            denials: Mutex::default(),
         }
     }
 
@@ -109,12 +135,70 @@ impl AuditLog {
         AuditLog {
             path: Some(path.into()),
             memory: Mutex::new(Vec::new()),
+            denials: Mutex::default(),
         }
     }
 
     /// Add `entry`. A failed write is logged, never returned: the action it
     /// records has already happened.
+    /// Refusals past [`DENIALS_PER_MINUTE`] are counted instead, and summed
+    /// up in one line after their minute.
     pub fn append(&self, entry: Entry) {
+        for e in self.throttle(entry) {
+            self.write(e);
+        }
+    }
+
+    /// What to write for `entry`: summaries of minutes that are over, then
+    /// the entry itself unless it's one refusal too many.
+    fn throttle(&self, entry: Entry) -> Vec<Entry> {
+        let minute = entry.ts / 60;
+        let mut out = Vec::new();
+        let mut denials = self.denials.lock().expect("audit mutex poisoned");
+        for (device_id, d) in denials.iter_mut() {
+            if d.minute < minute && d.suppressed > 0 {
+                out.push(Entry {
+                    ts: d.minute * 60 + 59,
+                    device_id: device_id.clone(),
+                    device_name: d.device_name.clone(),
+                    action: "denied".into(),
+                    target: format!(
+                        "{} more refused requests (last: {})",
+                        d.suppressed, d.last_target
+                    ),
+                    result: "denied".into(),
+                });
+                d.suppressed = 0;
+            }
+        }
+        denials.retain(|_, d| d.minute >= minute);
+        if entry.result == "denied" {
+            let d = denials
+                .entry(entry.device_id.clone())
+                .or_insert_with(|| Denials {
+                    minute,
+                    count: 0,
+                    per_target: HashMap::new(),
+                    suppressed: 0,
+                    device_name: String::new(),
+                    last_target: String::new(),
+                });
+            let same = d.per_target.entry(entry.target.clone()).or_insert(0);
+            *same += 1;
+            if d.count >= DENIALS_PER_MINUTE || *same > DENIALS_PER_TARGET {
+                d.suppressed += 1;
+                d.device_name = entry.device_name;
+                d.last_target = entry.target;
+                return out;
+            }
+            // Written: counts toward the minute's cap.
+            d.count += 1;
+        }
+        out.push(entry);
+        out
+    }
+
+    fn write(&self, entry: Entry) {
         let mut memory = self.memory.lock().expect("audit mutex poisoned");
         let Some(path) = &self.path else {
             memory.push(entry);
@@ -325,6 +409,50 @@ mod tests {
             page.iter().map(|e| e.ts).collect::<Vec<_>>(),
             (20..30).rev().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn repeated_refusals_are_summed_up_not_written_one_by_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let log = AuditLog::open(&path);
+        let denied = |ts: u64, dev: &str, target: String| Entry {
+            ts,
+            device_id: Some(dev.into()),
+            device_name: "Member".into(),
+            action: "denied".into(),
+            target,
+            result: "denied".into(),
+        };
+        let lines = || std::fs::read_to_string(&path).unwrap().lines().count();
+        let t0 = 6_000_000;
+        // The same request over and over: a few lines.
+        for _ in 0..500 {
+            log.append(denied(t0, "m", "POST /run".into()));
+        }
+        assert_eq!(lines(), DENIALS_PER_TARGET as usize);
+        // Different requests: up to the per-minute cap.
+        for n in 0..500 {
+            log.append(denied(t0, "m", format!("POST /x{n}")));
+        }
+        let mine = DENIALS_PER_MINUTE as usize;
+        assert_eq!(lines(), mine);
+        // Another device isn't held back by the first one's refusals.
+        log.append(denied(t0, "other", "POST /run".into()));
+        assert_eq!(lines(), mine + 1);
+        // Owner actions still go straight in.
+        log.append(entry(t0));
+        assert_eq!(lines(), mine + 2);
+        // The next minute: one summary line, then the new entry.
+        log.append(denied(t0 + 60, "m", "POST /y".into()));
+        let (page, _) = log.page(0, 2);
+        assert_eq!(page[0].target, "POST /y");
+        assert_eq!(
+            page[1].target,
+            format!("{} more refused requests (last: POST /x499)", 1000 - mine)
+        );
+        assert_eq!(page[1].device_id.as_deref(), Some("m"));
+        assert_eq!(lines(), mine + 4);
     }
 
     #[test]
