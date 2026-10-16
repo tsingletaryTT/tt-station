@@ -9,7 +9,7 @@ extension View {
     /// text boxes take more than one line: Return adds a line there, so
     /// there's no other way to close the keyboard. Attach once per screen.
     /// Not for a text box pinned to the bottom edge (Chat): the keyboard's bar
-    /// can land on top of it there, so use `HideKeyboardButton` in the layout.
+    /// can land on top of it there, so use `HideKeyboardOverlay` instead.
     func keyboardDoneButton() -> some View {
         toolbar {
             ToolbarItemGroup(placement: .keyboard) {
@@ -39,5 +39,25 @@ struct HideKeyboardButton: View {
         .buttonStyle(.plain)
         .glassEffect(.regular.interactive(), in: .capsule)
         .accessibilityLabel("Hide keyboard")
+    }
+}
+
+/// `HideKeyboardButton` floating just above a bottom-pinned text box while it
+/// has focus. Use it as the box's `.overlay(alignment: .topTrailing)`. It takes
+/// no layout space, so showing it doesn't resize the safe-area inset the box
+/// lives in, which would re-lay out everything above it (a whole conversation)
+/// and can take focus away from the box being tapped.
+struct HideKeyboardOverlay: View {
+    let visible: Bool
+    let action: () -> Void
+
+    var body: some View {
+        ZStack {
+            if visible {
+                HideKeyboardButton(action: action).transition(.opacity)
+            }
+        }
+        .alignmentGuide(.top) { $0[.bottom] + 8 }
+        .animation(.easeOut(duration: 0.15), value: visible)
     }
 }

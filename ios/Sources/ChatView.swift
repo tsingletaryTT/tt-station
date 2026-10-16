@@ -181,27 +181,24 @@ private struct ChatContent: View {
                 ListeningBar(voice: voice, onCancel: endVoice)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             } else {
-                VStack(alignment: .trailing, spacing: 6) {
-                    // The composer's Return adds a line, so typing gets its own way
-                    // to put the keyboard away. It sits in this inset, above the text
-                    // box, rather than on the keyboard's toolbar: iOS lays that bar out
-                    // separately and it sometimes landed on top of the composer.
-                    if inputFocused {
-                        HideKeyboardButton { inputFocused = false }
-                            .padding(.horizontal, 12)
-                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                Composer(draft: $draft, focused: $inputFocused,
+                         enabled: session.canChat,
+                         busy: session.isThinking,
+                         speaking: speaker.isSpeaking,
+                         placeholder: placeholder,
+                         onSend: send,
+                         onStop: { session.stopGenerating() },
+                         onMic: { showVoice = true },
+                         onHush: endVoice)
+                    // The composer's Return adds a line, so typing gets its own way to
+                    // put the keyboard away. Not on the keyboard's toolbar, which iOS
+                    // lays out separately and sometimes landed on the composer; and
+                    // floating above it rather than in this inset, so focusing doesn't
+                    // resize the inset and re-lay out the whole conversation.
+                    .overlay(alignment: .topTrailing) {
+                        HideKeyboardOverlay(visible: inputFocused) { inputFocused = false }
+                            .padding(.trailing, 12)
                     }
-                    Composer(draft: $draft, focused: $inputFocused,
-                             enabled: session.canChat,
-                             busy: session.isThinking,
-                             speaking: speaker.isSpeaking,
-                             placeholder: placeholder,
-                             onSend: send,
-                             onStop: { session.stopGenerating() },
-                             onMic: { showVoice = true },
-                             onHush: endVoice)
-                }
-                .animation(.snappy, value: inputFocused)
             }
         }
         .animation(.snappy, value: voice.isListening)
@@ -810,6 +807,9 @@ private struct Composer: View {
                     .focused(focused)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
+                    // A tap anywhere on the pill types, not only on the text line itself.
+                    .contentShape(.rect(cornerRadius: 24))
+                    .onTapGesture { focused.wrappedValue = true }
                     .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 24))
                     .disabled(!enabled)
 

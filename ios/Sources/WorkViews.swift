@@ -257,13 +257,6 @@ struct CodeThreadView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // In the layout, not on the keyboard's toolbar, which can cover a
-            // text box pinned to the bottom (see `HideKeyboardButton`).
-            if draftFocused {
-                HideKeyboardButton { draftFocused = false }
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
             if let problem {
                 Text(problem).font(.tt(.caption)).foregroundStyle(.orange)
             }
@@ -296,7 +289,11 @@ struct CodeThreadView: View {
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
-        .animation(.snappy, value: draftFocused)
+        // Floats above the composer: see `HideKeyboardOverlay`.
+        .overlay(alignment: .topTrailing) {
+            HideKeyboardOverlay(visible: draftFocused) { draftFocused = false }
+                .padding(.trailing, 12)
+        }
     }
 
     private func send(interrupt: Bool) {
