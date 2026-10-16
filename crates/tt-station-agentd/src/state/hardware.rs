@@ -279,6 +279,10 @@ impl AppState {
         }
 
         if action.is_machine_op() {
+            // On purpose: the next boot mustn't start the model again
+            // (`crate::boot`). Suspend too -- a resume isn't a boot, but the
+            // model is stopped either way.
+            crate::boot::note_owner_stop(&self.config_dir());
             if let Some(ep) = self.endpoint() {
                 if let Err(e) = self.backend().stop(&ep.model) {
                     eprintln!(

@@ -14,12 +14,16 @@
 //!
 //! - the setting is on, and the note says a model was serving when the box
 //!   went down (one the person stopped, or that stopped by itself, isn't
-//!   brought back);
+//!   brought back; nor is one serving when an owner shut the box down or
+//!   rebooted it on purpose, which [`note_owner_stop`] notes);
 //! - the box itself started a short while ago ([`BOOT_WINDOW_S`] of uptime):
 //!   this is a boot, not just the agent restarting (an update, a crash), after
 //!   which a model that was serving is still serving and is adopted instead;
 //! - nothing is serving or starting, nothing else holds the chips, and no job
 //!   is waiting to switch the box to what it needs.
+//!
+//! The model is started by the id it was started by (not its display name);
+//! a community package is started again through the community serve path.
 
 use std::time::Duration;
 
@@ -42,6 +46,9 @@ pub struct LastServing {
     /// The model last seen serving (kept after it stops, for the record).
     #[serde(default)]
     pub model: Option<String>,
+    /// The community package that served it, when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
     /// Whether it was still serving at the last look.
     #[serde(default)]
     pub serving: bool,
@@ -65,32 +72,66 @@ pub struct Facts {
     pub jobs_pending: bool,
 }
 
-/// The model to start again, if any (see the module docs).
-pub fn decide(last: &LastServing, facts: Facts) -> Option<String> {
-    let booted = facts.uptime_s.is_some_and(|u| u <= BOOT_WINDOW_S);
-    let free = facts.idle && facts.chips_free && !facts.jobs_pending;
-    if facts.enabled && last.serving && booted && free {
-        last.model.clone().filter(|m| !m.trim().is_empty())
-    } else {
-        None
-    }
+/// What to start again.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Restart {
+    /// A catalog model, by the id it was started by.
+    Model(String),
+    /// A community package, by its id.
+    Package(String),
 }
 
-/// The note brought up to date from what the agent sees now. A start in
-/// progress changes nothing (it either comes up or fails, and that's noted).
-pub fn observe(last: &LastServing, phase: Phase, model: Option<String>, now: u64) -> LastServing {
+/// What to start again, if anything (see the module docs).
+pub fn decide(last: &LastServing, facts: Facts) -> Option<Restart> {
+    let booted = facts.uptime_s.is_some_and(|u| u <= BOOT_WINDOW_S);
+    let free = facts.idle && facts.chips_free && !facts.jobs_pending;
+    if !(facts.enabled && last.serving && booted && free) {
+        return None;
+    }
+    let named = |s: &Option<String>| s.clone().filter(|m| !m.trim().is_empty());
+    named(&last.package)
+        .map(Restart::Package)
+        .or_else(|| named(&last.model).map(Restart::Model))
+}
+
+/// The note brought up to date from what the agent sees now (`package`: the
+/// community package serving, if one is). A start in progress changes nothing
+/// (it either comes up or fails, and that's noted).
+pub fn observe(
+    last: &LastServing,
+    phase: Phase,
+    model: Option<String>,
+    package: Option<String>,
+    now: u64,
+) -> LastServing {
     match phase {
         Phase::Serving => LastServing {
             model: model.or_else(|| last.model.clone()),
+            package,
             serving: true,
             at: now,
         },
         Phase::Starting => last.clone(),
         Phase::Idle | Phase::Stopping | Phase::Failed => LastServing {
-            model: last.model.clone(),
             serving: false,
             at: now,
+            ..last.clone()
         },
+    }
+}
+
+/// An owner is shutting the box down or rebooting it on purpose: note that
+/// nothing is serving, so the next boot doesn't start it again. The model
+/// stays in the note, for the record.
+pub fn note_owner_stop(config_dir: &std::path::Path) {
+    let path = config_dir.join(RECORD_FILE);
+    let Some(mut last) = crate::fsio::read_json_or_backup::<LastServing>(&path) else {
+        return;
+    };
+    if last.serving {
+        last.serving = false;
+        last.at = now();
+        crate::fsio::save_json(&path, &last, crate::fsio::PRIVATE);
     }
 }
 
@@ -130,28 +171,48 @@ pub async fn run_forever(state: AppState) {
         chips_free: state.chips_holder().is_none(),
         jobs_pending: state.jobs().is_some_and(|j| j.has_pending()),
     };
-    if let Some(model) = decide(&last, facts) {
-        let model = crate::notify::display_model(&model);
-        crate::log::info(format!(
-            "the box restarted while {model} was serving; starting it again"
-        ));
-        let started = crate::routes::begin_serve(&state, &model, false).await;
+    if let Some(restart) = decide(&last, facts) {
+        let (shown, started) = match &restart {
+            Restart::Model(id) => {
+                let shown = crate::notify::display_model(id);
+                crate::log::info(format!(
+                    "the box restarted while {shown} was serving; starting it again"
+                ));
+                // By the id it was started by: the display name isn't one.
+                let started = crate::routes::begin_serve(&state, id, false).await.is_ok();
+                (shown, started)
+            }
+            Restart::Package(id) => {
+                crate::log::info(format!(
+                    "the box restarted while the community package {id} was serving; starting it again"
+                ));
+                let (started, why) = crate::routines::start_model(&state, id).await;
+                if !started {
+                    crate::log::error(format!("couldn't start {id} again: {why}"));
+                }
+                (id.clone(), started)
+            }
+        };
         crate::audit::record_as(
             &state,
             &crate::audit::Actor::the_box(),
             "model_switch",
-            &format!("{model} (after a restart)"),
-            if started.is_ok() {
-                "starting"
-            } else {
-                "failed"
-            },
+            &format!("{shown} (after a restart)"),
+            if started { "starting" } else { "failed" },
         );
     }
     loop {
         let life = state.lifecycle();
-        let next = observe(&last, life.phase, life.model.or(life.served_id), now());
-        if next.model != last.model || next.serving != last.serving {
+        let package = crate::community::serving_package(&state, &life);
+        let next = observe(
+            &last,
+            life.phase,
+            life.model.or(life.served_id),
+            package,
+            now(),
+        );
+        if next.model != last.model || next.serving != last.serving || next.package != last.package
+        {
             crate::fsio::save_json(&path, &next, crate::fsio::PRIVATE);
         }
         last = next;
@@ -175,18 +236,46 @@ mod tests {
 
     fn was_serving() -> LastServing {
         LastServing {
-            model: Some("Llama-3.3-70B-Instruct".into()),
+            model: Some("meta-llama/Llama-3.3-70B-Instruct".into()),
+            package: None,
             serving: true,
             at: 1,
         }
     }
 
     #[test]
-    fn a_boot_with_the_setting_on_brings_the_model_back() {
+    fn a_boot_with_the_setting_on_brings_the_model_back_by_its_id() {
         assert_eq!(
-            decide(&was_serving(), facts()).as_deref(),
-            Some("Llama-3.3-70B-Instruct")
+            decide(&was_serving(), facts()),
+            Some(Restart::Model("meta-llama/Llama-3.3-70B-Instruct".into())),
+            "the id it was started by, not a display name"
         );
+        let community = LastServing {
+            model: Some("meta-models/Muse-Glimmer-30B".into()),
+            package: Some("muse-glimmer".into()),
+            ..was_serving()
+        };
+        assert_eq!(
+            decide(&community, facts()),
+            Some(Restart::Package("muse-glimmer".into())),
+            "a community package goes back through its own serve path"
+        );
+    }
+
+    #[test]
+    fn a_deliberate_shutdown_or_reboot_isnt_undone_at_the_next_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RECORD_FILE);
+        crate::fsio::write_json(&path, &was_serving(), crate::fsio::PRIVATE).unwrap();
+        note_owner_stop(dir.path());
+        let last: LastServing = crate::fsio::read_json_or_backup(&path).unwrap();
+        assert!(!last.serving);
+        assert_eq!(last.model, was_serving().model, "kept for the record");
+        assert_eq!(decide(&last, facts()), None);
+        // Nothing noted yet: nothing to change.
+        let empty = tempfile::tempdir().unwrap();
+        note_owner_stop(empty.path());
+        assert!(!empty.path().join(RECORD_FILE).exists());
     }
 
     #[test]
@@ -254,14 +343,23 @@ mod tests {
     #[test]
     fn the_note_follows_what_is_serving() {
         let mut last = LastServing::default();
-        last = observe(&last, Phase::Starting, Some("m".into()), 1);
+        last = observe(&last, Phase::Starting, Some("m".into()), None, 1);
         assert_eq!(last, LastServing::default(), "a start isn't serving yet");
-        last = observe(&last, Phase::Serving, Some("m".into()), 2);
+        last = observe(
+            &last,
+            Phase::Serving,
+            Some("m".into()),
+            Some("pkg".into()),
+            2,
+        );
         assert_eq!((last.model.as_deref(), last.serving), (Some("m"), true));
-        last = observe(&last, Phase::Idle, None, 3);
+        assert_eq!(last.package.as_deref(), Some("pkg"));
+        last = observe(&last, Phase::Serving, Some("m2".into()), None, 3);
+        assert_eq!(last.package, None, "a catalog model now");
+        last = observe(&last, Phase::Idle, None, None, 4);
         assert_eq!(
             (last.model.as_deref(), last.serving),
-            (Some("m"), false),
+            (Some("m2"), false),
             "stopped: remembered, but not brought back"
         );
     }
