@@ -45,6 +45,7 @@ private struct ModelsContent: View {
     @State private var pendingStart: TtModel?
     @State private var pendingDelete: TtModel?
     @State private var actionError: String?
+    @State private var showEverything = false
 
     /// Models that drove the assistant reliably in testing (tool calling, 10/10).
     private static let recommended: Set<String> = ["Qwen3-32B", "Qwen/Qwen3-32B"]
@@ -89,6 +90,28 @@ private struct ModelsContent: View {
                     StartingCard(model: starting, since: session.serve?.since, eta: session.serve?.etaS)
                 }
                 ModesStrip(session: session)
+                if let note = session.access?.modelsNote {
+                    Label(note, systemImage: "lock")
+                        .font(.tt(.footnote))
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .card(radius: 16)
+                }
+                Button { showEverything = true } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "square.stack.3d.down.right").font(.tt(.title3)).foregroundStyle(Brand.accent)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Everything it can serve").font(.tt(.headline))
+                            Text("Community packages and their profiles, native bundles, and what's serving now.")
+                                .font(.tt(.caption)).foregroundStyle(.secondary).multilineTextAlignment(.leading)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                    }
+                    .padding(16)
+                    .card()
+                }
+                .buttonStyle(.plain)
                 if let failure = session.startFailure {
                     Label("\(session.serve?.displayModel ?? "The model") couldn't start: \(failure)",
                           systemImage: "exclamationmark.triangle.fill")
@@ -134,6 +157,7 @@ private struct ModelsContent: View {
         }
         .scrollIndicators(.hidden)
         .refreshable { await session.loadCatalog(force: true) }
+        .sheet(isPresented: $showEverything) { ServeAnyView(session: session) }
         .confirmationDialog("Delete \(pendingDelete.map { Brand.shortModel($0.name) } ?? "")?",
                             isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
                             titleVisibility: .visible, presenting: pendingDelete) { model in

@@ -31,6 +31,7 @@ struct JobsView: View {
                         .font(.tt(.footnote))
                         .foregroundStyle(.secondary)
                 }
+                BoxRecordingSection(session: session)
                 if let uploading {
                     Section {
                         HStack(spacing: 12) {

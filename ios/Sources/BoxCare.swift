@@ -169,7 +169,12 @@ struct DoctorView: View {
                                         Text(fixTitle(fix))
                                     }
                                 }
-                                .disabled(working != nil)
+                                .disabled(working != nil || !mayApply(fix))
+                                if !mayApply(fix) {
+                                    Text(Self.ownersOnly.contains(fix) ? "Only an owner can do this."
+                                         : "Only owners can start or stop models on this box.")
+                                        .font(.tt(.caption)).foregroundStyle(.secondary)
+                                }
                             }
                             if let command = check.command {
                                 Button {
@@ -192,9 +197,11 @@ struct DoctorView: View {
                             Label("Share diagnostics with support", systemImage: "square.and.arrow.up")
                         }
                     }
-                    .disabled(working != nil)
+                    .disabled(working != nil || report?.owner == false)
                 } footer: {
-                    Text("A bundle of the box's logs, versions and this report (passwords and tokens removed) that you can send to Tenstorrent.")
+                    Text(report?.owner == false
+                         ? "An owner can make a bundle of the box's logs for support."
+                         : "A bundle of the box's logs, versions and this report (passwords and tokens removed) that you can send to Tenstorrent.")
                 }
                 if let error {
                     Section { Text(error).foregroundStyle(.orange) }
@@ -236,6 +243,15 @@ struct DoctorView: View {
         } catch {
             self.error = error.localizedDescription
         }
+    }
+
+    /// The fixes that are an owner's (the box refuses members too).
+    private static let ownersOnly: Set<String> = ["reset_chips", "stop_stray_containers"]
+
+    private func mayApply(_ fix: String) -> Bool {
+        if Self.ownersOnly.contains(fix) { return report?.owner ?? true }
+        if fix == "restart_model" { return session.access?.mayControlModels ?? true }
+        return true
     }
 
     private func fixTitle(_ fix: String) -> String {

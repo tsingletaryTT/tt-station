@@ -94,6 +94,7 @@ private struct BoxHome: View {
                 }
                 ServingCard(session: session, onChooseModel: { app.selectedTab = .models },
                             onOpenCreate: { app.selectedTab = .create })
+                BoxGlanceCard(session: session, telemetry: telemetry)
                 WaitingCard(session: session)
                 HappeningNow(session: session)
                 if style == .toplike {
@@ -128,12 +129,13 @@ private struct BoxHome: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    // The box refuses these too; disabled here so a member isn't surprised.
                     Button("Stop model", systemImage: "stop.fill") { confirming = .stop }
-                        .disabled(!session.isServing || working != nil)
+                        .disabled(!session.isServing || working != nil || session.access?.mayControlModels == false)
                     Button("Reset chips", systemImage: "arrow.counterclockwise") { confirming = .reset }
-                        .disabled(working != nil)
+                        .disabled(working != nil || (session.access != nil && !session.isOwner))
                     Divider()
-                    Button("Power…", systemImage: "power") { showPower = true }
+                    Button("Sleep and power…", systemImage: "power") { showPower = true }
                     Divider()
                     Picker("Style", selection: $style) {
                         Label("Clean", systemImage: "square.grid.2x2").tag(DashboardStyle.clean)
@@ -153,8 +155,8 @@ private struct BoxHome: View {
             }
         } message: { control in
             Text(control == .stop
-                 ? "The assistant runs on this model, so it goes offline until you start another."
-                 : "Stops serving and resets the Tenstorrent chips. The assistant goes offline until a model is started again.")
+                 ? "Everyone using \(session.box.name) loses it: the assistant, Code and apps go offline until a model is started again."
+                 : "Stops serving and resets the Tenstorrent chips. Everyone using \(session.box.name) loses the model until one is started again.")
         }
         .sheet(isPresented: $showPower) { PowerSheet(session: session) }
     }
@@ -392,11 +394,12 @@ private struct ExploreGrid: View {
     @State private var open: Item?
 
     enum Item: String, Identifiable, CaseIterable {
-        case code, routines, orchard, transcribe, lab, benchmark
+        case code, research, routines, transcribe, orchard, lab, benchmark
         var id: String { rawValue }
         var title: String {
             switch self {
             case .code: return "Code"
+            case .research: return "Research"
             case .routines: return "Routines"
             case .orchard: return "Bring up a model"
             case .transcribe: return "Transcribe"
@@ -406,10 +409,11 @@ private struct ExploreGrid: View {
         }
         var detail: String {
             switch self {
-            case .code: return "Follow and steer coding sessions"
+            case .code: return "Start, follow and steer coding sessions"
+            case .research: return "Reports with sources, from the web"
             case .routines: return "Jobs the box does on its own"
             case .orchard: return "Any Hugging Face model, tested on 1–4 chips"
-            case .transcribe: return "Meetings and recordings, any length"
+            case .transcribe: return "Record in the room or upload, any length"
             case .lab: return "gpt-oss on bare silicon"
             case .benchmark: return "Speed and cost per token"
             }
@@ -417,6 +421,7 @@ private struct ExploreGrid: View {
         var icon: String {
             switch self {
             case .code: return "chevron.left.forwardslash.chevron.right"
+            case .research: return "magnifyingglass"
             case .routines: return "clock.arrow.circlepath"
             case .orchard: return "leaf"
             case .transcribe: return "waveform.badge.mic"
@@ -450,9 +455,11 @@ private struct ExploreGrid: View {
                                        set: { open = $0 })) { item in
             if item == .orchard { OrchardView(session: session) } else { LabView(session: session) }
         }
-        .sheet(item: Binding(get: { open == .transcribe || open == .benchmark || open == .code || open == .routines ? open : nil },
+        .sheet(item: Binding(get: { open == .orchard || open == .lab ? nil : open },
                              set: { open = $0 })) { item in
-            if item == .transcribe {
+            if item == .research {
+                ResearchListView(session: session)
+            } else if item == .transcribe {
                 JobsView(session: session)
             } else if item == .code {
                 CodeListView(session: session)
@@ -470,14 +477,21 @@ private struct ExploreGrid: View {
     }
 }
 
-/// Sleep, restart, shut down and wake, from the Box tab's menu or Settings.
+/// Sleep and wake: the model (stays reachable) and the whole box (owners;
+/// waking it needs Wake-on-LAN), from the Box tab's menu or Settings.
 struct PowerSheet: View {
     let session: BoxSession
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            ScrollView { PowerCard(session: session).padding(16) }
+            ScrollView {
+                VStack(spacing: 16) {
+                    ModelSleepCard(session: session)
+                    PowerCard(session: session)
+                }
+                .padding(16)
+            }
                 .background(Brand.backdrop)
                 .navigationTitle("Power")
                 .navigationBarTitleDisplayMode(.inline)

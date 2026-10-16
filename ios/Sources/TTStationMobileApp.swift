@@ -112,6 +112,10 @@ private struct MainTabs: View {
                 RepairBanner(box: box, message: "Pair again to connect securely to \(box.name).")
             } else if let session = app.session, session.needsRepair {
                 RepairBanner(box: session.box, message: "\(session.box.name) doesn't recognize this phone anymore.")
+            } else if let session = app.session, session.statusError != nil {
+                OfflineBanner(session: session)
+            } else if let message = app.session?.compat.message {
+                UpdateNeededBanner(message: message)
             }
         }
     }
