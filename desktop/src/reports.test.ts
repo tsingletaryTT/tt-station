@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 import { strFromU8, unzipSync } from "fflate";
 import { describe, expect, it } from "vitest";
-import { fileName, reportFiles, zipFiles } from "./reports";
+import { fileName, ownershipLabel, reportFiles, shareAction, zipFiles } from "./reports";
 
 const text = (files: Record<string, Uint8Array>) => Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strFromU8(v)]));
 
@@ -85,5 +85,24 @@ describe("zipFiles", () => {
       "Batteries 2.md": "# Again",
       "EU AI Act.md": "# Act ✓",
     });
+  });
+});
+
+describe("whose a report is", () => {
+  it("says Shared, and to an owner who started someone else's", () => {
+    expect(ownershipLabel({ shared: true }, true, false)).toBe("Shared");
+    expect(ownershipLabel({ shared: true, started_by: "d1", started_by_name: "Ana's phone" }, false, true)).toBe("Shared · Ana's phone");
+    expect(ownershipLabel({ started_by: "d1", started_by_name: "Ana's phone" }, false, true)).toBe("By Ana's phone");
+    // From before starters were kept, or the box's own.
+    expect(ownershipLabel({}, false, true)).toBe("By the box");
+    // One's own private report needs no label; a member sees no names.
+    expect(ownershipLabel({ started_by: "me" }, true, true)).toBeNull();
+    expect(ownershipLabel({ shared: true, started_by_name: "Ana's phone" }, false, false)).toBe("Shared");
+  });
+
+  it("offers sharing only to whoever may change the report", () => {
+    expect(shareAction({ shared: false }, false)).toBeNull();
+    expect(shareAction({ shared: false }, true)).toEqual({ label: "Share with everyone on the box", shared: true });
+    expect(shareAction({ shared: true }, true)).toEqual({ label: "Stop sharing", shared: false });
   });
 });

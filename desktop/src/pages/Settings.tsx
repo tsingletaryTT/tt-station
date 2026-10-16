@@ -18,7 +18,7 @@ import { Badge } from "@tenstorrent/vesper/badge";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { useModal, Modal } from "@tenstorrent/vesper/modal";
 import { ago, ApiError, type AuditEntry, authHeader, boxName, bytes, del, delWith, get, patch, type PairedDevice, type Person, post, put, upload } from "../api";
-import { changesSomething, type DataSettings, describePreview, exportFileName, type ImportPreview, RETENTION_CHOICES, retentionDays, retentionValue } from "../yourdata";
+import { changesSomething, type DataSettings, describePreview, exportFileName, type ImportPreview, MODEL_CONTROL_CHOICES, type ModelControl, modelControlSaved, RETENTION_CHOICES, retentionDays, retentionValue } from "../yourdata";
 import { OWNER_ONLY, useOwner } from "../role";
 import { ThemeSwitcher } from "@tenstorrent/vesper/theme-switcher";
 import { Card, copyText, Empty, Eyebrow, Page, readable, toastError, toastOk, usePoll } from "../ui";
@@ -59,7 +59,7 @@ export function Settings() {
           <Typography variant="heading-sm">{current.label}</Typography>
           {section === "general" && <Desktop />}
           {section === "tori" && <><ToriCard /><Voice /></>}
-          {section === "models" && <ModelPrefs />}
+          {section === "models" && <><ModelControlCard /><ModelPrefs /></>}
           {section === "power" && <><Power /><IdleCard /><AfterPowerCut /><MovedFromPower /></>}
           {section === "people" && <Household />}
           {section === "data" && <YourData />}
@@ -715,7 +715,7 @@ function IdleCard() {
   );
 }
 
-type DataSettingsReply = { settings: DataSettings; owner: boolean };
+type DataSettingsReply = { settings: DataSettings; owner: boolean; may_control_models?: boolean };
 
 /** The household's data settings, shared by the cards that change them. */
 function useDataSettings() {
@@ -817,6 +817,29 @@ function YourData() {
         {!owner && <Typography variant="copy-xs" className="muted">{OWNER_ONLY}</Typography>}
       </Card>
     </>
+  );
+}
+
+/** Who may start, stop and switch the model everyone uses (owners set it). */
+function ModelControlCard() {
+  const { settings: s, owner, save } = useDataSettings();
+  if (!s) return null;
+  const value: ModelControl = s.model_control ?? "anyone";
+  return (
+    <Card>
+      <Eyebrow>Who can start and stop models</Eyebrow>
+      <div className="row-between" style={{ gap: 12 }}>
+        <div className="stack" style={{ gap: 2 }}>
+          <span>Start, stop or switch the model the box serves</span>
+          <span className="muted" style={{ fontSize: 12 }}>
+            The model is shared: switching it changes it for everyone. This covers Models, modes, Code's model picker, check-ups, Tori, routines run for someone, and the Doctor's restart.
+          </span>
+        </div>
+        <Select size="sm" value={value} disabled={!owner} aria-label="Who can start and stop models" options={MODEL_CONTROL_CHOICES}
+          onValueChange={(v) => v && v !== value && save({ model_control: v as ModelControl }, modelControlSaved(v as ModelControl))} />
+      </div>
+      {!owner && <Typography variant="copy-xs" className="muted">{OWNER_ONLY}</Typography>}
+    </Card>
   );
 }
 

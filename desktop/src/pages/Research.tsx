@@ -6,6 +6,10 @@
 // (`/research`, run by the agent on the served model). Reports stay here, a
 // notification says when one is ready, and a follow-up builds on what the
 // last one read. Tori starts them too ("research …").
+//
+// Reports are per person: a member sees their own and the ones shared with
+// everyone on the box; owners see all (the box decides, `GET /research`).
+// Whoever started a report, or an owner, renames, stops, deletes or shares it.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@tenstorrent/vesper/button";
@@ -23,7 +27,7 @@ import { ago, del, duration, get, post } from "../api";
 import { Card, copyText, Eyebrow, MoreMenu, Page, toastError, toastOk, usePoll } from "../ui";
 import { askText } from "../dialog";
 import { type Check, type Job, live, NewResearch } from "./ResearchCard";
-import { fileName, reportFiles, zipFiles, type ReportText } from "../reports";
+import { fileName, ownershipLabel, reportFiles, shareAction, zipFiles, type ReportText } from "../reports";
 import { deleteWithUndo, UNDO_MS } from "../undo";
 import { navigate } from "../App";
 import { ExplainPanel, SelectionMenu, useReportSelection, type ExplainRequest, type Picked } from "./ResearchExplain";
@@ -33,6 +37,8 @@ interface Source { n: number; url: string; title: string | null; query: string; 
 interface Detail {
   job: Job; events: { ts: number; kind: string; text: string }[]; report: string | null; sources: Source[];
   counts: { found: number; read: number; relevant: number; failed: number }; plan: { title?: string; sub_questions?: string[] } | null;
+  /** Whether this device may rename, stop, delete and share it (its starter or an owner). */
+  can_change?: boolean;
 }
 
 const mine = (u: string) => u.startsWith("file://") || u.startsWith("doc:");
@@ -55,7 +61,11 @@ const REPORT_COMPONENTS: Components = {
 const domain = (u: string) => { if (mine(u)) return "Your Library"; try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return u; } };
 
 export function Research() {
-  const list = usePoll(() => get<{ jobs: Job[]; check: Check }>("/research"), 4000);
+  const list = usePoll(() => get<{ jobs: Job[]; check: Check; owner?: boolean }>("/research"), 4000);
+  const owner = list.data?.owner !== false;
+  // This device's id, to tell its own reports from others' (an owner sees all).
+  const me = usePoll(() => get<{ devices: { id: string; this_device?: boolean }[] }>("/devices")
+    .then((r) => r.devices.find((d) => d.this_device)?.id ?? null).catch(() => null), 60000).data ?? null;
   // Deleted here, removed from the box once the undo window has passed.
   const [gone, setGone] = useState<string[]>([]);
   const jobs = (list.data?.jobs ?? []).filter((j) => !gone.includes(j.id));
@@ -116,6 +126,7 @@ export function Research() {
                   <span className="row" style={{ gap: 6 }}>
                     <StateBadge s={j.state} />
                     <span className="muted" style={{ fontSize: 11 }}>{ago(j.created)}</span>
+                    {(() => { const l = ownershipLabel(j, !!me && j.started_by === me, owner); return l && <span className="muted" style={{ fontSize: 11 }}>{l}</span>; })()}
                   </span>
                 </button>
               ))}
@@ -242,6 +253,15 @@ function JobView({ id, onChanged, onStarted, onDelete, canStartModel }: {
     try { const r = await post<{ job: Job }>("/research", { question: follow.trim(), depth: "quick", parent: id }); setFollow(""); toastOk("Following up. It builds on what this report read."); onStarted(r.job); }
     catch (e) { toastError(e); }
   };
+  const canChange = det.can_change !== false;
+  const sharing = shareAction(j, canChange);
+  const share = async (shared: boolean) => {
+    try {
+      await post(`/research/${id}/share`, { shared });
+      toastOk(shared ? "Shared. Everyone on the box can read it now." : "Not shared any more. Only you and the box's owners see it.");
+      d.refresh(); onChanged();
+    } catch (e) { toastError(e); }
+  };
   const download = () => save(new Blob([det.report ?? ""], { type: "text/markdown" }), fileName(det.plan?.title ?? j.question, "md"));
   const elapsed = (j.finished ?? Date.now() / 1000) - j.created;
 
@@ -252,24 +272,29 @@ function JobView({ id, onChanged, onStarted, onDelete, canStartModel }: {
           <div className="stack grow" style={{ gap: 4, minWidth: 0 }}>
             <div className="row wrap" style={{ gap: 6 }}>
               <StateBadge s={j.state} />
+              {j.shared && <Badge size="sm" variant="info" subtle>Shared</Badge>}
               <span className="muted" style={{ fontSize: 12 }}>
                 {j.depth} · {j.model?.split("/").pop() ?? "the box's model"} · {j.search === "searxng" ? "private search" : "web search"} · {duration(Math.max(0, elapsed))}{running ? " so far" : ""}
               </span>
             </div>
-            <button className="title-button" title="Rename this report" onClick={() => void rename()}>
-              <Typography variant="heading-sm">{j.title ?? det.plan?.title ?? j.question}</Typography>
-            </button>
+            {canChange ? (
+              <button className="title-button" title="Rename this report" onClick={() => void rename()}>
+                <Typography variant="heading-sm">{j.title ?? det.plan?.title ?? j.question}</Typography>
+              </button>
+            ) : <Typography variant="heading-sm">{j.title ?? det.plan?.title ?? j.question}</Typography>}
+            {!canChange && j.started_by_name && <span className="muted" style={{ fontSize: 12 }}>Shared by {j.started_by_name}</span>}
             {(j.title || det.plan?.title) && <span className="muted" style={{ fontSize: 13 }}>{j.question}</span>}
           </div>
           <div className="row" style={{ gap: 6 }}>
-            {running && <Button size="sm" variant="ghost" onClick={stop}>Stop</Button>}
+            {running && canChange && <Button size="sm" variant="ghost" onClick={stop}>Stop</Button>}
             {j.state === "done" && <><Button size="sm" variant="subtle" onClick={download}>Download</Button>
               <Button size="sm" variant="ghost" onClick={() => void copyText(det.report ?? "", "Report copied as Markdown.")}>Copy</Button></>}
             {(j.state === "failed" || j.state === "stopped") && <Button size="sm" onClick={again}>Try again</Button>}
-            <MoreMenu items={[
+            {canChange && <MoreMenu items={[
               { label: "Rename", onSelect: () => void rename() },
+              ...(sharing ? [{ label: sharing.label, onSelect: () => void share(sharing.shared) }] : []),
               ...(running ? [] : [{ label: "Delete report", danger: true, onSelect: onDelete }]),
-            ]} />
+            ]} />}
           </div>
         </div>
         {running && (
