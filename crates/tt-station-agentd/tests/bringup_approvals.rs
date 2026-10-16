@@ -510,3 +510,114 @@ async fn what_a_driver_reports_is_bounded() {
     assert_eq!(shown[1]["why"], "");
     assert!(shown[1]["command"].is_null());
 }
+
+#[tokio::test]
+async fn the_box_itself_cant_answer_a_bringup_only_a_paired_owner_can() {
+    let s = harness().await;
+    let run = live_run(&s, "loc", "loc-secret");
+    let id = run["id"].as_str().unwrap().to_string();
+    s.write_runs(&[run]);
+    let (_, body) = s
+        .driver(
+            &format!("/bringup/codex/runs/{id}/approvals"),
+            Some("loc-secret"),
+            ask("sudo true"),
+        )
+        .await;
+    let aid = body["id"].as_str().unwrap().to_string();
+    let decide = format!("/bringup/codex/runs/{id}/approvals/{aid}");
+    let accept = json!({ "decision": "accept" });
+
+    // Plain HTTP from the agent's own account (local trust, which is enough
+    // for owner routes): not for this. A bring-up runs as that account too.
+    let local = |token: Option<&str>| {
+        let mut req = s.client.post(format!("{}{decide}", s.local)).json(&accept);
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        req
+    };
+    let r = local(None).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    // With the run's own secret too.
+    let r = local(None)
+        .header("X-Run-Secret", "loc-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    // A member's token from the box: still not an owner.
+    let r = local(Some(&s.member)).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    assert!(
+        pending(&s, &id).await[0]["decision"].is_null(),
+        "still waiting"
+    );
+    // An owner's paired device answers, from the box or the network.
+    let r = local(Some(&s.owner)).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    let (_, got) = s
+        .driver(&format!("{decide}/wait"), Some("loc-secret"), json!({}))
+        .await;
+    assert_eq!(got["decision"], "accept");
+}
+
+#[tokio::test]
+async fn a_stopped_or_finished_runs_secret_is_dead() {
+    let s = harness().await;
+    let mut stopped = live_run(&s, "dead", "stopped-secret");
+    stopped["stopped"] = json!(true);
+    stopped["finished"] = json!(1_700_000_100u64);
+    let mut finished = live_run(&s, "done", "finished-secret");
+    finished["finished"] = json!(1_700_000_100u64);
+    finished["exit"] = json!(0);
+    let (ids, idf) = (
+        stopped["id"].as_str().unwrap().to_string(),
+        finished["id"].as_str().unwrap().to_string(),
+    );
+    s.write_runs(&[stopped, finished]);
+    for (id, secret) in [(&ids, "stopped-secret"), (&idf, "finished-secret")] {
+        let (status, body) = s
+            .driver(
+                &format!("/bringup/codex/runs/{id}/approvals"),
+                Some(secret),
+                ask("sudo true"),
+            )
+            .await;
+        assert_eq!(status, 401, "{id}: {body}");
+        let (status, _) = s
+            .driver(
+                &format!("/bringup/codex/runs/{id}/approvals/0000000000/wait"),
+                Some(secret),
+                json!({}),
+            )
+            .await;
+        assert_eq!(status, 401, "{id}");
+        assert_eq!(pending(&s, id).await, Vec::<Value>::new());
+    }
+}
+
+#[tokio::test]
+async fn stopping_a_run_kills_its_secret() {
+    let s = harness().await;
+    let run = live_run(&s, "kill", "kill-secret");
+    let id = run["id"].as_str().unwrap().to_string();
+    s.write_runs(&[run]);
+    let asks = format!("/bringup/codex/runs/{id}/approvals");
+    let (status, _) = s.driver(&asks, Some("kill-secret"), ask("sudo a")).await;
+    assert_eq!(status, 200);
+    let (status, _) = s
+        .call(
+            M::POST,
+            &format!("/bringup/codex/runs/{id}/stop"),
+            &s.owner,
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, 200);
+    // Whatever is left of the run (a process that outlived its unit) can't
+    // raise a request a person might answer without looking.
+    let (status, _) = s.driver(&asks, Some("kill-secret"), ask("sudo b")).await;
+    assert_eq!(status, 401);
+    assert_eq!(pending(&s, &id).await, Vec::<Value>::new());
+}

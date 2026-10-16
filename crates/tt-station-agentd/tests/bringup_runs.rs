@@ -93,9 +93,64 @@ async fn an_owner_starts_stops_and_deletes_a_run() {
         "claude_bringup.py",
         "permission_mcp.py",
         "lease_run.py",
+        "sandbox_exec.py",
     ] {
         assert!(s.bringup_dir().join(driver).is_file(), "{driver}");
     }
+
+    // Confined: the unit properties a user manager applies, and the stage
+    // starts through the Landlock launcher, which hides TT Station's folder
+    // and keys and lets it write only its own folder, the repo and caches.
+    for prop in [
+        "--property=NoNewPrivileges=yes",
+        "--property=RestrictSUIDSGID=yes",
+        "--property=RestrictNamespaces=yes",
+        "--property=KeyringMode=private",
+    ] {
+        assert!(argv.contains(&prop.to_string()), "{prop}: {argv:?}");
+    }
+    assert!(
+        argv.iter()
+            .any(|a| a.starts_with("--property=SystemCallFilter=~@mount")),
+        "{argv:?}"
+    );
+    // This box's user manager can't make mount namespaces (the fake reports
+    // nothing), so none of the properties it would silently skip.
+    assert!(
+        !argv.iter().any(|a| a.contains("InaccessiblePaths")
+            || a.contains("ProtectHome")
+            || a.contains("PrivateUsers")),
+        "{argv:?}"
+    );
+    let launcher = argv
+        .iter()
+        .position(|a| a.ends_with("sandbox_exec.py"))
+        .expect("the stage starts through the sandbox launcher");
+    let sh = argv.iter().position(|a| a == "sh").unwrap();
+    assert!(launcher < sh, "{argv:?}");
+    let pair = |flag: &str, path: &std::path::Path| {
+        argv.windows(2)
+            .any(|w| w[0] == flag && w[1] == path.display().to_string())
+    };
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+    assert!(pair("--deny", s.config.path()), "{argv:?}");
+    assert!(pair("--deny", &home.join(".ssh")), "{argv:?}");
+    assert!(pair("--deny", &home.join(".gnupg")), "{argv:?}");
+    assert!(
+        pair("--rw", &s.bringup_dir().join("codex").join(&id)),
+        "{argv:?}"
+    );
+    assert!(pair("--rw", &fakes().repo), "{argv:?}");
+    assert!(
+        pair("--ro-file", &s.bringup_dir().join("codex_bringup.py")),
+        "{argv:?}"
+    );
+    assert!(
+        !pair("--rw", &s.bringup_dir()),
+        "never the whole bring-up folder"
+    );
+    assert!(!pair("--rw", &home), "never the home folder");
+    assert_eq!(argv[sh + 1], "-c");
     assert!(
         s.audit().await.iter().any(|(a, t, r)| a == "host_run"
             && t == "bring-up of Qwen/Qwen3-0.6B with codex"
@@ -395,6 +450,10 @@ async fn a_resumed_run_carries_on_from_its_first_unfinished_stage() {
     assert!(!script.contains("--start-index"), "{script}");
     let saved = s.saved_runs();
     let me = saved.iter().find(|r| r["id"] == id.as_str()).unwrap();
+    // A new secret for the new launch, handed to the new unit; the old one is dead.
+    let secret = me["secret"].as_str().unwrap();
+    assert_ne!(secret, "sec");
+    assert_eq!(fakes().launched_secret(&unit).as_deref(), Some(secret));
     assert_eq!(me["stopped"], false);
     assert!(me["finished"].is_null());
     assert!(me["exit"].is_null());

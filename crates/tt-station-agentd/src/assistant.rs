@@ -217,6 +217,10 @@ pub fn models_ok(state: &AppState) -> bool {
         .unwrap_or_else(|_| crate::model_control::allows_now(state))
 }
 
+/// What the model hears when a bring-up answer doesn't come from an owner's
+/// paired device (`crate::auth::Caller::paired_owner`).
+const BRINGUP_DEVICE_ONLY: &str = "Only an owner's paired device can answer a bring-up's requests (the phone, or TT Station signed in as an owner). Tell the person so.";
+
 /// What the model hears when a member's turn calls one of [`HOST_TOOLS`].
 const HOST_REFUSED: &str = "Only an owner of this box can do that on the box itself. Tell the person so; an owner can make their device one in Settings.";
 
@@ -2721,6 +2725,11 @@ pub(crate) async fn run_read_only(state: &AppState, call: &ToolCall) -> (Value, 
                 .await
                 .map_err(|e| e.to_string())
                 .map(|(v, line)| (json!({ "status": line, "detail": v["state"] }), line))
+        }
+        // Answered from an owner's paired device only: the box's own local
+        // trust doesn't count, since the bring-up itself runs on the box.
+        "bringup_decide" if !crate::auth::current_caller().is_some_and(|c| c.paired_owner()) => {
+            Err(BRINGUP_DEVICE_ONLY.to_string())
         }
         "bringup_decide" => {
             let decision = match args["decision"].as_str() {

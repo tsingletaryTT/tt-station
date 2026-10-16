@@ -170,6 +170,12 @@ impl Caller {
         self.local || self.device.as_ref().is_some_and(|d| d.owner)
     }
 
+    /// An owner by its paired device's token alone, local trust aside: who
+    /// may answer what a program on the box asks permission for.
+    pub fn paired_owner(&self) -> bool {
+        self.device.as_ref().is_some_and(|d| d.owner)
+    }
+
     pub fn device_id(&self) -> Option<String> {
         self.device.as_ref().map(|d| d.id.clone())
     }
@@ -262,6 +268,33 @@ impl FromRequestParts<AppState> for OwnerAuth {
             .map_err(IntoResponse::into_response)?;
         if caller.owner() {
             return Ok(OwnerAuth);
+        }
+        let what = format!("{} {}", parts.method, parts.uri.path());
+        crate::audit::record_as(state, &caller.actor(), "denied", &what, "denied");
+        Err(tt_error(StatusCode::FORBIDDEN, OWNER_ONLY).into_response())
+    }
+}
+
+/// An owner's *paired device*, by its bearer token: for what a program on
+/// the box must never decide for itself, answering a bring-up's approvals.
+/// The box's own local trust doesn't count here (a bring-up runs as the box's
+/// account and reaches plain HTTP too): no token is `401`, a member's is `403`
+/// with [`OWNER_ONLY`], logged like [`OwnerAuth`]'s refusals.
+pub(crate) struct DeviceOwnerAuth;
+
+impl FromRequestParts<AppState> for DeviceOwnerAuth {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Response> {
+        use axum::response::IntoResponse;
+        // A live token (this counts its use), then who it belongs to.
+        ThisDevice::from_request_parts(parts, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        let caller = resolve_caller(&parts.headers, false, state)
+            .map_err(|f| AuthRejection(f).into_response())?;
+        if caller.paired_owner() {
+            return Ok(DeviceOwnerAuth);
         }
         let what = format!("{} {}", parts.method, parts.uri.path());
         crate::audit::record_as(state, &caller.actor(), "denied", &what, "denied");
@@ -424,6 +457,22 @@ fn own_addresses() -> Vec<std::net::IpAddr> {
     ips
 }
 
+/// `/bringup/codex/runs/{id}/approvals` and `…/approvals/{aid}/wait`: what a
+/// bring-up's driver calls (with its run secret) from inside its sandbox.
+pub fn is_bringup_driver_path(path: &str) -> bool {
+    let seg: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let plain = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    };
+    match seg.as_slice() {
+        ["bringup", "codex", "runs", id, "approvals"] => plain(id),
+        ["bringup", "codex", "runs", id, "approvals", aid, "wait"] => plain(id) && plain(aid),
+        _ => false,
+    }
+}
+
 /// Whether the owner turned on plain HTTP for other computers on the network
 /// (for apps that can't use the box's own certificate). Off by default.
 pub fn lan_http_allowed(state: &AppState) -> bool {
@@ -440,14 +489,38 @@ pub(crate) async fn only_local(
     req.extensions_mut().insert(PlainHttp);
     // Trusted as the box itself only when the program on the other end runs
     // as the agent's own account (`crate::localpeer`): not another user on
-    // the box, not root, not a container on the host network.
-    let me = local_peer(peer.ip())
-        && tokio::task::spawn_blocking(move || crate::localpeer::peer_is_me(peer))
+    // the box, not root, not a container on the host network -- and not a
+    // bring-up, Orchard or Code run, which run as that account too.
+    let who = if local_peer(peer.ip()) {
+        tokio::task::spawn_blocking(move || crate::localpeer::peer_trust(peer))
             .await
-            .unwrap_or(false);
-    if me {
-        req.extensions_mut().insert(LocalCaller);
-        return next.run(req).await;
+            .unwrap_or(crate::localpeer::Peer::Other)
+    } else {
+        crate::localpeer::Peer::Other
+    };
+    match who {
+        crate::localpeer::Peer::Me => {
+            req.extensions_mut().insert(LocalCaller);
+            return next.run(req).await;
+        }
+        crate::localpeer::Peer::Confined(unit) => {
+            // The model API (with an app key) and a bring-up driver's own
+            // routes (with its run secret); nothing else.
+            let path = req.uri().path();
+            if path.starts_with("/v1/") || is_bringup_driver_path(path) {
+                return next.run(req).await;
+            }
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "Programs in a bring-up, Orchard or Code run ({unit}) aren't the box's owner: they use the model API (/v1) with an app key, and a bring-up's driver its run secret."
+                    ),
+                })),
+            )
+                .into_response();
+        }
+        crate::localpeer::Peer::Other => {}
     }
     if (container_peer(peer.ip()) || local_peer(peer.ip())) && req.uri().path().starts_with("/v1/")
     {
@@ -578,6 +651,21 @@ mod local_http_tests {
         assert!(!local_peer("172.32.0.1".parse().unwrap()));
         assert!(!local_peer("192.168.1.20".parse().unwrap()));
         assert!(!local_peer("100.100.1.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_confined_run_reaches_only_its_drivers_routes() {
+        use super::is_bringup_driver_path as d;
+        assert!(d("/bringup/codex/runs/abc123/approvals"));
+        assert!(d("/bringup/codex/runs/abc123/approvals/a1b2/wait"));
+        // Answering one is an owner's paired device's.
+        assert!(!d("/bringup/codex/runs/abc123/approvals/a1b2"));
+        assert!(!d("/bringup/codex/runs/abc123/stop"));
+        assert!(!d("/bringup/codex/runs"));
+        assert!(!d("/bringup/codex/runs//approvals"));
+        assert!(!d("/bringup/codex/runs/../approvals"));
+        assert!(!d("/pair/offer"));
+        assert!(!d("/bringup/codex/runs/a/approvals/b/wait/x"));
     }
 
     #[test]
