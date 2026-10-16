@@ -23,6 +23,7 @@ import { openTranscribe, RecordingNow, useRecorder } from "../recorder";
 import { ask, whoIsAffected } from "../dialog";
 import { openModels } from "../modelsLink";
 import { firstRun, loadFirstRun, saveFirstRun, shouldShow, type FirstRunSaved, type StepState } from "../firstRun";
+import { smoothBehavior } from "../stickToBottom";
 
 const MODE_ICONS: Record<string, IconKind> = {
   chat: "chat", images: "galaxy", chat_images: "ai", video: "ai-video-gen", transcribe: "microphone",
@@ -83,7 +84,7 @@ export function Home() {
       <FirstRun modes={list} serve={serve.data} requestsAll={t ? t.requests_all : null} switching={switching} onSwitch={switchTo} onShown={setGuided} />
 
       <Hero serve={serve.data} error={serve.error} modes={list} guided={guided} switching={switching} onSwitch={switchTo} onStop={stop}
-        onRetry={() => void serve.refresh()} onShowModes={() => modesRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })} />
+        onRetry={() => void serve.refresh()} onShowModes={() => modesRef.current?.scrollIntoView({ behavior: smoothBehavior(), block: "start" })} />
 
       <Asleep onWoke={() => void serve.refresh()} />
       <HappeningNow />

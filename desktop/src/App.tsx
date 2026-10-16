@@ -3,7 +3,8 @@
 
 // The app's frame: a sidebar of places, the box's live state at the bottom of
 // it, and the current place on the right under a slim top bar with the
-// notifications bell (Notifications). Routes live under /app/.
+// notifications bell (Notifications). Routes live under /app/. The window
+// itself never scrolls; the sidebar's places and the page do (layout.ts).
 
 import { type ComponentType, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -22,6 +23,7 @@ import { OfflineBanner } from "./OfflineBanner";
 import { RecordingBanner } from "./RecordingBanner";
 import { useConnectivity } from "./connectivity";
 import { NotificationBell } from "./NotificationBell";
+import { FullHeightContext } from "./layout";
 
 // Every place but Home loads when it's first opened, so the app starts on Home
 // without waiting for screens it may not need.
@@ -135,6 +137,8 @@ function Shell() {
     window.ttDesktop?.onBoxEvent((e) => addToast({ content: <><b>{e.title}</b><br />{e.body}</>, timeout: 6000 }));
     return () => window.removeEventListener("popstate", onPop);
   }, []);
+  // Pages with their own scrolling panes fill the page area (useFullHeight).
+  const [fullHeight, setFullHeight] = useState(false);
   const devTools = useDevTools();
   const places = useMemo(() => PLACES.filter((p) => placeVisible(p.route, devTools)), [devTools]);
   // Keyboard: Ctrl+1…9 jumps to the first nine places shown.
@@ -186,10 +190,14 @@ function Shell() {
         <header className="topbar">
           <NotificationBell />
         </header>
-        <main className="content" key={route}>
+        <main className={`content ${fullHeight ? "content-full" : ""}`} key={route}>
           <OfflineBanner />
           <RecordingBanner />
-          <Suspense fallback={<div className="page-loading" role="status" aria-label="Loading" />}>{page}</Suspense>
+          <div className="page-area">
+            <FullHeightContext.Provider value={setFullHeight}>
+              <Suspense fallback={<div className="page-loading" role="status" aria-label="Loading" />}>{page}</Suspense>
+            </FullHeightContext.Provider>
+          </div>
         </main>
       </div>
       <Toasts />

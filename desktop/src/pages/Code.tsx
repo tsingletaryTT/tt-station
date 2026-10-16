@@ -32,6 +32,8 @@ import { reuse } from "../render";
 import { navigate } from "../App";
 import { FolderBrowser } from "./Terminals";
 import { CodeModelButton, SpeedStrip } from "./CodeSpeed";
+import { useFullHeight } from "../layout";
+import { JumpToLatest, useStickToBottom } from "../stickToBottom";
 
 interface Sess { id: string; folder: string; title: string; created: number; last: number; sandbox: boolean; policy: string; running: boolean; busy: boolean; waiting: number; changes: number; always: string[]; think: boolean }
 interface Activity { seconds: number; phase: string; tool: string | null; tokens: number; tokens_per_s: number; context_tokens: number; session?: string | null }
@@ -71,6 +73,7 @@ export function Code() {
   const [picked, setPicked] = useState<string | null>(() => location.hash.replace("#", "") || null);
   const [creating, setCreating] = useState(false);
   const sel = creating ? null : sessions.find((s) => s.id === picked) ?? sessions[0] ?? null;
+  useFullHeight();
   useEffect(() => { if (sel) history.replaceState(null, "", `/app/code#${sel.id}`); }, [sel?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const forget = (id: string) => {
     // Off the list at once, so the pane doesn't fall back to the session just removed.
@@ -474,19 +477,8 @@ function SessionPane({ s, check, onChanged, onForgotten }: { s: Sess; check: Ove
   openRef.current = openChanges;
   const onFile = useCallback((file: string) => openRef.current(file), []);
 
-  // Scrolling: follow new output only while you're at the bottom.
-  const scroller = useRef<HTMLDivElement>(null);
-  const pinned = useRef(true);
-  const [away, setAway] = useState(false);
-  const onScroll = () => {
-    const el = scroller.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    pinned.current = atBottom;
-    setAway(!atBottom);
-  };
-  const toBottom = (smooth = false) => { const el = scroller.current; if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" }); };
-  useLayoutEffect(() => { if (pinned.current) toBottom(); }, [events.length, thread.streaming.length, meta?.activity]);
+  // Scrolling: only the thread scrolls, and it follows new output only while you're at the bottom.
+  const follow = useStickToBottom(`${events.length}:${thread.streaming.length}:${working}`);
 
   // Mid-turn, a message joins the running turn at its next step; with `interrupt`
   // ("Stop & send") the turn stops first and the message starts a new one.
@@ -496,7 +488,7 @@ function SessionPane({ s, check, onChanged, onForgotten }: { s: Sess; check: Ove
     setSending(true);
     if (interrupt) setStopping(true);
     setText("");
-    pinned.current = true;
+    follow.stick();
     try { await post(`/code/sessions/${s.id}/message`, { text: t, interrupt }); refresh(); onChanged(); }
     catch (e) { setText(t); toastError(e); } finally { setSending(false); }
   };
@@ -550,29 +542,31 @@ function SessionPane({ s, check, onChanged, onForgotten }: { s: Sess; check: Ove
       </div>
       <SpeedStrip session={s.id} working={working} />
       {trouble && <div className="code-trouble" role="status">Can't reach the box right now ({trouble}). Retrying…</div>}
-      <div className="chat-scroll" ref={scroller} onScroll={onScroll}>
-        <div className="chat-thread code-thread">
-          {thread.plan && thread.plan.length > 0 && <PlanCard todos={thread.plan} />}
-          {thread.items.map((it, i) => (
-            <ItemView key={it.key} it={it} live={working && i === thread.items.length - 1} onFile={onFile} />
-          ))}
-          {thread.thinking && working && <LiveThought t={thread.thinking} />}
-          {thread.streaming && <div className="msg-assistant"><div className="msg-body markdown selectable"><Reply text={thread.streaming} /></div></div>}
-          {thread.items.length <= 1 && !working && (
-            <div className="code-empty">
-              <div className="code-empty-mark" aria-hidden="true">⌘</div>
-              <b>What should it do in {live.title}?</b>
-              <span className="muted">Ask in plain words. It reads the project, makes the change, and shows you every step before it runs anything.</span>
-              <div className="code-empty-examples">
-                {["Explain how this project is organized and how to run it.", "Run the tests and fix whatever fails.", "Add a README section on how to use this.", "Find and fix any obvious bugs."].map((x) => (
-                  <button key={x} className="example-chip" onClick={() => setText(x)}>{x}</button>
-                ))}
+      <div className="scroll-pane">
+        <div className="chat-scroll" ref={follow.ref} onScroll={follow.onScroll}>
+          <div className="chat-thread code-thread">
+            {thread.plan && thread.plan.length > 0 && <PlanCard todos={thread.plan} />}
+            {thread.items.map((it, i) => (
+              <ItemView key={it.key} it={it} live={working && i === thread.items.length - 1} onFile={onFile} />
+            ))}
+            {thread.thinking && working && <LiveThought t={thread.thinking} />}
+            {thread.streaming && <div className="msg-assistant"><div className="msg-body markdown selectable"><Reply text={thread.streaming} /></div></div>}
+            {thread.items.length <= 1 && !working && (
+              <div className="code-empty">
+                <div className="code-empty-mark" aria-hidden="true">⌘</div>
+                <b>What should it do in {live.title}?</b>
+                <span className="muted">Ask in plain words. It reads the project, makes the change, and shows you every step before it runs anything.</span>
+                <div className="code-empty-examples">
+                  {["Explain how this project is organized and how to run it.", "Run the tests and fix whatever fails.", "Add a README section on how to use this.", "Find and fix any obvious bugs."].map((x) => (
+                    <button key={x} className="example-chip" onClick={() => setText(x)}>{x}</button>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
+        <JumpToLatest show={follow.unseen} onClick={follow.jump} />
       </div>
-      {away && <button className="code-jump" onClick={() => { pinned.current = true; toBottom(true); }}>↓ Jump to latest</button>}
       <div className="composer-wrap">
         {thread.approvals.length > 0 && <ApprovalBar key={thread.approvals[0].request_id} a={thread.approvals[0]} more={thread.approvals.length - 1} session={s.id} onDecided={refresh} />}
         <StatusLine working={working} stopping={stopping} waiting={thread.approvals.length > 0} activity={activity} preparing={thread.preparing}

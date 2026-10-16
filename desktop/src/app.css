@@ -22,6 +22,8 @@ html[data-vesper-theme="system"] { color-scheme: light dark; }
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
+/* The window never scrolls: the shell is the window's height, and its parts scroll on their own. */
+html, body { overflow: hidden; overscroll-behavior: none; }
 body {
   background: var(--vesper-bg-dot-pattern-primary);
   color: var(--vesper-text-primary);
@@ -42,7 +44,8 @@ input, textarea, .selectable, .markdown, pre, code { user-select: text; }
 
 /* ---------- frame ---------- */
 
-.shell { display: grid; grid-template-columns: var(--sidebar) 1fr; height: 100%; }
+/* Sidebar | main column, one row exactly the window's height (an implicit row would grow to fit the page). */
+.shell { display: grid; grid-template-columns: var(--sidebar) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: 100%; overflow: clip; }
 
 .sidebar {
   display: flex; flex-direction: column; gap: 8px;
@@ -50,12 +53,17 @@ input, textarea, .selectable, .markdown, pre, code { user-select: text; }
   background: color-mix(in srgb, var(--vesper-stone-50) 88%, transparent);
   border-right: 1px solid var(--line);
   backdrop-filter: blur(12px);
+  min-height: 0;
 }
+.sidebar > :not(.nav) { flex: none; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 16px; }
 .brand-mark { width: 26px; height: 26px; color: var(--vesper-text-primary); }
 .brand-name { font-weight: 600; font-size: 15px; letter-spacing: -0.2px; }
 .brand-box { font-family: var(--mono); font-size: 11px; color: var(--muted); letter-spacing: 0.4px; }
-.nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+/* The places scroll on their own when there are more than fit; the brand and the box's state stay in view. */
+.nav { display: flex; flex-direction: column; gap: 2px; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  margin: 0 -6px; padding: 2px 6px; scrollbar-width: thin; }
+.nav > * { flex: none; }
 .nav-gap { height: 12px; }
 .nav-item {
   width: 100%; display: flex; align-items: center; gap: 12px;
@@ -82,8 +90,14 @@ input, textarea, .selectable, .markdown, pre, code { user-select: text; }
 .chip-hot { font-size: 10px; font-weight: 600; color: var(--vesper-text-warning); }
 .box-footer:focus-visible, .card-click:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
 
-.main-col { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; min-width: 0; }
-.content { overflow-y: auto; height: 100%; min-height: 0; animation: enter 220ms ease both; }
+.main-col { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; min-width: 0; min-height: 0; }
+/* Under the top bar: the banners, then the page area. Ordinary pages scroll in the page area; a page that
+   fills it (useFullHeight: Chat, Code, a Research report, a terminal) doesn't, and its own panes scroll. */
+.content { display: flex; flex-direction: column; min-height: 0; overflow: hidden; animation: enter 220ms ease both; }
+.content > :not(.page-area) { flex: none; }
+.page-area { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.content-full > .page-area { display: flex; flex-direction: column; }
+.content-full > .page-area > * { flex: 1 1 auto; min-height: 0; }
 
 /* The slim bar over the page: the notifications bell at the right. No-drag, for a frameless or inset title bar. */
 .topbar {
@@ -98,6 +112,10 @@ input, textarea, .selectable, .markdown, pre, code { user-select: text; }
 /* ---------- page ---------- */
 
 .page { max-width: 1240px; margin: 0 auto; padding: 24px 40px 64px; display: flex; flex-direction: column; gap: var(--gap); }
+/* A page that fills the page area (Page fill): its last child takes the rest of the height and scrolls on its own. */
+.page-fill { width: 100%; height: 100%; min-height: 0; padding-bottom: 24px; }
+.page-fill > * { flex: none; }
+.page-fill > :last-child { flex: 1 1 0; min-height: 0; }
 .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 4px; }
 .page-head h1 { margin: 0 0 4px; }
 .page-actions { display: flex; gap: 8px; align-items: center; }
@@ -192,17 +210,31 @@ input, textarea, .selectable, .markdown, pre, code { user-select: text; }
 
 /* ---------- chat ---------- */
 
-.chat { display: grid; grid-template-columns: 260px 1fr; height: 100%; }
-.chat-list { border-right: 1px solid var(--line); padding: 20px 12px; display: flex; flex-direction: column; gap: 4px; overflow-y: auto;
+/* Chat and Code fill the page area: the list of conversations and the messages scroll on their own,
+   the head and the composer stay put. */
+.chat { display: grid; grid-template-columns: 260px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: 100%; min-height: 0; }
+.chat-list { border-right: 1px solid var(--line); padding: 20px 12px; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; min-height: 0; overscroll-behavior: contain;
   background: color-mix(in srgb, var(--vesper-stone-50) 60%, transparent); }
+/* Rows keep their height (the list scrolls instead of squeezing them); a .grow spacer still takes what's left. */
+.chat-list > :not(.grow) { flex: none; }
 .chat-list button { text-align: left; border: 0; background: transparent; color: var(--vesper-text-secondary); padding: 8px 10px;
   border-radius: var(--vesper-radius-2); font: 400 13px var(--sans); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   transition: background 120ms ease, color 120ms ease; }
 .chat-list button:hover { background: var(--vesper-alpha-stone-100); }
 .chat-list button.on { background: var(--vesper-alpha-stone-200); color: var(--vesper-text-primary); }
-.chat-main { position: relative; display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.chat-main { position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; height: 100%; }
+.chat-main > * { flex: none; }
 .chat-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 32px; border-bottom: 1px solid var(--line); }
-.chat-scroll { flex: 1; overflow-y: auto; }
+.chat-main > .chat-scroll, .chat-main > .scroll-pane { flex: 1 1 0; min-height: 0; }
+.chat-scroll { overflow-y: auto; overscroll-behavior: contain; }
+/* A conversation's scroll box, with "Jump to latest" over its bottom edge. */
+.scroll-pane { position: relative; display: flex; flex-direction: column; }
+.scroll-pane > .chat-scroll { flex: 1 1 0; min-height: 0; }
+.jump-latest { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 3; font: inherit; font-size: 12px;
+  padding: 6px 14px; border-radius: 999px; border: 1px solid var(--vesper-border-primary); background: var(--vesper-background-primary);
+  color: var(--vesper-text-primary); cursor: pointer; box-shadow: 0 6px 16px -8px rgba(0,0,0,.5); }
+.jump-latest:hover { border-color: var(--vesper-teal-600); color: var(--vesper-teal-600); }
+.jump-latest:focus-visible { outline: none; box-shadow: var(--vesper-shadow-focus-ring); }
 .chat-thread { max-width: 820px; margin: 0 auto; padding: 32px 32px 24px; display: flex; flex-direction: column; gap: 28px; }
 .msg-user { align-self: flex-end; max-width: 78%; background: var(--vesper-stone-200); border: 1px solid var(--line);
   padding: 10px 16px; border-radius: 18px 18px 4px 18px; white-space: pre-wrap; user-select: text; }
@@ -539,6 +571,13 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 /* Research */
 .research-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 16px; align-items: start; }
 @media (max-width: 900px) { .research-layout { grid-template-columns: 1fr; } }
+/* Reading (Page fill): the list of reports and the report scroll side by side; in one column, together. */
+.page-fill > .research-layout { grid-template-rows: minmax(0, 1fr); align-items: stretch; }
+.page-fill > .research-layout > * { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px; margin: -2px; }
+@media (max-width: 900px) {
+  .page-fill > .research-layout { grid-template-rows: none; align-items: start; overflow-y: auto; }
+  .page-fill > .research-layout > * { overflow: visible; }
+}
 .research-list { display: flex; flex-direction: column; gap: 6px; }
 .research-item { display: flex; flex-direction: column; gap: 6px; text-align: left; font: inherit; color: var(--vesper-text-primary); cursor: pointer;
   padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); }
@@ -602,6 +641,11 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .agent-pick-name { font-weight: 600; font-size: 14px; }
 .example-chip.on { color: var(--vesper-text-primary); border-color: var(--vesper-teal-600); }
 .codeterm-wrap { position: relative; }
+/* Terminals, filling the window: the terminal takes what's left under its session's header. */
+.term-session { display: flex; flex-direction: column; }
+.term-session > * { flex: none; }
+.page-fill .term-session > .codeterm-wrap { flex: 1 1 0; min-height: 160px; }
+.page-fill .term-session .codeterm { height: 100%; min-height: 0; }
 .codeterm { height: min(68vh, 720px); min-height: 360px; padding: 8px; border-radius: 12px; background: var(--vesper-background-static-black); border: 1px solid var(--line); overflow: hidden; }
 .codeterm-state { position: absolute; top: 10px; right: 14px; font-size: 11px; color: var(--vesper-stone-500); font-family: var(--mono); }
 .diff { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto;
@@ -769,10 +813,6 @@ html.tori-window, html.tori-window body, html.tori-window #root { background: tr
 .code-table { overflow-x: auto; max-width: 100%; }
 
 /* Status, questions and the composer. */
-.code-jump { position: absolute; left: 50%; bottom: 150px; transform: translateX(-50%); z-index: 3; font: inherit; font-size: 12px;
-  padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--vesper-background-primary); color: var(--vesper-text-primary);
-  box-shadow: 0 6px 16px -8px rgba(0,0,0,.5); cursor: pointer; transition: border-color 120ms ease, color 120ms ease; }
-.code-jump:hover { border-color: var(--vesper-teal-600); color: var(--vesper-teal-600); }
 .code-status { max-width: 820px; margin: 0 auto 8px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--vesper-text-secondary); min-width: 0; flex-wrap: wrap; }
 .code-status.ok { color: var(--vesper-text-secondary); }
 .code-status.bad { color: var(--vesper-text-error); }

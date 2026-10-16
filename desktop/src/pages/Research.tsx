@@ -32,6 +32,8 @@ import { deleteWithUndo, UNDO_MS } from "../undo";
 import { navigate } from "../App";
 import { ExplainPanel, SelectionMenu, useReportSelection, type ExplainRequest, type Picked } from "./ResearchExplain";
 import { linkCitations, type ExplainMode } from "./explainHelpers";
+import { useFullHeight } from "../layout";
+import { smoothBehavior } from "../stickToBottom";
 
 interface Source { n: number; url: string; title: string | null; query: string; status: string; relevant: boolean; notes: { claim?: string; quote?: string }[]; error?: string | null }
 interface Detail {
@@ -55,7 +57,7 @@ const openLink = (href: string) => window.ttDesktop ? window.ttDesktop.openExter
 /** The report's links: citations scroll to their source, other links open outside the app. Made once, so polling doesn't remount them (and drop a selection). */
 const REPORT_COMPONENTS: Components = {
   a: ({ href, children }) => href?.startsWith("#src-")
-    ? <a href={href} className="cite" onClick={(e) => { e.preventDefault(); document.getElementById(href.slice(1))?.scrollIntoView({ behavior: "smooth", block: "center" }); }}>{children}</a>
+    ? <a href={href} className="cite" onClick={(e) => { e.preventDefault(); document.getElementById(href.slice(1))?.scrollIntoView({ behavior: smoothBehavior(), block: "center" }); }}>{children}</a>
     : <a href={href} onClick={(e) => { e.preventDefault(); if (href) void openLink(href); }}>{children}</a>,
 };
 const domain = (u: string) => { if (mine(u)) return "Your Library"; try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return u; } };
@@ -75,6 +77,9 @@ export function Research() {
   const sel = jobs.find((j) => j.id === picked) ?? jobs.find((j) => live(j.state)) ?? jobs[0] ?? null;
   const [asking, setAsking] = useState(false);
   useEffect(() => { if (sel) history.replaceState(null, "", `/app/research#${sel.id}`); }, [sel?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Reading: the list of reports and the report scroll on their own. Starting one: the page scrolls.
+  const reading = jobs.length > 0 && !asking;
+  useFullHeight(reading);
 
   const started = (j: Job) => { setPicked(j.id); setAsking(false); list.refresh(); };
   const remove = (j: Job) => {
@@ -108,7 +113,7 @@ export function Research() {
   };
 
   return (
-    <Page title="Research" subtitle="Ask a hard question. The box plans it, searches, reads dozens of pages and writes a report with every claim linked to its source. Nothing leaves the box but the searches."
+    <Page fill={reading} title="Research" subtitle="Ask a hard question. The box plans it, searches, reads dozens of pages and writes a report with every claim linked to its source. Nothing leaves the box but the searches."
       actions={<>
         {ready.length > 1 && <Button variant="subtle" iconLeft={<Icon kind="download" />} disabled={zipping} onClick={downloadAll}>{zipping ? "Zipping…" : "Download all"}</Button>}
         <Button iconLeft={<Icon kind="add" />} onClick={() => setAsking(true)}>New research</Button>
@@ -236,7 +241,7 @@ function JobView({ id, onChanged, onStarted, onDelete, canStartModel }: {
   const researchFurther = (q: string) => {
     setFollow(q);
     setAsked(null);
-    requestAnimationFrame(() => { const el = document.getElementById("research-follow-up") as HTMLInputElement | null; el?.scrollIntoView({ behavior: "smooth", block: "center" }); el?.focus({ preventScroll: true }); });
+    requestAnimationFrame(() => { const el = document.getElementById("research-follow-up") as HTMLInputElement | null; el?.scrollIntoView({ behavior: smoothBehavior(), block: "center" }); el?.focus({ preventScroll: true }); });
   };
 
   if (!det || !j) return <Card><span className="muted">Loading…</span></Card>;

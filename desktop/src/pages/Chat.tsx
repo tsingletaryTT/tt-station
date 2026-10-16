@@ -21,6 +21,8 @@ import { toastError, toastOk, usePoll, useToriShortcut } from "../ui";
 import { type AskHooks, VoiceMode } from "../VoiceMode";
 import { ask, askText } from "../dialog";
 import { frameBatcher } from "../render";
+import { useFullHeight } from "../layout";
+import { JumpToLatest, useStickToBottom } from "../stickToBottom";
 
 interface Message {
   role: "user" | "assistant";
@@ -35,6 +37,7 @@ interface Conversation { id: string; title: string; updated: number; messages: M
 const STORE = "tt.conversations";
 const load = (): Conversation[] => { try { return JSON.parse(localStorage.getItem(STORE) ?? "[]"); } catch { return []; } };
 const save = (c: Conversation[]) => localStorage.setItem(STORE, JSON.stringify(c.slice(0, 100)));
+const NO_MESSAGES: Message[] = [];
 const newId = () => Math.random().toString(36).slice(2, 10);
 
 const STARTERS = [
@@ -54,14 +57,16 @@ export function Chat() {
   const toriKeys = useToriShortcut();
   const [think, setThink] = useState(() => localStorage.getItem("tt.think") === "1");
   const abort = useRef<AbortController | null>(null);
-  const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
 
   // Where Tori thinks: the chips' chat model, or the CPU when the chips are busy.
   const brain = usePoll(() => get<{ where: "chips" | "cpu" | null; model: string | null }>("/assistant/brain"), 6000);
   const conv = convs.find((c) => c.id === current) ?? null;
-  const messages = conv?.messages ?? [];
+  const messages = conv?.messages ?? NO_MESSAGES;
   const canChat = !!brain.data?.where;
+  useFullHeight();
+  // Only the messages scroll: kept at the newest while you're there, left alone while you read back.
+  const follow = useStickToBottom(messages, current);
 
   // Saved when an answer is done, not at every streamed token (each save writes
   // every conversation).
@@ -72,11 +77,8 @@ export function Chat() {
     return () => window.removeEventListener("tt:voice", open);
   }, []);
   useEffect(() => { localStorage.setItem("tt.think", think ? "1" : "0"); }, [think]);
-  useEffect(() => { input.current?.focus(); }, [current]);
-  useEffect(() => {
-    const el = scroller.current;
-    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 200) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  // preventScroll: focusing the composer must not scroll anything to bring it into view.
+  useEffect(() => { input.current?.focus({ preventScroll: true }); }, [current]);
 
   // Re-sorted only when a conversation's time changes, not at every streamed token.
   const update = (id: string, fn: (c: Conversation) => Conversation) =>
@@ -108,6 +110,7 @@ export function Chat() {
     const history = [...messages, { role: "user" as const, content: prompt }];
     update(id, (c) => ({ ...c, updated: Date.now(), messages: [...history, { role: "assistant", content: "" }] }));
     setDraft("");
+    follow.stick();
     setBusy(true);
     const ctrl = new AbortController();
     abort.current = ctrl;
@@ -221,25 +224,28 @@ export function Chat() {
           </div>
         </div>
 
-        <div className="chat-scroll" ref={scroller}>
-          <div className="chat-thread">
-            {!canChat && serve.data && (
-              <Admonition variant="info" subtle cta={serve.data.phase === "starting" ? undefined : { children: "Switch to chat", onClick: async () => {
-                try { await post("/modes/chat", {}); serve.refresh(); } catch (e) { toastError(e); }
-              } }}>
-                {serve.data.phase === "starting" ? "A model is loading. Chat opens as soon as it's ready."
-                  : serve.data.phase === "serving" ? `The box is serving ${short(serve.data.served_id ?? serve.data.model)}, which doesn't chat.`
-                  : "Nothing is serving. Switch the box to Chat to talk to it."}
-              </Admonition>
-            )}
-            {(brain.data?.where === "cpu" || (serve.data?.phase === "starting" && brain.data?.where !== "chips")) && (
-              <LoadOnChips serve={serve.data} cpuModel={brain.data?.model ?? null} onStarted={() => { serve.refresh(); brain.refresh(); }} />
-            )}
-            {messages.length === 0 && canChat && <Welcome onPick={(p) => send(p)} />}
-            {messages.map((m, i) => m.role === "user"
-              ? <div key={i} className="msg-user">{m.content}</div>
-              : <AssistantMessage key={i} m={m} streaming={busy && i === messages.length - 1} onConfirm={onConfirm} />)}
+        <div className="scroll-pane">
+          <div className="chat-scroll" ref={follow.ref} onScroll={follow.onScroll} data-testid="chat-scroll">
+            <div className="chat-thread">
+              {!canChat && serve.data && (
+                <Admonition variant="info" subtle cta={serve.data.phase === "starting" ? undefined : { children: "Switch to chat", onClick: async () => {
+                  try { await post("/modes/chat", {}); serve.refresh(); } catch (e) { toastError(e); }
+                } }}>
+                  {serve.data.phase === "starting" ? "A model is loading. Chat opens as soon as it's ready."
+                    : serve.data.phase === "serving" ? `The box is serving ${short(serve.data.served_id ?? serve.data.model)}, which doesn't chat.`
+                    : "Nothing is serving. Switch the box to Chat to talk to it."}
+                </Admonition>
+              )}
+              {(brain.data?.where === "cpu" || (serve.data?.phase === "starting" && brain.data?.where !== "chips")) && (
+                <LoadOnChips serve={serve.data} cpuModel={brain.data?.model ?? null} onStarted={() => { serve.refresh(); brain.refresh(); }} />
+              )}
+              {messages.length === 0 && canChat && <Welcome onPick={(p) => send(p)} />}
+              {messages.map((m, i) => m.role === "user"
+                ? <div key={i} className="msg-user">{m.content}</div>
+                : <AssistantMessage key={i} m={m} streaming={busy && i === messages.length - 1} onConfirm={onConfirm} />)}
+            </div>
           </div>
+          <JumpToLatest show={follow.unseen} onClick={follow.jump} />
         </div>
 
         <div className="composer-wrap">

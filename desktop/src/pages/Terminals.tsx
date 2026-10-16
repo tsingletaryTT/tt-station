@@ -26,6 +26,7 @@ import { startConfirmingSharedFolder } from "../sharedFolder";
 import { ask } from "../dialog";
 import { navigate } from "../App";
 import { OWNER_ONLY_HOST } from "../role";
+import { useFullHeight } from "../layout";
 
 interface Agent { id: string; name: string; blurb: string; available: boolean }
 interface Session { id: string; agent: string; agent_name: string; folder: string; task: string | null; created: number; ended: number | null; exit: number | null; live: boolean; changes: number }
@@ -46,9 +47,12 @@ export function Terminals() {
   const sel = sessions.find((s) => s.id === picked) ?? sessions.find((s) => s.live) ?? null;
   useEffect(() => { if (sel) history.replaceState(null, "", `/app/terminals#${sel.id}`); }, [sel?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const showNew = starting || !sel;
+  // A session's terminal takes the rest of the window; the form to start one scrolls like any page.
+  const fill = !showNew && !!sel;
+  useFullHeight(fill);
 
   return (
-    <Page title="Terminal sessions" subtitle="Coding agents' own terminal apps, working in your projects on the box with the box's model. They run as you (not in the sandbox the Code page uses) and keep going when you close this window."
+    <Page fill={fill} title="Terminal sessions" subtitle="Coding agents' own terminal apps, working in your projects on the box with the box's model. They run as you (not in the sandbox the Code page uses) and keep going when you close this window."
       actions={<Button variant="tertiary" onClick={() => navigate("connect")}>Back to Connect</Button>}>
       {d?.owner === false && (
         <Admonition variant="info" subtle size="sm">
@@ -187,7 +191,7 @@ function SessionView({ s, onChanged, onDeleted }: { s: Session; onChanged: () =>
     try { await del(`/coding/sessions/${s.id}`); onDeleted(); } catch (e) { toastError(e); }
   };
   return (
-    <div className="stack" style={{ gap: 10 }}>
+    <div className="stack term-session" style={{ gap: 10 }}>
       <div className="row-between wrap" style={{ gap: 8 }}>
         <div className="stack" style={{ gap: 2, minWidth: 0 }}>
           <div className="row" style={{ gap: 8 }}>

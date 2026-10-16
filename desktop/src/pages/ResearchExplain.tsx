@@ -26,11 +26,12 @@ import { copyText } from "../ui";
 import {
   followUpQuestion, linkCitations, MAX_QUESTION, menuPlacement, modeTitle, selectionProblem, tidySelection, type Box, type ExplainMode,
 } from "./explainHelpers";
+import { smoothBehavior } from "../stickToBottom";
 
 /** A citation link scrolls to its source in the list below the report. */
 const toSource = (href: string) => {
   const el = document.getElementById(href.slice(1));
-  el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  el?.scrollIntoView({ behavior: smoothBehavior(), block: "center" });
 };
 
 /** How an answer renders: citations link to the sources; any other link or image is shown as text, never followed or loaded. */
