@@ -1,0 +1,19 @@
+    Finished `release` profile [optimized] target(s) in 0.14s
+     Running `target/release/examples/agent_reliability --url 'http://localhost:8003/v1' --histories 10 --tasks 5 --lengths 65536,98304 --seed 1 --out /home/ttuser/code/tt-station/docs/notes/code-serving-benchmark-2026-10-15/s5-B.json`
+openai/gpt-oss-20b (128K context): 10 sessions x 5 tasks per size, 4 at once
+[    0 s] 64K-token sessions (1 of 2)
+[  351 s] 96K-token sessions (2 of 2)
+| Target | Prompt tokens (median) | Trials | Valid | 95% CI | Leaked as text | Invented tool | Invalid args | No call | Salvageable leaks | Errors | Median latency (cached prefix) | Median prefill (cold) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 64K | 65363 | 50 | 84% | 71–92% | 0% | 0% | 16% | 0% | 0/0 | 0 | 7.9 s | 28.2 s |
+| 96K | 97290 | 50 | 80% | 67–89% | 0% | 0% | 18% | 2% | 0/0 | 0 | 10.0 s | 33.0 s |
+
+| Target | Trials | First reply valid (raw) | After translator repair | Within 1 retry | 95% CI (1 retry) | Within 2 retries | Still failing | of which: no call |
+|---|---|---|---|---|---|---|---|---|
+| 64K | 50 | 84% (42/50) | 84% (42/50) | 100% (50/50) | 93–100% | 100% (50/50) | 0% (0/50) | 0 |
+| 96K | 50 | 80% (40/50) | 80% (40/50) | 94% (47/50) | 84–98% | 98% (49/50) | 2% (1/50) | 1 |
+
+Recommended compaction window: 65536 tokens (64K)
+Rule: The largest tested prompt size at which it, and every smaller tested size, had a valid tool call in at least 95% of trials after the translator's repair and at most one retry on Claude Code's validation error (at least 20 graded trials each).
+By the earlier first-reply rule: none (no tested size held up)
+843 s in all

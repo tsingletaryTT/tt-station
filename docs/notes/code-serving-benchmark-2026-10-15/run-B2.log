@@ -1,0 +1,66 @@
+[2026-10-15T20:10:14-04:00] === config B2 (p150x4-throughput)
+[2026-10-15T20:10:14-04:00] full reset: tt-smi -r
+Resetting all PCI devices: [0, 1, 2, 3]
+[95m Re-initializing boards after reset.... [0m
+                      All available boards on host (UMD):                       
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ UMD Chip   ┃            ┃            ┃            ┃ Device      ┃ Board      ┃
+┃ ID         ┃ PCI BDF    ┃ PCI Dev ID ┃ Board Type ┃ Series      ┃ Number     ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ 0          │ 0000:01:0… │ /dev/tens… │ Blackhole  │ p300c       │ 000004613… │
+│ 1          │ 0000:02:0… │ /dev/tens… │ Blackhole  │ p300c       │ 000004613… │
+│ 2          │ 0000:03:0… │ /dev/tens… │ Blackhole  │ p300c       │ 000004613… │
+│ 3          │ 0000:04:0… │ /dev/tens… │ Blackhole  │ p300c       │ 000004613… │
+└────────────┴────────────┴────────────┴────────────┴─────────────┴────────────┘
+                        Boards that can be reset (UMD):                         
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ UMD Chip   ┃            ┃            ┃            ┃ Device      ┃ Board      ┃
+┃ ID         ┃ PCI BDF    ┃ PCI Dev ID ┃ Board Type ┃ Series      ┃ Number     ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ 0          │ 0000:01:0… │ /dev/tens… │ Blackhole  │ p300c       │ 000004613… │
+│ 1          │ 0000:02:0… │ /dev/tens… │ Blackhole  │ p300c       │ 000004613… │
+│ 2          │ 0000:03:0… │ /dev/tens… │ Blackhole  │ p300c       │ 000004613… │
+│ 3          │ 0000:04:0… │ /dev/tens… │ Blackhole  │ p300c       │ 000004613… │
+└────────────┴────────────┴────────────┴────────────┴─────────────┴────────────┘
+grain: board   (2 boards, 4 chips)
+board 0000046131934128  (p300c)
+  chip 0  0000:01:00.0  CLAIMED          claude:gozer-park pid 2228666
+  chip 1  0000:02:00.0  CLAIMED          claude:gozer-park pid 2228666
+board 0000046131934125  (p300c)
+  chip 2  0000:03:00.0  CLAIMED          claude:gozer-park pid 2228666
+  chip 3  0000:04:00.0  CLAIMED          claude:gozer-park pid 2228666
+[2026-10-15T20:10:57-04:00] start: tt-model serve tt-hous/gpt-oss-20b-p150 --local-only --no-update-check --port 8003 --profile p150x4-throughput
+{"t0_epoch": 1792109457.21593, "ready_epoch": 1792109638.96186, "load_s": 181.7}
+[2026-10-15T20:13:58-04:00] tt-model serve watcher gone
+[2026-10-15T20:13:58-04:00] container: tt-model-gpt-oss-20b-p150-p150x4-throughput
+[2026-10-15T20:13:59-04:00] S1-S3
+warm-up
+S1
+Traceback (most recent call last):
+  File "/home/ttuser/code/tt-station/docs/notes/code-serving-benchmark-2026-10-15/bench.py", line 375, in <module>
+    main()
+  File "/home/ttuser/code/tt-station/docs/notes/code-serving-benchmark-2026-10-15/bench.py", line 371, in main
+    suite(a.config, a.out, a.reps, [int(x) for x in a.sizes.split(",")])
+  File "/home/ttuser/code/tt-station/docs/notes/code-serving-benchmark-2026-10-15/bench.py", line 332, in suite
+    singles = [s1_single(i) for i in range(reps)]
+               ^^^^^^^^^^^^
+  File "/home/ttuser/code/tt-station/docs/notes/code-serving-benchmark-2026-10-15/bench.py", line 183, in s1_single
+    r = post_stream("/v1/completions", completion(prompt, 256))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ttuser/code/tt-station/docs/notes/code-serving-benchmark-2026-10-15/bench.py", line 49, in post_stream
+    resp = conn.getresponse()
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/ttuser/.local/share/uv/python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/http/client.py", line 1430, in getresponse
+    response.begin()
+  File "/home/ttuser/.local/share/uv/python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/http/client.py", line 331, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/home/ttuser/.local/share/uv/python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/http/client.py", line 292, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ttuser/.local/share/uv/python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/socket.py", line 720, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+ConnectionResetError: [Errno 104] Connection reset by peer
+[2026-10-15T20:14:20-04:00] server POSTs during suite: 12
+[2026-10-15T20:14:20-04:00] S5

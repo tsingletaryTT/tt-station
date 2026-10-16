@@ -1,0 +1,22 @@
+{
+  "chips": [
+    "0000:01:00.0",
+    "0000:02:00.0"
+  ],
+  "dev_indices": [
+    0,
+    1
+  ],
+  "env": {
+    "TT_VISIBLE_DEVICES": "0000:01:00.0,0000:02:00.0"
+  },
+  "expanded": true,
+  "granted": true,
+  "lease_id": "01d335",
+  "neighbours": {},
+  "owner_pid": 2228666,
+  "requested": 1,
+  "units": [
+    "0000046131934128"
+  ]
+}

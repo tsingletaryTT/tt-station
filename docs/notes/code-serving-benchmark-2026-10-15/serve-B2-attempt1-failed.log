@@ -1,0 +1,16 @@
+  • weights openai/gpt-oss-20b@6cee5e81 already on host
+  ✓ host ready  docker 29.9.0 · tt devices · hugepages
+  ✓ image tt-model/gpt-oss-20b-p150:e0046b6a0e80-hub1
+  ✓ container started  1.1s
+  ✓ engine initialised  vLLM 0.26.0.dev4+g2bbd2a6d9  20.6s
+╭─ serve tt-hous/gpt-oss-20b-p150 — the container exited before the server was─╮
+│                                                                              │
+│  The engine stopped during boot. The reason is in what it printed on the     │
+│  way out.                                                                    │
+│  Log · RuntimeError: Engine core initialization failed. See root cause       │
+│  above. Failed core proc(s): {}                                              │
+│                                                                              │
+│  Try:                                                                        │
+│    full log:  tt-model logs tt-hous/gpt-oss-20b-p150                         │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯

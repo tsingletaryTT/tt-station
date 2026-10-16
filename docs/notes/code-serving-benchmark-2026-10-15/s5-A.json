@@ -1,0 +1,2491 @@
+{
+  "report": {
+    "context": 131072,
+    "histories": 10,
+    "model": "openai/gpt-oss-20b",
+    "raw_rule": "The largest tested prompt size at which it, and every smaller tested size, had at least 95% valid tool calls (at least 20 graded trials each; calls as the server returned them, before any salvage of calls leaked as text).",
+    "raw_window": null,
+    "recommended_window": 65536,
+    "retries": 2,
+    "rows": [
+      {
+        "ci_high": 0.9166267863791231,
+        "ci_low": 0.7148551903823401,
+        "ended_without_call": 1,
+        "errors": 0,
+        "invalid_args": 6,
+        "invented": 2,
+        "leaked": 0,
+        "median_prefill_s": 20.9887912495,
+        "median_s": 7.5450796755,
+        "median_ttft_s": 1.435938937,
+        "no_call": 0,
+        "on_task": 39,
+        "prompt_tokens": 65739,
+        "recovered_ci_high": 0.9889613473391734,
+        "recovered_ci_low": 0.8653966212204534,
+        "recovered_rate": 0.96,
+        "repaired": 43,
+        "salvaged": 0,
+        "still_failing": 1,
+        "target": 65536,
+        "trials": 50,
+        "valid": 42,
+        "valid_rate": 0.84,
+        "within_1_retry": 48,
+        "within_2_retries": 49
+      },
+      {
+        "ci_high": 0.8252598564231963,
+        "ci_low": 0.5833461285401034,
+        "ended_without_call": 3,
+        "errors": 0,
+        "invalid_args": 9,
+        "invented": 1,
+        "leaked": 1,
+        "median_prefill_s": 35.2995970345,
+        "median_s": 9.020036216000001,
+        "median_ttft_s": 1.7912241145,
+        "no_call": 3,
+        "on_task": 35,
+        "prompt_tokens": 97820,
+        "recovered_ci_high": 0.9684509967442093,
+        "recovered_ci_low": 0.8116149745493629,
+        "recovered_rate": 0.92,
+        "repaired": 37,
+        "salvaged": 0,
+        "still_failing": 3,
+        "target": 98304,
+        "trials": 50,
+        "valid": 36,
+        "valid_rate": 0.72,
+        "within_1_retry": 46,
+        "within_2_retries": 47
+      }
+    ],
+    "rule": "The largest tested prompt size at which it, and every smaller tested size, had a valid tool call in at least 95% of trials after the translator's repair and at most one retry on Claude Code's validation error (at least 20 graded trials each).",
+    "seed": 1,
+    "tasks": 5
+  },
+  "seconds": 893.296197568,
+  "started": 1792103840,
+  "trials": [
+    {
+      "calls": [
+        "Edit({\"file_path\":\"/work/src/lib/retry.ts\",\"old_string\":\"export function rebuildBatch(state: RetrySchema, manifest: string, limit = 276): number {\",\"new_string\":\"export function rebuildBatch_checked(s…"
+      ],
+      "completion_tokens": 91,
+      "detail": "Edit({\"file_path\":\"/work/src/lib/retry.ts\",\"old_string\":\"export function rebuildBatch(state: RetrySchema, manifest: string, limit = 276): number {\",\"new_string\":\"export function rebuildBatch_checked(s…",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 0,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 36.850657295,
+      "prompt_tokens": 67541,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 14.896874967,
+      "target": 65536,
+      "task": "rename",
+      "ttft_s": 2.572787634,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/lib/export.ts\",\"limit\":200,\"offset\":0} )"
+      ],
+      "completion_tokens": 146,
+      "detail": "Read({\"file_path\":\"/work/src/lib/export.ts\",\"limit\":200,\"offset\":0} )",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 0,
+      "on_task": false,
+      "outcome": "valid",
+      "prefill_s": 36.850657295,
+      "prompt_tokens": 67526,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 20.743876232,
+      "target": 65536,
+      "task": "search_limit",
+      "ttft_s": 1.4222235030000001,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"git status\",\"description\":\"Show working tree status\"})"
+      ],
+      "completion_tokens": 38,
+      "detail": "Bash({\"command\":\"git status\",\"description\":\"Show working tree status\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 0,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 36.850657295,
+      "prompt_tokens": 67523,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 25.598904127,
+      "target": 65536,
+      "task": "git_status",
+      "ttft_s": 1.4166664039999999,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src\",\"pattern\":\"parseLease\"})"
+      ],
+      "completion_tokens": 42,
+      "detail": "Grep({\"path\":\"src\",\"pattern\":\"parseLease\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 0,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 36.850657295,
+      "prompt_tokens": 67525,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 20.425390018,
+      "target": 65536,
+      "task": "find_definition",
+      "ttft_s": 1.5071605099999998,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Glob({\"path\":\"src\",\"pattern\":\"*.ts\"})"
+      ],
+      "completion_tokens": 34,
+      "detail": "Glob({\"path\":\"src\",\"pattern\":\"*.ts\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 0,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 36.850657295,
+      "prompt_tokens": 67521,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 28.825055489,
+      "target": 65536,
+      "task": "list_files",
+      "ttft_s": 1.503995022,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"-n\":true,\"output_mode\":\"content\",\"path\":\"src/storage.rs\",\"pattern\":\"compact_manifest\"})"
+      ],
+      "completion_tokens": 46,
+      "detail": "Grep({\"-n\":true,\"output_mode\":\"content\",\"path\":\"src/storage.rs\",\"pattern\":\"compact_manifest\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 1,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 59.119455886,
+      "prompt_tokens": 64983,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 7.488141787,
+      "target": 65536,
+      "task": "rename",
+      "ttft_s": 2.5848915789999998,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Write({\"file_path\":\"docs/scheduler.md\",\"content\":\"# Scheduler\\n\\nThe *scheduler* module of Ledgerd is responsible for orchestrating work‑units across the various engine stages (limits, config, storage…"
+      ],
+      "completion_tokens": 136,
+      "detail": "Write({\"file_path\":\"docs/scheduler.md\",\"content\":\"# Scheduler\\n\\nThe *scheduler* module of Ledgerd is responsible for orchestrating work‑units across the various engine stages (limits, config, storage…",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 1,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 59.119455886,
+      "prompt_tokens": 64977,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 20.20727062,
+      "target": 65536,
+      "task": "write_file",
+      "ttft_s": 1.466195466,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"wc -l src/parser.rs\",\"description\":\"Count lines\"})"
+      ],
+      "completion_tokens": 49,
+      "detail": "Bash({\"command\":\"wc -l src/parser.rs\",\"description\":\"Count lines\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 1,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 59.119455886,
+      "prompt_tokens": 64969,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.397245802,
+      "target": 65536,
+      "task": "count_lines",
+      "ttft_s": 1.78029475,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"src/config.rs\",\"offset\":67,\"limit\":20})"
+      ],
+      "completion_tokens": 49,
+      "detail": "Read({\"file_path\":\"src/config.rs\",\"offset\":67,\"limit\":20})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 1,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 59.119455886,
+      "prompt_tokens": 64971,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 28.986319252,
+      "target": 65536,
+      "task": "read_range",
+      "ttft_s": 1.420416966,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"-n\":true,\"output_mode\":\"files_with_matches\",\"path\":\"src\",\"pattern\":\"encode_token\"})"
+      ],
+      "completion_tokens": 43,
+      "detail": "Grep({\"-n\":true,\"output_mode\":\"files_with_matches\",\"path\":\"src\",\"pattern\":\"encode_token\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 1,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 59.119455886,
+      "prompt_tokens": 64971,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 20.512662005,
+      "target": 65536,
+      "task": "find_definition",
+      "ttft_s": 1.38117665,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"wc -l src/auth.ts\",\"description\":\"Count lines in src/auth.ts\"})"
+      ],
+      "completion_tokens": 41,
+      "detail": "Bash({\"command\":\"wc -l src/auth.ts\",\"description\":\"Count lines in src/auth.ts\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 2,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 22.079263523,
+      "prompt_tokens": 64475,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 69.012020232,
+      "target": 65536,
+      "task": "count_lines",
+      "ttft_s": 52.447095604,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/planner.ts\",\"offset\":1,\"limit\":60})"
+      ],
+      "completion_tokens": 47,
+      "detail": "Read({\"file_path\":\"/work/src/planner.ts\",\"offset\":1,\"limit\":60})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 2,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 22.079263523,
+      "prompt_tokens": 64478,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 7.602017564,
+      "target": 65536,
+      "task": "read_function",
+      "ttft_s": 1.5636130129999999,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"git status\",\"description\":\"Show the current git status\"})"
+      ],
+      "completion_tokens": 58,
+      "detail": "Bash({\"command\":\"git status\",\"description\":\"Show the current git status\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 2,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 22.079263523,
+      "prompt_tokens": 64475,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 8.280573682,
+      "target": 65536,
+      "task": "git_status",
+      "ttft_s": 1.598175218,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src\",\"glob\":\"**/*.ts\",\"pattern\":\"renderLease\"})"
+      ],
+      "completion_tokens": 36,
+      "detail": "Grep({\"path\":\"src\",\"glob\":\"**/*.ts\",\"pattern\":\"renderLease\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 2,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 22.079263523,
+      "prompt_tokens": 64477,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 5.071685054,
+      "target": 65536,
+      "task": "find_definition",
+      "ttft_s": 1.4051148150000001,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src/auth.ts\",\"pattern\":\"limit\",\"output_mode\":\"content\",\"-n\":true})"
+      ],
+      "completion_tokens": 138,
+      "detail": "Grep({\"path\":\"src/auth.ts\",\"pattern\":\"limit\",\"output_mode\":\"content\",\"-n\":true})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 2,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 22.079263523,
+      "prompt_tokens": 64477,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 40.558757683,
+      "target": 65536,
+      "task": "search_limit",
+      "ttft_s": 1.386974045,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"\", \"pattern\":\"scheduleManifest\"})"
+      ],
+      "completion_tokens": 66,
+      "detail": "Grep({\"path\":\"\", \"pattern\":\"scheduleManifest\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 3,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 74.53955367,
+      "prompt_tokens": 65182,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 21.472515253,
+      "target": 65536,
+      "task": "find_definition",
+      "ttft_s": 3.892131583,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"wc -l src/codec.ts\",\"description\":\"Count lines\"})"
+      ],
+      "completion_tokens": 38,
+      "detail": "Bash({\"command\":\"wc -l src/codec.ts\",\"description\":\"Count lines\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 3,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 74.53955367,
+      "prompt_tokens": 65181,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.939130163,
+      "target": 65536,
+      "task": "count_lines",
+      "ttft_s": 1.46396453,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Glob({\"path\":\"src\",\"pattern\":\"**/*.ts\"})"
+      ],
+      "completion_tokens": 49,
+      "detail": "Glob({\"path\":\"src\",\"pattern\":\"**/*.ts\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 3,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 74.53955367,
+      "prompt_tokens": 65178,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.030729173,
+      "target": 65536,
+      "task": "list_files",
+      "ttft_s": 1.452818384,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src\",\"pattern\":\"TODO|FIXME\",\"output_mode\":\"files_with_matches\"})"
+      ],
+      "completion_tokens": 63,
+      "detail": "Grep({\"path\":\"src\",\"pattern\":\"TODO|FIXME\",\"output_mode\":\"files_with_matches\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 3,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 74.53955367,
+      "prompt_tokens": 65178,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 8.588293328,
+      "target": 65536,
+      "task": "find_todos",
+      "ttft_s": 1.402054071,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"npm test\",\"description\":\"Run all tests\"})"
+      ],
+      "completion_tokens": 34,
+      "detail": "Bash({\"command\":\"npm test\",\"description\":\"Run all tests\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 3,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 74.53955367,
+      "prompt_tokens": 65185,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.287552388,
+      "target": 65536,
+      "task": "run_tests",
+      "ttft_s": 1.42351231,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src/tidepool/storage.py\",\"query\":\"flush_index\",\"output_mode\":\"files_with_matches\"})"
+      ],
+      "completion_tokens": 48,
+      "detail": "Grep: missing pattern",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 4,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 12.466127153,
+      "prompt_tokens": 67512,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Grep({\"path\":\"src/tidepool/storage.py\",\"pattern\":\"flush_index\"})"
+          ],
+          "detail": "The syntax is pattern param.",
+          "seconds": 42.762124612,
+          "sent": [
+            "<tool_use_error>InputValidationError: Grep failed due to the following issues:\nThe required parameter `pattern` is missing\nAn unexpected parameter `query` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 7.273355858,
+      "target": 65536,
+      "task": "rename",
+      "ttft_s": 1.4359944900000001,
+      "valid_after": 1
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"wc -l src/tidepool/io/auth.py\",\"description\":\"Count lines in src/tidepool/io/auth.py\"})"
+      ],
+      "completion_tokens": 53,
+      "detail": "Bash({\"command\":\"wc -l src/tidepool/io/auth.py\",\"description\":\"Count lines in src/tidepool/io/auth.py\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 4,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 12.466127153,
+      "prompt_tokens": 67499,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 37.313444544,
+      "target": 65536,
+      "task": "count_lines",
+      "ttft_s": 1.43132299,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"src/tidepool/journal.py\",\"limit\":40})"
+      ],
+      "completion_tokens": 36,
+      "detail": "Read({\"file_path\":\"src/tidepool/journal.py\",\"limit\":40})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 4,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 12.466127153,
+      "prompt_tokens": 67502,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 5.326429505,
+      "target": 65536,
+      "task": "read_head",
+      "ttft_s": 1.400573294,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/tidepool/limits.py\",\"start_line\":66,\"end_line\":98})"
+      ],
+      "completion_tokens": 58,
+      "detail": "Read: unknown parameter end_line",
+      "failed_as": "no call",
+      "finish_reason": "tool_calls",
+      "history": 4,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 12.466127153,
+      "prompt_tokens": 67501,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [],
+          "detail": "Can you split your answer using the `use` = `path:page` format?We have to provide the requested section; since they ask format, need to provide path and page (maybe page is the lines). Let's output th…",
+          "seconds": 97.606859398,
+          "sent": [
+            "<tool_use_error>InputValidationError: Read failed due to the following issues:\nAn unexpected parameter `end_line` was provided\nAn unexpected parameter `start_line` was provided</tool_use_error>"
+          ],
+          "valid": false
+        }
+      ],
+      "salvaged": false,
+      "seconds": 7.823326143,
+      "target": 65536,
+      "task": "read_range",
+      "ttft_s": 2.719189073,
+      "valid_after": null
+    },
+    {
+      "calls": [
+        "Grep({\"pattern\":\"docs\",\"path\":\"\",\"output_mode\":\"files_with_matches\"})"
+      ],
+      "completion_tokens": 52,
+      "detail": "Grep({\"pattern\":\"docs\",\"path\":\"\",\"output_mode\":\"files_with_matches\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 4,
+      "on_task": false,
+      "outcome": "valid",
+      "prefill_s": 12.466127153,
+      "prompt_tokens": 67502,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 4.599687509,
+      "target": 65536,
+      "task": "write_file",
+      "ttft_s": 1.4175686189999999,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Write({\"content\":\"## Planner\\n\\nThe *planner* module in Tidepool is a thin glue layer that\\ngenerates work‑queue entries for the scheduler.  For every stage of the data\\npipeline it exposes one or mor…"
+      ],
+      "completion_tokens": 272,
+      "detail": "Write({\"content\":\"## Planner\\n\\nThe *planner* module in Tidepool is a thin glue layer that\\ngenerates work‑queue entries for the scheduler.  For every stage of the data\\npipeline it exposes one or mor…",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 5,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 13.761498417,
+      "prompt_tokens": 65083,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 112.507168164,
+      "target": 65536,
+      "task": "write_file",
+      "ttft_s": 1.408058488,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src\",\"pattern\":\"TODO|FIXME\",\"output_mode\":\"content\"})"
+      ],
+      "completion_tokens": 45,
+      "detail": "Grep({\"path\":\"src\",\"pattern\":\"TODO|FIXME\",\"output_mode\":\"content\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 5,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 13.761498417,
+      "prompt_tokens": 65073,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.911888885,
+      "target": 65536,
+      "task": "find_todos",
+      "ttft_s": 1.3885229350000001,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/storage.rs\",\"limit\":40})"
+      ],
+      "completion_tokens": 34,
+      "detail": "Read({\"file_path\":\"/work/src/storage.rs\",\"limit\":40})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 5,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 13.761498417,
+      "prompt_tokens": 65078,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.385130117,
+      "target": 65536,
+      "task": "read_head",
+      "ttft_s": 1.412185585,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"wc -l src/metrics.rs\",\"description\":\"Count lines\"})"
+      ],
+      "completion_tokens": 40,
+      "detail": "Bash({\"command\":\"wc -l src/metrics.rs\",\"description\":\"Count lines\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 5,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 13.761498417,
+      "prompt_tokens": 65076,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 21.531392805,
+      "target": 65536,
+      "task": "count_lines",
+      "ttft_s": 1.350562432,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src\",\"glob\":\"*.rs\",\"output_mode\":\"files_with_matches\"})"
+      ],
+      "completion_tokens": 40,
+      "detail": "Grep: missing pattern",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 5,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 13.761498417,
+      "prompt_tokens": 65073,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Grep({\"glob\":\"*.rs\",\"output_mode\":\"files_with_matches\",\"path\":\"src\"})"
+          ],
+          "detail": "I forgot the pattern. Just list.",
+          "seconds": 5.5688355309999995,
+          "sent": [
+            "<tool_use_error>InputValidationError: Grep failed due to the following issue:\nThe required parameter `pattern` is missing</tool_use_error>"
+          ],
+          "valid": false
+        },
+        {
+          "calls": [
+            "Bash({\"command\":\"ls -1 src/*.rs\",\"description\":\"List all .rs files\"})"
+          ],
+          "detail": "The tool uses glob for files; we need path only.Since our environment only supports grep regex, but we can use `ls` through Bash.",
+          "seconds": 6.31510113,
+          "sent": [
+            "<tool_use_error>InputValidationError: Grep failed due to the following issue:\nThe required parameter `pattern` is missing</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 6.690100043,
+      "target": 65536,
+      "task": "list_files",
+      "ttft_s": 1.435822474,
+      "valid_after": 2
+    },
+    {
+      "calls": [
+        "Grep({\"pattern\":\"TODO|FIXME\",\"path\":\"src\",\"glob\":\"**/*.ts\",\"output_mode\":\"count\"})"
+      ],
+      "completion_tokens": 47,
+      "detail": "Grep({\"pattern\":\"TODO|FIXME\",\"path\":\"src\",\"glob\":\"**/*.ts\",\"output_mode\":\"count\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 6,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 20.849720361,
+      "prompt_tokens": 65756,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 33.027218717,
+      "target": 65536,
+      "task": "find_todos",
+      "ttft_s": 1.615990083,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Write({\"file_path\":\"docs/index.md\",\"content\":\"# Index Module\\n\\nThe index module is the core of the **lanternd** library. It orchestrates the processing of incoming data by aggregating shards, resolvi…"
+      ],
+      "completion_tokens": 142,
+      "detail": "Write({\"file_path\":\"docs/index.md\",\"content\":\"# Index Module\\n\\nThe index module is the core of the **lanternd** library. It orchestrates the processing of incoming data by aggregating shards, resolvi…",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 6,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 20.849720361,
+      "prompt_tokens": 65766,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 23.231021049,
+      "target": 65536,
+      "task": "write_file",
+      "ttft_s": 3.005026644,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/lib/codec.ts\",\"limit\":40,\"offset\":1} )"
+      ],
+      "completion_tokens": 46,
+      "detail": "Read({\"file_path\":\"/work/src/lib/codec.ts\",\"limit\":40,\"offset\":1} )",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 6,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 20.849720361,
+      "prompt_tokens": 65763,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 5.69605842,
+      "target": 65536,
+      "task": "read_head",
+      "ttft_s": 1.371287261,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/lib/codec.ts\",\"line_start\":101,\"line_end\":144})"
+      ],
+      "completion_tokens": 44,
+      "detail": "Read: unknown parameter line_end",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 6,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 20.849720361,
+      "prompt_tokens": 65762,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Read({\"file_path\":\"/work/src/lib/codec.ts\",\"limit\":45,\"offset\":100})"
+          ],
+          "detail": "I incorrectly used parameters. Use offset and limit.",
+          "seconds": 8.465088826,
+          "sent": [
+            "<tool_use_error>InputValidationError: Read failed due to the following issues:\nAn unexpected parameter `line_end` was provided\nAn unexpected parameter `line_start` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 27.933932954,
+      "target": 65536,
+      "task": "read_range",
+      "ttft_s": 1.419115065,
+      "valid_after": 1
+    },
+    {
+      "calls": [
+        "Bashjson({\"command\":\"npm test\",\"description\":\"Run the test suite\"})"
+      ],
+      "completion_tokens": 35,
+      "detail": "called Bashjson, which wasn't offered",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 6,
+      "on_task": false,
+      "outcome": "invented",
+      "prefill_s": 20.849720361,
+      "prompt_tokens": 65763,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.743947017,
+      "target": 65536,
+      "task": "run_tests",
+      "ttft_s": 1.4347753,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"npm test\",\"description\":\"Run the test suite\"})"
+      ],
+      "completion_tokens": 35,
+      "detail": "Bash({\"command\":\"npm test\",\"description\":\"Run the test suite\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 7,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 13.814487666,
+      "prompt_tokens": 64109,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 13.286177664,
+      "target": 65536,
+      "task": "run_tests",
+      "ttft_s": 2.947570986,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"src/planner.ts\",\"limit\":40})"
+      ],
+      "completion_tokens": 34,
+      "detail": "Read({\"file_path\":\"src/planner.ts\",\"limit\":40})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 7,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 13.814487666,
+      "prompt_tokens": 64108,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 3.994692899,
+      "target": 65536,
+      "task": "read_head",
+      "ttft_s": 1.443406228,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"wc -l src/codec.ts\",\"description\":\"Count lines of codec.ts\"})"
+      ],
+      "completion_tokens": 40,
+      "detail": "Bash({\"command\":\"wc -l src/codec.ts\",\"description\":\"Count lines of codec.ts\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 7,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 13.814487666,
+      "prompt_tokens": 64105,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 5.326295709,
+      "target": 65536,
+      "task": "count_lines",
+      "ttft_s": 2.721109892,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/lib/index.ts\",\"limit\":200})"
+      ],
+      "completion_tokens": 53,
+      "detail": "Read({\"file_path\":\"/work/src/lib/index.ts\",\"limit\":200})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 7,
+      "on_task": false,
+      "outcome": "valid",
+      "prefill_s": 13.814487666,
+      "prompt_tokens": 64111,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 7.391899426,
+      "target": 65536,
+      "task": "write_file",
+      "ttft_s": 1.435883384,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src/planner.ts\",\"pattern\":\"limit\"})"
+      ],
+      "completion_tokens": 38,
+      "detail": "Grep({\"path\":\"src/planner.ts\",\"pattern\":\"limit\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 7,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 13.814487666,
+      "prompt_tokens": 64107,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 5.223189664,
+      "target": 65536,
+      "task": "search_limit",
+      "ttft_s": 1.4348100590000001,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"git status\",\"description\":\"Show the outstanding changes\"})"
+      ],
+      "completion_tokens": 35,
+      "detail": "Bash({\"command\":\"git status\",\"description\":\"Show the outstanding changes\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 8,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 21.127862138,
+      "prompt_tokens": 66695,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 5.107230645,
+      "target": 65536,
+      "task": "git_status",
+      "ttft_s": 1.50984107,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"npm test\",\"description\":\"Run the test suite\"})"
+      ],
+      "completion_tokens": 33,
+      "detail": "Bash({\"command\":\"npm test\",\"description\":\"Run the test suite\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 8,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 21.127862138,
+      "prompt_tokens": 66700,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.11184241,
+      "target": 65536,
+      "task": "run_tests",
+      "ttft_s": 2.549050337,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"\", \"pattern\":\"rebuildSession\"})"
+      ],
+      "completion_tokens": 31,
+      "detail": "Grep({\"path\":\"\", \"pattern\":\"rebuildSession\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 8,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 21.127862138,
+      "prompt_tokens": 66698,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.05015193,
+      "target": 65536,
+      "task": "find_definition",
+      "ttft_s": 1.451346915,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/queue.ts\",\"line_start\":1,\"line_end\":70})"
+      ],
+      "completion_tokens": 54,
+      "detail": "Read: unknown parameter line_end",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 8,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 21.127862138,
+      "prompt_tokens": 66699,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Read({\"file_path\":\"/work/src/queue.ts\",\"limit\":70})"
+          ],
+          "detail": "Let's read the relevant section.",
+          "seconds": 6.50985663,
+          "sent": [
+            "<tool_use_error>InputValidationError: Read failed due to the following issues:\nAn unexpected parameter `line_end` was provided\nAn unexpected parameter `line_start` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 22.544405785,
+      "target": 65536,
+      "task": "read_function",
+      "ttft_s": 1.839893958,
+      "valid_after": 1
+    },
+    {
+      "calls": [
+        "Glob({\"path\":\"src\",\"pattern\":\"**/*.ts\"})"
+      ],
+      "completion_tokens": 36,
+      "detail": "Glob({\"path\":\"src\",\"pattern\":\"**/*.ts\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 8,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 21.127862138,
+      "prompt_tokens": 66693,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 5.02152748,
+      "target": 65536,
+      "task": "list_files",
+      "ttft_s": 1.372786947,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"wc -l src/queue.rs\",\"description\":\"Count lines\"})"
+      ],
+      "completion_tokens": 37,
+      "detail": "Bash({\"command\":\"wc -l src/queue.rs\",\"description\":\"Count lines\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 9,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 12.392703768,
+      "prompt_tokens": 65740,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.587563591,
+      "target": 65536,
+      "task": "count_lines",
+      "ttft_s": 1.626425034,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Edit({\"file_path\":\"src/scheduler.rs\",\"new_string\":\"    pub fn split_chunk_checked(&mut self, record: &str, limit: usize) -> Result<usize, Error> {\\n        let entries_ok = match record.parse::<u64>()…"
+      ],
+      "completion_tokens": 491,
+      "detail": "Edit({\"file_path\":\"src/scheduler.rs\",\"new_string\":\"    pub fn split_chunk_checked(&mut self, record: &str, limit: usize) -> Result<usize, Error> {\\n        let entries_ok = match record.parse::<u64>()…",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 9,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 12.392703768,
+      "prompt_tokens": 65754,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 37.230161577,
+      "target": 65536,
+      "task": "rename",
+      "ttft_s": 1.455185425,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"include_patterns\":[],\"glob\":\"**/*.rs\",\"output_mode\":\"files_with_matches\",\"path\":\"src\",\"pattern\":\"decode_budget\"})"
+      ],
+      "completion_tokens": 53,
+      "detail": "Grep: unknown parameter include_patterns",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 9,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 12.392703768,
+      "prompt_tokens": 65741,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Grep({\"output_mode\":\"files_with_matches\",\"path\":\"src\",\"pattern\":\"decode_budget\"})"
+          ],
+          "detail": "Let's just grep.",
+          "seconds": 4.035074357,
+          "sent": [
+            "<tool_use_error>InputValidationError: Grep failed due to the following issue:\nAn unexpected parameter `include_patterns` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 4.356191727,
+      "target": 65536,
+      "task": "find_definition",
+      "ttft_s": 1.3494479529999999,
+      "valid_after": 1
+    },
+    {
+      "calls": [
+        "Git({\"path\": \"\", \"summary\": true})"
+      ],
+      "completion_tokens": 65,
+      "detail": "called Git, which wasn't offered",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 9,
+      "on_task": false,
+      "outcome": "invented",
+      "prefill_s": 12.392703768,
+      "prompt_tokens": 65739,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Bash({\"command\":\"git status\",\"description\":\"Show git status\"})"
+          ],
+          "detail": "The assistant doesn’t have git tool. We'll use `git status` to get status.",
+          "seconds": 4.109124856,
+          "sent": [
+            "<tool_use_error>Error: No such tool available: Git</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 4.951680752,
+      "target": 65536,
+      "task": "git_status",
+      "ttft_s": 1.339182616,
+      "valid_after": 1
+    },
+    {
+      "calls": [
+        "Write({\"file_path\":\"docs/limits.md\",\"content\":\"# Limits Module\\n\\nThe **limits** module in Fernlog tracks how many operations or items are processed in a given stage of the pipeline.  Each stage of fe…"
+      ],
+      "completion_tokens": 159,
+      "detail": "Write({\"file_path\":\"docs/limits.md\",\"content\":\"# Limits Module\\n\\nThe **limits** module in Fernlog tracks how many operations or items are processed in a given stage of the pipeline.  Each stage of fe…",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 9,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 12.392703768,
+      "prompt_tokens": 65747,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 10.988097883,
+      "target": 65536,
+      "task": "write_file",
+      "ttft_s": 1.341507255,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash<|channel|>commentary({\"command\":\"cargo test --quiet\",\"description\":\"Run all tests\"})"
+      ],
+      "completion_tokens": 38,
+      "detail": "called Bash<|channel|>commentary, which wasn't offered",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 0,
+      "on_task": false,
+      "outcome": "invented",
+      "prefill_s": 35.703434493,
+      "prompt_tokens": 97827,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 85.410348919,
+      "target": 98304,
+      "task": "run_tests",
+      "ttft_s": 61.186073385,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src\",\"pattern\":\"TODO\",\"output_mode\":\"count\"})"
+      ],
+      "completion_tokens": 46,
+      "detail": "Grep({\"path\":\"src\",\"pattern\":\"TODO\",\"output_mode\":\"count\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 0,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 35.703434493,
+      "prompt_tokens": 97820,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 8.271395755,
+      "target": 98304,
+      "task": "find_todos",
+      "ttft_s": 1.810641446,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"\", \"pattern\":\"rebuild_index\", \"output_mode\":\"content\"})"
+      ],
+      "completion_tokens": 44,
+      "detail": "Grep({\"path\":\"\", \"pattern\":\"rebuild_index\", \"output_mode\":\"content\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 0,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 35.703434493,
+      "prompt_tokens": 97825,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.452761812,
+      "target": 98304,
+      "task": "find_definition",
+      "ttft_s": 1.673893074,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Write({\"file_path\":\"docs/scheduler.md\",\"content\":\"# Scheduler\\n\\nThe `scheduler` module in packrat orchestrates the order and timing of all other component stages. It routinely receives snapshots, upd…"
+      ],
+      "completion_tokens": 131,
+      "detail": "Write({\"file_path\":\"docs/scheduler.md\",\"content\":\"# Scheduler\\n\\nThe `scheduler` module in packrat orchestrates the order and timing of all other component stages. It routinely receives snapshots, upd…",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 0,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 35.703434493,
+      "prompt_tokens": 97830,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 18.260491369,
+      "target": 98304,
+      "task": "write_file",
+      "ttft_s": 1.808469928,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"wc -l src/planner.rs\",\"description\":\"Count lines in planner.rs\"})"
+      ],
+      "completion_tokens": 50,
+      "detail": "Bash({\"command\":\"wc -l src/planner.rs\",\"description\":\"Count lines in planner.rs\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 0,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 35.703434493,
+      "prompt_tokens": 97823,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 8.851836628000001,
+      "target": 98304,
+      "task": "count_lines",
+      "ttft_s": 1.703755871,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src\",\"pattern\":\"TODO|FIXME\",\"output_mode\":\"files_with_matches\"})"
+      ],
+      "completion_tokens": 59,
+      "detail": "Grep({\"path\":\"src\",\"pattern\":\"TODO|FIXME\",\"output_mode\":\"files_with_matches\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 1,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 96.885797995,
+      "prompt_tokens": 96872,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 27.464764675,
+      "target": 98304,
+      "task": "find_todos",
+      "ttft_s": 11.588104374,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Edit({\"file_path\":\"/work/src/storage.rs\",\"old_string\":\"    pub fn collect_record(&mut self, line: &str, limit: usize) -> Result<usize, Error> {\",\"new_string\":\"    pub fn collect_record_checked(&mut se…"
+      ],
+      "completion_tokens": 104,
+      "detail": "Edit({\"file_path\":\"/work/src/storage.rs\",\"old_string\":\"    pub fn collect_record(&mut self, line: &str, limit: usize) -> Result<usize, Error> {\",\"new_string\":\"    pub fn collect_record_checked(&mut se…",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 1,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 96.885797995,
+      "prompt_tokens": 96888,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 17.604465677,
+      "target": 98304,
+      "task": "rename",
+      "ttft_s": 1.826976495,
+      "valid_after": 0
+    },
+    {
+      "calls": [],
+      "completion_tokens": 228,
+      "detail": "Sure.```rust     /// Errors when the budget is spent.     pub fn lookup_segment(&mut self, ledger: &str, limit: usize) -> Result<usize, Error> {         let pending_ok = match ledger.parse::<u64>() { …",
+      "failed_as": "no call",
+      "finish_reason": "stop",
+      "history": 1,
+      "on_task": false,
+      "outcome": "no_call",
+      "prefill_s": 96.885797995,
+      "prompt_tokens": 96876,
+      "repaired": false,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 88.171020841,
+      "target": 98304,
+      "task": "read_function",
+      "ttft_s": 1.787461216,
+      "valid_after": null
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"cargo test\",\"description\":\"Run the test suite\"})"
+      ],
+      "completion_tokens": 42,
+      "detail": "Bash({\"command\":\"cargo test\",\"description\":\"Run the test suite\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 1,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 96.885797995,
+      "prompt_tokens": 96879,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 7.846851677,
+      "target": 98304,
+      "task": "run_tests",
+      "ttft_s": 1.797891114,
+      "valid_after": 0
+    },
+    {
+      "calls": [],
+      "completion_tokens": 163,
+      "detail": "Sure.```rust //! The export stage: errors when the budget is spent. use std::collections::HashMap; use std::time::Duration; use crate::planner::Planner; use crate::limits::Limits; use crate::storage::…",
+      "failed_as": "no call",
+      "finish_reason": "stop",
+      "history": 1,
+      "on_task": false,
+      "outcome": "no_call",
+      "prefill_s": 96.885797995,
+      "prompt_tokens": 96877,
+      "repaired": false,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 29.267174933,
+      "target": 98304,
+      "task": "read_head",
+      "ttft_s": 1.796923241,
+      "valid_after": null
+    },
+    {
+      "calls": [
+        "Write({\"content\":\"# Cache Module\\n\\nThe **Cache** module in packrat is responsible for efficiently staging packet entries and metadata before they move through the rest of the system.  It accepts inco…"
+      ],
+      "completion_tokens": 182,
+      "detail": "Write({\"content\":\"# Cache Module\\n\\nThe **Cache** module in packrat is responsible for efficiently staging packet entries and metadata before they move through the rest of the system.  It accepts inco…",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 2,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 71.483430823,
+      "prompt_tokens": 96859,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 47.850340926,
+      "target": 98304,
+      "task": "write_file",
+      "ttft_s": 11.585424037,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/auth.ts\",\"line_start\":1,\"line_end\":40})"
+      ],
+      "completion_tokens": 44,
+      "detail": "Read: unknown parameter line_end",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 2,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 71.483430823,
+      "prompt_tokens": 96855,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Read({\"file_path\":\"/work/src/auth.ts\",\"limit\":200})"
+          ],
+          "detail": "We can't provide line_start/line_end? The `Read` tool only has file_path, limit, offset. So we read from start 200? Let's read first 200 lines.",
+          "seconds": 10.525748195,
+          "sent": [
+            "<tool_use_error>InputValidationError: Read failed due to the following issues:\nAn unexpected parameter `line_end` was provided\nAn unexpected parameter `line_start` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 4.877950599,
+      "target": 98304,
+      "task": "read_head",
+      "ttft_s": 1.7657301269999999,
+      "valid_after": 1
+    },
+    {
+      "calls": [],
+      "completion_tokens": 198,
+      "detail": "We have to output the `collectSpan` function.```ts export function collectSpan(state: QueueSnapshot, bucket: string, limit = 125): number {   if (Object.keys(state.checksum ?? {}).length > limit) {   …",
+      "failed_as": "no call",
+      "finish_reason": "stop",
+      "history": 2,
+      "on_task": false,
+      "outcome": "no_call",
+      "prefill_s": 71.483430823,
+      "prompt_tokens": 96855,
+      "repaired": false,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 88.973552874,
+      "target": 98304,
+      "task": "read_function",
+      "ttft_s": 1.899881561,
+      "valid_after": null
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"npm test\",\"description\":\"Run the test suite\"})"
+      ],
+      "completion_tokens": 35,
+      "detail": "Bash({\"command\":\"npm test\",\"description\":\"Run the test suite\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 2,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 71.483430823,
+      "prompt_tokens": 96857,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 5.6950042,
+      "target": 98304,
+      "task": "run_tests",
+      "ttft_s": 1.756553978,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src/sync.ts\",\"query\":\"limit\",\"output_mode\":\"lines\",\"case_sensitive\":true})"
+      ],
+      "completion_tokens": 51,
+      "detail": "Grep: missing pattern",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 2,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 71.483430823,
+      "prompt_tokens": 96855,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Grep({\"path\":\"src/sync.ts\",\"pattern\":\"limit\"})"
+          ],
+          "detail": "Need to use correct parameters: pattern, path.",
+          "seconds": 40.345395432,
+          "sent": [
+            "<tool_use_error>InputValidationError: Grep failed due to the following issues:\nThe required parameter `pattern` is missing\nThe parameter `output_mode` must be one of \"content\", \"files_with_matches\", \"count\"\nAn unexpected parameter `case_sensitive` was provided\nAn unexpected parameter `query` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 9.935052445,
+      "target": 98304,
+      "task": "search_limit",
+      "ttft_s": 3.451556226,
+      "valid_after": 1
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/tidepool/planner.py\",\"limit\":80})"
+      ],
+      "completion_tokens": 59,
+      "detail": "Read({\"file_path\":\"/work/src/tidepool/planner.py\",\"limit\":80})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 3,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 108.346308312,
+      "prompt_tokens": 96256,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 9.212491619,
+      "target": 98304,
+      "task": "read_function",
+      "ttft_s": 1.705771032,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"-n\":true,\"output_mode\":\"files_with_matches\",\"path\":\"src\",\"pattern\":\"TODO\"})"
+      ],
+      "completion_tokens": 45,
+      "detail": "Grep({\"-n\":true,\"output_mode\":\"files_with_matches\",\"path\":\"src\",\"pattern\":\"TODO\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 3,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 108.346308312,
+      "prompt_tokens": 96248,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.558085294,
+      "target": 98304,
+      "task": "find_todos",
+      "ttft_s": 1.784908406,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Write({\"file_path\":\"docs/scheduler.md\",\"content\":\"# Scheduler Module\\n\\nThe `tidepool.scheduler` package contains the core logic that runs the writer, the export stage, and all other processing stages…"
+      ],
+      "completion_tokens": 148,
+      "detail": "Write({\"file_path\":\"docs/scheduler.md\",\"content\":\"# Scheduler Module\\n\\nThe `tidepool.scheduler` package contains the core logic that runs the writer, the export stage, and all other processing stages…",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 3,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 108.346308312,
+      "prompt_tokens": 96258,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 22.602447425,
+      "target": 98304,
+      "task": "write_file",
+      "ttft_s": 1.803444866,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"python -m pytest -q\",\"description\":\"Run the test suite\"})"
+      ],
+      "completion_tokens": 38,
+      "detail": "Bash({\"command\":\"python -m pytest -q\",\"description\":\"Run the test suite\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 3,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 108.346308312,
+      "prompt_tokens": 96259,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.548030704,
+      "target": 98304,
+      "task": "run_tests",
+      "ttft_s": 1.781490823,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"wc -l src/tidepool/io/index.py\",\"description\":\"Count lines\"})"
+      ],
+      "completion_tokens": 41,
+      "detail": "Bash({\"command\":\"wc -l src/tidepool/io/index.py\",\"description\":\"Count lines\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 3,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 108.346308312,
+      "prompt_tokens": 96254,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 39.413462888,
+      "target": 98304,
+      "task": "count_lines",
+      "ttft_s": 34.758238454,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"path\":\"src/ledgerd/io/codec.py\",\"line_start\":20,\"line_end\":45})"
+      ],
+      "completion_tokens": 55,
+      "detail": "Read: missing file_path",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 4,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 34.895759576,
+      "prompt_tokens": 99235,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Read({\"file_path\":\"src/ledgerd/io/codec.py\",\"limit\":50,\"offset\":20})"
+          ],
+          "detail": "Need to provide correct arguments.",
+          "seconds": 8.290023666,
+          "sent": [
+            "<tool_use_error>InputValidationError: Read failed due to the following issues:\nThe required parameter `file_path` is missing\nAn unexpected parameter `line_end` was provided\nAn unexpected parameter `line_start` was provided\nAn unexpected parameter `path` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 28.849332009,
+      "target": 98304,
+      "task": "read_function",
+      "ttft_s": 1.902243843,
+      "valid_after": 1
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"python -m pytest -q\",\"description\":\"Run the test suite\"})"
+      ],
+      "completion_tokens": 40,
+      "detail": "Bash({\"command\":\"python -m pytest -q\",\"description\":\"Run the test suite\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 4,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 34.895759576,
+      "prompt_tokens": 99236,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 8.290690732,
+      "target": 98304,
+      "task": "run_tests",
+      "ttft_s": 1.813368257,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src\",\"pattern\":\"limit\",\"output_mode\":\"content\",\"type\":\"py\"})"
+      ],
+      "completion_tokens": 47,
+      "detail": "Grep({\"path\":\"src\",\"pattern\":\"limit\",\"output_mode\":\"content\",\"type\":\"py\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 4,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 34.895759576,
+      "prompt_tokens": 99233,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 8.152773365,
+      "target": 98304,
+      "task": "search_limit",
+      "ttft_s": 1.72396979,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/ledgerd/sync.py\",\"line_start\":123,\"line_end\":180})"
+      ],
+      "completion_tokens": 43,
+      "detail": "Read: unknown parameter line_end",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 4,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 34.895759576,
+      "prompt_tokens": 99233,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Read({\"file_path\":\"/work/src/ledgerd/sync.py\",\"limit\":60,\"offset\":122})"
+          ],
+          "detail": "The Read tool doesn't accept line range; use offset and limit.",
+          "seconds": 41.006121372,
+          "sent": [
+            "<tool_use_error>InputValidationError: Read failed due to the following issues:\nAn unexpected parameter `line_end` was provided\nAn unexpected parameter `line_start` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 7.958253785,
+      "target": 98304,
+      "task": "read_range",
+      "ttft_s": 1.76554899,
+      "valid_after": 1
+    },
+    {
+      "calls": [
+        "Edit({\"file_path\":\"/work/src/ledgerd/config.py\",\"old_string\":\"def prune_ledger(self, record: str, limit: int = 411) -> int:\\n        \\\"\\\"\\\"Callers hold the lock while this runs.\\\"\\\"\\\"\\n        for i, …"
+      ],
+      "completion_tokens": 458,
+      "detail": "Edit({\"file_path\":\"/work/src/ledgerd/config.py\",\"old_string\":\"def prune_ledger(self, record: str, limit: int = 411) -> int:\\n        \\\"\\\"\\\"Callers hold the lock while this runs.\\\"\\\"\\\"\\n        for i, …",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 4,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 34.895759576,
+      "prompt_tokens": 99248,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 162.719728748,
+      "target": 98304,
+      "task": "rename",
+      "ttft_s": 3.217151816,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src\",\"pattern\":\"rebuild_session\",\"output_mode\":\"files_with_matches\"})"
+      ],
+      "completion_tokens": 43,
+      "detail": "Grep({\"path\":\"src\",\"pattern\":\"rebuild_session\",\"output_mode\":\"files_with_matches\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 5,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 21.732322042,
+      "prompt_tokens": 97941,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 8.121062417,
+      "target": 98304,
+      "task": "find_definition",
+      "ttft_s": 1.7261696359999998,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"cargo test\",\"description\":\"Run the test suite\"})"
+      ],
+      "completion_tokens": 37,
+      "detail": "Bash({\"command\":\"cargo test\",\"description\":\"Run the test suite\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 5,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 21.732322042,
+      "prompt_tokens": 97943,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 7.420692134,
+      "target": 98304,
+      "task": "run_tests",
+      "ttft_s": 1.685147028,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"rg -n \\\"TODO\\\\|FIXME\\\" src\",\"description\":\"Search for todo comments\"})"
+      ],
+      "completion_tokens": 46,
+      "detail": "Bash({\"command\":\"rg -n \\\"TODO\\\\|FIXME\\\" src\",\"description\":\"Search for todo comments\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 5,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 21.732322042,
+      "prompt_tokens": 97936,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 7.109489808,
+      "target": 98304,
+      "task": "find_todos",
+      "ttft_s": 2.293204207,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/queue.rs\",\"line_start\":420,\"line_end\":500})"
+      ],
+      "completion_tokens": 45,
+      "detail": "Read: unknown parameter line_end",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 5,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 21.732322042,
+      "prompt_tokens": 97941,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Read({\"file_path\":\"/work/src/queue.rs\",\"limit\":80,\"offset\":400})"
+          ],
+          "detail": "Let's read from an offset.",
+          "seconds": 7.801774427,
+          "sent": [
+            "<tool_use_error>InputValidationError: Read failed due to the following issues:\nAn unexpected parameter `line_end` was provided\nAn unexpected parameter `line_start` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 7.949620636,
+      "target": 98304,
+      "task": "read_function",
+      "ttft_s": 1.749399816,
+      "valid_after": 1
+    },
+    {
+      "calls": [],
+      "completion_tokens": 50,
+      "detail": "assistantcommentary to=functions.Grep2jsonjson{\"path\":\"src/queue.rs\",\"pattern\":\"limit\",\"output_mode\":\"content\",\"head_limit\":20}",
+      "failed_as": null,
+      "finish_reason": "stop",
+      "history": 5,
+      "on_task": false,
+      "outcome": "leaked",
+      "prefill_s": 21.732322042,
+      "prompt_tokens": 97941,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Grep({\"output_mode\":\"content\",\"path\":\"src/queue.rs\",\"pattern\":\"limit\"})"
+          ],
+          "detail": "I should use Grep.",
+          "seconds": 30.315821432,
+          "sent": [
+            "<tool_use_error>Error: No such tool available: Grep2json</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 42.394894788,
+      "target": 98304,
+      "task": "search_limit",
+      "ttft_s": 1.6285595750000001,
+      "valid_after": 1
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"wc -l src/gateway.ts\",\"description\":\"Count lines of gateway file\"})"
+      ],
+      "completion_tokens": 74,
+      "detail": "Bash({\"command\":\"wc -l src/gateway.ts\",\"description\":\"Count lines of gateway file\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 6,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 31.339723607,
+      "prompt_tokens": 98168,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 73.257764921,
+      "target": 98304,
+      "task": "count_lines",
+      "ttft_s": 3.277384209,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src/storage.ts\",\"pattern\":\"limit\",\"output_mode\":\"content\"})"
+      ],
+      "completion_tokens": 35,
+      "detail": "Grep({\"path\":\"src/storage.ts\",\"pattern\":\"limit\",\"output_mode\":\"content\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 6,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 31.339723607,
+      "prompt_tokens": 98169,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 5.688153524,
+      "target": 98304,
+      "task": "search_limit",
+      "ttft_s": 1.701577006,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/http.ts\",\"line_start\":21,\"line_end\":71})"
+      ],
+      "completion_tokens": 56,
+      "detail": "Read: unknown parameter line_end",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 6,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 31.339723607,
+      "prompt_tokens": 98169,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Read({\"file_path\":\"/work/src/http.ts\",\"limit\":51,\"line_start\":21})"
+          ],
+          "detail": "We should use `limit` parameter to read, offset to start. For example to read lines 21-71, we need to set offset=21 and limit=?? lines count. Suppose we start at line 21 and read 71-21+1=51 lines. So …",
+          "seconds": 48.034085867,
+          "sent": [
+            "<tool_use_error>InputValidationError: Read failed due to the following issues:\nAn unexpected parameter `line_end` was provided\nAn unexpected parameter `line_start` was provided</tool_use_error>"
+          ],
+          "valid": false
+        },
+        {
+          "calls": [
+            "Read({\"file_path\":\"/work/src/​http.ts\",\"limit\":51,\"offset\":21})"
+          ],
+          "detail": "The \"line_start\" param is not allowed; we just use offset. Let's use offset=21 limit=51.  ",
+          "seconds": 9.858268271,
+          "sent": [
+            "<tool_use_error>InputValidationError: Read failed due to the following issue:\nAn unexpected parameter `line_start` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 10.329216554,
+      "target": 98304,
+      "task": "read_range",
+      "ttft_s": 1.794987013,
+      "valid_after": 2
+    },
+    {
+      "calls": [
+        "Glob({\"path\":\"src\",\"pattern\":\"**/*.ts\"})"
+      ],
+      "completion_tokens": 42,
+      "detail": "Glob({\"path\":\"src\",\"pattern\":\"**/*.ts\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 6,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 31.339723607,
+      "prompt_tokens": 98165,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 7.6962492000000005,
+      "target": 98304,
+      "task": "list_files",
+      "ttft_s": 3.331123915,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Edit({\"file_path\":\"src/storage.ts\",\"old_string\":\"export function loadManifest(state: StorageBudget, index: string, limit = 280): number {\",\"new_string\":\"export function loadManifest_checked(state: Sto…"
+      ],
+      "completion_tokens": 90,
+      "detail": "Edit({\"file_path\":\"src/storage.ts\",\"old_string\":\"export function loadManifest(state: StorageBudget, index: string, limit = 280): number {\",\"new_string\":\"export function loadManifest_checked(state: Sto…",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 6,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 31.339723607,
+      "prompt_tokens": 98181,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 9.188235804,
+      "target": 98304,
+      "task": "rename",
+      "ttft_s": 1.762055568,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/cache.rs\",\"limit\":200})"
+      ],
+      "completion_tokens": 37,
+      "detail": "Read({\"file_path\":\"/work/src/cache.rs\",\"limit\":200})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 7,
+      "on_task": false,
+      "outcome": "valid",
+      "prefill_s": 23.230938235,
+      "prompt_tokens": 97169,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 4.216625931,
+      "target": 98304,
+      "task": "search_limit",
+      "ttft_s": 1.718244568,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Glob({\"path\":\"src\",\"pattern\":\"*.rs\"})"
+      ],
+      "completion_tokens": 30,
+      "detail": "Glob({\"path\":\"src\",\"pattern\":\"*.rs\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 7,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 23.230938235,
+      "prompt_tokens": 97165,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 41.37547542,
+      "target": 98304,
+      "task": "list_files",
+      "ttft_s": 14.270901858,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"output_mode\":\"files_with_matches\",\"path\":\"src\",\"pattern\":\"TODO\"})"
+      ],
+      "completion_tokens": 48,
+      "detail": "Grep({\"output_mode\":\"files_with_matches\",\"path\":\"src\",\"pattern\":\"TODO\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 7,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 23.230938235,
+      "prompt_tokens": 97165,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 8.361448981,
+      "target": 98304,
+      "task": "find_todos",
+      "ttft_s": 1.700602188,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"cargo test\",\"description\":\"Run full test suite\"})"
+      ],
+      "completion_tokens": 34,
+      "detail": "Bash({\"command\":\"cargo test\",\"description\":\"Run full test suite\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 7,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 23.230938235,
+      "prompt_tokens": 97172,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 6.967376208,
+      "target": 98304,
+      "task": "run_tests",
+      "ttft_s": 1.696529645,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"git status\",\"description\":\"Show working tree status\"})"
+      ],
+      "completion_tokens": 36,
+      "detail": "Bash({\"command\":\"git status\",\"description\":\"Show working tree status\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 7,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 23.230938235,
+      "prompt_tokens": 97167,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 5.770598744,
+      "target": 98304,
+      "task": "git_status",
+      "ttft_s": 1.70656455,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src/scheduler.rs\",\"line_start\":1,\"line_end\":400,\"pattern\":\"limit\"})"
+      ],
+      "completion_tokens": 46,
+      "detail": "Grep: unknown parameter line_end",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 8,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 35.84823813,
+      "prompt_tokens": 97362,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Grep({\"path\":\"src/scheduler.rs\",\"pattern\":\"limit\"})"
+          ],
+          "detail": "Let's just display content with potential matches.",
+          "seconds": 6.016992972,
+          "sent": [
+            "<tool_use_error>InputValidationError: Grep failed due to the following issues:\nAn unexpected parameter `line_end` was provided\nAn unexpected parameter `line_start` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 9.927888843,
+      "target": 98304,
+      "task": "search_limit",
+      "ttft_s": 2.084512374,
+      "valid_after": 1
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"cargo test\",\"description\":\"Run all tests\"})"
+      ],
+      "completion_tokens": 35,
+      "detail": "Bash({\"command\":\"cargo test\",\"description\":\"Run all tests\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 8,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 35.84823813,
+      "prompt_tokens": 97364,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 7.210738551,
+      "target": 98304,
+      "task": "run_tests",
+      "ttft_s": 1.7325336820000001,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"output_mode\":\"files_with_matches\",\"path\":\"src\",\"pattern\":\"retry_metric\"})"
+      ],
+      "completion_tokens": 42,
+      "detail": "Grep({\"output_mode\":\"files_with_matches\",\"path\":\"src\",\"pattern\":\"retry_metric\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 8,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 35.84823813,
+      "prompt_tokens": 97361,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 35.890664277,
+      "target": 98304,
+      "task": "find_definition",
+      "ttft_s": 1.776913959,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src\",\"pattern\":\"\\\\.rs$\",\"regex\":true,\"output_mode\":\"files_with_matches\"})"
+      ],
+      "completion_tokens": 57,
+      "detail": "Grep: unknown parameter regex",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 8,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 35.84823813,
+      "prompt_tokens": 97357,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Read({\"file_path\":\"src\",\"limit\":1000})"
+          ],
+          "detail": "We'll just list the files manually by reading the directory.",
+          "seconds": 5.336041153,
+          "sent": [
+            "<tool_use_error>InputValidationError: Grep failed due to the following issue:\nAn unexpected parameter `regex` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 10.214971255,
+      "target": 98304,
+      "task": "list_files",
+      "ttft_s": 3.1798279799999998,
+      "valid_after": 1
+    },
+    {
+      "calls": [
+        "Grep({\"output_mode\":\"files_with_matches\",\"path\":\"src\",\"pattern\":\"TODO\"})"
+      ],
+      "completion_tokens": 44,
+      "detail": "Grep({\"output_mode\":\"files_with_matches\",\"path\":\"src\",\"pattern\":\"TODO\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 8,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 35.84823813,
+      "prompt_tokens": 97357,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 9.270433522,
+      "target": 98304,
+      "task": "find_todos",
+      "ttft_s": 1.8080251600000001,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Grep({\"path\":\"src\",\"pattern\":\"refreshManifest\",\"output_mode\":\"files_with_matches\"})"
+      ],
+      "completion_tokens": 36,
+      "detail": "Grep({\"path\":\"src\",\"pattern\":\"refreshManifest\",\"output_mode\":\"files_with_matches\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 9,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 23.921844716,
+      "prompt_tokens": 100402,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 5.56830988,
+      "target": 98304,
+      "task": "find_definition",
+      "ttft_s": 3.140306652,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/lib/auth.ts\",\"offset\":27,\"limit\":30})"
+      ],
+      "completion_tokens": 64,
+      "detail": "Read({\"file_path\":\"/work/src/lib/auth.ts\",\"offset\":27,\"limit\":30})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 9,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 23.921844716,
+      "prompt_tokens": 100403,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 11.535421276,
+      "target": 98304,
+      "task": "read_range",
+      "ttft_s": 1.766062433,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Bash({\"command\":\"git status\",\"description\":\"show diff\"})"
+      ],
+      "completion_tokens": 34,
+      "detail": "Bash({\"command\":\"git status\",\"description\":\"show diff\"})",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 9,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 23.921844716,
+      "prompt_tokens": 100400,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 5.596164775,
+      "target": 98304,
+      "task": "git_status",
+      "ttft_s": 3.328257506,
+      "valid_after": 0
+    },
+    {
+      "calls": [
+        "Read({\"file_path\":\"/work/src/codec.ts\",\"line_start\":1,\"line_end\":400})"
+      ],
+      "completion_tokens": 61,
+      "detail": "Read: unknown parameter line_end",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 9,
+      "on_task": false,
+      "outcome": "invalid_args",
+      "prefill_s": 23.921844716,
+      "prompt_tokens": 100403,
+      "repaired": false,
+      "retries": [
+        {
+          "calls": [
+            "Read({\"file_path\":\"/work/src/codec.ts\"})"
+          ],
+          "detail": "The read tool signature doesn't include line_start/end. So just read the file.",
+          "seconds": 4.9811579980000005,
+          "sent": [
+            "<tool_use_error>InputValidationError: Read failed due to the following issues:\nAn unexpected parameter `line_end` was provided\nAn unexpected parameter `line_start` was provided</tool_use_error>"
+          ],
+          "valid": true
+        }
+      ],
+      "salvaged": false,
+      "seconds": 7.203255532,
+      "target": 98304,
+      "task": "search_limit",
+      "ttft_s": 1.715453234,
+      "valid_after": 1
+    },
+    {
+      "calls": [
+        "Edit({\"file_path\":\"/work/src/config.ts\",\"old_string\":\"export function splitQueue(state: ConfigLease, token: string, limit = 274): number {\\n  console.debug(\\\"splitQueue\\\", token, state.weights);\\n  //…"
+      ],
+      "completion_tokens": 544,
+      "detail": "Edit({\"file_path\":\"/work/src/config.ts\",\"old_string\":\"export function splitQueue(state: ConfigLease, token: string, limit = 274): number {\\n  console.debug(\\\"splitQueue\\\", token, state.weights);\\n  //…",
+      "failed_as": null,
+      "finish_reason": "tool_calls",
+      "history": 9,
+      "on_task": true,
+      "outcome": "valid",
+      "prefill_s": 23.921844716,
+      "prompt_tokens": 100414,
+      "repaired": true,
+      "retries": [],
+      "salvaged": false,
+      "seconds": 43.384765123,
+      "target": 98304,
+      "task": "rename",
+      "ttft_s": 1.648019788,
+      "valid_after": 0
+    }
+  ],
+  "url": "http://localhost:8003/v1"
+}

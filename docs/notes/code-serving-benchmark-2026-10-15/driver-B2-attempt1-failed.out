@@ -1,0 +1,9 @@
+[2026-10-15T19:49:23-04:00] === config B2 (p150x4-throughput)
+[2026-10-15T19:49:23-04:00] gozer reset 01d335
+[2026-10-15T19:50:05-04:00] gozer reset a4ecc4
+[2026-10-15T19:50:47-04:00] start: tt-model serve tt-hous/gpt-oss-20b-p150 --local-only --no-update-check --port 8003 --profile p150x4-throughput
+[2026-10-15T20:09:51-04:00] killed tt-model serve watcher
+[2026-10-15T20:09:51-04:00] container: 
+[2026-10-15T20:09:51-04:00] FAILED to become ready
+[2026-10-15T20:09:51-04:00] stop
+[2026-10-15T20:09:51-04:00] === done B2

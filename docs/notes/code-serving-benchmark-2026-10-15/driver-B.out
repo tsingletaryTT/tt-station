@@ -1,0 +1,38 @@
+[2026-10-15T19:19:56-04:00] === config B (p150x4)
+[2026-10-15T19:19:56-04:00] gozer reset 01d335
+[2026-10-15T19:20:38-04:00] gozer reset a4ecc4
+[2026-10-15T19:21:20-04:00] start: tt-model serve tt-hous/gpt-oss-20b-p150 --local-only --no-update-check --port 8003 --profile p150x4
+{"t0_epoch": 1792106480.263186, "ready_epoch": 1792107041.892718, "load_s": 561.6}
+[2026-10-15T19:30:41-04:00] tt-model serve watcher gone
+[2026-10-15T19:30:41-04:00] container: tt-model-gpt-oss-20b-p150-p150x4
+[2026-10-15T19:30:41-04:00] S1-S3
+warm-up
+S1
+{"ttft_s": {"median": 0.2523, "iqr": 0.0724, "n": 3, "values": [0.2088, 0.2523, 0.3536]}, "ttft_short_1tok_s": {"median": 0.072, "iqr": 0.0023, "n": 3, "values": [0.0699, 0.072, 0.0744]}, "decode_tok_s": {"median": 85.9866, "iqr": 0.4989, "n": 3, "values": [85.7728, 85.9866, 86.7705]}, "batch8x128_tok_s": {"median": 267.9129, "iqr": 59.2131, "n": 3, "values": [232.4723, 267.9129, 350.8985]}}
+S2
+  S2 5000 rep0: tokens=5063 cold=1.99s hit1=5.77s hit2=0.57s
+  S2 5000 rep1: tokens=5054 cold=2.03s hit1=1.55s hit2=0.57s
+  S2 5000 rep2: tokens=5037 cold=0.92s hit1=0.64s hit2=0.65s
+  S2 16000 rep0: tokens=16062 cold=3.35s hit1=3.11s hit2=0.66s
+  S2 16000 rep1: tokens=16064 cold=1.95s hit1=0.72s hit2=0.79s
+  S2 16000 rep2: tokens=16043 cold=1.93s hit1=0.57s hit2=0.66s
+  S2 32000 rep0: tokens=32014 cold=4.84s hit1=3.01s hit2=0.79s
+  S2 32000 rep1: tokens=32033 cold=4.96s hit1=1.47s hit2=0.83s
+  S2 32000 rep2: tokens=32092 cold=5.41s hit1=1.75s hit2=0.79s
+  S2 64000 rep0: tokens=64136 cold=10.98s hit1=2.67s hit2=0.91s
+  S2 64000 rep1: tokens=64123 cold=10.06s hit1=2.07s hit2=1.16s
+  S2 64000 rep2: tokens=64205 cold=20.43s hit1=2.39s hit2=1.11s
+  S2 96000 rep0: tokens=96150 cold=16.93s hit1=2.82s hit2=1.33s
+  S2 96000 rep1: tokens=96123 cold=16.82s hit1=1.87s hit2=2.00s
+  S2 96000 rep2: tokens=96119 cold=15.97s hit1=1.13s hit2=1.12s
+S3
+  S3 rep0: cold=14.09s longest gap=3.9575442299974384s short p95=13.89158560299984 n=1
+  S3 rep1: cold=23.69s longest gap=3.6348690710001392s short p95=23.51305142899946 n=1
+  S3 rep2: cold=11.13s longest gap=1.3267358419980155s short p95=10.935018043994205 n=1
+done results-B.json
+[2026-10-15T19:35:07-04:00] server POSTs during suite: 95
+[2026-10-15T19:35:07-04:00] S5
+[2026-10-15T19:49:11-04:00] S5 exit 0
+[2026-10-15T19:49:11-04:00] server POSTs during S5: 165
+[2026-10-15T19:49:11-04:00] stop
+[2026-10-15T19:49:12-04:00] === done B
