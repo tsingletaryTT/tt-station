@@ -129,6 +129,32 @@ fn transfer_is_used_when_gozer_has_it() {
     assert_eq!(gozer_calls(&gozer, "acquire").len(), 1);
 }
 
+/// gozer `--json` reports a refused transfer on stdout with stderr empty: the
+/// log says gozer's own message, not nothing.
+#[test]
+fn a_refused_transfer_says_gozer_s_message() {
+    let runner = support::FakeRunner::new(0);
+    runner.set_run_capturing(
+        "gozer transfer",
+        1,
+        r#"{"transferred":false,"message":"lease lease-9 belongs to another user"}"#,
+        "",
+    );
+    let got = gozer::hand_off(
+        &runner,
+        &capability(),
+        "lease-9",
+        &["0000:01:00.0".to_string()],
+        WHO,
+        "test",
+        CONTAINER_PID,
+    );
+    assert_eq!(
+        got,
+        Handoff::Kept("gozer transfer exited 1: lease lease-9 belongs to another user".to_string())
+    );
+}
+
 /// While anyone is queued, the release/re-take is not attempted: the queued
 /// tenant is exactly who would win the gap. The lease stays this agent's,
 /// for the reconciler to hand over later.
@@ -254,6 +280,47 @@ fn reconciler_releases_a_lease_with_no_owner_and_no_workload() {
     assert_eq!(report.released, vec![stale.clone()]);
     assert_eq!(gozer.releases(), vec![(stale, true)]);
     assert!(gozer.held_lease_ids().is_empty());
+}
+
+/// A start or stop that begins during a pass stops the pass before its next
+/// action: nothing is released or handed over under it.
+#[test]
+fn a_reconcile_pass_stops_when_a_start_or_stop_begins() {
+    let gozer = FakeGozerBox::with_boards(1, 0);
+    gozer
+        .runner()
+        .set_run_output(&format!("docker ps --filter publish={PORT} -q"), "");
+    let stale = gozer.preexisting_lease(WHO);
+
+    let report =
+        gozer::reconcile_own_leases_while(&gozer, &capability(), PORT, std::process::id(), &|| {
+            false
+        })
+        .expect("reconcile read the box");
+
+    assert!(report.released.is_empty(), "{report:?}");
+    assert!(gozer.releases().is_empty());
+    assert_eq!(gozer.held_lease_ids(), vec![stale]);
+}
+
+/// While a start or stop is counted, a reconcile pass is skipped; a start or
+/// stop waits out a pass already going.
+#[tokio::test]
+async fn starts_and_stops_and_reconcile_passes_never_overlap() {
+    let ops = std::sync::Arc::new(gozer::ServeOps::default());
+    let pass = ops.pass().await;
+    let begun = {
+        let ops = ops.clone();
+        tokio::spawn(async move {
+            let _op = ops.begin().await;
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!begun.is_finished(), "a start waits for the pass");
+    assert!(!ops.quiet(), "but is counted at once, so the pass stops");
+    drop(pass);
+    begun.await.unwrap();
+    assert!(ops.quiet());
 }
 
 /// Release on workload exit: the container that owns the lease exits out of

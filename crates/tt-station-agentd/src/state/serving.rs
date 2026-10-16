@@ -83,6 +83,9 @@ impl AppState {
     }
 
     async fn start_serving_tracked(&self, model: &str, force: bool) -> anyhow::Result<Endpoint> {
+        // No lease reconcile runs while this start does (it waits out one
+        // already going).
+        let _op = self.serve_ops().begin().await;
         if let Some(holder) = self.chips_holder() {
             anyhow::bail!("{holder}");
         }
@@ -153,6 +156,9 @@ impl AppState {
     /// the doc on `ServingBackend::stop`), so calling it while genuinely idle
     /// is harmless.
     pub(crate) async fn stop_serving(&self) -> anyhow::Result<()> {
+        // No lease reconcile runs while this stop does (it waits out one
+        // already going).
+        let _op = self.serve_ops().begin().await;
         // Breadcrumb before we stop -- distinguishes stopping a live model
         // from a mid-bring-up abort (status is still `Idle` in the latter).
         eprintln!(

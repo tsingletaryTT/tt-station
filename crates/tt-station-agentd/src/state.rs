@@ -299,6 +299,9 @@ struct Inner {
     /// polled far more casually) spawn a `gozer status` subprocess on every
     /// single request." `None` until the first call populates it.
     gozer_leases_cache: tokio::sync::Mutex<Option<(Instant, crate::gozer::LeaseSnapshot)>>,
+    /// Starts and stops in flight, and the lease reconciler's pass: the two
+    /// never overlap (see [`crate::gozer::ServeOps`]).
+    serve_ops: crate::gozer::ServeOps,
     /// Disruptive actions the `POST /assistant` chat proposed but did NOT
     /// run, waiting for the human to approve or deny them via
     /// `POST /assistant/confirm`: `action_id -> PendingAction`. Same
@@ -556,6 +559,7 @@ impl AppState {
                 power_shutdown_cmd: vec!["systemctl".to_string(), "poweroff".to_string()],
                 gozer: None,
                 gozer_leases_cache: tokio::sync::Mutex::new(None),
+                serve_ops: crate::gozer::ServeOps::default(),
                 pending_actions: Mutex::new(HashMap::new()),
                 tt_cli: None,
                 lifecycle: Mutex::new(Lifecycle::default()),
@@ -1236,6 +1240,11 @@ impl AppState {
     /// `GET /status`'s `leasing` field (see the design doc).
     pub fn gozer(&self) -> Option<&crate::gozer::Capability> {
         self.inner.gozer.as_ref()
+    }
+
+    /// Starts and stops against the lease reconciler.
+    pub(crate) fn serve_ops(&self) -> &crate::gozer::ServeOps {
+        &self.inner.serve_ops
     }
 
     pub fn name(&self) -> &str {
