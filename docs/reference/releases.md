@@ -14,8 +14,13 @@ a package is unpacked, the agent checks, in order:
    (this only catches a broken download: the digest comes from the same place);
 3. **the package's `.sig` is a valid Ed25519 signature from a key the box
    trusts** (this is what shows who made it);
-4. it isn't older than the running major.minor, unless an owner allows a
-   downgrade.
+4. it isn't older than the running version (versions compare as semver,
+   pre-releases included), unless an owner allows a downgrade.
+
+A version already unpacked on the box (from an earlier install) is used again
+only if it was unpacked from this release's package (its sha256, noted beside
+it) and that package's signature still checks out against today's keys;
+otherwise it's downloaded again.
 
 Anything missing or wrong refuses the install with a message naming the
 problem (for a bad signature, the keys the box tried, by name and
@@ -68,8 +73,14 @@ The agent trusts:
   Ed25519 public key>` per line. **Empty today**, until it's decided who holds
   the release key; until then a box installs only releases signed by a key its
   owner added to the channel file.
-- **Channel keys**: any listed in the owner's `update-channel.toml` (below),
-  in addition to the compiled-in ones.
+- **Channel keys**: any listed in the owner's `update-channel.toml` (below)
+  **and approved by an owner** with `POST /updates/channel/approve
+  {fingerprint}`, in addition to the compiled-in ones. A key in the file that
+  no owner approved is listed under `pending_keys` and not trusted. Approval
+  only accepts a key already written in the file on the box (never one sent
+  in the request), is kept in `update-keys-approved.json` (0600), and is
+  recorded in the activity log (`update_key_approve`). At every start the
+  agent names each extra key it trusts, and each one waiting, in the journal.
 
 `GET /updates` shows the channel: `repo`, where it came from (`default`,
 `channel file`, `environment`), every trusted key's name, origin and
@@ -153,7 +164,8 @@ short.
 
 `update-channel.toml` in the agent's config directory
 (`$TT_CONFIG_DIR`, else `~/.config/tt-station/`), written by the box's owner
-on the box itself (it is deliberately not settable over the API):
+on the box itself (it is deliberately not settable over the API; a key in it
+also needs an owner's approval, above):
 
 ```toml
 # Follow a company-run release channel.

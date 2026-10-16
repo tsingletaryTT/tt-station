@@ -88,10 +88,11 @@ fn versions_compare_by_number_not_text() {
 }
 
 #[test]
-fn the_downgrade_floor_is_the_running_major_minor() {
+fn the_downgrade_floor_is_the_running_version() {
     assert!(below_floor("0.12.4", "0.11.99"));
-    assert!(!below_floor("0.12.4", "0.12.0"));
-    assert!(!below_floor("v0.12.4", "0.12.0"));
+    assert!(below_floor("0.12.4", "0.12.0"));
+    assert!(below_floor("v0.12.4", "0.12.3"));
+    assert!(!below_floor("v0.12.4", "0.12.4"));
     assert!(below_floor("1.0.0", "0.12.0"));
     // A pre-release of the running line is below it.
     assert!(below_floor("1.0.2", "1.0.0-rc.1"));
@@ -233,6 +234,17 @@ fn the_channel_comes_from_its_file_then_the_service_environment() {
         (c.repo.as_str(), c.repo_from.as_str()),
         ("acme/tt-station", "channel file")
     );
+    // Not trusted until an owner approves it.
+    assert_eq!(c.keys.len(), builtin);
+    assert_eq!(c.pending_keys.len(), 1);
+    std::fs::write(
+        dir.path().join(updates::APPROVED_KEYS_FILE),
+        serde_json::to_vec(&json!([{ "name": "acme-2026",
+            "fingerprint": c.pending_keys[0].fingerprint, "at": 1, "by": "Owner" }]))
+        .unwrap(),
+    )
+    .unwrap();
+    let c = updates::channel(dir.path()).unwrap();
     assert_eq!(c.keys.len(), builtin + 1);
     assert_eq!(
         (
@@ -350,6 +362,57 @@ async fn only_an_owner_updates_or_undoes() {
         .0
         .iter()
         .any(|e| e.action.starts_with("update_")));
+}
+
+/// A key in the channel file is trusted only once an owner approves it, by
+/// fingerprint, through the API -- and only a key already written on the box.
+#[tokio::test]
+async fn an_owner_approves_a_channel_key_and_it_is_logged() {
+    let _env = ENV.lock().await;
+    let b = Box_::new("approve").await;
+    let (_, _, b64) = keypair("acme");
+    std::fs::write(
+        b.config.join(updates::CHANNEL_FILE),
+        format!("[[keys]]\nname = \"acme-2026\"\nkey = \"{b64}\"\n"),
+    )
+    .unwrap();
+    let fp = updates::channel(&b.config).unwrap().pending_keys[0]
+        .fingerprint
+        .clone();
+    let approve = |token: String, fp: String| {
+        let b = &b;
+        async move {
+            b.send(
+                &token,
+                "POST",
+                "/updates/channel/approve",
+                json!({ "fingerprint": fp }),
+            )
+            .await
+        }
+    };
+    let member = support::pair(&b.base, &b.state).await;
+    assert_eq!(approve(member, fp.clone()).await.0, 403);
+    assert_eq!(
+        approve(b.owner.clone(), "0000000000000000".into()).await.0,
+        404,
+        "only a key in the channel file"
+    );
+    let (status, v) = approve(b.owner.clone(), fp.clone()).await;
+    assert_eq!(status, 200, "{v}");
+    let c = updates::channel(&b.config).unwrap();
+    assert!(c.pending_keys.is_empty());
+    assert!(c.keys.iter().any(|k| k.fingerprint == fp));
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(b.config.join(updates::APPROVED_KEYS_FILE))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let (entries, _) = b.state.audit().page(0, 20);
+    assert!(entries
+        .iter()
+        .any(|e| e.action == "update_key_approve" && e.target.contains(&fp)));
 }
 
 #[tokio::test]

@@ -86,6 +86,24 @@ pub const DEFAULT_REPO: &str = "tsingletaryTT/tt-station";
 /// The owner's channel file, in the agent's config directory.
 pub const CHANNEL_FILE: &str = "update-channel.toml";
 
+/// The channel file's keys an owner approved through the API
+/// (`POST /updates/channel/approve`), by fingerprint: `0600`, in the config
+/// directory. A key in the channel file isn't trusted until it's here.
+pub const APPROVED_KEYS_FILE: &str = "update-keys-approved.json";
+
+/// One approval: which key, when, by whom.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Approved {
+    pub name: String,
+    pub fingerprint: String,
+    pub at: u64,
+    pub by: String,
+}
+
+fn approved(config_dir: &Path) -> Vec<Approved> {
+    crate::fsio::read_json_or_backup(&config_dir.join(APPROVED_KEYS_FILE)).unwrap_or_default()
+}
+
 /// Set (`1`) in the agent service's environment to install updates whose
 /// signature is missing or doesn't check out. For developing the updater only;
 /// every use is logged as an error and recorded in the activity log.
@@ -99,8 +117,10 @@ pub struct Channel {
     /// Where `repo` came from: `default`, `channel file` or `environment`
     /// (`TT_STATION_UPDATE_REPO`).
     pub repo_from: String,
-    /// Compiled-in keys first, then the channel file's.
+    /// Compiled-in keys first, then the channel file's an owner approved.
     pub keys: Vec<TrustedKey>,
+    /// Keys in the channel file no owner has approved yet: not trusted.
+    pub pending_keys: Vec<TrustedKey>,
     /// [`ALLOW_UNSIGNED_ENV`] is set on the service.
     pub unsigned_allowed: bool,
 }
@@ -168,8 +188,10 @@ fn channel_from(
         repo: DEFAULT_REPO.into(),
         repo_from: "default".into(),
         keys: release_keys::builtin(),
+        pending_keys: Vec::new(),
         unsigned_allowed,
     };
+    let ok_keys = approved(config_dir);
     match std::fs::read_to_string(&path) {
         Ok(text) => {
             let f: ChannelFile = toml::from_str(&text).map_err(|e| {
@@ -189,10 +211,14 @@ fn channel_from(
                 c.repo_from = "channel file".into();
             }
             for k in f.keys {
-                c.keys.push(
-                    TrustedKey::new(&k.name, &k.key, "channel")
-                        .map_err(|e| format!("The update channel file {}: {e}", path.display()))?,
-                );
+                let key = TrustedKey::new(&k.name, &k.key, "channel")
+                    .map_err(|e| format!("The update channel file {}: {e}", path.display()))?;
+                // Written on the box AND approved by an owner (audited).
+                if ok_keys.iter().any(|a| a.fingerprint == key.fingerprint) {
+                    c.keys.push(key);
+                } else {
+                    c.pending_keys.push(key);
+                }
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -313,51 +339,74 @@ pub fn valid_version(v: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
 }
 
-/// `candidate` is older than `running`'s major.minor (`0.10.9` under `0.11.0`;
-/// `0.11.0` under `0.11.3` is not: a patch back within a line is allowed).
+/// `candidate` is older than the running version itself: any step back --
+/// a patch, a pre-release of the running release -- needs `allow_downgrade`
+/// (an owner's), since an older release can bring back what a newer one fixed.
 pub fn below_floor(running: &str, candidate: &str) -> bool {
-    let floor: Vec<&str> = running
-        .trim_start_matches('v')
-        .split(['.', '-', '+'])
-        .take(2)
-        .collect();
-    older(candidate, &floor.join("."))
+    older(candidate, running)
 }
 
-/// `a < b` for dotted versions (`0.9.0 < 0.11.0`). As in semver, a
-/// pre-release is older than its release (`1.0.0-rc.2 < 1.0.0`), and build
-/// metadata (`+…`) doesn't count.
+/// `a < b` for dotted versions (`0.9.0 < 0.11.0`), with semver's
+/// pre-release rules: a pre-release is older than its release
+/// (`1.0.0-rc.2 < 1.0.0`); pre-release identifiers compare one by one, numbers
+/// as numbers, numbers below words, words in ASCII order, and more
+/// identifiers above fewer when the rest are equal (`1.0.0-alpha <
+/// 1.0.0-alpha.1 < 1.0.0-alpha.beta < 1.0.0-beta < 1.0.0-beta.2 <
+/// 1.0.0-beta.11 < 1.0.0-rc.1`). Build metadata (`+…`) doesn't count.
 pub fn older(a: &str, b: &str) -> bool {
-    let parts = |v: &str| {
+    use std::cmp::Ordering;
+    let parts = |v: &str| -> (Vec<u64>, Option<Vec<String>>) {
         let v = v.trim_start_matches('v');
         let v = v.split('+').next().unwrap_or(v);
         let (core, pre) = v.split_once('-').map_or((v, None), |(c, p)| (c, Some(p)));
-        let nums = |s: &str| {
-            s.split(['.', '-'])
-                .map(|p| p.parse::<u64>().unwrap_or(0))
-                .collect::<Vec<_>>()
-        };
-        (nums(core), pre.map(nums))
+        let core = core
+            .split('.')
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect();
+        (
+            core,
+            pre.map(|p| p.split('.').map(str::to_string).collect()),
+        )
     };
-    let lt = |a: &[u64], b: &[u64]| {
-        for i in 0..a.len().max(b.len()) {
-            let (x, y) = (
-                a.get(i).copied().unwrap_or(0),
-                b.get(i).copied().unwrap_or(0),
-            );
-            if x != y {
-                return Some(x < y);
-            }
+    let core_cmp = |a: &[u64], b: &[u64]| {
+        (0..a.len().max(b.len()))
+            .map(|i| {
+                a.get(i)
+                    .copied()
+                    .unwrap_or(0)
+                    .cmp(&b.get(i).copied().unwrap_or(0))
+            })
+            .find(|o| o.is_ne())
+            .unwrap_or(Ordering::Equal)
+    };
+    let ident_cmp = |x: &str, y: &str| {
+        let num = |s: &str| {
+            (!s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+                .then(|| s.parse::<u128>().ok())
+                .flatten()
+        };
+        match (num(x), num(y)) {
+            (Some(m), Some(n)) => m.cmp(&n),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => x.cmp(y),
         }
-        None
+    };
+    let pre_cmp = |a: &[String], b: &[String]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| ident_cmp(x, y))
+            .find(|o| o.is_ne())
+            .unwrap_or_else(|| a.len().cmp(&b.len()))
     };
     let ((a, a_pre), (b, b_pre)) = (parts(a), parts(b));
-    match (lt(&a, &b), a_pre, b_pre) {
-        (Some(less), _, _) => less,
-        (None, Some(_), None) => true,
-        (None, Some(x), Some(y)) => lt(&x, &y).unwrap_or(false),
-        (None, None, _) => false,
-    }
+    let order = core_cmp(&a, &b).then_with(|| match (&a_pre, &b_pre) {
+        (None, None) => Ordering::Equal,
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(x), Some(y)) => pre_cmp(x, y),
+    });
+    order == Ordering::Less
 }
 
 // ---------------------------------------------------------------- releases
@@ -697,15 +746,24 @@ async fn fetch(release: &Release, channel: &Channel) -> Result<String, String> {
         ));
     }
     let dest = versions_dir().join(&release.version);
-    if dest.join("usr/bin/tt-station-agentd").is_file() {
-        return Ok("already on the box".into());
-    }
     // The signature first: a release without one isn't worth downloading.
     let sig = match &asset.signature {
         Some(url) => Some(download_signature(url).await?),
         None if channel.unsigned_allowed => None,
         None => return Err(missing_signature(asset)),
     };
+    if dest.join("usr/bin/tt-station-agentd").is_file() {
+        // Already unpacked (an undo, an earlier install): used only when it
+        // was unpacked from this very package, and the package's signature
+        // checks out against today's keys -- not just because the folder is
+        // there.
+        if unpacked_from(&dest, &asset.name, &want) {
+            let verified = check_signature(channel, asset, &want, sig.as_deref())?;
+            return Ok(format!("already on the box; {verified}"));
+        }
+        std::fs::remove_dir_all(&dest)
+            .map_err(|e| format!("Couldn't clear {}: {e}", dest.display()))?;
+    }
     std::fs::create_dir_all(root().join("downloads")).map_err(|e| e.to_string())?;
     // Names of this download's own: nothing else's half-written file is
     // picked up, and nothing else writes into this one.
@@ -758,7 +816,7 @@ async fn fetch(release: &Release, channel: &Channel) -> Result<String, String> {
     working(Some(&format!("Unpacking {}", release.version)));
     let tmp = versions_dir().join(format!(".{}.partial-{unique}", release.version));
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
-    let result = unpack(&deb, &tmp, &dest).await;
+    let result = unpack(&deb, &tmp, &dest, &asset.name, &hex).await;
     let _ = std::fs::remove_file(&deb);
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&tmp);
@@ -766,8 +824,32 @@ async fn fetch(release: &Release, channel: &Channel) -> Result<String, String> {
     result.map(|()| verified)
 }
 
-/// Unpack `deb` into `tmp`, check the agent in it starts, and move it to `dest`.
-async fn unpack(deb: &Path, tmp: &Path, dest: &Path) -> Result<(), String> {
+/// Beside an unpacked version: the package it came from and its sha256.
+const UNPACKED_FROM: &str = ".tt-station-package.json";
+
+/// Whether the version unpacked at `dest` came from package `asset_name`
+/// whose sha256 is `sha256_hex`.
+fn unpacked_from(dest: &Path, asset_name: &str, sha256_hex: &str) -> bool {
+    std::fs::read(dest.join(UNPACKED_FROM))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .is_some_and(|v| {
+            v["asset"] == asset_name
+                && v["sha256"]
+                    .as_str()
+                    .is_some_and(|h| h.eq_ignore_ascii_case(sha256_hex))
+        })
+}
+
+/// Unpack `deb` (package `asset_name`, sha256 `sha256_hex`) into `tmp`, check
+/// the agent in it starts, note where it came from, and move it to `dest`.
+async fn unpack(
+    deb: &Path,
+    tmp: &Path,
+    dest: &Path,
+    asset_name: &str,
+    sha256_hex: &str,
+) -> Result<(), String> {
     let out = tokio::process::Command::new("dpkg-deb")
         .arg("-x")
         .arg(deb)
@@ -797,7 +879,96 @@ async fn unpack(deb: &Path, tmp: &Path, dest: &Path) -> Result<(), String> {
             String::from_utf8_lossy(&probe.stderr).trim()
         ));
     }
+    crate::fsio::write_json(
+        &tmp.join(UNPACKED_FROM),
+        &json!({ "asset": asset_name, "sha256": sha256_hex }),
+        crate::fsio::PRIVATE,
+    )
+    .map_err(|e| e.to_string())?;
     std::fs::rename(tmp, dest).map_err(|e| e.to_string())
+}
+
+/// At agent start: say in the journal which extra signing keys the update
+/// channel trusts (and which are waiting for an owner's approval), so a key
+/// nobody meant to add can't go unnoticed.
+pub fn warn_extra_keys(config_dir: &Path) {
+    match channel(config_dir) {
+        Ok(c) => {
+            for k in c.keys.iter().filter(|k| k.origin == "channel") {
+                crate::log::warn(format!(
+                    "updates: trusting an extra release signing key from {CHANNEL_FILE}: {} ({})",
+                    k.name, k.fingerprint
+                ));
+            }
+            for k in &c.pending_keys {
+                crate::log::warn(format!(
+                    "updates: {CHANNEL_FILE} lists the signing key {} ({}), which no owner has \
+                     approved: it isn't trusted",
+                    k.name, k.fingerprint
+                ));
+            }
+        }
+        Err(e) => crate::log::error(format!("updates: {e}")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApproveKey {
+    pub fingerprint: String,
+}
+
+/// `POST /updates/channel/approve {fingerprint}` (owners): trust a key that
+/// is in the box's channel file. Only a key already written on the box can be
+/// approved -- never one sent here -- and each approval is in the activity log.
+pub(crate) async fn post_approve_key(
+    State(state): State<AppState>,
+    _owner: crate::routes::OwnerAuth,
+    crate::routes::CallerAuth(caller): crate::routes::CallerAuth,
+    Json(b): Json<ApproveKey>,
+) -> Reply {
+    let config = state.config_dir();
+    let c = channel(&config).map_err(|e| err(StatusCode::CONFLICT, e))?;
+    if c.keys
+        .iter()
+        .any(|k| k.origin == "channel" && k.fingerprint == b.fingerprint)
+    {
+        return Ok(Json(json!({ "approved": true })));
+    }
+    let key = c
+        .pending_keys
+        .iter()
+        .find(|k| k.fingerprint == b.fingerprint)
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("No key with that fingerprint is waiting in {CHANNEL_FILE}."),
+            )
+        })?;
+    let mut list = approved(&config);
+    list.push(Approved {
+        name: key.name.clone(),
+        fingerprint: key.fingerprint.clone(),
+        at: now(),
+        by: caller.actor().device_name,
+    });
+    crate::fsio::write_json(
+        &config.join(APPROVED_KEYS_FILE),
+        &list,
+        crate::fsio::PRIVATE,
+    )
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::audit::record_as(
+        &state,
+        &caller.actor(),
+        "update_key_approve",
+        &format!("{} ({})", key.name, key.fingerprint),
+        "ok",
+    );
+    crate::log::warn(format!(
+        "updates: an owner approved the release signing key {} ({})",
+        key.name, key.fingerprint
+    ));
+    Ok(Json(json!({ "approved": true })))
 }
 
 fn label(v: &Option<String>, base: &str) -> String {
@@ -1190,6 +1361,7 @@ mod tests {
             repo: DEFAULT_REPO.into(),
             repo_from: "default".into(),
             keys,
+            pending_keys: vec![],
             unsigned_allowed,
         }
     }
@@ -1335,6 +1507,22 @@ mod tests {
         let c = channel_from(dir.path(), None, false).unwrap();
         assert_eq!(c.repo, "example-org/tt-station");
         assert_eq!(c.repo_from, "channel file");
+        // Written on the box, but not trusted until an owner approves it.
+        assert_eq!(c.keys, release_keys::builtin());
+        assert_eq!(c.pending_keys.len(), 1);
+        crate::fsio::write_json(
+            &dir.path().join(APPROVED_KEYS_FILE),
+            &[Approved {
+                name: "example-2026a".into(),
+                fingerprint: c.pending_keys[0].fingerprint.clone(),
+                at: 1,
+                by: "Owner".into(),
+            }],
+            crate::fsio::PRIVATE,
+        )
+        .unwrap();
+        let c = channel_from(dir.path(), None, false).unwrap();
+        assert!(c.pending_keys.is_empty());
         let added = c.keys.last().unwrap();
         assert_eq!(
             (added.name.as_str(), added.origin.as_str()),
@@ -1379,17 +1567,59 @@ mod tests {
     }
 
     #[test]
-    fn no_downgrade_below_the_running_line() {
+    fn no_downgrade_below_the_running_version() {
         assert!(below_floor("0.11.3", "0.10.9"));
         assert!(below_floor("0.11.0", "0.9.0"));
         assert!(below_floor("1.0.0", "0.99.0"));
         assert!(
-            !below_floor("0.11.3", "0.11.0"),
-            "a patch back within the line is fine"
+            below_floor("0.11.3", "0.11.0"),
+            "a patch back needs allow_downgrade too"
         );
+        assert!(below_floor("1.0.0", "1.0.0-rc.9"));
         assert!(!below_floor("0.11.3", "0.11.3"));
         assert!(!below_floor("0.11.3", "0.12.0"));
         assert!(!below_floor("0.11.0-rc.1", "0.11.0"));
+    }
+
+    #[test]
+    fn pre_releases_order_as_semver_says() {
+        // semver.org's own example, in order.
+        let order = [
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+        ];
+        for (i, a) in order.iter().enumerate() {
+            for (j, b) in order.iter().enumerate() {
+                assert_eq!(older(a, b), i < j, "{a} < {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unpacked_version_is_known_by_the_package_it_came_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let sha = "ab".repeat(32);
+        let name = "tt-station_0.12.0_amd64_noble.deb";
+        assert!(!unpacked_from(dir.path(), name, &sha), "no note: not known");
+        crate::fsio::write_json(
+            &dir.path().join(UNPACKED_FROM),
+            &json!({ "asset": name, "sha256": sha }),
+            crate::fsio::PRIVATE,
+        )
+        .unwrap();
+        assert!(unpacked_from(dir.path(), name, &sha.to_uppercase()));
+        assert!(!unpacked_from(dir.path(), name, &"cd".repeat(32)));
+        assert!(!unpacked_from(
+            dir.path(),
+            "tt-station_0.12.1_amd64_noble.deb",
+            &sha
+        ));
     }
 
     #[test]

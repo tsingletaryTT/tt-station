@@ -1440,6 +1440,7 @@ async fn main() -> Result<()> {
     tokio::spawn(tt_station_agentd::routines::schedule_forever(state.clone()));
     tokio::spawn(tt_station_agentd::library::index_forever(state.clone()));
     tt_station_agentd::updates::settle();
+    tt_station_agentd::updates::warn_extra_keys(&config_dir());
     tokio::spawn(tt_station_agentd::idle::watch_forever(state.clone()));
     // Code sessions still running in their holders: picked back up.
     tokio::spawn(tt_station_agentd::workspace::resume(state.clone()));
