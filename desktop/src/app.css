@@ -217,11 +217,13 @@ input, textarea, .selectable, .markdown, pre, code { user-select: text; }
   background: color-mix(in srgb, var(--vesper-stone-50) 60%, transparent); }
 /* Rows keep their height (the list scrolls instead of squeezing them); a .grow spacer still takes what's left. */
 .chat-list > :not(.grow) { flex: none; }
-.chat-list button { text-align: left; border: 0; background: transparent; color: var(--vesper-text-secondary); padding: 8px 10px;
-  border-radius: var(--vesper-radius-2); font: 400 13px var(--sans); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.chat-row { display: flex; align-items: center; gap: 2px; border-radius: var(--vesper-radius-2); color: var(--vesper-text-secondary);
   transition: background 120ms ease, color 120ms ease; }
-.chat-list button:hover { background: var(--vesper-alpha-stone-100); }
-.chat-list button.on { background: var(--vesper-alpha-stone-200); color: var(--vesper-text-primary); }
+.chat-row:hover { background: var(--vesper-alpha-stone-100); }
+.chat-row.on { background: var(--vesper-alpha-stone-200); color: var(--vesper-text-primary); }
+.chat-pick { flex: 1 1 auto; min-width: 0; text-align: left; border: 0; background: transparent; color: inherit; padding: 8px 10px;
+  border-radius: var(--vesper-radius-2); font: 400 13px var(--sans); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-pick:focus-visible { outline: 2px solid var(--vesper-border-focus); outline-offset: -2px; }
 .chat-main { position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; height: 100%; }
 .chat-main > * { flex: none; }
 .chat-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 32px; border-bottom: 1px solid var(--line); }

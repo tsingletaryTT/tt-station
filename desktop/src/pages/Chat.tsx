@@ -201,12 +201,14 @@ export function Chat() {
         <Button size="sm" variant="tertiary" iconLeft={<Icon kind="add" />} onClick={() => setCurrent(null)}>New chat</Button>
         <div style={{ height: 10 }} />
         {convs.map((c) => (
-          <button key={c.id} className={c.id === current ? "on" : ""} onClick={() => setCurrent(c.id)}
-            onContextMenu={async (e) => { e.preventDefault(); if (await ask(`Delete “${c.title}”?`, { body: "The conversation is removed from this computer.", confirm: "Delete", danger: true })) remove(c.id); }}
-            title={c.title}>
-            <span className="chat-list-title" onDoubleClick={() => void rename(c.id, c.title)}>{c.title}</span>
+          // A row, not a button holding a button: picking and renaming are siblings.
+          <div key={c.id} className={`chat-row ${c.id === current ? "on" : ""}`}
+            onContextMenu={async (e) => { e.preventDefault(); if (await ask(`Delete “${c.title}”?`, { body: "The conversation is removed from this computer.", confirm: "Delete", danger: true })) remove(c.id); }}>
+            <button className="chat-pick" aria-current={c.id === current ? "true" : undefined} onClick={() => setCurrent(c.id)} title={c.title}>
+              <span className="chat-list-title" onDoubleClick={() => void rename(c.id, c.title)}>{c.title}</span>
+            </button>
             <IconButton icon={<Icon kind="document" />} size="xs" variant="ghost" title="Rename conversation" aria-label={`Rename conversation ${c.title}`} onClick={() => void rename(c.id, c.title)} className="chat-rename" />
-          </button>
+          </div>
         ))}
         {convs.length === 0 && <span className="muted" style={{ padding: 10, fontSize: 13 }}>Your conversations stay on this computer.</span>}
       </aside>
