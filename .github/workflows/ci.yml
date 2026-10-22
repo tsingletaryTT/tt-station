@@ -53,6 +53,10 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CARGO_TERM_COLOR: always
+      # About 80 test binaries with full debug info fill the runner's disk, and the
+      # linker dies with a bus error. Line tables keep backtraces readable.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
       # rustup is preinstalled on GitHub runners; with no argument it installs

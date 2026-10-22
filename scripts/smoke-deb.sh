@@ -36,7 +36,11 @@ docker run --rm \
         test -f /usr/lib/systemd/user/tt-station-agentd.service
         grep -q "^ExecStart=/usr/bin/tt-station-agentd" /usr/lib/systemd/user/tt-station-agentd.service
         test -f /usr/share/tt-station/app/index.html
-        for f in LICENSE NOTICE THIRD_PARTY_LICENSES.md; do test -f /usr/share/doc/tt-station/$f; done
+        # In the package, not on disk: Ubuntu images skip /usr/share/doc, and debhelper gzips big docs.
+        files=$(dpkg-deb -c "$deb")
+        for f in LICENSE NOTICE THIRD_PARTY_LICENSES.md; do
+            grep -qE "/usr/share/doc/tt-station/$f(\.gz)?$" <<<"$files" || { echo "missing $f in the package"; exit 1; }
+        done
         tt-station-agentd --help >/dev/null
         echo "== smoke-testing the installed agent"
         # No flags and no agentd.toml, exactly as the packaged unit starts it.
