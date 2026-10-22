@@ -13,6 +13,7 @@ under `gozer run`, which always releases the lease afterwards.
 
 from __future__ import annotations
 
+import errno
 import json
 import re
 import subprocess
@@ -26,10 +27,18 @@ TICKET_RE = re.compile(r"queued: ticket (\S+)")
 
 def holders() -> str:
     """Who holds the chips now, in a few words."""
-    try:
-        out = subprocess.run(["gozer", "status"], capture_output=True, text=True, timeout=20).stdout
-    except Exception:
-        return ""
+    for attempt in range(3):
+        try:
+            out = subprocess.run(["gozer", "status"], capture_output=True, text=True, timeout=20).stdout
+            break
+        except OSError as e:
+            # "Text file busy": gozer's file was being written (an upgrade in place)
+            # when we ran it. Gone a moment later.
+            if e.errno != errno.ETXTBSY or attempt == 2:
+                return ""
+            threading.Event().wait(0.05)  # not time.sleep: the wait loop's tests stub that
+        except Exception:
+            return ""
     held = {m.group(1).strip() for m in re.finditer(r"HELD\S*\s+(.+)", out)}
     return ", ".join(sorted(held))[:200]
 
