@@ -2,7 +2,9 @@
 
 Found while building the macOS Blackhole driver path (`macos/TTStationDriver/`, spec
 `docs/superpowers/specs/2026-09-28-macos-blackhole-dext-design.md`). Kept here to file later.
-**Nothing below has been posted anywhere.** Filing means public issues under Taylor's account, so
+**Nothing below has been posted anywhere.** Re-checked 2026-10-22 against ttsim **v1.13.0**: items 2, 3 and 5 still
+reproduce. Items 2 and 3 fail in functions now named `pcie_bar0_wr` and `pcie_bar0_rd`. Items 1
+and 4 weren't re-run, since they need the full blackhole-py path. Filing means public issues under Taylor's account, so
 it waits for their go-ahead.
 
 Environment for every item: ttsim **v1.10.12** (public source drop, commit `6cab92f`), built natively

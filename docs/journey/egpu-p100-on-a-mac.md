@@ -1927,6 +1927,10 @@ Would have reset to force m3 recovery, but did not due to --no-reset
 FLASH SUCCESS
 ```
 
+A replay of that recording, at its real timing:
+
+![tt-flash flashing firmware 19.16.0 onto the Mac-attached P100A: SETUP, DETECT, FLASH stages, three boot-critical images marked for rewrite, ROM 19.2.0 to 19.16.0, writing and verification SUCCESS, FLASH SUCCESS](images/2026-10-22-tt-flash-19.16.0-p100a.gif)
+
 Nine seconds, 10:39:05 to 10:39:14. One correction to what I'd said beforehand: tt-flash *did*
 rewrite the boot-critical images (`cmfw`, `safeimg`, `failover`) without `--update-boot-images`.
 Their descriptions differed from the bundle's, presumably because 19.2 predates the current
@@ -1957,3 +1961,21 @@ tt-flash now reads `running=(19, 16, 0, 0), spi=(19, 16, 0, 0)`. The compatibili
 skip passes after the fact ("SPI EEPROM is 0x20bb20, which this firmware supports"). luwen's
 `TEST` answers in 0.4 to 0.6 ms. The link is still Gen4 x4 and BAR4 is still unassigned: new
 firmware doesn't change what the Thunderbolt bridge gives the card.
+
+### Checking what we depend on
+
+Before cleaning the branch up for review, every upstream project this work builds on was checked
+for new commits and releases. luwen (`ecef1a8`, `bh-mod-v2.4.0`), tt-flash 4.1.0,
+tt-system-firmware 19.16.0 and blackhole-py `d8eae8f` are all current. 19.17's release notes are
+being written. Two had moved:
+
+- **The official `tt` CLI: 1.0.1 → 1.2.0.** Upgraded with `uv tool upgrade tenstorrent`. This one
+  changed what we show. tt 1.2.0 pins tt-inference-server v0.25.0, whose release spec drops p100
+  from Llama-3.1-8B and -8B-Instruct (p150 and up remain). For p100, `tt model list` now returns no
+  released-catalog model and seven verified community bundles, which have `hardware`/`kind`/
+  `engines`/`verified` and no per-device table. `tt-station local` printed every column as `-`.
+  Rows now carry `source` (catalog or community) and `verified`, and the CLI and the Mac app label
+  bundles as community. Tests use real 1.2.0 output (commit `67c00fd`).
+- **ttsim: v1.10.12 → v1.13.0.** Built and checked. Our ttsim tests pass. Of the drafted issues,
+  the strided-TLB write and the TLB register read still fail fatally (now in `pcie_bar0_wr` and
+  `pcie_bar0_rd`), and ARC `TEST` still answers zeros. The drafts stay valid.
