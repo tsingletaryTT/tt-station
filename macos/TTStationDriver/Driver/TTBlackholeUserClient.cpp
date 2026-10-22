@@ -99,9 +99,12 @@ kern_return_t TTBlackholeUserClient::ExternalMethod(uint64_t selector,
 
     case kTTBHCfgRead: {
         if (args->scalarInputCount != 2 || args->scalarOutputCount < 1) return kIOReturnBadArgument;
+        // Validate the client's 64-bit values before narrowing them: a huge offset or width must
+        // not truncate into a valid-looking one. CfgRead checks again (it's also called in-process).
+        const uint64_t offset = args->scalarInput[0], width = args->scalarInput[1];
+        if ((width != 1 && width != 2 && width != 4) || offset >= 4096) return kIOReturnBadArgument;
         uint32_t value = 0;
-        kern_return_t err = driver->CfgRead(uint32_t(args->scalarInput[0]),
-                                            uint32_t(args->scalarInput[1]), &value);
+        kern_return_t err = driver->CfgRead(uint32_t(offset), uint32_t(width), &value);
         if (err != kIOReturnSuccess) return err;
         args->scalarOutput[0] = value;
         args->scalarOutputCount = 1;

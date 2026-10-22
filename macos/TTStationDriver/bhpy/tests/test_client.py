@@ -277,6 +277,36 @@ class SocketPath(BrokerCase):
             self.assertEqual(f.read(), "not a socket")       # still there, untouched
 
 
+class AlignedReads(unittest.TestCase):
+    """TLBWindow.read sends the broker only aligned 32-bit spans and slices the bytes back out."""
+
+    def _window(self, memory):
+        calls = []
+
+        class FakeConn:
+            def call(self, cmd, id=0, a0=0, a1=0, a2=0, payload=b"", want_fd=False):
+                calls.append((cmd, a0, a1))
+                return 0, 0, bytes(memory[a0:a0 + a1]) if cmd == wire.TLB_READ else b"", None
+
+        w = object.__new__(pcie_darwin.TLBWindow)
+        w.fd, w.id, w.core = FakeConn(), 0, (1, 2)
+        return w, calls
+
+    def test_odd_reads_are_widened_to_aligned_words(self):
+        memory = bytes(range(256)) * 16
+        w, calls = self._window(memory)
+        for off, n in ((0x101, 3), (0x102, 1), (0x103, 6), (0x100, 4), (0x7, 0)):
+            self.assertEqual(w.read(off, n), memory[off:off + n], (off, n))
+            _, start, length = calls[-1]
+            self.assertEqual((start % 4, length % 4), (0, 0), (off, n))
+
+    def test_a_read_off_the_end_of_the_window_is_refused(self):
+        w, calls = self._window(b"")
+        with self.assertRaises(wire.BrokerError):
+            w.read(pcie_darwin.TLBWindow.SIZE - 2, 4)
+        self.assertEqual(calls, [])
+
+
 class CleanClose(unittest.TestCase):
     """PCIDevice.close() must close the broker connection even when the steps before it fail:
     the broker only frees the session (DMA mappings, iATU, the exclusive dext client) on hang-up."""

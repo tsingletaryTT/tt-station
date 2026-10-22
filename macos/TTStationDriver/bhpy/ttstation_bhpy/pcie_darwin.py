@@ -53,7 +53,15 @@ class TLBWindow:
         self.fd.call(wire.TLB_TARGET, self.id, addr, _xy(start), _xy(end))
 
     def read(self, offset, bytes=4):
-        return self.fd.call(wire.TLB_READ, self.id, offset, bytes)[2]
+        # MMIO through the broker must be aligned 32-bit reads: an odd-sized read isn't reliably
+        # honoured on the Mac (a 3-byte read of ARC_MISC_CNTL returned ffffff where the 4-byte
+        # read returned 00000000; see macos/TTStationDriver/luwen/README.md). So the window span
+        # is checked, whole words are read, and the requested bytes are sliced back out.
+        if offset < 0 or bytes < 0 or offset + bytes > self.SIZE:
+            raise wire.BrokerError(wire.TLB_READ, -1)             # same error the broker gives
+        start, end = offset & ~3, (offset + bytes + 3) & ~3
+        data = self.fd.call(wire.TLB_READ, self.id, start, end - start)[2]
+        return data[offset - start:offset - start + bytes]
 
     def write(self, offset, value, bytes=4):
         data = value.to_bytes(bytes, "little") if isinstance(value, int) else bytes_(value)

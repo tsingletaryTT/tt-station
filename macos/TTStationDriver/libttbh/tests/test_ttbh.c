@@ -250,6 +250,34 @@ static void test_noc_write_lands_in_window(void)
     sim_free(s);
 }
 
+// Two windows aimed at the same page are two views of one memory, as on hardware. (An earlier sim
+// copied each window's image back into the store, so the later copy erased the other window's
+// writes: window 1 below would have wiped window 0's word. Found in PR review.)
+static void test_two_windows_on_one_page_share_writes(void)
+{
+    ttbh_sim *s = ttbh_sim_new(4);
+    ttbh_window a = ttbh_sim_window(s, 0), b = ttbh_sim_window(s, 1);
+    const uint64_t page = 0x10000000, off = 0x4000;             // tile (8,0), one 2 MiB page
+    volatile uint8_t *wa = a.aim(a.ctx, 8, 0, page), *wb = b.aim(b.ctx, 8, 0, page);
+    CHECK(wa != NULL && wb != NULL);
+    *(volatile uint32_t *)(wa + off) = 0xAAAA0000u;              // through window 0
+    *(volatile uint32_t *)(wb + off + 4) = 0xBBBB0000u;          // through window 1
+    CHECK_EQ(*(volatile uint32_t *)(wb + off), 0xAAAA0000u);     // each sees the other's write now
+    CHECK_EQ(*(volatile uint32_t *)(wa + off + 4), 0xBBBB0000u);
+    ttbh_sim_sync(s);                                            // a firmware step must not undo them
+    ttbh_window c = ttbh_sim_window(s, 2);                       // nor must aiming a third window
+    volatile uint8_t *wc = c.aim(c.ctx, 8, 0, page);
+    CHECK_EQ(*(volatile uint32_t *)(wc + off), 0xAAAA0000u);
+    CHECK_EQ(*(volatile uint32_t *)(wc + off + 4), 0xBBBB0000u);
+    CHECK_EQ(*ttbh_sim_word(s, 8, 0, page + off), 0xAAAA0000u);  // and the store has both
+    CHECK_EQ(*ttbh_sim_word(s, 8, 0, page + off + 4), 0xBBBB0000u);
+    // Re-aiming window 0 elsewhere and back keeps everything.
+    a.aim(a.ctx, 9, 0, page);
+    wa = a.aim(a.ctx, 8, 0, page);
+    CHECK_EQ(*(volatile uint32_t *)(wa + off), 0xAAAA0000u);
+    ttbh_sim_free(s);
+}
+
 // ── host DMA ──────────────────────────────────────────────────────────────────────────────
 
 static void test_iatu_encode(void)
@@ -390,6 +418,7 @@ int main(void)
     test_arc_and_telemetry_walk();
     test_failure_modes();
     test_noc_write_lands_in_window();
+    test_two_windows_on_one_page_share_writes();
     test_iatu_encode();
     test_iatu_write_lands_at_region_offsets();
     test_dma_plan_makes_fragmented_iova_contiguous_on_the_noc();
