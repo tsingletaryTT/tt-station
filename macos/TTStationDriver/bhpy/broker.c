@@ -33,30 +33,52 @@ typedef struct {
 
 typedef struct {
     const broker_backend *be;
-    bool tlb_used[TTBH_BROKER_USER_TLBS];
+    int fd;
+    bool tlb_owned[TTBH_BROKER_USER_TLBS];   // windows this session allocated
     sysmem_slot sysmem[TTBH_BROKER_MAX_SYSMEM];
-    bool region_used[TTBH_IATU_REGIONS];
-    uint8_t io[TTBH_BROKER_MAX_IO];
 } session;
+
+// Several sessions at once, like several opens of /dev/tenstorrent/N under tt-kmd. tt-flash needs
+// this: it opens the card again in the same process and from forkserver workers while the parent
+// still holds it (tt_flash/chip.py, flash.py). The broker is single-threaded and handles each
+// request whole, so sessions interleave at request boundaries. What they share is the card's
+// hardware: TLB windows and outbound iATU regions are owned broker-wide, so two sessions can never
+// be handed the same window or region. What they do with the chip is theirs to coordinate, as on
+// Linux.
+#define TTBH_BROKER_MAX_SESSIONS 16
+static session *g_sessions[TTBH_BROKER_MAX_SESSIONS];
+static bool g_tlb_used[TTBH_BROKER_USER_TLBS];
+static bool g_region_used[TTBH_IATU_REGIONS];
+static uint8_t g_io[TTBH_BROKER_MAX_IO];       // one request at a time, so one buffer serves all
 
 // Lowest chip-visible offset where `size` bytes fit between the session's live buffers (first fit),
 // never straddling a 1 TiB boundary (an iATU region can't; see ttbh.h). Freed ranges come back:
 // this used to be a bump allocator, and a long-lived session walked up the NOC address space for
 // ever (seen 2026-10-22 on the card: 64 MiB, then 256 MiB, … each landing above the last though the
 // previous one had been freed). At most TTBH_BROKER_MAX_SYSMEM buffers, so the O(n^2) scan is fine.
-static uint64_t noc_first_fit(const session *s, uint64_t size)
+// The chip-visible range is one address space for the whole card, so the scan covers every
+// session's buffers.
+static const sysmem_slot *live_buffer(int i)          // i over all sessions x slots
 {
+    const session *s = g_sessions[i / (int)TTBH_BROKER_MAX_SYSMEM];
+    const sysmem_slot *m = s ? &s->sysmem[i % (int)TTBH_BROKER_MAX_SYSMEM] : NULL;
+    return m && m->used ? m : NULL;
+}
+static uint64_t noc_first_fit(uint64_t size)
+{
+    const int n = TTBH_BROKER_MAX_SESSIONS * (int)TTBH_BROKER_MAX_SYSMEM;
     uint64_t best = UINT64_MAX;
     // Candidate starts: 0 and the end of every live buffer. The answer is always one of these
     // (rounded up past a 1 TiB boundary when it would cross one).
-    for (int c = -1; c < (int)TTBH_BROKER_MAX_SYSMEM; c++) {
-        if (c >= 0 && !s->sysmem[c].used) continue;
-        uint64_t base = c < 0 ? 0 : s->sysmem[c].noc_base + s->sysmem[c].size;
+    for (int c = -1; c < n; c++) {
+        const sysmem_slot *cm = c < 0 ? NULL : live_buffer(c);
+        if (c >= 0 && !cm) continue;
+        uint64_t base = c < 0 ? 0 : cm->noc_base + cm->size;
         if ((base >> 40) != ((base + size - 1) >> 40)) base = (base + (1ull << 40)) & ~((1ull << 40) - 1);
         bool clear = true;
-        for (int o = 0; o < (int)TTBH_BROKER_MAX_SYSMEM && clear; o++) {
-            const sysmem_slot *m = &s->sysmem[o];
-            if (m->used && base < m->noc_base + m->size && m->noc_base < base + size) clear = false;
+        for (int o = 0; o < n && clear; o++) {
+            const sysmem_slot *m = live_buffer(o);
+            if (m && base < m->noc_base + m->size && m->noc_base < base + size) clear = false;
         }
         if (clear && base < best) best = base;
     }
@@ -121,7 +143,7 @@ static int respond(int fd, int32_t status, uint64_t r0, uint64_t r1, const void 
 
 // ── commands ──────────────────────────────────────────────────────────────────────────────
 
-static bool window_ok(session *s, uint32_t id) { return id < TTBH_BROKER_USER_TLBS && s->tlb_used[id]; }
+static bool window_ok(session *s, uint32_t id) { return id < TTBH_BROKER_USER_TLBS && s->tlb_owned[id]; }
 // Is [off, off + len) inside one 2 MiB window? Written so it can't wrap: a client-supplied offset
 // near UINT64_MAX would make `off + len` overflow and pass a naive `off + len > size` check.
 static bool span_ok(uint64_t off, uint64_t len) { return off <= TTBH_TLB_2M_SIZE && len <= TTBH_TLB_2M_SIZE - off; }
@@ -191,7 +213,7 @@ static int sysmem_create(session *s, uint64_t size, int *out_fd, uint64_t *noc, 
     size = (size + 0x3FFFu) & ~(uint64_t)0x3FFF;          // 16 KiB: the macOS DART page
 
     char name[64];
-    snprintf(name, sizeof name, "/ttbh.%d.%d", (int)getpid(), slot);
+    snprintf(name, sizeof name, "/ttbh.%d.%d.%d", (int)getpid(), s->fd, slot);
     shm_unlink(name);
     int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
     if (fd < 0) return TTBH_EINVAL;
@@ -208,11 +230,11 @@ static int sysmem_create(session *s, uint64_t size, int *out_fd, uint64_t *noc, 
     uint32_t first = TTBH_IATU_REGIONS;
     for (uint32_t r = 0; r + nseg <= TTBH_IATU_REGIONS && first == TTBH_IATU_REGIONS; r++) {
         uint32_t k = 0;
-        while (k < nseg && !s->region_used[r + k]) k++;
+        while (k < nseg && !g_region_used[r + k]) k++;
         if (k == nseg) first = r;
     }
     ttbh_iatu_plan_entry plan[TTBH_IATU_REGIONS];
-    uint64_t base = noc_first_fit(s, size);
+    uint64_t base = noc_first_fit(size);
     if (first == TTBH_IATU_REGIONS || ttbh_dma_plan(segs, nseg, base, first, plan) != TTBH_OK) {
         s->be->complete_dma(s->be->ctx, dma);
         goto fail;
@@ -221,7 +243,7 @@ static int sysmem_create(session *s, uint64_t size, int *out_fd, uint64_t *noc, 
         ttbh_iatu_regs r;
         ttbh_iatu_outbound_encode(plan[i].base, plan[i].limit, plan[i].target, &r);
         ttbh_iatu_outbound_write_with(bar2_wr32, (void *)s->be, plan[i].region, &r);
-        s->region_used[plan[i].region] = true;
+        g_region_used[plan[i].region] = true;
     }
     s->sysmem[slot] = (sysmem_slot){ true, addr, size, fd, dma, first, nseg, base };
     *out_fd = fd;
@@ -242,7 +264,7 @@ static void sysmem_free(session *s, uint32_t h)
         ttbh_iatu_regs off;
         ttbh_iatu_outbound_encode(0, 0, 0, &off);
         ttbh_iatu_outbound_write_with(bar2_wr32, (void *)s->be, m->first_region + i, &off);
-        s->region_used[m->first_region + i] = false;
+        g_region_used[m->first_region + i] = false;
     }
     s->be->complete_dma(s->be->ctx, m->dma_handle);
     munmap(m->addr, m->size);
@@ -251,8 +273,8 @@ static void sysmem_free(session *s, uint32_t h)
 }
 
 // ── Read-only telemetry for any number of readers ────────────────────────────────────────
-// The session socket has ONE owner (blackhole-py driving the card). Monitors such as tt-toplike
-// must still see the card while that session runs, so the broker also listens on a second socket
+// Sessions drive the card (blackhole-py, tt-flash). Monitors such as tt-toplike only want to see it,
+// and shouldn't need a session or its windows to do that, so the broker also listens on a second socket
 // (telemetry.sock next to the session socket, or TTBH_TELEMETRY_SOCKET). A reader connects, gets
 // ONE JSON line, and the broker closes the connection:
 //
@@ -297,22 +319,6 @@ static void serve_telemetry(const broker_backend *be)
     close(c);
 }
 
-// Block until `fd` has a request (0) or the broker should stop (-1), answering telemetry readers
-// meanwhile. With `ticking` (a session on a simulated backend) time keeps moving while we wait;
-// the idle accept loop passes false so a simulator doesn't spin with nobody connected.
-static int wait_for(const broker_backend *be, int fd, bool ticking)
-{
-    const bool tick = ticking && be->tick;
-    for (;;) {
-        if (stop_requested) return -1;
-        struct pollfd p[2] = { { .fd = fd, .events = POLLIN }, { .fd = tel_srv, .events = POLLIN } };
-        int n = poll(p, tel_srv >= 0 ? 2 : 1, tick ? 0 : -1);
-        if (n < 0) { if (errno == EINTR) continue; return -1; }
-        if (tel_srv >= 0 && (p[1].revents & POLLIN)) serve_telemetry(be);
-        if (p[0].revents & (POLLIN | POLLHUP | POLLERR)) { if (tick) be->tick(be->ctx); return 0; }
-        if (tick) be->tick(be->ctx);
-    }
-}
 
 // Bind a fresh AF_UNIX listener at `path`, replacing only a stale socket (never another file).
 static int listen_unix(const char *path, int backlog)
@@ -337,90 +343,107 @@ static int listen_unix(const char *path, int backlog)
     return srv;
 }
 
-void broker_session(const broker_backend *be, int fd)
+// One request from session `s`. Returns 0 to keep the session, nonzero to drop it.
+static int handle_request(session *s)
 {
-    session *s = calloc(1, sizeof *s);
-    if (!s) { close(fd); return; }
-    s->be = be;
+    const broker_backend *be = s->be;
+    const int fd = s->fd;
     ttbh_bar0_ctx own_ctx;
     ttbh_window own = own_window(be, &own_ctx);
-
     ttbh_broker_req q;
-    for (;;) {
-        // Wait for the next request, answering telemetry readers meanwhile. Simulated time only
-        // moves when we clock it, so with a tick the chip keeps running while the client thinks
-        // (e.g. between blackhole-py's readiness polls).
-        if (wait_for(be, fd, true) != 0) break;
-        if (read_all(fd, &q, sizeof q) != 0) break;
-        if (q.payload_len > TTBH_BROKER_MAX_IO) break;            // protocol violation: drop client
-        if (q.payload_len && read_all(fd, s->io, q.payload_len)) break;
-        int rc = 0;
-        switch (q.cmd) {
-        case TTBH_CMD_HELLO:
-            rc = respond(fd, TTBH_OK, TTBH_BROKER_VERSION, ((uint64_t)be->device_id << 16) | be->subsystem_id, 0, 0, -1);
-            break;
-        case TTBH_CMD_TLB_ALLOC: {
-            uint32_t id = 0;
-            while (id < TTBH_BROKER_USER_TLBS && s->tlb_used[id]) id++;
-            if (id == TTBH_BROKER_USER_TLBS) { rc = respond(fd, TTBH_EAGAIN, 0, 0, 0, 0, -1); break; }
-            s->tlb_used[id] = true;
-            rc = respond(fd, TTBH_OK, id, 0, 0, 0, -1);
-            break;
-        }
-        case TTBH_CMD_TLB_FREE:
-            if (q.id < TTBH_BROKER_USER_TLBS) s->tlb_used[q.id] = false;
-            rc = respond(fd, TTBH_OK, 0, 0, 0, 0, -1);
-            break;
-        case TTBH_CMD_TLB_TARGET:
-            rc = respond(fd, tlb_target(s, q.id, q.a0, q.a1, q.a2), 0, 0, 0, 0, -1);
-            break;
-        case TTBH_CMD_TLB_READ: {
-            if (!window_ok(s, q.id) || q.a1 > TTBH_BROKER_MAX_IO || !span_ok(q.a0, q.a1)) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
-            if (be->sync) be->sync(be->ctx);
-            bar_rd(be, 0, window_off(q.id) + q.a0, s->io, (uint32_t)q.a1);
-            rc = respond(fd, TTBH_OK, 0, 0, s->io, (uint32_t)q.a1, -1);
-            break;
-        }
-        case TTBH_CMD_TLB_WRITE: {
-            if (!window_ok(s, q.id) || !span_ok(q.a0, q.payload_len)) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
-            bar_wr(be, 0, window_off(q.id) + q.a0, s->io, q.payload_len);
-            if (be->sync) be->sync(be->ctx);
-            rc = respond(fd, TTBH_OK, 0, 0, 0, 0, -1);
-            break;
-        }
-        case TTBH_CMD_TELEMETRY: {
-            uint32_t v = 0;
-            int err = ttbh_telemetry_read(&own, (uint16_t)q.a0, &v);
-            rc = respond(fd, err, v, 0, 0, 0, -1);
-            break;
-        }
-        case TTBH_CMD_ARC_MSG: {
-            if (q.payload_len != sizeof(ttbh_arc_msg)) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
-            ttbh_arc_msg m;
-            memcpy(&m, s->io, sizeof m);
-            int err = ttbh_arc_msg_send(&own, &m);
-            rc = respond(fd, err, 0, 0, &m, err == TTBH_OK || err == TTBH_EREMOTE ? sizeof m : 0, -1);
-            break;
-        }
-        case TTBH_CMD_SYSMEM: {
-            int mfd = -1; uint64_t noc = 0; uint32_t h = 0;
-            int err = sysmem_create(s, q.a0, &mfd, &noc, &h);
-            rc = respond(fd, err, noc, h, 0, 0, err ? -1 : mfd);
-            break;
-        }
-        case TTBH_CMD_SYSMEM_FREE:
-            sysmem_free(s, (uint32_t)q.a0);
-            rc = respond(fd, TTBH_OK, 0, 0, 0, 0, -1);
-            break;
-        default:
-            rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1);
-        }
-        if (rc) break;
+    if (be->tick) be->tick(be->ctx);                   // simulated time: let the chip catch up
+    if (read_all(fd, &q, sizeof q) != 0) return -1;
+    if (q.payload_len > TTBH_BROKER_MAX_IO) return -1;           // protocol violation: drop client
+    if (q.payload_len && read_all(fd, g_io, q.payload_len)) return -1;
+    int rc = 0;
+    switch (q.cmd) {
+    case TTBH_CMD_HELLO:
+        rc = respond(fd, TTBH_OK, TTBH_BROKER_VERSION, ((uint64_t)be->device_id << 16) | be->subsystem_id, 0, 0, -1);
+        break;
+    case TTBH_CMD_TLB_ALLOC: {
+        uint32_t id = 0;
+        while (id < TTBH_BROKER_USER_TLBS && g_tlb_used[id]) id++;
+        if (id == TTBH_BROKER_USER_TLBS) { rc = respond(fd, TTBH_EAGAIN, 0, 0, 0, 0, -1); break; }
+        g_tlb_used[id] = s->tlb_owned[id] = true;
+        rc = respond(fd, TTBH_OK, id, 0, 0, 0, -1);
+        break;
     }
-    // Client gone: release everything it held (iATU regions + DMA mappings + pages).
-    for (uint32_t h = 0; h < TTBH_BROKER_MAX_SYSMEM; h++) sysmem_free(s, h);
+    case TTBH_CMD_TLB_FREE:
+        if (window_ok(s, q.id)) g_tlb_used[q.id] = s->tlb_owned[q.id] = false;   // only your own
+        rc = respond(fd, TTBH_OK, 0, 0, 0, 0, -1);
+        break;
+    case TTBH_CMD_TLB_TARGET:
+        rc = respond(fd, tlb_target(s, q.id, q.a0, q.a1, q.a2), 0, 0, 0, 0, -1);
+        break;
+    case TTBH_CMD_TLB_READ: {
+        if (!window_ok(s, q.id) || q.a1 > TTBH_BROKER_MAX_IO || !span_ok(q.a0, q.a1)) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
+        if (be->sync) be->sync(be->ctx);
+        bar_rd(be, 0, window_off(q.id) + q.a0, g_io, (uint32_t)q.a1);
+        rc = respond(fd, TTBH_OK, 0, 0, g_io, (uint32_t)q.a1, -1);
+        break;
+    }
+    case TTBH_CMD_TLB_WRITE: {
+        if (!window_ok(s, q.id) || !span_ok(q.a0, q.payload_len)) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
+        bar_wr(be, 0, window_off(q.id) + q.a0, g_io, q.payload_len);
+        if (be->sync) be->sync(be->ctx);
+        rc = respond(fd, TTBH_OK, 0, 0, 0, 0, -1);
+        break;
+    }
+    case TTBH_CMD_TELEMETRY: {
+        uint32_t v = 0;
+        int err = ttbh_telemetry_read(&own, (uint16_t)q.a0, &v);
+        rc = respond(fd, err, v, 0, 0, 0, -1);
+        break;
+    }
+    case TTBH_CMD_ARC_MSG: {
+        if (q.payload_len != sizeof(ttbh_arc_msg)) { rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1); break; }
+        ttbh_arc_msg m;
+        memcpy(&m, g_io, sizeof m);
+        int err = ttbh_arc_msg_send(&own, &m);
+        rc = respond(fd, err, 0, 0, &m, err == TTBH_OK || err == TTBH_EREMOTE ? sizeof m : 0, -1);
+        break;
+    }
+    case TTBH_CMD_SYSMEM: {
+        int mfd = -1; uint64_t noc = 0; uint32_t h = 0;
+        int err = sysmem_create(s, q.a0, &mfd, &noc, &h);
+        rc = respond(fd, err, noc, h, 0, 0, err ? -1 : mfd);
+        break;
+    }
+    case TTBH_CMD_SYSMEM_FREE:
+        sysmem_free(s, (uint32_t)q.a0);
+        rc = respond(fd, TTBH_OK, 0, 0, 0, 0, -1);
+        break;
+    default:
+        rc = respond(fd, TTBH_EINVAL, 0, 0, 0, 0, -1);
+    }
+    return rc;
+}
+
+static int session_open(const broker_backend *be, int fd)
+{
+    for (int i = 0; i < TTBH_BROKER_MAX_SESSIONS; i++) {
+        if (g_sessions[i]) continue;
+        session *s = calloc(1, sizeof *s);
+        if (!s) break;
+        s->be = be;
+        s->fd = fd;
+        g_sessions[i] = s;
+        return 0;
+    }
+    fprintf(stderr, "ttbh broker: %d sessions open; refusing another\n", TTBH_BROKER_MAX_SESSIONS);
     close(fd);
+    return -1;
+}
+
+// Client gone: release everything it held (iATU regions + DMA mappings + pages, then windows).
+static void session_close(int i)
+{
+    session *s = g_sessions[i];
+    for (uint32_t h = 0; h < TTBH_BROKER_MAX_SYSMEM; h++) sysmem_free(s, h);
+    for (uint32_t id = 0; id < TTBH_BROKER_USER_TLBS; id++) if (s->tlb_owned[id]) g_tlb_used[id] = false;
+    close(s->fd);
     free(s);
+    g_sessions[i] = NULL;
 }
 
 
@@ -428,7 +451,7 @@ int broker_serve(const broker_backend *be, const char *path)
 {
     // Replace only a stale SOCKET at the path. The path is caller-chosen (`serve [SOCKET]`), so
     // anything else there (a regular file, a directory, a symlink) is left alone and we refuse.
-    int srv = listen_unix(path, 1);
+    int srv = listen_unix(path, 16);
     if (srv < 0) return 1;
 
     // The read-only telemetry socket: TTBH_TELEMETRY_SOCKET, else telemetry.sock beside `path`.
@@ -458,12 +481,35 @@ int broker_serve(const broker_backend *be, const char *path)
     fprintf(stderr, "ttbh broker: listening on %s (ASIC_STATE0: %s), telemetry on %s\n",
             path, ttbh_strerror(a0_err), tel_srv >= 0 ? tel_path : "(none)");
 
+    // One loop for everything: new sessions, telemetry readers, and a request from any open session.
+    // With a tick (simulated backends) and a session open, time keeps moving while clients think;
+    // with nobody connected the loop blocks, so an idle simulator doesn't spin.
     while (!stop_requested) {
-        if (wait_for(be, srv, false) != 0) break;          // answers telemetry readers while idle
-        int c = accept(srv, NULL, NULL);
-        if (c < 0) { if (errno == EINTR) continue; perror("accept"); break; }   // loop re-checks the flag
-        broker_session(be, c);
+        struct pollfd p[2 + TTBH_BROKER_MAX_SESSIONS];
+        int idx[TTBH_BROKER_MAX_SESSIONS], n = 0, open_sessions = 0;
+        p[n++] = (struct pollfd){ .fd = srv, .events = POLLIN };
+        p[n++] = (struct pollfd){ .fd = tel_srv, .events = POLLIN };   // fd -1 is ignored by poll
+        for (int i = 0; i < TTBH_BROKER_MAX_SESSIONS; i++) {
+            if (!g_sessions[i]) continue;
+            idx[n - 2] = i;
+            p[n++] = (struct pollfd){ .fd = g_sessions[i]->fd, .events = POLLIN };
+            open_sessions++;
+        }
+        const bool ticking = be->tick && open_sessions > 0;
+        int r = poll(p, (nfds_t)n, ticking ? 0 : -1);
+        if (r < 0) { if (errno == EINTR) continue; perror("poll"); break; }   // loop re-checks the flag
+        if (ticking && r == 0) { be->tick(be->ctx); continue; }
+        if (p[1].revents & POLLIN) serve_telemetry(be);
+        for (int k = 2; k < n; k++)
+            if ((p[k].revents & (POLLIN | POLLHUP | POLLERR)) && handle_request(g_sessions[idx[k - 2]]) != 0)
+                session_close(idx[k - 2]);
+        if (p[0].revents & POLLIN) {
+            int c = accept(srv, NULL, NULL);
+            if (c >= 0) session_open(be, c);
+            else if (errno != EINTR) { perror("accept"); break; }
+        }
     }
+    for (int i = 0; i < TTBH_BROKER_MAX_SESSIONS; i++) if (g_sessions[i]) session_close(i);
     close(srv);
     unlink(path);
     if (tel_srv >= 0) { close(tel_srv); unlink(tel_path); tel_srv = -1; }

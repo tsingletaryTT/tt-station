@@ -111,17 +111,41 @@ class TelemetryReaders(BrokerCase):
         self.assertEqual(self.c.call(wire.HELLO)[1] >> 16, 0xB140)   # the session is undisturbed
 
 
-class OneOwner(BrokerCase):
-    def test_a_second_client_times_out_instead_of_hanging(self):
-        os.environ["TTBH_BROKER_TIMEOUT"] = "0.5"
+class ManySessions(BrokerCase):
+    """Several sessions at once, as several opens of /dev/tenstorrent/N are under tt-kmd. tt-flash
+    reopens the card in-process and from forkserver workers while the parent still holds it."""
+
+    def test_a_second_session_is_served_while_the_first_stays_open(self):
+        second = wire.BrokerClient(self.sock)
         try:
-            second = wire.BrokerClient(self.sock)
-            with self.assertRaises(TimeoutError) as e:
-                second.call(wire.HELLO)
-            self.assertIn("busy with another client", str(e.exception))
-            second.close()
+            self.assertEqual(second.call(wire.HELLO)[1] >> 16, 0xB140)
+            self.assertEqual(self.c.call(wire.HELLO)[1] >> 16, 0xB140)
         finally:
-            del os.environ["TTBH_BROKER_TIMEOUT"]
+            second.close()
+
+    def test_windows_are_never_shared_and_a_closed_session_frees_only_its_own(self):
+        second = wire.BrokerClient(self.sock)
+        mine = [self.c.call(wire.TLB_ALLOC)[0] for _ in range(3)]
+        theirs = [second.call(wire.TLB_ALLOC)[0] for _ in range(3)]
+        self.assertFalse(set(mine) & set(theirs))
+        with self.assertRaises(wire.BrokerError):
+            second.call(wire.TLB_READ, mine[0], 0, 4)          # can't use another session's window
+        second.call(wire.TLB_FREE, mine[0])                    # nor free it
+        self.c.call(wire.TLB_TARGET, mine[0], 0, 1 | 2 << 8, 1 | 2 << 8)
+        second.close()
+        # The second session's windows come back; ours stay ours.
+        again = [self.c.call(wire.TLB_ALLOC)[0] for _ in range(3)]
+        self.assertEqual(sorted(again), sorted(theirs))
+        self.c.call(wire.TLB_TARGET, mine[0], 0, 1 | 2 << 8, 1 | 2 << 8)
+
+    def test_sysmem_from_two_sessions_never_overlaps_on_the_chip(self):
+        pcie_darwin.Allocator = _MiniAllocator
+        second = wire.BrokerClient(self.sock)
+        a = pcie_darwin.Sysmem(self.c, 1 << 20)
+        b = pcie_darwin.Sysmem(second, 1 << 20)
+        self.assertNotEqual(a.noc_addr, b.noc_addr)
+        self.assertGreaterEqual(abs(a.noc_addr - b.noc_addr), 1 << 20)
+        b.close(), second.close(), a.close()
 
 
 class Windows(BrokerCase):

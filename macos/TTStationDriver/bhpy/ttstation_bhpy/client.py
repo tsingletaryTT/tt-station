@@ -32,9 +32,9 @@ class BrokerClient:
     def __init__(self, path=None):
         self.path = path or os.environ.get("TTBH_BROKER_SOCKET", DEFAULT_SOCKET)
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        # The broker serves one client at a time (the card has one owner). A second client's connect
-        # succeeds into the listen backlog but is never answered; without a timeout it hangs forever
-        # (as the first version of the tests did). With one, it fails with a clear message.
+        # A broker that never answers (stuck, or an old single-session broker busy with another
+        # client) would otherwise hang this call forever, as the first version of the tests did.
+        # With a timeout it fails with a clear message.
         self.sock.settimeout(float(os.environ.get("TTBH_BROKER_TIMEOUT", "30")))
         try:
             self.sock.connect(self.path)
@@ -51,7 +51,7 @@ class BrokerClient:
             try:
                 chunk = self.sock.recv(n - len(buf))
             except socket.timeout:
-                raise TimeoutError(f"ttbh broker at {self.path} did not answer: busy with another client?") from None
+                raise TimeoutError(f"ttbh broker at {self.path} did not answer (is it running? an older broker serves one session at a time)") from None
             if not chunk:
                 raise ConnectionError("ttbh broker closed the connection")
             buf += chunk
@@ -65,7 +65,7 @@ class BrokerClient:
             try:
                 msg, anc, _flags, _addr = self.sock.recvmsg(RESP.size, socket.CMSG_SPACE(fds.itemsize))
             except socket.timeout:
-                raise TimeoutError(f"ttbh broker at {self.path} did not answer: busy with another client?") from None
+                raise TimeoutError(f"ttbh broker at {self.path} did not answer (is it running? an older broker serves one session at a time)") from None
             for level, typ, data in anc:
                 if level == socket.SOL_SOCKET and typ == socket.SCM_RIGHTS:
                     fds.frombytes(data[: len(data) - (len(data) % fds.itemsize)])

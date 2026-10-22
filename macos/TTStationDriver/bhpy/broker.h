@@ -81,12 +81,11 @@ typedef struct broker_backend {
     void (*tick)(void *ctx);
 } broker_backend;
 
-// Serve clients on `socket_path`, one at a time, until a signal. Returns non-zero on setup failure.
-// Sends ASIC_STATE0 at start, as tt-kmd does at device init.
+// Serve sessions on `socket_path` (up to 16 at once, like opens of /dev/tenstorrent/N) plus read-only
+// telemetry readers, until a signal. Returns non-zero on setup failure. Sends ASIC_STATE0 at start,
+// as tt-kmd does at device init. A session that disconnects has everything it held released.
 int broker_serve(const broker_backend *be, const char *socket_path);
 
-// One client, already accepted. Exposed for tests. Frees everything the client left behind.
-void broker_session(const broker_backend *be, int client_fd);
 
 #ifdef __cplusplus
 }
