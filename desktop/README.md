@@ -58,7 +58,7 @@ user-local copy lives in `~/.local/share/node/current/bin`).
 
 ```sh
 export PATH=$HOME/.local/share/node/current/bin:$PATH
-npm install
+npm ci
 npm run build            # → dist/, served by the agent at /app
 ./install-desktop.sh     # icon + launcher for this user (pin it to the dock)
 ```

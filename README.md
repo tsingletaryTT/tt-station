@@ -66,7 +66,7 @@ fingerprint. Details: [docs/reference/gateway.md](docs/reference/gateway.md).
 |---|---|
 | Box agent and CLI | `cargo build --release` (Rust toolchain pinned in `rust-toolchain.toml`); `cargo test --workspace` |
 | Box package (`tt-station` .deb) | `./build-deb.sh` (needs `devscripts`, `debhelper` and Node 22; see [installing.md](docs/reference/installing.md)) |
-| Desktop apps | `cd desktop && npm install`, then `desktop/mac/build-mac.sh` or `desktop/linux/build-deb.sh` |
+| Desktop apps | `cd desktop && npm ci`, then `desktop/mac/build-mac.sh` or `desktop/linux/build-deb.sh` |
 | iPhone app | `cd ios && xcodegen`, then build in Xcode (see [ios/README.md](ios/README.md)) |
 
 No hardware? `cargo run -p mock-box -- serve --ctrl-port 8899` runs a fake box for

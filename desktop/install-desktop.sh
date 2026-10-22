@@ -7,7 +7,10 @@
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ELECTRON="$HERE/node_modules/electron/dist/electron"
-[ -x "$ELECTRON" ] || { echo "Run 'npm install' in $HERE first." >&2; exit 1; }
+[ -f "$HERE/node_modules/electron/install.js" ] || { echo "Run 'npm ci' in $HERE first." >&2; exit 1; }
+# Electron 44 fetches its binary on first run, not at install time: fetch it now.
+[ -x "$ELECTRON" ] || (cd "$HERE" && node node_modules/electron/install.js)
+[ -x "$ELECTRON" ] || { echo "Couldn't get Electron's binary (see above)." >&2; exit 1; }
 for n in 32 48 64 128 256 512; do
   install -D -m 644 "$HERE/assets/icon-$n.png" "$HOME/.local/share/icons/hicolor/${n}x${n}/apps/tt-station.png"
 done

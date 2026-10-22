@@ -49,7 +49,7 @@ in Settings → Assistant (Tori) and voice.
 
 ## Build it
 
-`desktop/linux/build-deb.sh` (on x86-64 Linux, after `npm install` in `desktop/`)
+`desktop/linux/build-deb.sh` (on x86-64 Linux, after `npm ci` in `desktop/`)
 → `desktop/linux/dist/tt-station-desktop_<version>_amd64.deb`. It packages
 this checkout's Electron (`node_modules/electron/dist`) with the shell
 (`electron/`, `assets/`) and `bonjour-service` in `resources/app.asar`, and

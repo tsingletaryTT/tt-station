@@ -21,7 +21,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 DESKTOP="$(dirname "$HERE")"
 REPO="$(dirname "$DESKTOP")"
 ELECTRON_DIST="$DESKTOP/node_modules/electron/dist"
-[ -x "$ELECTRON_DIST/electron" ] || { echo "Run 'npm install' in $DESKTOP first." >&2; exit 1; }
+[ -f "$DESKTOP/node_modules/electron/install.js" ] || { echo "Run 'npm ci' in $DESKTOP first." >&2; exit 1; }
+# Electron 44 doesn't fetch its binary at install time (only on first run), so a fresh
+# `npm ci` has none yet: fetch it now.
+[ -x "$ELECTRON_DIST/electron" ] || (cd "$DESKTOP" && node node_modules/electron/install.js)
+[ -x "$ELECTRON_DIST/electron" ] || { echo "Couldn't get Electron's binary (see above)." >&2; exit 1; }
 [ "$(uname -m)" = x86_64 ] || { echo "Builds amd64 from this machine's Electron; run it on x86_64." >&2; exit 1; }
 ELECTRON_VERSION="$(cat "$ELECTRON_DIST/version")"
 # TT Station's own version (the workspace's), so the app and the box match.
