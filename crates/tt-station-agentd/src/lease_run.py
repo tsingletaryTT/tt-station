@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import re
 import subprocess
 import sys
@@ -70,9 +71,10 @@ def main() -> int:
         t.start()
         code = proc.wait()
         t.join(timeout=2)
+        if proc.stderr:
+            proc.stderr.close()
         if code != EXIT_QUEUED:
             try:
-                import os
                 os.remove(status_file)
             except OSError:
                 pass

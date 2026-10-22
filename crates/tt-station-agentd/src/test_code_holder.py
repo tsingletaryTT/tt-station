@@ -80,7 +80,11 @@ class Holder(unittest.TestCase):
         c.settimeout(10)
         c.connect(self.sock)
         c.sendall(first)
-        return c, c.makefile("rb")
+        r = c.makefile("rb")
+        # Closed at the end of the test even when an assertion fails first.
+        self.addCleanup(c.close)
+        self.addCleanup(r.close)
+        return c, r
 
     def test_the_spec_is_deleted_and_the_socket_is_private(self):
         self.assertFalse(os.path.exists(self.spec), "it can hold the session's key")

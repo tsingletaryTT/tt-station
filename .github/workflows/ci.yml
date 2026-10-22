@@ -175,7 +175,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      # The agent's Python helpers (Code holder and session, bring-up permission
+      # The agent's Python helpers (Code holder, sandbox launcher, bring-up permission
       # policy, lease runner, Orchard bridge): standard library only, no hardware.
       - name: Run the helpers' tests
         working-directory: crates/tt-station-agentd/src
