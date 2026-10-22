@@ -2078,8 +2078,8 @@ tt-kmd-darwin: SET_POWER_STATE flags=0xe validity=0x4 -> ok
 "firmwares": { "fw_bundle_version": "19.16.0.0", "cm_fw": "0.38.0.0", "dm_app_fw": "0.32.0.0", "gddr_fw": "2.17" }
 ```
 
-The firmware versions match what pyluwen read after the flash. All eight GDDR channels report
-training and BIST passing.
+The firmware versions match what pyluwen read after the flash. Seven GDDR channels report training
+and BIST passing. Channel 3 is harvested on this board (`ENABLED_GDDR` = `0xf7`).
 
 **What this says about difficulty.** Most of tt-umd is already portable C++. What is
 Linux-specific sits in two places: the kernel-module interface, and a handful of sysfs reads in
