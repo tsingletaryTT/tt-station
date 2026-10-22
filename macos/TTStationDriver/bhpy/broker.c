@@ -28,6 +28,7 @@ typedef struct {
     int fd;
     uint32_t dma_handle;
     uint32_t first_region, nregions;
+    uint64_t noc_base;             // chip-visible offset above TTBH_NOC_PCIE_OFFSET
 } sysmem_slot;
 
 typedef struct {
@@ -35,9 +36,32 @@ typedef struct {
     bool tlb_used[TTBH_BROKER_USER_TLBS];
     sysmem_slot sysmem[TTBH_BROKER_MAX_SYSMEM];
     bool region_used[TTBH_IATU_REGIONS];
-    uint64_t next_noc_base;        // bump allocator for the chip-visible sysmem range
     uint8_t io[TTBH_BROKER_MAX_IO];
 } session;
+
+// Lowest chip-visible offset where `size` bytes fit between the session's live buffers (first fit),
+// never straddling a 1 TiB boundary (an iATU region can't; see ttbh.h). Freed ranges come back:
+// this used to be a bump allocator, and a long-lived session walked up the NOC address space for
+// ever (seen 2026-10-22 on the card: 64 MiB, then 256 MiB, … each landing above the last though the
+// previous one had been freed). At most TTBH_BROKER_MAX_SYSMEM buffers, so the O(n^2) scan is fine.
+static uint64_t noc_first_fit(const session *s, uint64_t size)
+{
+    uint64_t best = UINT64_MAX;
+    // Candidate starts: 0 and the end of every live buffer. The answer is always one of these
+    // (rounded up past a 1 TiB boundary when it would cross one).
+    for (int c = -1; c < (int)TTBH_BROKER_MAX_SYSMEM; c++) {
+        if (c >= 0 && !s->sysmem[c].used) continue;
+        uint64_t base = c < 0 ? 0 : s->sysmem[c].noc_base + s->sysmem[c].size;
+        if ((base >> 40) != ((base + size - 1) >> 40)) base = (base + (1ull << 40)) & ~((1ull << 40) - 1);
+        bool clear = true;
+        for (int o = 0; o < (int)TTBH_BROKER_MAX_SYSMEM && clear; o++) {
+            const sysmem_slot *m = &s->sysmem[o];
+            if (m->used && base < m->noc_base + m->size && m->noc_base < base + size) clear = false;
+        }
+        if (clear && base < best) best = base;
+    }
+    return best;
+}
 
 // The server's own window (201) for telemetry and ARC messages, never handed to a client.
 static ttbh_window own_window(const broker_backend *be, ttbh_bar0_ctx *ctx)
@@ -188,9 +212,7 @@ static int sysmem_create(session *s, uint64_t size, int *out_fd, uint64_t *noc, 
         if (k == nseg) first = r;
     }
     ttbh_iatu_plan_entry plan[TTBH_IATU_REGIONS];
-    // Start each buffer on a fresh 1 TiB block if it would otherwise cross one (see ttbh.h).
-    uint64_t base = s->next_noc_base;
-    if ((base >> 40) != ((base + size - 1) >> 40)) base = (base + (1ull << 40)) & ~((1ull << 40) - 1);
+    uint64_t base = noc_first_fit(s, size);
     if (first == TTBH_IATU_REGIONS || ttbh_dma_plan(segs, nseg, base, first, plan) != TTBH_OK) {
         s->be->complete_dma(s->be->ctx, dma);
         goto fail;
@@ -201,8 +223,7 @@ static int sysmem_create(session *s, uint64_t size, int *out_fd, uint64_t *noc, 
         ttbh_iatu_outbound_write_with(bar2_wr32, (void *)s->be, plan[i].region, &r);
         s->region_used[plan[i].region] = true;
     }
-    s->next_noc_base = base + size;
-    s->sysmem[slot] = (sysmem_slot){ true, addr, size, fd, dma, first, nseg };
+    s->sysmem[slot] = (sysmem_slot){ true, addr, size, fd, dma, first, nseg, base };
     *out_fd = fd;
     *noc = TTBH_NOC_PCIE_OFFSET + base;
     *handle = (uint32_t)slot;

@@ -170,6 +170,29 @@ class HostMemory(BrokerCase):
         self.assertEqual(n.noc_addr, (4 << 58) + (1 << 20))    # adjacent chip-visible range
         m.close(), n.close()
 
+    def test_freed_chip_addresses_are_reused(self):
+        # A long-lived session (blackhole-py's chat switching models) frees and re-creates sysmem.
+        # The chip-visible range of a freed buffer must come back, or the session walks up the NOC
+        # address space for ever. (2026-10-22: a probe on the real card got 0x...00000000,
+        # 0x...04000000, 0x...14000000, … with each buffer freed before the next.)
+        base = 4 << 58                                         # TTBH_NOC_PCIE_OFFSET
+        for _ in range(3):
+            m = pcie_darwin.Sysmem(self.c, 1 << 20)
+            self.assertEqual(m.noc_addr, base)
+            m.close()
+        # A hole is reused first-fit, and a buffer that doesn't fit the hole goes after the others.
+        a = pcie_darwin.Sysmem(self.c, 1 << 20)
+        b = pcie_darwin.Sysmem(self.c, 1 << 20)
+        c = pcie_darwin.Sysmem(self.c, 1 << 20)
+        self.assertEqual((a.noc_addr, b.noc_addr, c.noc_addr), (base, base + (1 << 20), base + (2 << 20)))
+        b.close()
+        big = pcie_darwin.Sysmem(self.c, 2 << 20)              # too big for b's 1 MiB hole
+        self.assertEqual(big.noc_addr, base + (3 << 20))
+        small = pcie_darwin.Sysmem(self.c, 1 << 20)            # fits it exactly
+        self.assertEqual(small.noc_addr, base + (1 << 20))
+        for m in (a, c, big, small):
+            m.close()
+
     def test_a_dropped_client_releases_everything(self):
         pcie_darwin.Sysmem(self.c, 1 << 20)                     # leaked on purpose
         self.c.close()

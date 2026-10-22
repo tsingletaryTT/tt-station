@@ -1816,3 +1816,10 @@ in Mac memory and the card fetches it across the x4 link. That's the next thing 
 
 Also noticed: the broker's NOC address allocator only bumps upward and never reuses freed ranges,
 so a long-lived session leaks chip-visible address space. It's harmless at this scale; logged to fix.
+
+Fixed the same day: the broker's NOC allocator is now first fit over the session's live buffers
+(`noc_first_fit` in `bhpy/broker.c`), still never straddling a 1 TiB boundary. Freed ranges come
+back. A new test frees and re-allocates, fills a hole, and skips a hole that's too small. It
+failed against the bump allocator first (`1152921504607895552 != 1152921504606846976`: the second
+buffer landed 1 MiB up). The host app embeds the broker, so the card only gets this after the
+next `install-dev.sh --team` rebuild.
