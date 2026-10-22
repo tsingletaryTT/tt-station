@@ -250,6 +250,93 @@ static void sysmem_free(session *s, uint32_t h)
     m->used = false;
 }
 
+// ── Read-only telemetry for any number of readers ────────────────────────────────────────
+// The session socket has ONE owner (blackhole-py driving the card). Monitors such as tt-toplike
+// must still see the card while that session runs, so the broker also listens on a second socket
+// (telemetry.sock next to the session socket, or TTBH_TELEMETRY_SOCKET). A reader connects, gets
+// ONE JSON line, and the broker closes the connection:
+//
+//   {"v":1,"device_id":45376,"subsystem_id":67,"arc_ready":true,"asic_temp_c":56.4,"power_w":38,
+//    "vcore_mv":740,"current_a":51,"aiclk_mhz":800,"heartbeat":48141,"fan_rpm":null}
+//
+// A field is null when its read failed. Readers are served between the session's requests (the
+// broker is single-threaded), through the broker's own TLB window, never a client's, so a reading
+// can't disturb what the session is doing. Nothing here writes to the card.
+static int tel_srv = -1;
+
+static void json_u32(FILE *f, const char *k, int err, uint32_t v) { if (err) fprintf(f, ",\"%s\":null", k); else fprintf(f, ",\"%s\":%u", k, v); }
+
+static void serve_telemetry(const broker_backend *be)
+{
+    int c = accept(tel_srv, NULL, NULL);
+    if (c < 0) return;
+    ttbh_bar0_ctx ctx;
+    ttbh_window w = own_window(be, &ctx);
+    uint32_t boot = 0, v = 0;
+    int boot_err = ttbh_arc_boot_status(&w, &boot);
+    char buf[512];
+    FILE *f = fmemopen(buf, sizeof buf, "w");
+    if (!f) { close(c); return; }
+    fprintf(f, "{\"v\":1,\"device_id\":%u,\"subsystem_id\":%u,\"arc_ready\":%s",
+            be->device_id, be->subsystem_id, (!boot_err && ttbh_arc_ready(boot)) ? "true" : "false");
+    int e = boot_err ? boot_err : ttbh_telemetry_read(&w, TTBH_TAG_ASIC_TEMP, &v);
+    if (e) fprintf(f, ",\"asic_temp_c\":null"); else fprintf(f, ",\"asic_temp_c\":%.2f", ttbh_temp_c(v));
+    static const struct { const char *k; uint16_t tag; } tags[] = {
+        { "power_w", TTBH_TAG_POWER }, { "vcore_mv", TTBH_TAG_VCORE }, { "current_a", TTBH_TAG_CURRENT },
+        { "aiclk_mhz", TTBH_TAG_AICLK }, { "heartbeat", TTBH_TAG_TIMER_HEARTBEAT }, { "fan_rpm", TTBH_TAG_FAN_RPM },
+    };
+    for (size_t i = 0; i < sizeof tags / sizeof tags[0]; i++) {
+        int err = boot_err ? boot_err : ttbh_telemetry_read(&w, tags[i].tag, &v);
+        if (!err && tags[i].tag == TTBH_TAG_FAN_RPM && v == 0xFFFFFFFFu) err = 1;   // fan control disabled
+        json_u32(f, tags[i].k, err, v);
+    }
+    fprintf(f, "}\n");
+    long n = ftell(f);
+    fclose(f);
+    if (n > 0) { ssize_t wr = write(c, buf, (size_t)n); (void)wr; }
+    close(c);
+}
+
+// Block until `fd` has a request (0) or the broker should stop (-1), answering telemetry readers
+// meanwhile. With `ticking` (a session on a simulated backend) time keeps moving while we wait;
+// the idle accept loop passes false so a simulator doesn't spin with nobody connected.
+static int wait_for(const broker_backend *be, int fd, bool ticking)
+{
+    const bool tick = ticking && be->tick;
+    for (;;) {
+        if (stop_requested) return -1;
+        struct pollfd p[2] = { { .fd = fd, .events = POLLIN }, { .fd = tel_srv, .events = POLLIN } };
+        int n = poll(p, tel_srv >= 0 ? 2 : 1, tick ? 0 : -1);
+        if (n < 0) { if (errno == EINTR) continue; return -1; }
+        if (tel_srv >= 0 && (p[1].revents & POLLIN)) serve_telemetry(be);
+        if (p[0].revents & (POLLIN | POLLHUP | POLLERR)) { if (tick) be->tick(be->ctx); return 0; }
+        if (tick) be->tick(be->ctx);
+    }
+}
+
+// Bind a fresh AF_UNIX listener at `path`, replacing only a stale socket (never another file).
+static int listen_unix(const char *path, int backlog)
+{
+    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+    if (strlen(path) >= sizeof addr.sun_path) { fprintf(stderr, "socket path too long: %s\n", path); return -1; }
+    strcpy(addr.sun_path, path);
+    struct stat st;
+    if (lstat(path, &st) == 0) {
+        if (!S_ISSOCK(st.st_mode)) {
+            fprintf(stderr, "ttbh broker: %s exists and is not a socket; refusing to replace it\n", path);
+            return -1;
+        }
+        unlink(path);
+    }
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (srv < 0) { perror("socket"); return -1; }
+    mode_t old = umask(0077);                             // only this user may connect
+    int err = bind(srv, (struct sockaddr *)&addr, sizeof addr);
+    umask(old);
+    if (err || listen(srv, backlog)) { perror("bind/listen"); close(srv); return -1; }
+    return srv;
+}
+
 void broker_session(const broker_backend *be, int fd)
 {
     session *s = calloc(1, sizeof *s);
@@ -260,13 +347,10 @@ void broker_session(const broker_backend *be, int fd)
 
     ttbh_broker_req q;
     for (;;) {
-        if (be->tick) {
-            // Simulated time only moves when we clock it: keep the chip running while the client
-            // thinks (e.g. between blackhole-py's readiness polls), then serve the next request.
-            struct pollfd pfd = { .fd = fd, .events = POLLIN };
-            while (!stop_requested && poll(&pfd, 1, 0) == 0) be->tick(be->ctx);
-            be->tick(be->ctx);
-        }
+        // Wait for the next request, answering telemetry readers meanwhile. Simulated time only
+        // moves when we clock it, so with a tick the chip keeps running while the client thinks
+        // (e.g. between blackhole-py's readiness polls).
+        if (wait_for(be, fd, true) != 0) break;
         if (read_all(fd, &q, sizeof q) != 0) break;
         if (q.payload_len > TTBH_BROKER_MAX_IO) break;            // protocol violation: drop client
         if (q.payload_len && read_all(fd, s->io, q.payload_len)) break;
@@ -342,26 +426,19 @@ void broker_session(const broker_backend *be, int fd)
 
 int broker_serve(const broker_backend *be, const char *path)
 {
-    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (srv < 0) { perror("socket"); return 1; }
-    struct sockaddr_un addr = { .sun_family = AF_UNIX };
-    if (strlen(path) >= sizeof addr.sun_path) { fprintf(stderr, "socket path too long\n"); return 1; }
-    strcpy(addr.sun_path, path);
     // Replace only a stale SOCKET at the path. The path is caller-chosen (`serve [SOCKET]`), so
     // anything else there (a regular file, a directory, a symlink) is left alone and we refuse.
-    struct stat st;
-    if (lstat(path, &st) == 0) {
-        if (!S_ISSOCK(st.st_mode)) {
-            fprintf(stderr, "ttbh broker: %s exists and is not a socket; refusing to replace it\n", path);
-            close(srv);
-            return 1;
-        }
-        unlink(path);
-    }
-    mode_t old = umask(0077);                             // only this user may connect
-    int err = bind(srv, (struct sockaddr *)&addr, sizeof addr);
-    umask(old);
-    if (err || listen(srv, 1)) { perror("bind/listen"); close(srv); return 1; }
+    int srv = listen_unix(path, 1);
+    if (srv < 0) return 1;
+
+    // The read-only telemetry socket: TTBH_TELEMETRY_SOCKET, else telemetry.sock beside `path`.
+    char tel_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    const char *env = getenv("TTBH_TELEMETRY_SOCKET");
+    const char *slash = strrchr(path, '/');
+    if (env) snprintf(tel_path, sizeof tel_path, "%s", env);
+    else snprintf(tel_path, sizeof tel_path, "%.*stelemetry.sock", slash ? (int)(slash - path + 1) : 0, path);
+    tel_srv = listen_unix(tel_path, 16);
+    if (tel_srv < 0) fprintf(stderr, "ttbh broker: no telemetry socket (%s); readers won't see the card\n", tel_path);
 
     // sigaction WITHOUT SA_RESTART: on macOS signal() restarts accept()/read() after the handler,
     // so SIGTERM set the flag but the server never noticed (the first test run hung in tearDown).
@@ -378,14 +455,17 @@ int broker_serve(const broker_backend *be, const char *path)
     ttbh_window own = own_window(be, &ctx);
     ttbh_arc_msg a0 = { .header = TTBH_ARC_MSG_ASIC_STATE0 };
     int a0_err = ttbh_arc_msg_send(&own, &a0);
-    fprintf(stderr, "ttbh broker: listening on %s (ASIC_STATE0: %s)\n", path, ttbh_strerror(a0_err));
+    fprintf(stderr, "ttbh broker: listening on %s (ASIC_STATE0: %s), telemetry on %s\n",
+            path, ttbh_strerror(a0_err), tel_srv >= 0 ? tel_path : "(none)");
 
     while (!stop_requested) {
+        if (wait_for(be, srv, false) != 0) break;          // answers telemetry readers while idle
         int c = accept(srv, NULL, NULL);
         if (c < 0) { if (errno == EINTR) continue; perror("accept"); break; }   // loop re-checks the flag
         broker_session(be, c);
     }
     close(srv);
     unlink(path);
+    if (tel_srv >= 0) { close(tel_srv); unlink(tel_path); tel_srv = -1; }
     return 0;
 }

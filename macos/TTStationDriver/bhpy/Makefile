@@ -19,6 +19,11 @@ build/ttbh-broker-sim: broker_sim.c broker.h $(SRCS) | build
 build/ttbh-broker-ttsim: broker_ttsim.c broker.h broker.c ../libttbh/ttbh.c | build
 	$(CC) $(CFLAGS) broker_ttsim.c broker.c ../libttbh/ttbh.c -ldl -o $@
 
+# The real-hardware broker as a standalone binary (macOS only; see broker_iokit_main.c).
+build/ttbh-broker-iokit: broker_iokit_main.c broker_iokit.c broker.h broker.c $(LIB)/ttbh.c | build
+	$(CC) $(CFLAGS) broker_iokit_main.c broker_iokit.c broker.c $(LIB)/ttbh.c -framework IOKit -framework CoreFoundation -o $@
+	codesign --sign - --force $@
+
 build:
 	mkdir -p build
 clean:

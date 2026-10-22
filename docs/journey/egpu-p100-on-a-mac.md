@@ -1823,3 +1823,26 @@ back. A new test frees and re-allocates, fills a hole, and skips a hole that's t
 failed against the bump allocator first (`1152921504607895552 != 1152921504606846976`: the second
 buffer landed 1 MiB up). The host app embeds the broker, so the card only gets this after the
 next `install-dev.sh --team` rebuild.
+
+## 2026-10-22 (later still): tt-toplike arcade mode, live from the Mac
+
+Taylor wanted to watch the card work in tt-toplike's arcade mode while a model loads and runs.
+The obstacle was that the broker owns the driver for the whole model run, and the driver allows
+one client. So the broker now has a second, read-only socket, `telemetry.sock` beside `ttbh.sock`.
+Any number of readers connect, each gets one JSON line from the broker's own TLB window, and the
+broker answers them between the driving session's requests. A test reads it while another client
+holds the session.
+
+For the proof of concept, nothing in tt-toplike's backend changed. It already has `--remote
+HOST:PORT` for QuietBoxes, which reads `tt-smi -s` frames over a WebSocket. A 200-line stdlib
+bridge (`python3 -m ttstation_bhpy.toplike_bridge`) builds those frames from `tt-station local`
+(identity) and `telemetry.sock` (readings). A standalone `ttbh-broker-iokit` runs the new broker
+without reinstalling the host app: the development driver accepts any client.
+
+The first frame tt-toplike drew showed the card as **UK0**. tt-toplike's `from_board_type` knew
+p150 and p300 but not p100, so a P100A read as an unknown architecture on any host. That's fixed
+on tt-toplike's new `feat/macos-tenstorrent` branch.
+
+Recorded with VHS while the chat server loaded Llama 3 8B and wrote a story:
+
+![tt-toplike arcade mode on the Mac-attached P100A: header "BH0 73W 58°C 1.35GHz", starfield, memory castle and memory flow panes animating while Llama 3 8B loads and generates](images/2026-10-22-tt-toplike-arcade-p100a.gif)

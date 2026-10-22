@@ -10,6 +10,7 @@ firmware, and the sysmem iATU plan over deliberately fragmented fake IOVAs.
 import inspect
 import os
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -79,6 +80,35 @@ class Protocol(BrokerCase):
         _, _, data, _ = self.c.call(wire.ARC_MSG, payload=struct.pack("<8I", 0x90, 0xBEEF, *([0] * 6)))
         status, echo = struct.unpack_from("<2I", data)
         self.assertEqual((status, echo), (0, 0xBEF0))
+
+
+class TelemetryReaders(BrokerCase):
+    """Monitors (tt-toplike) read the card through telemetry.sock while a session owns ttbh.sock."""
+
+    def _read(self):
+        import json
+        path = os.path.join(self.tmp, "telemetry.sock")
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect(path)
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        s.close()
+        return json.loads(data)
+
+    def test_readers_see_live_values_while_a_session_holds_the_card(self):
+        t = self._read()                                       # self.c holds the session
+        self.assertEqual((t["v"], t["device_id"], t["subsystem_id"]), (1, 0xB140, 0x43))
+        self.assertTrue(t["arc_ready"])
+        live = self.c.call(wire.TELEMETRY, a0=11)[0]           # the session's own view of ASIC temp
+        self.assertAlmostEqual(t["asic_temp_c"], live / 65536.0, places=2)
+        for _ in range(3):                                     # many readers, one at a time
+            self.assertIn("aiclk_mhz", self._read())
+        self.assertEqual(self.c.call(wire.HELLO)[1] >> 16, 0xB140)   # the session is undisturbed
 
 
 class OneOwner(BrokerCase):
