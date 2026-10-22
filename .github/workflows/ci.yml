@@ -1,6 +1,11 @@
 name: CI
 
-on: [push, pull_request]
+# Not on the review/* branches: each adds one area to the last (docs/landing-plan.md), so
+# most don't build on their own by design. CI runs on the branch they're cut from.
+on:
+  push:
+    branches-ignore: ["review/**"]
+  pull_request:
 
 jobs:
   version-consistency:
