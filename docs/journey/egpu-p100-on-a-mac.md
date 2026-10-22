@@ -1846,3 +1846,63 @@ on tt-toplike's new `feat/macos-tenstorrent` branch.
 Recorded with VHS while the chat server loaded Llama 3 8B and wrote a story:
 
 ![tt-toplike arcade mode on the Mac-attached P100A: header "BH0 73W 58°C 1.35GHz", starfield, memory castle and memory flow panes animating while Llama 3 8B loads and generates](images/2026-10-22-tt-toplike-arcade-p100a.gif)
+
+## 2026-10-22 (evening): firmware, up to the point of writing
+
+Taylor asked to update the card's firmware with Tenstorrent's own tools (tt-flash,
+tt-system-firmware, the `tt` CLI), to the newest release. Everything below only reads the card.
+The write waits for Taylor's go-ahead.
+
+**What's installed:** bundle **19.2.0** (telemetry tag 28 = `0x13020000`), CMFW 0.24.0, DMFW
+0.18.0, board ID `0x4323191b055`. The `tt` CLI's golden pin is 19.15.0, and the newest release is
+**19.16.0** (2026-10-10). The bundles (`p100a.fwbundle`, `fw_pack-19.16.0.fwbundle`, the recovery
+pack) are in `~/tenstorrent/firmware/19.16.0`, and their SHA-256s match the release's. The
+`P100A-1` files are identical in the two bundles.
+
+**What the `tt` CLI contributes:** it has no `firmware` command. `tt update` runs the Linux
+installer, which downloads `fw_pack-<golden>.fwbundle` and runs `tt-flash flash` on it. On the Mac
+that becomes: tt-flash directly, with the bundle tt would have picked.
+
+**tt-flash on macOS.** tt-flash talks to cards only through pyluwen. A fork of luwen
+(`~/code/luwen`, branch `feat/ttstation-broker`, local) adds a chip backend over our broker,
+switched on by `TTSTATION_BROKER=1`. luwen and its tt-kmd crate compile on macOS unchanged.
+tt-flash 4.1.0 from PyPI runs against it unmodified. The broker had to learn to serve several
+sessions at once, because tt-flash reopens the card in-process and from forkserver workers.
+
+Four things went wrong, each found on the card:
+
+1. **luwen's ARC messages timed out** (`Timeout { phase: "pop", 500 ms }`, which pyluwen turns into
+   a panic) while the broker's own messages worked. Queue 2's pointers explained it. The firmware
+   had taken and answered luwen's requests (`req_rptr = 2`, `resp_wptr = 2`), but only after
+   something rang the MSI FIFO doorbell. luwen rings `ARC_MISC_CNTL.irq0_trig`, and tt-kmd and
+   libttbh ring the MSI FIFO. A 15-second wait never got a reply, and one MSI FIFO write from the
+   broker answered it at once (`TEST` echoed `0x1235` for `0x1234`).
+2. **luwen hadn't rung at all.** It checks the doorbell bit first and skips ringing if it's
+   already set. The bit lives in a 3-byte field, and **a 3-byte MMIO read on this Mac returns
+   `ffffff`** where the 4-byte read returns `00000000`. luwen's Linux PCI layer widens small
+   accesses to 32 bits, so the broker backend now does too.
+3. **Stale replies:** a reply that arrives after a timeout is taken as the answer to the next
+   request. luwen now drains uncollected replies before sending, as tt-kmd does.
+4. **Crossed replies between processes:** eight forkserver workers sending `TEST` on one queue got
+   each other's answers (`0x2001, 0x2003, 0x2004, 0x2006, 0x2004, …`). With a file lock around each
+   exchange (only when `TTSTATION_BROKER` is set), five runs of 64 exchanges from 8 workers came
+   back 320 for 320.
+
+After that, the read-only checks pass:
+
+```
+TEST #0..4 via luwen queue 2: (4097, 0) .. (4101, 0)   ~0.5 ms each
+tt-flash detect_chips: [Blackhole[0]] board type P100A-1
+tt-flash get_bundle_version(): running=(19, 2, 0, 0), spi=(19, 2, 0, 0)
+boot fs 'boardcfg': {"board_id": 4613626507349, ..., "vendor_id": 7762}
+spi_read: 16 MiB in 10.5 s (1.52 MiB/s); a re-read of the first 4 MiB matches
+tt-flash compat: SPI EEPROM could not be read from this board, so it was not checked  (UNCHECKED)
+```
+
+The full SPI is backed up to
+`~/tenstorrent/firmware/backup/p100a-4323191b055-spi-fw19.2.0-2026-10-22.bin`
+(sha256 `dcfb404e…5020c9`). Logs of each step are in `~/tenstorrent/firmware/flash-log/`.
+
+The compat result needs saying plainly. 19.16.0 requires the SPI part ID (telemetry tag 80) to be
+`0x20bb20`. 19.2.0 predates that tag, so tt-flash can't check it and proceeds. The same is true on
+Linux for any card upgraded from 19.2.
