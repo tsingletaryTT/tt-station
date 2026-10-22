@@ -320,7 +320,18 @@ async fn the_doctor_reads_the_chips_docker_and_kernel_through_the_boxs_tools() {
         "{hang}"
     );
     assert!(!has(&v, "serving"), "nothing serving, nothing to say");
-    assert_eq!(v["status"], "warn", "the worst verdict");
+    // The worst verdict among what this test fakes. Disk space and 1 GB pages are
+    // read from the machine running the test (a CI runner has ~14 GB free and none),
+    // and have their own tests in doctor.rs with fixed readings.
+    let worst = v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["id"] != "disk" && c["id"] != "hugepages")
+        .map(|c| c["status"].as_str().unwrap())
+        .max_by_key(|s| ["ok", "warn", "fail"].iter().position(|x| x == s))
+        .unwrap();
+    assert_eq!(worst, "warn", "the worst verdict: {v}");
 }
 
 #[tokio::test]

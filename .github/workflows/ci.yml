@@ -90,7 +90,7 @@ jobs:
             chmod +x "$RUNNER_TEMP/hw-stubs/$cmd"
           done
       - name: Test (hardware stubbed)
-        run: PATH="$RUNNER_TEMP/hw-stubs:$PATH" cargo test --workspace --locked
+        run: PATH="$RUNNER_TEMP/hw-stubs:$PATH" cargo test --workspace --locked --no-fail-fast
       # Start the agent the Build step made and probe it: a router that panics
       # at start (axum's "Overlapping method route") passes every unit test
       # and still crash-loops on a box. The script stubs the hardware itself.
