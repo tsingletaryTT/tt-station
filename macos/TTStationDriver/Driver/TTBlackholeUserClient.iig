@@ -1,0 +1,35 @@
+// TTBlackholeUserClient.iig — the userspace-facing half of the dext.
+//
+// One instance per IOServiceOpen() from a client process. Exposes:
+//   * ExternalMethod          — the selectors in Shared/TTBlackholeABI.h (GetInfo, CfgRead)
+//   * CopyClientMemoryForType — BAR0/2/4 for IOConnectMapMemory64, type == BAR number
+//
+// v1 is deliberately read-only at the RPC level (no config writes, reset, or DMA); the BAR
+// mappings are of course writable, which is what M2 of the spec uses.
+
+#ifndef TTBlackholeUserClient_h
+#define TTBlackholeUserClient_h
+
+#include <DriverKit/IOUserClient.iig>
+
+class TTBlackholeUserClient: public IOUserClient
+{
+public:
+    virtual bool init() override;
+    virtual void free() override;
+
+    virtual kern_return_t Start(IOService * provider) override;
+    virtual kern_return_t Stop(IOService * provider) override;
+
+    virtual kern_return_t ExternalMethod(uint64_t selector,
+                                         IOUserClientMethodArguments * arguments,
+                                         const IOUserClientMethodDispatch * dispatch,
+                                         OSObject * target,
+                                         void * reference) override;
+
+    virtual kern_return_t CopyClientMemoryForType(uint64_t type,
+                                                  uint64_t * options,
+                                                  IOMemoryDescriptor ** memory) override;
+};
+
+#endif /* TTBlackholeUserClient_h */

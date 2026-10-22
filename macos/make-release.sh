@@ -86,6 +86,10 @@ cp -R "$app_src" "$stage/TTStation.app"
 mkdir -p "$stage/TTStation.app/Contents/Resources/bin"
 cp "$tt_bin" "$stage/TTStation.app/Contents/Resources/bin/tt-station"
 chmod +x "$stage/TTStation.app/Contents/Resources/bin/tt-station"
+# The official-tt installer the app offers on first run (CLIInstaller.swift → OfficialCLIInstaller).
+mkdir -p "$stage/TTStation.app/Contents/Resources/scripts"
+cp "$here/scripts/ensure-official-tt.sh" "$stage/TTStation.app/Contents/Resources/scripts/"
+chmod +x "$stage/TTStation.app/Contents/Resources/scripts/ensure-official-tt.sh"
 
 # 4. Ad-hoc sign the whole bundle AFTER embedding so the nested tt-station is covered.
 codesign --force --deep --sign - "$stage/TTStation.app"

@@ -30,6 +30,8 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 
 [dev-dependencies]
+# local_cli.rs builds IORegistry captures with a driver attached from the real fixture.
+plist = "1"
 assert_cmd = "2"
 # Builds and locates the `mock-box` binary from a *different* workspace
 # crate for the e2e test -- `assert_cmd::Command::cargo_bin` only resolves

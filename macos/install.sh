@@ -48,6 +48,12 @@ seed_vsix() {
 echo "==> Seeding tt-vscode-toolkit .vsix (best-effort)"
 seed_vsix
 
+# tt-station delegates model right-sizing for a locally attached card to Tenstorrent's official
+# `tt` CLI (`tt-station local` → `tt model list --hw <config>`), so the Mac install brings it
+# along. Best-effort: a failure here never blocks installing the app.
+echo "==> Ensuring the official Tenstorrent CLI (\`tt\`, via uv tool install tenstorrent)"
+"$here/scripts/ensure-official-tt.sh" || echo "   (official tt not ready — see above; tt-station local will say so too)"
+
 echo "==> Generating project + building Release"
 ( cd "$proj" && xcodegen generate >/dev/null )
 xcodebuild -project "$proj/TTStation.xcodeproj" -scheme TTStation \

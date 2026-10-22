@@ -17,6 +17,7 @@ public protocol TTCommands {
     func power(_ action: PowerAction, host: String?) async throws
     func wake(mac: String?, host: String?) async throws
     func sshAuthorize(host: String) async throws -> SshAuthorizeInfo
+    func local() async throws -> LocalReport
     func isAuthError(_ error: TTError) -> Bool
     func isIdleConflict(_ error: TTError) -> Bool
 }
@@ -71,6 +72,13 @@ public final class TTClient {
     /// `config`, so it can be fetched regardless of pairing.
     public func catalog(host: String) async throws -> BoxCatalog {
         try await call(["--json", "catalog", "--host", host], decode: BoxCatalog.self)
+    }
+
+    /// Tenstorrent cards attached to THIS Mac (IORegistry, no driver) plus the official `tt`
+    /// CLI's right-sized models for them. No `--host`: this machine is the host. 30s because the
+    /// official CLI may consult its catalog over the network.
+    public func local() async throws -> LocalReport {
+        try await call(["--json", "local"], decode: LocalReport.self, timeout: 30)
     }
 
     // MARK: Helpers

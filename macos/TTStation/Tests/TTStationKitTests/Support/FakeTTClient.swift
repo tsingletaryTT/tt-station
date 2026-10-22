@@ -20,6 +20,15 @@ final class FakeTTClient: TTCommands {
     var gateRun = false
     private(set) var runIsWaiting = false
     private var runGate: CheckedContinuation<Void, Never>?
+    var localResult = LocalReport(cards: [], deviceMesh: nil, officialTT: nil, models: nil, modelsError: nil)
+    var localError: TTError?
+    private(set) var localCallCount = 0
+    func local() async throws -> LocalReport {
+        localCallCount += 1
+        if let localError { throw localError }
+        return localResult
+    }
+
     func releaseRun() {
         let c = runGate
         runGate = nil

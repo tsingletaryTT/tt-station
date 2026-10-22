@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Host app: may install system extensions. It opens the dext's user client through the dext's
+     own allow-any-userclient-access (development; both Team and Dev entitlement sets carry it).
+     The app-side com.apple.developer.driverkit.userclient-access needs Apple's approval on a new
+     team (2026-10-21), so it comes back for shipping (spec M6):
+       <key>com.apple.developer.driverkit.userclient-access</key>
+       <array><string>com.tenstorrent.ttstation.driver</string></array> -->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+	<key>com.apple.developer.system-extension.install</key>
+	<true/>
+</dict>
+</plist>

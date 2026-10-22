@@ -4,6 +4,7 @@ import TTStationKit
 struct MenuContentView: View {
     @Bindable var model: AppModel
     @State private var showAddHost = false
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -16,6 +17,29 @@ struct MenuContentView: View {
             }
             if case let .failed(msg) = model.scanState {
                 Text(msg).font(.caption).foregroundStyle(.red)
+            }
+            // "This Mac": a locally attached card, from `tt-station local`. One glanceable line;
+            // tapping selects it, which the window's detail pane then shows in full.
+            if let local = model.localReport, local.hasCards {
+                HStack(spacing: 6) {
+                    Image(systemName: "cpu").foregroundStyle(TTTheme.teal)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("This Mac").font(.subheadline.weight(.semibold))
+                        Text(local.summary).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    // The full local pane lives in the window; this is its only entry point from
+                    // the popover when no box is selected (BoxDetailView carries the other one).
+                    Button {
+                        model.selectedHostPort = AppModel.localSelectionID
+                        openWindow(id: "main")
+                    } label: { Image(systemName: "macwindow") }
+                        .buttonStyle(.borderless)
+                        .help("Open This Mac in the TTStation window")
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { model.selectedHostPort = AppModel.localSelectionID }
+                Divider()
             }
             if model.boxes.isEmpty {
                 Text("No boxes found — add one manually.").font(.caption).foregroundStyle(.secondary)

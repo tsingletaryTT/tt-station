@@ -48,15 +48,6 @@ pub fn board_types(tt_smi_json: &str) -> Option<Vec<String>> {
     )
 }
 
-/// THE table: `(board_type, count) -> mesh label`. `count` is a count of
-/// `tt-smi -s` `device_info` entries, i.e. of ASICs, NOT of physical cards
-/// -- a p300 card presents two, which is why four `p300c` entries are
-/// `p300x2` (two boards) and two are `p300` (one board). gozer's grants
-/// count the same way (one BDF per ASIC), so a granted chip count can be
-/// passed straight in here.
-///
-/// `None` for any combination this codebase has no CONFIRMED mapping for.
-/// Callers must treat that as "don't guess" -- see `resolve_tt_device`.
 /// The mesh label for the shape a gozer lease actually GRANTED, derived from
 /// a verbatim `tt-smi -s` snapshot plus the grant's chip count.
 ///
@@ -105,20 +96,10 @@ pub fn leased_mesh(tt_smi_snapshot: &str, granted_chips: usize, lease_id: &str) 
         })
 }
 
-pub fn mesh_for(board_type: &str, count: usize) -> Option<&'static str> {
-    let mesh = match (board_type, count) {
-        ("p300c", 4) => "p300x2",
-        ("p300c", 2) => "p300",
-        ("p150" | "p150c", 1) => "p150",
-        ("p150" | "p150c", 2) => "p150x2",
-        ("p150" | "p150c", 3) => "p150x3",
-        ("p150" | "p150c", 4) => "p150x4",
-        ("n300", 4) => "n300x4",
-        ("n300", 1) => "n300",
-        _ => return None,
-    };
-    Some(mesh)
-}
+/// The `(board_type, count) -> mesh` table now lives in `libttstation::device_mesh` so the
+/// Mac-side local detection (`tt-station local`) and this agent share one copy. Re-exported
+/// here so every existing `crate::device::mesh_for` caller is unchanged.
+pub use libttstation::device_mesh::mesh_for;
 
 #[cfg(test)]
 mod tests {

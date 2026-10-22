@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  RELEASE entitlements — placeholder for spec milestone M6. These only work once Apple has
+  granted Tenstorrent's developer account driverkit.transport.pci for vendor 0x1e52 and the
+  provisioning profile carries it. Not used by any build today.
+  (No allow-any-userclient-access: only the host app, via its userclient-access entitlement.)
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.driverkit</key>
+	<true/>
+	<key>com.apple.developer.driverkit.transport.pci</key>
+	<array>
+		<dict>
+			<key>IOPCIPrimaryMatch</key>
+			<string>0x00001e52&amp;0x0000FFFF</string>
+		</dict>
+	</array>
+</dict>
+</plist>

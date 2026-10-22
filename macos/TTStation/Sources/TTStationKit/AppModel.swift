@@ -9,6 +9,18 @@ public final class AppModel {
     public var selectedHostPort: String?
     public var scanState: ScanState = .idle
 
+    /// Sidebar/popover selection id for "This Mac" (the locally attached card). A `hostPort` can
+    /// never look like this (no port), so it can't collide with a box.
+    public static let localSelectionID = "local:this-mac"
+
+    /// What `tt-station local` last reported; `nil` until the first scan finishes.
+    public var localReport: LocalReport?
+    /// Why the last local scan failed (e.g. an old `tt-station` without `local`); shown quietly.
+    public var localError: String?
+
+    /// True when "This Mac" is the current selection.
+    public var isLocalSelected: Bool { selectedHostPort == Self.localSelectionID }
+
     private let commands: TTCommands
     private let discovery: DiscoveryService
     private let registry: HostRegistry
@@ -61,9 +73,28 @@ public final class AppModel {
         boxes = records.map { rec in
             existing[rec.hostPort] ?? BoxViewModel(record: rec, commands: commands, registry: registry)
         }
-        if selectedHostPort == nil { selectedHostPort = boxes.first?.id }
+        await refreshLocal()
+        // With nothing selected yet, a card physically attached to this Mac is the most
+        // immediate thing to show; otherwise the first box, as before.
+        if selectedHostPort == nil {
+            selectedHostPort = (localReport?.hasCards ?? false) ? Self.localSelectionID : boxes.first?.id
+        }
         for box in boxes { await box.refresh() }
         scanState = .idle
+    }
+
+    /// Re-read locally attached cards. Never fatal: an error is recorded and the "This Mac"
+    /// entry just hides (an older `tt-station` without `local` fails here harmlessly).
+    public func refreshLocal() async {
+        do {
+            localReport = try await commands.local()
+            localError = nil
+        } catch {
+            localReport = nil
+            localError = String(describing: error)
+        }
+        // Drop a stale "This Mac" selection if the card went away (enclosure unplugged).
+        if isLocalSelected, !(localReport?.hasCards ?? false) { selectedHostPort = boxes.first?.id }
     }
 
     public func addManualHost(_ host: String) {
