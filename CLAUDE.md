@@ -23,7 +23,7 @@ installed on this box at `~/.tenstorrent-venv/bin/tt`.
 
 ## ▶ PICK UP HERE
 
-**Linux tray (`tt-station-tray`, v0.13.0, branch `feat/linux-tray`, 2026-10-05).** Original
+**Linux tray (`tt-station-tray`, v0.14.0, branch `feat/linux-tray`, 2026-10-05).** Original
 prompt: *"Branching off this current branch, imagine how tt-station on the linux side could also
 do what it does on the mac side. Tray app in gnome, kde, xfce, etc. Helpful connection to running
 llms. stop start them. use tt CLI, my machine franklinstower is connected and can be our guinea
@@ -73,14 +73,16 @@ against this box's real `agentd.toml`). `auto` picks `tt` when a valid official 
 polls readiness on `127.0.0.1` and advertises the LAN address in endpoints. `--print-config` and
 `/config` report each value's source. A `--backend tt` agent with no port now serves on 20000
 (was 8000). Reference: `docs/reference/agentd-config.md`.
-**Branches and review (as of 2026-10-14).** The branches stack: `main` <- `experiments/egpu`
-(PR #1, open) <- `feat/linux-tray`. `feat/linux-tray` was cut from `experiments/egpu`, so its PR
-targets `experiments/egpu`. When #1 merges and its branch is deleted, GitHub retargets the
-stacked PR to `main`. The stacked PR is **#2** (`feat/linux-tray` into `experiments/egpu`, opened
-2026-10-14, https://github.com/tsingletaryTT/tt-station/pull/2; its description is kept in
-`.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md` on the box that built it). The branch
-was pushed on 2026-10-14, including every Copilot-review fix (`origin/feat/linux-tray` was at
-`11777c3` when those fixes went up); commits made after that are local until the next push.
+**Branches and review (as of 2026-10-22).** PR #1 (`experiments/egpu`) merged into `main` on
+2026-10-22, and PR #2 (https://github.com/tsingletaryTT/tt-station/pull/2) now targets `main`.
+`main` was merged into `feat/linux-tray` the same day. The only conflict was `debian/changelog`:
+both branches had written a 0.13.0 entry, and `main` released 0.13.0, so the tray work became
+0.14.0 (`scripts/bump-version.sh`, plus `MARKETING_VERSION`). The tray still parses tt 1.2.0's
+`tt --json model list` (rows keep `name`, `type`, `source`, `hardware`, `cached`). Community
+bundles name their weights `weights_repo` and have no `hf_repo`, so they get no reference
+performance, which is correct: the targets were measured on the catalog models. qb2-lab runs tt
+1.0.1. The PR description is kept in `.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md`
+on the box that built it.
 Pushing needs SSH or a token with the `workflow` scope (the branch edits `.github/workflows/`).
 **Models page reference performance and GtkPaned fix (2026-10-14, after `4596d11`).** The Models
 page shows tt-inference-server's `model_performance_reference.json` targets for this machine

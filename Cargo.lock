@@ -1698,7 +1698,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libttstation"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "mdns-sd",
@@ -1867,7 +1867,7 @@ dependencies = [
 
 [[package]]
 name = "mock-box"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3538,7 +3538,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tt-station"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3559,7 +3559,7 @@ dependencies = [
 
 [[package]]
 name = "tt-station-agentd"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3583,7 +3583,7 @@ dependencies = [
 
 [[package]]
 name = "tt-station-tray"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
