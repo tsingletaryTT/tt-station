@@ -56,18 +56,15 @@ pub(crate) async fn assistant_chat(
     CallerAuth(caller): CallerAuth,
     Json(req): Json<crate::assistant::AssistantRequest>,
 ) -> Result<Json<crate::assistant::AssistantResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let opts = req.options(false);
-    // The tools that act on the box's own computer are an owner's.
-    let host_ok = caller.owner();
+    let mut opts = req.options(false);
+    // Nothing reaches the person's computer without the stream, so no computer tools.
+    opts.client = false;
     // Starting and stopping models: whoever `crate::model_control` allows.
     let models_ok = crate::model_control::allows(&state, &caller);
     if let Some(done) = crate::assistant::MODELS_OK
         .scope(
             models_ok,
-            crate::assistant::HOST_OK.scope(
-                host_ok,
-                crate::assistant::quick(&state, &req.messages, opts),
-            ),
+            crate::assistant::quick(&state, &req.messages, opts),
         )
         .await
     {
@@ -78,10 +75,7 @@ pub(crate) async fn assistant_chat(
             who.person,
             crate::assistant::MODELS_OK.scope(
                 models_ok,
-                crate::assistant::HOST_OK.scope(
-                    host_ok,
-                    crate::assistant::converse(&state, req.messages, opts),
-                ),
+                crate::assistant::converse(&state, req.messages, opts),
             ),
         )
         .await
@@ -111,31 +105,34 @@ pub(crate) async fn assistant_stream(
     let person = who.person;
     let signed_out = state.signed_out(who.token);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    // The tools that act on the box's own computer are an owner's.
-    let host_ok = caller.owner();
     // Starting and stopping models: whoever `crate::model_control` allows.
     let models_ok = crate::model_control::allows(&state, &caller);
-    if let Some(done) = crate::assistant::MODELS_OK
-        .scope(
-            models_ok,
-            crate::assistant::HOST_OK.scope(
-                host_ok,
-                crate::assistant::quick(&state, &req.messages, opts),
+    if let Some(steps) = crate::assistant::quick_steps(&state, &req.messages, opts, true) {
+        // An instant command, told like a stream: each step as it's done (a
+        // step on the person's computer goes out to it, and waits for it).
+        let actor = caller.actor();
+        tokio::spawn(crate::auth::as_caller(
+            caller,
+            crate::audit::ACTOR.scope(
+                actor,
+                crate::assistant::MODELS_OK.scope(models_ok, async move {
+                    let events = tx.clone();
+                    let mut on_action = move |a: &crate::assistant::ActionReport| {
+                        let _ = events
+                            .send(crate::assistant::StreamEvent::Action { action: a.clone() });
+                    };
+                    let done =
+                        crate::assistant::run_quick(&state, steps, opts, &mut on_action).await;
+                    let _ = tx.send(crate::assistant::StreamEvent::Delta {
+                        text: done.reply.clone(),
+                    });
+                    let _ = tx.send(crate::assistant::StreamEvent::Done {
+                        reply: done.reply,
+                        model: done.model,
+                    });
+                }),
             ),
-        )
-        .await
-    {
-        // An instant command: already done; tell it like a stream.
-        for action in done.actions {
-            let _ = tx.send(crate::assistant::StreamEvent::Action { action });
-        }
-        let _ = tx.send(crate::assistant::StreamEvent::Delta {
-            text: done.reply.clone(),
-        });
-        let _ = tx.send(crate::assistant::StreamEvent::Done {
-            reply: done.reply,
-            model: done.model,
-        });
+        ));
     } else {
         let chat = crate::people::CALLER
             .scope(
@@ -155,8 +152,7 @@ pub(crate) async fn assistant_stream(
                     person,
                     crate::assistant::MODELS_OK.scope(
                         models_ok,
-                        crate::assistant::HOST_OK
-                            .scope(host_ok, crate::assistant::converse_stream(state, chat, tx)),
+                        crate::assistant::converse_stream(state, chat, tx),
                     ),
                 ),
             ),
@@ -207,9 +203,7 @@ pub(crate) async fn assistant_confirm(
         ));
     }
     let approve = req.approve;
-    let done = crate::assistant::HOST_OK
-        .scope(caller.owner(), crate::assistant::confirm(&state, req))
-        .await;
+    let done = crate::assistant::confirm(&state, req).await;
     let what = tool.unwrap_or_else(|| "unknown action".to_string());
     crate::audit::record(
         &state,

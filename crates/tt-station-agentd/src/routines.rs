@@ -35,7 +35,7 @@
 //!
 //! A routine can also just switch the box's mode at set times (`mode`): no
 //! model thinks, the runner switches, and -- as schedules always did -- it
-//! never interrupts a Lab run, an Orchard bring-up or a transcription job
+//! never interrupts a transcription job
 //! (it skips that time and says so), and a switch more than ten minutes late
 //! (the box was off) waits for the next time. These used to be Settings →
 //! Schedules (`crate::schedules`); schedules found there are turned into
@@ -112,7 +112,7 @@ impl Default for Schedule {
 }
 
 /// What a routine may do without asking: the action tools it was given.
-pub const ACTIONS: [&str; 4] = ["start_model", "stop_model", "download_model", "reset_chips"];
+pub const ACTIONS: [&str; 3] = ["start_model", "stop_model", "reset_chips"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Routine {
@@ -657,19 +657,14 @@ fn tools() -> Value {
     let def = |name: &str, desc: &str, params: Value| json!({ "type": "function", "function": { "name": name, "description": desc, "parameters": params } });
     let none = json!({ "type": "object", "properties": {} });
     out.extend([
-        def("community_models", "The community model packages on this box (with whether their weights are all here and whether they fit), downloads in progress, and which one is serving.", none.clone()),
         def("ask_model", "Send one prompt to the model serving right now and get its reply, with its speed (tokens per second) and time to first token. Use it to test a model.",
             json!({ "type": "object", "properties": { "prompt": { "type": "string" }, "max_tokens": { "type": "integer" } }, "required": ["prompt"] })),
         def("wait_until_ready", "Wait for the model that's starting to finish loading (or fail). Call it after start_model.",
             json!({ "type": "object", "properties": { "minutes": { "type": "integer", "description": "Give up after this long (default 45)." } } })),
-        def("wait_for_download", "Wait for a community model's download to finish (or fail). Call it after download_model.",
-            json!({ "type": "object", "properties": { "id": { "type": "string" }, "minutes": { "type": "integer", "description": "Give up after this long (default 240)." } }, "required": ["id"] })),
-        def("start_model", "ACTION: start a model on the chips, stopping whatever serves now. `model` is a community package id (namespace/name, from community_models) or a model name from list_models. Then call wait_until_ready.",
+        def("start_model", "ACTION: start a model on the chips, stopping whatever serves now. `model` is a model name from list_models. Then call wait_until_ready.",
             json!({ "type": "object", "properties": { "model": { "type": "string" } }, "required": ["model"] })),
         def("evaluate_model", "Run the full check-up on the model serving now (tool use, code, reasoning, following instructions, long documents, speed; about 5-10 minutes). Results are saved on the Models page, where models are compared.", none.clone()),
         def("stop_model", "ACTION: stop the model that's serving.", none.clone()),
-        def("download_model", "ACTION: download a community model package with its weights (can be hundreds of GB). Then call wait_for_download.",
-            json!({ "type": "object", "properties": { "id": { "type": "string", "description": "namespace/name" } }, "required": ["id"] })),
         def("reset_chips", "ACTION: reset the Tenstorrent chips (stops whatever is serving).", none),
     ]);
     json!(out)
@@ -696,7 +691,6 @@ fn action_summary(tool: &str, args: &Value) -> String {
     match tool {
         "start_model" => format!("Start {}", args["model"].as_str().unwrap_or("a model")),
         "stop_model" => "Stop the model that's serving".into(),
-        "download_model" => format!("Download {}", args["id"].as_str().unwrap_or("a model")),
         "reset_chips" => "Reset the chips".into(),
         "remember" | "research" => crate::assistant::pending_summary(tool, args, ""),
         "read_webpage" => format!("Read {}", args["url"].as_str().unwrap_or("a web page")),
@@ -749,16 +743,6 @@ fn cut(s: &str, n: usize) -> String {
 /// Runs one look-up or action; (ok, what it found).
 async fn run_tool(state: &AppState, run_id: &str, name: &str, args: &Value) -> (bool, String) {
     match name {
-        "community_models" => {
-            let Json(c) = crate::community::get_community(State(state.clone()), BearerAuth).await;
-            let installed: Vec<Value> = c["installed"].as_array().into_iter().flatten().map(|p| json!({
-                "id": p["id"], "fits": p["fits"], "fit": p["fit"], "weights_on_box": p["weights_on_box"], "can_use_tools": p["tools"],
-            })).collect();
-            let pulls: Vec<Value> = c["pulls"].as_array().into_iter().flatten().map(|d| json!({
-                "id": d["id"], "running": d["running"], "paused": d["paused"], "failed": d["failed"], "progress": d["progress"]["percent"],
-            })).collect();
-            (true, json!({ "installed": installed, "downloads": pulls, "serving": c["serving"], "starting": c["starting"]["id"] }).to_string())
-        }
         "ask_model" => ask_model(state, args).await,
         "evaluate_model" => {
             set_activity(state, run_id, "Evaluating the model");
@@ -773,43 +757,11 @@ async fn run_tool(state: &AppState, run_id: &str, name: &str, args: &Value) -> (
             set_activity(state, run_id, "Waiting for the model to load");
             wait_until_ready(state, run_id, minutes).await
         }
-        "wait_for_download" => {
-            let id = args["id"].as_str().unwrap_or("").to_string();
-            let minutes = args["minutes"].as_u64().unwrap_or(240).clamp(1, 24 * 60);
-            set_activity(
-                state,
-                run_id,
-                &format!("Waiting for {} to download", short(&id)),
-            );
-            wait_for_download(state, run_id, &id, minutes).await
-        }
         "start_model" => start_model(state, args["model"].as_str().unwrap_or("")).await,
         "stop_model" => match state.stop_serving().await {
             Ok(()) => (true, "Stopped the model that was serving.".into()),
             Err(e) => (false, format!("Couldn't stop it: {e:#}")),
         },
-        "download_model" => {
-            let id = args["id"].as_str().unwrap_or("").to_string();
-            let body = crate::community::IdBody {
-                id: id.clone(),
-                stop_serving: false,
-                anyway: false,
-                profile: None,
-            };
-            match crate::community::post_pull(State(state.clone()), BearerAuth, Json(body)).await {
-                Ok(_) => (
-                    true,
-                    format!("Downloading {id}. Call wait_for_download next."),
-                ),
-                Err((_, Json(v))) => (
-                    false,
-                    v["error"]
-                        .as_str()
-                        .unwrap_or("couldn't start the download")
-                        .to_string(),
-                ),
-            }
-        }
         "reset_chips" => {
             let call = crate::assistant::ToolCall {
                 id: String::new(),
@@ -846,43 +798,11 @@ async fn run_tool(state: &AppState, run_id: &str, name: &str, args: &Value) -> (
     }
 }
 
-fn short(id: &str) -> &str {
-    id.rsplit('/').next().unwrap_or(id)
-}
-
-/// Starts a community package by id, or a catalog model by name.
+/// Starts a catalog model by name.
 pub(crate) async fn start_model(state: &AppState, model: &str) -> (bool, String) {
     let model = model.trim();
     if model.is_empty() {
         return (false, "Say which model to start.".into());
-    }
-    let Json(c) = crate::community::get_community(State(state.clone()), BearerAuth).await;
-    let package = c["installed"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|p| p["id"].as_str())
-        .find(|id| id.eq_ignore_ascii_case(model) || short(id).eq_ignore_ascii_case(model))
-        .map(str::to_string);
-    if let Some(id) = package {
-        let body = crate::community::IdBody {
-            id: id.clone(),
-            stop_serving: true,
-            anyway: false,
-            profile: None,
-        };
-        return match crate::community::post_serve(State(state.clone()), BearerAuth, Json(body))
-            .await
-        {
-            Ok(_) => (true, format!("Starting {id}. Call wait_until_ready next.")),
-            Err((_, Json(v))) => (
-                false,
-                v["error"]
-                    .as_str()
-                    .unwrap_or("it wouldn't start")
-                    .to_string(),
-            ),
-        };
     }
     let call = crate::assistant::ToolCall {
         id: String::new(),
@@ -1024,15 +944,6 @@ async fn wait_until_ready(state: &AppState, run_id: &str, minutes: u64) -> (bool
             }
             _ => {}
         }
-        if let Some(stuck) = crate::community::stalled_s(state) {
-            return (
-                false,
-                format!(
-                    "The start looks stuck: no progress for {} minutes.",
-                    stuck / 60
-                ),
-            );
-        }
         if Instant::now() > deadline {
             return (
                 false,
@@ -1040,65 +951,6 @@ async fn wait_until_ready(state: &AppState, run_id: &str, minutes: u64) -> (bool
             );
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
-    }
-}
-
-async fn wait_for_download(
-    state: &AppState,
-    run_id: &str,
-    id: &str,
-    minutes: u64,
-) -> (bool, String) {
-    let deadline = Instant::now() + Duration::from_secs(minutes * 60);
-    loop {
-        if stopping(state, run_id) {
-            return (false, "Stopped.".into());
-        }
-        let Json(c) = crate::community::get_community(State(state.clone()), BearerAuth).await;
-        let pull = c["pulls"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|d| d["id"] == id)
-            .cloned();
-        match pull {
-            Some(d) if d["running"] == true => {
-                let pct = d["progress"]["percent"]
-                    .as_f64()
-                    .map(|p| format!(" ({p:.0}%)"))
-                    .unwrap_or_default();
-                set_activity(state, run_id, &format!("Downloading {}{pct}", short(id)));
-            }
-            Some(d) if d["failed"] == true => {
-                return (
-                    false,
-                    format!("The download failed: {}", d["line"].as_str().unwrap_or("")),
-                )
-            }
-            Some(d) if d["paused"] == true => return (false, "The download is paused.".into()),
-            _ => {
-                let here = c["installed"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|p| p["id"] == id);
-                return if here {
-                    (true, format!("{id} is downloaded."))
-                } else {
-                    (
-                        false,
-                        format!("{id} isn't downloading, and it isn't on the box."),
-                    )
-                };
-            }
-        }
-        if Instant::now() > deadline {
-            return (
-                false,
-                format!("It was still downloading after {minutes} minutes."),
-            );
-        }
-        tokio::time::sleep(Duration::from_secs(20)).await;
     }
 }
 
@@ -1126,9 +978,9 @@ fn system_prompt(r: &Routine) -> String {
     format!(
         "You carry out a routine on a Tenstorrent QuietBox (four Blackhole chips) for TT Station, with the tools given. \
 It's {} {:04}-{:02}-{:02}, {:02}:{:02}. Nobody may be watching: work it out yourself, one tool call at a time.\n\
-- Find out before you act: check what's serving and what's on the box (box_status, community_models, list_models).\n\
+- Find out before you act: check what's serving and what's on the box (box_status, list_models).\n\
 - Tools marked ACTION change the box; the person may have to approve them. If one is declined, adapt or stop, and say so in your report.\n\
-- After start_model, call wait_until_ready; after download_model, call wait_for_download. These can take a long time; that's fine.\n\
+- After start_model, call wait_until_ready. It can take a long time; that's fine.\n\
 - To test a model thoroughly, use evaluate_model (it's graded automatically and saved for comparison); for a quick look, ask_model.\n\
 - If the routine changes which model is serving, put the one that served before back at the end unless the goal says otherwise.\n\
 - Never invent results. If something fails, say what and why.\n\
@@ -2068,7 +1920,7 @@ mod tests {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(tmp.path().to_path_buf());
         let session = |id: &str, owner| crate::sessions::Session {
@@ -2104,7 +1956,6 @@ mod tests {
             assert_eq!(refused(&state, None, tool), None);
             assert!(refused(&state, Some("removed"), tool).is_some());
         }
-        assert_eq!(refused(&state, Some("member"), "download_model"), None);
         assert_eq!(refused(&state, Some("member"), "box_status"), None);
     }
 
@@ -2152,14 +2003,7 @@ mod tests {
             .iter()
             .filter_map(|t| t["function"]["name"].as_str().map(str::to_string))
             .collect();
-        for want in [
-            "box_status",
-            "community_models",
-            "ask_model",
-            "wait_until_ready",
-            "start_model",
-            "download_model",
-        ] {
+        for want in ["box_status", "ask_model", "wait_until_ready", "start_model"] {
             assert!(names.iter().any(|n| n == want), "missing {want}");
         }
         for never in ["control_computer", "open_app", "start_recording"] {
@@ -2190,13 +2034,7 @@ mod tests {
         for t in ACTIONS.iter().chain(ACTING.iter()) {
             assert!(must_queue(t, &none, &turn), "{t}");
         }
-        for t in [
-            "box_status",
-            "list_models",
-            "ask_model",
-            "community_models",
-            "wait_until_ready",
-        ] {
+        for t in ["box_status", "list_models", "ask_model", "wait_until_ready"] {
             assert!(!must_queue(t, &none, &turn), "{t}");
         }
         // Reading: known addresses go; new ones (or new queries) wait.
@@ -2254,7 +2092,7 @@ mod tests {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(tmp.path().to_path_buf());
         let run: Run = serde_json::from_value(json!({ "id": "9-atomic", "routine": "r", "name": "n", "trigger": "manual", "started": 7, "status": "done" })).unwrap();
@@ -2293,7 +2131,7 @@ mod tests {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(tmp.path().to_path_buf());
         let runs = tmp.path().join("routines/runs");
@@ -2405,7 +2243,7 @@ mod tests {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(tmp.path().to_path_buf())
         .with_schedules(crate::schedules::Schedules::open(&path));

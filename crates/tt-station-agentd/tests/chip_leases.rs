@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! The two chip users that used to run without a gozer lease: Lab runs
-//! (tt-lab) and chip resets. Both now hold a whole-box lease while they touch
-//! the chips -- see `docs/reference/chip-leasing.md` §5.
+//! Chip resets, which used to run without a gozer lease, now hold a
+//! whole-box lease while they touch the chips -- see
+//! `docs/reference/chip-leasing.md`.
 //!
-//! `POST /power reset-chips` and `POST /lab/run` reach gozer through the real
-//! command runner, so they run against a STUB `gozer` script that keeps its
-//! state in a temp dir (never the real gozer, never a chip). `POST /reset`
-//! goes through the backend's injected runner, so it uses `FakeGozerBox`.
+//! `POST /power reset-chips` reaches gozer through the real command runner, so
+//! it runs against a STUB `gozer` script that keeps its state in a temp dir
+//! (never the real gozer, never a chip). `POST /reset` goes through the
+//! backend's injected runner, so it uses `FakeGozerBox`.
 
 mod support;
 
@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use support::{FakeGozerBox, FakeRunner};
 use tt_station_agentd::gozer::{self, Capability, OwnLease, ReconcileAction};
-use tt_station_agentd::lab::Lab;
 use tt_station_agentd::routes::{app, AppState};
 use tt_station_agentd::serving::runpy::{RunPyBackend, RunPyConfig};
 use tt_station_agentd::serving::ServingBackend;
@@ -121,26 +120,6 @@ fn state(dir: &Path, gozer: bool) -> AppState {
     )
 }
 
-/// A built tt-lab stand-in with gpt-oss-20b prepared. It prints who holds the
-/// box while it runs.
-fn with_lab(state: AppState, dir: &Path) -> AppState {
-    let bin_dir = dir.join("tt-lab/_out");
-    std::fs::create_dir_all(&bin_dir).unwrap();
-    let models = dir.join("models");
-    std::fs::create_dir_all(&models).unwrap();
-    std::fs::write(models.join("gpt-oss-20b-MXFP4.gguf"), "gguf").unwrap();
-    std::fs::write(models.join("gpt-oss-20b.ttq"), "ttq").unwrap();
-    let bin = bin_dir.join("tt-lab");
-    let d = dir.display();
-    executable(
-        &bin,
-        &format!(
-            "#!/bin/sh\nif [ -f \"{d}/held\" ]; then echo \"lab-lease: $(cat {d}/held)\"; else echo lab-lease: none; fi\necho 'decode: 3 evals, 0.1 s, 30.0 t/s'\n"
-        ),
-    );
-    state.with_lab(Lab::new(bin, models))
-}
-
 async fn serve(state: AppState) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -161,112 +140,10 @@ async fn post(base: &str, token: &str, path: &str, body: serde_json::Value) -> (
     (status, resp.text().await.unwrap_or_default())
 }
 
-async fn lab_run(base: &str, token: &str) -> (u16, String) {
-    post(
-        base,
-        token,
-        "/lab/run",
-        serde_json::json!({ "model": "gpt-oss-20b", "prompt": "hi", "tiles": 32 }),
-    )
-    .await
-}
-
 fn reset_ran(dir: &Path) -> Option<String> {
     std::fs::read_to_string(dir.join("reset-ran"))
         .ok()
         .map(|s| s.trim().to_string())
-}
-
-// ---------------------------------------------------------------------------
-// Lab
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn lab_run_holds_a_whole_box_lease_and_releases_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = with_lab(state(dir.path(), true), dir.path());
-    let base = serve(state.clone()).await;
-    let token = support::pair(&base, &state).await;
-
-    let (status, body) = lab_run(&base, &token).await;
-    assert_eq!(status, 200, "{body}");
-    assert!(body.contains("\"done\""), "{body}");
-
-    let calls = calls(dir.path());
-    let acquire = calls
-        .iter()
-        .find(|c| c.starts_with("acquire"))
-        .expect("an acquire");
-    assert!(acquire.contains("--chips all"), "{acquire}");
-    assert!(acquire.contains("--no-queue"), "{acquire}");
-    assert!(acquire.contains("--owner-pid"), "{acquire}");
-    let who = std::fs::read_to_string(dir.path().join("reset-ran")).unwrap();
-    assert!(
-        who.trim().starts_with("tt-station:") && who.trim().ends_with(":lab"),
-        "the pre-run reset runs under the Lab's own lease: {who}"
-    );
-    assert!(
-        body.contains("lab-lease: tt-station:"),
-        "tt-lab runs under the lease: {body}"
-    );
-    // Released WITH gozer's reset (no --no-reset), and only once.
-    let releases: Vec<&String> = calls.iter().filter(|c| c.starts_with("release")).collect();
-    assert_eq!(releases.len(), 1, "{calls:?}");
-    assert!(releases[0].starts_with("release lease-1"), "{calls:?}");
-    assert!(!releases[0].contains("--no-reset"), "{calls:?}");
-    assert!(!dir.path().join("held").exists(), "the lease is gone");
-    assert!(!state.lab_busy(), "the run is over");
-}
-
-#[tokio::test]
-async fn lab_run_is_refused_when_someone_holds_the_chips() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("foreign"), "").unwrap();
-    let state = with_lab(state(dir.path(), true), dir.path());
-    let base = serve(state.clone()).await;
-    let token = support::pair(&base, &state).await;
-
-    let (status, body) = lab_run(&base, &token).await;
-    assert_eq!(status, 409, "{body}");
-    assert!(body.contains(NEIGHBOUR), "names the holder: {body}");
-    assert_eq!(reset_ran(dir.path()), None, "nothing was reset");
-    assert!(
-        !calls(dir.path())
-            .iter()
-            .any(|c| c.starts_with("acquire") || c.starts_with("release")),
-        "{:?}",
-        calls(dir.path())
-    );
-    assert!(!state.lab_busy());
-}
-
-#[tokio::test]
-async fn lab_without_gozer_runs_unleased_and_says_so() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = with_lab(state(dir.path(), false), dir.path());
-    let base = serve(state.clone()).await;
-    let token = support::pair(&base, &state).await;
-
-    let (status, body) = lab_run(&base, &token).await;
-    assert_eq!(status, 200, "{body}");
-    assert!(body.contains("lab-lease: none"), "{body}");
-    assert_eq!(reset_ran(dir.path()).as_deref(), Some("unleased"));
-    assert!(calls(dir.path()).is_empty());
-
-    let lab: serde_json::Value = reqwest::Client::new()
-        .get(format!("{base}/lab"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(lab["leasing"]["gozer"], false);
-    assert!(lab["leasing"]["note"]
-        .as_str()
-        .unwrap()
-        .contains("gozer isn't installed"));
 }
 
 // ---------------------------------------------------------------------------
@@ -525,17 +402,16 @@ fn utility_leases_are_never_handed_to_a_serving_container() {
         owner_pid: Some(agent),
         owner_alive: alive,
     };
-    for who in ["tt-station:8080:lab", "tt-station:8080:reset-chips"] {
-        assert!(gozer::is_utility_who(who));
-        // The agent's own live lease, a container on the port: left alone.
-        assert!(gozer::plan_reconcile(&[lease(who, true)], Some(4242), agent).is_empty());
-        // Owner dead, a container on the port: left for gozer's reap.
-        assert!(gozer::plan_reconcile(&[lease(who, false)], Some(4242), agent).is_empty());
-        // Owner dead, nothing serving: released (reset).
-        assert!(matches!(
-            &gozer::plan_reconcile(&[lease(who, false)], None, agent)[..],
-            [ReconcileAction::Release { .. }]
-        ));
-    }
+    let who = "tt-station:8080:reset-chips";
+    assert!(gozer::is_utility_who(who));
+    // The agent's own live lease, a container on the port: left alone.
+    assert!(gozer::plan_reconcile(&[lease(who, true)], Some(4242), agent).is_empty());
+    // Owner dead, a container on the port: left for gozer's reap.
+    assert!(gozer::plan_reconcile(&[lease(who, false)], Some(4242), agent).is_empty());
+    // Owner dead, nothing serving: released (reset).
+    assert!(matches!(
+        &gozer::plan_reconcile(&[lease(who, false)], None, agent)[..],
+        [ReconcileAction::Release { .. }]
+    ));
     assert!(!gozer::is_utility_who("tt-station:8080:model-a"));
 }

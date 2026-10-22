@@ -53,7 +53,7 @@ struct SettingsView: View {
                         sheetRow(.connect, "point.3.connected.trianglepath.dotted", "Connect apps",
                                  detail: "Use the box as a private OpenAI API from your laptop")
                         sheetRow(.notifications, "bell.badge", "Notifications",
-                                 detail: "Downloads, models ready, bring-ups, transcripts")
+                                 detail: "Downloads, models ready, transcripts")
                         sheetRow(.power, "power", "Sleep and wake",
                                  detail: "Sleep the model or the box, wake it, restart, shut down")
                     } header: {

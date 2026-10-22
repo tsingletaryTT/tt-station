@@ -2,7 +2,7 @@
 
 *Sourced from the shipped code: `crates/tt-station/src/console/{names,state,env,actions,ui,mod}.rs`,
 `crates/tt-station/src/main.rs` (`Command::Console`), `deploy/tt-station-agentd.service`,
-`crates/libttstation/src/model.rs` (`BoxLifecycleSnapshot`), and `box-panel/tt-station-panel.py`.
+and `crates/libttstation/src/model.rs` (`BoxLifecycleSnapshot`).
 Live SSH click-through of the interactive TUI is **owner-verified, not automated** — the
 test suite covers the pure line-builders and a `ratatui::TestBackend` render, plus unit
 tests for the collector/actions against fake environments (no real `systemctl`/`journalctl`/
@@ -11,8 +11,7 @@ HTTP in CI).*
 ## What it is
 
 `tt-station console` is a ratatui/crossterm terminal UI for loading, unloading, and monitoring
-**this box's own agent** (`tt-station-agentd`) — the SSH-native sibling of the GTK box
-panel. Run it directly on the box (over SSH or on its own console); it always talks to
+**this box's own agent** (`tt-station-agentd`). Run it directly on the box (over SSH or on its own console); it always talks to
 `127.0.0.1:<ctrl-port>` and to the local `systemctl --user`/`journalctl --user`, never a
 remote box. There is no `--host` flag, unlike every other `tt-station` subcommand.
 
@@ -70,7 +69,7 @@ supervision anymore; closing the TUI (or an SSH session) does **not** stop the a
   ```
   The agent takes no CLI flags in the unit — it reads its own config
   (`~/.config/tt-station/agentd.toml`) for name/ctrl-port/profile.
-- **Profile pinning:** pressing `c` in the TUI (or the panel's equivalent) doesn't edit the
+- **Profile pinning:** pressing `c` in the TUI doesn't edit the
   unit file directly — it writes a systemd drop-in at
   `~/.config/systemd/user/<unit>.d/profile.conf`:
   ```ini
@@ -114,10 +113,8 @@ panic — so a bug can't leave an operator's SSH session stuck in raw mode.
 
 `tt-station console --snapshot` prints one `BoxLifecycleSnapshot` (from
 `libttstation::model`) as pretty JSON and exits. This is the **single shared wire
-contract** — the interactive TUI, `--snapshot`, and the GTK box panel (which polls `tt-station
-console --snapshot --ctrl-port <port>` as a subprocess instead of re-implementing the
-systemctl/journalctl/HTTP collection logic in Python) all consume exactly this shape, so
-all three surfaces can never disagree about what state the box is in.
+contract** — the interactive TUI and `--snapshot` (for scripts) consume exactly this
+shape, so they can never disagree about what state the box is in.
 
 ```rust
 pub struct BoxLifecycleSnapshot {
@@ -226,10 +223,7 @@ future rename is a one-place change:
 | `agent_bin` (agent binary name/path, used to build the unit's `ExecStart=`) | `TTS_AGENT_BIN` | `tt-station-agentd` |
 | `service_name` (the systemd unit name) | `TTS_SERVICE_NAME` | `tt-station-agentd.service` |
 
-An empty-string override is treated as unset and falls back to the default. The GTK panel
-reads the same `TTS_*` env vars independently (see `box-panel/tt-station-panel.py`), kept
-in sync with these defaults by convention — there is currently no single runtime source
-both processes read from (each resolves its own copy of `ToolNames`/`TTS_*` at startup).
+An empty-string override is treated as unset and falls back to the default.
 
 ## Reset precondition: localhost pairing
 
@@ -246,8 +240,8 @@ confirming) and `p` both shell out to the `tt-station` binary itself
   found in the agent's journal (`snap.pairing`) and runs `tt-station pair` against
   `127.0.0.1:<ctrl-port>` with that code, storing a token locally. If no pairing code is
   currently active, `p` reports `no pairing code available -- start a pairing on the box
-  first` instead of attempting anything (a pairing must be initiated on the box — or the
-  GTK panel — first; see `pairing_lines` in `ui.rs`).
+  first` instead of attempting anything (a pairing must be initiated on the box first; see
+  `pairing_lines` in `ui.rs`).
 - Once paired, `R` → confirm (`y`) actually resets: **stops the currently-served model,
   clears ALL issued bearer tokens** (in-memory + the persisted token store — invalidating
   every paired client, including the one that just requested the reset), and **resets the
@@ -257,10 +251,5 @@ confirming) and `p` both shell out to the `tt-station` binary itself
 
 ## Related
 
-- The GTK box panel (`box-panel/tt-station-panel.py`) shares this exact model: it polls `tt-station
-  console --snapshot --ctrl-port <port>` on a timer instead of parsing child-process
-  stdout, and its Start/Stop/Restart buttons shell the same `systemctl --user <verb>
-  <service_name>` commands `tt-station console` uses. The panel and the TUI can never disagree
-  about box state.
 - `docs/reference/agentd-config.md` — the `GET /config` / `tt-station config` contract that feeds
   `BoxLifecycleSnapshot.config`.

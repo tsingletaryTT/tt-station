@@ -318,14 +318,7 @@ pub(crate) async fn delete_model(
         .into_iter()
         .flatten()
         .any(|m| short(&m) == short(&name));
-    let companion_busy = state.companion().is_some_and(|c| {
-        let l = c.lifecycle();
-        [l.model, l.served_id]
-            .into_iter()
-            .flatten()
-            .any(|m| short(&m) == short(&name))
-    });
-    if busy || companion_busy {
+    if busy {
         return Err(err(
             StatusCode::CONFLICT,
             format!("{name} is in use. Stop it first, then remove it."),

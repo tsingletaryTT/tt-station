@@ -38,7 +38,7 @@ is removed and follows cleanly by byte offset.
 
 Both routes require the `runpy` backend (the one that knows about a
 `tt-inference-server` checkout and its `workflow_logs/` dir). On a non-`runpy` backend
-(e.g. `dstack`) there is no such directory, so both routes answer `409` — see "Errors"
+(e.g. `docker`) there is no such directory, so both routes answer `409` — see "Errors"
 below.
 
 Within each directory, the **newest `*.log` by mtime** is the one tailed/followed — a

@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use libttstation::model::ConfigSummary;
 use tt_station_agentd::routes::{app, local_http_app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 /// `GET /config` should return 200 with a JSON body that round-trips back
 /// to the exact `ConfigSummary` the `AppState` was built with, and the raw
@@ -36,12 +36,12 @@ async fn get_config_returns_summary_without_secrets() {
         tt_device: None,
     };
 
-    // `/config` doesn't touch the serving backend at all -- `DstackBackend`'s
+    // `/config` doesn't touch the serving backend at all -- `NullBackend`'s
     // no-op stub is enough of a `ServingBackend` for this test.
     let state = AppState::new(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
     )
     .with_config_summary(summary.clone());
     // From the network (the HTTPS server's router): pairing first.

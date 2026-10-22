@@ -157,8 +157,8 @@ async fn telemetry_stream(
     // tick's scrape -- see `inference::InferenceSampler`. Also skipped in
     // `lite` mode.
     let mut inference_sampler = (!lite).then(crate::inference::InferenceSampler::new);
-    // Log a failure once per reason, not once a second for hours (an Orchard
-    // run pauses readings for its whole length).
+    // Log a failure once per reason, not once a second for hours (a reset or
+    // a stuck tt-smi can pause readings for a while).
     let mut last_error: Option<String> = None;
 
     loop {
@@ -449,7 +449,7 @@ mod signed_out_tests {
         AppState::new(
             "qb2-lab".to_string(),
             "4xBH".to_string(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
     }
 
@@ -544,7 +544,7 @@ mod metrics_tests {
         let state = AppState::new(
             "qb2-lab".to_string(),
             "4xBH".to_string(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_serving_config("127.0.0.1".to_string(), 9000);
         assert_eq!(resolve_metrics_port(&state), 9000);

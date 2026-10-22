@@ -311,7 +311,7 @@ async fn a_routine_is_made_changed_and_removed() {
         .any(|x| x["id"] == id));
     assert_eq!(
         list["actions"],
-        json!(["start_model", "stop_model", "download_model", "reset_chips"])
+        json!(["start_model", "stop_model", "reset_chips"])
     );
 
     // Hourly, and turned off: no next run shown.
@@ -633,12 +633,9 @@ async fn stopping_a_run_that_waits_for_the_person_ends_it() {
     let _one = RUNS.lock().await;
     let b = Box_::new("stop").await;
     b.serve_model().await;
-    *b.llm.script.lock().unwrap() = vec![
-        calls("download_model", json!({ "id": "acme/huge" })),
-        says("never"),
-    ];
+    *b.llm.script.lock().unwrap() = vec![calls("reset_chips", json!({})), says("never")];
     let id = b
-        .make(json!({ "name": "Resetter", "goal": "Download a model." }))
+        .make(json!({ "name": "Resetter", "goal": "Reset the chips." }))
         .await;
     let run_id = b.run(&id).await;
     b.run_when(&run_id, |r| r["status"] == "waiting").await;

@@ -23,7 +23,7 @@ use futures_util::StreamExt;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tt_station_agentd::routes::{app, local_http_app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 mod support;
 
@@ -75,13 +75,13 @@ impl Drop for StubTtSmi {
 async fn telemetry_stream_pushes_verbatim_tt_smi_snapshot() {
     let stub = StubTtSmi::new();
 
-    // `/telemetry` never touches the serving backend -- `DstackBackend`'s
+    // `/telemetry` never touches the serving backend -- `NullBackend`'s
     // no-op stub is enough. Point the stream at the stub tt-smi with a short
     // interval so the first frame arrives promptly.
     let state = AppState::new(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
     )
     .with_telemetry_config(stub.path(), 50);
     // The box's own plain HTTP: tt-toplike and the panel read it there.
@@ -163,7 +163,7 @@ async fn telemetry_needs_pairing_and_hides_command_lines_from_members() {
     let state = AppState::new(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
     )
     .with_telemetry_config(stub.path(), 50);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -177,26 +177,9 @@ pub(crate) async fn get_serve(
         "since": life.since,
         "error": life.error,
         "kind": kind,
-        "split": crate::coserve::is_split(&state),
         "eta_s": life_model_eta,
-        // A start that has shown no progress for a while (community packages): seconds.
-        "stalled_s": (life.phase == Phase::Starting).then(|| crate::community::stalled_s(&state)).flatten(),
         // `ok`, `degraded` (loaded but not answering) or `unknown`; see `/status`'s `model_health`.
         "health": state.liveness().health().state,
-        "companion": state.companion().map(|c| {
-            let life = c.lifecycle();
-            serde_json::json!({
-                "phase": life.phase,
-                "model": life.model,
-                "served_id": life.served_id,
-                "since": life.since,
-                "error": life.error,
-                "eta_s": (life.phase == Phase::Starting)
-                    .then(|| life.model.as_deref().and_then(|m| state.load_times().estimate(m)))
-                    .flatten(),
-                "kind": "image",
-            })
-        }),
     }))
 }
 
@@ -230,9 +213,6 @@ pub(crate) async fn begin_serve(
     model: &str,
     force: bool,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    if let Some(holder) = state.chips_holder() {
-        return Err(tt_error(StatusCode::CONFLICT, holder));
-    }
     // Claimed before the first await, so a second caller sees `starting`.
     let prev = state
         .claim_start(model)

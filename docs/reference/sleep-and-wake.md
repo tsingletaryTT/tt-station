@@ -17,7 +17,7 @@ stays reachable. The phone offers it in place of suspend whenever it can't wake 
 ## Model sleep
 
 - `GET /idle`: `{settings: {enabled, after_minutes, wake_on_request}, asleep: {target,
-  community, label, at} | null, idle_for_s, waking}`.
+  label, at} | null, idle_for_s, waking}`.
 - `PUT /idle`: idle sleep, off by default. With `enabled`, the agent stops the model after
   `after_minutes` (5 to 1440) with nothing running or generated on it (read from vLLM's
   `/metrics`, so every client counts) and no busy Code session or routine.

@@ -28,21 +28,20 @@ export function useInbox(): { items: InboxItem[]; owner: boolean; loaded: boolea
   const owner = !!devices.data && devices.data.owner !== false;
   ownerNow = owner;
   const approvals = useSharedPoll("inbox:/approvals", sources.approvals, EVERY_MS);
-  // Members never get bring-up's or pairing's: no need to ask (a long interval keeps them idle).
-  const bringup = useSharedPoll("inbox:/bringup/codex/runs", ownerOnly(sources.bringup), owner ? EVERY_MS * 2 : 3600_000);
+  // Members never get pairing's: no need to ask (a long interval keeps them idle).
   const events = useSharedPoll("inbox:/events", ownerOnly(sources.events), owner ? EVERY_MS : 3600_000);
   const [ignored, setIgnored] = useState<string[]>(loadIgnored);
   // Pairing codes run out after two minutes even when nothing new arrives.
   const [tick, setTick] = useState(0);
   useEffect(() => { const t = window.setInterval(() => setTick((n) => n + 1), 10000); return () => window.clearInterval(t); }, []);
   // Owner learnt after the first fetch: fetch the owner-only sources now.
-  useEffect(() => { if (owner) { void bringup.refresh(); void events.refresh(); } }, [owner]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (owner) void events.refresh(); }, [owner]); // eslint-disable-line react-hooks/exhaustive-deps
   const items = useMemo(
-    () => gather({ approvals: approvals.data, bringup: bringup.data, events: events.data, owner, now: Math.floor(Date.now() / 1000), ignored, seen }),
+    () => gather({ approvals: approvals.data, events: events.data, owner, now: Math.floor(Date.now() / 1000), ignored, seen }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [approvals.data, bringup.data, events.data, owner, ignored, tick],
+    [approvals.data, events.data, owner, ignored, tick],
   );
-  const refresh = useCallback(() => { void approvals.refresh(); if (owner) { void bringup.refresh(); void events.refresh(); } }, [approvals, bringup, events, owner]);
+  const refresh = useCallback(() => { void approvals.refresh(); if (owner) void events.refresh(); }, [approvals, events, owner]);
   const ignore = useCallback((key: string) => setIgnored((cur) => {
     const next = [...cur, key].slice(-100);
     try { sessionStorage.setItem(IGNORED_KEY, JSON.stringify(next)); } catch { /* private */ }

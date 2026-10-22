@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! Image and video generation, proxied to the served media model:
-//! `POST /generate/image`, `/generate/video` and the `/generate/video/{id}` views.
+//! Image generation, proxied to the served media model: `POST /generate/image`.
 
 use std::time::Duration;
 
@@ -12,41 +11,29 @@ use crate::state::AppState;
 use axum::{http::StatusCode, Json};
 
 // ---------------------------------------------------------------------
-// Image and video generation, proxied to the served media server
+// Image generation, proxied to the served media server
 // ---------------------------------------------------------------------
 
-/// The served media server's root URL (the endpoint without its `/v1`), after
-/// checking the served model is of `kind`.
-async fn media_base(
-    state: &AppState,
-    kind: &'static str,
-) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
-    // Co-serving: the companion slot answers image requests.
-    if let Some(base) = state.companion().and_then(|c| c.media_base(kind)) {
-        return Ok(base);
-    }
+/// The served image server's root URL (the endpoint without its `/v1`), after
+/// checking the served model makes images.
+async fn image_base(state: &AppState) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
     let _ = state.reconciled_status().await;
     let endpoint = state.endpoint().ok_or_else(|| {
         tt_error(
             StatusCode::CONFLICT,
-            format!(
-                "Nothing is serving. Start a{} model first.",
-                if kind == "image" { "n image" } else { " video" }
-            ),
+            "Nothing is serving. Start an image model first.",
         )
     })?;
     let probe = state.clone();
     let served = tokio::task::spawn_blocking(move || probe.served_kind_blocking())
         .await
         .unwrap_or("other");
-    if served != kind {
+    if served != "image" {
         return Err(tt_error(
             StatusCode::CONFLICT,
             format!(
-                "The box is serving {} ({served}), not {} generation. Start a{} model first.",
-                endpoint.model,
-                kind,
-                if kind == "image" { "n image" } else { " video" }
+                "The box is serving {} ({served}), not image generation. Start an image model first.",
+                endpoint.model
             ),
         ));
     }
@@ -155,118 +142,13 @@ pub(crate) async fn generate_image(
         obj.entry("guidance_scale")
             .or_insert(serde_json::json!(3.5));
     }
-    match media_base(&state, "image").await {
+    match image_base(&state).await {
         Ok(base) => {
             media_proxy(
                 reqwest::Method::POST,
                 format!("{base}/v1/images/generations"),
                 Some(body),
                 Duration::from_secs(600),
-            )
-            .await
-        }
-        Err(e) => e.into_response(),
-    }
-}
-
-/// `POST /generate/video` (authed): submit a text-to-video job (`prompt`,
-/// `negative_prompt`, `num_inference_steps`, `seed`); answers the job object.
-pub(crate) async fn generate_video(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
-    Json(body): Json<serde_json::Value>,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    match media_base(&state, "video").await {
-        Ok(base) => {
-            media_proxy(
-                reqwest::Method::POST,
-                format!("{base}/v1/videos/generations"),
-                Some(body),
-                Duration::from_secs(120),
-            )
-            .await
-        }
-        Err(e) => e.into_response(),
-    }
-}
-
-/// `GET /generate/videos` (authed): every video job the server knows.
-pub(crate) async fn list_videos(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    match media_base(&state, "video").await {
-        Ok(base) => {
-            media_proxy(
-                reqwest::Method::GET,
-                format!("{base}/v1/videos/jobs"),
-                None,
-                Duration::from_secs(30),
-            )
-            .await
-        }
-        Err(e) => e.into_response(),
-    }
-}
-
-/// `GET /generate/video/{id}` (authed): a job's status.
-pub(crate) async fn get_video(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    match media_base(&state, "video").await {
-        Ok(base) => {
-            media_proxy(
-                reqwest::Method::GET,
-                format!("{base}/v1/videos/generations/{id}"),
-                None,
-                Duration::from_secs(30),
-            )
-            .await
-        }
-        Err(e) => e.into_response(),
-    }
-}
-
-/// `GET /generate/video/{id}/download` (authed): the finished MP4.
-pub(crate) async fn download_video(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    match media_base(&state, "video").await {
-        Ok(base) => {
-            media_proxy(
-                reqwest::Method::GET,
-                format!("{base}/v1/videos/generations/{id}/download"),
-                None,
-                Duration::from_secs(600),
-            )
-            .await
-        }
-        Err(e) => e.into_response(),
-    }
-}
-
-/// `POST /generate/video/{id}/cancel` (authed).
-pub(crate) async fn cancel_video(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    _auth: BearerAuth,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    match media_base(&state, "video").await {
-        Ok(base) => {
-            media_proxy(
-                reqwest::Method::POST,
-                format!("{base}/v1/videos/generations/{id}/cancel"),
-                None,
-                Duration::from_secs(30),
             )
             .await
         }

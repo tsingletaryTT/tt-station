@@ -266,52 +266,15 @@ struct HardwareView: View {
     }
 }
 
-/// Long work in progress on the box, with its progress: an Orchard bring-up
-/// and transcription jobs. Shows nothing when nothing is going.
+/// Long work in progress on the box, with its progress: transcription jobs.
+/// Shows nothing when nothing is going.
 private struct HappeningNow: View {
     let session: BoxSession
-    @State private var orchard: OrchardRun?
-    @State private var bringup: BringupRun?
-    @State private var deciding = false
     @State private var jobs: [BoxJob] = []
-    @State private var showOrchard = false
     @State private var showJobs = false
 
     var body: some View {
         VStack(spacing: 10) {
-            if let run = orchard {
-                Button { showOrchard = true } label: {
-                    row(icon: "leaf.fill", title: "Bringing up \(run.title)",
-                        detail: run.progress?.title ?? OrchardWords.state(run.state).name,
-                        value: run.progress?.overall,
-                        trailing: run.progress?.overallEtaS.map { OrchardProgress.approx($0) + " left" })
-                }
-                .buttonStyle(.plain)
-            }
-            if let run = bringup {
-                VStack(alignment: .leading, spacing: 10) {
-                    row(icon: "hammer.fill", title: "Bringing up \(run.title)", detail: run.detail,
-                        value: run.total > 0 ? Double(run.done) / Double(run.total) : nil, trailing: nil)
-                    ForEach(run.approvals) { a in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("\(run.agent) wants to \(a.kind == "command" ? "run" : "change") something that \(a.why):")
-                                .font(.tt(.footnote)).foregroundStyle(.secondary)
-                            if let cmd = a.command {
-                                Text(cmd).font(.ttMono(12)).lineLimit(4)
-                                    .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
-                            }
-                            HStack {
-                                Button("Allow") { decide(run, a, "accept") }.buttonStyle(.borderedProminent).tint(Brand.accent)
-                                Button("Deny", role: .destructive) { decide(run, a, "decline") }.buttonStyle(.bordered)
-                            }
-                            .disabled(deciding)
-                        }
-                        .padding(12)
-                        .background(Vesper.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
-                    }
-                }
-            }
             ForEach(jobs.filter(\.isActive)) { job in
                 Button { showJobs = true } label: {
                     row(icon: "waveform", title: "Transcribing \(job.title)",
@@ -323,24 +286,12 @@ private struct HappeningNow: View {
         }
         .task(id: session.box.id) {
             while !Task.isCancelled {
-                orchard = (try? await session.orchard())?.runs.first(where: \.live)
-                bringup = (try? await session.bringupRuns())?.first(where: \.live)
                 jobs = (try? await session.jobs()) ?? []
-                let busy = orchard != nil || bringup != nil || jobs.contains(where: \.isActive)
+                let busy = jobs.contains(where: \.isActive)
                 try? await Task.sleep(for: .seconds(busy ? 10 : 30))
             }
         }
-        .fullScreenCover(isPresented: $showOrchard) { OrchardView(session: session) }
         .sheet(isPresented: $showJobs) { JobsView(session: session) }
-    }
-
-    private func decide(_ run: BringupRun, _ a: BringupApproval, _ decision: String) {
-        deciding = true
-        Task {
-            try? await session.decideBringup(run: run.id, approval: a.id, decision: decision)
-            bringup = (try? await session.bringupRuns())?.first(where: \.live)
-            deciding = false
-        }
     }
 
     private func row(icon: String, title: String, detail: String, value: Double?, trailing: String?) -> some View {
@@ -368,16 +319,14 @@ private struct ExploreGrid: View {
     @State private var open: Item?
 
     enum Item: String, Identifiable, CaseIterable {
-        case code, research, routines, transcribe, orchard, lab, benchmark
+        case code, research, routines, transcribe, benchmark
         var id: String { rawValue }
         var title: String {
             switch self {
             case .code: return "Code"
             case .research: return "Research"
             case .routines: return "Routines"
-            case .orchard: return "Bring up a model"
             case .transcribe: return "Transcribe"
-            case .lab: return "Silicon check"
             case .benchmark: return "Benchmark"
             }
         }
@@ -386,9 +335,7 @@ private struct ExploreGrid: View {
             case .code: return "Start, follow and steer coding sessions"
             case .research: return "Reports with sources, from the web"
             case .routines: return "Jobs the box does on its own"
-            case .orchard: return "Any Hugging Face model, tested on 1–4 chips"
             case .transcribe: return "Record in the room or upload, any length"
-            case .lab: return "gpt-oss on bare silicon"
             case .benchmark: return "Speed and cost per token"
             }
         }
@@ -397,9 +344,7 @@ private struct ExploreGrid: View {
             case .code: return "chevron.left.forwardslash.chevron.right"
             case .research: return "magnifyingglass"
             case .routines: return "clock.arrow.circlepath"
-            case .orchard: return "leaf"
             case .transcribe: return "waveform.badge.mic"
-            case .lab: return "flask"
             case .benchmark: return "speedometer"
             }
         }
@@ -425,12 +370,7 @@ private struct ExploreGrid: View {
                 }
             }
         }
-        .fullScreenCover(item: Binding(get: { open == .orchard || open == .lab ? open : nil },
-                                       set: { open = $0 })) { item in
-            if item == .orchard { OrchardView(session: session) } else { LabView(session: session) }
-        }
-        .sheet(item: Binding(get: { open == .orchard || open == .lab ? nil : open },
-                             set: { open = $0 })) { item in
+        .sheet(item: $open) { item in
             if item == .research {
                 ResearchListView(session: session)
             } else if item == .transcribe {
@@ -513,15 +453,9 @@ private struct ServingCard: View {
                 }
                 .buttonStyle(.glassProminent)
                 .controlSize(.large)
-            } else if session.canMakeImages && session.isSplit {
+            } else if session.isServing, session.servedKind == "image" {
                 Button { onOpenCreate() } label: {
-                    Label("Make images", systemImage: "wand.and.stars").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.glassProminent)
-                .controlSize(.large)
-            } else if session.isServing, let kind = session.servedKind, kind == "image" || kind == "video" {
-                Button { onOpenCreate() } label: {
-                    Label(kind == "image" ? "Make images" : "Make videos", systemImage: "wand.and.stars")
+                    Label("Make images", systemImage: "wand.and.stars")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.glassProminent)
@@ -536,9 +470,6 @@ private struct ServingCard: View {
         if session.statusError != nil { return "Unreachable" }
         if let starting = session.startingModel { return "Starting \(Brand.shortModel(starting))…" }
         if session.startFailure != nil { return "\(session.serve?.displayModel ?? "Model") failed to start" }
-        if session.isSplit, let chat = session.serve?.displayModel, let image = session.companion?.displayModel {
-            return "\(chat) + \(image)"
-        }
         if session.isServing, let model = session.serve?.displayModel ?? session.status?.servingModel.map(Brand.shortModel) {
             return model
         }
@@ -552,16 +483,6 @@ private struct ServingCard: View {
             return "Loading onto the chips\(elapsed). This can take a few minutes; you can leave the app."
         }
         if let failure = session.startFailure { return failure }
-        if session.isSplit, let companion = session.companion {
-            let chips = session.coserve?.layout
-            let chat = "Chat on chips \(chips?.chat ?? "0,1")"
-            let image = "\(companion.displayModel ?? "images") on \(chips?.image ?? "2,3")"
-            switch companion.phase {
-            case "starting": return "\(chat) · \(image) loading (\(Elapsed.string(since: companion.since)))"
-            case "failed": return "\(chat) · \(companion.displayModel ?? "Image model") failed: \(companion.error ?? "unknown")"
-            default: return "\(chat) · \(image)"
-            }
-        }
         if session.isServing, let served = session.status?.servingModel {
             switch session.servedKind {
             case "image": return "Making images · \(served)"

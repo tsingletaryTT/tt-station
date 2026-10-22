@@ -63,11 +63,7 @@ struct BoxStatusIntent: AppIntent {
         if let serve {
             switch serve.phase {
             case "serving":
-                var what = "Serving \(serve.displayModel ?? "a model")"
-                if let image = serve.companion, image.isServing {
-                    what += " and \(image.displayModel ?? "an image model")"
-                }
-                parts.append(what + ".")
+                parts.append("Serving \(serve.displayModel ?? "a model").")
             case "starting": parts.append("Starting \(serve.displayModel ?? "a model").")
             case "failed": parts.append("The last start failed.")
             default: parts.append("Nothing is serving.")

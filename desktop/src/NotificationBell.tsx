@@ -118,7 +118,7 @@ export function NotificationBell() {
           ) : count === 0 ? (
             <div className="bell-empty">
               <b>You're all caught up</b>
-              <span className="muted">When {owner ? "Code, a routine, a bring-up or someone pairing" : "Code or a routine"} needs your OK, it shows up here.</span>
+              <span className="muted">When {owner ? "Code, a routine or someone pairing" : "Code or a routine"} needs your OK, it shows up here.</span>
             </div>
           ) : (
             <ul className="bell-list" aria-label={`Waiting for you: ${count}`}>
@@ -132,7 +132,7 @@ export function NotificationBell() {
                     <Icon kind={INBOX_ICONS[item.kind]} className="bell-icon" aria-hidden />
                     <div className="bell-main">
                       <div className="bell-where"><span>{item.where}</span><span className="muted">{itemAge(item)}</span></div>
-                      <div className={`bell-summary ${item.kind === "code" || item.kind === "bringup" ? "mono" : ""}`}>{item.summary}</div>
+                      <div className={`bell-summary ${item.kind === "code" ? "mono" : ""}`}>{item.summary}</div>
                       <div className="bell-actions">
                         {item.answer === "decide" ? (
                           <>

@@ -56,9 +56,8 @@ impl Default for Settings {
 /// The model put to sleep, to start again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asleep {
-    /// A community package id, or a model name for the official catalog.
+    /// The model, by the name it was started by.
     pub target: String,
-    pub community: bool,
     /// As a person would say it.
     pub label: String,
     pub at: u64,
@@ -200,19 +199,10 @@ fn working(state: &AppState) -> bool {
 /// What's serving, as something [`wake`] can start again.
 async fn current_target(state: &AppState) -> Option<Asleep> {
     let life = state.lifecycle();
-    if let Some(id) = crate::community::serving_package(state, &life) {
-        return Some(Asleep {
-            label: id.rsplit('/').next().unwrap_or(&id).to_string(),
-            target: id,
-            community: true,
-            at: now(),
-        });
-    }
     let model = life.model.clone().or(life.served_id.clone())?;
     Some(Asleep {
         label: model.rsplit('/').next().unwrap_or(&model).to_string(),
         target: model,
-        community: false,
         at: now(),
     })
 }

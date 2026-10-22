@@ -135,9 +135,9 @@ pub struct Eval {
     /// How many times it was picked up again after an agent restart.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub resumed: u32,
-    /// What served the model, past its name: a community package and profile
-    /// (`<package>#<profile>`, see [`crate::codespeed::current_setup`]), or none
-    /// for any other serve path. Only meaningful with `setup_recorded`.
+    /// What served the model, past its name (a serve setup, see
+    /// [`crate::codespeed::book_key`]), or none. Only meaningful with
+    /// `setup_recorded`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<String>,
     /// `setup` was recorded: false for check-ups from before the box kept it.
@@ -1016,7 +1016,7 @@ pub async fn run(state: &AppState, agent: bool) -> Result<Eval, String> {
             context,
             activity: Some("Measuring speed".into()),
             agent,
-            setup: crate::codespeed::current_setup(&ep.model),
+            setup: None,
             setup_recorded: true,
             ..Default::default()
         });
@@ -1732,7 +1732,7 @@ mod tests {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(tmp.path().to_path_buf());
         let e = Eval {

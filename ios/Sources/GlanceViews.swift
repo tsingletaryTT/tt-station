@@ -5,11 +5,10 @@ import SwiftUI
 
 /// The Box tab's "right now": the model's state (serving, not answering,
 /// asleep, starting), the chips, and what's running on the box and who
-/// started it -- a recording in the room, Code sessions, research, a routine.
+/// started it -- Code sessions, research, a routine.
 struct BoxGlanceCard: View {
     let session: BoxSession
     let telemetry: TelemetryFeed
-    @State private var record: RecordStatus?
     @State private var code: [CodeSession] = []
     @State private var research: [ResearchJob] = []
     @State private var routine: RoutineRun?
@@ -56,7 +55,6 @@ struct BoxGlanceCard: View {
             ForEach(activity, id: \.self) { line in
                 Label(line.text, systemImage: line.icon)
                     .font(.tt(.footnote))
-                    .foregroundStyle(line.icon == "record.circle" ? .red : .primary)
             }
             if let problem { Text(problem).font(.tt(.caption)).foregroundStyle(.orange) }
         }
@@ -91,10 +89,6 @@ struct BoxGlanceCard: View {
 
     private var activity: [Line] {
         var lines: [Line] = []
-        if let r = record?.recording, r.ended != true {
-            let who = r.startedBy.map { " by \($0)" } ?? ""
-            lines.append(Line(icon: "record.circle", text: "Recording in the room\(who) · \(r.seconds / 60) min"))
-        }
         let busy = code.filter(\.busy)
         if !busy.isEmpty {
             let waiting = code.reduce(0) { $0 + $1.waiting }
@@ -115,7 +109,6 @@ struct BoxGlanceCard: View {
 
     private func load() async {
         guard session.statusError == nil else { return }
-        record = try? await session.recordStatus()
         code = (try? await session.codeSessions()) ?? []
         research = (try? await session.research())?.jobs ?? []
         routine = (try? await session.routines())?.running

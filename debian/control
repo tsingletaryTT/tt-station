@@ -14,7 +14,6 @@ Depends: ${shlibs:Depends}, ${misc:Depends}
 # Recommends so the package still installs where only the pip tt-smi is.
 # ffmpeg: meeting recordings and voice notes are cut into pieces to transcribe.
 Recommends: tt-smi, docker.io | docker-ce, ffmpeg
-Suggests: tt-station-panel
 Description: Control plane for a Tenstorrent box (CLI + box agent)
  tt-station makes a Tenstorrent box (a QuietBox, Galaxy server or workstation
  with Tenstorrent cards) plug-and-play on the LAN: discover a box, pair once,
@@ -25,12 +24,3 @@ Description: Control plane for a Tenstorrent box (CLI + box agent)
  (installed as a systemd --user service, not auto-enabled). Enable it per-user
  with: systemctl --user enable --now tt-station-agentd
 
-Package: tt-station-panel
-Architecture: amd64
-Depends: ${misc:Depends}, tt-station (= ${binary:Version}), python3, gir1.2-gtk-4.0, python3-gi
-Recommends: docker.io | docker-ce, xdg-utils
-Description: On-box GTK control panel for tt-station
- A small GTK4 control surface that runs on the Tenstorrent box itself: shows
- the live 6-digit pairing code, agent/serving status and endpoint, and
- Start/Stop/Restart/Reset the agent. Includes one-click Connect launchers (Open WebUI,
- opencode) for the model the box is serving.

@@ -12,7 +12,7 @@ export function DevToolsSetting() {
     <div className="stack" style={{ gap: 4 }}>
       <Switch label="Developer tools" checked={on} onChange={(e) => setDevTools(e.target.checked)} />
       <span className="muted" style={{ fontSize: 12 }}>
-        Adds Bring-up (porting new models) to the sidebar, and the silicon check and who holds the chips to Hardware.
+        Shows who holds which chips (the chip scheduler) on Hardware.
       </span>
     </div>
   );

@@ -10,10 +10,10 @@
 use std::sync::Arc;
 
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 async fn spawn() -> (String, String) {
-    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend));
+    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend));
     let token = "error-bodies-owner".to_string();
     state
         .sessions()

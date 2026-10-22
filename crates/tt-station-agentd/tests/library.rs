@@ -20,7 +20,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tt_station_agentd::docs::DocStore;
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 mod support;
 
@@ -62,7 +62,7 @@ impl Box_ {
             std::env::temp_dir().join(format!("tt-library-cfg-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&config);
         std::fs::create_dir_all(&config).unwrap();
-        let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+        let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
             .with_telemetry_config("/nonexistent/tt-smi".to_string(), 1000)
             .with_config_dir(config.clone())
             .with_docs(DocStore::open(config.join("docs")));

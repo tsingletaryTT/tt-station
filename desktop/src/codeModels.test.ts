@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { chipsLine, groupModels, optionOrigin, optionTitle, reliabilityText, serveRequest, type CodeModel } from "./codeModels";
 
 const option = (o: Partial<CodeModel> & { key: string }): CodeModel => ({
-  group: "gpt-oss-20b", name: "gpt-oss-20b", model: "openai/gpt-oss-20b", source: "community", origin: "tt-hous/gpt-oss-20b-p150",
+  group: "gpt-oss-20b", name: "gpt-oss-20b", model: "openai/gpt-oss-20b", source: "catalog", origin: "tt catalog",
   profile: null, profile_label: null, profile_note: null, chips: null, context: 131072,
   tools: { verified: true, how: "tool parser openai" }, prefix_cache: { state: "unknown", how: "not seen serving here yet" },
   params_b: null, served_id: null, speed: null, reliability: null, choice: { action: "switch" }, eta_s: null, serve: null, ...o,
@@ -25,20 +25,20 @@ describe("Code's model list", () => {
   });
 
   it("says what each option is and where it comes from", () => {
-    const pkg = option({ key: "p", profile: "p150x4", profile_label: "4 chips · low latency" });
-    expect(optionTitle(pkg)).toBe("4 chips · low latency");
-    expect(optionOrigin(pkg)).toBe("Community package tt-hous/gpt-oss-20b-p150 · profile p150x4");
+    const labelled = option({ key: "p", profile: "p150x4", profile_label: "4 chips · low latency" });
+    expect(optionTitle(labelled)).toBe("4 chips · low latency");
     const cat = option({ key: "c", source: "catalog", origin: "tt catalog", chips: 4 });
     expect(optionTitle(cat)).toBe("4 chips · tt catalog");
     expect(optionOrigin(cat)).toBe("tt catalog");
-    const native = option({ key: "n", source: "native", origin: "mando2222/gemma" });
-    expect(optionTitle(native)).toBe("Native vLLM bundle");
-    expect(optionOrigin(native)).toBe("Native vLLM bundle mando2222/gemma");
+    const running = option({ key: "r", source: "running", model: "openai/gpt-oss-20b" });
+    expect(optionTitle(running)).toBe("Serving now");
+    expect(optionOrigin(running)).toBe("openai/gpt-oss-20b");
   });
 
-  it("only ever calls a source's own serve route", () => {
-    for (const route of ["/serve", "/community/serve", "/vllm/native/serve"]) {
-      expect(serveRequest(option({ key: route, serve: { route, body: { x: 1 } } }))).toEqual({ route, body: { x: 1 } });
+  it("only ever calls the box's serve route", () => {
+    expect(serveRequest(option({ key: "s", serve: { route: "/serve", body: { x: 1 } } }))).toEqual({ route: "/serve", body: { x: 1 } });
+    for (const route of ["/community/serve", "/vllm/native/serve"]) {
+      expect(serveRequest(option({ key: route, serve: { route, body: { x: 1 } } }))).toBeNull();
     }
     expect(serveRequest(option({ key: "x", serve: { route: "/power", body: {} } }))).toBeNull();
     expect(serveRequest(option({ key: "y" }))).toBeNull();

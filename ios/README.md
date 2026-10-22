@@ -2,7 +2,7 @@
 
 TT Station on your iPhone (and iPad), connected to your own Tenstorrent box (a QuietBox,
 a Galaxy server, or a workstation with Tenstorrent cards running TT Station). Chat with
-the model the box serves, by text or voice; make images and videos; transcribe
+the model the box serves, by text or voice; make images; transcribe
 recordings; see the chips' temperature, power and load; start, stop and download models;
 put the box to sleep and wake it. The app talks only to your box, over HTTPS pinned to the
 box's own certificate, on your network.
@@ -26,7 +26,7 @@ open TTStationMobile.xcodeproj
 ```
 
 In Xcode, select the **TTStationMobile** target → **Signing & Capabilities** and choose
-your team (do the same for **TTStationActivity** and **TTStationNotificationService**),
+your team (do the same for **TTStationActivity**),
 then run the **TTStationMobile** scheme on your iPhone. If Xcode says a bundle identifier
 isn't available, change the `com.tenstorrent.ttstation.mobile…` identifiers in
 `project.yml` to your own prefix and run `xcodegen` again.
@@ -36,12 +36,9 @@ isn't available, change the `com.tenstorrent.ttstation.mobile…` identifiers in
 
 - **Free (personal) team:** the app runs on your own devices, and stops opening after
   7 days until you build and run it again from Xcode.
-- **Paid team:** needed for TestFlight and the App Store, and for push notifications.
-- **Push notifications** are off by default because a free team can't sign them. With a
-  paid team, add `CODE_SIGN_ENTITLEMENTS: TTStationMobile.entitlements` to the app target
-  in `project.yml` and set `AlertCenter.remotePush` to `true` (`Sources/Alerts.swift`).
-  Without push, alerts arrive while the app is open and from background refresh. How the
-  box sends pushes: [alerts-and-power.md](../docs/reference/alerts-and-power.md).
+- **Paid team:** needed for TestFlight and the App Store.
+- **Notifications** need no push setup: the app checks the box's event feed while it's
+  open and from background refresh, and shows each alert as a local notification.
 
 ## Pair with your box
 
@@ -66,7 +63,7 @@ security. What the phone can and can't do compared with the desktop app:
 | Microphone | Voice chat with the box, and recording meetings or notes for it to transcribe. |
 | Speech Recognition | Turn your speech into text on the iPhone (on-device where supported); only the text goes to the box. |
 | Notifications | Tell you when a download finishes, a model is ready or fails, the box comes online, or chips run hot. Asked when you start a download or a model. |
-| Photos (add only) | Save the images and videos your box makes. |
+| Photos (add only) | Save the images your box makes. |
 
 The app also uses background refresh (to check for alerts) and background audio (so a
 voice conversation or a recording keeps going with the screen locked). It has no tracking
@@ -82,11 +79,10 @@ and collects nothing: see `PrivacyInfo.xcprivacy`.
   the answer is read aloud, then it listens again until you tap ✕.
 - **Documents.** Upload PDFs and text from the Chat tab; the assistant searches them on
   the box and names its source.
-- **Create.** Images and videos from whatever image or video model the box serves, saved
-  to an on-device gallery. On a box with two boards, it can run a chat model on one and an
-  image model on the other, so you can ask for pictures in chat.
+- **Create.** Images from whatever image model the box serves, saved to an on-device
+  gallery.
 - **Box.** Live chip readings, history and energy, Box Doctor, Jobs (transcribe long
-  recordings now or overnight), Orchard and Lab, a shareable benchmark ("How fast is my
+  recordings now or overnight), Code, Research, Routines, a shareable benchmark ("How fast is my
   box?"), and sleep and power (⋯ → Sleep and power; Wake-on-LAN where it can work, see
   [sleep-and-wake.md](../docs/reference/sleep-and-wake.md)).
 - **Models.** The box's catalog: download (with progress), start, recommended picks.
@@ -105,11 +101,10 @@ and collects nothing: see `PrivacyInfo.xcprivacy`.
 | `Sources/TTStationMobileApp.swift` | App entry; onboarding until a box is paired, then the five tabs (Chat, Create, Box, Models, Settings) and the glass "now serving" accessory |
 | `Sources/AppModel.swift` | App-wide state: paired boxes, discovery, the active box's session and telemetry |
 | `Sources/ChatView.swift` | **Chat** tab: chat bubbles, confirm cards, glass composer; explains/offers a switch when a non-chat model serves |
-| `Sources/CreateView.swift` | **Create** tab: image/video studio for whatever serves, else a launcher (start or download image/video models); gallery + viewer (save to Photos, share, reuse) |
+| `Sources/CreateView.swift` | **Create** tab: the image studio while an image model serves, else a launcher (start or download image models); gallery + viewer (save to Photos, share, reuse) |
 | `Sources/ImageStudio.swift` | Text-to-image: prompt, style chips, per-model step limits (FLUX schnell/dev), count, seed |
-| `Sources/VideoStudio.swift` | Text-to-video jobs: submit, poll (survives relaunch), download, cancel |
 | `Sources/Gallery.swift` | On-device store of creations (`Documents/Creations`) |
-| `Sources/DashboardView.swift` | **Box** tab: serving hero, Happening now, chip summary → Hardware page, Box Doctor, Explore grid (Orchard, Transcribe, Lab, Benchmark); stop/reset/power in the ⋯ menu; box switcher |
+| `Sources/DashboardView.swift` | **Box** tab: serving hero, Happening now, chip summary → Hardware page, Box Doctor, Explore grid (Code, Research, Routines, Transcribe, Benchmark); stop/reset/power in the ⋯ menu; box switcher |
 | `Sources/DashboardCharts.swift` | Box tab charts: history (temp/power/throughput/clock), inference, energy, health |
 | `Sources/ChipStyle.swift` | Chip colors and load for the Box tab's charts |
 | `Sources/GlanceViews.swift` | The Box tab's "right now" card, the unreachable banner (Retry, Wake), the update-needed banner |
@@ -131,16 +126,14 @@ and collects nothing: see `PrivacyInfo.xcprivacy`.
 | `Sources/DevicesViews.swift` | Devices and security (roles, remove, sign out, model-control rule), activity log, updates |
 | `Sources/Power.swift` | The whole box's power (sleep/restart/shut down, owners), Wake-on-LAN, remote power setup |
 | `Sources/SleepViews.swift` | Model sleep: sleep now, wake, the idle-sleep rule |
-| `Sources/Alerts.swift` | App delegate (push token), alert center (registers with the box; fallback polling + local notifications), in-app banner, Notifications screen |
-| `Sources/LiveActivities.swift` | Lock Screen / Dynamic Island Live Activities for a model loading, an Orchard run and a transcription |
+| `Sources/Alerts.swift` | App delegate (notification actions), alert center (polls the box's `/events`, posts local notifications), in-app banner, Notifications screen |
+| `Sources/LiveActivities.swift` | Lock Screen / Dynamic Island Live Activities for a model loading and a transcription |
 | `Shared/BoxActivity.swift`, `ActivityExtension/` | The Live Activity's attributes (shared) and the widget extension that draws it |
-| `Shared/PushCredentials.swift`, `NotificationService/` | The notification service extension: fetches a pushed event's real text from the box (pushes carry only an event id) |
 | `Sources/WorkViews.swift` | "Waiting for you": everything on the box that needs your OK (a Code session's command or edit, a routine's action) |
 | `Sources/CodeNewSession.swift` | New sandboxed Code session: recent folders, or browse the box |
 | `Sources/VoiceMode.swift` | Hands-free voice: on-device recognition with endpointing, spoken replies, voice picker, the orb |
 | `Sources/Voice.swift` | Voice: on-device speech recognition with silence detection, spoken answers, the listening bar |
 | `Sources/Recorder.swift` | Record on the phone for Transcribe (AAC 16 kHz mono into `Documents/Recordings`, kept until the box has it); keeps going with the screen locked |
-| `Sources/RecordingViews.swift` | Record in the room on the box (Transcribe → On the box) |
 | `Sources/JobsView.swift` | Jobs: upload recordings to transcribe (now / tonight), progress, transcript viewer |
 | `Sources/ResearchViews.swift` | Research: start, follow, read with sources, share, stop |
 | `Sources/DocumentsView.swift` | Documents: upload (PDF/RTF/HTML/text extraction), list, delete |
@@ -149,8 +142,6 @@ and collects nothing: see `PrivacyInfo.xcprivacy`.
 | `Sources/Markdown.swift` | Markdown renderer for answers (headings, lists, tables, code with copy) |
 | `Sources/ConnectAppsView.swift` | Connect apps: the box's OpenAI endpoint, per-app keys, copy-ready setup for Open WebUI, SDKs, curl, Continue |
 | `Sources/BenchView.swift` | Benchmark card: speed, throughput, image and energy test, shareable as an image |
-| `Sources/LabView.swift` | Lab: tt-lab runs of gpt-oss on bare silicon, bit-exact checks, per-stage profile, history |
-| `Sources/OrchardView.swift` | Orchard: tt-orchard model bring-ups (built for a QuietBox 2): setup, preflight, runs and their progress, reports |
 | `Sources/Intents.swift` | App Intents for Siri, Spotlight, Shortcuts and the Action button |
 | `Sources/SSHKey.swift` | This iPhone's SSH key: Ed25519 in the Keychain, OpenSSH public key and fingerprint, private-key export |
 | `Sources/KeyboardDone.swift` | A Done button above the keyboard for multi-line text boxes |

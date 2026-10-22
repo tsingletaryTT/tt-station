@@ -16,9 +16,9 @@ export default defineConfig({
     port: 5173,
     proxy: Object.fromEntries(
       ["/status", "/serve", "/modes", "/run", "/stop", "/tt", "/telemetry", "/assistant", "/metrics", "/doctor",
-       "/events", "/clients", "/connect", "/keys", "/orchard", "/jobs", "/people", "/schedules", "/energy",
-       "/remote", "/power", "/software", "/lab", "/generate", "/creations", "/docs", "/memories", "/logs",
-       "/leases", "/coserve", "/bench", "/pair", "/devices"].map((p) => [p, { target: "http://127.0.0.1:8765", ws: true }]),
+       "/events", "/clients", "/connect", "/keys", "/jobs", "/people", "/schedules", "/energy",
+       "/remote", "/power", "/software", "/generate", "/creations", "/docs", "/memories", "/logs",
+       "/leases", "/bench", "/pair", "/devices"].map((p) => [p, { target: "http://127.0.0.1:8765", ws: true }]),
     ),
   },
 });

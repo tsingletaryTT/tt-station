@@ -6,7 +6,7 @@
 // notifications bell (Notifications). Routes live under /app/. The window
 // itself never scrolls; the sidebar's places and the page do (layout.ts).
 
-import { type ComponentType, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { type ComponentType, lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "@tenstorrent/vesper/icons";
 import type { IconKind } from "@tenstorrent/vesper/icons";
@@ -15,12 +15,10 @@ import { StatusIndicator } from "@tenstorrent/vesper/status-indicator";
 import { Button } from "@tenstorrent/vesper/button";
 import { TextInput } from "@tenstorrent/vesper/text-input";
 import { Typography } from "@tenstorrent/vesper/typography";
-import { boxName, get, onAnotherComputer, openBoxShell, setToken, short, signIn } from "./api";
+import { boxName, onAnotherComputer, openBoxShell, setToken, short, signIn } from "./api";
 import { pressable, toastError, useServe, useTelemetry, tempTone, tempWord, useToriShortcut } from "./ui";
 import { Home } from "./pages/Home";
-import { adoptFromBox, placeVisible, storedChoice, useDevTools } from "./devtools";
 import { OfflineBanner } from "./OfflineBanner";
-import { RecordingBanner } from "./RecordingBanner";
 import { useConnectivity } from "./connectivity";
 import { NotificationBell } from "./NotificationBell";
 import { FullHeightContext } from "./layout";
@@ -32,7 +30,6 @@ const named = <K extends string>(load: () => Promise<Record<K, ComponentType>>, 
 const Chat = named(() => import("./pages/Chat"), "Chat");
 const Studio = named(() => import("./pages/Studio"), "Studio");
 const Models = named(() => import("./pages/Models"), "Models");
-const BringupPage = named(() => import("./pages/BringupWays"), "BringupPage");
 const Research = named(() => import("./pages/Research"), "Research");
 const Code = named(() => import("./pages/Code"), "Code");
 const Hardware = named(() => import("./pages/Hardware"), "Hardware");
@@ -44,7 +41,7 @@ const Library = named(() => import("./pages/Library"), "Library");
 const Inbox = named(() => import("./pages/Inbox"), "Inbox");
 const ToriWindow = named(() => import("./Tori"), "ToriWindow");
 
-export type Route = "home" | "inbox" | "chat" | "studio" | "research" | "code" | "models" | "bringup" | "orchard" | "hardware" | "discover" | "connect" | "routines" | "library" | "settings";
+export type Route = "home" | "inbox" | "chat" | "studio" | "research" | "code" | "models" | "hardware" | "discover" | "connect" | "routines" | "library" | "settings";
 
 const PLACES: { route: Route; label: string; icon: IconKind; group: number }[] = [
   { route: "home", label: "Home", icon: "quietbox", group: 0 },
@@ -55,7 +52,6 @@ const PLACES: { route: Route; label: string; icon: IconKind; group: number }[] =
   { route: "library", label: "Library", icon: "folder", group: 0 },
   { route: "routines", label: "Routines", icon: "clock", group: 0 },
   { route: "models", label: "Models", icon: "ai-model", group: 1 },
-  { route: "bringup", label: "Bring-up", icon: "ai-task", group: 1 },
   { route: "hardware", label: "Hardware", icon: "blackhole", group: 1 },
   { route: "discover", label: "What's new", icon: "globe", group: 2 },
   { route: "connect", label: "Connect", icon: "link", group: 2 },
@@ -67,13 +63,12 @@ const UNLISTED: Route[] = ["inbox"];
 
 function routeFromPath(): Route {
   const r = location.pathname.replace(/^\/app\/?/, "").split("/")[0] as Route;
-  // Orchard (Quick port) is one of Bring-up's ways; its old address still opens it there.
-  return r === "orchard" ? "bringup" : PLACES.some((p) => p.route === r) || UNLISTED.includes(r) ? r : "home";
+  return PLACES.some((p) => p.route === r) || UNLISTED.includes(r) ? r : "home";
 }
 
 /** Opens a place; `hash` picks something in it (a Code session, a run, a Settings section). */
 export function navigate(route: Route, hash?: string) {
-  const path = route === "orchard" ? "bringup#orchard" : route === "home" ? "" : route;
+  const path = route === "home" ? "" : route;
   history.pushState(null, "", `/app/${path}${hash ? `#${hash}` : ""}`);
   window.dispatchEvent(new PopStateEvent("popstate"));
   if (hash) window.dispatchEvent(new HashChangeEvent("hashchange"));
@@ -137,8 +132,7 @@ function Shell() {
   }, []);
   // Pages with their own scrolling panes fill the page area (useFullHeight).
   const [fullHeight, setFullHeight] = useState(false);
-  const devTools = useDevTools();
-  const places = useMemo(() => PLACES.filter((p) => placeVisible(p.route, devTools)), [devTools]);
+  const places = PLACES;
   // Keyboard: Ctrl+1…9 jumps to the first nine places shown.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -152,14 +146,6 @@ function Shell() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [places]);
-  // No choice made about developer tools yet: someone with bring-up runs on the box gets them.
-  useEffect(() => {
-    if (storedChoice()) return;
-    void Promise.all([
-      get<{ runs: unknown[] }>("/orchard").catch(() => null),
-      get<{ runs: unknown[] }>("/bringup/codex/runs").catch(() => null),
-    ]).then(([o, a]) => adoptFromBox((o?.runs?.length ?? 0) + (a?.runs?.length ?? 0) > 0));
-  }, []);
 
   let page: ReactNode;
   switch (route) {
@@ -168,8 +154,6 @@ function Shell() {
     case "research": page = <Research />; break;
     case "code": page = <Code />; break;
     case "models": page = <Models />; break;
-    case "bringup":
-    case "orchard": page = <BringupPage />; break;
     case "routines": page = <Routines />; break;
     case "library": page = <Library />; break;
     case "inbox": page = <Inbox />; break;
@@ -189,7 +173,6 @@ function Shell() {
         </header>
         <main className={`content ${fullHeight ? "content-full" : ""}`} key={route}>
           <OfflineBanner />
-          <RecordingBanner />
           <div className="page-area">
             <FullHeightContext.Provider value={setFullHeight}>
               <Suspense fallback={<div className="page-loading" role="status" aria-label="Loading" />}>{page}</Suspense>

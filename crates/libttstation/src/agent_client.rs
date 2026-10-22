@@ -127,8 +127,8 @@ pub async fn get_status(base: &str) -> anyhow::Result<StatusInfo> {
 ///
 /// A FREE function rather than an `AgentClient` method, same reasoning as
 /// [`list_models`]/[`get_status`]: `/config` is unauthed read-only discovery
-/// (the GTK panel and `tt-station config` want to show "what will this box actually
-/// serve with" before/without a pairing existing), so there's no bearer
+/// (`tt-station config` wants to show "what will this box actually serve
+/// with" before/without a pairing existing), so there's no bearer
 /// token to hang an `AgentClient` off of yet.
 ///
 /// `token`: the stored pairing token when there is one. The box answers its own

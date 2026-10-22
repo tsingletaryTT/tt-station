@@ -94,32 +94,18 @@ pub fn write_hf_token(dir: &Path, token: &str) -> Result<PathBuf> {
     write_secret(dir, HF_TOKEN_FILE, token.trim())
 }
 
-/// The `systemd-run` arguments that give a host-side launch (`tt-model`,
-/// native vLLM) the Hugging Face token: `--setenv=HF_TOKEN_PATH=<file>`, the
-/// file written into `dir` first. Empty without a token. The value itself
-/// never goes into the unit's environment, where `systemctl --user show`
-/// would print it.
-pub fn systemd_hf_token_args(dir: &Path, token: Option<&str>) -> Result<Vec<String>> {
-    match token.map(str::trim).filter(|t| !t.is_empty()) {
-        Some(token) => {
-            let file = write_hf_token(dir, token)?;
-            Ok(vec![format!("--setenv=HF_TOKEN_PATH={}", file.display())])
-        }
-        None => Ok(Vec::new()),
-    }
-}
-
-/// [`systemd_hf_token_args`] for the token the agent knows
-/// (`bringup::hf_token`), kept in [`default_dir`]. A file that can't be
-/// written leaves the launch without a token rather than falling back to
-/// the environment.
-pub fn launch_hf_token_args() -> Vec<String> {
-    systemd_hf_token_args(&default_dir(), crate::bringup::hf_token().as_deref()).unwrap_or_else(
-        |e| {
-            eprintln!("tt-station-agentd: launching without the Hugging Face token: {e:#}");
-            Vec::new()
-        },
-    )
+/// The Hugging Face token the agent knows: `HF_TOKEN` in its environment,
+/// else the one `huggingface-cli login` saved (`~/.cache/huggingface/token`).
+pub fn hf_token() -> Option<String> {
+    std::env::var("HF_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            let home = std::env::var_os("HOME").map(PathBuf::from)?;
+            fs::read_to_string(home.join(".cache/huggingface/token"))
+                .ok()
+                .map(|t| t.trim().to_string())
+        })
 }
 
 #[cfg(test)]
@@ -157,23 +143,5 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, vec![std::ffi::OsString::from(HF_TOKEN_FILE)]);
-    }
-
-    #[test]
-    fn systemd_args_name_the_file_not_the_token() {
-        let tmp = tempfile::tempdir().unwrap();
-        let args = systemd_hf_token_args(tmp.path(), Some("hf_secret")).unwrap();
-        assert_eq!(
-            args,
-            vec![format!(
-                "--setenv=HF_TOKEN_PATH={}",
-                tmp.path().join(HF_TOKEN_FILE).display()
-            )]
-        );
-        assert!(args.iter().all(|a| !a.contains("hf_secret")));
-        assert!(systemd_hf_token_args(tmp.path(), None).unwrap().is_empty());
-        assert!(systemd_hf_token_args(tmp.path(), Some("  "))
-            .unwrap()
-            .is_empty());
     }
 }

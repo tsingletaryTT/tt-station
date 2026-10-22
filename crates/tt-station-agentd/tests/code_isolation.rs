@@ -2,14 +2,14 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 //! What runs as the box's own account is an owner's: Code outside the
-//! sandbox, bring-ups, Orchard, the lab and the desktop launches. Members get
-//! Code in the sandbox, in a folder that isn't the box's own; a session someone started outside the sandbox stays out of their reach.
+//! sandbox. Members get Code in the sandbox, in a folder that isn't the box's
+//! own; a session someone started outside the sandbox stays out of their reach.
 
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 mod support;
 
@@ -23,7 +23,7 @@ struct Station {
 
 async fn harness() -> Station {
     let config = tempfile::tempdir().unwrap();
-    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
         .with_config_dir(config.path().to_path_buf());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -126,41 +126,6 @@ async fn members_get_code_in_the_sandbox_only_and_owners_choose() {
     assert!(actions.contains(&"host_run"), "{log}");
     assert!(actions.contains(&"denied"), "{log}");
     assert!(actions.contains(&"shared_folder_confirmed"), "{log}");
-}
-
-#[tokio::test]
-async fn running_things_as_the_box_is_for_owners() {
-    let b = harness().await;
-    use reqwest::Method as M;
-    let refused = [
-        (M::POST, "/bringup/codex/runs", json!({ "model": "a/b" })),
-        (M::POST, "/bringup/codex/runs/x/resume", json!({})),
-        (M::POST, "/bringup/claude/login", json!({})),
-        (M::POST, "/orchard/setup", json!({})),
-        (M::POST, "/orchard/preflight", json!({ "model": "a/b" })),
-        (M::POST, "/orchard/runs", json!({ "model": "a/b" })),
-        (M::POST, "/orchard/runs/x/resume", json!({})),
-        (M::POST, "/orchard/runs/x/serve", json!({})),
-        (M::PUT, "/orchard/lab", json!({ "remove": true })),
-        (M::POST, "/orchard/lab/setup", json!({})),
-        (M::POST, "/lab/prepare", json!({ "model": "gpt-oss-20b" })),
-        (
-            M::POST,
-            "/lab/run",
-            json!({ "model": "gpt-oss-20b", "prompt": "hi" }),
-        ),
-        (M::POST, "/desktop/open", json!({ "app": "Terminal" })),
-        (M::POST, "/hermes/open", json!({})),
-        (M::POST, "/vllm/native/setup", json!({})),
-    ];
-    for (m, path, body) in refused {
-        let (status, said) = b.call(m.clone(), path, &b.member, body.clone()).await;
-        assert_eq!(status, 403, "member {m} {path}: {said}");
-        assert!(
-            said["error"].as_str().unwrap().contains("Only an owner"),
-            "{said}"
-        );
-    }
 }
 
 #[tokio::test]

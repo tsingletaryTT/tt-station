@@ -28,7 +28,6 @@ multi-platform index, so it covers linux/amd64.
 | `itzcrazykns1337/vane:latest` | `sha256:0b61bf0d4470e9f2a9c71f794b72fab6e5a612177172770684c158a461f6896e` | registry |
 | `langflowai/langflow:latest` | `sha256:a0396e089eb97fa471ef8affc492b8c56abb3758040a5ddaa80814b0abad15bf` | registry |
 | `ghcr.io/openhands/agent-canvas:latest` | `sha256:91b7a217dcbefe8c10562523b043458ed1dfaf8ba770194b319fe754cee03f23` | registry |
-| `openclaw/openclaw:2026.9.3` | `sha256:6cb72e1599b3b76e2ea3dcc2f4dd7f112247367fbecadfcdee8caa7423f4989b` | pulled on the box |
 | `ghcr.io/hkuds/lightrag:v1.5.7` | `sha256:5bdbd524931b011df246fe20888d110cef691e6804c12cde636a2b746d7de27e` | registry |
 | `ghcr.io/remsky/kokoro-fastapi-cpu:latest` (voice) | `sha256:ee3111d6a2c903ed62f3b4fa19543c6901205ed39fce3c177e895b34a8386b9c` | pulled on the box |
 | `ghcr.io/speaches-ai/speaches:latest-cpu` (voice) | `sha256:21e3df06d842fb7802ab470dd77c25f0e8c0d22950e8d8c6ae886e851af53ef8` | pulled on the box |
@@ -56,25 +55,3 @@ Jupyter's start command installs the OpenAI Python client into the notebook
 container: `pip install -q openai==3.26.1` (released 2026-10-08). Bump the
 version in `apps.rs` the same way: read the changelog, change the number. It's
 a version pin, not a hash pin: PyPI still serves the file.
-
-## Hermes Agent's installer
-
-`crates/tt-station-agentd/src/hermes.rs` runs Nous Research's installer from a
-fixed commit of `NousResearch/hermes-agent` (`INSTALLER_COMMIT`), checked
-against `INSTALLER_SHA256` before it runs, and passes the same commit to the
-installer (`--commit`) so the checkout matches. Pinned 2026-10-15 to
-`046094df28b712f62a5e3c728a9e59da05dcbf1e` (byte-identical to what
-hermes-agent.nousresearch.com/install.sh served that day).
-
-To bump:
-
-```bash
-C=$(git ls-remote https://github.com/NousResearch/hermes-agent.git refs/heads/main | cut -f1)
-curl -fsSL -o install.sh https://raw.githubusercontent.com/NousResearch/hermes-agent/$C/scripts/install.sh
-less install.sh          # read it: it runs as the box's account
-sha256sum install.sh
-```
-
-Put `$C` and the sha256 in `hermes.rs`. The installer then fetches its own
-tools (uv, Python, Node packages) from their usual places; those aren't pinned
-by TT Station.

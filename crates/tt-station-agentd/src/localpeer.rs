@@ -18,14 +18,12 @@
 //! Elsewhere (no `/proc`), nobody gets local trust: callers pair like any
 //! other device.
 //!
-//! Running as the agent's user isn't enough on its own: a bring-up run, an
-//! Orchard run or a Code terminal runs as that user too, and must not answer
-//! its own approvals or call owner routes. Those run in systemd units whose
-//! names say so (`crate::sandbox::CONFINED_UNIT_PREFIXES`), so the agent
-//! reads which processes are in those units' cgroups and whether one of them
-//! holds the caller's socket (`/proc/<pid>/fd/* -> socket:[<inode>]`). A run
-//! can't move itself out of its cgroup: the cgroup files are read-only inside
-//! its Landlock sandbox (`crate::sandbox`).
+//! Running as the agent's user isn't enough on its own: a Code session runs
+//! as that user too, and must not answer its own approvals or call owner
+//! routes. Those run in systemd units whose names say so
+//! ([`CONFINED_UNIT_PREFIXES`]), so the agent reads which processes are in
+//! those units' cgroups and whether one of them holds the caller's socket
+//! (`/proc/<pid>/fd/* -> socket:[<inode>]`).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -142,7 +140,16 @@ fn cgroup_pids(dir: &Path, out: &mut Vec<u32>) {
     }
 }
 
-/// The confined units (`crate::sandbox::is_confined_unit`) under `root`, a
+/// Unit-name prefixes of the processes that never get the box's own local
+/// trust: Code's sessions (`tt-code-agent-<id>`, see `crate::workspace`).
+pub const CONFINED_UNIT_PREFIXES: &[&str] = &["tt-code-"];
+
+/// Whether `unit` is one whose processes get no local trust.
+pub fn is_confined_unit(unit: &str) -> bool {
+    CONFINED_UNIT_PREFIXES.iter().any(|p| unit.starts_with(p))
+}
+
+/// The confined units ([`is_confined_unit`]) under `root`, a
 /// user manager's cgroup, with the pids in each. Units sit in slices
 /// (`app.slice/…`), so this looks a few folders down.
 pub fn confined_units(root: &Path) -> Vec<(String, Vec<u32>)> {
@@ -152,7 +159,7 @@ pub fn confined_units(root: &Path) -> Vec<(String, Vec<u32>)> {
                 continue;
             }
             let name = e.file_name().to_string_lossy().to_string();
-            if crate::sandbox::is_confined_unit(&name) {
+            if is_confined_unit(&name) {
                 let mut pids = Vec::new();
                 cgroup_pids(&e.path(), &mut pids);
                 out.push((name, pids));
@@ -189,8 +196,8 @@ pub fn confined_holder(inode: u64, manager_cgroup: &Path, proc_root: &Path) -> O
 pub enum Peer {
     /// The agent's own account, outside any confined unit: the box itself.
     Me,
-    /// The agent's account, but from inside this confined unit (a bring-up,
-    /// Orchard or Code run): no local trust.
+    /// The agent's account, but from inside this confined unit (a Code
+    /// session): no local trust.
     Confined(String),
     /// Anyone else (another account, root, a container), or unknown.
     Other,
@@ -310,7 +317,7 @@ mod tests {
     }
 
     /// A user manager's cgroup tree and a /proc with sockets, as fixtures:
-    /// a bring-up unit (pid 4242, holding socket 912345, with a child cgroup
+    /// a Code agent unit (pid 4242, holding socket 912345, with a child cgroup
     /// holding 912346), a Code session in a nested slice (pid 6000, socket
     /// 600), and an ordinary terminal (pid 5151, socket 777).
     fn fixture() -> tempfile::TempDir {
@@ -318,7 +325,7 @@ mod tests {
         let cg = t
             .path()
             .join("cg/user.slice/user-1000.slice/user@1000.service");
-        let unit = cg.join("app.slice/tt-codex-bringup-r1.service");
+        let unit = cg.join("app.slice/tt-code-agent-r1.service");
         std::fs::create_dir_all(unit.join("child")).unwrap();
         std::fs::write(unit.join("cgroup.procs"), "4242\n").unwrap();
         std::fs::write(unit.join("child/cgroup.procs"), "4243\n").unwrap();
@@ -365,6 +372,20 @@ mod tests {
     }
 
     #[test]
+    fn only_codes_units_are_confined() {
+        for u in ["tt-code-agent-123.service", "tt-code-123.service"] {
+            assert!(is_confined_unit(u), "{u}");
+        }
+        for u in [
+            "tt-station-agentd.service",
+            "app-gnome-terminal-1.scope",
+            "run-u1.service",
+        ] {
+            assert!(!is_confined_unit(u), "{u}");
+        }
+    }
+
+    #[test]
     fn a_socket_held_inside_a_confined_unit_is_named() {
         let t = fixture();
         let cg = t
@@ -373,12 +394,12 @@ mod tests {
         let proc_root = t.path().join("proc");
         assert_eq!(
             confined_holder(912345, &cg, &proc_root).as_deref(),
-            Some("tt-codex-bringup-r1.service")
+            Some("tt-code-agent-r1.service")
         );
         // A child cgroup of the unit is still the unit.
         assert_eq!(
             confined_holder(912346, &cg, &proc_root).as_deref(),
-            Some("tt-codex-bringup-r1.service")
+            Some("tt-code-agent-r1.service")
         );
         // Units in nested slices too.
         assert_eq!(

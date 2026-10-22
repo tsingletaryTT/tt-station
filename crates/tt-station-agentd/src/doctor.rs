@@ -110,7 +110,6 @@ pub struct Facts {
     pub stray_containers: Vec<String>,
     pub starts_at_boot: Option<bool>,
     pub headless_power: Option<bool>,
-    pub push_ready: Option<bool>,
     /// Starts that failed in the last day: (model, reason).
     pub recent_failures: Vec<(String, String)>,
     /// A newer `tt` CLI: (current, latest).
@@ -124,11 +123,6 @@ pub struct Facts {
     pub iommu_translated: Option<bool>,
     /// Programs the kernel saw stuck in the Tenstorrent driver since boot.
     pub driver_hangs: u32,
-    /// A model start with no progress for this many seconds.
-    pub stuck_start: Option<u64>,
-    /// Set while a Lab run or an Orchard bring-up has the chips: tt-smi isn't
-    /// read then, and their containers aren't strays.
-    pub chips_lent_to: Option<String>,
     /// The tt-inference-server checkout the run.py backend serves from, when
     /// it isn't there (`None` when it is, or another backend is in use).
     pub inference_repo_missing: Option<String>,
@@ -176,12 +170,6 @@ pub fn checks(f: &Facts) -> Vec<Check> {
     let mut out = Vec::new();
 
     match &f.chips {
-        _ if f.chips_lent_to.is_some() => out.push(Check::new(
-            "chips",
-            "Chips in use",
-            Status::Ok,
-            f.chips_lent_to.clone().unwrap_or_default(),
-        )),
         None => out.push(
             Check::new("chips", "Chips not readable", Status::Fail,
                 "tt-smi couldn't read the Tenstorrent chips. A reset usually clears this; if not, power the box off and on.")
@@ -322,7 +310,7 @@ pub fn checks(f: &Facts) -> Vec<Check> {
         }
     }
 
-    if !f.stray_containers.is_empty() && f.chips_lent_to.is_none() {
+    if !f.stray_containers.is_empty() {
         out.push(
             Check::new(
                 "stray",
@@ -390,14 +378,6 @@ pub fn checks(f: &Facts) -> Vec<Check> {
             )),
         );
     }
-    if let Some(secs) = f.stuck_start {
-        out.push(Check::new(
-            "stuck_start",
-            "A model start looks stuck",
-            Status::Warn,
-            format!("No progress for {} minutes. Stop it in Models (its chips are reset); after 20 minutes TT Station does that itself and puts the last model that worked back.", secs / 60),
-        ));
-    }
     if f.driver_hangs > 0 {
         out.push(Check::new(
             "driver_hang",
@@ -448,14 +428,6 @@ pub fn checks(f: &Facts) -> Vec<Check> {
             "Remote power off/sleep needs setup",
             Status::Info,
             "See Box → Power for the one-time command.",
-        ));
-    }
-    if f.push_ready == Some(false) {
-        out.push(Check::new(
-            "push",
-            "Push notifications not set up",
-            Status::Info,
-            "The box needs the app's push key; until then the app checks for news itself.",
         ));
     }
     out
@@ -547,14 +519,8 @@ pub async fn gather(state: &AppState) -> Facts {
                 ports.extend(u.port());
             }
         }
-        if let Some(e) = state.companion().and_then(|c| c.endpoint()) {
-            if let Ok(u) = reqwest::Url::parse(&e.base_url) {
-                ports.extend(u.port());
-            }
-        }
         ports
     };
-    let push_ready = Some(state.notifier().push_status().0);
     let recent_failures: Vec<(String, String)> = {
         let day_ago = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -675,15 +641,12 @@ pub async fn gather(state: &AppState) -> Facts {
         stray_containers,
         starts_at_boot: Some(boot),
         headless_power: Some(headless),
-        push_ready,
         recent_failures,
         tt_update,
         leftovers,
-        chips_lent_to: state.chips_holder().map(str::to_string),
         network,
         iommu_translated,
         driver_hangs,
-        stuck_start: crate::community::stalled_s(state),
         inference_repo_missing: state
             .tt_inference_repo()
             .filter(|p| !p.is_dir())
@@ -848,9 +811,6 @@ pub(crate) async fn post_fix(
     }
     if fix == "restart_model" {
         crate::model_control::check_now(&state, &what)?;
-    }
-    if let Some(holder) = state.chips_holder() {
-        return Err(err(StatusCode::CONFLICT, holder));
     }
     match fix.as_str() {
         "stop_stray_containers" => {
@@ -1101,7 +1061,6 @@ mod tests {
             network: Some(("wlp9s0".into(), true, Some("enp10s0".into()))),
             iommu_translated: Some(true),
             driver_hangs: 2,
-            stuck_start: Some(15 * 60),
             ..Default::default()
         };
         let c = checks(&f);
@@ -1118,7 +1077,6 @@ mod tests {
             .unwrap_or("")
             .contains("iommu=pt"));
         assert_eq!(get("driver_hang").status, Status::Warn);
-        assert!(get("stuck_start").detail.contains("15 minutes"));
         let wired = Facts {
             network: Some(("enp10s0".into(), false, None)),
             ..Default::default()
@@ -1142,15 +1100,12 @@ mod tests {
             stray_containers: vec![],
             starts_at_boot: Some(true),
             headless_power: Some(true),
-            push_ready: Some(true),
             recent_failures: vec![],
             tt_update: None,
             leftovers: vec![],
-            chips_lent_to: None,
             network: None,
             iommu_translated: None,
             driver_hangs: 0,
-            stuck_start: None,
             inference_repo_missing: None,
         }
     }

@@ -9,54 +9,29 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::{
-    extract::Json as AxJson,
-    http::header,
-    response::IntoResponse,
-    routing::{get, post},
-    Router,
-};
+use axum::{extract::Json as AxJson, response::IntoResponse, routing::post, Router};
 use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 use serde_json::{json, Value};
 use tt_station_agentd::routes::{app, AppState};
 use tt_station_agentd::serving::ServingBackend;
 use tt_station_agentd::ttcli::TtCli;
 
-/// A stub tt-media-server: images, video jobs, and FastAPI-style errors.
+/// A stub tt-media-server: images and FastAPI-style errors.
 async fn stub_media_server() -> String {
-    let router = Router::new()
-        .route(
-            "/v1/images/generations",
-            post(|AxJson(body): AxJson<Value>| async move {
-                if body["prompt"] == "fail" {
-                    return (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        AxJson(json!({ "detail": "boom" })),
-                    )
-                        .into_response();
-                }
-                AxJson(
-                    json!({ "images": ["aGk="], "generation_time": 1.5, "echo": body["prompt"] }),
+    let router = Router::new().route(
+        "/v1/images/generations",
+        post(|AxJson(body): AxJson<Value>| async move {
+            if body["prompt"] == "fail" {
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    AxJson(json!({ "detail": "boom" })),
                 )
+                    .into_response();
+            }
+            AxJson(json!({ "images": ["aGk="], "generation_time": 1.5, "echo": body["prompt"] }))
                 .into_response()
-            }),
-        )
-        .route(
-            "/v1/videos/generations",
-            post(|| async { AxJson(json!({ "id": "job1", "status": "queued" })) }),
-        )
-        .route(
-            "/v1/videos/generations/job1",
-            get(|| async { AxJson(json!({ "id": "job1", "status": "completed" })) }),
-        )
-        .route(
-            "/v1/videos/generations/job1/download",
-            get(|| async { ([(header::CONTENT_TYPE, "video/mp4")], "MP4DATA").into_response() }),
-        )
-        .route(
-            "/v1/videos/jobs",
-            get(|| async { AxJson(json!([{ "id": "job1", "status": "completed" }])) }),
-        );
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -422,45 +397,6 @@ async fn generation_is_refused_for_the_wrong_kind_of_model() {
     let (s, b) = h.post("/generate/image", json!({ "prompt": "x" })).await;
     assert_eq!(s, 409, "{b}");
     assert!(b["error"].as_str().unwrap().contains("not image"), "{b}");
-    assert_eq!(
-        h.post("/generate/video", json!({ "prompt": "x" })).await.0,
-        409
-    );
-}
-
-#[tokio::test]
-async fn video_jobs_submit_poll_and_download_through_the_agent() {
-    let h = Harness::new(
-        "/home/container_app_user/cache_root/Wan2.2-T2V-A14B-Diffusers",
-        10,
-        None,
-    )
-    .await;
-    h.serve("Wan2.2-T2V-A14B-Diffusers").await;
-    assert_eq!(h.get("/serve").await.1["kind"], "video");
-
-    let (s, job) = h
-        .post(
-            "/generate/video",
-            json!({ "prompt": "waves", "num_inference_steps": 12 }),
-        )
-        .await;
-    assert_eq!((s, job["id"].as_str()), (200, Some("job1")), "{job}");
-    let (s, status) = h.get("/generate/video/job1").await;
-    assert_eq!((s, status["status"].as_str()), (200, Some("completed")));
-    let (s, jobs) = h.get("/generate/videos").await;
-    assert_eq!((s, jobs[0]["id"].as_str()), (200, Some("job1")));
-
-    let r = h
-        .client
-        .get(format!("{}/generate/video/job1/download", h.base))
-        .bearer_auth(&h.token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status().as_u16(), 200);
-    assert_eq!(r.headers()["content-type"], "video/mp4");
-    assert_eq!(r.bytes().await.unwrap().as_ref(), b"MP4DATA");
 }
 
 #[tokio::test]
@@ -483,7 +419,7 @@ async fn the_assistant_says_plainly_when_a_non_chat_model_is_serving() {
 #[tokio::test]
 async fn generation_and_serve_need_a_paired_client() {
     let h = Harness::new("tt-flux.1-schnell", 10, None).await;
-    for path in ["/serve", "/generate/image", "/generate/video"] {
+    for path in ["/serve", "/generate/image"] {
         let r = h
             .client
             .post(format!("{}{path}", h.base))

@@ -120,7 +120,7 @@ const TELEMETRY_MAX_AGE: Duration = Duration::from_secs(30);
 const TELEMETRY_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Names of the tools that run immediately.
-pub const READ_ONLY_TOOLS: [&str; 20] = [
+pub const READ_ONLY_TOOLS: [&str; 18] = [
     "remember",
     "forget",
     "box_status",
@@ -137,8 +137,6 @@ pub const READ_ONLY_TOOLS: [&str; 20] = [
     "start_recording",
     "stop_recording",
     "open_station",
-    "bringup_status",
-    "bringup_decide",
     "research",
     "research_check",
 ];
@@ -152,12 +150,12 @@ pub const DISRUPTIVE_TOOLS: [&str; 5] = [
     "install_app",
 ];
 
-/// Read-only tools that act -- on the box, the person's computer, a bring-up,
-/// a recording or what Tori remembers -- rather than only look. Once text from
-/// the web has come into a turn it may be what's steering the model, so for
-/// the rest of that turn each of these waits for the person, like the
-/// disruptive ones (see [`needs_confirmation`]).
-pub const ACTING_TOOLS: [&str; 10] = [
+/// Read-only tools that act -- on the box, the person's computer, a recording
+/// or what Tori remembers -- rather than only look. Once text from the web has
+/// come into a turn it may be what's steering the model, so for the rest of
+/// that turn each of these waits for the person, like the disruptive ones
+/// (see [`needs_confirmation`]).
+pub const ACTING_TOOLS: [&str; 9] = [
     "remember",
     "forget",
     "open_app",
@@ -166,33 +164,11 @@ pub const ACTING_TOOLS: [&str; 10] = [
     "open_station",
     "start_recording",
     "stop_recording",
-    "bringup_decide",
     "research",
 ];
 
 /// Tools whose results carry text from the web.
 pub const WEB_TOOLS: [&str; 2] = ["web_search", "read_webpage"];
-
-/// Tools that act on the box's own computer, as its account: open apps, files
-/// and pages on its screen, work its controls, list its files, and answer a
-/// bring-up (which runs a command on the box). An owner's, like the routes
-/// that do the same (`POST /desktop/open`, bring-up approvals): for anyone
-/// else they're refused when they run ([`run_read_only`]). Tori on the
-/// person's own computer (`ChatOptions::client`) runs hers there instead.
-pub const HOST_TOOLS: [&str; 6] = [
-    "open_app",
-    "control_computer",
-    "open_folder",
-    "find_files",
-    "open_station",
-    "bringup_decide",
-];
-
-tokio::task_local! {
-    /// Whether the request being answered may use [`HOST_TOOLS`]: an owner's
-    /// (set by the routes, `routes::assistant_*`). Unset, nobody may.
-    pub static HOST_OK: bool;
-}
 
 /// Tools that start, stop or switch the served model: refused to a member
 /// when only owners may (`crate::model_control`), before a confirm card is
@@ -206,6 +182,10 @@ tokio::task_local! {
     pub static MODELS_OK: bool;
 }
 
+/// What the model hears when a computer tool is called with no TT Station
+/// desktop app on the other end to run it (see [`CLIENT_TOOLS`]).
+const NEEDS_THE_APP: &str = "That only works from the TT Station desktop app, which does it on the person's own computer. Tell the person so.";
+
 /// What the model hears when a member's turn calls one of [`MODEL_TOOLS`]
 /// while only owners may.
 const MODELS_REFUSED: &str = "Only owners can start or stop models on this box. Tell the person so; don't offer to do it another way.";
@@ -216,13 +196,6 @@ pub fn models_ok(state: &AppState) -> bool {
         .try_with(|ok| *ok)
         .unwrap_or_else(|_| crate::model_control::allows_now(state))
 }
-
-/// What the model hears when a bring-up answer doesn't come from an owner's
-/// paired device (`crate::auth::Caller::paired_owner`).
-const BRINGUP_DEVICE_ONLY: &str = "Only an owner's paired device can answer a bring-up's requests (the phone, or TT Station signed in as an owner). Tell the person so.";
-
-/// What the model hears when a member's turn calls one of [`HOST_TOOLS`].
-const HOST_REFUSED: &str = "Only an owner of this box can do that on the box itself. Tell the person so; an owner can make their device one in Settings.";
 
 /// Whether a model's call of `name` would fetch or open a web address the turn
 /// didn't already know, after web text came in (see `crate::urltrust`): it
@@ -237,12 +210,11 @@ pub fn fetches_unknown_address(name: &str, args: &Value, turn: &crate::urltrust:
 }
 
 /// Whether a model's call of a read-only tool must wait for the person.
-/// Always: answering a bring-up (it runs a command on the box), starting a
-/// recording, opening a web address. Once web text is in the turn (`tainted`):
-/// any acting tool.
+/// Always: starting a recording, opening a web address. Once web text is in
+/// the turn (`tainted`): any acting tool.
 pub fn needs_confirmation(name: &str, args: &Value, tainted: bool) -> bool {
     match name {
-        "bringup_decide" | "start_recording" => true,
+        "start_recording" => true,
         "open_app" if args["url"].as_str().is_some_and(|u| !u.trim().is_empty()) => true,
         _ => tainted && ACTING_TOOLS.contains(&name),
     }
@@ -265,13 +237,15 @@ pub struct AssistantRequest {
     /// Streamed separately as `reasoning` events; never part of the reply.
     #[serde(default)]
     pub think: bool,
-    /// `"tori"`: Tori, the summon-anywhere assistant that also runs the box's
-    /// computer (apps, files, volume, media). Absent: the box's chat.
+    /// `"tori"`: Tori, the summon-anywhere assistant that also runs the
+    /// person's computer (apps, files, volume, media) through the desktop app.
+    /// Absent: the box's chat.
     #[serde(default)]
     pub persona: Option<String>,
-    /// Tori on another computer (`"mac"`, `"linux"`...): her computer tools
-    /// act on that computer -- its app runs them and posts the result to
-    /// `POST /assistant/client-result` -- not on the box. Streaming only.
+    /// The desktop app's platform (`"darwin"`, `"linux"`...): the computer
+    /// tools act on that computer -- the app runs them and posts the result to
+    /// `POST /assistant/client-result`. Without it there are no computer
+    /// tools. Streaming only.
     #[serde(default)]
     pub client: Option<String>,
 }
@@ -562,7 +536,7 @@ pub fn tool_definitions() -> Value {
         ),
         tool(
             "open_app",
-            "Open an app or a web page on the box's own screen (the QuietBox desktop), e.g. VS Code, Chrome, Files, Terminal, or YouTube. Use it whenever the user asks to open, launch or show something on the box. Give the app's name, a web address, or both (to open the address in that app).",
+            "Open an app or a web page on the person's computer, e.g. VS Code, Chrome, Files, Terminal, or YouTube. Use it whenever the user asks to open, launch or show something. Give the app's name, a web address, or both (to open the address in that app).",
             json!({
                 "type": "object",
                 "properties": {
@@ -572,41 +546,31 @@ pub fn tool_definitions() -> Value {
             }),
         ),
         tool(
-            "bringup_status",
-            "How the current model bring-up (Codex or Claude Code bringing a new model up on the chips) is going, and whether it's waiting for the user.",
-            no_params.clone(),
-        ),
-        tool(
-            "bringup_decide",
-            "Answer what a running bring-up is waiting on (a command it wants to run). Only when the user clearly says to allow or deny it.",
-            json!({ "type": "object", "properties": { "decision": { "type": "string", "enum": ["accept", "decline"] } }, "required": ["decision"] }),
-        ),
-        tool(
             "start_recording",
-            "Start recording a meeting on the box: its microphone and whatever it's playing. Remind the user to tell everyone.",
+            "Start recording a meeting with the person's computer's microphone. Remind the user to tell everyone.",
             json!({ "type": "object", "properties": { "title": { "type": "string" } } }),
         ),
         tool(
             "stop_recording",
-            "Stop the meeting recording; the box transcribes it in the background.",
+            "Stop the meeting recording; it goes to the box, which transcribes it in the background.",
             no_params.clone(),
         ),
         tool(
             "open_station",
-            "Open a page of TT Station, the box's desktop app: home, chat, studio, transcribe, models, bringup (bring up a new model), hardware, connect (apps), settings, research (research reports), news (what's new), code (coding agents working in projects).",
+            "Open a page of TT Station, the desktop app: home, chat, studio, transcribe, models, hardware, connect (apps), settings, research (research reports), news (what's new), code (coding agents working in projects).",
             json!({
                 "type": "object",
-                "properties": { "page": { "type": "string", "enum": ["home", "chat", "studio", "transcribe", "models", "bringup", "hardware", "connect", "settings", "research", "news", "code"] } },
+                "properties": { "page": { "type": "string", "enum": ["home", "chat", "studio", "transcribe", "models", "hardware", "connect", "settings", "research", "news", "code"] } },
                 "required": ["page"]
             }),
         ),
         tool(
             "control_computer",
-            "Control the box's desktop: speaker volume, mute, media playback (any app playing audio or video), lock the screen, dark or light mode, do not disturb.",
+            "Control the person's computer: speaker volume, mute, media playback (any app playing audio or video), lock the screen, dark or light mode, do not disturb.",
             json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": crate::desktop::CONTROLS },
+                    "action": { "type": "string", "enum": CONTROLS },
                     "value": { "type": "number", "description": "Volume percent for volume_set (0-150), or the step for volume_up/volume_down (default 10)." }
                 },
                 "required": ["action"]
@@ -614,7 +578,7 @@ pub fn tool_definitions() -> Value {
         ),
         tool(
             "open_folder",
-            "Open a folder in Files, or a file in its default app, on the box's screen. Paths are in the user's home: Downloads, Documents, ~/code/project, or a full path from find_files.",
+            "Open a folder on the person's computer. Paths are in the user's home: Downloads, Documents, ~/code/project, or a full path from find_files.",
             json!({
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -623,7 +587,7 @@ pub fn tool_definitions() -> Value {
         ),
         tool(
             "find_files",
-            "Find files or folders in the user's home on the box by part of their name; newest first. Then open one with open_folder.",
+            "Find files or folders in the user's home on their computer by part of their name; newest first. Then open one with open_folder.",
             json!({
                 "type": "object",
                 "properties": { "name": { "type": "string", "description": "Part of the file or folder name." } },
@@ -653,13 +617,13 @@ pub fn tool_definitions() -> Value {
         ),
         tool(
             "switch_mode",
-            "Switch what the box is set up to do: chat (best answers), images, chat_images (chat and drawing at once, smaller chat model), video, or transcribe. Use it when the user wants something the box isn't set up for, e.g. a picture while only chat is loaded. Needs the user's confirmation.",
+            "Switch what the box is set up to do: chat (best answers), images, or transcribe. Use it when the user wants something the box isn't set up for, e.g. a picture while only chat is loaded. Needs the user's confirmation.",
             json!({
                 "type": "object",
                 "properties": {
                     "mode": {
                         "type": "string",
-                        "enum": ["chat", "images", "chat_images", "video", "transcribe"],
+                        "enum": ["chat", "images", "transcribe"],
                         "description": "The mode to switch to."
                     }
                 },
@@ -692,9 +656,11 @@ pub fn tool_definitions() -> Value {
 
 /// The tools that can do something right now: no `create_image` without an
 /// image model, no `search_documents` without documents, no web tools when web
-/// access is off. Fewer schemas keep small models (Llama-3.1-8B on half a box)
-/// on track -- with all of them offered it was seen to loop on tool names.
-pub async fn offered_tools(state: &AppState, tori: bool) -> Value {
+/// access is off, no computer tools ([`CLIENT_TOOLS`]) unless the desktop app
+/// asked (`client`) -- and of those, only recording outside Tori (`tori`).
+/// Fewer schemas keep small models (Llama-3.1-8B on half a box) on track --
+/// with all of them offered it was seen to loop on tool names.
+pub async fn offered_tools(state: &AppState, tori: bool, client: bool) -> Value {
     let images = crate::gateway::image_target(state).await.is_some();
     let docs = state.docs().is_some_and(|d| !d.is_empty());
     let web = web_allowed().is_ok();
@@ -708,9 +674,10 @@ pub async fn offered_tools(state: &AppState, tori: bool) -> Value {
                     "create_image" => images,
                     "search_documents" => docs,
                     "web_search" | "read_webpage" => web,
-                    // The computer is Tori's; the box's chat sticks to the box.
-                    "open_app" | "control_computer" | "open_folder" | "find_files"
-                    | "open_station" => tori,
+                    // The person's computer is reached through the desktop app; the
+                    // box's chat may record there, the rest is Tori's.
+                    "start_recording" | "stop_recording" => client,
+                    name if CLIENT_TOOLS.contains(&name) => tori && client,
                     _ => true,
                 })
                 .cloned()
@@ -729,8 +696,6 @@ pub struct BoxContext {
     pub model: String,
     /// Names of the user's uploaded documents (`search_documents`).
     pub documents: Vec<String>,
-    /// How the box is split between models right now, when it is.
-    pub layout: Option<String>,
     /// What the assistant remembers about the user (a prompt section, or empty).
     pub memories: String,
 }
@@ -783,13 +748,12 @@ fn system_prompt_base(ctx: &BoxContext) -> String {
          offline until a model is serving again, because you run on the served model.\n\
          - NEVER say an action happened unless a tool result says it did.\n\
          - Never mention tool or function names to the user; if a model name doesn't \
-         match, retry with one of the suggested names or call list_models yourself.{docs}{layout}{memories}{facts}",
+         match, retry with one of the suggested names or call list_models yourself.{docs}{memories}{facts}",
         name = ctx.name,
         chips = ctx.chips,
         model = ctx.model,
         docs = documents_note(&ctx.documents),
         memories = ctx.memories,
-        layout = ctx.layout.as_deref().map(|l| format!("\n{l}")).unwrap_or_default(),
         facts = hardware_facts(ctx.device_mesh.as_deref()),
     )
 }
@@ -1240,11 +1204,6 @@ pub fn pending_summary(tool: &str, args: &Value, current_model: &str) -> String 
             (Some(app), _) => format!("Open {app}."),
             _ => "Open an app.".to_string(),
         },
-        "bringup_decide" => format!(
-            "{} what the bring-up is waiting on: {}",
-            if args["decision"] == "accept" { "Allow" } else { "Deny" },
-            crate::bringup::waiting_on().unwrap_or_else(|| "nothing right now".into())
-        ),
         "start_recording" => "Start recording (the microphone, until you stop it).".to_string(),
         "remember" => format!("Remember: {}", args["fact"].as_str().unwrap_or("something")),
         "read_webpage" => format!(
@@ -1283,7 +1242,7 @@ pub fn pending_reply(proposed: &[(String, Value)]) -> String {
                 "I can set up {} on the box; it downloads the first time.",
                 args.get("name").and_then(Value::as_str).unwrap_or("that app")
             ),
-            "open_app" | "bringup_decide" | "start_recording" | "remember" | "research" | "read_webpage" => {
+            "open_app" | "start_recording" | "remember" | "research" | "read_webpage" => {
                 format!("I'd like to: {}", pending_summary(tool, args, ""))
             }
             other => format!("I can run {other}."),
@@ -1788,7 +1747,7 @@ async fn prepare_chat(
         },
     };
     let mut llm = LlmClient::new(&endpoint)?;
-    llm.tools = offered_tools(state, opts.tori).await;
+    llm.tools = offered_tools(state, opts.tori, opts.client).await;
 
     let ctx = BoxContext {
         name: state.name().to_string(),
@@ -1799,7 +1758,6 @@ async fn prepare_chat(
             .docs()
             .map(|d| d.list().into_iter().map(|s| s.name).collect())
             .unwrap_or_default(),
-        layout: split_note(state),
         memories: state
             .memories()
             .prompt_note(crate::people::current().as_ref()),
@@ -1811,14 +1769,16 @@ async fn prepare_chat(
             "You are Tori, the assistant for",
             1,
         );
-        prompt.push_str(TORI_NOTE);
-        if opts.client {
-            prompt.push_str(CLIENT_NOTE);
-        }
+        prompt.push_str(if opts.client {
+            TORI_NOTE
+        } else {
+            TORI_ELSEWHERE_NOTE
+        });
     } else {
         prompt.push_str(
-            "\nThis chat can't open apps or change things on the box's own desktop; Tori, \
-             the assistant summoned with Ctrl+Alt+Space, does that. Say so if asked.",
+            "\nThis chat can't open apps or change things on the person's computer; Tori, \
+             the assistant summoned with Ctrl+Alt+Space in the TT Station desktop app, does \
+             that. Say so if asked.",
         );
     }
     if let Some(why) = &on_cpu {
@@ -1865,19 +1825,20 @@ pub(crate) async fn get_brain(
 /// What Tori knows about herself, on top of the box assistant's prompt.
 const TORI_NOTE: &str =
     "\nYour name is Tori. You are summoned with a keyboard shortcut over whatever \
-the user is doing, so be quick and brief. You run this computer too: open apps and web pages \
-(open_app; call it once per app), open folders and files (open_folder, find_files), and change \
-the volume, media playback, dark mode, do not disturb, or lock the screen (control_computer). \
-When asked to do one of these, call the tool; never say something is open or done unless a \
-tool result says so.";
+the user is doing, so be quick and brief. You run the person's computer too, through the \
+TT Station app on it: open apps and web pages (open_app; call it once per app), open folders \
+(open_folder, find_files), change the volume, media playback, dark mode, do not disturb, or \
+lock the screen (control_computer), and record meetings. These act on THEIR computer; \
+everything about models, chips and the box still acts on the box. When asked to do one of \
+these, call the tool; never say something is open or done unless a tool result says so.";
 
-/// Tori on another computer: which one "this computer" is.
-const CLIENT_NOTE: &str = "\nThe person is using you from their own computer, not the box: \
-open_app, open_folder, find_files, control_computer and recordings act on THEIR computer. \
-Everything about models, chips and the box still acts on the box.";
+/// Tori with no desktop app on the other end: no computer tools.
+const TORI_ELSEWHERE_NOTE: &str =
+    "\nYour name is Tori. Be quick and brief. Opening apps, folders and pages, sound and \
+screen controls, and recording work only from the TT Station desktop app; say so if asked.";
 
-/// Tools that act on "this computer": on the person's computer when Tori runs
-/// there (`ChatOptions::client`).
+/// Tools that act on the person's computer: run there by the TT Station
+/// desktop app (`ChatOptions::client`), never on the box.
 pub const CLIENT_TOOLS: &[&str] = &[
     "open_app",
     "control_computer",
@@ -1886,6 +1847,26 @@ pub const CLIENT_TOOLS: &[&str] = &[
     "open_station",
     "start_recording",
     "stop_recording",
+];
+
+/// What `control_computer` can do (the desktop app does those its computer allows).
+pub const CONTROLS: &[&str] = &[
+    "volume_set",
+    "volume_up",
+    "volume_down",
+    "mute",
+    "unmute",
+    "play_pause",
+    "pause_media",
+    "play_media",
+    "next_track",
+    "previous_track",
+    "stop_media",
+    "lock_screen",
+    "dark_mode",
+    "light_mode",
+    "do_not_disturb_on",
+    "do_not_disturb_off",
 ];
 
 /// What `crate::assistant` keeps for the life of one agent (`crate::state::PerAgent`).
@@ -2007,57 +1988,42 @@ fn claims_done(reply: &str) -> bool {
 }
 
 /// Tori's instant commands (see `tori.rs`): done here without a model.
-pub async fn quick(
+/// `None` for anything else, which goes to the model. Steps on the person's
+/// computer are only instant when the desktop app asked (`opts.client`) and
+/// can hear about them as they go (`streaming`); otherwise the model answers.
+pub fn quick_steps(
     state: &AppState,
     turns: &[ChatTurn],
     opts: ChatOptions,
-) -> Option<AssistantResponse> {
+    streaming: bool,
+) -> Option<Vec<crate::tori::Step>> {
+    use crate::tori::Step;
     if !opts.tori {
         return None;
     }
     let said = turns.last().filter(|t| t.role == "user")?.content.clone();
-    let steps = tokio::task::spawn_blocking(move || {
-        let apps = crate::desktop::apps();
-        crate::tori::parse(&said, &apps)
-    })
-    .await
-    .ok()??;
-    use crate::tori::Step;
-    // "yes" with nothing waiting for a yes is just conversation.
-    let pending = state.latest_pending_action(Duration::from_secs(180));
-    if let [Step::Confirm(yes)] = steps.as_slice() {
-        if pending.is_none() {
-            // Nothing of Tori's to confirm: maybe a bring-up is waiting on a yes.
-            if crate::bringup::anything_waiting() {
-                let step = Step::Tool(
-                    "bringup_decide",
-                    json!({ "decision": if *yes { "accept" } else { "decline" } }),
-                );
-                let call = ToolCall {
-                    id: new_action_id(),
-                    name: "bringup_decide".into(),
-                    args: Ok(step.tool().1),
-                };
-                let (result, report) = run_read_only(state, &call).await;
-                let reply = result["what"]
-                    .as_str()
-                    .map(|w| {
-                        if *yes {
-                            format!("Allowed. It's running `{w}` now.")
-                        } else {
-                            format!("Denied `{w}`. It'll find another way or stop.")
-                        }
-                    })
-                    .unwrap_or_else(|| "There's nothing waiting for a yes.".into());
-                return Some(AssistantResponse {
-                    reply,
-                    actions: vec![report],
-                    model: "Tori".into(),
-                });
-            }
-            return None;
-        }
+    let steps = crate::tori::parse(&said)?;
+    let on_computer = steps.iter().any(|s| CLIENT_TOOLS.contains(&s.tool().0));
+    if on_computer && !(opts.client && streaming) {
+        return None;
     }
+    // "yes" with nothing waiting for a yes is just conversation.
+    if let [Step::Confirm(_)] = steps.as_slice() {
+        state.latest_pending_action(Duration::from_secs(180))?;
+    }
+    Some(steps)
+}
+
+/// [`quick_steps`] answered: each step done (on the box, or on the person's
+/// computer through `on_action`), and what Tori says about it.
+pub async fn run_quick(
+    state: &AppState,
+    steps: Vec<crate::tori::Step>,
+    opts: ChatOptions,
+    on_action: &mut (dyn FnMut(&ActionReport) + Send),
+) -> AssistantResponse {
+    use crate::tori::Step;
+    let pending = state.latest_pending_action(Duration::from_secs(180));
     let current = state.endpoint().map(|e| e.model).unwrap_or_default();
     let mut actions = Vec::new();
     let mut done = Vec::new();
@@ -2116,6 +2082,8 @@ pub async fn quick(
                     },
                 ),
             }
+        } else if opts.client && CLIENT_TOOLS.contains(&name) {
+            run_on_client(state, &call, on_action).await
         } else {
             run_read_only(state, &call).await
         };
@@ -2131,22 +2099,10 @@ pub async fn quick(
                     let offer = ToolCall {
                         id: new_action_id(),
                         name: "switch_mode".into(),
-                        args: Ok(json!({ "mode": "chat_images" })),
+                        args: Ok(json!({ "mode": "images" })),
                     };
-                    let offered = match propose(state, &offer, &current).await {
-                        Ok(pair) => Some(pair),
-                        Err(_) => propose(
-                            state,
-                            &ToolCall {
-                                args: Ok(json!({ "mode": "images" })),
-                                ..offer
-                            },
-                            &current,
-                        )
-                        .await
-                        .ok(),
-                    };
-                    if let Some((r, report)) = offered {
+                    if let Ok((r, report)) = propose(state, &offer, &current).await {
+                        on_action(&report);
                         actions.push(report);
                         done.push((
                             Step::Tool("switch_mode", json!({})),
@@ -2163,14 +2119,25 @@ pub async fn quick(
                 }
             }
         }
+        on_action(&report);
         actions.push(report);
         done.push((step, outcome));
     }
-    Some(AssistantResponse {
+    AssistantResponse {
         reply: crate::tori::reply(&done),
         actions,
         model: "Tori".into(),
-    })
+    }
+}
+
+/// [`quick_steps`] and [`run_quick`] for a request that isn't streamed.
+pub async fn quick(
+    state: &AppState,
+    turns: &[ChatTurn],
+    opts: ChatOptions,
+) -> Option<AssistantResponse> {
+    let steps = quick_steps(state, turns, opts, false)?;
+    Some(run_quick(state, steps, opts, &mut |_| {}).await)
 }
 
 /// The CPU model Tori falls back to when the chips aren't serving a chat
@@ -2340,6 +2307,11 @@ async fn run_tool_calls(
             && (needs_confirmation(&call.name, args, turn.tainted())
                 || fetches_unknown_address(&call.name, args, turn));
         let result = match tool_kind(&call.name) {
+            // The person's computer runs these, through the desktop app: with
+            // none on the other end there's nothing to run or park them on.
+            Some(ToolKind::ReadOnly) if !client && CLIENT_TOOLS.contains(&call.name.as_str()) => {
+                json!({ "error": NEEDS_THE_APP })
+            }
             Some(ToolKind::ReadOnly) if gated => match park(
                 state,
                 call,
@@ -2415,11 +2387,6 @@ fn park(
         .map_err(|raw| format!("arguments were not a JSON object: {raw}"))?;
     let summary = pending_summary(&call.name, &args, "");
     let mut stored = args.clone();
-    if call.name == "bringup_decide" {
-        // The very request the person is shown, not whatever is waiting when they answer.
-        stored["what"] =
-            json!(crate::bringup::waiting_on().ok_or("the bring-up isn't waiting on anything")?);
-    }
     if on_client {
         stored[ON_CLIENT] = json!(true);
     }
@@ -2634,9 +2601,8 @@ fn new_action_id() -> String {
 pub(crate) async fn run_read_only(state: &AppState, call: &ToolCall) -> (Value, ActionReport) {
     let args = call.args.clone().unwrap_or_else(|_| json!({}));
     let outcome: Result<(Value, String), String> = match call.name.as_str() {
-        name if HOST_TOOLS.contains(&name) && !HOST_OK.try_with(|ok| *ok).unwrap_or(false) => {
-            Err(HOST_REFUSED.to_string())
-        }
+        // The person's computer runs these, through the desktop app (`run_on_client`).
+        name if CLIENT_TOOLS.contains(&name) => Err(NEEDS_THE_APP.to_string()),
         "box_status" => Ok(box_status(state).await),
         "list_models" => list_models(state).await,
         "recent_logs" => recent_logs(state, &args).await,
@@ -2694,102 +2660,6 @@ pub(crate) async fn run_read_only(state: &AppState, call: &ToolCall) -> (Value, 
         "remember" => remember(state, &args),
         "forget" => forget(state, &args),
         "read_webpage" => read_webpage(&args).await,
-        "open_app" => open_app(&args).await,
-        "control_computer" => {
-            let action = args["action"].as_str().unwrap_or("").to_string();
-            let value = args["value"].as_f64();
-            tokio::task::spawn_blocking(move || crate::desktop::control(&action, value))
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r)
-                .map(|r| {
-                    let s = format!("{} on the box", r["done"].as_str().unwrap_or("done"));
-                    let s = s[..1].to_uppercase() + &s[1..];
-                    (r, s)
-                })
-        }
-        "open_folder" => {
-            let path = args["path"].as_str().unwrap_or("").to_string();
-            tokio::task::spawn_blocking(move || crate::desktop::open_path(&path))
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r)
-                .map(|r| {
-                    let s = format!("Opened {} on the box", r["opened"].as_str().unwrap_or("it"));
-                    (r, s)
-                })
-        }
-        "bringup_status" => {
-            let st = state.clone();
-            tokio::task::spawn_blocking(move || crate::bringup::status_line(&st))
-                .await
-                .map_err(|e| e.to_string())
-                .map(|(v, line)| (json!({ "status": line, "detail": v["state"] }), line))
-        }
-        // Answered from an owner's paired device only: the box's own local
-        // trust doesn't count, since the bring-up itself runs on the box.
-        "bringup_decide" if !crate::auth::current_caller().is_some_and(|c| c.paired_owner()) => {
-            Err(BRINGUP_DEVICE_ONLY.to_string())
-        }
-        "bringup_decide" => {
-            let decision = match args["decision"].as_str() {
-                Some("accept") => "accept",
-                _ => "decline",
-            };
-            match crate::bringup::decide_waiting(decision) {
-                Some((d, what)) => {
-                    let said = if d == "accept" {
-                        format!("Allowed: {what}")
-                    } else {
-                        format!("Denied: {what}")
-                    };
-                    Ok((json!({ "decided": d, "what": what }), said))
-                }
-                None => Err("the bring-up isn't waiting on anything".into()),
-            }
-        }
-        "start_recording" => {
-            let title = args["title"].as_str().map(str::to_string);
-            crate::recorder::start(
-                state,
-                crate::recorder::StartBody {
-                    title,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map(|(_, r)| (r.0, "Started recording".to_string()))
-            .map_err(|(_, e)| e.0.error)
-        }
-        "stop_recording" => crate::recorder::stop(state, false)
-            .await
-            .map(|r| (r.0, "Stopped recording; transcribing".to_string()))
-            .map_err(|(_, e)| e.0.error),
-        "open_station" => {
-            let page = args["page"].as_str().unwrap_or("home").to_string();
-            tokio::task::spawn_blocking(move || crate::desktop::open_station(&page))
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r)
-                .map(|r| {
-                    let s = format!(
-                        "Opened {} in TT Station",
-                        r["page"].as_str().unwrap_or("it")
-                    );
-                    (r, s)
-                })
-        }
-        "find_files" => {
-            let name = args["name"].as_str().unwrap_or("").to_string();
-            tokio::task::spawn_blocking(move || crate::desktop::find_files(&name))
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r)
-                .map(|r| {
-                    let n = r["matches"].as_array().map_or(0, Vec::len);
-                    (r, format!("Found {n} matching file(s)"))
-                })
-        }
         other => Err(format!("{other} is not a read-only tool")),
     };
     let (result, status, summary) = match outcome {
@@ -2818,25 +2688,6 @@ pub(crate) async fn run_read_only(state: &AppState, call: &ToolCall) -> (Value, 
     (result, report)
 }
 
-/// `open_app`: open an app or web page on the box's desktop.
-async fn open_app(args: &Value) -> Result<(Value, String), String> {
-    let app = args["app"].as_str().map(str::to_string);
-    let url = args["url"].as_str().map(str::to_string);
-    let result =
-        tokio::task::spawn_blocking(move || crate::desktop::open(app.as_deref(), url.as_deref()))
-            .await
-            .map_err(|e| e.to_string())??;
-    let summary = if result["ambiguous"] == true {
-        "Found several matching apps".to_string()
-    } else {
-        format!(
-            "Opened {} on the box",
-            result["opened"].as_str().unwrap_or("it")
-        )
-    };
-    Ok((result, summary))
-}
-
 /// `box_status`: cheap, in-memory facts plus per-device temperature/power.
 /// Telemetry comes from a recent cached `tt-smi` snapshot when a `/telemetry`
 /// viewer has already paid for one, else from one fresh, deduplicated
@@ -2854,9 +2705,6 @@ async fn box_status(state: &AppState) -> (Value, String) {
         "device_mesh": state.device_mesh(),
         "serving": serving,
     });
-    if let Some(layout) = split_layout(state) {
-        result["split"] = layout;
-    }
     let snapshot = match state.peek_snapshot(TELEMETRY_MAX_AGE) {
         Some(json) => Some(json),
         None => tokio::time::timeout(TELEMETRY_FETCH_TIMEOUT, state.cached_snapshot())
@@ -2874,37 +2722,6 @@ async fn box_status(state: &AppState) -> (Value, String) {
         }
     }
     (result, "Checked the box status".to_string())
-}
-
-/// When the box is split (co-serving), which model runs on which chips.
-fn split_layout(state: &AppState) -> Option<Value> {
-    if !crate::coserve::is_split(state) {
-        return None;
-    }
-    let companion = state.companion()?;
-    let image = companion.lifecycle();
-    Some(json!({
-        "chat": { "model": state.current_model(), "chips": crate::coserve::CHAT_CHIPS },
-        "image": {
-            "model": image.model.or(image.served_id),
-            "phase": image.phase,
-            "chips": crate::coserve::MEDIA_CHIPS,
-        },
-        "note": "The box is split: one P300 card (two chips) per model, so chat and images run at the same time.",
-    }))
-}
-
-/// The system-prompt line describing a split box, if it is split.
-fn split_note(state: &AppState) -> Option<String> {
-    let layout = split_layout(state)?;
-    Some(format!(
-        "Right now the box is split between two models: you run on chips {} (one P300 card), \
-         and the image model {} runs on chips {} at the same time, for the app's Create tab. \
-         Images are made there, not by you.",
-        crate::coserve::CHAT_CHIPS,
-        layout["image"]["model"].as_str().unwrap_or("(starting)"),
-        crate::coserve::MEDIA_CHIPS,
-    ))
 }
 
 /// `list_models`: `GET /models`'s backend call, narrowed to this box.
@@ -3063,8 +2880,8 @@ async fn create_image(state: &AppState, args: &Value) -> Result<(Value, String),
         .to_string();
     let Some((base, model)) = crate::gateway::image_target(state).await else {
         return Err(
-            "no image model is serving next to you. Offer to switch the box: call switch_mode \
-             with mode chat_images (chat and drawing at once) or images (pictures only)."
+            "no image model is serving. Offer to switch the box: call switch_mode with mode \
+             images."
                 .to_string(),
         );
     };
@@ -3454,13 +3271,6 @@ pub(crate) async fn confirm(
                     ..respond(ConfirmStatus::OnClient, action.summary.clone())
                 });
             }
-            if name == "bringup_decide"
-                && crate::bringup::waiting_on().as_deref() != args["what"].as_str()
-            {
-                return Err(AssistantError::Backend(anyhow::anyhow!(
-                    "the bring-up is no longer waiting on that"
-                )));
-            }
             let call = ToolCall {
                 id: req.action_id.clone(),
                 name: name.to_string(),
@@ -3483,36 +3293,57 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn the_box_own_computer_is_only_for_owners() {
+    async fn computer_tools_never_run_on_the_box() {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         );
-        for name in HOST_TOOLS {
+        for name in CLIENT_TOOLS {
             let call = ToolCall {
                 id: "a".into(),
-                name: name.into(),
-                args: Ok(json!({ "decision": "accept", "app": "Terminal" })),
+                name: name.to_string(),
+                args: Ok(json!({ "app": "Terminal", "path": "Downloads", "name": "x" })),
             };
-            // Not an owner's turn (or nobody's): refused before anything runs.
-            for scoped in [None, Some(false)] {
-                let (result, report) = match scoped {
-                    None => run_read_only(&state, &call).await,
-                    Some(ok) => HOST_OK.scope(ok, run_read_only(&state, &call)).await,
-                };
-                assert_eq!(result["error"], HOST_REFUSED, "{name}");
-                assert_eq!(report.status, ActionStatus::Error);
+            let (result, report) = run_read_only(&state, &call).await;
+            assert_eq!(result["error"], NEEDS_THE_APP, "{name}");
+            assert_eq!(report.status, ActionStatus::Error);
+        }
+    }
+
+    #[tokio::test]
+    async fn computer_tools_are_offered_only_to_the_desktop_app() {
+        let state = AppState::new(
+            "t".into(),
+            "1xBH".into(),
+            std::sync::Arc::new(crate::serving::NullBackend),
+        );
+        let names = |v: Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        for tori in [false, true] {
+            let without = names(offered_tools(&state, tori, false).await);
+            for t in CLIENT_TOOLS {
+                assert!(!without.iter().any(|n| n == t), "{t}");
             }
         }
+        let tori = names(offered_tools(&state, true, true).await);
+        for t in CLIENT_TOOLS {
+            assert!(tori.iter().any(|n| n == t), "{t}");
+        }
+        let chat = names(offered_tools(&state, false, true).await);
+        assert!(chat.iter().any(|n| n == "start_recording"));
+        assert!(!chat.iter().any(|n| n == "open_app"));
     }
 
     #[test]
     fn what_waits_for_the_person() {
         let none = json!({});
-        for t in ["bringup_decide", "start_recording"] {
-            assert!(needs_confirmation(t, &none, false), "{t}");
-        }
+        assert!(needs_confirmation("start_recording", &none, false));
         assert!(needs_confirmation(
             "open_app",
             &json!({ "url": "https://x.example" }),
@@ -3539,7 +3370,6 @@ mod tests {
             "read_webpage",
             "search_documents",
             "find_files",
-            "bringup_status",
             "research_check",
         ] {
             assert!(!needs_confirmation(t, &none, true), "{t}");
@@ -3598,7 +3428,7 @@ mod tests {
         let state = AppState::new(
             "t".to_string(),
             "1xBH".to_string(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         );
         let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<ActionReport>();
         let st = state.clone();
@@ -3853,7 +3683,6 @@ mod tests {
             device_mesh: Some("p300x2".into()),
             model: "Qwen/Qwen3-32B".into(),
             documents: vec![],
-            layout: None,
             memories: String::new(),
         });
         for needle in [
@@ -3921,7 +3750,6 @@ mod tests {
             device_mesh: None,
             model: "m".into(),
             documents: vec![],
-            layout: None,
             memories: String::new(),
         };
         let concise = system_prompt_styled(&ctx, false);

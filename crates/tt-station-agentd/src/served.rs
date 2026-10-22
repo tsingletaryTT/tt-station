@@ -3,8 +3,7 @@
 
 //! What a model server says it serves, from its OpenAI-style `/v1/models`
 //! listing: one probe and one reading of it, shared by everything that asks
-//! (Hermes, research, evals, Code's speed, community packages, discovery and
-//! the reconciled status).
+//! (research, evals, Code's speed, discovery and the reconciled status).
 
 use std::time::Duration;
 

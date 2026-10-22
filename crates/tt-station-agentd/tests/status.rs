@@ -9,19 +9,19 @@ use std::sync::Arc;
 
 use libttstation::model::ServingStatus;
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 /// `GET /status` should return 200 with a JSON body whose `name` field
 /// matches the name the `AppState` was constructed with, and whose `status`
 /// field is the TXT string form (`idle`) of the initial `ServingStatus`.
 #[tokio::test]
 async fn status_returns_name_and_idle_status() {
-    // `/status` doesn't touch the backend at all -- `DstackBackend`'s
+    // `/status` doesn't touch the backend at all -- `NullBackend`'s
     // no-op stub is enough of a `ServingBackend` for this test.
     let state = AppState::new(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
     );
     let router = app(state);
 
@@ -60,7 +60,7 @@ async fn status_reports_device_mesh_when_set() {
     let state = AppState::new(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
     )
     .with_device_mesh(Some("p300x2".to_string()));
     let router = app(state);
@@ -91,7 +91,7 @@ async fn status_reports_mac_when_set() {
     let state = AppState::new(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
     )
     .with_mac(Some("aa:bb:cc:dd:ee:ff".to_string()));
     let router = app(state);
@@ -127,7 +127,7 @@ async fn healthz_is_minimal_and_status_carries_versions() {
     }
     let dir = tempfile::tempdir().unwrap();
     let ok = serve(
-        AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+        AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
             .with_config_dir(dir.path().to_path_buf()),
     )
     .await;
@@ -147,7 +147,7 @@ async fn healthz_is_minimal_and_status_carries_versions() {
     assert_eq!(status["model_health"]["state"], "unknown");
 
     let broken = serve(
-        AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+        AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
             .with_config_dir(dir.path().join("missing")),
     )
     .await;

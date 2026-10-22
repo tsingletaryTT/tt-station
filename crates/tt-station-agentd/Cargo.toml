@@ -33,10 +33,9 @@ rand = { workspace = true }
 # coexist fine in the same dependency -- `blocking` just adds the extra
 # module, it doesn't change how the async client behaves. `stream` lets the
 # `/v1` gateway (src/gateway.rs) pass a model's streamed answer straight through.
-# `http2` for Apple's push service (src/apns.rs); `multipart` for Whisper uploads
-# (src/jobs.rs).
-reqwest = { workspace = true, features = ["blocking", "stream", "http2", "multipart"] }
-# ES256 signing of APNs provider tokens (src/apns.rs); already in the tree via rustls.
+# `multipart` for Whisper uploads (src/jobs.rs).
+reqwest = { workspace = true, features = ["blocking", "stream", "multipart"] }
+# SHA-256 of the TLS certificate (src/tls.rs); already in the tree via rustls.
 ring = "0.17"
 # HTTPS for the control plane (src/tls.rs): a self-signed certificate the phone
 # pins at pairing, served next to plain HTTP. Ring as the crypto provider, like

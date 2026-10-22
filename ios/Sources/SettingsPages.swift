@@ -111,7 +111,7 @@ struct SchedulesView: View {
     var body: some View {
         List {
             Section {
-                Text("Switch the box to a mode at set times. A schedule never interrupts a silicon check, a bring-up or a transcription: it skips that day and tells you.")
+                Text("Switch the box to a mode at set times. A schedule never interrupts a transcription: it skips that day and tells you.")
                     .font(.tt(.footnote)).foregroundStyle(.secondary)
             }
             if let error { Section { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(Vesper.warning) } }

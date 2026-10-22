@@ -13,7 +13,7 @@ only**: deliberately left to a computer (needs a keyboard, a terminal or a file 
 
 | Behavior | Before | After |
 |---|---|---|
-| Token on every request (`AgentClient.send`/`raw`, WebSockets, the notification extension) | Has (verified: `send` adds `Authorization` whenever a token exists, `raw` and the streams require it) | Has |
+| Token on every request (`AgentClient.send`/`raw`, WebSockets) | Has (verified: `send` adds `Authorization` whenever a token exists, `raw` and the streams require it) | Has |
 | `401` → pair again | Broken: only chat, model starts, downloads and images set `needsRepair`; every other screen showed a raw error | Has: any refused token from any request posts `AgentClient.unauthorized`, and the session shows "Pair again" |
 | `403` → plain "Only owners can …" | Broken: the box's text passed through, but members could tap owner-only buttons first | Has: the box's sentence (`OWNER_ONLY`, `model_control::OWNERS_ONLY`), and owner-only controls are disabled for members up front |
 | Box unreachable | Broken: an "Unreachable" headline on the Box tab only | Has: a banner over every tab with Retry and Wake (or why waking can't work) |
@@ -27,11 +27,10 @@ only**: deliberately left to a computer (needs a keyboard, a terminal or a file 
 | Model not answering, restart it | `/status` `model_health`, `POST /doctor/fix/{fix}` | Lacks | Has (model rule) |
 | Model asleep (idle sleep) | `GET /idle` | Lacks | Has |
 | Chips and temperatures | `/telemetry` (WebSocket), `GET /metrics/now` | Has | Has |
-| What's running and who started it | `GET /record`, `GET /code`, `GET /research`, `GET /routines` | Lacks | Has ("right now" card) |
+| What's running and who started it | `GET /jobs`, `GET /code`, `GET /research`, `GET /routines` | Lacks | Has ("right now" card) |
 | Code and routine approvals, Allow/Deny | `GET /approvals`, `POST /approvals/answer` | Has | Has |
-| Bring-up approvals (owners) | `GET /bringup/codex/runs`, `POST /bringup/codex/runs/{id}/approvals/{aid}` | Has | Has |
 | Pairing codes (owners) | `GET /events` (`pairing`) | Has (banner, notification) | Has |
-| Push notifications | `/notify`, `POST /notify/devices` | Has | Has |
+| Notifications (local, from `/events` checks) | `GET /events` | Has | Has |
 
 ## Models
 
@@ -39,9 +38,8 @@ only**: deliberately left to a computer (needs a keyboard, a terminal or a file 
 |---|---|---|---|
 | Catalog, download, cancel, delete weights | `GET /tt/models`, `POST /tt/pull`, `POST /tt/pull/cancel`, `DELETE /tt/models/{name}` | Has | Has |
 | Start or switch a catalog model, stop | `POST /serve`, `POST /stop` | Has | Has (model rule shown) |
-| Modes, chat + images side by side | `GET /modes`, `POST /modes/{id}`, `/coserve` | Has | Has |
-| Community packages and their profiles, native vLLM bundles | `GET /code/models` (each entry's own serve call: `POST /community/serve`, `POST /vllm/native/serve`) | Lacks | Has ("Everything it can serve") |
-| Community downloads (pull, pause, cancel, delete) | `/community/pull`, `/community/pull/pause`, `/community/pull/cancel`, `DELETE /community/{ns}/{name}` | Lacks | Lacks: start what's on the box; downloading packages stays on the computer |
+| Modes | `GET /modes`, `POST /modes/{id}` | Has | Has |
+| Everything Code can run on | `GET /code/models` (each entry's own serve call) | Lacks | Has ("Everything it can serve") |
 | The model-control rule | `GET /data/settings`, `PUT /data/settings` | Lacks | Has (owners change it; members see it) |
 | Checkups (evals), CPU embeddings, model preferences | `/evals`, `/embeddings`, `/preferences/models` | Lacks | Lacks |
 
@@ -78,7 +76,7 @@ only**: deliberately left to a computer (needs a keyboard, a terminal or a file 
 | Share with everyone on the box, stop | `POST /research/{id}/share`, `POST /research/{id}/stop` | Lacks | Has (starter or owner) |
 | Explain a passage, rename, delete | `POST /research/{id}/explain`, `POST /research/{id}/rename`, `DELETE /research/{id}` | Lacks | Lacks |
 | Transcribe a recording or file; list, read, run now, delete | `POST /jobs/transcribe`, `GET /jobs`, `GET /jobs/{id}/result`, `POST /jobs/{id}/run`, `DELETE /jobs/{id}` | Has | Has |
-| Record in the room on the box (start, stop, discard) | `GET /record`, `POST /record/start`, `POST /record/stop` | Lacks | Has (asks first; the room is told) |
+| Record on the phone and transcribe on the box | `POST /jobs/transcribe` | Has | Has |
 
 ## Routines
 
@@ -114,9 +112,8 @@ only**: deliberately left to a computer (needs a keyboard, a terminal or a file 
 
 ## Also on the phone, unchanged
 
-Chat and Tori (`/assistant/stream`), images and video (`/generate/*`), memories, documents,
-household and schedules, energy, bring-ups (Orchard), Lab, Benchmark, tt-toplike, the
-box's voice, browser apps (`/clients`), Live Activities, the widget and Siri intents.
+Chat and Tori (`/assistant/stream`), images (`/generate/image`), memories, documents,
+household and schedules, energy, Benchmark, live telemetry, the box's voice, browser apps (`/clients`), Live Activities, the widget and Siri intents.
 
 Not on the phone: box apps from the store (`/apps`, box-only by design, with their own
-network sharing), Library sources, Hermes, favorites and What's new.
+network sharing), Library sources, favorites and What's new.

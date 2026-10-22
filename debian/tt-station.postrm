@@ -5,7 +5,7 @@
 # /etc/polkit-1/rules.d/49-tt-station-power.rules (see debian/rules'
 # override_dh_auto_install and deploy/tt-station-power.rules). That rule
 # grants the `tt-station-power` group headless reboot/power-off/suspend so the agent's
-# `POST /power` and the box panel's local power row don't hit an interactive
+# `POST /power` doesn't hit an interactive
 # polkit auth prompt -- see docs/reference/power-controls.md.
 #
 # The file lives under /etc/, so debhelper's dh_installdeb auto-registers it

@@ -27,7 +27,7 @@ use crate::routes::{AppState, BearerAuth};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Schedule {
     pub id: String,
-    /// A mode id (`crate::modes`): chat, images, chat_images, video, transcribe.
+    /// A mode id (`crate::modes`): chat, images, transcribe.
     pub mode: String,
     /// Local time, "HH:MM".
     pub time: String,
@@ -278,9 +278,6 @@ impl Schedules {
 
 /// What a schedule found when it came due.
 pub fn blocker(state: &AppState) -> Option<String> {
-    if let Some(holder) = state.chips_holder() {
-        return Some(holder.to_string());
-    }
     let busy_job = state.jobs().is_some_and(|j| {
         j.list().iter().any(|j| {
             matches!(

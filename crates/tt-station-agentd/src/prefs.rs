@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! The owner's preferred models: which chat, image, video and speech models
+//! The owner's preferred models: which chat, image and speech models
 //! the box's modes start ("Switch to chat" starts *your* chat model), and
 //! which CPU model Tori thinks with while the chips are busy. Unset means
 //! "the best this box has" (each mode's built-in order).
 //!
 //! - `GET /preferences/models`: the choices for each, and what's picked.
-//! - `PUT /preferences/models` `{chat?, image?, video?, transcribe?, cpu_chat?}`;
+//! - `PUT /preferences/models` `{chat?, image?, transcribe?, cpu_chat?}`;
 //!   `""` goes back to automatic.
 
 use axum::http::StatusCode;
@@ -24,20 +24,17 @@ pub struct ModelPrefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub video: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcribe: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_chat: Option<String>,
 }
 
 impl ModelPrefs {
-    /// The preferred model for a mode id (`chat_images` uses chat + image).
+    /// The preferred model for a mode id.
     pub fn for_kind(&self, kind: &str) -> Option<&str> {
         match kind {
             "chat" => self.chat.as_deref(),
             "image" | "images" => self.image.as_deref(),
-            "video" => self.video.as_deref(),
             "transcribe" | "speech" => self.transcribe.as_deref(),
             _ => None,
         }
@@ -107,7 +104,7 @@ pub(crate) async fn get_prefs(
     })
     .await
     .unwrap_or_default();
-    let mut choices = json!({ "chat": [], "image": [], "video": [], "speech": [] });
+    let mut choices = json!({ "chat": [], "image": [], "speech": [] });
     for m in catalog.iter().filter(|m| m.supported) {
         let kind = kind_of(&m.model_type, &m.name);
         let Some(list) = choices.get_mut(kind).and_then(Value::as_array_mut) else {
@@ -137,7 +134,6 @@ pub(crate) async fn get_prefs(
 pub struct PrefsBody {
     pub chat: Option<String>,
     pub image: Option<String>,
-    pub video: Option<String>,
     pub transcribe: Option<String>,
     pub cpu_chat: Option<String>,
 }
@@ -157,7 +153,6 @@ pub(crate) async fn put_prefs(
     };
     set(&mut prefs.chat, body.chat);
     set(&mut prefs.image, body.image);
-    set(&mut prefs.video, body.video);
     set(&mut prefs.transcribe, body.transcribe);
     set(&mut prefs.cpu_chat, body.cpu_chat);
     save(&state, &prefs).map_err(|e| {

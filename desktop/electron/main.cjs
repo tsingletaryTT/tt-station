@@ -610,9 +610,9 @@ async function sshAction(what) {
 
 // ---------------------------------------------------------------- this computer, for Tori on it
 //
-// When TT Station runs on another computer than the device, Tori's computer
-// tools act here: the device sends the step ("on_client"), this runs it and the
-// page posts the result back.
+// Tori's computer tools act on the computer TT Station runs on (the box itself
+// too: the device never acts on its own screen): the device sends the step
+// ("on_client"), this runs it and the page posts the result back.
 
 let localRecording = false;
 
@@ -712,7 +712,7 @@ async function computerTool(tool, args) {
       return { summary: `Opened ${name}`, result: { opened: name } };
     }
     case "control_computer": {
-      if (!IS_MAC) throw new Error("That only works on a Mac or on the box itself for now.");
+      if (!IS_MAC) throw new Error("That only works on a Mac for now.");
       const action = String(args.action || ""), v = Number(args.value);
       // Music and Spotify, whichever is playing; Spotify is only named when it's
       // running (its name in a script would otherwise make macOS ask where it is).
@@ -1200,14 +1200,12 @@ function openAppWindow(url, title) {
 async function refreshTray() {
   if (!tray) makeTray();
   if (!tray || !auth) return;
-  const [status, modes, rec] = await Promise.all([
+  const [status, modes] = await Promise.all([
     call(auth.base, "GET", "/serve", { token: auth.token }).catch(() => null),
     call(auth.base, "GET", "/modes", { token: auth.token }).catch(() => null),
-    call(auth.base, "GET", "/record", { token: auth.token }).catch(() => null),
   ]);
-  const remote = boxes.current !== "local";
-  // On another computer, meetings are recorded here (its microphone), not on the device.
-  const recording = remote ? localRecording : rec?.json?.recording;
+  // Meetings are recorded on this computer (its microphone) and uploaded to the box.
+  const recording = localRecording;
   const serve = status?.json;
   const line = !serve
     ? "Can't reach the box"
@@ -1230,16 +1228,14 @@ async function refreshTray() {
     { label: "Open TT Station", click: show },
     recording
       ? { label: "Stop recording and transcribe", click: async () => {
-          if (remote) { const r = await clientRecord("stop"); if (!r.ok) notify({ title: "Couldn't stop recording", body: r.error }); }
-          else await call(auth.base, "POST", "/record/stop", { token: auth.token, body: {} }).catch(() => null);
+          const r = await clientRecord("stop");
+          if (!r.ok) notify({ title: "Couldn't stop recording", body: r.error });
           refreshTray(); openTranscribe();
         } }
       : { label: "Record a meeting", click: async () => {
-          const r = remote
-            ? await clientRecord("start").then((x) => ({ json: { recording: x.ok } }), () => null)
-            : await call(auth.base, "POST", "/record/start", { token: auth.token, body: {} }).catch(() => null);
+          const r = await clientRecord("start").catch(() => null);
           refreshTray();
-          if (r?.json?.recording) notify({ title: "Recording", body: "Let everyone know you're recording. Stop from here or in Studio." }, openTranscribe);
+          if (r?.ok) notify({ title: "Recording", body: "Let everyone know you're recording. Stop from here or in Studio." }, openTranscribe);
           else openTranscribe();
         } },
     { type: "separator" },
@@ -1279,8 +1275,7 @@ async function pollEvents() {
         win.webContents.send("box-event", e);
         continue;
       }
-      // A bring-up waiting on you (or moving on) opens Bring-up when clicked.
-      const route = e.kind === "bringup" || e.kind === "orchard" ? "/bringup" : e.kind === "research" ? "/research" : e.kind === "coding" ? "/code" : e.kind === "routine" ? "/routines" : null;
+      const route = e.kind === "research" ? "/research" : e.kind === "coding" ? "/code" : e.kind === "routine" ? "/routines" : null;
       notify({ title: several ? `${c.name}: ${e.title}` : e.title, body: e.body, silent: false }, () => {
         show();
         if (!onScreen) {
@@ -1452,19 +1447,6 @@ handle("notify", (_e, title, body) => {
   if (!win?.isFocused()) notify({ title: String(title), body: String(body ?? "") });
 });
 handle("hide-tori", () => overlay?.hide());
-// tt-toplike's own native window, on this box's live telemetry.
-handle("open-toplike", (_e, view) => {
-  if (!auth) return;
-  // tt-toplike's window is a Linux app on the box: elsewhere, the Hardware page.
-  if (IS_MAC || boxes.current !== "local") { show(); win?.webContents.send("navigate", "/hardware"); return; }
-  const modes = { arcade: "arcade", starfield: "starfield", castle: "castle", flow: "flow", defrag: "arcade", inference: "normal", insights: "normal", hivemind: "hivemind" };
-  const mode = modes[view] ?? "arcade";
-  const port = new URL(auth.base).port || "8765";
-  const { spawn } = require("node:child_process");
-  const child = spawn("tt-toplike-app", ["--", "--remote", `127.0.0.1:${port}`, "--mode", mode], { detached: true, stdio: "ignore" });
-  child.on("error", () => notify({ title: "tt-toplike isn't installed", body: "Install tt-toplike-app to open it in its own window." }));
-  child.unref();
-});
 handle("show-tori", (_e, mode) => showTori(mode === "type" ? "type" : "talk"));
 handle("show-main", (_e, route) => {
   show();

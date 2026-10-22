@@ -191,12 +191,10 @@ enum ServeGroups {
             .map(\.element)
     }
 
-    /// "Community · 2 chips · Throughput" -- what tells one setup from another.
+    /// "Catalog · 2 chips · 128K context" -- what tells one setup from another.
     static func detail(_ o: ServeOption) -> String {
         var parts: [String] = []
         switch o.source {
-        case "community": parts.append("Community")
-        case "native": parts.append("Native vLLM")
         case "running": parts.append("Running now")
         default: parts.append("Catalog")
         }

@@ -21,7 +21,7 @@ use libttstation::model::Endpoint;
 use serde_json::{json, Value};
 use tt_station_agentd::liveness::{check_once, Config};
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 #[derive(Clone, Default)]
 struct Stub {
@@ -63,7 +63,7 @@ const FAST: Config = Config {
 async fn harness() -> (AppState, Stub, String) {
     let stub = Stub::default();
     let port = stub_model(stub.clone()).await;
-    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
         .with_serving_config("127.0.0.1".into(), port);
     // Up on the serving port (as after an agent restart under a loaded model).
     state.adopt_serving(Endpoint {
@@ -170,7 +170,7 @@ async fn a_busy_model_is_not_probed() {
 async fn nothing_serving_is_not_probed() {
     let stub = Stub::default();
     let _port = stub_model(stub.clone()).await;
-    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend));
+    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend));
     check_once(&state, FAST).await;
     assert_eq!(stub.completions.load(Ordering::SeqCst), 0);
     assert_eq!(

@@ -90,7 +90,7 @@ Source of truth: `vllm-tt-metal/README.md` "Minimal Example" in the repo, corrob
 - Container port **8000**; base URL `http://host:8000/v1`.
 - Readiness: `GET /health` → 200 when ready (what `run.py` polls). `GET /v1/models` also works as a smoke test.
 - Inference: `/v1/completions`, `/v1/chat/completions` (standard vLLM OpenAI routes).
-- Bring-up is slow: ~10 min (8B), ~40 min (70B) first run incl. weight download + compile. → health-poll timeout must be generous.
+- A first start is slow: ~10 min (8B), ~40 min (70B) first run incl. weight download + compile. → health-poll timeout must be generous.
 
 ## Host prerequisites / gotchas
 
@@ -109,13 +109,9 @@ Since 2026-10-15 the agent adds the flag where the vLLM it launches is known to 
 
 | Launch path | Adds the flag? | Why |
 |---|---|---|
-| Community packages, `tt-model serve` (`community::launch`) | yes, for `kind: vllm-plugin` | `tt-model serve` passes flags it doesn't know to `vllm serve` (checked with `--print`). vLLM added the flag in 0.6.4 (#10174, 2024-11), before the platform-plugin API (#11602, 2024-12) that `vllm-plugin` needs. The gpt-oss-20b package runs vLLM 0.26.0.dev4, and the flag is in its `cli_args.py`. Other packages on the box pin vLLM 0.24 or 0.26. |
-| Native vLLM bundles (`native_vllm::serve_argv`) | yes, when the command is a vLLM OpenAI server | It runs the tt-metal vLLM checkout (`~/dispatch/vllm`, merged from upstream 0.17), which has the flag. |
-| `run.py` backend (`RunPyBackend`, run.py called directly, incl. a split box) | yes, for chat models with a known tool-call parser | Sent as `"enable_prompt_tokens_details": true` in the one `--vllm-override-args` JSON (with the tool-calling keys). Every tt-inference-server release image on the box has the flag in its vLLM's `cli_args.py` (0.10.0, 0.14.0, 0.17.0, 0.18.0, 0.19.0 and the 0.20.0 studio image; the fork's vLLM reports `0.1.dev14179+g9bd099cbd`). Base checkpoints and media models get nothing. |
+| `run.py` backend (`RunPyBackend`, run.py called directly) | yes, for chat models with a known tool-call parser | Sent as `"enable_prompt_tokens_details": true` in the one `--vllm-override-args` JSON (with the tool-calling keys). Every tt-inference-server release image on the box has the flag in its vLLM's `cli_args.py` (0.10.0, 0.14.0, 0.17.0, 0.18.0, 0.19.0 and the 0.20.0 studio image; the fork's vLLM reports `0.1.dev14179+g9bd099cbd`). Base checkpoints and media models get nothing. |
 | `--serve-with tt` (`tt serve <catalog model>`) | no | `tt serve` takes no vLLM passthrough for catalog models, so the agent can't add it. |
 | Docker backend (`DockerBackend`) | no | It passes no vLLM flags at all. |
-| Bring-up `serve` step (`bringup.rs`) | no | Not changed. |
-| `tt-dit-server` and `vllm-fork` packages | no | `tt-dit-server` isn't vLLM. `vllm-fork` doesn't pass loose flags through to vLLM. |
 
 The flag takes effect at a model's next start. A server that is already running keeps the
 flags it started with.
@@ -125,12 +121,7 @@ flags it started with.
 vLLM exports its prefix-cache counters (`vllm:prefix_cache_queries`/`_hits`) on `/metrics`
 only with stats on, which is vLLM's default. Neither run.py nor the images'
 `run_vllm_api_server.py` pass `--disable-log-stats`, so the run.py path already exports
-them. Native vLLM bundles have it removed from their launch command if they carry it (the
-cost is per-step stats bookkeeping on the API process; vLLM's own serving benchmarks run with
-stats on). Community packages are out of reach: the gpt-oss-20b package's
-`/opt/gpt-oss-20b/entrypoint.py` hard-codes `--disable-log-stats`, the flag is a plain
-`store_true` with no `--no-` form in its vLLM (0.26.0.dev4), and `tt-model serve` only
-appends, so the package itself has to drop it.
+them.
 
 ## The Hugging Face token reaches servers as a file
 
@@ -139,34 +130,14 @@ unit's by `systemctl --user show`. Since 2026-10-15 the agent never puts the tok
 in either. It writes the token to `$XDG_RUNTIME_DIR/tt-station/hf_token` (tmpfs; directory
 0700, file 0400, else `~/.config/tt-station/secrets/`) at each launch and points the server
 at it with `HF_TOKEN_PATH`, which huggingface_hub reads instead of `$HF_HOME/token`
-(verified with hub 1.16.1 in the release images and tt-metal's venv and 2.1.1 in tt-model's
-venv, including as uid 1000 inside a release image with the file mounted read-only).
+(verified with hub 1.16.1 in the release images and tt-metal's venv, including as uid 1000 inside a release image with the file mounted read-only).
 
 | Launch path | Now |
 |---|---|
 | Docker backend | `--volume <file>:/run/secrets/hf_token:ro --env HF_TOKEN_PATH=/run/secrets/hf_token` |
-| Community `tt-model pull` / `tt-model serve` | `--setenv=HF_TOKEN_PATH=<file>`. tt-model forwards only `HF_TOKEN` into a container, so its containers get no token in their environment; a `--local-only` serve downloads nothing, and a container that needs it still finds `$HF_HOME/token` in the cache tt-model mounts into the container (as /hf). |
-| Native vLLM | `--setenv=HF_TOKEN_PATH=<file>` |
 | run.py backend and `tt serve` | **Gap, not fixed here.** run.py requires `HF_TOKEN` in its environment for `--docker-server`, writes it to its checkout's `.env`, and starts the container with `--env-file .env`, so the token shows in `docker inspect`. Needs an upstream run.py change (mount the token file, set `HF_TOKEN_PATH`). |
 
 A token change takes effect at the next model start.
-
-## Docker health status of community packages
-
-`tt-model/gpt-oss-20b-p150:e0046b6a0e80-hub1` carries `HEALTHCHECK ...
-urlopen('http://127.0.0.1:8000/health')` (and `EXPOSE 8000`), baked in by the package's
-own `container/` Dockerfile (the image's source label is
-`https://huggingface.co/tt-hous/gpt-oss-20b-p150`; its `entrypoint.py` also hard-codes
-`--port 8000`, which `tt-model serve --port 8003` overrides by appending a later `--port`).
-Served on 8003, that check always failed, so Docker reported `unhealthy` while the model
-served fine. Neither tt-inference-server's images (no `HEALTHCHECK` in any of them) nor
-`tt-model serve` had a passthrough for docker flags, so the fix went into tt-model's
-`compose_run` (in tt-model-manager): every `tt-model serve` now passes `--health-cmd` checking the port it
-publishes, which replaces the image's check. A container started before that change keeps the
-old check until the model is restarted. The agent's own readiness checks hit the
-serving port directly and don't read Docker's health status. The Docker backend's images
-have no healthcheck, and they listen on 8000 inside the container, so nothing needs
-overriding there.
 
 ## Decisions taken for the PoC DockerBackend
 

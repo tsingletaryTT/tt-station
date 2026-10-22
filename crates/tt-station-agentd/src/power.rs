@@ -35,7 +35,7 @@ impl PowerAction {
 }
 
 /// The polkit rule granting the logind power actions (see
-/// docs/reference/power-controls.md §6).
+/// docs/reference/power-controls.md §5).
 pub const POLKIT_RULE: &str = include_str!("../../../deploy/tt-station-power.rules");
 
 /// What the phone can do with this machine's power right now, and the one-time

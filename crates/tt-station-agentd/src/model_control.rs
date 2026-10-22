@@ -12,8 +12,7 @@
 //!   with [`OWNERS_ONLY`], and the refusal is in the activity log.
 //!
 //! It applies everywhere serving changes on a person's say-so: the routes
-//! (`POST /run`, `/stop`, `/serve`, `/modes/{id}`, `/coserve`,
-//! `/community/serve`, `/vllm/native/serve`, `/jobs/{id}/run`, the Doctor's
+//! (`POST /run`, `/stop`, `/serve`, `/modes/{id}`, `/jobs/{id}/run`, the Doctor's
 //! `restart_model` fix, and check-ups: `POST /evals`, `/evals/stop`; see
 //! [`require`]), the assistant's `run_model`, `stop_model` and `switch_mode`
 //! (refused before a confirm card is offered, and again on confirm), and
@@ -141,7 +140,7 @@ mod tests {
         let state = AppState::new(
             "qb2".into(),
             "4xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(dir.path().to_path_buf());
         (dir, state)

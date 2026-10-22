@@ -1,6 +1,6 @@
 #!/bin/bash
 # bump-version.sh — set the tt-station version in lockstep across all files
-# that hard-code it: the workspace Cargo.toml, debian/changelog, and the panel.
+# that hard-code it: the workspace Cargo.toml, and debian/changelog.
 #
 # Usage: scripts/bump-version.sh 0.10.0
 # Edits only — does not git-commit. Run cargo build afterwards to refresh Cargo.lock.
@@ -21,9 +21,6 @@ cd "$SCRIPT_DIR"
 # indented/inline, never at column 0). The `$done` guard replaces only that first
 # match, mirroring the previous `0,/…/` intent.
 NEW="$NEW" perl -i -pe 'if (!$done && s/^version = "\d+\.\d+\.\d+"/version = "$ENV{NEW}"/) { $done = 1 }' Cargo.toml
-
-# Panel __version__.
-NEW="$NEW" perl -i -pe 's/^__version__ = "\d+\.\d+\.\d+"/__version__ = "$ENV{NEW}"/' box-panel/tt-station-panel.py
 
 # debian/changelog: rewrite the first entry's version token in-place. We prepend
 # a fresh stanza so the changelog keeps history.

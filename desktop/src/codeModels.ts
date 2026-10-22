@@ -2,14 +2,14 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 // The "Model for Code" list (`GET /code/models`, `codemodels.rs`), shaped for
-// the picker: every model the box could run Code on, from the tt catalog,
-// community packages (one choice per profile) and native vLLM bundles, grouped
-// by model. Choosing one calls that source's own serve route, as Models does.
+// the picker: every model the box could run Code on, from the tt catalog (and
+// whatever is serving now), grouped by model. Choosing one calls the box's
+// serve route, as Models does.
 
 export type CacheState = "on" | "off" | "unknown";
 export interface PrefixCache { state: CacheState; how: string }
 export type Choice = { action: "in_use" } | { action: "switch" } | { action: "busy"; why: string } | { action: "unavailable"; why: string };
-export type Source = "catalog" | "community" | "native" | "running";
+export type Source = "catalog" | "running";
 export interface ServeCall { route: string; body: Record<string, unknown> }
 
 export interface CodeModel {
@@ -19,7 +19,7 @@ export interface CodeModel {
   name: string;
   model: string;
   source: Source;
-  /** "tt catalog", or the package or bundle it comes from. */
+  /** Where it comes from: "tt catalog". */
   origin: string;
   profile: string | null;
   profile_label: string | null;
@@ -64,7 +64,7 @@ export function groupModels(models: CodeModel[]): Group[] {
   return out;
 }
 
-const SOURCE: Record<Source, string> = { catalog: "tt catalog", community: "Community package", native: "Native vLLM bundle", running: "Serving now" };
+const SOURCE: Record<Source, string> = { catalog: "tt catalog", running: "Serving now" };
 
 /** One option's line: "4 chips · low latency", else where it comes from. */
 export function optionTitle(m: CodeModel): string {
@@ -75,14 +75,12 @@ export function optionTitle(m: CodeModel): string {
 
 /** Where an option comes from, under its title. */
 export function optionOrigin(m: CodeModel): string {
-  if (m.source === "community") return `${SOURCE.community} ${m.origin}${m.profile ? ` · profile ${m.profile}` : ""}`;
-  if (m.source === "native") return `${SOURCE.native} ${m.origin}`;
   if (m.source === "running") return m.model;
   return SOURCE.catalog;
 }
 
-/** The serve routes a choice may call: each source's own start, nothing else. */
-const ROUTES = new Set(["/serve", "/community/serve", "/vllm/native/serve"]);
+/** The serve routes a choice may call: the box's own start, nothing else. */
+const ROUTES = new Set(["/serve"]);
 
 /** The request that starts `m`, if it's one the picker may send. */
 export function serveRequest(m: CodeModel): ServeCall | null {

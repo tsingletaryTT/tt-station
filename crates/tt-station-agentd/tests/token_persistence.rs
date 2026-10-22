@@ -11,13 +11,13 @@
 //! Like `tests/pairing.rs` and `tests/control.rs`, these exercise the real
 //! axum `Router` end to end (ephemeral port, real HTTP) rather than calling
 //! `AppState` methods directly, so the bearer extractor is genuinely
-//! exercised, not just `is_valid_token` in isolation.
+//! exercised, not just `AppState::authenticate` in isolation.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 /// Hand back a fresh path under the OS temp dir that no other test (or test
 /// run) will collide with. No `tempfile` dependency in this crate, and a
@@ -132,7 +132,7 @@ async fn issuing_a_token_persists_it_to_the_configured_file() {
     let state = AppState::new_persisting(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
         path.clone(),
     );
     let base = spawn_with(state.clone()).await;
@@ -174,7 +174,7 @@ async fn a_token_written_to_the_store_is_accepted_by_a_freshly_constructed_state
     let state = AppState::new_persisting(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
         path.clone(),
     );
     let base = spawn_with(state).await;
@@ -228,7 +228,7 @@ async fn a_corrupt_token_store_file_starts_empty_instead_of_panicking() {
     let state = AppState::new_persisting(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
         path.clone(),
     );
     let base = spawn_with(state).await;
@@ -277,7 +277,7 @@ async fn a_missing_token_store_file_starts_empty() {
     let state = AppState::new_persisting(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
         path.clone(),
     );
     let base = spawn_with(state).await;
@@ -303,7 +303,7 @@ async fn plain_new_never_touches_the_filesystem() {
     let state = AppState::new(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
     );
     let base = spawn_with(state.clone()).await;
     let client = reqwest::Client::new();
@@ -332,7 +332,7 @@ async fn two_sequential_token_issues_both_end_up_in_the_file() {
     let state = AppState::new_persisting(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
         path.clone(),
     );
     let base = spawn_with(state.clone()).await;
@@ -376,7 +376,7 @@ async fn a_token_issued_before_restart_still_authenticates_after_restart() {
     let first_state = AppState::new_persisting(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
         path.clone(),
     );
     let first_base = spawn_with(first_state.clone()).await;
@@ -387,7 +387,7 @@ async fn a_token_issued_before_restart_still_authenticates_after_restart() {
     let second_state = AppState::new_persisting(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
         path.clone(),
     );
     let second_base = spawn_with(second_state).await;

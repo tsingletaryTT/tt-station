@@ -23,12 +23,12 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tt_station_agentd::routes::{
     app, local_http_app, AppState, HANDLER_AUTHED_ROUTES, PUBLIC_ROUTES,
 };
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 mod support;
 
 fn new_state() -> AppState {
-    AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+    AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
 }
 
 /// The router as the network sees it (the HTTPS server's), on a real port.
@@ -104,7 +104,7 @@ fn concrete(route: &str) -> String {
 async fn every_route_needs_credentials_unless_it_is_on_the_public_allowlist() {
     let routes = routes_in("pub fn app(state: AppState) -> Router {");
     assert!(
-        routes.len() > 200,
+        routes.len() > 150,
         "the route table parsed to only {} routes",
         routes.len()
     );
@@ -288,7 +288,6 @@ async fn the_first_device_is_an_owner_and_members_cannot_manage_the_box() {
             format!("{base}/apps/langflow/network"),
             json!({ "open": true }),
         ),
-        (M::POST, format!("{base}/hermes/install"), json!({})),
         (M::POST, format!("{base}/updates/install"), json!({})),
         (M::POST, format!("{base}/updates/undo"), json!({})),
         (
@@ -307,11 +306,6 @@ async fn the_first_device_is_an_owner_and_members_cannot_manage_the_box() {
             M::PUT,
             format!("{base}/devices/{member_id}/person"),
             json!({ "person": null }),
-        ),
-        (
-            M::POST,
-            format!("{base}/bringup/codex/runs/r/approvals/a"),
-            json!({ "decision": "accept" }),
         ),
     ];
     for (m, url, body) in refused {

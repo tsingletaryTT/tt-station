@@ -6,11 +6,9 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-/// Gets the APNs device token from iOS (the standard app-delegate callbacks).
+/// Shows the box's notifications (posted locally by `AlertCenter`) and answers
+/// their Allow / Don't allow actions.
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-    static let tokenKey = "tt.push.deviceToken"
-    static let tokenArrived = Notification.Name("tt.push.tokenArrived")
-
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         UNUserNotificationCenter.current().delegate = self
@@ -34,16 +32,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
-        let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
-        UserDefaults.standard.set(hex, forKey: Self.tokenKey)
-        NotificationCenter.default.post(name: Self.tokenArrived, object: hex)
-    }
-
-    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
-        NotificationCenter.default.post(name: Self.tokenArrived, object: error)
-    }
-
     /// Show box notifications even while the app is open.
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async
         -> UNNotificationPresentationOptions {
@@ -52,37 +40,21 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 }
 
 /// Notifications from the box -- "FLUX.1-schnell downloaded", "Qwen3-32B is
-/// ready", "tt-quietbox is online" -- the way any app does it: the phone gives
-/// the box its push token, and the box sends each alert through Apple's push
-/// service. Nothing to sign up for.
-///
-/// Until the box can push (it needs the app's APNs key -- see
-/// docs/reference/alerts-and-power.md), the app falls back to checking the
-/// box's event feed itself: instantly while open, now and then in the background.
+/// ready", "tt-quietbox is online": the app checks the box's event feed itself
+/// (`GET /events`), instantly while open and now and then in the background,
+/// and shows each new event as a local notification.
 @MainActor
 @Observable
 final class AlertCenter {
     static let refreshTaskID = "com.tenstorrent.ttstation.mobile.refresh"
 
-    /// The newest event while the app is open and push isn't doing the job.
+    /// The newest event while the app is open.
     private(set) var banner: BoxEvent?
     private(set) var permission: UNAuthorizationStatus = .notDetermined
-    /// The box will push to this phone.
-    private(set) var pushActive = false
-    /// Why the box can't push yet, if it can't.
-    private(set) var pushProblem: String?
-    private(set) var registrationError: String?
 
     private var pollTask: Task<Void, Never>?
 
     private static func seqKey(_ boxID: String) -> String { "tt.alerts.lastSeq.\(boxID)" }
-    private static func pushKey(_ boxID: String) -> String { "tt.push.active.\(boxID)" }
-
-    #if DEBUG
-    private static let sandbox = true
-    #else
-    private static let sandbox = false
-    #endif
 
     func refreshPermission() async {
         permission = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
@@ -96,60 +68,13 @@ final class AlertCenter {
         }
     }
 
-    /// Ask for permission, then register this phone with the box.
+    /// Ask for permission to show the box's notifications.
     func enable(for session: BoxSession) async {
         _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
         await refreshPermission()
-        await registerIfAllowed(with: session)
     }
 
-    /// Remote push (APNs) needs the `aps-environment` entitlement, which only a
-    /// paid Apple team can sign. Off for now: alerts arrive while the app is
-    /// open and from background refresh.
-    static let remotePush = false
-
-    /// If notifications are allowed, get the device token and hand it to the box.
-    func registerIfAllowed(with session: BoxSession) async {
-        await refreshPermission()
-        guard Self.remotePush else { return }
-        guard [.authorized, .provisional, .ephemeral].contains(permission) else { return }
-        let token = await deviceToken()
-        guard let token else { return }
-        do {
-            let result = try await session.registerPush(token: token, sandbox: Self.sandbox, name: UIDevice.current.name)
-            pushActive = result.pushAvailable
-            pushProblem = result.problem
-            registrationError = nil
-            UserDefaults.standard.set(result.pushAvailable, forKey: Self.pushKey(session.box.id))
-        } catch {
-            registrationError = error.localizedDescription
-        }
-    }
-
-    /// The APNs token: iOS hands it to the app delegate after this call.
-    private func deviceToken() async -> String? {
-        let waiter = Task { () -> String? in
-            for await note in NotificationCenter.default.notifications(named: AppDelegate.tokenArrived) {
-                if let hex = note.object as? String { return hex }
-                if let error = note.object as? Error {
-                    await MainActor.run { self.registrationError = error.localizedDescription }
-                    return nil
-                }
-            }
-            return nil
-        }
-        UIApplication.shared.registerForRemoteNotifications()
-        let timeout = Task {
-            try? await Task.sleep(for: .seconds(10))
-            waiter.cancel()
-        }
-        let fresh = await waiter.value
-        timeout.cancel()
-        return fresh ?? UserDefaults.standard.string(forKey: AppDelegate.tokenKey)
-    }
-
-    /// Check the active box every 10 s while the app is in front (the fallback
-    /// path; with push active it only keeps its place in the feed).
+    /// Check the active box every 10 s while the app is in front.
     func start(_ app: AppModel) {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
@@ -176,12 +101,7 @@ final class AlertCenter {
         UserDefaults.standard.set(latest, forKey: key)
         // First look at a box: just learn where its feed is.
         guard last != 0 else { return }
-        // With push on, the box already told the phone -- except a pairing
-        // code, which a push never carries (its text passes through Apple):
-        // that's shown here, from the box's own feed, while it's still good.
-        let pushOn = UserDefaults.standard.bool(forKey: Self.pushKey(session.box.id))
         for event in events where event.kind != "test" {
-            if pushOn && !(event.kind == "pairing" && Date().timeIntervalSince1970 - event.at < 120) { continue }
             if foreground && UIApplication.shared.applicationState == .active {
                 banner = event
             } else {
@@ -212,13 +132,12 @@ final class AlertCenter {
         try? BGTaskScheduler.shared.submit(request)
     }
 
-    /// Background refresh (fallback path only).
+    /// Background refresh.
     nonisolated static func backgroundCheck() async {
         await MainActor.run { scheduleRefresh() }
         let store = BoxStore()
         let activeID = UserDefaults.standard.string(forKey: "tt.mobile.activeBox")
         guard let box = store.boxes.first(where: { $0.id == activeID }) ?? store.boxes.first,
-              !UserDefaults.standard.bool(forKey: "tt.push.active.\(box.id)"),
               let token = store.token(for: box),
               let client = try? AgentClient(box: box, token: token) else { return }
         let key = "tt.alerts.lastSeq.\(box.id)"
@@ -274,7 +193,7 @@ enum ApprovalActions {
     }
 }
 
-/// The in-app banner (fallback path, while the app is open).
+/// The in-app banner, while the app is open.
 struct AlertBanner: View {
     let event: BoxEvent
     let onDismiss: () -> Void
@@ -320,9 +239,6 @@ struct AlertsView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
-    @State private var settings: NotifySettings?
-    @State private var working = false
-    @State private var message: String?
 
     private var alerts: AlertCenter { app.alerts }
 
@@ -330,7 +246,7 @@ struct AlertsView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Get a notification when a download finishes, a model is loaded and ready, a start fails, the box comes online, or its chips run hot.")
+                    Text("Get a notification when a download finishes, a model is loaded and ready, a start fails, the box comes online, or its chips run hot. TT Station shows them while it's open and checks now and then in the background, so they can arrive late.")
                         .font(.tt(.footnote))
                         .foregroundStyle(.secondary)
                 }
@@ -338,52 +254,15 @@ struct AlertsView: View {
                 Section {
                     switch alerts.permission {
                     case .authorized, .provisional, .ephemeral:
-                        if alerts.pushActive || settings?.push.available == true {
-                            Label("On for this iPhone", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                        } else {
-                            Label("Allowed on this iPhone", systemImage: "checkmark.circle").foregroundStyle(.green)
-                        }
+                        Label("Allowed on this iPhone", systemImage: "checkmark.circle").foregroundStyle(.green)
                     case .denied:
                         Button("Turn on notifications in Settings") {
                             if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
                         }
                     default:
                         Button("Turn on notifications") {
-                            Task { await alerts.enable(for: session); await reload() }
+                            Task { await alerts.enable(for: session) }
                         }
-                    }
-                    if let error = alerts.registrationError {
-                        Text(error).font(.tt(.footnote)).foregroundStyle(.orange)
-                    }
-                }
-
-                if let push = settings?.push, !push.available {
-                    Section("Your box can't send them yet") {
-                        Text("Until it can, TT Station shows alerts while it's open and checks now and then in the background, so they can arrive late.")
-                            .font(.tt(.footnote))
-                        if let problem = push.problem {
-                            Text(problem).font(.tt(.footnote)).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                if let devices = settings?.push.devices, !devices.isEmpty {
-                    Section("Phones \(session.box.name) notifies") {
-                        ForEach(devices, id: \.self) { device in
-                            Text(device.name.isEmpty ? "iPhone" : device.name)
-                        }
-                    }
-                }
-
-                Section {
-                    Button {
-                        Task { await sendTest() }
-                    } label: {
-                        Label("Send a test notification", systemImage: "bell.badge")
-                    }
-                    .disabled(working || ![.authorized, .provisional, .ephemeral].contains(alerts.permission))
-                    if let message {
-                        Text(message).font(.tt(.footnote)).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -392,25 +271,7 @@ struct AlertsView: View {
             .navigationTitle("Notifications")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .task {
-                await alerts.registerIfAllowed(with: session)
-                await reload()
-            }
-        }
-    }
-
-    private func reload() async {
-        settings = try? await session.notifySettings()
-    }
-
-    private func sendTest() async {
-        working = true
-        defer { working = false }
-        do {
-            let sent = try await session.testNotification()
-            message = sent == 1 ? "Sent. It should appear in a moment." : "Sent to \(sent) phones."
-        } catch {
-            message = error.localizedDescription
+            .task { await alerts.refreshPermission() }
         }
     }
 }

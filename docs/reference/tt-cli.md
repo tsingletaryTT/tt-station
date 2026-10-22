@@ -94,7 +94,7 @@ assistant, telemetry and `/logs` working unchanged against it.
 
 ## The serving lifecycle: `GET /serve`, `POST /serve`
 
-`/run` holds its request open for the minutes a bring-up takes; a phone backgrounding the
+`/run` holds its request open for the minutes a model start takes; a phone backgrounding the
 app killed that request, and the agent used to lose the outcome with it (the model came up
 while `/status` said `idle`). Now every start runs to completion on its own task and is
 tracked:
@@ -109,7 +109,7 @@ A failed start keeps its reason in `error` until the next start. At startup the 
 model) instead of reading `idle`; `/serving` discovery now also sees media-server
 containers (`tt-media-inference-server` images).
 
-## Image and video generation: `/generate/*`
+## Image generation: `/generate/image`
 
 Proxied to the served tt-media-server (which runs `--no-auth`), only while a model of the
 right kind serves (`409` otherwise, naming what *is* serving):
@@ -117,47 +117,6 @@ right kind serves (`409` otherwise, naming what *is* serving):
 | Route | Upstream |
 |---|---|
 | `POST /generate/image` | `POST /v1/images/generations` — `{prompt, negative_prompt, num_inference_steps, seed, number_of_images, guidance_scale, image_return_format}` → `{images: [base64], generation_time}` |
-| `POST /generate/video` | `POST /v1/videos/generations` → a job `{id, status, ...}` (or the MP4 itself if the server runs synchronously) |
-| `GET /generate/video/{id}` | job status: `queued`, `in_progress`, `completed`, `failed`, `cancelled` |
-| `GET /generate/video/{id}/download` | the MP4 |
-| `POST /generate/video/{id}/cancel`, `GET /generate/videos` | cancel; list jobs |
 
 FastAPI `{"detail": ...}` errors come back as this API's `{"error": ...}`. The assistant
 answers `409` with a plain explanation while a non-chat model serves.
-
-## Co-serving: chat and images at once (`/coserve`)
-
-A P300x2 box is two P300 cards: chips 0,1 and 2,3 (`tt-smi -ls` shows the board
-numbers). Split mode serves a chat model on the first card and an image model
-on the second, so the assistant keeps working while the Create tab makes images.
-
-| Route | |
-|---|---|
-| `GET /coserve` | `{available, reason, split, layout: {chat: "0,1", image: "2,3"}, chat: <lifecycle>, image: <companion lifecycle>, choices: {chat: [{name, ready}], image: [...]}}`. Choices come from `tt --json model list --hw p300`: models tt supports on one card (chat ones must have a tool-call parser, for the assistant). |
-| `POST /coserve` `{chat, image}` (authed) | `202`; stops whatever serves, then starts both side by side. `400` for a model that doesn't fit one card (names the options), `409` when one isn't fully downloaded, the box isn't P300x2, or a start/stop is in flight. |
-
-How it works:
-
-- **Placement.** `ServingBackend::set_placement` pins a backend to a slice of
-  the box: `--tt-device p300 --device-id 0,1` for run.py (which then mounts
-  only `/dev/tenstorrent/0` and `/1` into the container), and a pre-serve reset
-  of only those chips (`tt-smi -r 0,1`). Resets are serialized across slots.
-  `tt serve` has no chip selector, so a pinned launch runs tt's managed
-  checkout's `run.py` directly with tt's venv Python, adding the `--no-auth` and
-  `--host-hf-cache` that `tt serve` would.
-- **Two slots.** The chat model runs on the agent's normal backend (pinned to
-  0,1), so `/status`, `/assistant` and metrics follow it unchanged. The image
-  model runs on a *companion* runpy backend on serving port + 1 (8004), with
-  its own lifecycle, shown as `companion` in `GET /serve`. `/generate/image`
-  goes to the companion when it serves.
-- **Leaving split mode is automatic.** Any ordinary start (`/run`, `/serve`, the
-  assistant's `run_model`) or `/stop` stops the companion and un-pins the main
-  backend first. Each slot's container sweep only touches its own port, so one
-  half never kills the other.
-- **Restarts.** At startup the agent adopts an image server on the companion
-  port and re-pins the main backend to 0,1.
-- **Not with gozer**: a split box can't also lease chips, so the companion is
-  only built when gozer is absent.
-
-Fits one card on this box (tt catalog): Llama-3.1-8B-Instruct for chat; FLUX.1-schnell
-and FLUX.1-dev for images. Qwen3-32B and Wan2.2 need all four chips.

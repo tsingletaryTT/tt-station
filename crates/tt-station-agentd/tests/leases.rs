@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use tt_station_agentd::gozer::Capability;
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 /// Write an executable shell-script stand-in for `gozer` at `dir/gozer-stub.sh`
 /// that:
@@ -90,7 +90,7 @@ fn fresh_state() -> AppState {
     AppState::new(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
     )
 }
 

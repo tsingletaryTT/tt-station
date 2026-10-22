@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 // The words TT Station uses, one per thing, so every screen says the same.
-// Write copy with these; the code may keep older names (orchard, gozer, evals)
+// Write copy with these; the code may keep older names (gozer, evals)
 // where they're the agent's API or a tool's real name.
 
 export const TERMS = {
@@ -15,17 +15,11 @@ export const TERMS = {
   assistant: "Assistant (Tori)",
   /** gozer: hands chips to one job at a time, so two never collide. */
   chipScheduler: "chip scheduler",
-  /** tt-orchard: grafts a fine-tune onto an architecture that already runs here. */
-  quickPort: "Quick port",
-  /** A coding agent writes a new architecture's code, stage by stage. */
-  agentPort: "Agent port",
-  /** Getting a model that isn't in Models running: Quick port, Agent port or a community package. */
-  bringUp: "Bring-up",
   /** A model's accuracy and speed tests (the agent's "evals"). */
   checkUp: "Check-up",
   /** A one-click setup of the whole box (Chat, Images, Transcribe…). */
   mode: "mode",
-  /** Developer tools: Bring-up, the silicon check and chip leases. */
+  /** Developer tools: who holds the chips, on Hardware. */
   developerTools: "Developer tools",
   /** A job the box does on its own, on a timetable or when run; switching modes at set times is one. Never "schedule" in copy. */
   routine: "routine",
@@ -45,11 +39,8 @@ export const GLOSSARY: { term: string; means: string }[] = [
   { term: "Mode", means: "A one-click setup of the whole box for one kind of work, like Chat or Images." },
   { term: "Assistant (Tori)", means: "The assistant you call up over anything you're doing, by voice or by typing." },
   { term: "Check-up", means: "Tests a model's accuracy and speed on this box." },
-  { term: "Bring-up", means: "Getting a model that isn't in Models running here." },
-  { term: "Quick port", means: "A bring-up that grafts a fine-tune onto a model that already runs here." },
-  { term: "Agent port", means: "A bring-up where a coding agent writes a new architecture's code." },
   { term: "Chip scheduler", means: "Hands the chips to one job at a time, so two never collide." },
   { term: "Routine", means: "A job the box does on its own, when you run it or on a timetable, like a morning check or switching modes at set times." },
-  { term: "Notifications", means: "Everything waiting for your OK, from Code, routines and, for owners, bring-up and pairing, in one list: the bell at the top right of the window." },
+  { term: "Notifications", means: "Everything waiting for your OK, from Code, routines and, for owners, pairing requests, in one list: the bell at the top right of the window." },
   { term: "Owner and member", means: "Owners manage the box: devices, keys, power and updates. Members use it." },
 ];

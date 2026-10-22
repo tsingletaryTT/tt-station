@@ -157,7 +157,6 @@ struct WakeOnLanEnable: Decodable, Equatable {
 struct IdleInfo: Decodable, Equatable {
     struct Asleep: Decodable, Equatable {
         let target: String
-        let community: Bool
         /// As a person would say it.
         let label: String
         let at: Double
@@ -313,9 +312,8 @@ enum JSONValue: Codable, Equatable, Hashable {
     }
 }
 
-/// `GET /code/models`: every model the box can serve -- its catalog, community
-/// packages (one entry per profile) and native vLLM bundles -- with what
-/// choosing each does.
+/// `GET /code/models`: every model the box can serve -- its catalog and what's
+/// running now -- with what choosing each does.
 struct ServeOptions: Decodable, Equatable {
     struct Serve: Decodable, Equatable {
         let phase: String
@@ -346,13 +344,13 @@ struct ServeOption: Decodable, Equatable, Identifiable {
     /// What starting it posts: a route and its body, exactly as the agent gave them.
     struct Call: Decodable, Equatable { let route: String; let body: JSONValue }
 
-    /// `catalog:<name>`, `community:<id>#<profile>`, `native:<id>`.
+    /// `catalog:<name>`, or the running model's key.
     let key: String
     /// The model, the same for all its setups.
     let group: String
     let name: String
     let model: String
-    /// `catalog`, `community`, `native` or `running`.
+    /// `catalog` or `running`.
     let source: String
     let origin: String?
     let profile: String?
@@ -624,37 +622,6 @@ struct ResearchReport: Decodable {
 struct ResearchRequest: Encodable, Equatable {
     let question: String
     var depth = "standard"
-}
-
-// MARK: - Recording on the box
-
-/// `GET /record`: the box's microphone and speakers, and the recording in
-/// progress (with who started it: anyone paired can, so the room is told).
-struct RecordStatus: Decodable, Equatable {
-    struct Recording: Decodable, Equatable {
-        let id: String
-        let title: String
-        let started: Double
-        let seconds: Int
-        let ended: Bool?
-        let maxSeconds: Int?
-        let startedBy: String?
-        enum CodingKeys: String, CodingKey {
-            case id, title, started, seconds, ended
-            case maxSeconds = "max_seconds"
-            case startedBy = "started_by"
-        }
-    }
-    let microphone: String?
-    let speakers: String?
-    let recording: Recording?
-}
-
-/// `POST /record/start`.
-struct RecordStart: Encodable, Equatable {
-    var title: String?
-    var mic = true
-    var system = true
 }
 
 // MARK: - Updates

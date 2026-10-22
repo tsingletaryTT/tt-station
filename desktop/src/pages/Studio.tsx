@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-// Studio: make images and video, and transcribe recordings of any length.
+// Studio: make images, and transcribe recordings of any length.
 // Everything runs on the box; files dropped here go straight to it.
 
 import { useEffect, useRef, useState } from "react";
@@ -11,35 +11,31 @@ import { Select } from "@tenstorrent/vesper/select";
 import { ProgressBar } from "@tenstorrent/vesper/progress-bar";
 import { Admonition } from "@tenstorrent/vesper/admonition";
 import { Typography } from "@tenstorrent/vesper/typography";
-import { StatusIndicator } from "@tenstorrent/vesper/status-indicator";
 import { Icon } from "@tenstorrent/vesper/icons";
-import { del, duration, fetchBlob, get, type Job, post, type Serve, short, text, upload } from "../api";
+import { del, duration, get, type Job, post, type Serve, short, text, upload } from "../api";
 import { Card, copyText, Empty, Eyebrow, Page, toastError, toastOk, usePoll, useReducedMotion, useServe } from "../ui";
 import { addToast } from "@tenstorrent/vesper/toast";
 import { ask, whoIsAffected } from "../dialog";
 import { deleteWithUndo, UNDO_MS } from "../undo";
 import { MeetingRecorder } from "../recorder";
 
-type Tab = "images" | "video" | "transcribe";
+type Tab = "images" | "transcribe";
 
 export function Studio() {
   const serve = useServe(5000);
-  const kind = serve.data?.phase === "serving" ? serve.data.kind : null;
   const [tab, setTab] = useState<Tab>(location.hash === "#transcribe" ? "transcribe" : "images");
-  useEffect(() => { if (kind === "video") setTab("video"); }, [kind]);
   return (
-    <Page title="Studio" subtitle="Pictures, video, meeting recordings and transcripts, made on your box."
+    <Page title="Studio" subtitle="Pictures, meeting recordings and transcripts, made on your box."
       actions={
         <div className="pill-tabs" role="tablist">
-          {(["images", "video", "transcribe"] as Tab[]).map((t) => (
+          {(["images", "transcribe"] as Tab[]).map((t) => (
             <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)} role="tab" aria-selected={tab === t}>
-              {t === "images" ? "Images" : t === "video" ? "Video" : "Transcribe"}
+              {t === "images" ? "Images" : "Transcribe"}
             </button>
           ))}
         </div>
       }>
       {tab === "images" && <Images serve={serve.data} onSwitched={serve.refresh} />}
-      {tab === "video" && <Video serve={serve.data} onSwitched={serve.refresh} />}
       {tab === "transcribe" && <Transcribe />}
     </Page>
   );
@@ -59,7 +55,7 @@ function NeedsMode({ what, mode, serve, onSwitched }: { what: string; mode: stri
       },
     }}>
       {serve?.phase === "starting" ? `${short(serve.model)} is loading…`
-        : `${what === "images" ? "Images need an image model" : "Video needs a video model"} on the box. ${serve?.phase === "serving" ? `It's serving ${short(serve.served_id ?? serve.model)} right now.` : ""}`}
+        : `Images need an image model on the box. ${serve?.phase === "serving" ? `It's serving ${short(serve.served_id ?? serve.model)} right now.` : ""}`}
     </Admonition>
   );
 }
@@ -69,7 +65,7 @@ function NeedsMode({ what, mode, serve, onSwitched }: { what: string; mode: stri
 interface Made { url: string; prompt: string; seconds: number | null }
 
 function Images({ serve, onSwitched }: { serve: Serve | null; onSwitched: () => void }) {
-  const canMake = serve?.phase === "serving" && (serve.kind === "image" || serve.split);
+  const canMake = serve?.phase === "serving" && serve.kind === "image";
   const [prompt, setPrompt] = useState("");
   const [steps, setSteps] = useState("20");
   const [count, setCount] = useState("1");
@@ -131,53 +127,6 @@ function Images({ serve, onSwitched }: { serve: Serve | null; onSwitched: () => 
           ))}
         </div>
       )}
-    </>
-  );
-}
-
-// ---------------------------------------------------------------- video
-
-interface VideoJob { id: string; status: string; progress?: number | null; error?: string | null }
-
-function Video({ serve, onSwitched }: { serve: Serve | null; onSwitched: () => void }) {
-  const canMake = serve?.phase === "serving" && serve.kind === "video";
-  const [prompt, setPrompt] = useState("");
-  const [job, setJob] = useState<VideoJob | null>(null);
-  const [video, setVideo] = useState<string | null>(null);
-  useEffect(() => {
-    if (!job || ["completed", "failed", "cancelled", "done"].includes(job.status)) return;
-    const t = window.setInterval(async () => {
-      try {
-        const j = await get<VideoJob>(`/generate/video/${job.id}`);
-        setJob(j);
-        if (j.status === "completed" || j.status === "done") {
-          setVideo(URL.createObjectURL(await fetchBlob(`/generate/video/${job.id}/download`)));
-        }
-      } catch { /* keep polling */ }
-    }, 3000);
-    return () => window.clearInterval(t);
-  }, [job]);
-  return (
-    <>
-      {!canMake && <NeedsMode what="video" mode="video" serve={serve} onSwitched={onSwitched} />}
-      <Card>
-        <TextArea value={prompt} onChange={(e) => setPrompt(e.target.value)} height={96} disabled={!canMake}
-          placeholder="Slow aerial shot over a misty pine forest at sunrise" />
-        <div className="row-between">
-          <span className="muted">A few seconds of video takes several minutes on the box.</span>
-          <Button disabled={!canMake || !prompt.trim() || (!!job && !video)} onClick={async () => {
-            try { setVideo(null); setJob(await post<VideoJob>("/generate/video", { prompt: prompt.trim() })); } catch (e) { toastError(e); }
-          }}>Make video</Button>
-        </div>
-        {job && !video && (
-          <div className="stack" style={{ gap: 6 }}>
-            <StatusIndicator label={job.status} state={job.status === "failed" ? "error" : "progress"} animated={job.status !== "failed"} />
-            {job.progress != null && <ProgressBar value={job.progress * 100} aria-label="Video progress" />}
-            {job.error && <span className="muted">{job.error}</span>}
-          </div>
-        )}
-        {video && <video src={video} controls autoPlay loop style={{ width: "100%", borderRadius: 12 }} />}
-      </Card>
     </>
   );
 }

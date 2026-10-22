@@ -76,8 +76,7 @@ jobs:
         run: |
           SUITE="${{ matrix.suite }}"
           mkdir -p dist
-          cp ../tt-station_*_amd64_${SUITE}.deb \
-             ../tt-station-panel_*_amd64_${SUITE}.deb dist/
+          cp ../tt-station_*_amd64_${SUITE}.deb dist/
           ls -lh dist/
 
       # Packaging gate: install the .deb in a clean image of the Ubuntu it's

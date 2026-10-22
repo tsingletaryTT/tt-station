@@ -85,86 +85,6 @@ fn written(m: &std::fs::Metadata) -> u64 {
     m.len().min(m.blocks() * 512)
 }
 
-/// Files this size or larger in a snapshot stay links: they're weights.
-const SMALL: u64 = 64 * 1024 * 1024;
-
-/// Replaces the links in `repo`'s snapshots that point at small files (tokenizer,
-/// config, chat template) with real copies of them; weights stay links. Some
-/// model servers verify their tokenizer files and refuse a link (sjettTT's Flash
-/// Next: "tokenizer artifact must be a non-symlink regular file"), and every file
-/// in a Hugging Face cache snapshot is one. A copy reads the same to everything
-/// else.
-///
-/// Also turns the repo's own blobs that are links into a shared blob store
-/// (`hub/blobs/..`) into hard links of those files: the same data, no extra
-/// space, but one link from a snapshot instead of two, which is the standard
-/// layout. Flash Next's server opens weights with one link allowed and failed
-/// on the second ("Too many levels of symbolic links").
-///
-/// Returns how many files it changed.
-pub fn unlink_small_files(hub: &Path, repo: &str) -> usize {
-    let repo_dir = hub.join(format!("models--{}", repo.replace('/', "--")));
-    let snapshots = repo_dir.join("snapshots");
-    let mut copied = 0;
-    for e in std::fs::read_dir(repo_dir.join("blobs"))
-        .into_iter()
-        .flatten()
-        .flatten()
-    {
-        let path = e.path();
-        if !e.file_type().is_ok_and(|t| t.is_symlink()) {
-            continue;
-        }
-        let Ok(target) = std::fs::canonicalize(&path) else {
-            continue;
-        };
-        if !std::fs::metadata(&target).is_ok_and(|m| m.is_file()) {
-            continue;
-        }
-        // Linked beside it, then swapped in: never a moment without the file.
-        let tmp = path.with_file_name(format!(".{}.tt-link", e.file_name().to_string_lossy()));
-        let _ = std::fs::remove_file(&tmp);
-        if std::fs::hard_link(&target, &tmp).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-            copied += 1;
-        } else {
-            let _ = std::fs::remove_file(&tmp);
-        }
-    }
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&snapshots)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    while let Some(dir) = dirs.pop() {
-        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let path = e.path();
-            let Ok(kind) = e.file_type() else { continue };
-            if kind.is_dir() {
-                dirs.push(path);
-                continue;
-            }
-            if !kind.is_symlink() {
-                continue;
-            }
-            let Ok(target) = std::fs::canonicalize(&path) else {
-                continue;
-            };
-            if !std::fs::metadata(&target).is_ok_and(|m| m.is_file() && m.len() < SMALL) {
-                continue;
-            }
-            // Copy beside it, then swap it in: never a moment without the file.
-            let tmp = path.with_file_name(format!(".{}.tt-copy", e.file_name().to_string_lossy()));
-            if std::fs::copy(&target, &tmp).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-                copied += 1;
-            } else {
-                let _ = std::fs::remove_file(&tmp);
-            }
-        }
-    }
-    copied
-}
-
 /// A repo's full size: when it was asked for, and the answer once it's in.
 type Total = (Instant, Option<u64>);
 
@@ -195,21 +115,13 @@ pub fn repo_total(repo: &str) -> Option<u64> {
     None
 }
 
-/// Records a size learned elsewhere (a package's details).
-pub fn know_total(repo: &str, bytes: u64) {
-    TOTALS
-        .lock()
-        .expect("totals")
-        .insert(repo.to_string(), (Instant::now(), Some(bytes)));
-}
-
 async fn fetch_total(repo: &str) -> Option<u64> {
     let mut req = reqwest::Client::new()
         .get(format!(
             "https://huggingface.co/api/models/{repo}?blobs=true"
         ))
         .timeout(Duration::from_secs(15));
-    if let Some(t) = crate::bringup::hf_token() {
+    if let Some(t) = crate::serving::secrets::hf_token() {
         req = req.bearer_auth(t);
     }
     let v: Value = req.send().await.ok()?.json().await.ok()?;
@@ -272,35 +184,6 @@ pub fn progress(key: &str, done: u64, total: Option<u64>) -> Value {
     json!({ "done_bytes": done, "total_bytes": total, "percent": percent, "bytes_per_s": rate.map(|r| r.round() as u64), "eta_s": eta })
 }
 
-/// Refuse a download that can't fit before it starts, rather than after it has
-/// filled the disk (and everything else on it): `need` bytes still to fetch
-/// against `free` where they'll land.
-pub fn check_room(what: &str, need: u64, free: u64) -> Result<(), String> {
-    if need <= free {
-        return Ok(());
-    }
-    let gb = |b: u64| b as f64 / 1e9;
-    Err(format!(
-        "{what} needs about {:.1} GB of free disk to download; the box has {:.1} GB free. Free up {:.1} GB (remove models you don't use) and try again.",
-        gb(need),
-        gb(free),
-        gb(need - free)
-    ))
-}
-
-/// What a community package download still needs on disk, from its details
-/// (`community::info`): the package, plus its weights less `weights_here`
-/// already in the cache (a resumed download), unless they're all here. `None`
-/// when the sizes aren't known (then nothing is refused).
-pub fn package_need(info: &Value, weights_here: u64) -> Option<u64> {
-    let package = info["package_bytes"].as_u64()?;
-    if info["weights_on_box"].as_bool() == Some(true) || info["weights"].is_null() {
-        return Some(package);
-    }
-    let weights = info["weights_bytes"].as_u64()?;
-    Some(package + weights.saturating_sub(weights_here))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,90 +216,6 @@ mod tests {
         assert_eq!(repo_on_disk(&hub, "org/m"), 5500);
         assert_eq!(repo_on_disk(&hub, "org/missing"), 0);
         let _ = std::fs::remove_dir_all(&hub);
-    }
-
-    #[test]
-    fn copies_small_linked_files_and_leaves_weights_linked() {
-        let hub = tmp("unlink");
-        let repo = hub.join("models--org--m");
-        let snap = repo.join("snapshots/rev1");
-        std::fs::create_dir_all(snap.join("sub")).unwrap();
-        std::fs::create_dir_all(repo.join("blobs")).unwrap();
-        std::fs::write(repo.join("blobs/tok"), b"{\"tokenizer\": 1}").unwrap();
-        std::fs::write(repo.join("blobs/cfg"), b"{}").unwrap();
-        let big = std::fs::File::create(repo.join("blobs/weights")).unwrap();
-        big.set_len(SMALL + 1).unwrap(); // sparse: no real disk used
-        std::os::unix::fs::symlink("../../blobs/tok", snap.join("tokenizer.json")).unwrap();
-        std::os::unix::fs::symlink("../../../blobs/cfg", snap.join("sub/config.json")).unwrap();
-        std::os::unix::fs::symlink("../../blobs/weights", snap.join("model.safetensors")).unwrap();
-        // A blob kept in the shared store, linked from the repo's blobs.
-        std::fs::create_dir_all(hub.join("blobs/ab")).unwrap();
-        std::fs::File::create(hub.join("blobs/ab/shard"))
-            .unwrap()
-            .set_len(SMALL + 1)
-            .unwrap(); // sparse
-        std::os::unix::fs::symlink("../../blobs/ab/shard", repo.join("blobs/shard")).unwrap();
-        std::os::unix::fs::symlink("../../blobs/shard", snap.join("model-00001.safetensors"))
-            .unwrap();
-        assert_eq!(unlink_small_files(&hub, "org/m"), 3); // the shard's link, then the two small snapshot files
-        use std::os::unix::fs::MetadataExt;
-        let shard = std::fs::symlink_metadata(repo.join("blobs/shard")).unwrap();
-        assert!(shard.is_file(), "one link from the snapshot, not two");
-        assert_eq!(
-            shard.ino(),
-            std::fs::metadata(hub.join("blobs/ab/shard")).unwrap().ino(),
-            "the same file, no copy"
-        );
-        // The snapshot's link to a weight stays a link; it reads the weights.
-        assert!(
-            std::fs::symlink_metadata(snap.join("model-00001.safetensors"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        assert_eq!(
-            std::fs::metadata(snap.join("model-00001.safetensors"))
-                .unwrap()
-                .len(),
-            SMALL + 1
-        );
-        let tok = std::fs::symlink_metadata(snap.join("tokenizer.json")).unwrap();
-        assert!(tok.is_file() && !tok.file_type().is_symlink());
-        assert_eq!(
-            std::fs::read(snap.join("tokenizer.json")).unwrap(),
-            b"{\"tokenizer\": 1}"
-        );
-        assert!(std::fs::symlink_metadata(snap.join("sub/config.json"))
-            .unwrap()
-            .is_file());
-        assert!(std::fs::symlink_metadata(snap.join("model.safetensors"))
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        // Nothing left to do the second time; a missing repo is fine.
-        assert_eq!(unlink_small_files(&hub, "org/m"), 0);
-        assert_eq!(unlink_small_files(&hub, "org/missing"), 0);
-        let _ = std::fs::remove_dir_all(&hub);
-    }
-
-    #[test]
-    fn a_download_that_cant_fit_is_refused_with_the_numbers() {
-        assert!(check_room("Qwen3-32B", 60_000_000_000, 61_000_000_000).is_ok());
-        let e = check_room("Qwen3-32B", 65_000_000_000, 20_000_000_000).unwrap_err();
-        assert!(e.contains("65.0 GB"), "{e}");
-        assert!(e.contains("20.0 GB free"), "{e}");
-        assert!(e.contains("Free up 45.0 GB"), "{e}");
-    }
-
-    #[test]
-    fn a_package_needs_its_size_plus_the_weights_not_yet_here() {
-        let info = json!({ "package_bytes": 10, "weights": "org/w", "weights_bytes": 100, "weights_on_box": false });
-        assert_eq!(package_need(&info, 0), Some(110));
-        assert_eq!(package_need(&info, 40), Some(70), "a resumed download");
-        let here = json!({ "package_bytes": 10, "weights": "org/w", "weights_bytes": 100, "weights_on_box": true });
-        assert_eq!(package_need(&here, 0), Some(10));
-        let unknown = json!({ "package_bytes": 10, "weights": "org/w", "weights_bytes": null });
-        assert_eq!(package_need(&unknown, 0), None);
     }
 
     #[test]

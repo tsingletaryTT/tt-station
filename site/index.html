@@ -575,12 +575,8 @@
         <li><strong>Named serving profiles.</strong> An optional <code>agentd.toml</code> defines profiles like <code>stable</code>/<code>bleeding</code> — different repo checkouts or images, picked with <code>tt-station config</code> / <code>--profile</code>.</li>
         <li><strong>Keyless SSH on pairing.</strong> The same 6-digit handshake can install your Mac's public key on the box (<code>/ssh/authorize</code>, <code>tt-station ssh-authorize</code>) — no password prompts for the workbench.</li>
         <li><strong>Readiness that means something.</strong> Resets the board, pins a compatible serving image, and only reports "serving" once <code>/v1/models</code> actually lists the model.</li>
-        <li><strong>Operable two ways.</strong> A GTK <strong>box panel</strong> on the QuietBox's own screen (start/stop/reset, live pairing code, profile picker), or headless as a systemd-style daemon driven entirely by the CLI/app.</li>
+        <li><strong>Operable two ways.</strong> <code>tt-station console</code> on the box itself (start/stop/reset, live pairing code, profile picker), or headless as a systemd user service driven entirely by the CLI/app.</li>
       </ul>
-      <div class="figure shot">
-        <img src="assets/tt-station-code.png" alt="The GTK box panel on the QuietBox's own screen showing a large 6-digit pairing code and start/stop/restart/reset controls" loading="lazy">
-      </div>
-      <p class="shot-cap">The box panel on the QuietBox's own screen — live 6-digit code, start/stop, profile picker.</p>
     </div>
     <div class="side-card">
       <div class="side-head">
@@ -754,7 +750,7 @@ c.chat.completions.<span class="f">create</span>(
 systemctl --user enable --now tt-station-agentd</code>
           <button class="cmd-copy" data-target="cmddl2">Copy</button>
         </div>
-        <p style="margin-top:0.85rem;">The optional <code>tt-station-panel</code> <code>.deb</code> adds the on-box GTK control panel. These packages aren't signed or served from an apt repo — you're installing a local <code>.deb</code> you downloaded.</p>
+        <p style="margin-top:0.85rem;">These packages aren't signed or served from an apt repo — you're installing a local <code>.deb</code> you downloaded.</p>
       </div>
     </div>
   </div>

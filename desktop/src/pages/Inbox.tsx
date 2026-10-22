@@ -2,8 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 // Notifications: everything waiting for this person -- a Code session's question,
-// a routine's action, and for owners a bring-up's command and someone asking
-// to pair -- each answered right here or opened where it came from. The
+// a routine's action, and for owners someone asking to pair -- each answered right here or opened where it came from. The
 // desktop's version of the phone's "Waiting for you" (`inbox.ts`). The bell at
 // the top right of the window shows the same list as a dropdown, newest first;
 // this page is its "See everything".
@@ -15,7 +14,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@tenstorrent/vesper/button";
 import { Admonition } from "@tenstorrent/vesper/admonition";
 import { Icon } from "@tenstorrent/vesper/icons";
-import { alwaysLabel, type Decision, type InboxItem } from "../inbox";
+import { type Decision, type InboxItem } from "../inbox";
 import { INBOX_ICONS, itemAge, onRowKey, OPEN_LABEL, openItem, useAnswering, usePairingTick } from "../inboxActions";
 import { useInbox } from "../useInbox";
 import { Empty, Page } from "../ui";
@@ -45,7 +44,7 @@ export function Inbox() {
     if (await answerItem(item, d) && hadFocus) setFocusAfter(at);
   };
 
-  const what = owner ? "Code, routines, bring-up and pairing" : "Code and routines";
+  const what = owner ? "Code, routines and pairing" : "Code and routines";
   return (
     <Page title="Notifications" subtitle={`Everything waiting for your OK, from ${what}, in one place. Answer here, or open it where it came from.`}>
       <div className="sr-only" role="status" aria-live="polite">{said}</div>
@@ -54,7 +53,7 @@ export function Inbox() {
         <div className="page-loading" role="status" aria-label="Loading" />
       ) : shown.length === 0 ? (
         <Empty title="You're all caught up">
-          When {owner ? "Code, a routine, a bring-up or someone pairing a device" : "Code or a routine"} needs your OK, it shows up here and under the bell at the top right, with a count, and as a notification.
+          When {owner ? "Code, a routine or someone pairing a device" : "Code or a routine"} needs your OK, it shows up here and under the bell at the top right, with a count, and as a notification.
         </Empty>
       ) : (
         <>
@@ -72,13 +71,13 @@ export function Inbox() {
                       <span>{item.where}</span>
                       <span className="muted">{itemAge(item)}</span>
                     </div>
-                    <div className={`inbox-summary ${item.kind === "code" || item.kind === "bringup" ? "mono" : ""}`}>{item.summary}</div>
+                    <div className={`inbox-summary ${item.kind === "code" ? "mono" : ""}`}>{item.summary}</div>
                     {item.detail && <div className="inbox-detail muted">{item.detail}</div>}
                     <div className="inbox-actions">
                       {item.answer === "decide" ? (
                         <>
                           <Button size="sm" disabled={!!busy} onClick={() => void decide(item, "allow")}>{mine ? "Answering…" : "Allow"}</Button>
-                          {item.canAlways && <Button size="sm" variant="subtle" disabled={!!busy} onClick={() => void decide(item, "always")}>{alwaysLabel(item.kind)}</Button>}
+                          {item.canAlways && <Button size="sm" variant="subtle" disabled={!!busy} onClick={() => void decide(item, "always")}>Always allow</Button>}
                           <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void decide(item, "deny")}>Deny</Button>
                           <span className="grow" />
                           <Button size="sm" variant="ghost" onClick={() => openItem(item)}>{OPEN_LABEL[item.kind]}</Button>

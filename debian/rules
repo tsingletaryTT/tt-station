@@ -25,8 +25,8 @@ override_dh_clean:
 	# and skip the *.orig sweep.
 	rm -f debian/debhelper-build-stamp
 	rm -rf debian/.debhelper/
-	rm -f debian/tt-station.substvars debian/tt-station-panel.substvars debian/files
-	rm -rf debian/tt-station/ debian/tt-station-panel/ debian/tmp/
+	rm -f debian/tt-station.substvars debian/files
+	rm -rf debian/tt-station/ debian/tmp/
 
 # ── Compile ────────────────────────────────────────────────────────────────
 override_dh_auto_build:
@@ -46,9 +46,7 @@ override_dh_auto_install:
 	    debian/tt-station/usr/lib/systemd/user/tt-station-agentd.service
 	# polkit rule: grants the `tt-station-power` group (the agent's account,
 	# from its systemd user manager) headless reboot/power-off/suspend so
-	# `POST /power` (agent) and the panel's local power row don't hit an
-	# interactive auth prompt. Shipped in tt-station (not the panel package)
-	# since both the agent and the panel rely on it. Removed on purge --
+	# `POST /power` (agent) doesn't hit an interactive auth prompt. Removed on purge --
 	# see debian/tt-station.postrm. Doc: docs/reference/power-controls.md.
 	install -d debian/tt-station/etc/polkit-1/rules.d
 	install -m 644 deploy/tt-station-power.rules \
@@ -68,30 +66,6 @@ override_dh_auto_install:
 	test -f desktop/dist/index.html || { echo "desktop/dist is missing: build the app first (build-deb.sh does)" >&2; exit 1; }
 	install -d debian/tt-station/usr/share/tt-station/app
 	cp -r desktop/dist/. debian/tt-station/usr/share/tt-station/app/
-	# ── tt-station-panel (GTK on-box GUI) ──
-	install -d debian/tt-station-panel/usr/share/tt-station-panel
-	install -m 755 box-panel/tt-station-panel.py \
-	    debian/tt-station-panel/usr/share/tt-station-panel/tt-station-panel.py
-	install -m 644 box-panel/panel_launchers.py \
-	    debian/tt-station-panel/usr/share/tt-station-panel/panel_launchers.py
-	install -d debian/tt-station-panel/usr/share/tt-station-panel/assets
-	install -m 644 box-panel/assets/tt-logo.png \
-	    debian/tt-station-panel/usr/share/tt-station-panel/assets/tt-logo.png
-	install -d debian/tt-station-panel/usr/bin
-	install -m 755 box-panel/tt-station-panel.wrapper \
-	    debian/tt-station-panel/usr/bin/tt-station-panel
-	install -d debian/tt-station-panel/usr/share/applications
-	install -m 644 box-panel/com.tenstorrent.ttstation.panel.desktop \
-	    debian/tt-station-panel/usr/share/applications/com.tenstorrent.ttstation.panel.desktop
-	# Icons (existing PNGs under box-panel/assets/icons/hicolor)
-	for sz in 48x48 128x128 256x256; do \
-	    install -d debian/tt-station-panel/usr/share/icons/hicolor/$$sz/apps; \
-	    install -m 644 box-panel/assets/icons/hicolor/$$sz/apps/com.tenstorrent.ttstation.panel.png \
-	        debian/tt-station-panel/usr/share/icons/hicolor/$$sz/apps/com.tenstorrent.ttstation.panel.png; \
-	done
-	install -d debian/tt-station-panel/usr/share/doc/tt-station-panel
-	install -m 644 box-panel/README.md \
-	    debian/tt-station-panel/usr/share/doc/tt-station-panel/README.md
 
 # ── systemd: install the user unit but do NOT enable/start it on install ─────
 # NOTE: this box's debhelper (13.14.1ubuntu5) splits system vs. --user unit

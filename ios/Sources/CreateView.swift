@@ -5,8 +5,8 @@ import AVKit
 import Photos
 import SwiftUI
 
-/// The Create tab: the image studio while an image model serves, the video studio
-/// while a video model serves, and otherwise a launcher for getting one going.
+/// The Create tab: the image studio while an image model serves, and otherwise
+/// a launcher for getting one going.
 struct CreateView: View {
     @Environment(AppModel.self) private var app
     @State private var transcribing = false
@@ -17,8 +17,6 @@ struct CreateView: View {
                 if let session = app.session {
                     if session.canMakeImages {
                         ImageStudio(session: session)
-                    } else if session.servedKind == "video" {
-                        VideoStudio(session: session)
                     } else {
                         CreateLauncher(session: session)
                     }
@@ -51,8 +49,8 @@ struct CreateView: View {
 
 // MARK: - Launcher
 
-/// Nothing visual is serving: explain the one-model-at-a-time box, offer the
-/// image and video models it has (start, or download first), show the gallery.
+/// No image model is serving: explain the one-model-at-a-time box, offer the
+/// image models it has (start, or download first), show the gallery.
 private struct CreateLauncher: View {
     let session: BoxSession
     @Environment(AppModel.self) private var app
@@ -61,30 +59,10 @@ private struct CreateLauncher: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
-                if let companion = session.companion, companion.isStarting {
-                    StartingCard(model: companion.model ?? "the image model", since: companion.since, eta: companion.etaS)
-                } else if let starting = session.startingModel {
+                if let starting = session.startingModel {
                     StartingCard(model: starting, since: session.serve?.since, eta: session.serve?.etaS)
                 } else {
                     intro
-                }
-                if let failed = session.companion, failed.isFailed {
-                    Label("\(failed.displayModel ?? "The image model") couldn't start: \(failed.error ?? "unknown error")",
-                          systemImage: "exclamationmark.triangle.fill")
-                        .font(.tt(.footnote))
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .card(tint: .red.opacity(0.3), radius: 16)
-                }
-                if let coserve = session.coserve, coserve.available, !session.isSplit {
-                    CoserveCard(info: coserve, isBusy: session.startingModel != nil) { chat, image in
-                        Task {
-                            actionError = nil
-                            do { try await session.startCoserve(chat: chat, image: image) } catch {
-                                actionError = error.localizedDescription
-                            }
-                        }
-                    }
                 }
                 if let failure = session.startFailure {
                     Label(failure, systemImage: "exclamationmark.triangle.fill")
@@ -101,7 +79,6 @@ private struct CreateLauncher: View {
                         .card(tint: .red.opacity(0.3), radius: 16)
                 }
                 modelSection("Images", kind: "image", icon: "photo.on.rectangle.angled")
-                modelSection("Videos", kind: "video", icon: "film.stack")
                 GalleryGrid(title: "Your creations", kind: nil)
             }
             .padding(.horizontal, 16)
@@ -110,17 +87,15 @@ private struct CreateLauncher: View {
         .scrollIndicators(.hidden)
         .task(id: session.box.id) {
             await session.loadCatalog()
-            await session.loadCoserve()
         }
         .refreshable {
             await session.loadCatalog(force: true)
-            await session.loadCoserve()
         }
     }
 
     private var intro: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Make images and video on your box", systemImage: "wand.and.stars")
+            Label("Make images on your box", systemImage: "wand.and.stars")
                 .font(.tt(.headline))
             Text(introText)
                 .font(.tt(.subheadline))
@@ -135,7 +110,7 @@ private struct CreateLauncher: View {
         let serving = session.status?.servingModel.map(Brand.shortModel)
         let tail = "Your box runs one model at a time, so starting one replaces "
             + (serving.map { "\($0), and chat is offline until you switch back." } ?? "whatever is serving.")
-        return "Start an image or video model below. " + tail
+        return "Start an image model below. " + tail
     }
 
     @ViewBuilder
@@ -164,83 +139,6 @@ private struct CreateLauncher: View {
             }
         } catch {
             actionError = error.localizedDescription
-        }
-    }
-}
-
-/// Chat and images at once: one model per P300 card. Picks the best ready pair
-/// and says what it costs (a smaller chat model than the whole box can run).
-private struct CoserveCard: View {
-    let info: CoserveInfo
-    let isBusy: Bool
-    let onStart: (String, String) -> Void
-    @State private var chat: String?
-    @State private var image: String?
-
-    private var readyChat: [CoserveInfo.Choice] { info.choices.chat.filter(\.ready) }
-    private var readyImage: [CoserveInfo.Choice] { info.choices.image.filter(\.ready) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "rectangle.split.2x1.fill")
-                    .font(.tt(.title3))
-                    .foregroundStyle(Brand.accent)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Chat and images together").font(.tt(.headline))
-                    Text("One model per card: chat on chips \(info.layout.chat), images on \(info.layout.image).")
-                        .font(.tt(.caption))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            if readyChat.isEmpty || readyImage.isEmpty {
-                Text(missingText)
-                    .font(.tt(.footnote))
-                    .foregroundStyle(.secondary)
-            } else {
-                picker("Chat", choices: readyChat, selection: $chat)
-                picker("Images", choices: readyImage, selection: $image)
-                if let note = readyImage.first(where: { $0.name == (image ?? readyImage.first?.name) })?.note {
-                    Label(note, systemImage: "exclamationmark.triangle")
-                        .font(.tt(.caption))
-                        .foregroundStyle(.orange)
-                }
-                Text("Uses a smaller chat model than the whole box runs. Starting replaces what's serving now.")
-                    .font(.tt(.caption))
-                    .foregroundStyle(.secondary)
-                Button {
-                    if let chat = chat ?? readyChat.first?.name, let image = image ?? readyImage.first?.name {
-                        onStart(chat, image)
-                    }
-                } label: {
-                    Label("Start both", systemImage: "play.fill").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.glassProminent)
-                .disabled(isBusy)
-            }
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .card(tint: Brand.accent.opacity(0.18))
-    }
-
-    private var missingText: String {
-        let chat = info.choices.chat.map(\.name).prefix(3).joined(separator: ", ")
-        let images = info.choices.image.map(\.name).prefix(3).joined(separator: ", ")
-        return "Download a chat model that fits half the box (\(chat.isEmpty ? "none listed" : chat)) and an image model (\(images.isEmpty ? "none listed" : images)) to run both at once."
-    }
-
-    private func picker(_ title: String, choices: [CoserveInfo.Choice], selection: Binding<String?>) -> some View {
-        HStack {
-            Text(title).font(.tt(.subheadline)).foregroundStyle(.secondary)
-            Spacer()
-            Picker(title, selection: Binding(
-                get: { selection.wrappedValue ?? choices.first?.name ?? "" },
-                set: { selection.wrappedValue = $0 })
-            ) {
-                ForEach(choices, id: \.name) { Text($0.name).tag($0.name) }
-            }
-            .pickerStyle(.menu)
         }
     }
 }

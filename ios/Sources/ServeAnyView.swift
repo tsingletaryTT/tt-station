@@ -3,9 +3,8 @@
 
 import SwiftUI
 
-/// Models → Everything this box can serve: its catalog, community packages
-/// with each of their profiles, and native vLLM bundles (`GET /code/models`),
-/// started the way the box says to. Shows the load while it happens, and the
+/// Models → Everything this box can serve: its catalog and what's running now
+/// (`GET /code/models`), started the way the box says to. Shows the load while it happens, and the
 /// owners' rule on who may start and stop models.
 struct ServeAnyView: View {
     let session: BoxSession

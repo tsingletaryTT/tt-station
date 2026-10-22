@@ -520,17 +520,7 @@ pub struct RunPyBackend {
     /// `stop` take `&self` and are reachable concurrently from
     /// `spawn_blocking` tasks.
     lease: Arc<Mutex<Option<String>>>,
-    /// The slice of the box `start` serves on, when the box is split between
-    /// models (`ServingBackend::set_placement`); `None` = the whole box.
-    placement: Arc<Mutex<Option<super::Placement>>>,
 }
-
-/// Serializes the launch window -- board reset through run.py's return (its
-/// system checks and `docker run`) -- across a split box's two slots, which
-/// start at once. Without it, one slot's `tt-smi -r 2,3` lands while the other's
-/// run.py is reading every board with `tt-smi -s`, which then fails ("devices
-/// must be reset") -- seen live on a P300x2.
-static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
 
 impl RunPyBackend {
     /// Build a `RunPyBackend` with production health-poll defaults. Starts
@@ -550,7 +540,6 @@ impl RunPyBackend {
             // existed. See the `gozer` field's doc comment.
             gozer: None,
             lease: Arc::new(Mutex::new(None)),
-            placement: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1195,18 +1184,6 @@ impl RunPyBackend {
 }
 
 impl ServingBackend for RunPyBackend {
-    fn set_placement(&self, placement: Option<super::Placement>) -> bool {
-        *self.placement.lock().expect("placement mutex poisoned") = placement;
-        true
-    }
-
-    fn placement(&self) -> Option<super::Placement> {
-        self.placement
-            .lock()
-            .expect("placement mutex poisoned")
-            .clone()
-    }
-
     /// See `ServingBackend::start_forcing`. `force` reaches exactly one
     /// decision in this whole function -- `acquire_lease`'s -- and that
     /// method's doc explains what it licenses. Every other guard below
@@ -1297,16 +1274,6 @@ impl ServingBackend for RunPyBackend {
         // lease to `self.lease` for `stop` to release -- see the very end of
         // this function.
         let lease = self.acquire_lease(model, force)?;
-        let placement = self
-            .placement
-            .lock()
-            .expect("placement mutex poisoned")
-            .clone();
-        if placement.is_some() && lease.is_some() {
-            anyhow::bail!(
-                "this box is split between models, which can't be combined with a chip lease"
-            );
-        }
 
         // Reset the board next -- validated on real hardware: stopping a
         // serving container leaves the p300x2 mesh's ethernet cores wedged,
@@ -1329,9 +1296,6 @@ impl ServingBackend for RunPyBackend {
         // a lease the command is byte-for-byte what it always was, because
         // the wedged-ethernet-core protection above was validated on real
         // hardware and single-tenant boxes still need it.
-        let launch_window = placement
-            .is_some()
-            .then(|| LAUNCH_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
         if self.config.reset_before_serve {
             let mut reset_args = self.config.reset_cmd.clone();
             if let Some(guard) = &lease {
@@ -1340,10 +1304,6 @@ impl ServingBackend for RunPyBackend {
                 // `gozer::Grant::reset_target`. `?` here drops `lease`,
                 // handing the unusable lease straight back.
                 reset_args.push(guard.grant().reset_target()?);
-            } else if let Some(placement) = &placement {
-                // Split box: reset only this slot's chips, never the other
-                // model's (`tt-smi -r 0,1`).
-                reset_args.push(placement.device_ids.clone());
             }
             let reset_cmd_str = reset_args.join(" ");
             eprintln!("resetting board before serving: {reset_cmd_str}");
@@ -1379,10 +1339,9 @@ impl ServingBackend for RunPyBackend {
         // `resolve_tt_device` describes the whole box, which is a wider mesh
         // than the lease covers. Fails closed rather than falling back; see
         // `leased_tt_device`. `?` drops `lease`, handing it straight back.
-        let device = match (&lease, &placement) {
-            (Some(guard), _) => Some(self.leased_tt_device(guard.grant())?),
-            (None, Some(placement)) => Some(placement.device.clone()),
-            (None, None) => self.resolve_tt_device(),
+        let device = match &lease {
+            Some(guard) => Some(self.leased_tt_device(guard.grant())?),
+            None => self.resolve_tt_device(),
         };
         let image = self.resolve_image();
 
@@ -1491,10 +1450,7 @@ impl ServingBackend for RunPyBackend {
                     .collect::<Vec<_>>()
                     .join(","),
             ),
-            None => placement
-                .as_ref()
-                .map(|p| p.device_ids.clone())
-                .or_else(|| self.config.device_id.clone()),
+            None => self.config.device_id.clone(),
         };
         if lease.is_some() {
             if let Some(configured) = self.config.device_id.as_deref() {
@@ -1540,27 +1496,7 @@ impl ServingBackend for RunPyBackend {
         // the tt catalog's name ("Qwen/Qwen3-32B" -> "Qwen3-32B"); passing the
         // org-qualified form would make `tt serve` treat it as a tt-model
         // bundle id instead.
-        // A split box can't go through `tt serve` (no chip selector): run tt's
-        // own managed checkout's run.py directly, with tt's venv Python -- the
-        // command `tt serve --dry-run` prints, plus `--device-id`.
-        if self.config.tt_cli_serve.is_some() && placement.is_some() {
-            let venv_python =
-                std::path::Path::new(&self.config.repo_dir).join("../venv/bin/python");
-            if venv_python.exists() {
-                args[0] = venv_python.to_string_lossy().into_owned();
-            }
-            // What `tt serve` always passes: no auth on the box-local API, and
-            // the host's Hugging Face cache (where `tt model pull` put weights).
-            if !self.config.no_auth {
-                args.push("--no-auth".to_string());
-            }
-            if self.config.host_hf_cache.is_none() {
-                if let Ok(home) = std::env::var("HOME") {
-                    args.push("--host-hf-cache".to_string());
-                    args.push(format!("{home}/.cache/huggingface"));
-                }
-            }
-        } else if let Some(tt) = &self.config.tt_cli_serve {
+        if let Some(tt) = &self.config.tt_cli_serve {
             // A lease on every chip is the whole box, which is what `tt
             // serve` opens anyway; only a partial lease can't be honoured.
             let partial = lease.as_ref().is_some_and(|guard| {
@@ -1650,9 +1586,6 @@ impl ServingBackend for RunPyBackend {
                     self.stop_launched_container(None);
                 }
             })?;
-        // run.py has validated the box and launched its container: the other
-        // slot may reset its chips now.
-        drop(launch_window);
 
         // `run.py`'s captured stdout carries the underlying container id and
         // both log file paths on a successful launch (see

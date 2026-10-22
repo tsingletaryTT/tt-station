@@ -1188,10 +1188,7 @@ pub(crate) async fn v1_messages(
         .get("x-tt-session")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.chars().take(40).collect::<String>());
-    let asked_model = req["model"].as_str().map(str::to_string);
-    let Some(endpoint) =
-        crate::gateway::llm_endpoint(&state, asked_model.as_deref(), session.is_some()).await
-    else {
+    let Some(endpoint) = crate::gateway::chat_endpoint(&state).await else {
         // Asleep: wake it. "Overloaded" makes Claude Code wait and retry.
         if let Some(waking) = crate::idle::wake_for_request(&state).await {
             return error(
@@ -1750,7 +1747,7 @@ mod tests {
         AppState::new(
             "t".to_string(),
             "1xBH".to_string(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
     }
 

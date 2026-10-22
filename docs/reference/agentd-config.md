@@ -61,7 +61,7 @@ complete, independently-selectable serving configuration.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `backend` | string | `"runpy"` \| `"docker"` \| `"dstack"`. Default `"runpy"`. |
+| `backend` | string | `"runpy"` \| `"docker"`. Default `"runpy"`. |
 | `tt_inference_repo` | string (path) | Local `tt-inference-server` checkout (the `runpy` backend). Default: `./vendor/tt-inference-server` if present, else `$HOME/code/tt-inference-server`. |
 | `serving_image` | string | Container image to serve (`run.py --override-docker-image`, or `docker run <image>` for the `docker` backend). No default for `runpy` (left unset so `run.py` can self-resolve via `model_spec.json`); the `docker` backend falls back to a hardcoded example tag if unset — pin this per box. |
 | `auto_image` | bool | `runpy` only: opt in to auto-picking the newest locally-present release image when `serving_image` is unset. Default `false` — image↔run.py compatibility is a curated matrix, so pinning is safer. |
@@ -82,7 +82,7 @@ A serving-scoped key placed under `[global]` (or a global-scoped key placed
 under `[profile.*]`) is an **unknown key** there and is rejected at parse
 time — see "Errors" below.
 
-### Example (similar to `box-panel/agentd.example.toml`, which is more minimal)
+### Example (similar to `deploy/agentd.example.toml`, which is more minimal)
 
 ```toml
 default_profile = "stable"
@@ -228,12 +228,7 @@ tt-station config --host <host:port> --json     # pretty-printed ConfigSummary
 and the `--follow` WebSocket) don't send a stored token yet, so from another machine they get
 `401` until the CLI is updated; on the box itself they work unpaired.
 
-The GTK box panel (`box-panel/tt-station-panel.py`) reads the profile list
-directly from the box-local TOML to populate a profile dropdown *before* the
-agent is started, passes `--profile <selected>` on Start/Restart, and shows
-the active profile from the running agent's own `GET /config` once it's up
-(falling back to the dropdown pick while starting). See
-`box-panel/agentd.example.toml` for a copy-paste starting file.
+See `deploy/agentd.example.toml` for a copy-paste starting file.
 
 ## Errors
 

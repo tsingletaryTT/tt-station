@@ -167,7 +167,7 @@ backed by device-cgroup restriction rather than trusting cooperation.
   `tt-dra-driver` and let tt-station be a thin UX veneer over `ResourceClaim`s. Same
   primitive underneath, so the mental model carries over — but it stays a *growth path*,
   not a dependency.
-- **Note the third isolation axis:** dstack/confidential-VMs (the M4 `dstack` backend stub)
+- **Note the third isolation axis:** dstack/confidential-VMs (the M4 direction; TT Station's `dstack` backend stub was removed)
   isolate at the *VM* boundary rather than the *chip* boundary. Per-chip leasing and
   per-VM attestation are complementary, not competing.
 

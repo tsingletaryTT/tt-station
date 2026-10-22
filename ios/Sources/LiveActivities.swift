@@ -4,8 +4,8 @@
 import ActivityKit
 import SwiftUI
 
-/// Keeps a Live Activity per kind of long work (a model loading, an Orchard
-/// bring-up, a transcription) in step with the box while the app runs. Between
+/// Keeps a Live Activity per kind of long work (a model loading, a
+/// transcription) in step with the box while the app runs. Between
 /// updates the bar runs on from its estimate, so the Lock Screen keeps moving
 /// after you put the phone down. No push needed: nothing leaves the phone.
 @MainActor
@@ -77,17 +77,6 @@ struct LiveActivityDriver: ViewModifier {
             } else {
                 center.finish(kind: "model", title: "Model didn't start", detail: session.startFailure ?? "")
             }
-        }
-
-        // An Orchard bring-up.
-        if let run = (try? await session.orchard())?.runs.first(where: \.live) {
-            let p = run.progress
-            center.show(kind: "orchard", box: box, .init(
-                title: "Bringing up \(run.title)", detail: p?.title ?? OrchardWords.state(run.state).name,
-                progress: p?.overall, estimatedStart: nil,
-                estimatedEnd: p?.overallEtaS.map { Date.now.addingTimeInterval($0) }, symbol: "leaf.fill", done: false))
-        } else if center.isActive("orchard") {
-            center.finish(kind: "orchard", title: "Bring-up finished", detail: "Open Orchard to see how it went")
         }
 
         // A transcription.

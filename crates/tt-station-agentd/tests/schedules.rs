@@ -3,7 +3,7 @@
 
 //! Scheduled modes (`src/schedules.rs`): the routes (checked, normalized,
 //! kept sorted, saved to disk and read back), the cap, when one is due, and
-//! what stops one from switching (a bring-up holding the chips).
+//! what stops one from switching (a transcription job using the chips).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tt_station_agentd::routes::{app, AppState};
 use tt_station_agentd::schedules::{self, due, parse_time, Schedule, Schedules};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 mod support;
 
@@ -34,7 +34,7 @@ impl Box_ {
         // or they'd pile up across runs in the shared default.
         let config = file.parent().unwrap().join("config");
         std::fs::create_dir_all(&config).unwrap();
-        let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+        let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
             .with_telemetry_config("/nonexistent/tt-smi".to_string(), 1000)
             .with_config_dir(config)
             .with_schedules(Schedules::open(file));
@@ -353,19 +353,4 @@ fn imported_schedules_are_checked_and_capped() {
     let (added, _) = s.merge_imported(many);
     assert_eq!(added, schedules::MAX_SCHEDULES - 2);
     assert_eq!(s.list().len(), schedules::MAX_SCHEDULES);
-}
-
-#[test]
-fn a_schedule_skips_while_something_else_holds_the_chips() {
-    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend));
-    assert_eq!(schedules::blocker(&state), None);
-    state.set_orchard_busy(true);
-    assert!(schedules::blocker(&state).unwrap().contains("Orchard"));
-    state.set_orchard_busy(false);
-    state.set_bringup_busy(true);
-    assert!(schedules::blocker(&state)
-        .unwrap()
-        .starts_with("A model bring-up is using the chips."));
-    state.set_bringup_busy(false);
-    assert_eq!(schedules::blocker(&state), None);
 }

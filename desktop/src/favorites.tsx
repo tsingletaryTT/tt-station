@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-// Favorite models: a star on every model card (official, community, your
-// bring-ups, the community catalog). The list lives on the box (`/favorites`),
+// Favorite models: a star on every official model card. The list lives on the box (`/favorites`),
 // so every app shows the same one; this module keeps one copy for the whole
 // window, so a star on one card updates the others at once.
 
@@ -10,7 +9,8 @@ import { useEffect, useState } from "react";
 import { get, put } from "./api";
 import { toastError } from "./ui";
 
-export type FavoriteKind = "official" | "community" | "code" | "catalog";
+/** "official" is the only kind starred now; a box may still hold others from older apps. */
+export type FavoriteKind = "official" | (string & {});
 export interface Favorite { key: string; name: string; kind: FavoriteKind; added: number }
 
 let list: Favorite[] = [];

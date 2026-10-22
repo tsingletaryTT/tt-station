@@ -554,7 +554,6 @@ fn spawn(state: AppState, id: String) {
                     },
                     None,
                     crate::notify::Audience::person_or_owners(job.person.clone()),
-                    None,
                 );
             }
             Err(e) if stopped(&state, &id) => {
@@ -575,7 +574,6 @@ fn spawn(state: AppState, id: String) {
                     },
                     None,
                     crate::notify::Audience::person_or_owners(job.person.clone()),
-                    None,
                 );
             }
         }
@@ -1669,7 +1667,7 @@ mod tests {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(tmp.path().to_path_buf());
         let mut running: Job = serde_json::from_value(json!({

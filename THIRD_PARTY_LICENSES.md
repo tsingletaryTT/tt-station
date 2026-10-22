@@ -346,9 +346,9 @@ all target platforms, as `cargo tree` resolves features. 283 crates.
 ## npm packages (desktop app, production dependencies)
 
 From `desktop/package-lock.json`, excluding devDependencies (Electron itself, the
-build toolchain and test tools). 136 packages.
+build toolchain and test tools). 133 packages.
 
-- MIT: 133
+- MIT: 130
 - OFL-1.1: 2
 - ISC: 1
 
@@ -381,9 +381,6 @@ build toolchain and test tools). 136 packages.
 | @types/unist | 2.0.11 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @types/unist | 3.0.3 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | @ungap/structured-clone | 1.4.0 | ISC | https://github.com/ungap/structured-clone |
-| @xterm/addon-fit | 0.11.0 | MIT | https://github.com/xtermjs/xterm.js/tree/master/addons/addon-fit |
-| @xterm/addon-webgl | 0.19.0 | MIT | https://github.com/xtermjs/xterm.js/tree/master/addons/addon-webgl |
-| @xterm/xterm | 6.0.0 | MIT | https://github.com/xtermjs/xterm.js |
 | bail | 2.0.2 | MIT | wooorm/bail |
 | ccount | 2.0.1 | MIT | wooorm/ccount |
 | character-entities | 2.0.2 | MIT | wooorm/character-entities |

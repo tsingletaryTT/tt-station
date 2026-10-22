@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use tt_station_agentd::routes::{app, local_http_app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 /// The box's own plain-HTTP server, which `/logs` answers without pairing
 /// (the console and panel read it there).
@@ -30,7 +30,7 @@ async fn spawn(state: AppState) -> String {
 /// From the network (the HTTPS server's router), `/logs` needs a paired token.
 #[tokio::test]
 async fn logs_from_the_network_need_pairing() {
-    let state = AppState::new("t".to_string(), "1xBH".to_string(), Arc::new(DstackBackend));
+    let state = AppState::new("t".to_string(), "1xBH".to_string(), Arc::new(NullBackend));
     let router = app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -56,7 +56,7 @@ async fn logs_run_source_returns_newest_file_tail() {
     let t0 = filetime::FileTime::from_unix_time(1_000_000, 0);
     filetime::set_file_mtime(run_dir.join("old.log"), t0).unwrap();
 
-    let state = AppState::new("qb2".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let state = AppState::new("qb2".into(), "4xBH".into(), Arc::new(NullBackend))
         .with_log_source(repo.path());
     let base = spawn(state).await;
 
@@ -74,7 +74,7 @@ async fn logs_run_source_returns_newest_file_tail() {
 #[tokio::test]
 async fn logs_no_file_yields_empty_lines_null_origin() {
     let repo = tempfile::tempdir().unwrap();
-    let state = AppState::new("qb2".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let state = AppState::new("qb2".into(), "4xBH".into(), Arc::new(NullBackend))
         .with_log_source(repo.path());
     let base = spawn(state).await;
     let resp = reqwest::get(format!("{base}/logs?source=container"))
@@ -88,7 +88,7 @@ async fn logs_no_file_yields_empty_lines_null_origin() {
 
 #[tokio::test]
 async fn logs_no_repo_configured_is_conflict() {
-    let state = AppState::new("qb2".into(), "4xBH".into(), Arc::new(DstackBackend));
+    let state = AppState::new("qb2".into(), "4xBH".into(), Arc::new(NullBackend));
     let base = spawn(state).await;
     let resp = reqwest::get(format!("{base}/logs?source=run"))
         .await

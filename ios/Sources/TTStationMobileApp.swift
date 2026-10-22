@@ -191,9 +191,6 @@ private struct NowServingAccessory: View {
             return "Starting \(Brand.shortModel(starting))\(elapsed)"
         }
         if session.startFailure != nil { return "\(session.serve?.displayModel ?? "Model") failed to start" }
-        if session.isSplit, let chat = session.serve?.displayModel, let image = session.companion?.displayModel {
-            return "\(chat) + \(image)"
-        }
         if let model = session.serve?.displayModel ?? session.status?.servingModel.map(Brand.shortModel) {
             return session.isServing ? "\(model)\(kindSuffix(session.servedKind))" : "Nothing serving"
         }

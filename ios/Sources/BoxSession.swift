@@ -35,8 +35,6 @@ final class BoxSession {
     /// list and downloads aren't available.
     private(set) var canDownload = false
     private(set) var catalogError: String?
-    /// Whether (and with which models) the box can run chat and images at once.
-    private(set) var coserve: CoserveInfo?
     /// Whether this app and the box speak the same API (from `/status`).
     private(set) var compat: ClientCompat = .ok
     /// What this phone may do on the box: owner or member, and whether it may
@@ -94,40 +92,12 @@ final class BoxSession {
         return catalog?.first { $0.name == served || $0.hfRepo == status?.servingModel }?.kind ?? "chat"
     }
 
-    /// The image half of a split box, when it's doing something.
-    var companion: CompanionState? {
-        guard let companion = serve?.companion, companion.phase != "idle" else { return nil }
-        return companion
-    }
-
-    /// Chat and images at once.
-    var isSplit: Bool { serve?.split == true }
-
-    /// An image model is serving, alone or beside chat.
-    var canMakeImages: Bool { servedKind == "image" || companion?.isServing == true }
+    /// An image model is serving.
+    var canMakeImages: Bool { servedKind == "image" }
 
     /// The image model to name in the studio.
     var imageModel: String? {
-        if companion?.isServing == true { return companion?.model ?? companion?.servedId }
-        return servedKind == "image" ? (serve?.model ?? status?.servingModel) : nil
-    }
-
-    func loadCoserve() async {
-        coserve = try? await client.coserve()
-    }
-
-    /// Run `chat` and `image` side by side (one P300 card each).
-    func startCoserve(chat: String, image: String) async throws {
-        onLongOperation?()
-        do {
-            try await client.startCoserve(chat: chat, image: image)
-        } catch {
-            noteAuthFailure(error)
-            throw error
-        }
-        pendingStart = chat
-        items.append(.notice("Starting \(Brand.shortModel(chat)) for chat and \(Brand.shortModel(image)) for images, side by side."))
-        await refreshStatus()
+        servedKind == "image" ? (serve?.model ?? status?.servingModel) : nil
     }
 
     /// A chat model is serving (or one of unknown kind, which the agent lets the
@@ -198,16 +168,6 @@ final class BoxSession {
     }
 
     private func announceTransition(from previous: ServeState?, to next: ServeState, wasStarting: String?) {
-        if let was = previous?.companion, let now = next.companion, was.phase != now.phase {
-            switch (was.phase, now.phase) {
-            case ("starting", "serving"):
-                items.append(.notice("\(now.displayModel ?? "The image model") is ready. Make images in the Create tab while you chat."))
-            case ("starting", "failed"):
-                items.append(.error("\(now.displayModel ?? "The image model") couldn't start: \(now.error ?? "unknown error")"))
-            default:
-                break
-            }
-        }
         guard let previous, previous.phase != next.phase else { return }
         switch (previous.phase, next.phase) {
         case ("starting", "serving"):
@@ -506,14 +466,6 @@ final class BoxSession {
         do { return try await client.generateImage(request) } catch { noteAuthFailure(error); throw error }
     }
 
-    func submitVideo(_ request: VideoRequest) async throws -> VideoSubmission {
-        do { return try await client.submitVideo(request) } catch { noteAuthFailure(error); throw error }
-    }
-
-    func videoJob(id: String) async throws -> VideoJob { try await client.videoJob(id: id) }
-    func downloadVideo(id: String) async throws -> Data { try await client.downloadVideo(id: id) }
-    func cancelVideo(id: String) async throws { try await client.cancelVideo(id: id) }
-
     // MARK: direct controls (the Box tab)
 
     func stopServing() async throws {
@@ -539,7 +491,7 @@ final class BoxSession {
             return creation
         }
         let data = try await client.creation(id: id)
-        let creation = Creation(id: UUID(), kind: .image, prompt: prompt ?? "", model: companion?.model ?? "image model",
+        let creation = Creation(id: UUID(), kind: .image, prompt: prompt ?? "", model: imageModel ?? "image model",
                                 seed: nil, steps: 4, createdAt: Date(), boxID: box.id, seconds: nil,
                                 fileName: try store.write(data, ext: "jpg"), jobID: nil, status: "done", error: nil)
         store.add(creation)
@@ -569,13 +521,6 @@ final class BoxSession {
         return freed
     }
     func webClients() async throws -> [WebClient] { try await client.webClients() }
-    func lab() async throws -> LabStatus { try await client.lab() }
-    func orchard(fresh: Bool = false) async throws -> OrchardStatus { try await client.orchard(fresh: fresh) }
-    func serveOrchard(_ name: String, stopServing: Bool) async throws {
-        try await client.serveOrchard(name, stopServing: stopServing)
-        await refreshStatus()
-    }
-    func setOrchardPackaging(_ enabled: Bool) async throws { try await client.setOrchardPackaging(enabled) }
     func people() async throws -> PeopleList { try await client.people() }
     func addPerson(name: String, me: Bool) async throws -> PeopleList { try await client.addPerson(name: name, me: me) }
     func setMe(_ person: String?) async throws -> PeopleList { try await client.setMe(person) }
@@ -591,27 +536,11 @@ final class BoxSession {
     func revokeSSH(publicKey: String) async throws { try await client.revokeSSH(publicKey: publicKey) }
     func energy() async throws -> EnergyReport { try await client.energy() }
     func voice() async throws -> BoxVoiceStatus { try await client.voice() }
-    func bringupRuns() async throws -> [BringupRun] { try await client.bringupRuns() }
-    func decideBringup(run: String, approval: String, decision: String) async throws {
-        try await client.decideBringup(run: run, approval: approval, decision: decision)
-    }
 
     func setVoice(_ id: String) async throws { try await client.setVoice(id) }
     func speak(_ text: String, voice: String?, pcm: Bool = true) async throws -> Data {
         try await client.speak(text, voice: voice, pcm: pcm)
     }
-    func orchardSetup() async throws { try await client.orchardSetup() }
-    func orchardPreflight(model: String, acceptCredentials: Bool) async throws -> OrchardPreflight {
-        try await client.orchardPreflight(model: model, acceptCredentials: acceptCredentials)
-    }
-    func startOrchard(model: String, stopServing: Bool, acceptCredentials: Bool) async throws {
-        try await client.startOrchard(model: model, stopServing: stopServing, acceptCredentials: acceptCredentials)
-    }
-    func orchardRun(_ name: String) async throws -> OrchardRun { try await client.orchardRun(name) }
-    func orchardControl(_ name: String, action: String, stopServing: Bool = false) async throws {
-        try await client.orchardControl(name, action: action, stopServing: stopServing)
-    }
-    func orchardReport(_ name: String, _ which: String) async throws -> String { try await client.orchardReport(name, which) }
     func jobs() async throws -> [BoxJob] { try await client.jobs() }
     func uploadTranscription(file: URL, name: String, tonight: Bool) async throws -> BoxJob {
         onLongOperation?()
@@ -620,17 +549,10 @@ final class BoxSession {
     func runJobNow(_ id: String) async throws { try await client.runJobNow(id) }
     func deleteJob(_ id: String) async throws { try await client.deleteJob(id) }
     func jobResult(_ id: String, format: String = "txt") async throws -> Data { try await client.jobResult(id, format: format) }
-    func prepareLab(model: String) async throws { try await client.prepareLab(model: model) }
-    func runLab(_ run: LabRunRequest) -> AsyncThrowingStream<LabEvent, Error> { client.runLab(run) }
     func startWebClient(_ tool: String) async throws -> String { try await client.startWebClient(tool) }
     func stopWebClient(_ tool: String) async throws { try await client.stopWebClient(tool) }
     func memories() async throws -> [MemoryItem] { try await client.memories() }
     func events(since: Int) async throws -> (events: [BoxEvent], latest: Int) { try await client.events(since: since) }
-    func notifySettings() async throws -> NotifySettings { try await client.notifySettings() }
-    func registerPush(token: String, sandbox: Bool, name: String) async throws -> PushRegistration {
-        try await client.registerPush(token: token, sandbox: sandbox, name: name)
-    }
-    func testNotification() async throws -> Int { try await client.testNotification() }
     func powerInfo() async throws -> PowerInfo {
         let info = try await client.powerInfo()
         // Remember how to wake it, for when it's asleep and can't be asked.

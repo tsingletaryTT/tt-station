@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 async fn spawn_with(state: AppState) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -64,7 +64,7 @@ async fn devices(client: &reqwest::Client, base: &str, token: &str) -> reqwest::
 }
 
 fn new_state() -> AppState {
-    AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+    AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
 }
 
 #[tokio::test]
@@ -322,12 +322,8 @@ async fn an_expired_device_is_told_so_and_asked_to_pair_again() {
         session("fresh", "fresh-token", now),
     ] });
     std::fs::write(&path, file.to_string()).unwrap();
-    let restarted = AppState::new_persisting(
-        "qb2-lab".into(),
-        "4xBH".into(),
-        Arc::new(DstackBackend),
-        path,
-    );
+    let restarted =
+        AppState::new_persisting("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend), path);
     assert_eq!(restarted.sessions().len(), 1);
     assert!(!restarted.sessions().is_live("stale-token"));
     assert!(restarted.sessions().is_live("fresh-token"));

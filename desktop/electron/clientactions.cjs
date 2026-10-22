@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-// Asking before a box acts on this computer. When TT Station runs on another
-// computer than the box, Tori's computer tools run here (main.cjs
-// `computerTool`): a box could open any web or mail link, launch any app,
+// Asking before a box acts on this computer. Tori's computer tools run here,
+// in the desktop app (main.cjs `computerTool`): a box could open any web or
+// mail link, launch any app,
 // record with the microphone, search the person's files or change settings,
 // with nobody at the keyboard agreeing. So each such action is put to the
 // person first -- exactly what will open, and which box asked -- with "Allow

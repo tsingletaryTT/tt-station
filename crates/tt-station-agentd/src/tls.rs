@@ -35,9 +35,22 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The DER inside one PEM block.
+fn pem_to_der(pem: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .map(str::trim)
+        .collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .map_err(|e| format!("the certificate isn't PEM: {e}"))
+}
+
 /// SHA-256 of the first certificate in `cert_pem`.
 pub fn fingerprint(cert_pem: &str) -> Result<String, String> {
-    let der = crate::apns::pem_to_der(
+    let der = pem_to_der(
         cert_pem
             .split("-----END CERTIFICATE-----")
             .next()

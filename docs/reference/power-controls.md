@@ -1,8 +1,7 @@
 # Box power controls (reset chips / suspend / reboot / shutdown / wake)
 
 tt-station can power-manage a QuietBox from the agent's `POST /power` route, the `tt-station
-power`/`tt-station wake` CLI, the macOS app's power menu, and the Linux box panel's local power row —
-all backed by the same design
+power`/`tt-station wake` CLI, and the macOS app's power menu — all backed by the same design
 (`docs/superpowers/specs/2026-07-15-box-power-controls-design.md`). This doc is the reference
 for operators wiring up or troubleshooting any of those surfaces, and for the polkit rule that
 makes suspend/reboot/shutdown work without an interactive password prompt.
@@ -32,8 +31,7 @@ box must be paired first).
 lease refusals described below. The machine ops have no lease check, so it is ignored for them.
 
 `PowerAction::parse` (`crates/tt-station-agentd/src/power.rs`) is the single source of truth for
-these four wire values; the CLI, the macOS `PowerAction` enum, and the panel's action strings all
-match it.
+these four wire values; the CLI, and the macOS `PowerAction` enum match it.
 
 **Behavior by action** (`AppState::run_power_command`):
 
@@ -65,8 +63,7 @@ match it.
   `gozer release --no-reset` (the command just reset them). When the lease can't be taken only
   because the chips are this agent's own serve or untracked work, the reset runs unleased as
   before; a forced reset past someone else's lease is unleased too. Every caller of
-  `run_power_command` gets this: the Doctor's fix, bring-up, Orchard, native vLLM and
-  community starts. See [`chip-leasing.md` §4](chip-leasing.md).
+  `run_power_command` gets this, the Doctor's fix included. See [`chip-leasing.md` §4](chip-leasing.md).
 - **`suspend` / `reboot` / `shutdown`** (the "machine ops",
   `PowerAction::is_machine_op() == true` for everything but `reset-chips`) —
   1. Best-effort stop any serving container first (reuses the backend's normal `stop` path) so a
@@ -85,7 +82,7 @@ match it.
 | `suspend`/`reboot`/`shutdown` succeeds | `202 Accepted` | `{"action": "...", "accepted": true}` — the command only *initiates* teardown; the box may go down before a `200` could ever be observed, so the response says "accepted," never "done" |
 | `reset-chips` refused because another tenant holds chips (or occupancy could not be read), and `force` was not set | `409 Conflict` | `{"error": "refusing reset-chips: … board <serial> is held by <who>. … pass `--force` …"}` — the box's state conflicts with the request; nothing ran. No duration is reported: gozer exposes no lease start time |
 | `reset-chips` with `"force": true` on that same contended box | `200` | `{}` — the reset ran; the override (holder + chips) is in the agent's journal |
-| Command fails with a permission/polkit-shaped error (message contains "Interactive authentication required", "Access denied", or "not authorized") | `403` | Points at this doc — see §6 below |
+| Command fails with a permission/polkit-shaped error (message contains "Interactive authentication required", "Access denied", or "not authorized") | `403` | Points at this doc — see §5 below |
 | Any other command failure (e.g. the binary itself is missing) | `500` | The generic `backend_error` fallback used by every other route |
 | No bearer token / bad token | `401` | Standard `BearerAuth` rejection |
 
@@ -196,35 +193,11 @@ target).
 
 ---
 
-## 5. Linux box panel: the Power row
-
-The GTK panel (`box-panel/tt-station-panel.py`) runs **on the box**, so its Power row shells
-**local** commands directly rather than routing through the agent's `/power` — the panel is
-already local and already shells `systemctl` for agent lifecycle, and doing the same here avoids
-needing a pairing token just to press a button on the box's own screen. Both paths (the agent's
-`/power` and the panel's local calls) rely on the *same* polkit rule — one privilege source, two
-contexts.
-
-Row: **Reset chips**, **Suspend**, **Reboot**, **Shut Down** — deliberately **no Wake button**
-(waking the box from its own screen is meaningless; it's already awake to display the panel).
-
-- Reset chips fires immediately, no confirmation (non-destructive to the OS session).
-- Suspend/Reboot/Shut Down each show a `Gtk.MessageDialog` (question, OK/Cancel) naming the
-  consequence before running.
-- The pure argv-builder `power_command(action) -> list[str]`
-  (`box-panel/panel_launchers.py`) maps `reset-chips → ["tt-smi","-r"]`,
-  `suspend/reboot/shutdown → ["systemctl","suspend"|"reboot"|"poweroff"]`; unit-tested in
-  `test_panel_launchers.py`. The panel itself is thin worker-thread glue (never runs a blocking
-  `systemctl` call on the GTK main thread) — a missing `tt-smi`/`systemctl` binary surfaces via
-  the panel's existing inline `_log` message, never a crash.
-
----
-
-## 6. The polkit rule
+## 5. The polkit rule
 
 `systemctl suspend|reboot|poweroff` (and the equivalent logind D-Bus calls) normally require an
 interactive polkit authentication prompt for a non-root user — fine at a desktop, useless for a
-headless agent or a box panel with no one there to type a password. tt-station ships a polkit
+headless agent with no one there to type a password. tt-station ships a polkit
 **rule** (not a full policy) that grants these specific actions to the agent's own account,
 from its systemd user manager.
 
@@ -234,8 +207,7 @@ from its systemd user manager.
 
 ```javascript
 // tt-station: let the TT Station agent power-manage this machine without an
-// interactive auth prompt, so `POST /power` (agent) and the box panel's
-// power row work headlessly. Grants ONLY the logind power actions, and only
+// interactive auth prompt, so `POST /power` (agent) works headlessly. Grants ONLY the logind power actions, and only
 // to a process that is both:
 //  - run by a member of the `tt-station-power` group. Put the agent's own
 //    account in it and no other: `sudo groupadd -f tt-station-power &&
@@ -247,7 +219,7 @@ from its systemd user manager.
 // by their user, so `system_unit` only ever names the user manager, and any
 // process the agent's account runs under it (its desktop apps too) passes.
 // Needs polkit 121+ for `system_unit`; older polkit never grants. See
-// docs/reference/power-controls.md §6.
+// docs/reference/power-controls.md §5.
 polkit.addRule(function(action, subject) {
     if ((action.id == "org.freedesktop.login1.reboot" ||
             action.id == "org.freedesktop.login1.reboot-multiple-sessions" ||
@@ -285,8 +257,7 @@ permission to execute; no polkit action is involved).
 
 ### Where it installs
 
-The `tt-station` `.deb` (not `tt-station-panel` — the rule is shipped in the base package since
-both the agent and the panel depend on it) installs the file to:
+The `tt-station` `.deb` installs the file to:
 
 ```
 /etc/polkit-1/rules.d/49-tt-station-power.rules
@@ -336,7 +307,7 @@ that returns a non-`undefined` result).
 
 ### Manual install (non-`.deb` setups)
 
-If you're running the agent/panel from source rather than the `.deb` (or on a distro where the
+If you're running the agent from source rather than the `.deb` (or on a distro where the
 package hasn't been built), install the rule by hand:
 
 ```bash
@@ -370,7 +341,5 @@ the same way (`sudo rm /etc/polkit-1/rules.d/49-tt-station-power.rules`) if you 
   This is purely informational: it never blocks any `tt-station console` action, and every route/CLI
   command other than the three machine-power ops works identically whether the rule is present
   or not.
-- **The Linux panel's Power row / `tt-station power suspend|reboot|shutdown`:** the underlying
-  `systemctl` call fails the same way as above; the panel surfaces it via its normal inline
-  `_log` message, `tt-station power` surfaces the agent's `403` (with the same doc pointer) as a CLI
+- **`tt-station power suspend|reboot|shutdown`:** `tt-station power` surfaces the agent's `403` (with the same doc pointer) as a CLI
   error.

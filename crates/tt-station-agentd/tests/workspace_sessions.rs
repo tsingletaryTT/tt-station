@@ -21,7 +21,7 @@ use std::sync::Arc;
 use reqwest::Method as M;
 use serde_json::{json, Value};
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 mod support;
 
@@ -61,7 +61,7 @@ fn box_at(config: &Path) -> AppState {
     AppState::new_persisting(
         "qb2-lab".into(),
         "4xBH".into(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
         config.join("tokens.json"),
     )
     .with_config_dir(config.to_path_buf())

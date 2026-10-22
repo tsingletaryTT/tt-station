@@ -7,7 +7,7 @@ The route table is parsed out of crates/tt-station-agentd/src/router.rs (every
 `.route("<path>", <method>(...)...)` call, multi-line ones included). Docs are
 scanned for inline code spans that look like endpoints:
 
-  `GET /people`, `POST /orchard/runs/{name}/{pause|resume}`  -> path AND method must match
+  `GET /people`, `POST /routines/runs/{run}/stop`            -> path AND method must match
   `/status`, `/v1`, `/tt/*`                                   -> path must be a route or a
                                                                  prefix of one
 
@@ -39,10 +39,7 @@ ALLOW = {
     "/health": "tt-inference-server / vLLM readiness, not the agent",
     "/chat/completions": "upstream OpenAI-compatible path (relative to the served /v1)",
     "/v1/audio/transcriptions": "upstream speech server the jobs runner calls",
-    "/v1/videos/generations": "tt-media-server path the agent proxies to",
     "/api/models/{repo}": "Hugging Face Hub API",
-    "/explain": "a tt-toplike key binding, not a route",
-    "/1": "fragment of /dev/tenstorrent/0 and /1",
     "/": "bare root, used in prose",
 }
 

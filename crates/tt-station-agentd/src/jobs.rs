@@ -587,13 +587,12 @@ pub async fn run_forever(state: AppState) {
         let whisper = serving_whisper(&state).await;
         let life = state.lifecycle();
         let go = GO_AHEAD.lock().expect("go mutex").contains(&job.id);
-        // The chips are busy (a model, Lab, Orchard): transcribe on the CPU
-        // instead of switching, unless the owner asked for the chips.
-        let chips_busy = state.chips_holder().is_some()
-            || matches!(
-                life.phase,
-                Phase::Serving | Phase::Starting | Phase::Stopping
-            );
+        // The chips are busy with a model: transcribe on the CPU instead of
+        // switching, unless the owner asked for the chips.
+        let chips_busy = matches!(
+            life.phase,
+            Phase::Serving | Phase::Starting | Phase::Stopping
+        );
         if whisper.is_none() && chips_busy && !go && job.status != JobStatus::Switching {
             if let Some(cpu) = crate::voice::cpu_whisper().await {
                 let id = job.id.clone();
@@ -601,9 +600,6 @@ pub async fn run_forever(state: AppState) {
                 GO_AHEAD.lock().expect("go mutex").retain(|g| g != &id);
                 continue;
             }
-        }
-        if state.chips_holder().is_some() {
-            continue;
         }
         match plan(&job, whisper.is_some(), life.phase, go, local_hour()) {
             Plan::Hold => {}

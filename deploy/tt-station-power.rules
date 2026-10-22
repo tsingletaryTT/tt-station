@@ -1,6 +1,5 @@
 // tt-station: let the TT Station agent power-manage this machine without an
-// interactive auth prompt, so `POST /power` (agent) and the box panel's
-// power row work headlessly. Grants ONLY the logind power actions, and only
+// interactive auth prompt, so `POST /power` (agent) works headlessly. Grants ONLY the logind power actions, and only
 // to a process that is both:
 //  - run by a member of the `tt-station-power` group. Put the agent's own
 //    account in it and no other: `sudo groupadd -f tt-station-power &&
@@ -12,7 +11,7 @@
 // by their user, so `system_unit` only ever names the user manager, and any
 // process the agent's account runs under it (its desktop apps too) passes.
 // Needs polkit 121+ for `system_unit`; older polkit never grants. See
-// docs/reference/power-controls.md §6.
+// docs/reference/power-controls.md §5.
 polkit.addRule(function(action, subject) {
     if ((action.id == "org.freedesktop.login1.reboot" ||
             action.id == "org.freedesktop.login1.reboot-multiple-sessions" ||

@@ -225,24 +225,15 @@ struct Harness {
 impl Harness {
     /// Agent + stub LLM + a paired token. Nothing is serving yet.
     async fn idle(script: Vec<Value>) -> Self {
-        Self::idle_with_media(script, None).await
-    }
-
-    /// Like `idle`, with an image server (at `media`) serving beside chat.
-    async fn idle_with_media(script: Vec<Value>, media: Option<String>) -> Self {
-        Self::build(script, media, None).await
+        Self::build(script, None).await
     }
 
     /// Like `idle`, keeping the box's settings in `config`.
     async fn idle_in(script: Vec<Value>, config: std::path::PathBuf) -> Self {
-        Self::build(script, None, Some(config)).await
+        Self::build(script, Some(config)).await
     }
 
-    async fn build(
-        script: Vec<Value>,
-        media: Option<String>,
-        config: Option<std::path::PathBuf>,
-    ) -> Self {
+    async fn build(script: Vec<Value>, config: Option<std::path::PathBuf>) -> Self {
         let llm = StubLlm::new(script);
         let llm_base = llm.serve().await;
         let calls: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -267,20 +258,6 @@ impl Harness {
             .with_creations(tt_station_agentd::creations::Creations::new(temp_docs_dir()));
         let state = match config {
             Some(dir) => state.with_config_dir(dir),
-            None => state,
-        };
-        let state = match media {
-            Some(base_url) => {
-                let state = state.with_companion(tt_station_agentd::coserve::Companion::new(
-                    Arc::new(FakeBackend {
-                        base_url: base_url.clone(),
-                        calls: Arc::default(),
-                        serving: Mutex::new(None),
-                    }),
-                ));
-                let _ = base_url;
-                state
-            }
             None => state,
         };
 
@@ -1197,93 +1174,6 @@ async fn search_documents_answers_from_uploaded_files() {
     assert_eq!(list["documents"], json!([]));
 }
 
-/// `create_image`: with an image model beside chat, the picture is rendered,
-/// kept on the box, shown via the action's `images`, and fetchable by id --
-/// the model only sees ids. Without one, the model is told how to get one.
-#[tokio::test]
-async fn create_image_draws_in_chat_when_an_image_model_serves() {
-    use axum::{extract::Json as AxJson, routing::post, Router};
-    let media = Router::new().route(
-        "/v1/images/generations",
-        post(|AxJson(body): AxJson<Value>| async move {
-            assert_eq!(body["num_inference_steps"], 4);
-            AxJson(json!({ "images": ["/9j/4AAQ"] }))
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let media_base = format!("http://{}/v1", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, media).await.unwrap() });
-
-    let h = Harness::idle_with_media(
-        vec![
-            calls("create_image", json!({ "prompt": "a red fox in snow" })),
-            says("Here's your fox."),
-        ],
-        Some(media_base.clone()),
-    )
-    .await;
-    let run = h
-        .client
-        .post(format!("{}/run", h.base))
-        .bearer_auth(&h.token)
-        .json(&json!({ "model": SERVED }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(run.status(), 200);
-    // The image server comes up beside chat (as after `/coserve`).
-    h.state
-        .companion()
-        .unwrap()
-        .adopt(libttstation::model::Endpoint {
-            base_url: media_base,
-            model: "tt-flux.1-schnell".to_string(),
-            requires_key: false,
-        });
-
-    let body: Value = h.ask("draw me a fox").await.json().await.unwrap();
-    assert_eq!(body["reply"], "Here's your fox.");
-    let action = &body["actions"][0];
-    assert_eq!(action["tool"], "create_image");
-    assert_eq!(action["status"], "done", "{action}");
-    let id = action["images"][0].as_str().unwrap();
-
-    // The model saw ids, not pixels.
-    let reqs = h.llm.requests();
-    let tool_msg = reqs[1]["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|m| m["role"] == "tool")
-        .cloned()
-        .unwrap();
-    let content = tool_msg["content"].as_str().unwrap();
-    assert!(
-        content.contains(id) && !content.contains("/9j/"),
-        "{content}"
-    );
-
-    let image = h
-        .client
-        .get(format!("{}/creations/{id}", h.base))
-        .bearer_auth(&h.token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(image.headers()["content-type"], "image/jpeg");
-    assert_eq!(
-        image.bytes().await.unwrap().as_ref(),
-        &[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]
-    );
-    let anon = h
-        .client
-        .get(format!("{}/creations/{id}", h.base))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(anon.status(), 401);
-}
-
 #[tokio::test]
 async fn create_image_without_an_image_model_explains_how_to_get_one() {
     let h = Harness::serving(vec![
@@ -1528,8 +1418,7 @@ async fn without_web_text_remember_runs_at_once() {
     assert_eq!(body["actions"][0]["status"], "done", "{body}");
 }
 
-/// Opening a web address, starting a recording, and answering a bring-up
-/// always wait for the person.
+/// Opening a web address and starting a recording always wait for the person.
 #[tokio::test]
 async fn opening_an_address_and_recording_always_wait() {
     let h = Harness::serving(vec![calls(
@@ -1537,24 +1426,73 @@ async fn opening_an_address_and_recording_always_wait() {
         json!({ "app": "Chrome", "url": "https://evil.example/" }),
     )])
     .await;
-    let body: Value = h.ask("open it").await.json().await.unwrap();
-    assert_eq!(body["actions"][0]["status"], "needs_confirmation", "{body}");
-    assert!(body["actions"][0]["summary"]
+    // From the desktop app on the person's computer (Tori's computer tools
+    // act there).
+    let app = json!({ "persona": "tori", "client": "darwin" });
+    let (status, events) = h.stream("open it", app.clone()).await;
+    assert_eq!(status, 200);
+    let action = events
+        .iter()
+        .find(|e| e["type"] == "action")
+        .map(|e| e["action"].clone())
+        .unwrap_or_else(|| panic!("{events:?}"));
+    assert_eq!(action["status"], "needs_confirmation", "{action}");
+    assert!(action["summary"]
         .as_str()
         .unwrap()
         .contains("https://evil.example/"));
+    // Approved, it goes back to the person's computer to run.
+    let id = action["id"].as_str().unwrap().to_string();
+    let done: Value = h.confirm(&id, true).await.json().await.unwrap();
+    assert_eq!(done["status"], "on_client", "{done}");
+    assert_eq!(done["run"]["tool"], "open_app", "{done}");
 
     let h = Harness::serving(vec![calls("start_recording", json!({}))]).await;
-    let body: Value = h.ask("record this").await.json().await.unwrap();
-    assert_eq!(body["actions"][0]["status"], "needs_confirmation", "{body}");
+    // (Not words Tori acts on at once, which the app itself confirms.)
+    let (_, events) = h.stream("capture the meeting audio", app).await;
+    let action = events
+        .iter()
+        .find(|e| e["type"] == "action")
+        .map(|e| e["action"].clone())
+        .unwrap_or_else(|| panic!("{events:?}"));
+    assert_eq!(action["status"], "needs_confirmation", "{action}");
+}
 
-    // Nothing waiting: nothing to confirm, and the model is told so.
+/// Tori's instant commands stream like any answer: each step as it's done,
+/// then the reply -- no model asked.
+#[tokio::test]
+async fn tori_streams_an_instant_command() {
+    let h = Harness::serving(vec![]).await;
+    let (status, events) = h
+        .stream("how hot are the chips?", json!({ "persona": "tori" }))
+        .await;
+    assert_eq!(status, 200);
+    let action = events
+        .iter()
+        .find(|e| e["type"] == "action")
+        .map(|e| e["action"].clone())
+        .unwrap_or_else(|| panic!("{events:?}"));
+    assert_eq!(action["tool"], "box_status", "{action}");
+    assert_eq!(action["status"], "done", "{action}");
+    let done = events.iter().find(|e| e["type"] == "done").unwrap();
+    assert_eq!(done["model"], "Tori", "{done}");
+    assert!(h.llm.requests().is_empty(), "no model was asked");
+    // Steps on a computer aren't instant without the desktop app: the model answers.
+    let h = Harness::serving(vec![says("That needs the app.")]).await;
+    let (_, events) = h.stream("open youtube", json!({ "persona": "tori" })).await;
+    assert_eq!(joined(&events, "delta"), "That needs the app.");
+}
+
+/// The computer tools never run on the box: with no desktop app on the
+/// other end, the model is told it only works from the app.
+#[tokio::test]
+async fn computer_tools_need_the_desktop_app() {
     let h = Harness::serving(vec![
-        calls("bringup_decide", json!({ "decision": "accept" })),
-        says("It isn't waiting."),
+        calls("open_app", json!({ "app": "Terminal" })),
+        says("Only from the app."),
     ])
     .await;
-    let body: Value = h.ask("allow it").await.json().await.unwrap();
+    let body: Value = h.ask("open a terminal").await.json().await.unwrap();
     assert!(body["actions"].as_array().unwrap().is_empty(), "{body}");
     let tool_msg = h.llm.requests().last().unwrap()["messages"]
         .as_array()
@@ -1568,7 +1506,7 @@ async fn opening_an_address_and_recording_always_wait() {
         tool_msg["content"]
             .as_str()
             .unwrap()
-            .contains("isn't waiting"),
+            .contains("TT Station desktop app"),
         "{tool_msg}"
     );
 }

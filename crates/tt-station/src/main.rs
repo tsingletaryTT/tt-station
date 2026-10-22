@@ -211,8 +211,8 @@ enum Command {
 
     /// Ask a paired box to start serving `model`.
     Run {
-        /// The model identifier to serve (backend-specific, e.g. a Docker
-        /// image tag or dstack app name).
+        /// The model identifier to serve (backend-specific, e.g. a catalog
+        /// name or a Docker image tag).
         model: String,
 
         /// The box's control-plane address, as `host:port`. Must already be

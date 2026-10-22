@@ -73,7 +73,7 @@ sequenceDiagram
     Note over Mac,Box: 1. Pairing — exchange a short-lived code for a bearer token
     Mac->>Box: POST /pair/init
     Box-->>Mac: pair_id
-    Box-->>You: shows a 6-digit code on its screen<br/>(GTK panel / tt-station console), valid 120s
+    Box-->>You: shows a 6-digit code on its screen<br/>(TT Station / tt-station console), valid 120s
     You->>Mac: read the code, type it in
     Mac->>Box: POST /pair/complete { pair_id, code }
     Box-->>Mac: 256-bit bearer token (stored in your Keychain)
@@ -88,7 +88,7 @@ sequenceDiagram
 ```
 
 **The pairing code is a "read it off the box" secret.** It only appears on the box's own
-screen (the GTK panel or `tt-station console`), lives 120 seconds, and a given attempt allows only
+screen (TT Station on the box or `tt-station console`), lives 120 seconds, and a given attempt allows only
 5 wrong guesses before it's discarded. So to pair, you generally need to be *looking at the
 box*. The result is a **256-bit random bearer token** — that's the real credential; the
 code is just how you bootstrap it.
@@ -97,7 +97,7 @@ code is just how you bootstrap it.
 (the name and platform the client sends, e.g. "Jane's MacBook · macOS", when it paired, when
 it was last used) and keeps only a SHA-256 of its token, never the token. A device unused for
 **90 days** is signed out automatically; any use restarts the clock. Pairing a new device is
-announced as a box event (desktop notification and phone push).
+announced as a box event (a notification in the desktop and phone apps).
 
 ---
 
@@ -114,28 +114,17 @@ see below) **except** this short list, which is what a device needs to find the 
 | `POST /pair/offer` | pairing for the box's own user (needs the agent's `local-secret` file) |
 | `GET /app/…` | the desktop app's pages (no data in them) |
 
-The model API (`/v1/…`) checks its own credential, an app key, and a bring-up run's driver
-checks its run secret. The agent enforces this as a default-deny layer, and a test walks
+The model API (`/v1/…`) checks its own credential, an app key. The agent enforces this as a default-deny layer, and a test walks
 every route in the router to check that each one is either on the list above or answers
 `401` without credentials (`tests/access_control.rs`).
 
 **The box's own user.** A program on the box that connects over plain HTTP is trusted
-without pairing (the console, the panel, tt-toplike) only if it runs as the agent's own
+without pairing (the console, the desktop app, tt-toplike) only if it runs as the agent's own
 account: the agent looks the connection up in `/proc/net/tcp` and checks its owner's uid.
 Another account on the box, root, or a container on the host network gets no such trust,
-and neither does a process inside a bring-up, Orchard or Code run (`tt-*-bringup-*`,
-`tt-orchard-*`, `tt-code-*` units): they run as the box's account, so the agent also
-checks which unit's cgroup holds the connection's socket, and gives those the model API
-(with an app key) and a bring-up driver's own routes (with its run secret), nothing else.
-
-**Bring-up runs** are sandboxed: TT Station's folder (`~/.config/tt-station`), SSH and
-GnuPG keys and the keyring are unreadable to them, and only the run's folder, the
-tt-metal checkout and caches are writable (Landlock, plus the systemd properties a user
-manager can apply). A bring-up's requests for permission are answered only from an
-owner's paired device, never by the box's own local trust, and a stopped run's secret
-stops working. The same account can still reach the docker socket and the user's
-systemd bus; closing those takes a separate account (`deploy/contain-bringup.sh`). See
-`docs/reference/bringup-containment.md`.
+and neither does a process inside a Code run (`tt-code-*` units): it runs as the box's
+account, so the agent also checks which unit's cgroup holds the connection's socket, and
+gives those the model API (with an app key), nothing else.
 
 ## Owners and members
 
@@ -144,7 +133,7 @@ Each paired device is an **owner** or a **member**.
 - **Owners** manage the box: they see and remove other devices, make other devices owners
   (or members again), add and remove SSH keys, make/change/revoke app keys, use power
   (sleep, restart, shut down, reset chips), install or undo updates, reset the box, change
-  the security settings, answer bring-up approvals (from a paired device only), rename or remove people, read the
+  the security settings, rename or remove people, read the
   activity log, stop containers the box didn't start (the Doctor's "stop stray
   containers"), build and download the Doctor's support bundle (it carries the agent's and
   the serving logs, redacted), and choose who may start and stop models.
@@ -169,7 +158,7 @@ stop models; `model_control` in `PUT /data/settings`): **anyone** on the box (th
 so boxes that had no such setting work as they did) or **owners only**. With owners only, a
 member gets `403` "Only owners can start or stop models on this box." from everything that
 starts, stops or switches serving: `POST /run`, `/stop`, `/serve` (Models, Code's model
-picker), `/modes/{id}`, `/coserve`, `/community/serve`, `/vllm/native/serve`, the go-ahead to
+picker), `/modes/{id}`, the go-ahead to
 switch for a transcription (`/jobs/{id}/run`), writing a mode schedule (`POST`/`PATCH
 /schedules`), starting or stopping a check-up (`POST /evals`, `/evals/stop`: it holds the
 model for minutes, about fifteen with agent reliability), and the Doctor's `restart_model`.
@@ -213,8 +202,7 @@ once.
 The box keeps an append-only log of who did what (`~/.config/tt-station/audit.jsonl`,
 `0600`, rotated at 10 MB, five files kept): pairing, removed devices, owner changes, resets,
 SSH and app keys, power, security settings, updates, answered approvals, model starts and
-stops, who may start and stop models, research reports shared or unshared, meeting
-recordings started and stopped, and every owner-only request a member was refused (and
+stops, who may start and stop models, research reports shared or unshared, and every owner-only request a member was refused (and
 every model start or stop refused to one). It records device ids and names,
 never tokens or keys. Owners read it in Settings → Security and activity → Activity log, or
 `GET /audit`.
@@ -237,7 +225,6 @@ when shared, or can't be shared:
 | Flowise | yes: `FLOWISE_USERNAME`/`FLOWISE_PASSWORD` (generated, shown) are always set, so nobody can claim its admin account without them |
 | Langflow | yes: sharing adds `LANGFLOW_AUTO_LOGIN=False`, so you sign in as `langflow` with the generated password (shown) instead of everyone getting the superuser, which can run Python code |
 | LightRAG | yes: `AUTH_ACCOUNTS` (generated password, shown) is always set; sharing adds `WHITELIST_PATHS=/health`, so its Ollama-style `/api/*` isn't left open |
-| OpenClaw | yes: its gateway token (generated, shown as the access code) is always on |
 | Jupyter, OpenHands | no: they run code on the box |
 | SearXNG, Vane, Local Deep Research | no: no sign-in of their own (or anyone can sign up), and they spend the box's model or search the web for whoever reaches them |
 
@@ -265,65 +252,35 @@ come into a Tori turn or a routine run:
   turn. A parent of one of those is fine; one with a query or path segment none of them
   had is new. Research jobs only read their searches' results.
 - **Not covered:** the words of a web search itself (`web_search`'s query goes to the
-  search engine), and agents with their own tools (Code sessions, Hermes, OpenClaw).
+  search engine), and agents with their own tools (Code sessions).
 
-### Pairing codes and push notifications
+### Pairing codes
 
-A push notification's text passes through Apple. When another computer asks to pair, the
-push says only "A computer is asking to pair: open TT Station to see the code"; the code is
-shown in TT Station (the desktop app, and the phone app's banner while it's open), which
-reads it from the box over its authenticated connection (`GET /events`). Every other push
-works the same way: Apple sees generic words for the kind of event and an event id; the
-iPhone app fills in the real text from the box itself (see
-`docs/reference/alerts-and-power.md`).
+When another computer asks to pair, the code is shown only in TT Station (the desktop app,
+and the phone app's banner while it's open), which reads it from the box over its
+authenticated connection (`GET /events`). The box sends it nowhere else.
 
 ## Privacy: recording and notifications
 
-### Recording in the room
+### Recordings
 
-Any paired device, a member's phone included, can have the box record a meeting through
-its microphone and speakers (`POST /record/start`, or asking Tori), for up to four hours.
-So the room is always told, whoever started it and from wherever:
-
-- **The box chimes.** Two rising notes on the box's speakers when a recording starts, the
-  same notes falling when it stops or ends on its own (a device unplugged, or the four
-  hours ran out). The tones are generated by the agent (`chime.rs`), not a sound file.
-- **The desktop app on the box shows a banner** on every screen while it records:
-  "Recording in this room · started by *person or device* · *time* · Stop". Anyone at the
-  box can stop it there. (The app on another computer doesn't show it: that isn't the room.)
-- **The other paired phones are notified:** "The box started recording". Like every push,
-  it carries no content through Apple; the app shows who started it from the box itself.
-  The phone that started it isn't notified (it knows).
-- **The activity log** records who started it (`record_start`, with the device and the
-  recording's id) and who stopped it (`record_stop`, or `record_end` when it ended on its
-  own).
-
-**Tori listening for one request** (`POST /voice/hear`) is different: it opens the
-microphone for a single utterance (a minute at most), transcribes it, and keeps nothing.
-It gets a short, quiet tick on the box's speakers as the microphone opens, played to the
-end before listening starts so it isn't heard as speech, but no banner, notification or
-log line: those would fire on every spoken request.
-
-The chime needs the box's speakers to be on and audible; a muted or unplugged speaker
-means the banner and the phones are the cue.
+Meetings and voice notes are recorded by the desktop or phone app on that device's own
+microphone and uploaded to the box to be transcribed (`POST /jobs/transcribe`; see
+`docs/reference/jobs.md`). The box never records through its own microphone.
 
 ### Who gets which notification
 
-Every event has an audience, and the same rule decides whose phones are pushed and who
-sees the event in `GET /events`:
+Every event has an audience, which decides who sees it in `GET /events` (and so in the
+desktop and phone apps' notifications):
 
 | Event | Goes to |
 |---|---|
 | The box's own news: a model ready or failed, a download, hot chips, power, the box online, schedules | everyone |
-| A recording started or stopped | everyone (it concerns the room), except the phone that started it |
 | A research report | the person who asked; the owners when nobody in particular did |
-| Pairing requests (with the code), new or removed devices, approvals (Code, routines, bring-up), transcripts, Code sessions, routines, Orchard, box checks | owners |
-| A test notification | the phone that asked |
+| Pairing requests (with the code), new or removed devices, approvals (Code, routines), transcripts, Code sessions, routines, box checks | owners |
 
-A phone's notifications follow the device it registered with (its pairing token) and the
-person that device is (Settings → People). A device that's signed out or expired gets
-nothing, even though Apple still knows the phone. A phone registered before this routing
-existed gets only the household's news until the app next opens and registers again. A
+A device's notifications follow its pairing and the person that device is (Settings →
+People). A device that's signed out or expired gets nothing. A
 member's `/events` shows the household's events and their own, never another person's
 or the owners'.
 
@@ -356,8 +313,8 @@ Yes. The first command that uses it finds the box's HTTPS, pins the certificate 
 trust, pair again with `tt-station pair <host:port> --fp <fingerprint shown on the box>`.
 
 **Can a box open things on my computer?**
-Only if you say so. When TT Station runs on another computer, Tori's computer tools act on
-that computer. Before a box opens a web or mail link, or launches an app, the desktop app
+Only if you say so. Tori's computer tools act on the computer the TT Station app runs on (the
+box never runs them itself). Before a box opens a web or mail link, or launches an app, the desktop app
 shows a dialog with the box's name and address and exactly what will open (the full link, or
 the app), with **Allow once**, **Always allow <site/app> from <box>** and **Don't allow**
 (the default; closing the dialog is "don't allow"). "Always" is remembered per box and per
@@ -411,7 +368,7 @@ machine.
 - **One device**: TT Station → Settings → **Devices and pairing** → Remove (or
   `DELETE /devices/{id}`; `GET /devices` lists them). It stops working on its next request,
   and its open streams close. Removing the computer you're on signs it out.
-- **Reset** (GTK panel button, or clear the box's token store): forgets **all** pairings,
+- **Reset** (`tt-station reset`, `R` in `tt-station console`, or clear the box's token store): forgets **all** pairings,
   stops the serving model, resets the board — a clean slate. Clients must pair again.
 - **Revoke SSH**: `tt-station ssh-authorize --revoke` removes the tt-station-added key.
 - **Stop it entirely**: `systemctl --user stop tt-station-agentd` — the control plane goes

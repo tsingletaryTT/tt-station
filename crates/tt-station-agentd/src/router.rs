@@ -17,9 +17,7 @@ use crate::handlers::assistant::{assistant_chat, assistant_confirm, assistant_st
 use crate::handlers::devices::{delete_device, get_devices, post_device_owner, put_device_person};
 use crate::handlers::docs::{add_doc, delete_doc, list_docs, search_docs, DOC_BODY_LIMIT};
 use crate::handlers::logs::{get_logs, logs_ws};
-use crate::handlers::media::{
-    cancel_video, download_video, generate_image, generate_video, get_video, list_videos,
-};
+use crate::handlers::media::generate_image;
 use crate::handlers::memories::{clear_memories, delete_memory, get_creation, list_memories};
 use crate::handlers::pairing::{pair_complete, pair_init, pair_offer, pair_qr};
 use crate::handlers::power::{power, power_info, reset, wake_on_lan};
@@ -155,77 +153,12 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/apps/{id}", axum::routing::delete(crate::apps::delete_app))
         .route("/energy", get(get_energy))
-        .route("/record", get(crate::recorder::get_record))
         .route("/assistant/brain", get(crate::assistant::get_brain))
-        .route("/bringup/engines", get(crate::bringup::get_engines))
-        .route("/community", get(crate::community::get_community))
-        .route("/community/catalog", get(crate::community::get_catalog))
-        .route(
-            "/community/info/{ns}/{name}",
-            get(crate::community::get_info),
-        )
-        .route("/community/pull", post(crate::community::post_pull))
-        .route("/community/pull/pause", post(crate::community::post_pause))
-        .route(
-            "/community/pull/cancel",
-            post(crate::community::post_cancel),
-        )
-        .route(
-            "/community/serve",
-            post(crate::community::post_serve).route_layer(models()),
-        )
-        .route(
-            "/community/{ns}/{name}",
-            axum::routing::delete(crate::community::delete_package),
-        )
-        .route("/hermes", get(crate::hermes::get_hermes))
-        .route("/hermes/install", post(crate::hermes::post_install))
-        .route("/hermes/open", post(crate::hermes::post_open))
-        .route("/hermes/key", post(crate::hermes::post_key))
-        .route("/vllm/native", get(crate::native_vllm::get_native))
-        .route("/vllm/native/setup", post(crate::native_vllm::post_setup))
-        .route(
-            "/vllm/native/serve",
-            post(crate::native_vllm::post_serve).route_layer(models()),
-        )
-        .route("/bringup/survey", post(crate::bringup::post_survey))
-        .route(
-            "/bringup/claude/login",
-            post(crate::bringup::post_claude_login),
-        )
-        .route(
-            "/bringup/codex/runs",
-            get(crate::bringup::get_runs).post(crate::bringup::post_run),
-        )
-        .route(
-            "/bringup/codex/runs/{id}",
-            get(crate::bringup::get_run).delete(crate::bringup::delete_run),
-        )
-        .route(
-            "/bringup/codex/runs/{id}/approvals",
-            post(crate::bringup::post_approval),
-        )
-        .route(
-            "/bringup/codex/runs/{id}/approvals/{aid}/wait",
-            post(crate::bringup::post_wait),
-        )
-        .route(
-            "/bringup/codex/runs/{id}/approvals/{aid}",
-            post(crate::bringup::post_decide),
-        )
-        .route(
-            "/bringup/codex/runs/{id}/{action}",
-            post(crate::bringup::post_action),
-        )
-        .route("/toplike", get(crate::toplike_term::get_toplike))
-        .route("/toplike/term", get(crate::toplike_term::term_ws))
         // Which model the box prefers to serve: the model-control setting applies.
         .route(
             "/preferences/models",
             get(crate::prefs::get_prefs).merge(put(crate::prefs::put_prefs).route_layer(models())),
         )
-        .route("/desktop/apps", get(crate::desktop::get_apps))
-        .route("/desktop/open", post(crate::desktop::post_open))
         .route(
             "/voice",
             get(crate::voice::get_voice)
@@ -235,20 +168,10 @@ pub fn app(state: AppState) -> Router {
         .route("/voice/setup", post(crate::voice::post_setup))
         .route("/voice/speak", post(crate::voice::post_speak))
         .route(
-            "/voice/hear",
-            get(crate::voice::get_hear)
-                .post(crate::voice::post_hear)
-                .delete(crate::voice::delete_hear),
-        )
-        .route("/voice/say", post(crate::voice::post_say))
-        .route("/voice/hear/finish", post(crate::voice::post_hear_finish))
-        .route(
             "/voice/listen",
             post(crate::voice::post_listen)
                 .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
         )
-        .route("/record/start", post(crate::recorder::post_start))
-        .route("/record/stop", post(crate::recorder::post_stop))
         // A schedule switches the box's mode at set times, as the box (they
         // keep no author), so writing one is for whoever may switch models.
         .route(
@@ -271,34 +194,6 @@ pub fn app(state: AppState) -> Router {
             "/people/{id}",
             axum::routing::patch(crate::people::patch_person).delete(crate::people::delete_person),
         )
-        .route("/orchard", get(crate::orchard::get_orchard))
-        .route("/orchard/setup", post(crate::orchard::post_setup))
-        .route("/orchard/preflight", post(crate::orchard::post_preflight))
-        .route("/orchard/runs", post(crate::orchard::post_run))
-        .route(
-            "/orchard/runs/{name}",
-            get(crate::orchard::get_run).delete(crate::orchard::delete_run),
-        )
-        .route(
-            "/orchard/runs/{name}/serve",
-            post(crate::orchard::post_serve),
-        )
-        .route("/orchard/packaging", post(crate::orchard::post_packaging))
-        .route(
-            "/orchard/lab",
-            get(crate::orchard_lab::get_lab).put(crate::orchard_lab::put_lab),
-        )
-        .route("/orchard/lab/check", post(crate::orchard_lab::post_check))
-        .route("/orchard/lab/setup", post(crate::orchard_lab::post_setup))
-        .route(
-            "/orchard/runs/{name}/{action}",
-            post(crate::orchard::post_control),
-        )
-        .route(
-            "/orchard/runs/{name}/report/{which}",
-            get(crate::orchard::get_report),
-        )
-        .route("/orchard/runs/{name}/story", get(crate::orchard::get_story))
         .route(
             "/favorites",
             get(crate::favorites::get_favorites).put(crate::favorites::put_favorite),
@@ -443,9 +338,6 @@ pub fn app(state: AppState) -> Router {
             "/routines/runs/{run}/stop",
             post(crate::routines::post_stop),
         )
-        .route("/lab", get(crate::lab::get_lab))
-        .route("/lab/prepare", post(crate::lab::post_prepare))
-        .route("/lab/run", post(crate::lab::post_run))
         .route("/modes", get(crate::modes::get_modes))
         .route(
             "/modes/{id}",
@@ -468,12 +360,6 @@ pub fn app(state: AppState) -> Router {
         .route("/diagnostics", post(crate::doctor::post_diagnostics))
         .route("/diagnostics/{id}", get(crate::doctor::get_diagnostics))
         .route("/notify", get(crate::notify::get_notify))
-        .route("/notify/devices", post(crate::notify::register_device))
-        .route(
-            "/notify/devices/{token}",
-            axum::routing::delete(crate::notify::unregister_device),
-        )
-        .route("/notify/test", post(crate::notify::test_notify))
         .route("/events", get(crate::notify::get_events))
         .route("/memories/{id}", axum::routing::delete(delete_memory))
         .route("/v1/models", get(crate::gateway::v1_models))
@@ -487,11 +373,6 @@ pub fn app(state: AppState) -> Router {
             post(crate::anthropic::count_tokens),
         )
         .route("/v1/images/generations", post(crate::gateway::v1_images))
-        .route(
-            "/coserve",
-            get(crate::coserve::get_coserve)
-                .merge(post(crate::coserve::post_coserve).route_layer(models())),
-        )
         .route("/metrics/history", get(metrics_history))
         .route("/metrics/now", get(metrics_now))
         .route(
@@ -503,11 +384,6 @@ pub fn app(state: AppState) -> Router {
         .route("/docs/search", post(search_docs))
         .route("/docs/{id}", axum::routing::delete(delete_doc))
         .route("/generate/image", post(generate_image))
-        .route("/generate/video", post(generate_video))
-        .route("/generate/videos", get(list_videos))
-        .route("/generate/video/{id}", get(get_video))
-        .route("/generate/video/{id}/download", get(download_video))
-        .route("/generate/video/{id}/cancel", post(cancel_video))
         // Default-deny (see `require_auth`): last, so it covers every route above.
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),

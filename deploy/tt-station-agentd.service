@@ -17,11 +17,8 @@ RestartSec=2
 # agent restart (the agent re-adopts running pulls and the serving container at
 # startup). The default, control-group, killed a 17 GB-in download on restart.
 # The flip side is that anything else left in this cgroup outlives the agent
-# and is logged as a "left-over process" at the next start, so the agent keeps
-# long-lived helpers out of it: apps it opens on the desktop (Hermes, Chrome via
-# gtk-launch/xdg-open) run in their own `systemd-run --user --scope`, and the
-# tt-toplike behind a terminal WebSocket dies with the agent (PR_SET_PDEATHSIG).
-# See crates/tt-station-agentd/src/scope.rs.
+# and is logged as a "left-over process" at the next start, so long-lived
+# helpers belong in their own `systemd-run --user` unit, not in this cgroup.
 KillMode=process
 
 [Install]

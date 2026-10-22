@@ -1,27 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-// Hardware: the chips, live and over the last hour; the chips as tt-toplike
-// draws them; energy use (the one place for it: Home shows today's and links
-// here, `#energy`); the serving log; and, with developer tools on, who holds which
-// chips (the chip scheduler, gozer) and the silicon check (gpt-oss straight on
-// the chips with tt-lab).
+// Hardware: the chips, live and over the last hour; energy use (the one place
+// for it: Home shows today's and links here, `#energy`); the serving log; and,
+// with developer tools on, who holds which chips (the chip scheduler, gozer).
 
 import { useEffect, useRef, useState } from "react";
-import { Button } from "@tenstorrent/vesper/button";
 import { Badge } from "@tenstorrent/vesper/badge";
-import { Select } from "@tenstorrent/vesper/select";
-import { TextArea } from "@tenstorrent/vesper/text-area";
 import { TextInput } from "@tenstorrent/vesper/text-input";
-import { Switch } from "@tenstorrent/vesper/switch";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { Admonition } from "@tenstorrent/vesper/admonition";
-import { authHeader, boxName, type Chip, get, hardwareLabel, type MetricsNow, short, type Status } from "../api";
-import { Card, Eyebrow, Page, Spark, Stat, tempTone, tempWord, toastError, usePoll, useTelemetry } from "../ui";
+import { boxName, type Chip, get, hardwareLabel, type MetricsNow, type Status } from "../api";
+import { Card, Eyebrow, Page, Spark, Stat, tempTone, tempWord, usePoll, useTelemetry } from "../ui";
 import { useDevTools } from "../devtools";
-import { TopTerm } from "../TopTerm";
-import { askToStop } from "../dialog";
-import { OWNER_ONLY_HOST, useOwner } from "../role";
 
 interface HistoryPoint { t: number; chips: { temp_c: number | null; power_w: number | null }[]; gen_tps: number | null }
 interface Lease { chip: number; board: string; state: string; who: string | null; reason: string | null }
@@ -48,11 +39,6 @@ export function Hardware() {
         {chips.map((c) => <ChipPanel key={c.index} chip={c} live={live}
           temps={points.map((p) => p.chips[c.index]?.temp_c ?? NaN)} power={points.map((p) => p.chips[c.index]?.power_w ?? NaN)} times={times} />)}
       </div>
-
-      <Card>
-        <div className="row-between"><Eyebrow>tt-toplike</Eyebrow><span className="muted mono" style={{ fontSize: 12 }}>{Math.round(watts)} W now</span></div>
-        <TopTerm />
-      </Card>
 
       <div className={devTools ? "grid grid-2" : ""}>
         <Card>
@@ -95,8 +81,6 @@ export function Hardware() {
           <div className="console" style={{ maxHeight: 260 }}>{(logs.data?.lines ?? []).join("\n") || "No output."}</div>
         </Card>
       </div>
-
-      {devTools && <Lab />}
     </Page>
   );
 }
@@ -168,82 +152,6 @@ function ChipPanel({ chip: c, live, temps, power, times }: { chip: Chip; live: b
       </div>
       <Spark title={`Chip ${c.index} power`} values={power} labels={times} height={28} format={(v) => `${v.toFixed(0)} W`} />
       <Spark title={`Chip ${c.index} temperature`} values={temps} labels={times} color="var(--vesper-amber-600)" height={20} format={(v) => `${v.toFixed(0)} °C`} />
-    </Card>
-  );
-}
-
-interface LabStatus { installed: boolean; serving: string | null; running: unknown; models: { id: string; title: string; ready: boolean; tiles: number[] }[] }
-
-function Lab() {
-  const owner = useOwner();
-  const lab = usePoll(() => get<LabStatus>("/lab"), 20000);
-  const [model, setModel] = useState("gpt-oss-20b");
-  const [prompt, setPrompt] = useState("Explain what a Tensix core is in two sentences.");
-  const [check, setCheck] = useState(false);
-  const [output, setOutput] = useState("");
-  const [result, setResult] = useState<{ ok: boolean; seconds: number } | null>(null);
-  const [running, setRunning] = useState(false);
-  if (!lab.data?.installed) return null;
-
-  const run = async (stopServing = false) => {
-    setRunning(true);
-    setOutput("");
-    setResult(null);
-    try {
-      const m = lab.data!.models.find((x) => x.id === model)!;
-      const res = await fetch("/lab/run", {
-        method: "POST",
-        headers: { "content-type": "application/json", ...authHeader() },
-        body: JSON.stringify({ model, prompt, tokens: check ? 8 : 128, tiles: m.tiles[0], check, profile: false, stop_serving: stopServing }),
-      });
-      if (res.status === 409) {
-        const msg = (await res.json()).error as string;
-        setRunning(false);
-        if (/Stop/.test(msg)) { if (await askToStop(msg, "It can be started again afterwards.")) run(true); }
-        else toastError(new Error(msg));
-        return;
-      }
-      const reader = res.body!.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let i: number;
-        while ((i = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, i).trim();
-          buf = buf.slice(i + 1);
-          if (!line.startsWith("data:")) continue;
-          const e = JSON.parse(line.slice(5));
-          if (e.type === "text") setOutput((o) => o + e.text);
-          if (e.type === "done") setResult({ ok: e.ok, seconds: e.seconds });
-        }
-      }
-    } catch (e) {
-      toastError(e);
-    } finally {
-      setRunning(false);
-      lab.refresh();
-    }
-  };
-
-  return (
-    <Card>
-      <div className="row-between">
-        <div><Eyebrow>Silicon check (tt-lab)</Eyebrow><Typography variant="copy-sm" className="muted">Runs gpt-oss straight on the chips with tt-lab (its own firmware, no TT-Metal) and can check every output bit for bit against a host-side copy of the math, to show the hardware computes exactly what it should. It takes every chip, so a serving model is stopped first.</Typography></div>
-        {result && <Badge variant={result.ok ? "mint" : "danger"} subtle>{result.ok ? "passed" : "failed"} · {result.seconds.toFixed(1)} s</Badge>}
-      </div>
-      <div className="row">
-        <Select size="sm" value={model} onValueChange={(v) => setModel(v ?? model)}
-          options={(lab.data?.models ?? []).map((m) => ({ label: `${m.title}${m.ready ? "" : " (not prepared)"}`, value: m.id }))} />
-        <Switch size="sm" label="Bit-exact check" checked={check} onChange={(e) => setCheck(e.target.checked)} />
-        <div className="grow" />
-        <Button size="sm" disabled={running || !owner || !lab.data?.models.find((m) => m.id === model)?.ready} title={owner ? undefined : OWNER_ONLY_HOST} onClick={() => run()}>{running ? "Checking…" : "Run the check"}</Button>
-      </div>
-      <TextArea value={prompt} onChange={(e) => setPrompt(e.target.value)} height={64} />
-      {(output || running) && <div className="console">{output || "Resetting the chips and loading the firmware…"}</div>}
-      {lab.data?.serving && <span className="muted" style={{ fontSize: 12 }}>The silicon check needs every chip: running it stops {short(lab.data.serving)} first.</span>}
     </Card>
   );
 }

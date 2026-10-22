@@ -2,33 +2,34 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 //! Tori's instant commands: everything TT Station and this computer can do,
-//! said plainly -- "open Claude and VS Code", "start Qwen3-32B", "make an
-//! image of a fox", "switch to video", "record this meeting", "how hot are
-//! the chips", "volume to 30", "yes". See [`CAPABILITIES`]. Plain commands like these are understood here,
-//! without a model, so they happen at once and every time -- a model can
-//! answer "Done!" without doing anything, and a CPU model takes seconds.
-//! Anything this doesn't fully understand goes to the model as usual.
+//! said plainly -- "open YouTube", "start Qwen3-32B", "make an image of a
+//! fox", "switch to images", "record this meeting", "how hot are the chips",
+//! "volume to 30", "yes". See [`CAPABILITIES`]. Plain commands like these are
+//! understood here, without a model, so they happen at once and every time --
+//! a model can answer "Done!" without doing anything, and a CPU model takes
+//! seconds. Anything this doesn't fully understand goes to the model as usual.
+//!
+//! Steps that act on a computer (opening things, sound and screen controls,
+//! recording) run on the person's own computer, through the TT Station
+//! desktop app (`crate::assistant::CLIENT_TOOLS`).
 
 use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::desktop::{self, DesktopApp};
-
 /// What Tori can do instantly, for "what can you do?" (and the docs).
 pub const CAPABILITIES: &[(&str, &str)] = &[
     (
-        "Open apps and sites",
-        "“open Claude and VS Code”, “open YouTube”, “go to github.com”",
+        "Open sites and folders",
+        "“open YouTube”, “go to github.com”, “open my Downloads”",
     ),
-    ("Open folders", "“open my Downloads”, “open Documents”"),
     (
         "Run models",
         "“start Qwen3-32B”, “stop the model”, “reset the chips”",
     ),
     (
         "Switch what the box does",
-        "“switch to images”, “video mode”, “chat and images”, “transcribe mode”",
+        "“switch to images”, “chat mode”, “transcribe mode”",
     ),
     (
         "Make pictures",
@@ -41,7 +42,7 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
     ),
     (
         "Open TT Station",
-        "“open Studio”, “open Models”, “open Bring-up”, “open hardware”",
+        "“open Studio”, “open Models”, “open hardware”",
     ),
     (
         "Sound and music",
@@ -52,10 +53,6 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
         "“lock the screen”, “dark mode”, “do not disturb”",
     ),
     (
-        "Bring-up",
-        "“how's the bring-up going?”, “allow it” / “deny it” when it's waiting on you",
-    ),
-    (
         "Confirm",
         "“yes” / “no” when I ask before changing the model",
     ),
@@ -64,7 +61,6 @@ pub const CAPABILITIES: &[(&str, &str)] = &[
 /// One thing to do, as the matching assistant tool call.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
-    OpenApp(String),
     OpenUrl(String),
     OpenFolder(String),
     Control(&'static str, Option<f64>),
@@ -83,7 +79,6 @@ impl Step {
     pub fn tool(&self) -> (&'static str, serde_json::Value) {
         use serde_json::json;
         match self {
-            Step::OpenApp(app) => ("open_app", json!({ "app": app })),
             Step::OpenUrl(url) => ("open_app", json!({ "url": url })),
             Step::OpenFolder(path) => ("open_folder", json!({ "path": path })),
             Step::Control(action, value) => (
@@ -184,10 +179,6 @@ const PAGES: &[(&str, &str)] = &[
     ("transcribe", "transcribe"),
     ("models", "models"),
     ("model list", "models"),
-    ("bring-up", "bringup"),
-    ("bring up", "bringup"),
-    ("bringup", "bringup"),
-    ("orchard", "bringup"),
     ("hardware", "hardware"),
     ("chips", "hardware"),
     ("telemetry", "hardware"),
@@ -196,16 +187,10 @@ const PAGES: &[(&str, &str)] = &[
 ];
 
 const MODES: &[(&str, &str)] = &[
-    ("chat and images", "chat_images"),
-    ("chat and image", "chat_images"),
-    ("chat and pictures", "chat_images"),
-    ("chat + images", "chat_images"),
     ("images", "images"),
     ("image", "images"),
     ("pictures", "images"),
     ("picture", "images"),
-    ("video", "video"),
-    ("videos", "video"),
     ("transcription", "transcribe"),
     ("transcribe", "transcribe"),
     ("transcribing", "transcribe"),
@@ -237,7 +222,7 @@ fn page(item: &str) -> Option<&'static str> {
 }
 
 /// Box things: models, modes, pictures, recording, status, help, yes/no.
-fn box_command(s: &str, apps: &[DesktopApp]) -> Option<Vec<Step>> {
+fn box_command(s: &str) -> Option<Vec<Step>> {
     use serde_json::json;
     let one = |step| Some(vec![step]);
     match s {
@@ -279,34 +264,6 @@ fn box_command(s: &str, apps: &[DesktopApp]) -> Option<Vec<Step>> {
         | "finish recording"
         | "stop recording and transcribe"
         | "transcribe the meeting" => return one(Step::Tool("stop_recording", json!({}))),
-        "how's the bring-up going"
-        | "how is the bring-up going"
-        | "how's the bring-up"
-        | "bring-up status"
-        | "bringup status"
-        | "how's the bringup going"
-        | "how's the port going"
-        | "what's the bring-up doing"
-        | "where's the bring-up"
-        | "is the bring-up done" => return one(Step::Tool("bringup_status", json!({}))),
-        "allow it"
-        | "approve it"
-        | "allow that"
-        | "approve that"
-        | "let it"
-        | "let it run"
-        | "go ahead and allow it" => {
-            return one(Step::Tool(
-                "bringup_decide",
-                json!({ "decision": "accept" }),
-            ))
-        }
-        "deny it" | "deny that" | "don't allow it" | "don't let it" | "block it" | "reject it" => {
-            return one(Step::Tool(
-                "bringup_decide",
-                json!({ "decision": "decline" }),
-            ))
-        }
         "status"
         | "box status"
         | "what's the box doing"
@@ -365,11 +322,7 @@ fn box_command(s: &str, apps: &[DesktopApp]) -> Option<Vec<Step>> {
     }
     if let Some(m) = RUN.captures(s) {
         let name = m[1].trim();
-        // An installed app with that name wins ("start Steam").
-        let app = desktop::find(apps, name)
-            .0
-            .filter(|a| desktop::score(a, name) >= 60);
-        if app.is_none() && model_like(name) && !name.contains(" and ") {
+        if model_like(name) && !name.contains(" and ") {
             return one(Step::Tool("run_model", json!({ "model": name })));
         }
     }
@@ -397,7 +350,7 @@ pub fn normalize(said: &str) -> String {
     TAIL.replace(&s, "").trim().to_string()
 }
 
-fn resolve(item: &str, apps: &[DesktopApp]) -> Option<Step> {
+fn resolve(item: &str) -> Option<Step> {
     let item = ITEM_NOISE.replace_all(item.trim(), "").trim().to_string();
     if item.is_empty() {
         return None;
@@ -405,11 +358,6 @@ fn resolve(item: &str, apps: &[DesktopApp]) -> Option<Step> {
     let folder = item.trim_end_matches(" folder").trim();
     if FOLDERS.contains(&folder) {
         return Some(Step::OpenFolder(folder.to_string()));
-    }
-    // An installed app wins over a website of the same name (Spotify, Slack…).
-    let (best, _) = desktop::find(apps, &item);
-    if let Some(app) = best.filter(|a| desktop::score(a, &item) >= 60) {
-        return Some(Step::OpenApp(app.name.clone()));
     }
     if let Some(p) = page(&item) {
         return Some(Step::Station(p));
@@ -490,7 +438,7 @@ fn control(s: &str) -> Option<Step> {
 }
 
 /// The steps for a plain command, or `None` to ask the model.
-pub fn parse(said: &str, apps: &[DesktopApp]) -> Option<Vec<Step>> {
+pub fn parse(said: &str) -> Option<Vec<Step>> {
     let s = normalize(said);
     if s.is_empty() || s.len() > 200 {
         return None;
@@ -499,14 +447,14 @@ pub fn parse(said: &str, apps: &[DesktopApp]) -> Option<Vec<Step>> {
     if let Some(step) = control(&s) {
         return Some(vec![step]);
     }
-    if let Some(steps) = box_command(&s, apps) {
+    if let Some(steps) = box_command(&s) {
         return Some(steps);
     }
     let what = OPEN.captures(&s)?.get(1)?.as_str().to_string();
     let steps: Option<Vec<Step>> = SPLIT
         .split(&what)
         .filter(|i| !i.trim().is_empty())
-        .map(|i| resolve(i, apps))
+        .map(resolve)
         .collect();
     steps.filter(|s| !s.is_empty() && s.len() <= 6)
 }
@@ -529,21 +477,11 @@ fn box_reply(tool: &str, r: &serde_json::Value) -> Option<String> {
     }
     Some(match tool {
         "box_status" => status_line(r),
-        "bringup_status" => r["status"].as_str().unwrap_or("").to_string(),
-        "bringup_decide" => {
-            let what = r["what"].as_str().unwrap_or("it");
-            if r["decided"] == "accept" {
-                format!("Allowed. It's running `{what}` now.")
-            } else {
-                format!("Denied `{what}`.")
-            }
-        }
         "create_image" => "Here it is. It's in Studio too.".into(),
         "start_recording" => "Recording. Let everyone know.".into(),
         "stop_recording" => "Stopped. I'll have the transcript in a few minutes.".into(),
         "studio" => String::new(),
         "home" => "Opening TT Station.".into(),
-        "bringup" => "Opening Bring-up.".into(),
         "transcribe" => "Opening your transcripts.".into(),
         "chat" | "models" | "hardware" | "connect" | "settings" => {
             format!("Opening {}.", capitalize(tool))
@@ -637,9 +575,7 @@ pub fn reply(done: &[(Step, Result<serde_json::Value, String>)]) -> String {
                 ));
             }
             Ok(r) => match step {
-                Step::OpenApp(_) | Step::OpenUrl(_) => {
-                    opened.push(r["opened"].as_str().unwrap_or("it").to_string())
-                }
+                Step::OpenUrl(_) => opened.push(r["opened"].as_str().unwrap_or("it").to_string()),
                 Step::OpenFolder(_) => opened.push(
                     r["opened"]
                         .as_str()
@@ -686,92 +622,53 @@ pub fn reply(done: &[(Step, Result<serde_json::Value, String>)]) -> String {
 mod tests {
     use super::*;
 
-    fn apps() -> Vec<DesktopApp> {
-        [
-            "Claude",
-            "Visual Studio Code",
-            "Google Chrome",
-            "Files",
-            "Terminal",
-            "Spotify",
-            "Steam",
-        ]
-        .iter()
-        .map(|n| DesktopApp {
-            id: n.to_lowercase().replace(' ', "-"),
-            name: n.to_string(),
-            generic: None,
-            keywords: vec![],
-        })
-        .collect()
-    }
-
     #[test]
-    fn several_apps_at_once() {
+    fn sites_and_folders() {
         assert_eq!(
-            parse("Open up Claude and VSCode", &apps()),
-            Some(vec![
-                Step::OpenApp("Claude".into()),
-                Step::OpenApp("Visual Studio Code".into())
-            ])
-        );
-        assert_eq!(
-            parse(
-                "hey Tori, can you please launch chrome, terminal and files for me",
-                &apps()
-            ),
-            Some(vec![
-                Step::OpenApp("Google Chrome".into()),
-                Step::OpenApp("Terminal".into()),
-                Step::OpenApp("Files".into())
-            ])
-        );
-    }
-
-    #[test]
-    fn sites_folders_and_apps() {
-        assert_eq!(
-            parse("open youtube", &apps()),
+            parse("open youtube"),
             Some(vec![Step::OpenUrl("https://www.youtube.com".into())])
         );
         assert_eq!(
-            parse("go to tenstorrent.com", &apps()),
+            parse("go to tenstorrent.com"),
             Some(vec![Step::OpenUrl("https://tenstorrent.com".into())])
         );
         assert_eq!(
-            parse("open my downloads folder", &apps()),
+            parse("open my downloads folder"),
             Some(vec![Step::OpenFolder("downloads".into())])
         );
         assert_eq!(
-            parse("open spotify", &apps()),
-            Some(vec![Step::OpenApp("Spotify".into())])
+            parse("hey Tori, can you please open youtube and github for me"),
+            Some(vec![
+                Step::OpenUrl("https://www.youtube.com".into()),
+                Step::OpenUrl("https://github.com".into())
+            ])
         );
     }
 
     #[test]
     fn controls() {
         assert_eq!(
-            parse("Turn the volume up.", &apps()),
+            parse("Turn the volume up."),
             Some(vec![Step::Control("volume_up", None)])
         );
         assert_eq!(
-            parse("set the volume to 30%", &apps()),
+            parse("set the volume to 30%"),
             Some(vec![Step::Control("volume_set", Some(30.0))])
         );
         assert_eq!(
-            parse("volume 45", &apps()),
+            parse("volume 45"),
             Some(vec![Step::Control("volume_set", Some(45.0))])
         );
         assert_eq!(
-            parse("Pause the music", &apps()),
+            parse("Pause the music"),
             Some(vec![Step::Control("pause_media", None)])
         );
         assert_eq!(
-            parse("skip this song", &apps()),
+            parse("skip this song"),
             Some(vec![Step::Control("next_track", None)])
         );
         assert_eq!(
-            parse("lock my screen please", &apps()),
+            parse("lock my screen please"),
             Some(vec![Step::Control("lock_screen", None)])
         );
     }
@@ -779,7 +676,7 @@ mod tests {
     #[test]
     fn box_commands() {
         use serde_json::json;
-        let t = |s: &str| parse(s, &apps());
+        let t = |s: &str| parse(s);
         assert_eq!(
             t("start Qwen3-32B"),
             Some(vec![Step::Tool(
@@ -799,16 +696,13 @@ mod tests {
             Some(vec![Step::Tool("switch_mode", json!({ "mode": "images" }))])
         );
         assert_eq!(
-            t("video mode"),
-            Some(vec![Step::Tool("switch_mode", json!({ "mode": "video" }))])
-        );
-        assert_eq!(
-            t("set the box up for chat and images"),
+            t("transcribe mode"),
             Some(vec![Step::Tool(
                 "switch_mode",
-                json!({ "mode": "chat_images" })
+                json!({ "mode": "transcribe" })
             )])
         );
+        assert_eq!(t("video mode"), None);
         assert_eq!(
             t("make an image of a fox in the snow"),
             Some(vec![
@@ -849,20 +743,7 @@ mod tests {
         assert_eq!(t("yes"), Some(vec![Step::Confirm(true)]));
         assert_eq!(t("never mind"), Some(vec![Step::Confirm(false)]));
         assert_eq!(t("what can you do?"), Some(vec![Step::Help]));
-        assert_eq!(
-            t("how's the bring-up going?"),
-            Some(vec![Step::Tool("bringup_status", json!({}))])
-        );
-        assert_eq!(
-            t("allow it"),
-            Some(vec![Step::Tool(
-                "bringup_decide",
-                json!({ "decision": "accept" })
-            )])
-        );
         assert_eq!(t("open models"), Some(vec![Step::Station("models")]));
-        assert_eq!(t("open bring-up"), Some(vec![Step::Station("bringup")]));
-        assert_eq!(t("start steam"), Some(vec![Step::OpenApp("Steam".into())]));
     }
 
     #[test]
@@ -880,11 +761,14 @@ mod tests {
         for said in [
             "open the file I was working on yesterday",
             "open photoshop",
+            "open claude and vs code",
+            "start steam",
+            "how's the bring-up going?",
             "why is the sky blue?",
             "start a timer",
             "open a new document about cats",
         ] {
-            assert_eq!(parse(said, &apps()), None, "{said}");
+            assert_eq!(parse(said), None, "{said}");
         }
     }
 
@@ -892,12 +776,12 @@ mod tests {
     fn replies_sound_natural() {
         let ok = |name: &str| Ok(serde_json::json!({ "opened": name }));
         let done = vec![
-            (Step::OpenApp("Claude".into()), ok("Claude")),
             (
-                Step::OpenApp("Visual Studio Code".into()),
-                ok("Visual Studio Code"),
+                Step::OpenUrl("https://www.youtube.com".into()),
+                ok("YouTube"),
             ),
+            (Step::OpenUrl("https://github.com".into()), ok("GitHub")),
         ];
-        assert_eq!(reply(&done), "Opening Claude and Visual Studio Code.");
+        assert_eq!(reply(&done), "Opening YouTube and GitHub.");
     }
 }

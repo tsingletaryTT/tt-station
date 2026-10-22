@@ -23,7 +23,6 @@ declare global {
       showMain: (route?: string) => Promise<void>;
       onTori: (fn: (mode: "type" | "talk" | "hidden") => void) => void;
       shortcuts: (on?: boolean) => Promise<boolean>;
-      openToplike: (view: string) => Promise<void>;
       toriShortcut: (binding?: string) => Promise<{ binding: string; installed: boolean; dropdown: boolean }>;
       /** Other QuietBoxes this app is paired with (older desktop shells don't have these). */
       boxes?: () => Promise<{ current: string; boxes: { id: string; name: string; host: string; local: boolean }[] }>;
@@ -156,7 +155,7 @@ export const upload = <T>(path: string, file: Blob) => request<T>("POST", path, 
  *  one, so the token rides here, never in the URL. */
 export const wsProtocols = (): string[] => ["tt-station", ...(token ? [`tt-token.${token}`] : [])];
 
-/** The Authorization header, for the few calls that stream (Lab, chat). */
+/** The Authorization header, for the few calls that stream (chat). */
 export const authHeader = (): Record<string, string> => (token ? { authorization: `Bearer ${token}` } : {});
 
 /** A file the box serves behind the token (a picture, a video), as a Blob. */
@@ -196,8 +195,6 @@ export interface Serve {
   /** A start that has shown no progress for this long (seconds): it looks stuck. */
   stalled_s?: number | null;
   error: string | null;
-  split: boolean;
-  companion: { model: string | null; phase: string } | null;
 }
 
 export interface Mode {
@@ -330,56 +327,6 @@ export interface PairedDevice {
 export interface AuditEntry { ts: number; device_id: string | null; device_name: string; action: string; target: string; result: string }
 export interface Schedule { id: string; mode: string; time: string; days: number[]; enabled: boolean }
 
-export interface OrchardRun {
-  run_name: string;
-  model: string | null;
-  state: string;
-  live: boolean;
-  stage: { current: number | null; name: string | null } | null;
-  stages: { stage: number; name: string; status: string; wall_s: number | null }[];
-  blocked: { reason: string | null } | null;
-  pause: { reason: string | null } | null;
-  restore: string | null;
-  reports?: string[];
-  console?: string[];
-  servable?: boolean;
-  /** Where each hardware test ran (this box or the lab box) and the configurations not run. */
-  hardware?: {
-    lab: { host: string; root?: string; hostname?: string; chips?: number } | null;
-    tests: { stage: number | null; config: number | null; chips: number; where: string; started: number | null; result: string; detail: string | null }[];
-  };
-  /** tt-orchard's `refused: …` line, when it wouldn't start. */
-  refused?: string | null;
-  progress?: {
-    title: string;
-    detail: string;
-    fraction: number | null;
-    eta_s: number | null;
-    overall: number;
-    overall_eta_s: number | null;
-    needs_you: string | null;
-    hint: string | null;
-    typical_s: number[];
-  };
-}
-
-/** tt-orchard's lab box (`[lab]` in its bringup.toml): every hardware test runs there. */
-export interface OrchardLab { host: string; root: string; gozer: string; path: string[]; python: string; test_python: string | null }
-
-export interface OrchardStatus {
-  installed: boolean;
-  ready: boolean;
-  version: string | null;
-  setup: { name: string; status: string; detail: string }[];
-  setup_running: boolean;
-  config: { coder: { target: string; chips: number }; lab?: OrchardLab | null; package_format?: string | null } | null;
-  config_error: string | null;
-  busy: boolean;
-  packaging: boolean;
-  runs: OrchardRun[];
-  notes: { text: string; command?: string }[];
-}
-
 export interface ActionReport {
   id: string;
   tool: string;
@@ -505,8 +452,6 @@ export interface ChipProcess { pid: number; device: number; cmdline: string; use
 /** What the full telemetry frame adds beyond per-chip readings. */
 export interface FrameExtras {
   processes: ChipProcess[];
-  /** tt-toplike's view of the inference server(s): phase, model, stats. */
-  inference: Record<string, unknown>[];
   time: string | null;
 }
 
@@ -563,7 +508,6 @@ export function parseFrame(frame: Record<string, unknown>): { chips: Chip[]; err
   const procs = Array.isArray(frame.processes) ? (frame.processes as Record<string, unknown>[]) : [];
   const extras: FrameExtras = {
     processes: procs.map((p) => ({ pid: Number(p.pid), device: Number(p.device), cmdline: String(p.cmdline ?? ""), user: (p.user as string) ?? null })),
-    inference: (((frame.tt_toplike as Record<string, unknown>)?.inference as Record<string, unknown>[]) ?? []),
     time: (frame.time as string) ?? null,
   };
   if (typeof frame.error === "string" && !frame.device_info) return { chips: [], error: frame.error, extras };
@@ -687,12 +631,11 @@ export async function openBoxShell(what: "terminal" | "vscode"): Promise<string 
   return r && !r.ok ? r.error ?? "It didn't open." : null;
 }
 
-let clientOnce: Promise<string | undefined> | null = null;
-/** Which computer the assistant's computer tools should act on: this one (its
- *  platform) when it isn't the device, else undefined (the device's own). */
+/** Where the assistant's computer tools act: this computer (its platform) in
+ *  the desktop app, which runs them; undefined in a browser, which can't (the
+ *  box never runs them on its own screen). */
 export function clientKind(): Promise<string | undefined> {
-  clientOnce ??= onAnotherComputer().then((other) => (other ? window.ttDesktop?.platform ?? "desktop" : undefined)).catch(() => undefined);
-  return clientOnce;
+  return Promise.resolve(window.ttDesktop?.computer ? window.ttDesktop.platform ?? "desktop" : undefined);
 }
 
 /** Runs an assistant step on this computer and tells the device what happened. */

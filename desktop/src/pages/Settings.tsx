@@ -213,8 +213,8 @@ function Shortcuts() {
 
 interface Choice { name: string; ready: boolean; tools: boolean; params_b: number | null }
 interface PrefsInfo {
-  prefs: { chat?: string; image?: string; video?: string; transcribe?: string; cpu_chat?: string };
-  choices: { chat: Choice[]; image: Choice[]; video: Choice[]; speech: Choice[] };
+  prefs: { chat?: string; image?: string; transcribe?: string; cpu_chat?: string };
+  choices: { chat: Choice[]; image: Choice[]; speech: Choice[] };
   cpu_chat: string[];
   cpu_default: string;
 }
@@ -252,7 +252,6 @@ function ModelPrefs() {
       <div className="pref-grid">
         {row("Chat", "Chat mode, Chat and Tori", "chat", d.choices.chat, true)}
         {row("Images", "Images mode and Studio", "image", d.choices.image)}
-        {row("Video", "Video mode", "video", d.choices.video)}
         {row("Speech to text", "Transcribe mode (on the chips)", "transcribe", d.choices.speech)}
         <div className="pref-row">
           <div><b>While the chips are busy</b><div className="muted">Tori and Chat on the CPU</div></div>
@@ -990,7 +989,7 @@ const ACTIONS: Record<string, string> = {
   pair: "Paired", revoke: "Removed a device", promote: "Made an owner", demote: "Made a member", reset: "Reset the box",
   ssh_key_add: "Added an SSH key", ssh_key_remove: "Removed an SSH key", app_key_create: "Made an app key", app_key_change: "Changed an app key",
   app_key_revoke: "Revoked an app key", power: "Power", security: "Security settings", update_install: "Updated TT Station",
-  update_undo: "Undid an update", update_tt_cli: "Updated tt", approval: "Answered an approval", bringup_approval: "Answered a bring-up approval",
+  update_undo: "Undid an update", update_tt_cli: "Updated tt", approval: "Answered an approval",
   assistant_approval: "Answered Tori", model_start: "Started a model", model_stop: "Stopped the model", model_switch: "Switched models",
   mode_switch: "Switched mode", device_person: "Set whose a device is", person_remove: "Removed a person", denied: "Refused (owners only)",
   host_run: "Ran something on the box itself",

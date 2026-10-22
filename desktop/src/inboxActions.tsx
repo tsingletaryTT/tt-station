@@ -12,8 +12,8 @@ import { navigate } from "./App";
 import { answer, type Decision, type InboxItem, type InboxKind } from "./inbox";
 import { toastError } from "./ui";
 
-export const INBOX_ICONS: Record<InboxKind, IconKind> = { code: "org-developer", routine: "clock", bringup: "ai-task", pairing: "phone" };
-export const OPEN_LABEL: Record<InboxKind, string> = { code: "Open in Code", routine: "Open the run", bringup: "Open the bring-up", pairing: "Devices and pairing" };
+export const INBOX_ICONS: Record<InboxKind, IconKind> = { code: "org-developer", routine: "clock", pairing: "phone" };
+export const OPEN_LABEL: Record<InboxKind, string> = { code: "Open in Code", routine: "Open the run", pairing: "Devices and pairing" };
 const DONE: Record<Decision, string> = { allow: "Allowed", always: "Allowed from now on", deny: "Denied" };
 
 /** Opens an item where it came from. */

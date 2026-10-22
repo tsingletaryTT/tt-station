@@ -21,7 +21,7 @@ use axum::{extract::Json as AxJson, routing, Router};
 use libttstation::model::Endpoint;
 use serde_json::{json, Value};
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 mod support;
 
@@ -185,7 +185,7 @@ async fn station(smi: Option<String>) -> Station {
         &format!("touch '{}/reset-ran'", dir.path().display()),
     );
     let config = dir.path().join("config");
-    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
         .with_telemetry_config(tt_smi.display().to_string(), 1)
         .with_power_config(
             vec![reset.display().to_string()],
@@ -401,36 +401,6 @@ async fn a_serving_model_is_probed_and_its_own_container_is_not_a_stray() {
         .unwrap()
         .ends_with("isn't answering"));
     assert!(has(&v, "stray"), "that container is someone else's now");
-}
-
-#[tokio::test]
-async fn while_a_bring_up_has_the_chips_they_arent_read_and_no_fix_runs() {
-    let s = station(Some(healthy())).await;
-    s.state.set_bringup_busy(true);
-    let v = s.doctor().await;
-    let chips = check(&v, "chips");
-    assert_eq!(
-        (&chips["status"], &chips["title"]),
-        (&json!("ok"), &json!("Chips in use"))
-    );
-    assert_eq!(
-        s.tt_smi_runs(),
-        0,
-        "tt-smi would open chips a bring-up is driving"
-    );
-    assert!(!has(&v, "stray"), "a bring-up's containers aren't strays");
-
-    for fix in [
-        "reset_chips",
-        "stop_stray_containers",
-        "restart_model",
-        "nope",
-    ] {
-        let (status, v) = s.fix(fix, &s.owner).await;
-        assert_eq!(status, 409, "{fix}: {v}");
-        assert!(v["error"].as_str().unwrap().contains("bring-up"), "{v}");
-    }
-    assert!(!s.reset_ran());
 }
 
 // ---------------------------------------------------------------- fixes

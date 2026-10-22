@@ -204,7 +204,7 @@ pub struct ModelInfo {
 /// `ModelInfo`) plus the `model_spec.json` release version they were read
 /// from, if the backend has one to report (the default, empty
 /// `ServingBackend::list_models` impl -- used by backends with no model
-/// catalog of their own, e.g. `DstackBackend` -- reports `None`).
+/// catalog of their own, e.g. `NullBackend` -- reports `None`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelsResponse {
     pub release_version: Option<String>,
@@ -280,7 +280,7 @@ pub struct StatusInfo {
 /// `GET /config`'s response body (see `tt-station-agentd::routes::get_config`,
 /// Task 5): a REDACTED view of the agent's fully-resolved serving config
 /// (`tt-station-agentd::config::ResolvedConfig`, Task 1-3) -- just enough for
-/// the GTK panel, the `tt-station config` CLI (Task 6), and the Mac app to render
+/// the `tt-station config` CLI (Task 6) and the Mac app to render
 /// "what am I actually about to serve with," without ever exposing secrets.
 /// There is deliberately no `hf_token` (or any token-store) field here: the
 /// struct's shape enforces the "secrets never leave the box" constraint by
@@ -319,9 +319,8 @@ pub struct LogsInfo {
 /// systemd's own unit-state vocabulary (the agent runs as a systemd-managed
 /// service on the box) -- `Active`/`Inactive`/`Activating`/`Deactivating`/
 /// `Failed`, plus `Unknown` for "couldn't determine" (e.g. the box is
-/// unreachable). `tt-station console`'s collector reads this from the box; the TUI,
-/// `tt-station console --snapshot` JSON, and the GTK panel all render off the same
-/// values. `#[serde(rename_all = "snake_case")]` so the wire/JSON form reads
+/// unreachable). `tt-station console`'s collector reads this from the box; the TUI
+/// and `tt-station console --snapshot` JSON both render off the same values. `#[serde(rename_all = "snake_case")]` so the wire/JSON form reads
 /// naturally (`"inactive"`, not `"Inactive"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -334,8 +333,7 @@ pub enum ServiceState {
     Unknown,
 }
 
-/// A live pairing code as currently shown on the box (GTK panel) or
-/// reported by the agent, plus its remaining TTL -- lets `tt-station console`
+/// A live pairing code as reported by the agent, plus its remaining TTL -- lets `tt-station console`
 /// surface "pair with this box" affordances without a separate round trip
 /// to fetch the code and its expiry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,8 +367,8 @@ pub struct BoxLifecycleSnapshot {
     /// Trailing lines of the current/most-recent serving log, from `GET
     /// /logs?source=container&tail=<N>` (Task 6, dogfooding Task 2's route).
     /// `#[serde(default)]` so a snapshot recorded before this field existed
-    /// still deserializes (the `--snapshot` JSON is a documented contract the
-    /// GTK panel consumes) -- an old/absent value degrades to `vec![]`, the
+    /// still deserializes (the `--snapshot` JSON is a documented contract) --
+    /// an old/absent value degrades to `vec![]`, the
     /// same "nothing to show yet" state as a box that hasn't served anything.
     #[serde(default)]
     pub logs: Vec<String>,
@@ -788,8 +786,8 @@ mod tests {
 
     /// `#[serde(default)]` on `logs` is REQUIRED, not decorative: a
     /// `--snapshot` recorded before Task 6 (no `logs` key at all) must still
-    /// deserialize -- the GTK panel polls this JSON as a documented contract
-    /// and must not break against a slightly-older `tt-station console` binary.
+    /// deserialize -- the JSON is a documented contract and must not break
+    /// against a slightly-older `tt-station console` binary.
     #[test]
     fn lifecycle_snapshot_deserializes_without_logs_field() {
         let json = r#"{

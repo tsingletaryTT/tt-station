@@ -14,9 +14,8 @@ use libttstation::model::{BoxLifecycleSnapshot, PairingState, ServiceState, Serv
 /// How long a freshly-issued pairing code stays valid, in seconds.
 ///
 /// Must match the agent's own `PAIR_TTL` (`crates/tt-station-agentd/src/routes.rs`,
-/// `Duration::from_secs(120)`) and the GTK box panel's `PAIR_TTL_SECS`
-/// (`box-panel/tt-station-panel.py`) -- all three surfaces show a countdown
-/// for the same underlying pairing attempt, so they must agree on its TTL.
+/// `Duration::from_secs(120)`) -- both show a countdown for the same
+/// underlying pairing attempt, so they must agree on its TTL.
 pub const PAIRING_TTL_SECS: u64 = 120;
 
 /// Where the `tt-station` `.deb` installs the polkit rule that grants
@@ -76,9 +75,7 @@ pub fn parse_service_state(show_output: &str) -> ServiceState {
 /// first, as `journalctl` emits them) and report it with a full TTL.
 ///
 /// The agent logs pairing codes as `tt-station-agentd: pairing code: NNNNNN`
-/// (`crates/tt-station-agentd/src/routes.rs`, `init_pair`); the GTK panel
-/// parses the same line with `CODE_RE = re.compile(r"pairing code:\s*(\d{6})")`
-/// (`box-panel/tt-station-panel.py`). This mirrors that: any line mentioning
+/// (`crates/tt-station-agentd/src/routes.rs`, `init_pair`). Any line mentioning
 /// "pairing" or "code" (case-insensitively) that contains a standalone
 /// 6-digit run is a candidate, and the most recent one wins.
 ///

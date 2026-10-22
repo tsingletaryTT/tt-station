@@ -880,9 +880,8 @@ pub async fn pair(base: &str, state: &tt_station_agentd::routes::AppState) -> St
 }
 
 /// A scratch `HOME` with no models in it, set once for the test binary: the
-/// Code model list (`codemodels.rs`) reads tt-model's packages, native vLLM
-/// bundles and the Hugging Face cache from the home folder, and the box
-/// running the tests has real ones. Env changes are process-wide, so call it
+/// Code model list (`codemodels.rs`) reads the Hugging Face cache from the
+/// home folder, and the box running the tests has real ones. Env changes are process-wide, so call it
 /// before the first agent starts.
 #[allow(dead_code)]
 pub fn home_without_models() -> &'static std::path::Path {

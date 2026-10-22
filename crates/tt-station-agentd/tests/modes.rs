@@ -9,12 +9,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::{extract::Json as AxJson, routing::post, Router};
 use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 use serde_json::{json, Value};
-use tt_station_agentd::coserve::Companion;
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::{Placement, ServingBackend};
+use tt_station_agentd::serving::ServingBackend;
 use tt_station_agentd::ttcli::TtCli;
 
 const CATALOG: &str = r#"{
@@ -78,32 +76,11 @@ fn downloaded(hf: &Path, repo: &str) {
     std::fs::write(dir.join("snapshots/abc/model.safetensors"), vec![1u8; 4096]).unwrap();
 }
 
-async fn stub_media_server() -> String {
-    let router = Router::new().route(
-        "/v1/images/generations",
-        post(
-            |headers: axum::http::HeaderMap, AxJson(body): AxJson<Value>| async move {
-                AxJson(json!({
-                    "images": ["aGk="],
-                    "echo": body["prompt"],
-                    "guidance": body["guidance_scale"],
-                    "auth": headers.get("authorization").and_then(|v| v.to_str().ok()),
-                }))
-            },
-        ),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    format!("{base}/v1")
-}
-
-/// Serves after a short delay and records the placement it was pinned to.
+/// Serves after a short delay and records what it started.
 struct FakeBackend {
     base_url: String,
     served_id: String,
-    placement: Mutex<Option<Placement>>,
-    started_with: Mutex<Vec<(String, Option<Placement>)>>,
+    started_with: Mutex<Vec<String>>,
     serving: Mutex<Option<String>>,
 }
 
@@ -112,7 +89,6 @@ impl FakeBackend {
         Arc::new(FakeBackend {
             base_url: base_url.to_string(),
             served_id: served_id.to_string(),
-            placement: Mutex::new(None),
             started_with: Mutex::new(Vec::new()),
             serving: Mutex::new(None),
         })
@@ -122,11 +98,7 @@ impl FakeBackend {
 impl ServingBackend for FakeBackend {
     fn start_forcing(&self, model: &str, _force: bool) -> anyhow::Result<Endpoint> {
         std::thread::sleep(Duration::from_millis(100));
-        let placement = self.placement.lock().unwrap().clone();
-        self.started_with
-            .lock()
-            .unwrap()
-            .push((model.to_string(), placement));
+        self.started_with.lock().unwrap().push(model.to_string());
         *self.serving.lock().unwrap() = Some(self.served_id.clone());
         Ok(Endpoint {
             base_url: self.base_url.clone(),
@@ -150,26 +122,16 @@ impl ServingBackend for FakeBackend {
             models: vec![],
         })
     }
-    fn set_placement(&self, placement: Option<Placement>) -> bool {
-        *self.placement.lock().unwrap() = placement;
-        true
-    }
-    fn placement(&self) -> Option<Placement> {
-        self.placement.lock().unwrap().clone()
-    }
 }
 
-#[allow(dead_code)] // shared scaffolding with tests/coserve.rs
 struct Harness {
     client: reqwest::Client,
     base: String,
     token: String,
     main: Arc<FakeBackend>,
-    side: Arc<FakeBackend>,
     _scratch: Scratch,
 }
 
-#[allow(dead_code)]
 impl Harness {
     async fn new() -> Self {
         let scratch = Scratch::new();
@@ -177,14 +139,11 @@ impl Harness {
         downloaded(&hf, "org/Qwen3-32B");
         downloaded(&hf, "org/Llama-3.1-8B-Instruct");
         downloaded(&hf, "org/FLUX.1-schnell");
-        let media = stub_media_server().await;
         let main = FakeBackend::new("http://127.0.0.1:9/v1", "Qwen/Qwen3-32B");
-        let side = FakeBackend::new(&media, "tt-flux-s");
         let state = AppState::new("qb2-lab".into(), "4xBH".into(), main.clone())
             .with_device_mesh(Some("p300x2".into()))
             .with_telemetry_config("/nonexistent/tt-smi".to_string(), 1000)
-            .with_tt_cli(Arc::new(TtCli::new(stub_tt(&scratch.0), &hf)))
-            .with_companion(Companion::new(side.clone()));
+            .with_tt_cli(Arc::new(TtCli::new(stub_tt(&scratch.0), &hf)));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let router = app(state.clone());
@@ -215,7 +174,6 @@ impl Harness {
             base,
             token: done["token"].as_str().unwrap().to_string(),
             main,
-            side,
             _scratch: scratch,
         }
     }
@@ -241,19 +199,6 @@ impl Harness {
             .await
             .unwrap()
     }
-
-    /// Poll `GET /coserve` until `done` holds (or fail after a few seconds).
-    async fn wait(&self, done: impl Fn(&Value) -> bool) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let v = self.get("/coserve").await;
-            if done(&v) {
-                return v;
-            }
-            assert!(Instant::now() < deadline, "timed out: {v}");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
 }
 
 #[tokio::test]
@@ -271,25 +216,19 @@ async fn modes_pick_models_report_downloads_start_and_learn_load_times() {
     assert_eq!(get("chat")["models"], json!(["Qwen3-32B"]), "{v}");
     assert_eq!(get("chat")["ready"], true);
     assert_eq!(get("images")["models"], json!(["FLUX.1-schnell"]));
-    assert_eq!(
-        get("chat_images")["models"],
-        json!(["Llama-3.1-8B-Instruct", "FLUX.1-schnell"])
-    );
-    assert!(get("chat_images")["note"]
-        .as_str()
-        .unwrap()
-        .contains("Known issue"));
-    assert_eq!(get("video")["ready"], false);
-    assert_eq!(
-        get("video")["needs_download"],
-        json!(["Wan2.2-T2V-A14B-Diffusers"])
-    );
     assert_eq!(get("transcribe"), Value::Null, "not in this catalog");
+    for gone in ["chat_images", "video"] {
+        assert_eq!(get(gone), Value::Null, "{gone} is not a mode");
+    }
     assert_eq!(get("chat")["eta_s"], Value::Null, "never loaded yet");
 
     let video = h.post("/modes/video", json!({})).await;
     assert_eq!(video.status(), 409);
-    assert!(video.text().await.unwrap().contains("downloaded first"));
+    assert!(video
+        .text()
+        .await
+        .unwrap()
+        .contains("no \\\"video\\\" mode"));
 
     let chat = h.post("/modes/chat", json!({})).await;
     assert_eq!(chat.status(), 202);
@@ -311,7 +250,7 @@ async fn modes_pick_models_report_downloads_start_and_learn_load_times() {
         assert!(Instant::now() < deadline, "{v}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(h.main.started_with.lock().unwrap()[0].0, "Qwen3-32B");
+    assert_eq!(h.main.started_with.lock().unwrap()[0], "Qwen3-32B");
     let again = h.post("/modes/chat", json!({})).await;
     assert_eq!(again.status(), 200, "already active");
 }

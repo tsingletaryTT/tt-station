@@ -37,7 +37,7 @@ use reqwest::Method as M;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 mod support;
 
@@ -117,7 +117,7 @@ struct Station {
 
 /// The agent on `config`, serving `stub` when there is one.
 async fn station(config: &Path, stub: Option<&Stub>) -> Station {
-    let mut state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let mut state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
         .with_config_dir(config.to_path_buf());
     if let Some(stub) = stub {
         let port = stub_model(stub.clone()).await;

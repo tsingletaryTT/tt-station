@@ -5,6 +5,10 @@ benchmark in §5 was cancelled. The analysis is kept as background. Written 2026
 were measured on the QuietBox (`tt-quietbox`) on 2026-10-15 unless another date is given.
 Audience: TT Station engineering, and whoever decides how company QuietBoxes are configured.*
 
+*Update (v0.12.0): community packages, native vLLM bundles, Lab (tt-lab) and co-serving were
+removed from TT Station before production. The Code picker now lists the `tt` catalog only, and
+the mentions of those features below are background, not current behavior.*
+
 ## Summary
 
 Code (Claude Code and friends, driven by TT Station) runs on **gpt-oss-20b served by vLLM in
@@ -69,7 +73,7 @@ step-time model in §2 still hold.
 | Fully cached prompt (prefix-cache hit) | **0.71 s at 4.8K, 1.0 s at 28.8K.** The *first* reuse after a cold read was slower: 1.1 s and 2.3 s | Measured. This matches "cached prompts still cost 0.6–1 s". An 8-token prompt costs 0.12 s, so a hit carries **~0.6–0.9 s of fixed overhead**. Not yet explained |
 | Session read from an empty cache | 2.7 s (8K), 12.9 s (32K), **21.6 s (64K)**, 37.2 s (120K), with other requests in flight | [agent-reliability note](../notes/agent-reliability-gpt-oss-20b.md) |
 | Tool-call reliability | Valid within one retry: **99/100 at 64K, 94/100 at 96K** (pooled). Code compacts at **64K** (`coding.rs` `COMPACT_WINDOW`; window capped at `MAX_WINDOW` 131072) | Reliability note |
-| tt-lab bare metal, 4 chips | **152–158 tok/s decode, prefill ~198 tok/s**, 5.8 ms/token device time. One chip: 16.5 ms/token | [lab.md](../reference/lab.md), 2026-10-07 |
+| tt-lab bare metal, 4 chips | **152–158 tok/s decode, prefill ~198 tok/s**, 5.8 ms/token device time. One chip: 16.5 ms/token | tt-lab run, 2026-10-07 |
 | Prompt : output tokens in Code | **~160:1** for Qwen3.8-27B (2026-10-12). **197:1 pooled** over 26 Code turns on this box (35.4M prompt, 180K output; `~/.config/tt-station/code/*/events.jsonl`) | Measured |
 
 ## 2. Where a Code step's time goes

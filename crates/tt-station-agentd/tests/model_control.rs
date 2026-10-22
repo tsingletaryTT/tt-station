@@ -17,7 +17,7 @@ use std::sync::Arc;
 use reqwest::Method as M;
 use serde_json::{json, Value};
 use tt_station_agentd::routes::{app, local_http_app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 mod support;
 
@@ -30,17 +30,6 @@ fn switching_routes() -> Vec<(M, &'static str, Value)> {
         (M::POST, "/stop", json!({})),
         (M::POST, "/serve", json!({ "model": "Qwen/Qwen3-32B" })),
         (M::POST, "/modes/chat", json!({})),
-        (
-            M::POST,
-            "/coserve",
-            json!({ "chat": "Qwen/Qwen3-32B", "image": "FLUX.1-schnell" }),
-        ),
-        (M::POST, "/community/serve", json!({ "id": "acme/chat" })),
-        (
-            M::POST,
-            "/vllm/native/serve",
-            json!({ "model": "acme/chat" }),
-        ),
         (M::POST, "/jobs/abc123/run", json!({})),
         (M::POST, "/evals", json!({})),
         (M::POST, "/evals/stop", json!({})),
@@ -59,7 +48,7 @@ fn switching_routes() -> Vec<(M, &'static str, Value)> {
 }
 
 /// Of those, the ones whose handlers refuse here without touching serving
-/// (nothing is serving, no job queue, no such schedule, no second slot), so
+/// (nothing is serving, no job queue, no such schedule), so
 /// a request that gets past the gate is safe to make in a test.
 fn harmless_routes() -> Vec<(M, &'static str, Value)> {
     let harmless = [
@@ -67,7 +56,6 @@ fn harmless_routes() -> Vec<(M, &'static str, Value)> {
         "/evals/stop",
         "/jobs/abc123/run",
         "/schedules/abc",
-        "/coserve",
         // Nothing serves in these tests: refused (409) before it stops anything.
         "/idle/sleep",
     ];
@@ -88,7 +76,7 @@ struct Station {
 
 async fn the_box() -> Station {
     let config = tempfile::tempdir().unwrap();
-    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
         // Never the box's real serving port.
         .with_serving_config("127.0.0.1".into(), 9)
         .with_config_dir(config.path().to_path_buf());
@@ -222,7 +210,7 @@ async fn reading_and_the_routes_beside_them_stay_open_to_members() {
     let b = the_box().await;
     let (status, _) = b.set(&b.owner, "owners").await;
     assert_eq!(status, 200);
-    for path in ["/serve", "/evals", "/coserve", "/schedules", "/modes"] {
+    for path in ["/serve", "/evals", "/schedules", "/modes"] {
         let (status, v) = b.call(M::GET, path, &b.member, json!(null)).await;
         assert_ne!(status, 403, "GET {path}: {v}");
     }
@@ -236,7 +224,7 @@ async fn reading_and_the_routes_beside_them_stay_open_to_members() {
 #[tokio::test]
 async fn the_boxs_own_user_is_an_owner_here_too() {
     let config = tempfile::tempdir().unwrap();
-    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
         .with_serving_config("127.0.0.1".into(), 9)
         .with_config_dir(config.path().to_path_buf());
     std::fs::write(

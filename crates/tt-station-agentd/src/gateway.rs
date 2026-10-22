@@ -6,8 +6,7 @@
 //! (Open WebUI, Continue, LangChain, the `openai` SDK, curl...).
 //!
 //! It follows whatever the box is doing: chat and completions go to the served
-//! chat model, `/v1/images/generations` to the image model -- including both at
-//! once on a split box (`crate::coserve`) -- so a client never chases ports or
+//! chat model, `/v1/images/generations` to the image model -- so a client never chases ports or
 //! model ids. The `model` a client sends is rewritten to the one actually
 //! serving, so tools that insist on a model name just work.
 //!
@@ -681,9 +680,6 @@ async fn served_models(state: &AppState) -> Vec<Value> {
     if let Some(chat) = chat_endpoint(state).await {
         models.push(json!({ "id": chat.model, "object": "model", "owned_by": state.name(), "kind": "chat" }));
     }
-    if let Some(second) = state.companion().and_then(|c| c.chat()) {
-        models.push(json!({ "id": second.model, "object": "model", "owned_by": state.name(), "kind": "chat" }));
-    }
     if let Some((_, id)) = image_target(state).await {
         models.push(
             json!({ "id": id, "object": "model", "owned_by": state.name(), "kind": "image" }),
@@ -736,56 +732,8 @@ pub(crate) async fn chat_endpoint(state: &AppState) -> Option<libttstation::mode
     matches!(kind, "chat" | "other").then_some(endpoint)
 }
 
-/// Which chat model a request goes to, when two are serving (`crate::coserve`):
-/// the one it names; for Code (`for_code`), the second unless it names the
-/// first; otherwise the first.
-pub(crate) async fn llm_endpoint(
-    state: &AppState,
-    asked: Option<&str>,
-    for_code: bool,
-) -> Option<libttstation::model::Endpoint> {
-    let main = chat_endpoint(state).await;
-    let second = state.companion().and_then(|c| c.chat());
-    pick_llm(main, second, asked, for_code)
-}
-
-pub fn pick_llm(
-    main: Option<libttstation::model::Endpoint>,
-    second: Option<libttstation::model::Endpoint>,
-    asked: Option<&str>,
-    for_code: bool,
-) -> Option<libttstation::model::Endpoint> {
-    let names = |e: &libttstation::model::Endpoint, a: &str| {
-        let short = |s: &str| s.rsplit('/').next().unwrap_or(s).to_lowercase();
-        !a.is_empty() && (e.model.eq_ignore_ascii_case(a) || short(&e.model) == short(a))
-    };
-    match (main, second) {
-        (Some(m), Some(s)) => {
-            let a = asked.unwrap_or("");
-            if names(&s, a) {
-                Some(s)
-            } else if names(&m, a) || !for_code {
-                Some(m)
-            } else {
-                Some(s)
-            }
-        }
-        (m, s) => m.or(s),
-    }
-}
-
-/// The image server's base URL and model id, from the companion slot or the
-/// main one.
+/// The image server's base URL and model id, when the box serves one.
 pub(crate) async fn image_target(state: &AppState) -> Option<(String, String)> {
-    if let Some(companion) = state.companion() {
-        if let Some(base) = companion.media_base("image") {
-            let id = companion
-                .endpoint()
-                .map(|e| e.model)
-                .unwrap_or_else(|| "image".to_string());
-            return Some((base, id));
-        }
-    }
     let endpoint = state.endpoint()?;
     let probe = state.clone();
     let kind = tokio::task::spawn_blocking(move || probe.served_kind_blocking())
@@ -819,11 +767,7 @@ pub(crate) async fn v1_text(
     uri: axum::http::Uri,
     Json(mut body): Json<Value>,
 ) -> Response {
-    let asked = body
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let Some(endpoint) = llm_endpoint(&state, asked.as_deref(), false).await else {
+    let Some(endpoint) = chat_endpoint(&state).await else {
         if let Some(waking) = crate::idle::wake_for_request(&state).await {
             let mut r = openai_error(StatusCode::SERVICE_UNAVAILABLE, waking);
             r.headers_mut()
@@ -1200,50 +1144,6 @@ mod tests {
                 }
             )
             .is_err());
-    }
-
-    #[test]
-    fn two_chat_models_go_by_name_and_code_gets_the_second() {
-        let ep = |m: &str| libttstation::model::Endpoint {
-            base_url: format!("http://x/{m}"),
-            model: m.to_string(),
-            requires_key: false,
-        };
-        let (main, coder) = (ep("Qwen/Qwen3-8B"), ep("Qwen/Qwen3-Coder-30B-A3B-Instruct"));
-        let pick = |asked: Option<&str>, code: bool| {
-            pick_llm(Some(main.clone()), Some(coder.clone()), asked, code).map(|e| e.model)
-        };
-        assert_eq!(
-            pick(Some("gpt-4o"), false).as_deref(),
-            Some("Qwen/Qwen3-8B"),
-            "an unknown name gets the first"
-        );
-        assert_eq!(
-            pick(Some("Qwen3-Coder-30B-A3B-Instruct"), false).as_deref(),
-            Some("Qwen/Qwen3-Coder-30B-A3B-Instruct")
-        );
-        assert_eq!(
-            pick(Some("claude-sonnet"), true).as_deref(),
-            Some("Qwen/Qwen3-Coder-30B-A3B-Instruct"),
-            "Code gets the second"
-        );
-        assert_eq!(
-            pick(Some("qwen/qwen3-8b"), true).as_deref(),
-            Some("Qwen/Qwen3-8B"),
-            "unless it names the first"
-        );
-        assert_eq!(
-            pick_llm(Some(main.clone()), None, Some("x"), true)
-                .map(|e| e.model)
-                .as_deref(),
-            Some("Qwen/Qwen3-8B")
-        );
-        assert_eq!(
-            pick_llm(None, Some(coder.clone()), None, false)
-                .map(|e| e.model)
-                .as_deref(),
-            Some("Qwen/Qwen3-Coder-30B-A3B-Instruct")
-        );
     }
 
     #[test]

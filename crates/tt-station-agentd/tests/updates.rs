@@ -21,7 +21,7 @@ use ring::signature::KeyPair as _;
 use serde_json::{json, Value};
 use tt_station_agentd::release_keys::{self, TrustedKey};
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 use tt_station_agentd::updates::{self, below_floor, names_version, older, valid_version};
 
 mod support;
@@ -308,7 +308,7 @@ impl Box_ {
         std::fs::create_dir_all(&config).unwrap();
         // A channel file that doesn't parse: nothing goes to GitHub.
         std::fs::write(config.join(updates::CHANNEL_FILE), "repos = \"typo/x\"\n").unwrap();
-        let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+        let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
             .with_telemetry_config("/nonexistent/tt-smi".to_string(), 1000)
             .with_config_dir(config.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

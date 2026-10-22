@@ -15,17 +15,13 @@ tag publishes both the `.deb`s (`release.yml`) and the macOS `.dmg`
 
 ## On the QuietBox (Ubuntu)
 
-1. From the release, download the two `.deb`s matching your Ubuntu version —
-   `_noble` for 24.04, `_jammy` for 22.04:
-   - `tt-station_<ver>_amd64_<suite>.deb`
-   - `tt-station-panel_<ver>_amd64_<suite>.deb`
+1. From the release, download the `.deb` matching your Ubuntu version —
+   `_noble` for 24.04, `_jammy` for 22.04: `tt-station_<ver>_amd64_<suite>.deb`
 
-2. Install both with `apt` (not `dpkg -i`) so dependencies resolve
-   (`gir1.2-gtk-4.0`, `python3-gi`, `docker.io`, `xdg-utils`):
+2. Install it with `apt` (not `dpkg -i`) so dependencies resolve:
 
    ```bash
-   sudo apt install ./tt-station_<ver>_amd64_<suite>.deb \
-                    ./tt-station-panel_<ver>_amd64_<suite>.deb
+   sudo apt install ./tt-station_<ver>_amd64_<suite>.deb
    ```
 
 3. Start the agent as your **user** service and make it survive logout/reboot:
@@ -36,9 +32,8 @@ tag publishes both the `.deb`s (`release.yml`) and the macOS `.dmg`
    systemctl --user status tt-station-agentd   # expect: active (running)
    ```
 
-4. Open the panel — “tt-station Panel” in the app menu, or `tt-station-panel` in a
-   terminal. You should see the status pill, and a big 6-digit **pairing code**
-   appears the moment a client tries to pair.
+4. Open TT Station on the box (or `tt-station console` in a terminal). The 6-digit
+   **pairing code** appears the moment a client tries to pair.
 
 If the service won't stay up, the logs are:
 
@@ -63,13 +58,12 @@ journalctl --user -u tt-station-agentd -e --no-pager
 ## The test loop
 
 1. In the Mac app, the box should appear via LAN (mDNS) discovery. Click **Pair**
-   and enter the 6-digit code shown on the box panel.
+   and enter the 6-digit code shown on the box.
 2. The app's device strip should stream live temp/power telemetry — this confirms
    the unauthenticated telemetry path even before anything is serving.
 3. Run a model from the app's model browser (needs serving config on the box — see
    below).
-4. Once it's serving, try **Connect → Open WebUI / opencode** — both from the Mac
-   app *and* from the box panel's Connect row.
+4. Once it's serving, try **Connect → Open WebUI / opencode** from the Mac app.
 
 ## Serving a model (needed for steps 3–4)
 
@@ -78,7 +72,7 @@ status work out of the box**. Actually *running a model* additionally needs a
 box-side config file at `~/.config/tt-station/agentd.toml` pointing at a
 `tt-inference-server` checkout and a pinned serving image:
 
-- Copy the starter: `box-panel/agentd.example.toml` → `~/.config/tt-station/agentd.toml`
+- Copy the starter: `deploy/agentd.example.toml` → `~/.config/tt-station/agentd.toml`
 - Reference: `docs/reference/agentd-config.md`
 - After editing, `systemctl --user restart tt-station-agentd`.
 
@@ -93,10 +87,10 @@ Apple-Silicon Mac. On other hardware you'll need a matching build.
 
 A single tag publishes everything (both `.deb` suites + the macOS DMG) to one
 release page. The tag **must** match the version in `Cargo.toml`
-(`[workspace.package]`), `debian/changelog`, `box-panel/tt-station-panel.py`
-(`__version__`), and `macos/TTStation/AppShell/project.yml` (`MARKETING_VERSION`) —
+(`[workspace.package]`), `debian/changelog`, and
+`macos/TTStation/AppShell/project.yml` (`MARKETING_VERSION`) —
 `ci.yml` and `make-release.sh` assert this. Use `scripts/bump-version.sh <ver>` for
-the first three; bump `MARKETING_VERSION` by hand.
+the first two; bump `MARKETING_VERSION` by hand.
 
 ```bash
 git tag vX.Y.Z && git push origin vX.Y.Z

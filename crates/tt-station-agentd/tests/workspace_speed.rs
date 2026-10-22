@@ -28,7 +28,7 @@ use reqwest::Method as M;
 use serde_json::{json, Value};
 use tt_station_agentd::codespeed::{record, Step};
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 use tt_station_agentd::ttcli::TtCli;
 
 mod support;
@@ -91,7 +91,7 @@ fn stub_tt(dir: &Path, catalog: &Value) -> Vec<String> {
 async fn harness(setup: Setup) -> Station {
     support::home_without_models();
     let config = tempfile::tempdir().unwrap();
-    let mut state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let mut state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
         .with_config_dir(config.path().to_path_buf());
     if let Some(catalog) = &setup.catalog {
         let dir = config.path().join("tt");

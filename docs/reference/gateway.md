@@ -15,8 +15,7 @@ http://127.0.0.1:8765/v1        # on the box
 ```
 
 It follows whatever the box is doing: chat and completions go to the served chat
-model, images to the image model -- both at once on a split box (see
-[tt-cli.md](tt-cli.md#co-serving-chat-and-images-at-once-coserve)). Clients never
+model, images to the image model. Clients never
 chase ports or model ids: the `model` a client sends is rewritten to the one
 serving, so tools that insist on `gpt-4o` just work.
 
@@ -50,10 +49,10 @@ model serves, and the chips' mean power from the metrics recorder. The app turns
 
 ## Images in chat (`create_image`)
 
-A read-only assistant tool: renders with the image model beside the chat model,
+A read-only assistant tool: renders with the image model that serves,
 saves the JPEGs to `$TT_CONFIG_DIR/creations` (newest 300 kept), and hands the
 model only their ids; the action report carries `images: [id]` for the client to
-fetch. Without an image model it tells the model how to get one (co-serving).
+fetch. Without an image model it tells the model how to get one (the `images` mode).
 
 ## Media-server stall watchdog
 

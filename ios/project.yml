@@ -19,8 +19,6 @@ targets:
     dependencies:
       # The Lock Screen / Dynamic Island Live Activity.
       - target: TTStationActivity
-      # Fills in a push's real text from the box (pushes carry only an event id).
-      - target: TTStationNotificationService
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.tenstorrent.ttstation.mobile
@@ -35,11 +33,6 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         # Set your own team in Xcode (Signing & Capabilities) to run on a device.
         CODE_SIGN_STYLE: Automatic
-        # Push notifications are off for now: a personal (free) team can't sign
-        # the capability. To turn them on with a paid team, add back
-        # `CODE_SIGN_ENTITLEMENTS: TTStationMobile.entitlements` (push, and the
-        # Keychain group shared with the notification service extension) and
-        # set `AlertCenter.remotePush` to true.
   TTStationActivity:
     type: app-extension
     platform: iOS
@@ -52,24 +45,6 @@ targets:
         SWIFT_VERSION: "5.0"
         INFOPLIST_FILE: ActivityExtension/Info.plist
         GENERATE_INFOPLIST_FILE: NO
-        MARKETING_VERSION: "0.12.0"
-        CURRENT_PROJECT_VERSION: "1"
-        TARGETED_DEVICE_FAMILY: "1,2"
-        CODE_SIGN_STYLE: Automatic
-        SKIP_INSTALL: YES
-  TTStationNotificationService:
-    type: app-extension
-    platform: iOS
-    sources:
-      - NotificationService
-      - path: Shared/PushCredentials.swift
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.tenstorrent.ttstation.mobile.notifications
-        SWIFT_VERSION: "5.0"
-        INFOPLIST_FILE: NotificationService/Info.plist
-        GENERATE_INFOPLIST_FILE: NO
-        CODE_SIGN_ENTITLEMENTS: NotificationService/NotificationService.entitlements
         MARKETING_VERSION: "0.12.0"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -99,7 +74,6 @@ schemes:
       targets:
         TTStationMobile: all
         TTStationActivity: all
-        TTStationNotificationService: all
     run:
       config: Debug
       executable: TTStationMobile

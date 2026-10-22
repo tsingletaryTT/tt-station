@@ -9,12 +9,11 @@
 // warns as the conversation nears compaction. "Steps" opens the last few.
 //
 // The model button opens "Model for Code": every model on the box Code could
-// run on (`codeModels.ts`), from the tt catalog, community packages (each
-// profile its own option) and native vLLM bundles, grouped by model. Each says
+// run on (`codeModels.ts`), from the tt catalog, grouped by model. Each says
 // its window, chips, whether its server caches prompt prefixes, how fast it ran
 // here and how reliably it made tool calls in a check-up, and flags tool
 // calling nobody has verified. Choosing one that isn't serving starts it
-// through its source's own serve route, the way Models does, after saying
+// through the box's serve route, the way Models does, after saying
 // plainly what that stops for everyone.
 
 import { useEffect, useRef, useState } from "react";
@@ -224,13 +223,13 @@ export function ModelPicker() {
       {d.serve.phase === "failed" && (
         <Admonition variant="danger" subtle size="sm">{short(d.serve.model) || "The model"} didn't start: {d.serve.error ?? "no reason given"}. Try again, pick another, or see Models.</Admonition>
       )}
-      {d.catalog_error && <Admonition variant="warning" subtle size="sm">Couldn't read the box's model catalog: {d.catalog_error}. Community packages and bundles are still listed.</Admonition>}
+      {d.catalog_error && <Admonition variant="warning" subtle size="sm">Couldn't read the box's model catalog: {d.catalog_error}.</Admonition>}
       {current?.prefix_cache.state === "off" && <Admonition variant="info" subtle size="sm">{NO_CACHE_COST}</Admonition>}
 
       {groups.length === 0 ? (
         <div className="code-models-empty">
           <b>No models on the box can run Code yet.</b>
-          <span className="muted">Code needs a chat model whose weights are on the box, that fits its chips and can make tool calls. Download one in Models (the tt catalog or a community package), then pick it here.</span>
+          <span className="muted">Code needs a chat model whose weights are on the box, that fits its chips and can make tool calls. Download one in Models, then pick it here.</span>
           <div><Button size="sm" variant="subtle" onClick={() => navigate("models")}>Open Models</Button></div>
         </div>
       ) : (
@@ -287,7 +286,7 @@ export function ModelPicker() {
           ))}
         </ul>
       )}
-      <span className="muted code-models-foot">Every model on the box that could run Code, from the tt catalog, community packages (each profile that fits) and native vLLM bundles. Speeds are what Code measured on this box in that setup: the median of its recent steps. Code uses up to {k(CODE_WINDOW)} of a model's window.</span>
+      <span className="muted code-models-foot">Every model on the box that could run Code, from the tt catalog. Speeds are what Code measured on this box in that setup: the median of its recent steps. Code uses up to {k(CODE_WINDOW)} of a model's window.</span>
     </div>
   );
 }

@@ -139,7 +139,7 @@ final class WakeTests: XCTestCase {
 
 final class BoxControlShapesTests: XCTestCase {
     func testIdleSleepRoundTrips() throws {
-        let json = #"{"settings":{"enabled":true,"after_minutes":60,"wake_on_request":true},"asleep":{"target":"Qwen/Qwen3-32B","community":false,"label":"Qwen3-32B","at":1760500000},"idle_for_s":null,"waking":false}"#
+        let json = #"{"settings":{"enabled":true,"after_minutes":60,"wake_on_request":true},"asleep":{"target":"Qwen/Qwen3-32B","label":"Qwen3-32B","at":1760500000},"idle_for_s":null,"waking":false}"#
         let idle = try JSONDecoder().decode(IdleInfo.self, from: Data(json.utf8))
         XCTAssertEqual(idle.asleep?.label, "Qwen3-32B")
         XCTAssertEqual(idle.settings.afterMinutes, 60)
@@ -164,16 +164,15 @@ final class BoxControlShapesTests: XCTestCase {
         XCTAssertNil(BoxAccess(owner: true, mayControlModels: true, modelControl: "owners").modelsNote)
     }
 
-    /// `GET /code/models`, trimmed: the catalog model in use, a community package
-    /// with two profiles, and one that can't run here.
+    /// `GET /code/models`, trimmed: the catalog model in use, one that can be
+    /// started, and one that can't run here.
     private let options = #"""
     {"code_model":"Qwen/Qwen3-32B","serve":{"phase":"serving","model":"Qwen/Qwen3-32B","since":1760500000,"error":null,"eta_s":null},
      "catalog_error":null,
      "models":[
-      {"key":"community:acme/gpt-oss-20b#p150x2","group":"gpt-oss-20b","name":"gpt-oss-20b","model":"openai/gpt-oss-20b","source":"community","origin":"acme","profile":"p150x2","profile_label":"Interactive","profile_note":null,"chips":2,"context":131072,"tools":{"verified":true,"how":"tool parser openai"},"choice":{"action":"switch"},"serve":{"route":"/community/serve","body":{"id":"acme/gpt-oss-20b","profile":"p150x2","stop_serving":true}},"eta_s":300},
+      {"key":"catalog:gpt-oss-20b","group":"gpt-oss-20b","name":"gpt-oss-20b","model":"openai/gpt-oss-20b","source":"catalog","origin":"tt","profile":null,"profile_label":null,"profile_note":null,"chips":2,"context":131072,"tools":{"verified":true,"how":"tool parser openai"},"choice":{"action":"switch"},"serve":{"route":"/serve","body":{"model":"gpt-oss-20b","force":true}},"eta_s":300},
       {"key":"catalog:Qwen3-32B","group":"qwen3-32b","name":"Qwen3-32B","model":"Qwen/Qwen3-32B","source":"catalog","origin":"tt","profile":null,"profile_label":null,"profile_note":null,"chips":4,"context":null,"tools":{"verified":true,"how":"x"},"choice":{"action":"in_use"},"serve":null,"eta_s":600},
-      {"key":"community:acme/gpt-oss-20b#p150x4","group":"gpt-oss-20b","name":"gpt-oss-20b","model":"openai/gpt-oss-20b","source":"community","origin":"acme","profile":"p150x4-throughput","profile_label":"Throughput","profile_note":"Up to 32 sequences.","chips":4,"context":null,"tools":null,"choice":{"action":"switch"},"serve":{"route":"/community/serve","body":{"id":"acme/gpt-oss-20b","profile":"p150x4-throughput","stop_serving":true}},"eta_s":null},
-      {"key":"native:/opt/m","group":"llama","name":"Llama","model":"meta/Llama","source":"native","origin":"","profile":null,"profile_label":null,"profile_note":null,"chips":null,"context":null,"tools":null,"choice":{"action":"unavailable","why":"tt-model isn't installed on this box."},"serve":null,"eta_s":null}
+      {"key":"catalog:Llama","group":"llama","name":"Llama","model":"meta/Llama","source":"catalog","origin":"tt","profile":null,"profile_label":null,"profile_note":null,"chips":null,"context":null,"tools":null,"choice":{"action":"unavailable","why":"Not downloaded on this box."},"serve":null,"eta_s":null}
      ]}
     """#
 
@@ -181,19 +180,18 @@ final class BoxControlShapesTests: XCTestCase {
         let decoded = try JSONDecoder().decode(ServeOptions.self, from: Data(options.utf8))
         let groups = ServeGroups.make(decoded.models)
         XCTAssertEqual(groups.map(\.id), ["qwen3-32b", "gpt-oss-20b", "llama"])
-        XCTAssertEqual(groups[1].options.map(\.profileLabel), ["Interactive", "Throughput"])
         XCTAssertTrue(groups[0].inUse)
-        XCTAssertEqual(groups[2].options[0].blocked, "tt-model isn't installed on this box.")
+        XCTAssertEqual(groups[2].options[0].blocked, "Not downloaded on this box.")
         XCTAssertNil(groups[1].options[0].blocked)
-        XCTAssertEqual(ServeGroups.detail(groups[1].options[0]), "Community · Interactive · 2 chips · 128K context")
+        XCTAssertEqual(ServeGroups.detail(groups[1].options[0]), "Catalog · 2 chips · 128K context")
         XCTAssertEqual(ServeGroups.make(decoded.models, query: "llama").map(\.id), ["llama"])
 
         // The serve call goes back exactly as the box gave it.
-        let call = try XCTUnwrap(groups[1].options[1].serve)
-        XCTAssertEqual(call.route, "/community/serve")
+        let call = try XCTUnwrap(groups[1].options[0].serve)
+        XCTAssertEqual(call.route, "/serve")
         let body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(call.body)) as? [String: Any]
-        XCTAssertEqual(body?["profile"] as? String, "p150x4-throughput")
-        XCTAssertEqual(body?["stop_serving"] as? Bool, true)
+        XCTAssertEqual(body?["model"] as? String, "gpt-oss-20b")
+        XCTAssertEqual(body?["force"] as? Bool, true)
     }
 
     func testPausingARoutineSendsTheRestBackUnchanged() throws {
@@ -227,12 +225,5 @@ final class BoxControlShapesTests: XCTestCase {
         XCTAssertEqual(report.canChange, true)
         XCTAssertFalse(report.job.isActive)
         XCTAssertEqual(report.job.displayTitle, "How do Blackhole chips cool?")
-    }
-
-    func testARecordingInTheRoomSaysWhoStartedIt() throws {
-        let json = #"{"microphone":"USB mic","speakers":"Speakers","recording":{"id":"r","title":"Standup","started":1760500000,"seconds":125,"mic":"USB mic","system":"Speakers","mic_db":-30.0,"system_db":null,"ended":false,"max_seconds":14400,"started_by":"Jane's iPhone"}}"#
-        let status = try JSONDecoder().decode(RecordStatus.self, from: Data(json.utf8))
-        XCTAssertEqual(status.recording?.startedBy, "Jane's iPhone")
-        XCTAssertEqual(status.recording?.maxSeconds, 14400)
     }
 }

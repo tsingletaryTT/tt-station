@@ -2805,7 +2805,7 @@ mod tests {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            Arc::new(crate::serving::dstack::DstackBackend),
+            Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(home.path().to_path_buf());
         let folder = Path::new("/h/proj");
@@ -2846,7 +2846,7 @@ mod tests {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            Arc::new(crate::serving::dstack::DstackBackend),
+            Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(home.clone());
         let id = "ev-poll";

@@ -32,7 +32,7 @@ ones; owners see every job. Someone else's job answers `404` everywhere.
 | serving something else | `now` + go-ahead, or `tonight` between 1:00 and 5:59 | **switch**, remembering the model in `restore` |
 
 Whisper (whisper-large-v3) runs only on the whole box (P300x2). When the queue empties,
-the runner starts the remembered model again. Lab runs (`lab_busy`) pause the queue.
+the runner starts the remembered model again.
 
 ## Transcription
 
@@ -56,27 +56,12 @@ The file is deleted only once the box has it; a failed or dismissed upload stays
 "Send it again" button.
 
 
-## Recording meetings on the box
+## Recording meetings on a computer
 
-`recorder.rs` records the box's default microphone and whatever its default
-output is playing (PipeWire's `@DEFAULT_MONITOR@`), mixed to 16 kHz mono Opus,
-straight into a new job directory. Stopping queues it as an ordinary
-`transcribe` job that belongs to the device that started the recording (its starter and
-owners see it; members' other devices don't, until it's shared). A recording started on the
-box itself, or by Tori there, has no starter, so it's owners-only. Each recording can say
-whether to keep the audio and whether the transcript goes to the Library; what it doesn't
-say takes the household's data settings when the job finishes.
-
-- `GET /record`: `{microphone, speakers, recording}`; while recording,
-  `recording` has `seconds`, the devices in use and live levels (`mic_db`,
-  `system_db`, dBFS over the last 100 ms).
-- `POST /record/start` `{title?, mic?, system?, keep_audio?, documents?}`: both sides by
-  default; the microphone is skipped when none is plugged in. Four hours at most.
-- `POST /record/stop` `{discard?, keep_audio?, documents?}`: `{job}` once queued. A choice made
-  at stop wins over one made at start.
-
-The desktop app shows it in Studio → Transcribe, on Home while recording, and
-in the tray ("Record a meeting").
+The desktop app records a meeting from the microphone of the computer it runs on (Studio →
+Transcribe, Home while recording, the tray's "Record a meeting", or asking Tori) and uploads it
+through the same `POST /jobs/transcribe` when it stops. The job belongs to the device that
+uploaded it. The box itself never records.
 
 ## Research reports (`/research`, `src/research.rs`)
 

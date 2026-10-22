@@ -20,7 +20,7 @@ use std::sync::Arc;
 use reqwest::Method as M;
 use serde_json::{json, Value};
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 mod support;
 
@@ -34,7 +34,7 @@ struct Station {
 
 async fn harness() -> Station {
     let config = tempfile::tempdir().unwrap();
-    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
         .with_config_dir(config.path().to_path_buf());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

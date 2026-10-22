@@ -37,7 +37,7 @@ quick actions (status, Run/Stop, a live temp chip, "Open window"), backed by a r
   **P150 x1–x4** and P300/N300/T3K/GALAXY.
 - **Config card** — a read-only summary of the box's resolved serving config (active
   profile + other available ones, backend, `serving_host:port`, image, device), from the
-  unauthed `tt-station --json config` read. **Switching profiles happens on the box panel, not
+  unauthed `tt-station --json config` read. **Switching profiles happens on the box (`tt-station console`), not
   here** — the Mac only ever displays the resolved result.
 - **Fast Connect** — Open WebUI / opencode, installing missing deps (`brew install …`) as needed.
 - **Workbench** — Terminal (SSH), tt-toplike (remote telemetry), and VS Code Remote-SSH with

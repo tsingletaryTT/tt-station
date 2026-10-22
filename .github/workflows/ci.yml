@@ -13,18 +13,15 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - name: Assert version matches across Cargo.toml, changelog, and the panel
+      - name: Assert version matches across Cargo.toml and the changelog
         run: |
           set -euo pipefail
           CARGO=$(grep -m1 '^version = ' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
           DEB=$(head -1 debian/changelog | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-          PANEL=$(grep -m1 '^__version__ = ' box-panel/tt-station-panel.py | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
           echo "Cargo.toml:       $CARGO"
           echo "debian/changelog: $DEB"
-          echo "panel __version__: $PANEL"
           fail=0
           [ "$DEB" = "$CARGO" ]   || { echo "::error::debian/changelog ($DEB) != Cargo.toml ($CARGO)"; fail=1; }
-          [ "$PANEL" = "$CARGO" ] || { echo "::error::panel __version__ ($PANEL) != Cargo.toml ($CARGO)"; fail=1; }
           [ "$fail" -eq 0 ] || { echo "Run scripts/bump-version.sh <version> to fix."; exit 1; }
           echo "All version strings agree: $CARGO"
 
@@ -131,7 +128,7 @@ jobs:
       - name: Stage packages
         run: |
           mkdir -p dist
-          cp ../tt-station_*_amd64.deb ../tt-station-panel_*_amd64.deb dist/
+          cp ../tt-station_*_amd64.deb dist/
           ls -lh dist/
       # Installs the .deb with apt in a clean ubuntu:24.04, checks the files the
       # updater and systemd rely on, starts the installed agent with stubbed
@@ -175,8 +172,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      # The agent's Python helpers (Code holder, sandbox launcher, bring-up permission
-      # policy, lease runner, Orchard bridge): standard library only, no hardware.
+      # The agent's Python helpers (the Code holder): standard library only, no hardware.
       - name: Run the helpers' tests
         working-directory: crates/tt-station-agentd/src
         run: python3 -m unittest -v

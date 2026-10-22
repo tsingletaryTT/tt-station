@@ -155,14 +155,6 @@ pub(crate) async fn power(
         )
     })?;
 
-    if let Some(holder) = state.chips_holder() {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: holder.to_string(),
-            }),
-        ));
-    }
     if action.is_machine_op() {
         let (what, body) = match action {
             crate::power::PowerAction::Suspend => (
@@ -174,14 +166,11 @@ pub(crate) async fn power(
             }
             _ => ("shutting down", "Turn it back on to use it again."),
         };
-        state
-            .notifier()
-            .emit_and_wait(crate::notify::Draft {
-                kind: "power",
-                title: format!("{} is {what}", state.name()),
-                body: body.to_string(),
-            })
-            .await;
+        state.notifier().emit(crate::notify::Draft {
+            kind: "power",
+            title: format!("{} is {what}", state.name()),
+            body: body.to_string(),
+        });
     }
     let s = state.clone();
     let force = req.force;

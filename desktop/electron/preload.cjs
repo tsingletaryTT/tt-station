@@ -14,7 +14,6 @@ contextBridge.exposeInMainWorld("ttDesktop", {
   onNavigate: (fn) => ipcRenderer.on("navigate", (_e, route) => fn(route)),
   onBoxEvent: (fn) => ipcRenderer.on("box-event", (_e, event) => fn(event)),
   hideTori: () => ipcRenderer.invoke("hide-tori"),
-  openToplike: (view) => ipcRenderer.invoke("open-toplike", view),
   showTori: (mode) => ipcRenderer.invoke("show-tori", mode),
   showMain: (route) => ipcRenderer.invoke("show-main", route),
   onTori: (fn) => ipcRenderer.on("tori", (_e, mode) => fn(mode)),

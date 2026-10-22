@@ -32,13 +32,11 @@ use tt_station_agentd::serving::runpy::RunPyConfig;
 /// launch LLMs (`tt-inference-server/run.py`, not a hand-rolled `docker
 /// run` -- see `docs/reference/tt-inference-server-docker.md`'s "⭐ Ground
 /// truth" section). `Docker` remains available as a best-effort fallback
-/// for when `run.py`/its repo checkout isn't available. `Dstack` is the M4
-/// direction and still an intentional stub.
+/// for when `run.py`/its repo checkout isn't available.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Backend {
     Runpy,
     Docker,
-    Dstack,
 }
 
 /// How the `runpy` backend launches a serve (`--serve-with`).
@@ -56,7 +54,6 @@ impl std::fmt::Display for Backend {
         match self {
             Backend::Runpy => write!(f, "runpy"),
             Backend::Docker => write!(f, "docker"),
-            Backend::Dstack => write!(f, "dstack"),
         }
     }
 }
@@ -665,26 +662,7 @@ async fn sweep_stale_leases_at_startup(
             // silicon with wedged ethernet cores. See
             // `ServingBackend::adopt_lease`.
             let mut adopted = 0usize;
-            // A community package's leases are released by the package's own
-            // stop (`community::stop_package`), not the serving backend's.
-            let mut community: Vec<String> =
-                std::fs::read(config_dir().join("community/leases.json"))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok())
-                    .unwrap_or_default();
-            // So are a holder unit's (native vLLM, a served bring-up): stopping
-            // the unit releases them (`orchard::stop_harvest`).
-            community.extend(gozer::holder_lease_file(&config_dir()).ids());
-            let mut theirs = 0usize;
             for lease in &report.adoptable {
-                if community.contains(&lease.lease_id) {
-                    theirs += 1;
-                    eprintln!(
-                        "tt-station-agentd: lease '{}' ({}) belongs to the community model or a serving unit; its stop releases it",
-                        lease.lease_id, lease.who
-                    );
-                    continue;
-                }
                 if backend.adopt_lease(&lease.lease_id, &lease.who) {
                     adopted += 1;
                     eprintln!(
@@ -724,7 +702,7 @@ async fn sweep_stale_leases_at_startup(
                     report.released.len(),
                     report.kept.len(),
                     report.adoptable.len(),
-                    report.adoptable.len() - adopted - theirs,
+                    report.adoptable.len() - adopted,
                     report.unresolved.len()
                 );
             }
@@ -1057,14 +1035,6 @@ async fn main() -> Result<()> {
     // `build_serving_backend`'s doc comment for why the ordering is the
     // point. `gozer_capability` is carried down to `AppState::with_gozer`
     // below rather than re-probed there.
-    // Co-serving's second slot (chat + images on separate cards): the same
-    // run.py launch on the next port up. Not with gozer -- a split box can't
-    // also lease chips.
-    let companion_config = (rc.backend == "runpy").then(|| {
-        let mut cfg = runpy_config.clone();
-        cfg.service_port = rc.serving_port + 1;
-        cfg
-    });
     let (backend, gozer_capability) = build_serving_backend(
         &rc.backend,
         rc.gozer_path.as_deref(),
@@ -1072,7 +1042,6 @@ async fn main() -> Result<()> {
         runpy_config,
     )
     .await?;
-    let companion_config = companion_config.filter(|_| gozer_capability.is_none());
 
     // Reconcile gozer's lease state against what is actually running, ONCE,
     // right after the probe that produced `gozer_capability` -- before the
@@ -1147,7 +1116,7 @@ async fn main() -> Result<()> {
     // Configure the additive `GET /logs` route (see handlers/logs.rs): only the
     // runpy backend writes `workflow_logs/{docker_server,run_logs}` under the
     // tt-inference-server checkout, so this is deliberately gated on
-    // `rc.backend == "runpy"` -- other backends (dstack, docker) leave the
+    // `rc.backend == "runpy"` -- other backends (docker) leave the
     // `AppState` default of `None`, and `/logs` answers 409 rather than
     // pointing at a directory that will never exist. Applied here, before any
     // clone of `state` exists, for the same sole-owner reason the other
@@ -1172,13 +1141,6 @@ async fn main() -> Result<()> {
         .join("metrics-history.json");
     let state = state.with_history(tt_station_agentd::history::History::load(&history_path));
 
-    let state = match companion_config.clone() {
-        Some(cfg) => state.with_companion(tt_station_agentd::coserve::Companion::new(Arc::new(
-            tt_station_agentd::serving::runpy::RunPyBackend::new(cfg, Box::new(RealCommandRunner)),
-        ))),
-        None => state,
-    };
-
     let state = state.with_config_dir(config_dir()).managing_units();
     let state = state.with_load_times(tt_station_agentd::modes::LoadTimes::open(
         config_dir().join("load-times.json"),
@@ -1187,9 +1149,6 @@ async fn main() -> Result<()> {
     let state = state.with_jobs(tt_station_agentd::jobs::Jobs::open(
         config_dir().join("jobs"),
     ));
-
-    // Lab mode: tt-lab, when it's built here (see `lab`).
-    let state = state.with_lab(tt_station_agentd::lab::Lab::from_env());
 
     // Who's who in the household (see `people`).
     let state = state.with_cpu_brain(true);
@@ -1204,11 +1163,6 @@ async fn main() -> Result<()> {
     let state = state.with_schedules(tt_station_agentd::schedules::Schedules::open(
         config_dir().join("schedules.json"),
     ));
-
-    // Orchard: model bring-ups with tt-orchard (see `orchard`).
-    let state = state.with_orchard(
-        tt_station_agentd::orchard::Orchard::from_env(&config_dir()).with_tt_smi(&rc.tt_smi_bin),
-    );
 
     // HTTPS beside HTTP: a certificate the phone pins at pairing (see `tls`).
     let tls_identity = match tt_station_agentd::tls::identity(
@@ -1230,9 +1184,7 @@ async fn main() -> Result<()> {
     };
 
     // Alerts for the owner (downloads, model readiness, power-on).
-    let state = state.with_notifier(tt_station_agentd::notify::Notifier::open(
-        config_dir().join("notify.json"),
-    ));
+    let state = state.with_notifier(tt_station_agentd::notify::Notifier::new());
 
     // What the assistant remembers about its owner.
     let state = state.with_memories(tt_station_agentd::memory::Memories::open(
@@ -1401,16 +1353,6 @@ async fn main() -> Result<()> {
             })
             .await
             .unwrap_or_default();
-            let companion_port = port + 1;
-            let companion = found
-                .iter()
-                .find(|e| e.host_port == companion_port)
-                .map(|e| libttstation::model::Endpoint {
-                    base_url: e.base_url.clone(),
-                    model: e.model.clone(),
-                    requires_key: false,
-                });
-            tt_station_agentd::coserve::adopt_at_startup(&adopt, companion);
             if let Some(entry) = found.into_iter().find(|e| e.host_port == port) {
                 if matches!(adopt.status(), libttstation::model::ServingStatus::Idle) {
                     adopt.adopt_serving(libttstation::model::Endpoint {
@@ -1423,7 +1365,6 @@ async fn main() -> Result<()> {
         });
     }
 
-    state.notifier().set_box_name(&rc.name);
     tokio::spawn(tt_station_agentd::notify::watch_forever(state.clone()));
     tokio::spawn(tt_station_agentd::doctor::nightly_forever(state.clone()));
     tokio::spawn(tt_station_agentd::jobs::run_forever(state.clone()));
@@ -1433,15 +1374,10 @@ async fn main() -> Result<()> {
     tokio::spawn(tt_station_agentd::boot::run_forever(state.clone()));
     // A model check-up the restart cut short: carried on, or marked interrupted.
     tokio::spawn(tt_station_agentd::evals::resume(state.clone()));
-    tokio::spawn(tt_station_agentd::orchard::watch_forever(state.clone()));
-    tokio::spawn(tt_station_agentd::bringup::watch_forever(state.clone()));
-    tokio::spawn(tt_station_agentd::community::readopt(state.clone()));
     // Keep this agent's chip leases owned by the workloads using them, and
     // give back the ones whose workload is gone (see `gozer::reconcile_own_leases`).
     tokio::spawn(gozer::reconcile_forever(state.clone()));
     tt_station_agentd::research::resume(&state);
-    // Puts the last good model back after a stuck start is stopped.
-    tokio::spawn(tt_station_agentd::community::restarter(state.clone()));
     // Routines that run on a schedule.
     tokio::spawn(tt_station_agentd::routines::schedule_forever(state.clone()));
     tokio::spawn(tt_station_agentd::library::index_forever(state.clone()));

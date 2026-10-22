@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 mod support;
 
@@ -140,7 +140,7 @@ impl Box_ {
         let config = std::env::temp_dir().join(format!("tt-apps-cfg-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&config);
         std::fs::create_dir_all(&config).unwrap();
-        let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+        let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
             .with_telemetry_config("/nonexistent/tt-smi".to_string(), 1000)
             .with_config_dir(config.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -233,9 +233,10 @@ async fn the_app_list_needs_a_paired_device() {
                 .unwrap();
         assert_eq!(r.status(), 401, "{method} {path}");
     }
-    assert!(calls_for("tt-app-lightrag")
+    // Nothing ran, started or stopped it (another test removes it, as an owner).
+    assert!(!calls_for("tt-app-lightrag")
         .iter()
-        .all(|c| c.starts_with("inspect")));
+        .any(|c| c.starts_with("run ") || c.starts_with("start ") || c.starts_with("stop ")));
 }
 
 #[tokio::test]
@@ -566,9 +567,9 @@ async fn an_app_that_shows_its_key_keeps_it_private_on_disk() {
 async fn a_failed_pull_shows_on_the_tile_until_an_owner_removes_the_app_and_its_network_sharing() {
     // One test, as the stub's log is shared: removing is what it checks for.
     let b = Box_::new("remove").await;
-    let (status, _) = b.network(&b.owner, "openclaw", true).await;
+    let (status, _) = b.network(&b.owner, "lightrag", true).await;
     assert_eq!(status, 200);
-    let image = tt_station_agentd::apps::app("openclaw").unwrap().image;
+    let image = tt_station_agentd::apps::app("lightrag").unwrap().image;
     let fail = docker_dir().join(format!("fail-pull-{}", image.replace(['/', ':', '@'], "_")));
     std::fs::write(
         &fail,
@@ -576,29 +577,29 @@ async fn a_failed_pull_shows_on_the_tile_until_an_owner_removes_the_app_and_its_
     )
     .unwrap();
 
-    assert_eq!(b.post("/apps/openclaw/start").await.0, 200);
-    let tile = b.tile_when("openclaw", |t| t["state"] == "failed").await;
+    assert_eq!(b.post("/apps/lightrag/start").await.0, 200);
+    let tile = b.tile_when("lightrag", |t| t["state"] == "failed").await;
     assert_eq!(tile["error"], "Error: toomanyrequests: rate limited");
     assert_eq!(tile["step"], "Failed");
-    assert!(!calls_for("tt-app-openclaw")
+    assert!(!calls_for("tt-app-lightrag")
         .iter()
         .any(|c| c.starts_with("run ")));
 
     let member = support::pair(&b.base, &b.state).await;
     let delete = |token: String| {
-        b.c.delete(format!("{}/apps/openclaw", b.base))
+        b.c.delete(format!("{}/apps/lightrag", b.base))
             .bearer_auth(token)
             .send()
     };
     assert_eq!(delete(member).await.unwrap().status(), 403);
-    assert!(!calls_for("tt-app-openclaw").contains(&"rm -f tt-app-openclaw".to_string()));
+    assert!(!calls_for("tt-app-lightrag").contains(&"rm -f tt-app-lightrag".to_string()));
     assert_eq!(delete(b.owner.clone()).await.unwrap().status(), 200);
-    assert!(calls_for("tt-app-openclaw").contains(&"rm -f tt-app-openclaw".to_string()));
+    assert!(calls_for("tt-app-lightrag").contains(&"rm -f tt-app-lightrag".to_string()));
     let saved: Vec<String> =
         serde_json::from_slice(&std::fs::read(b.config.join("apps/network.json")).unwrap())
             .unwrap();
     assert!(saved.is_empty(), "{saved:?}");
-    let tile = b.tile("openclaw").await;
+    let tile = b.tile("lightrag").await;
     assert_eq!(tile["state"], "not_installed", "{tile}");
     assert!(tile["error"].is_null());
     assert_eq!(tile["network"]["open"], false, "{tile}");

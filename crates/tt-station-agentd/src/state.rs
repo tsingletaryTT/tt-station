@@ -120,18 +120,14 @@ pub(crate) struct PerAgent {
     pub(crate) apps: crate::apps::PerAgent,
     pub(crate) assistant: crate::assistant::PerAgent,
     pub(crate) bench: crate::bench::PerAgent,
-    pub(crate) bringup: crate::bringup::PerAgent,
-    pub(crate) community: crate::community::PerAgent,
     pub(crate) embeddings: crate::embeddings::PerAgent,
     pub(crate) evals: crate::evals::PerAgent,
     pub(crate) favorites: crate::favorites::PerAgent,
     pub(crate) idle: crate::idle::PerAgent,
     pub(crate) library: crate::library::PerAgent,
-    pub(crate) native_vllm: crate::native_vllm::PerAgent,
     pub(crate) research: crate::research::PerAgent,
     pub(crate) routines: crate::routines::PerAgent,
     pub(crate) telemetry: crate::handlers::telemetry::PerAgent,
-    pub(crate) toplike_term: crate::toplike_term::PerAgent,
     pub(crate) voice: crate::voice::PerAgent,
 }
 
@@ -154,7 +150,7 @@ struct Inner {
     /// from scratch -- `status` only round-trips the model name, not the
     /// full `Endpoint` a backend chose to return.
     endpoint: Mutex<Option<Endpoint>>,
-    /// The real serving backend (Docker or dstack, chosen on the command
+    /// The real serving backend (run.py or Docker, chosen on the command
     /// line -- see `make_backend` in `serving/mod.rs`) that `/run`/`/stop`
     /// delegate to. `Arc<dyn ServingBackend>` rather than `Box` so route
     /// handlers can cheaply clone a handle to move into
@@ -260,7 +256,7 @@ struct Inner {
     /// box (see the module-level `CLAUDE.md`). Set via `with_ssh_target`.
     ssh_user: String,
     /// Path to the tt-inference-server checkout, when the runpy backend is
-    /// active. `None` for backends without a workflow_logs dir (e.g. dstack).
+    /// active. `None` for backends without a workflow_logs dir (e.g. docker).
     /// Enables the `/logs` routes to locate `workflow_logs/{docker_server,run_logs}`.
     tt_inference_repo: Option<std::path::PathBuf>,
     /// Command vector run for `PowerAction::ResetChips` (a `tt-smi -r` board
@@ -329,9 +325,6 @@ struct Inner {
     /// The same-user secret that lets `tt-station-agentd pair` mint a pairing
     /// code for a QR (`POST /pair/offer`). `None` disables that route.
     local_secret: Option<String>,
-    /// The second serving slot for co-serving (chat + images on separate
-    /// cards), when the box can split. See `crate::coserve`.
-    companion: Option<Arc<crate::coserve::Companion>>,
     /// Keys for the OpenAI-compatible `/v1` gateway (`crate::gateway`).
     app_keys: Arc<crate::gateway::AppKeys>,
     /// The control port this agent listens on, for URLs it hands out.
@@ -352,10 +345,6 @@ struct Inner {
     load_times: Arc<crate::modes::LoadTimes>,
     /// HTTPS, when the agent serves it (`crate::tls`).
     tls: Option<crate::tls::TlsInfo>,
-    /// Lab mode (`crate::lab`), when tt-lab is set up.
-    lab: Option<Arc<crate::lab::Lab>>,
-    /// A tt-lab run owns the chips: no tt-smi, no model starts, no resets.
-    lab_busy: std::sync::atomic::AtomicBool,
     /// Long jobs (`crate::jobs`).
     jobs: Option<Arc<crate::jobs::Jobs>>,
     /// Let the assistant think on the CPU (Ollama) when the chips aren't chatting.
@@ -366,19 +355,10 @@ struct Inner {
     audit: Arc<crate::audit::AuditLog>,
     /// Scheduled modes (`crate::schedules`).
     schedules: Arc<crate::schedules::Schedules>,
-    /// Model bring-ups with tt-orchard (`crate::orchard`), when it's checked out.
-    orchard: Option<Arc<crate::orchard::Orchard>>,
-    /// A tt-orchard run has the box: no model starts, no resets.
-    orchard_busy: std::sync::atomic::AtomicBool,
-    /// Its supervisor is live and may be using the chips: no tt-smi either
-    /// (it would keep the chips looking busy to gozer's quiet checks).
-    orchard_chips: std::sync::atomic::AtomicBool,
     /// Chip resets running (`tt-smi -r`, or gozer resetting a board as it
     /// releases a lease): `tt-smi -s` against chips mid-reset only fails, and
     /// slows the reset down, so readings pause while this is above zero.
     chips_resetting: Arc<std::sync::atomic::AtomicUsize>,
-    /// An agent-driven bring-up (Codex, fast-models-fast) holds the whole box.
-    bringup_busy: std::sync::atomic::AtomicBool,
     /// Whether the served chat model answers (`crate::liveness`).
     liveness: Arc<crate::liveness::Liveness>,
     /// What modules keep for the life of this agent.
@@ -566,7 +546,6 @@ impl AppState {
                 history: Arc::new(crate::history::History::new()),
                 docs: None,
                 local_secret: None,
-                companion: None,
                 app_keys: Arc::new(crate::gateway::AppKeys::in_memory()),
                 ctrl_port: 8765,
                 memories: Arc::new(crate::memory::Memories::in_memory()),
@@ -575,18 +554,12 @@ impl AppState {
                 manages_units: false,
                 load_times: Arc::new(crate::modes::LoadTimes::in_memory()),
                 tls: None,
-                lab: None,
-                lab_busy: std::sync::atomic::AtomicBool::new(false),
                 jobs: None,
                 cpu_brain: false,
-                orchard: None,
                 people: Arc::new(crate::people::People::in_memory()),
                 audit: Arc::new(crate::audit::AuditLog::in_memory()),
                 schedules: Arc::new(crate::schedules::Schedules::in_memory()),
-                orchard_busy: std::sync::atomic::AtomicBool::new(false),
-                orchard_chips: std::sync::atomic::AtomicBool::new(false),
                 chips_resetting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                bringup_busy: std::sync::atomic::AtomicBool::new(false),
                 liveness: Arc::new(crate::liveness::Liveness::default()),
                 per_agent: PerAgent::default(),
                 creations: crate::creations::Creations::new(
@@ -683,7 +656,7 @@ impl AppState {
     /// default (`None`, meaning `GET /logs` answers 409) in place rather
     /// than panicking.
     ///
-    /// Optional: an `AppState` never given this (e.g. the dstack backend,
+    /// Optional: an `AppState` never given this (e.g. `NullBackend`,
     /// which has no `workflow_logs` dir) still answers `/logs` -- with a 409
     /// rather than a fabricated path.
     /// Enable the `/tt/*` model-manager routes with the official tt CLI. Same
@@ -739,17 +712,6 @@ impl AppState {
     /// What modules keep for the life of this agent (see [`PerAgent`]).
     pub(crate) fn per_agent(&self) -> &PerAgent {
         &self.inner.per_agent
-    }
-
-    /// Attach the co-serving companion slot. Same contract as the other `with_*`.
-    pub fn with_companion(mut self, companion: crate::coserve::Companion) -> Self {
-        match Arc::get_mut(&mut self.inner) {
-            Some(inner) => inner.companion = Some(Arc::new(companion)),
-            None => {
-                eprintln!("tt-station-agentd: with_companion called on a shared AppState; ignored")
-            }
-        }
-        self
     }
 
     /// Load the `/v1` gateway's app keys and record the control port. Same
@@ -848,15 +810,6 @@ impl AppState {
         self
     }
 
-    /// Enable Lab mode. Same contract as the other `with_*` builders.
-    pub fn with_lab(mut self, lab: crate::lab::Lab) -> Self {
-        match Arc::get_mut(&mut self.inner) {
-            Some(inner) => inner.lab = Some(Arc::new(lab)),
-            None => eprintln!("tt-station-agentd: with_lab called on a shared AppState; ignored"),
-        }
-        self
-    }
-
     /// Enable the job queue. Same contract as the other `with_*` builders.
     pub fn with_jobs(mut self, jobs: crate::jobs::Jobs) -> Self {
         match Arc::get_mut(&mut self.inner) {
@@ -868,17 +821,6 @@ impl AppState {
 
     pub fn jobs(&self) -> Option<Arc<crate::jobs::Jobs>> {
         self.inner.jobs.clone()
-    }
-
-    /// Enable tt-orchard bring-ups. Same contract as the other `with_*` builders.
-    pub fn with_orchard(mut self, orchard: crate::orchard::Orchard) -> Self {
-        match Arc::get_mut(&mut self.inner) {
-            Some(inner) => inner.orchard = Some(Arc::new(orchard)),
-            None => {
-                eprintln!("tt-station-agentd: with_orchard called on a shared AppState; ignored")
-            }
-        }
-        self
     }
 
     pub fn with_cpu_brain(mut self, on: bool) -> Self {
@@ -936,34 +878,6 @@ impl AppState {
         Arc::clone(&self.inner.audit)
     }
 
-    pub fn orchard(&self) -> Option<Arc<crate::orchard::Orchard>> {
-        self.inner.orchard.clone()
-    }
-
-    pub fn orchard_busy(&self) -> bool {
-        self.inner
-            .orchard_busy
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn set_orchard_busy(&self, busy: bool) {
-        self.inner
-            .orchard_busy
-            .store(busy, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn bringup_busy(&self) -> bool {
-        self.inner
-            .bringup_busy
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn set_bringup_busy(&self, busy: bool) {
-        self.inner
-            .bringup_busy
-            .store(busy, std::sync::atomic::Ordering::SeqCst);
-    }
-
     pub fn chips_resetting(&self) -> bool {
         self.inner
             .chips_resetting
@@ -977,58 +891,6 @@ impl AppState {
             .chips_resetting
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         ReadingsPause(Arc::clone(&self.inner.chips_resetting))
-    }
-
-    pub fn set_orchard_chips(&self, in_use: bool) {
-        self.inner
-            .orchard_chips
-            .store(in_use, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Who has the chips when it isn't this agent's serving: a Lab run or a
-    /// tt-orchard bring-up. Model starts, chip resets, power actions and
-    /// tt-smi all wait while this is `Some` -- it's the message to show.
-    pub fn chips_holder(&self) -> Option<&'static str> {
-        if self.lab_busy() {
-            Some("A silicon check is using the chips. Wait for it to finish.")
-        } else if self.orchard_busy() {
-            Some(
-                "A model bring-up (Orchard) is using the chips. Pause or stop it in Orchard first.",
-            )
-        } else if self.bringup_busy() {
-            Some("A model bring-up is using the chips. Stop it in Bring-up first.")
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn lab(&self) -> Option<Arc<crate::lab::Lab>> {
-        self.inner.lab.clone()
-    }
-
-    pub fn lab_busy(&self) -> bool {
-        self.inner
-            .lab_busy
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// Claim the chips for a lab run; false if one already has them.
-    pub(crate) fn try_set_lab_busy(&self) -> bool {
-        self.inner
-            .lab_busy
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-            )
-            .is_ok()
-    }
-
-    pub(crate) fn set_lab_busy(&self, busy: bool) {
-        self.inner
-            .lab_busy
-            .store(busy, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn tls(&self) -> Option<crate::tls::TlsInfo> {
@@ -1061,10 +923,6 @@ impl AppState {
 
     pub(crate) fn ctrl_port(&self) -> u16 {
         self.inner.ctrl_port
-    }
-
-    pub fn companion(&self) -> Option<Arc<crate::coserve::Companion>> {
-        self.inner.companion.clone()
     }
 
     pub(crate) fn docs(&self) -> Option<Arc<crate::docs::DocStore>> {
@@ -1407,7 +1265,7 @@ mod pair_init_tests {
         let state = AppState::new(
             "t".to_string(),
             "1xBH".to_string(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         );
         let ip = |n: u8| Some(std::net::IpAddr::from([192, 168, 1, n]));
         for _ in 0..PAIR_INITS_PER_ADDRESS {
@@ -1466,7 +1324,7 @@ mod tests {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_power_config(
             vec!["touch".into(), marker.display().to_string()],
@@ -1561,7 +1419,7 @@ mod tests {
         let state = AppState::new(
             "t".to_string(),
             "1xBH".to_string(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_telemetry_config(script.to_string_lossy().into_owned(), 10_000);
 
@@ -1599,7 +1457,7 @@ mod tests {
         let state = AppState::new(
             "t".to_string(),
             "1xBH".to_string(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_telemetry_config(script.to_string_lossy().into_owned(), 1_000);
         let ticks: Vec<_> = (0..8)
@@ -1637,7 +1495,7 @@ mod tests {
         let state = AppState::new(
             "t".to_string(),
             "1xBH".to_string(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_power_config(cmd.clone(), cmd.clone(), cmd.clone(), cmd.clone());
 
@@ -1661,7 +1519,7 @@ mod tests {
         AppState::new(
             "t".to_string(),
             "1xBH".to_string(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
     }
 

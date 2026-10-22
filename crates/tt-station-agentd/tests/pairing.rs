@@ -11,17 +11,17 @@
 use std::sync::Arc;
 
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 /// Spin up the real router on an ephemeral port and hand back both the
 /// `AppState` (so the test can call the `last_code` hook) and the base URL.
 async fn spawn() -> (AppState, String) {
-    // The pairing flow never touches the backend -- `DstackBackend`'s no-op
+    // The pairing flow never touches the backend -- `NullBackend`'s no-op
     // stub is enough of a `ServingBackend` for these tests.
     let state = AppState::new(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
     );
     let router = app(state.clone());
 

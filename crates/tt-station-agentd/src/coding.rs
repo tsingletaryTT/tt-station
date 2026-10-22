@@ -255,27 +255,21 @@ pub(crate) fn allowed_folder(folder: &str) -> Result<PathBuf, String> {
 /// Where the box keeps what it runs as its own account: TT Station's settings
 /// and state, its programs (every folder on `PATH`, the agent's own), and the
 /// checkouts its features run code from (tt-inference-server, tt-metal,
-/// tt-orchard, tt-lab, tt-kernel, tt-model-manager, TT Station's source).
-/// Real paths where they exist.
+/// tt-kernel, tt-model-manager, TT Station's source). Real paths where they
+/// exist.
 fn box_software(state: &AppState) -> Vec<PathBuf> {
     let h = home();
     let env_or = |var: &str, default: PathBuf| std::env::var_os(var).map_or(default, PathBuf::from);
     let mut v = vec![
         state.config_dir(),
         PathBuf::from(crate::config::default_tt_inference_repo()),
-        crate::native_vllm::tt_metal(),
+        env_or("TT_METAL_HOME", h.join("tt-metal")),
         h.join("tt-kernel-package-manager"),
         h.join("dispatch"),
-        env_or("TT_ORCHARD_DIR", h.join("code/tt-orchard")),
-        h.join("code/tt-lab"),
         h.join("code/tt-model-manager"),
         h.join("code/tt-station"),
         h.join("bin"),
     ];
-    if let Some(lab) = std::env::var_os("TT_LAB_BIN") {
-        // `<checkout>/_out/tt-lab`
-        v.extend(Path::new(&lab).ancestors().nth(2).map(Path::to_path_buf));
-    }
     // This agent's own source, when it was built on the box.
     v.extend(
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -444,7 +438,7 @@ mod tests {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(dir.path().to_path_buf());
         (dir, state)
@@ -513,7 +507,7 @@ mod tests {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(dir.clone());
         let v = box_software(&state);
@@ -549,7 +543,7 @@ mod tests {
         let state = AppState::new(
             "t".into(),
             "1xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(dir.clone());
         let (args, env) = claude_tuning(&state, Some(262_144), &dir, false);

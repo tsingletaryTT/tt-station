@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use tt_station_agentd::routes::{app, local_http_app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
 use tt_station_agentd::serving::runpy::{RunPyBackend, RunPyConfig};
+use tt_station_agentd::serving::NullBackend;
 use tt_station_agentd::serving::ServingBackend;
 
 mod support;
@@ -75,7 +75,7 @@ async fn models_returns_catalog_from_runpy_backend_to_the_box_itself() {
 }
 
 /// `GET /models` against the default `ServingBackend::list_models` impl
-/// (exercised here via `DstackBackend`, which doesn't override it) must
+/// (exercised here via `NullBackend`, which doesn't override it) must
 /// return 200 with an empty catalog, not an error -- a backend with no
 /// model spec of its own isn't a failure case.
 #[tokio::test]
@@ -83,7 +83,7 @@ async fn models_returns_empty_catalog_for_backend_without_override() {
     let state = AppState::new(
         "qb2-lab".to_string(),
         "4xBH".to_string(),
-        Arc::new(DstackBackend),
+        Arc::new(NullBackend),
     );
     let network = app(state.clone());
     let router = local_http_app(state);

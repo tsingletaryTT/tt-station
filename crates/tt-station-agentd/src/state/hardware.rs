@@ -27,25 +27,6 @@ impl AppState {
     /// retries — and while an entry is stale the previous frame is replaced, never
     /// served past its interval.
     pub(crate) async fn cached_snapshot(&self) -> anyhow::Result<String> {
-        // tt-lab and tt-orchard's supervisor own the chips while they run;
-        // tt-smi opening them could break a run (and would show up as a user
-        // in gozer). An Orchard run that is still checking and downloading
-        // doesn't use them yet, so readings go on until it does.
-        if self.lab_busy() {
-            anyhow::bail!(
-                "A silicon check is using the chips, so the box isn't reading them until it finishes."
-            );
-        }
-        if self
-            .inner
-            .orchard_chips
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            anyhow::bail!("A model bring-up (Orchard) is using the chips, so the box isn't reading them until the run ends.");
-        }
-        if self.bringup_busy() {
-            anyhow::bail!("A model bring-up (Codex) is using the chips, so the box isn't reading them until the run ends.");
-        }
         if self.chips_resetting() {
             anyhow::bail!("The chips are being reset; readings come back in a minute.");
         }
@@ -196,9 +177,6 @@ impl AppState {
     ) -> anyhow::Result<Option<String>> {
         use crate::power::PowerAction;
 
-        if let Some(holder) = self.chips_holder() {
-            anyhow::bail!("{holder}");
-        }
         // A board reset under this box's own model -- starting, serving or
         // stopping -- pulls the chips out from under it: the owner stops it
         // first, `force` or not (`force` is for other tenants' leases). Every

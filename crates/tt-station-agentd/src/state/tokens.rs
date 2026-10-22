@@ -9,13 +9,8 @@ use super::*;
 
 impl AppState {
     /// Check a bearer token against the paired devices, counting it as a use
-    /// of that device when it's good (see `crate::sessions`).
-    pub(crate) fn is_valid_token(&self, token: &str) -> bool {
-        self.authenticate(token).is_ok()
-    }
-
-    /// [`Self::is_valid_token`], saying which device the token belongs to or
-    /// why it was refused.
+    /// of that device when it's good (see `crate::sessions`): which device the
+    /// token belongs to, or why it was refused.
     pub(crate) fn authenticate(&self, token: &str) -> Result<String, crate::sessions::AuthFailure> {
         self.inner.sessions.authenticate(token)
     }

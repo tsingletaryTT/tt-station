@@ -3,14 +3,13 @@
 
 //! The OpenAI-compatible `/v1` gateway: app keys, model rewriting, streaming
 //! pass-through, and OpenAI image requests on top of the media server -- with a
-//! chat model and an image model serving side by side.
+//! chat model or an image model serving.
 
 use std::sync::Arc;
 
 use axum::{extract::Json as AxJson, http::header, response::IntoResponse, routing::post, Router};
 use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 use serde_json::{json, Value};
-use tt_station_agentd::coserve::Companion;
 use tt_station_agentd::routes::{app, AppState};
 use tt_station_agentd::serving::ServingBackend;
 
@@ -78,20 +77,26 @@ struct Harness {
     token: String,
 }
 
-async fn harness() -> Harness {
-    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(Idle))
-        .with_device_mesh(Some("p300x2".into()))
-        .with_companion(Companion::new(Arc::new(Idle)));
-    state.adopt_serving(Endpoint {
+async fn chat() -> Endpoint {
+    Endpoint {
         base_url: stub_vllm().await,
         model: "meta-llama/Llama-3.1-8B-Instruct".into(),
         requires_key: false,
-    });
-    state.companion().unwrap().adopt(Endpoint {
+    }
+}
+
+async fn image() -> Endpoint {
+    Endpoint {
         base_url: stub_media().await,
         model: "tt-flux.1-schnell".into(),
         requires_key: false,
-    });
+    }
+}
+
+async fn harness(serving: Endpoint) -> Harness {
+    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(Idle))
+        .with_device_mesh(Some("p300x2".into()));
+    state.adopt_serving(serving);
     let base = serve(app(state.clone())).await;
     let client = reqwest::Client::new();
     let init: Value = client
@@ -121,8 +126,8 @@ async fn harness() -> Harness {
 }
 
 #[tokio::test]
-async fn app_keys_unlock_an_openai_api_that_follows_both_models() {
-    let h = harness().await;
+async fn app_keys_unlock_an_openai_api_that_follows_the_model() {
+    let h = harness(chat().await).await;
 
     // No key, a bad key: OpenAI-shaped 401s.
     let anon = h
@@ -161,7 +166,7 @@ async fn app_keys_unlock_an_openai_api_that_follows_both_models() {
     let key = minted["key"].as_str().unwrap().to_string();
     assert!(key.starts_with("ttq-"));
 
-    // Both models are listed, by kind.
+    // The model is listed, by kind.
     let models: Value = h
         .client
         .get(format!("{}/v1/models", h.base))
@@ -178,13 +183,7 @@ async fn app_keys_unlock_an_openai_api_that_follows_both_models() {
         .iter()
         .map(|m| (m["id"].as_str().unwrap(), m["kind"].as_str().unwrap()))
         .collect();
-    assert_eq!(
-        kinds,
-        vec![
-            ("meta-llama/Llama-3.1-8B-Instruct", "chat"),
-            ("tt-flux.1-schnell", "image")
-        ]
-    );
+    assert_eq!(kinds, vec![("meta-llama/Llama-3.1-8B-Instruct", "chat")]);
 
     // Any model name is rewritten to the one serving.
     let chat: Value = h
@@ -216,21 +215,6 @@ async fn app_keys_unlock_an_openai_api_that_follows_both_models() {
     let text = stream.text().await.unwrap();
     assert!(text.contains("\"Hel\"") && text.contains("\"lo\"") && text.contains("[DONE]"));
 
-    // OpenAI image requests become media-server ones, and back.
-    let images: Value = h
-        .client
-        .post(format!("{}/v1/images/generations", h.base))
-        .bearer_auth(&key)
-        .json(&json!({ "model": "dall-e-3", "prompt": "a fox", "n": 2, "response_format": "b64_json" }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(images["data"].as_array().unwrap().len(), 2);
-    assert_eq!(images["data"][0]["b64_json"], "aGk=");
-
     // Usage is counted; revoking locks the key out.
     let connect: Value = h
         .client
@@ -251,7 +235,7 @@ async fn app_keys_unlock_an_openai_api_that_follows_both_models() {
         .collect();
     assert!(urls.iter().any(|u| u.starts_with("http://127.0.0.1:")));
     assert!(!urls.iter().any(|u| u.starts_with("http://qb2-lab.local:")));
-    assert_eq!(connect["keys"][0]["requests"], 4);
+    assert_eq!(connect["keys"][0]["requests"], 3);
     let id = minted["info"]["id"].as_str().unwrap();
     let revoked = h
         .client
@@ -271,10 +255,66 @@ async fn app_keys_unlock_an_openai_api_that_follows_both_models() {
     assert_eq!(after.status(), 401);
 }
 
-/// The benchmark measures the chat model (single + batch) and the image model.
+/// With an image model serving, OpenAI image requests become media-server
+/// ones, and back; chat isn't offered.
 #[tokio::test]
-async fn bench_measures_chat_and_images() {
-    let h = harness().await;
+async fn openai_image_requests_reach_the_image_model() {
+    let h = harness(image().await).await;
+    let key = h
+        .client
+        .post(format!("{}/keys", h.base))
+        .bearer_auth(&h.token)
+        .json(&json!({ "name": "Open WebUI" }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let models: Value = h
+        .client
+        .get(format!("{}/v1/models", h.base))
+        .bearer_auth(&key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(models["data"][0]["id"], "tt-flux.1-schnell");
+    assert_eq!(models["data"][0]["kind"], "image");
+    assert_eq!(models["data"].as_array().unwrap().len(), 1);
+    let images: Value = h
+        .client
+        .post(format!("{}/v1/images/generations", h.base))
+        .bearer_auth(&key)
+        .json(&json!({ "model": "dall-e-3", "prompt": "a fox", "n": 2, "response_format": "b64_json" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(images["data"].as_array().unwrap().len(), 2);
+    assert_eq!(images["data"][0]["b64_json"], "aGk=");
+    let chat = h
+        .client
+        .post(format!("{}/v1/chat/completions", h.base))
+        .bearer_auth(&key)
+        .json(&json!({ "model": "x", "messages": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat.status(), 503);
+}
+
+/// The benchmark measures the chat model (single + batch), or the image model.
+#[tokio::test]
+async fn bench_measures_chat_or_images() {
+    let h = harness(chat().await).await;
     let anon = h
         .client
         .post(format!("{}/bench", h.base))
@@ -297,6 +337,19 @@ async fn bench_measures_chat_and_images() {
     assert!(r["ttft_s"].as_f64().unwrap() >= 0.0);
     assert!(r["batch_tps"].as_f64().unwrap() > 0.0, "8 x 64 tokens");
     assert_eq!(r["batch_size"], 8);
-    assert_eq!(r["image_model"], "tt-flux.1-schnell");
+    assert_eq!(r["image_model"], Value::Null);
+
+    let h = harness(image().await).await;
+    let r: Value = h
+        .client
+        .post(format!("{}/bench", h.base))
+        .bearer_auth(&h.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["image_model"], "tt-flux.1-schnell", "{r}");
     assert!(r["image_s"].as_f64().is_some());
 }

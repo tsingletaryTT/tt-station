@@ -8,9 +8,8 @@
 //! conversation so far), how much of that the server had cached, the time to
 //! its first token and its decode speed. A session keeps its last few steps,
 //! for the speed strip in the Code window. The box also keeps a small book of
-//! what it measured per model and setup (a community package's profile, see
-//! [`current_setup`]), so the "Model for Code" picker can say how fast a model
-//! it has run before actually was here, in the setup it ran in.
+//! what it measured per model (and setup, see [`book_key`]), so the "Model for
+//! Code" picker can say how fast a model it has run before actually was here.
 //!
 //! Whether the server caches prompt prefixes matters more than anything else
 //! for an agent: each step re-sends the whole conversation, so without the
@@ -141,7 +140,7 @@ pub fn record(session: &str, step: Step) {
         }
     }
     if let Some(model) = &step.model {
-        book_add(&book_key(model, current_setup(model).as_deref()), &step);
+        book_add(&book_key(model, None), &step);
     }
 }
 
@@ -199,8 +198,9 @@ pub(crate) fn attach(state: &AppState) {
     }
 }
 
-/// The book's key for `model` served in `setup`: the model alone when no
-/// community package serves it, else `<model> @ <package>#<profile>`.
+/// The book's key for `model` served in `setup`: the model alone with no
+/// setup, else `<model> @ <setup>` (entries a box kept for setups it once
+/// served in are still read).
 pub fn book_key(model: &str, setup: Option<&str>) -> String {
     match setup {
         Some(s) => format!("{model} @ {s}"),
@@ -279,7 +279,7 @@ fn median_u(v: &VecDeque<u64>) -> Option<u64> {
     s.get(s.len() / 2).copied()
 }
 
-/// The book's entry for `model` with no community setup, matched like model
+/// The book's entry for `model` with no setup, matched like model
 /// names are elsewhere.
 fn measured(model: &str) -> Option<Measured> {
     BOOK.lock()
@@ -488,8 +488,7 @@ pub async fn prefix_cache(model: &str, base_url: &str) -> PrefixCache {
     }
     let found = detect(model, base_url).await;
     if found.state != Cache::Unknown {
-        let setup = current_setup(model);
-        book_prefix(&book_key(model, setup.as_deref()), found.state == Cache::On);
+        book_prefix(&book_key(model, None), found.state == Cache::On);
     }
     DETECTED
         .lock()
@@ -540,59 +539,6 @@ pub(crate) fn remembered_cache(model: &str, setup: Option<&str>) -> Option<Prefi
         )),
         _ => None,
     }
-}
-
-// ---------------------------------------------------------------- the setup
-
-/// The `tt-model serve` running on the box, from command lines: the package
-/// and the `--profile` it was given (none: the package's default).
-pub fn tt_model_serve(cmdlines: &[Vec<String>]) -> Option<(String, Option<String>)> {
-    cmdlines.iter().find_map(|a| {
-        // `tt-model …`, or its interpreter running it: `python …/tt-model …`.
-        let name = |x: &String| x.rsplit('/').next().unwrap_or("").to_string();
-        let at = match a.first().map(name).as_deref() {
-            Some("tt-model") => 0,
-            Some(p)
-                if p.starts_with("python") && a.get(1).map(name).as_deref() == Some("tt-model") =>
-            {
-                1
-            }
-            _ => return None,
-        };
-        if a.get(at + 1).map(String::as_str) != Some("serve") {
-            return None;
-        }
-        let id = a.get(at + 2).filter(|x| !x.starts_with('-'))?.clone();
-        let mut profile = None;
-        for (i, x) in a.iter().enumerate() {
-            if x == "--profile" {
-                profile = a.get(i + 1).cloned();
-            } else if let Some(v) = x.strip_prefix("--profile=") {
-                profile = Some(v.to_string());
-            }
-        }
-        Some((id, profile))
-    })
-}
-
-/// The setup serving `model` now, when it's a community package:
-/// `<package>#<profile>`. None for any other serve path. A few seconds' cache:
-/// it reads `/proc` and tt-model's index, and every Code step asks.
-pub fn current_setup(model: &str) -> Option<String> {
-    type Found = Option<(Instant, String, Option<String>)>;
-    static LAST: Mutex<Found> = Mutex::new(None);
-    if let Some((at, m, setup)) = LAST.lock().expect("setup").as_ref() {
-        if at.elapsed() < Duration::from_secs(15) && m == model {
-            return setup.clone();
-        }
-    }
-    let setup = tt_model_serve(&cmdlines()).and_then(|(id, profile)| {
-        let (weights, default) = crate::codemodels::package_model(&id)?;
-        same_model(&weights, model).then_some(())?;
-        Some(format!("{id}#{}", profile.or(default)?))
-    });
-    *LAST.lock().expect("setup") = Some((Instant::now(), model.to_string(), setup.clone()));
-    setup
 }
 
 // ---------------------------------------------------------------- the window
@@ -659,8 +605,6 @@ pub struct Serving<'a> {
     pub phase: Phase,
     /// The model starting or stopping (`phase` starting/stopping).
     pub changing: Option<&'a str>,
-    /// Something else that has the chips (a bring-up, a lab run).
-    pub holder: Option<&'a str>,
 }
 
 /// Whether picking `c` needs a switch, and whether one can happen now.
@@ -695,10 +639,7 @@ pub fn switch_now(c: &Candidate, s: &Serving) -> Choice {
         Phase::Stopping => {
             Choice::Busy("The box is stopping a model. Try again in a moment.".into())
         }
-        _ => match s.holder {
-            Some(h) => Choice::Busy(h.to_string()),
-            None => Choice::Switch,
-        },
+        _ => Choice::Switch,
     }
 }
 
@@ -720,7 +661,7 @@ pub(crate) async fn get_speed(
         ));
     }
     attach(&state);
-    let endpoint = crate::gateway::llm_endpoint(&state, None, true).await;
+    let endpoint = crate::gateway::chat_endpoint(&state).await;
     let (context, cache) = match &endpoint {
         Some(e) => (
             served_context(&e.model, &e.base_url).await,
@@ -751,7 +692,6 @@ mod tests {
         code_model: Some("openai/gpt-oss-20b"),
         phase: Phase::Serving,
         changing: None,
-        holder: None,
     };
 
     #[test]
@@ -762,12 +702,6 @@ mod tests {
             tools: true,
         };
         assert_eq!(decide(&c, &SERVING), Choice::InUse);
-        // Even with something holding the chips: nothing would be disturbed.
-        let held = Serving {
-            holder: Some("A bring-up has the chips."),
-            ..SERVING
-        };
-        assert_eq!(decide(&c, &held), Choice::InUse);
     }
 
     #[test]
@@ -834,7 +768,6 @@ mod tests {
             code_model: None,
             phase: Phase::Starting,
             changing: Some("Qwen3-32B"),
-            holder: None,
         };
         assert_eq!(
             decide(&c, &starting_it),
@@ -853,14 +786,6 @@ mod tests {
             ..SERVING
         };
         assert!(matches!(decide(&c, &stopping), Choice::Busy(_)));
-        let held = Serving {
-            holder: Some("A model bring-up is using the chips."),
-            ..SERVING
-        };
-        assert_eq!(
-            decide(&c, &held),
-            Choice::Busy("A model bring-up is using the chips.".into())
-        );
     }
 
     #[test]
@@ -1015,34 +940,6 @@ mod tests {
         let m = measured("test-ring-model").unwrap();
         assert_eq!(m.decode_tps.len(), SAMPLES);
         assert_eq!(median_f(&m.decode_tps), Some(19.0));
-    }
-
-    #[test]
-    fn the_running_package_and_profile_come_from_tt_model_serve() {
-        // As on this box today.
-        let lines = vec![
-            args("python -m vllm.entrypoints.openai.api_server --served-model-name openai/gpt-oss-20b"),
-            args("/home/u/tt-model-manager/.venv/bin/python /home/u/.local/bin/tt-model serve tt-hous/gpt-oss-20b-p150 --local-only --no-update-check --port 8003 --profile p150x2-throughput"),
-        ];
-        assert_eq!(
-            tt_model_serve(&lines),
-            Some((
-                "tt-hous/gpt-oss-20b-p150".into(),
-                Some("p150x2-throughput".into())
-            ))
-        );
-        // No --profile: the package's default (resolved by the caller).
-        assert_eq!(
-            tt_model_serve(&[args("tt-model serve a/b --port 1")]),
-            Some(("a/b".into(), None))
-        );
-        assert_eq!(
-            tt_model_serve(&[args("tt-model serve a/b --profile=x")]),
-            Some(("a/b".into(), Some("x".into())))
-        );
-        // Other tt-model commands, and other programs, aren't a serve.
-        assert_eq!(tt_model_serve(&[args("tt-model pull a/b")]), None);
-        assert_eq!(tt_model_serve(&[args("grep tt-model serve a/b")]), None);
     }
 
     #[test]

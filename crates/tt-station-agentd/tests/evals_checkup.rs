@@ -29,7 +29,7 @@ use libttstation::model::Endpoint;
 use serde_json::{json, Value};
 use tt_station_agentd::evals::{self, Category, Eval, Speed};
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 mod support;
 
@@ -269,7 +269,7 @@ struct Station {
 async fn station(stub: Option<&Stub>) -> Station {
     fakes();
     let config = tempfile::tempdir().unwrap();
-    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
         .with_serving_config(
             "127.0.0.1".into(),
             stub.map(|s| s.port).unwrap_or_else(dead_port),
@@ -1137,7 +1137,7 @@ async fn code_compacts_where_the_latest_finished_measurement_of_the_served_model
     );
 
     // Survives a restart: a new AppState on the same config dir reads the same.
-    let again = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let again = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
         .with_config_dir(s.config.path().to_path_buf());
     assert_eq!(evals::compact_window(&again, Some("other/model")), 122_880);
 }

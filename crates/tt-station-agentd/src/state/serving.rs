@@ -57,11 +57,9 @@ impl AppState {
         let me = self.clone();
         let model = model.to_string();
         tokio::spawn(async move {
-            // An ordinary start takes the whole box: leave co-serving first.
-            crate::coserve::leave_split(&me).await;
             let result = me.start_serving_tracked(&model, force).await;
             if result.is_err() {
-                // Refused before the backend was asked (chips held): nothing
+                // Refused before the backend was asked: nothing
                 // started, so the claim goes back. A real failure already moved
                 // the lifecycle to `failed`, which this leaves alone.
                 me.release_start(prev, &model);
@@ -72,23 +70,10 @@ impl AppState {
         .map_err(|join_err| anyhow::anyhow!("run task panicked: {join_err}"))?
     }
 
-    /// Start `model` on the main backend WITHOUT leaving split mode -- the
-    /// chat half of a co-serve (`crate::coserve`), pinned by the caller.
-    pub(crate) async fn start_serving_placed(&self, model: &str) -> anyhow::Result<Endpoint> {
-        let me = self.clone();
-        let model = model.to_string();
-        tokio::spawn(async move { me.start_serving_tracked(&model, false).await })
-            .await
-            .map_err(|join_err| anyhow::anyhow!("run task panicked: {join_err}"))?
-    }
-
     async fn start_serving_tracked(&self, model: &str, force: bool) -> anyhow::Result<Endpoint> {
         // No lease reconcile runs while this start does (it waits out one
         // already going).
         let _op = self.serve_ops().begin().await;
-        if let Some(holder) = self.chips_holder() {
-            anyhow::bail!("{holder}");
-        }
         self.set_lifecycle(Phase::Starting, Some(model.to_string()), None, None);
         let started = Instant::now();
         let result = self.start_serving_inner(model, force).await;
@@ -172,15 +157,8 @@ impl AppState {
         // Model name is only used for logging by backends that track one;
         // `RunPyBackend::stop` ignores the argument entirely. When nothing is
         // serving there's no name to pass, so hand it an empty placeholder.
-        // Stopping takes the whole box back: the companion goes too.
-        crate::coserve::leave_split(self).await;
-        // A model Orchard brought up and the owner tapped Serve on.
-        crate::orchard::stop_harvest(self).await;
-        // Stopping from here on (a community package's stop alone can take minutes).
         let was = self.lifecycle().model;
         self.set_lifecycle(Phase::Stopping, was, None, None);
-        // A community package: its container outlives `tt-model serve`.
-        crate::community::stop_package(self).await;
 
         let model = self.current_model().unwrap_or_default();
         let backend = self.backend();
@@ -240,8 +218,8 @@ impl AppState {
     /// Claim the lifecycle for a start of `model`: check nothing else is
     /// starting or stopping and set `Starting` under ONE hold of the lock, so
     /// two clients asking at once can't both pass the check (the start itself
-    /// only gets to `start_serving_tracked` after awaits -- `check_servable`,
-    /// `coserve::leave_split` -- that used to leave that window open). Returns
+    /// only gets to `start_serving_tracked` after awaits -- `check_servable`
+    /// -- that used to leave that window open). Returns
     /// the lifecycle it replaced, for [`AppState::release_start`] when the start
     /// never gets going.
     pub(crate) fn claim_start(&self, model: &str) -> Result<Lifecycle, StartInFlight> {
@@ -405,9 +383,8 @@ impl AppState {
             })
             .await
             .unwrap_or(true);
-            // Not one of the container images discovery knows (a community
-            // tt-model package, Orchard's package, native vLLM with no
-            // container): the port answering with a model is enough.
+            // Not one of the container images discovery knows: the port
+            // answering with a model is enough.
             let answering = alive
                 || crate::served::list(
                     &crate::served::local_root(self),

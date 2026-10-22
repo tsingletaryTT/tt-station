@@ -9,13 +9,12 @@ import SwiftUI
 struct ModelsView: View {
     @Environment(AppModel.self) private var app
     @State private var query = ""
-    @State private var orchard = false
 
     var body: some View {
         NavigationStack {
             Group {
                 if let session = app.session {
-                    ModelsContent(session: session, query: query, onOrchard: { orchard = true })
+                    ModelsContent(session: session, query: query)
                 } else {
                     ContentUnavailableView("No box selected", systemImage: "server.rack",
                                            description: Text("Add or pick a box in Settings."))
@@ -24,18 +23,6 @@ struct ModelsView: View {
             .background(Brand.backdrop)
             .navigationTitle("Models")
             .searchable(text: $query, prompt: "Search models")
-            .toolbar {
-                if app.session != nil {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button { orchard = true } label: {
-                            Label("Bring up a new model", systemImage: "leaf")
-                        }
-                    }
-                }
-            }
-            .fullScreenCover(isPresented: $orchard) {
-                if let session = app.session { OrchardView(session: session) }
-            }
         }
     }
 }
@@ -43,7 +30,6 @@ struct ModelsView: View {
 private struct ModelsContent: View {
     let session: BoxSession
     let query: String
-    var onOrchard: () -> Void = {}
     @Environment(AppModel.self) private var app
     @State private var pendingStart: TtModel?
     @State private var pendingDelete: TtModel?
@@ -105,7 +91,7 @@ private struct ModelsContent: View {
                         Image(systemName: "square.stack.3d.down.right").font(.tt(.title3)).foregroundStyle(Brand.accent)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Everything it can serve").font(.tt(.headline))
-                            Text("Community packages and their profiles, native bundles, and what's serving now.")
+                            Text("Every model it can run, how many chips each needs, and what's serving now.")
                                 .font(.tt(.caption)).foregroundStyle(.secondary).multilineTextAlignment(.leading)
                         }
                         Spacer(minLength: 0)
@@ -139,21 +125,6 @@ private struct ModelsContent: View {
                 section("Downloading", downloading, serving: serving)
                 section("On this box", onBox, serving: serving)
                 section(session.canDownload ? "More for this box" : "Not downloaded", available, serving: serving)
-                Button(action: onOrchard) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "leaf").font(.tt(.title3)).foregroundStyle(Brand.accent)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(query.isEmpty ? "Not in the list?" : "Can't find \(query)?").font(.tt(.headline))
-                            Text("Bring up any Hugging Face model on this box with Orchard. It runs for hours and tells you when it's done.")
-                                .font(.tt(.caption)).foregroundStyle(.secondary).multilineTextAlignment(.leading)
-                        }
-                        Spacer(minLength: 0)
-                        Image(systemName: "chevron.right").foregroundStyle(.tertiary)
-                    }
-                    .padding(16)
-                    .card()
-                }
-                .buttonStyle(.plain)
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 32)
@@ -245,7 +216,6 @@ private struct ModelsContent: View {
         }
         switch model.kind {
         case "image": parts.append("You'll make images in the Create tab; chat is unavailable while it serves.")
-        case "video": parts.append("You'll make videos in the Create tab; chat is unavailable while it serves.")
         default:
             if !model.worksWithAssistant {
                 parts.append("This model can't drive the assistant's box controls, so expect plain chat only.")
@@ -341,7 +311,7 @@ private struct ModelCard: View {
                     .font(.tt(.caption))
                     .foregroundStyle(.secondary)
             } else if model.weightsState == "container" && !canStartHere {
-                Text("Speech models aren't usable from the app yet.")
+                Text("This kind of model isn't usable from the app yet.")
                     .font(.tt(.caption))
                     .foregroundStyle(.secondary)
             } else if model.weightsState == "container" {
@@ -398,7 +368,7 @@ private struct ModelCard: View {
 
     /// The app has an experience for chat, image and video models; speech/TTS
     /// models can be downloaded but not used from here yet.
-    private var canStartHere: Bool { ["chat", "image", "video", "other"].contains(model.kind) }
+    private var canStartHere: Bool { ["chat", "image", "other"].contains(model.kind) }
 
     private var icon: String {
         if isRecommended { return "star.fill" }

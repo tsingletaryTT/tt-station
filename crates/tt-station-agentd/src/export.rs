@@ -1851,7 +1851,7 @@ mod tests {
         AppState::new(
             "t".into(),
             "1xBH".into(),
-            std::sync::Arc::new(crate::serving::dstack::DstackBackend),
+            std::sync::Arc::new(crate::serving::NullBackend),
         )
         .with_config_dir(root.to_path_buf())
         .with_people(crate::people::People::open(root.join("people.json")))

@@ -32,13 +32,11 @@
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
     <key>NSPhotoLibraryAddUsageDescription</key>
-    <string>TT Station saves the images and videos your box makes to Photos.</string>
+    <string>TT Station saves the images your box makes to Photos.</string>
     <key>BGTaskSchedulerPermittedIdentifiers</key>
     <array>
         <string>com.tenstorrent.ttstation.mobile.refresh</string>
     </array>
-    <!-- The Keychain group shared with the notification service extension (PushCredentials). -->
-    <key>TTKeychainGroup</key><string>$(AppIdentifierPrefix)com.tenstorrent.ttstation.shared</string>
     <key>NSSupportsLiveActivities</key>
     <true/>
     <key>UIAppFonts</key>

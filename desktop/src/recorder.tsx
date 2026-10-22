@@ -1,29 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-// Meeting recorder: the box records its microphone and whatever it's playing
-// (the meeting), then transcribes it like any other recording. From another
-// computer (a Mac), that computer records its own microphone and uploads the
-// recording to the device to transcribe.
+// Meeting recorder: this computer records its own microphone and uploads the
+// recording to the box (`POST /jobs/transcribe`), which transcribes it like
+// any other recording.
 
 import { useEffect, useState } from "react";
 import { Button } from "@tenstorrent/vesper/button";
 import { TextInput } from "@tenstorrent/vesper/text-input";
 import { Typography } from "@tenstorrent/vesper/typography";
 import { Icon } from "@tenstorrent/vesper/icons";
-import { currentToken, get, onAnotherComputer, post } from "./api";
+import { currentToken } from "./api";
 import { navigate } from "./App";
 import { Card, Eyebrow, toastError, toastOk } from "./ui";
-import { sharedSource } from "./poll";
 import { ask } from "./dialog";
 
 export interface Recording {
   id: string; title: string; started: number; seconds: number; max_seconds: number; ended: boolean;
-  mic: string | null; system: string | null; mic_db: number | null; system_db: number | null;
-  /** Who started it (a person's or a device's name); absent on this computer's own recordings. */
-  started_by?: string | null;
+  mic: string | null; mic_db: number | null;
 }
-export interface RecordState { microphone: string | null; speakers: string | null; recording: Recording | null }
+export interface RecordState { microphone: string | null; recording: Recording | null }
 
 // ---------------------------------------------------------------- recording on this computer
 
@@ -31,7 +27,7 @@ const MAX_SECONDS = 4 * 3600;
 
 /** This computer's microphone, recorded here, then sent to the device to transcribe. */
 class LocalRecorder {
-  state: RecordState = { microphone: "This computer's microphone", speakers: null, recording: null };
+  state: RecordState = { microphone: "This computer's microphone", recording: null };
   private listeners = new Set<() => void>();
   private rec: MediaRecorder | null = null;
   private stream: MediaStream | null = null;
@@ -60,7 +56,7 @@ class LocalRecorder {
     const started = Date.now() / 1000;
     const name = title?.trim() || `Meeting, ${new Date().toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
     this.state.microphone = label;
-    this.state.recording = { id: "local", title: name, started, seconds: 0, max_seconds: MAX_SECONDS, ended: false, mic: label, system: null, mic_db: null, system_db: null };
+    this.state.recording = { id: "local", title: name, started, seconds: 0, max_seconds: MAX_SECONDS, ended: false, mic: label, mic_db: null };
     this.timer = window.setInterval(() => {
       analyser.getFloatTimeDomainData(buf);
       const rms = Math.sqrt(buf.reduce((a, x) => a + x * x, 0) / buf.length);
@@ -99,9 +95,6 @@ class LocalRecorder {
 
 export const localRecorder = new LocalRecorder();
 
-let elsewhere: boolean | null = null;
-const elsewhereOnce = onAnotherComputer().then((v) => { elsewhere = v; return v; }).catch(() => false);
-
 // The menu bar and Tori (another window) ask this one to record.
 window.ttDesktop?.onClientRecord?.(async ({ nonce, action, title }) => {
   try {
@@ -112,42 +105,24 @@ window.ttDesktop?.onClientRecord?.(async ({ nonce, action, title }) => {
   }
 });
 
-/** Start recording a meeting: on the device, or on this computer when it isn't the device. */
+/** Start recording a meeting on this computer. */
 export async function startRecording(title?: string) {
-  if (await elsewhereOnce) await localRecorder.start(title);
-  else await post("/record/start", { title: title || undefined });
+  await localRecorder.start(title);
 }
 
-/** Stop; queues the transcription. Says what happened. */
-export async function stopRecording(discard = false): Promise<string> {
-  if (await elsewhereOnce) return localRecorder.stop(discard);
-  await post("/record/stop", { discard });
-  return discard ? "Recording thrown away." : "Saved. The transcript will be ready in a few minutes; you'll get a notification.";
+/** Stop; uploads the recording and queues its transcription. Says what happened. */
+export function stopRecording(discard = false): Promise<string> {
+  return localRecorder.stop(discard);
 }
 
-/** Polls fast while recording (for the meters), slowly otherwise. On another
- *  computer, follows this computer's own recorder. */
+/** This computer's recorder, kept current (the meters update while recording). */
 export function useRecorder() {
-  const [state, setState] = useState<RecordState | null>(null);
-  const [local, setLocal] = useState<boolean | null>(elsewhere);
-  const [tick, setTick] = useState(0);
-  const live = !!state?.recording;
-  useEffect(() => { void elsewhereOnce.then(setLocal); }, []);
+  const [state, setState] = useState<RecordState>(localRecorder.state);
   useEffect(() => {
-    if (local !== true) return;
     setState(localRecorder.state);
     return localRecorder.subscribe(() => setState(localRecorder.state));
-  }, [local]);
-  useEffect(() => {
-    if (local !== false) return;
-    // One poll for every recorder on screen; it rests while the window is hidden.
-    const src = sharedSource("/record", () => get<RecordState>("/record"));
-    if (src.data) setState(src.data);
-    const stop = src.add(live ? 200 : 4000, () => { if (src.data) setState(src.data); });
-    if (tick) void src.fetch();
-    return stop;
-  }, [live, tick, local]);
-  return { state, local: local === true, refresh: () => setTick((n) => n + 1) };
+  }, []);
+  return { state };
 }
 
 export function clock(s: number) {
@@ -170,21 +145,21 @@ function Meter({ label, device, db }: { label: string; device: string | null; db
 }
 
 export function MeetingRecorder({ onQueued }: { onQueued?: () => void }) {
-  const { state, local, refresh } = useRecorder();
+  const { state } = useRecorder();
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
   const rec = state?.recording;
 
   const start = async () => {
     setBusy(true);
-    try { await startRecording(title.trim() || undefined); setTitle(""); refresh(); }
+    try { await startRecording(title.trim() || undefined); setTitle(""); }
     catch (e) { toastError(e); } finally { setBusy(false); }
   };
   const stop = async (discard = false) => {
     setBusy(true);
     try {
       toastOk(await stopRecording(discard));
-      refresh(); onQueued?.();
+      onQueued?.();
     } catch (e) { toastError(e); } finally { setBusy(false); }
   };
 
@@ -197,11 +172,8 @@ export function MeetingRecorder({ onQueued }: { onQueued?: () => void }) {
       {rec ? (
         <>
           <Typography variant="heading-xs">{rec.title}</Typography>
-          <div className="grid grid-2" style={{ gap: 16 }}>
-            <Meter label="You" device={rec.mic} db={rec.mic_db} />
-            <Meter label="The meeting" device={rec.system} db={rec.system_db} />
-          </div>
-          {rec.ended && <Typography variant="copy-sm" style={{ color: "var(--vesper-text-error)" }}>The recording stopped on its own (a device was unplugged, or it hit {clock(rec.max_seconds)}). Save what you have.</Typography>}
+          <Meter label="Microphone" device={rec.mic} db={rec.mic_db} />
+          {rec.ended && <Typography variant="copy-sm" style={{ color: "var(--vesper-text-error)" }}>The recording stopped on its own (it hit {clock(rec.max_seconds)}). Save what you have.</Typography>}
           <div className="row">
             <Button onClick={() => stop()} disabled={busy}>Stop and transcribe</Button>
             <Button variant="ghost" disabled={busy} onClick={async () => { if (await ask("Throw this recording away?", { body: "Nothing is kept or transcribed.", confirm: "Discard", danger: true })) stop(true); }}>Discard</Button>
@@ -209,24 +181,15 @@ export function MeetingRecorder({ onQueued }: { onQueued?: () => void }) {
         </>
       ) : (
         <>
-          {local ? (
-            <Typography variant="copy-sm" className="muted">
-              Records this computer's microphone, then the box writes a transcript you can search and ask about. On a call through the speakers it hears both sides; with headphones on, only you (macOS doesn't let apps record other apps' sound).
-            </Typography>
-          ) : (
-            <Typography variant="copy-sm" className="muted">
-              Join your call on this box and press record. It hears you through {state?.microphone ?? "a microphone"} and the meeting through the speakers, then writes a transcript you can search and ask about.
-            </Typography>
-          )}
-          {state && !state.microphone && !local && (
-            <Typography variant="copy-sm" style={{ color: "var(--vesper-text-warning, var(--vesper-yellow-700))" }}>No microphone is plugged in: only the meeting's side will be recorded.</Typography>
-          )}
+          <Typography variant="copy-sm" className="muted">
+            Records this computer's microphone, then the box writes a transcript you can search and ask about. On a call through the speakers it hears both sides; with headphones on, only you (most systems don't let apps record other apps' sound).
+          </Typography>
           <div className="row">
             <div className="grow"><TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Name it (optional), e.g. Design sync"
               onKeyDown={(e) => { if (e.key === "Enter") start(); }} /></div>
-            <Button onClick={start} disabled={busy || !state} iconLeft={<Icon kind="microphone" />}>Record</Button>
+            <Button onClick={start} disabled={busy} iconLeft={<Icon kind="microphone" />}>Record</Button>
           </div>
-          <Typography variant="copy-xs" className="muted">Let everyone know you're recording. {local ? "The recording goes to your box to be transcribed; audio and transcripts stay there." : "Audio and transcripts stay on this box."}</Typography>
+          <Typography variant="copy-xs" className="muted">Let everyone know you're recording. The recording goes to your box to be transcribed; audio and transcripts stay there.</Typography>
         </>
       )}
     </Card>
@@ -248,10 +211,7 @@ export function RecordingNow() {
     <Card tone="accent" onClick={openTranscribe}>
       <div className="row-between"><Eyebrow>Recording</Eyebrow><span className="rec-dot mono">{clock(rec.seconds)}</span></div>
       <Typography variant="copy-md">{rec.title}</Typography>
-      <div className="grid grid-2" style={{ gap: 12 }}>
-        <Meter label="You" device={rec.mic} db={rec.mic_db} />
-        <Meter label="The meeting" device={rec.system} db={rec.system_db} />
-      </div>
+      <Meter label="Microphone" device={rec.mic} db={rec.mic_db} />
     </Card>
   );
 }

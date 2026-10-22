@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 use tt_station_agentd::voice;
 
 mod support;
@@ -60,7 +60,7 @@ impl Box_ {
             std::env::temp_dir().join(format!("tt-voice-cfg-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&config);
         std::fs::create_dir_all(&config).unwrap();
-        let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(DstackBackend))
+        let state = AppState::new("qb2-lab".into(), "4xBH".into(), Arc::new(NullBackend))
             .with_telemetry_config("/nonexistent/tt-smi".to_string(), 1000)
             .with_config_dir(config.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -100,11 +100,6 @@ async fn every_voice_route_needs_a_paired_device() {
         ("POST", "/voice/setup"),
         ("POST", "/voice/speak"),
         ("POST", "/voice/listen"),
-        ("GET", "/voice/hear"),
-        ("POST", "/voice/hear"),
-        ("DELETE", "/voice/hear"),
-        ("POST", "/voice/hear/finish"),
-        ("POST", "/voice/say"),
     ] {
         let r =
             b.c.request(method.parse().unwrap(), format!("{}{path}", b.base))
@@ -222,30 +217,21 @@ async fn nothing_is_spoken_or_heard_for_an_empty_or_oversized_request() {
     assert_eq!(r.status(), 400);
     let body: Value = r.json().await.unwrap();
     assert_eq!(body["error"], "The recording was empty.");
-
-    // Saying nothing out loud is a no-op, not an error.
-    let (status, body) = b
-        .send("POST", "/voice/say", Some(json!({ "text": "  " })))
-        .await;
-    assert_eq!((status, body), (200, json!({ "said": false })));
 }
 
+/// The box's own microphone and speakers aren't reachable: listening and
+/// speaking go through the apps (`/voice/listen`, `/voice/speak`).
 #[tokio::test]
-async fn the_hearing_state_is_reported_and_stopping_is_always_accepted() {
+async fn the_box_s_own_microphone_and_speakers_are_not_routes() {
     let b = Box_::new("hear").await;
-    let (status, h) = b.send("GET", "/voice/hear", None).await;
-    assert_eq!(status, 200);
-    assert_eq!(h["hearing"], false);
-    assert_eq!(h["saying"], false);
-    assert!(h["level_db"].is_number());
-    assert_eq!(
-        b.send("POST", "/voice/hear/finish", None).await,
-        (200, json!({ "finishing": true }))
-    );
-    assert_eq!(
-        b.send("DELETE", "/voice/hear", None).await,
-        (200, json!({ "stopped": true }))
-    );
+    for (method, path) in [
+        ("GET", "/voice/hear"),
+        ("POST", "/voice/hear"),
+        ("POST", "/voice/hear/finish"),
+        ("POST", "/voice/say"),
+    ] {
+        assert_eq!(b.send(method, path, None).await.0, 404, "{method} {path}");
+    }
 }
 
 #[tokio::test]

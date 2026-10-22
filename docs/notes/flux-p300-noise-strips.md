@@ -31,4 +31,5 @@ lit", "seed": 11, "num_inference_steps": 4, "guidance_scale": 3.5}`.
 ## In tt-station
 
 `GET /coserve` marks FLUX models with a known-issue note for half-box use, and the app shows it
-under the image-model picker (`coserve::half_box_note`). Whole-box FLUX is unaffected.
+under the image-model picker (`coserve::half_box_note`). Whole-box FLUX is unaffected. (Co-serving was removed in
+v0.12.0, so half-box FLUX no longer happens in TT Station.)

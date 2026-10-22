@@ -299,29 +299,6 @@ pub const APPS: &[AppDef] = &[
         files: &[],
     },
     AppDef {
-        id: "openclaw",
-        name: "OpenClaw",
-        blurb: "Your own AI assistant that you message from WhatsApp, Telegram, Slack or Discord, running on the box's model.",
-        category: "Agents",
-        image: "openclaw/openclaw:2026.9.3@sha256:6cb72e1599b3b76e2ea3dcc2f4dd7f112247367fbecadfcdee8caa7423f4989b",
-        port: 3032,
-        container_port: 18789,
-        data: "/home/node/.openclaw",
-        env: &[("OPENCLAW_GATEWAY_TOKEN", "{token}"), ("TT_API_KEY", "{key}")],
-        command: None,
-        share: Share::OwnLogin("sign in to its control page with the access code and run your assistant, its channels and its tools"),
-        url_suffix: "",
-        homepage: "https://openclaw.ai",
-        needs: &[],
-        login_user: None,
-        hint: "Sign in to its control page with the access code, then connect a chat app (WhatsApp, Telegram, Slack…) under Channels.",
-        extra_args: &[],
-        show_key: false,
-        // The box as its model provider; memory search off (it would need embeddings the box doesn't serve).
-        // `quietbox` is the gateway's catch-all model name (any name reaches the served model).
-        files: &[("/home/node/.openclaw/openclaw.json", "{\n  \"gateway\": { \"mode\": \"local\" },\n  \"models\": { \"providers\": { \"tt\": { \"baseUrl\": \"{base}\", \"apiKey\": \"{key}\", \"api\": \"openai-completions\", \"models\": [ { \"id\": \"quietbox\", \"name\": \"TT Station\", \"contextWindow\": {context}, \"maxTokens\": 8192 } ] } } },\n  \"agents\": { \"defaults\": { \"model\": { \"primary\": \"tt/quietbox\" } } },\n  \"memory\": { \"search\": { \"provider\": \"none\" } }\n}\n")],
-    },
-    AppDef {
         id: "lightrag",
         name: "LightRAG",
         blurb: "Upload documents and ask questions: it maps how the facts in them connect (a knowledge graph) and answers from it, with the box's model and embeddings.",
@@ -1172,7 +1149,7 @@ mod tests {
         ] {
             assert!(matches!(app(id).unwrap().share, Share::Never(_)), "{id}");
         }
-        for id in ["lobechat", "flowise", "openclaw"] {
+        for id in ["lobechat", "flowise"] {
             let a = app(id).unwrap();
             assert!(matches!(a.share, Share::OwnLogin(_)), "{id}");
             // Its sign-in is always in its environment.

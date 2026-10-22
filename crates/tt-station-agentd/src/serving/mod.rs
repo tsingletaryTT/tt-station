@@ -1,31 +1,18 @@
 //! Serving-backend abstraction: the seam between `tt-station-agentd` and
 //! whatever actually runs model-serving containers/VMs on a box.
 //!
-//! Docker proves the end-to-end story today (Task 9); `dstack` (a
-//! confidential-VM orchestrator) takes over the same role in M4. Both live
-//! behind the one `ServingBackend` trait so nothing above this module --
-//! the agent's control routes (Task 10), the Mac-side `AgentClient` (Task
-//! 11), or the `tt-station` CLI (Task 12) -- ever has to know or care which backend
-//! is actually running. Swapping Docker for dstack later should be a
-//! one-line change at whatever call site constructs the backend, not a
-//! rewrite of everything that talks to it.
+//! `run.py` (the default) and plain Docker both live behind the one
+//! `ServingBackend` trait so nothing above this module -- the agent's control
+//! routes, the Mac-side `AgentClient`, or the `tt-station` CLI -- ever has to
+//! know or care which backend is actually running. [`NullBackend`] serves
+//! nothing, for an agent (or a test) that needs no serving at all.
 
 pub mod discovery;
 pub mod docker;
-pub mod dstack;
 pub mod runpy;
 pub mod secrets;
 
 use std::time::Duration;
-
-/// Where on the box a serve runs when the box is split between models: the
-/// device config for that slice (`p300` = one P300 card, two chips) and the
-/// chips (`/dev/tenstorrent/<n>` indices, e.g. `0,1`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct Placement {
-    pub device: String,
-    pub device_ids: String,
-}
 
 use anyhow::Result;
 use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
@@ -34,7 +21,7 @@ use libttstation::model::{Endpoint, ModelsResponse, ServingStatus};
 ///
 /// Deliberately synchronous (no `async fn`): implementations are expected
 /// to block for as long as it genuinely takes to start/stop serving (docker
-/// pulling an image, dstack spinning up a VM, ...), and a plain sync trait
+/// pulling an image, `run.py` waiting for a model to load, ...), and a plain sync trait
 /// is trivial to fake in tests with no async-trait machinery. A caller that
 /// invokes this from an async context (e.g. an axum handler, arriving in
 /// Task 10) is expected to hop off the async runtime first -- e.g. via
@@ -101,7 +88,7 @@ pub trait ServingBackend: Send + Sync {
     /// `swap_held_lease`.
     ///
     /// Default: adopt nothing and say so, correct for a backend that does not
-    /// lease (`DstackBackend`). A caller that gets `false` for a lease on its
+    /// lease (`NullBackend`). A caller that gets `false` for a lease on its
     /// own serving port must LOG IT LOUDLY, naming the id -- an unowned lease
     /// is an operator-visible problem and the log line is what explains it.
     fn adopt_lease(&self, lease_id: &str, who: &str) -> bool {
@@ -133,17 +120,16 @@ pub trait ServingBackend: Send + Sync {
     /// its own `status` (updated by `state/serving.rs`'s `set_serving`/`set_idle`
     /// on every successful `/run`/`/stop`), and `GET /status` reads that,
     /// not this method -- nothing in `tt-station-agentd` calls
-    /// `ServingBackend::status()` today. It's here ahead of the dstack
-    /// backend (M4), where a backend that can lose track of what it's
-    /// serving across an agent restart will need `/status` to ask it
-    /// directly instead of trusting in-process state. Don't assume `GET
+    /// `ServingBackend::status()` today. It's here for a backend that can
+    /// lose track of what it's serving across an agent restart and so needs
+    /// `/status` to ask it directly instead of trusting in-process state. Don't assume `GET
     /// /status`'s response reflects this method's return value -- as of
     /// this PoC, it doesn't.
     fn status(&self) -> Result<ServingStatus>;
 
     /// The `gozer` capability this backend leases chips through, or `None`
     /// when leasing is off (no gozer on the box, or a backend that doesn't
-    /// lease at all -- see `serving/dstack.rs`).
+    /// lease at all, such as [`NullBackend`]).
     ///
     /// **Test-only, and it exists for exactly one assertion**: that the
     /// backend `main.rs` actually constructs is holding the capability
@@ -162,25 +148,13 @@ pub trait ServingBackend: Send + Sync {
         None
     }
 
-    /// Pin every following `start` to a slice of the box (co-serving: chat on
-    /// one card, images on the other), or `None` for the whole box. Returns
-    /// whether this backend can honour it; the default can't.
-    fn set_placement(&self, placement: Option<Placement>) -> bool {
-        placement.is_none()
-    }
-
-    /// The current pin, if any.
-    fn placement(&self) -> Option<Placement> {
-        None
-    }
-
     /// The serving status RECONCILED against real serving state, self-correcting
     /// a stale in-memory `Serving` when the serve actually died out of band (a
     /// manual `docker stop`, a crash, a host reboot of the container -- none of
     /// which run through the agent's `/stop`).
     ///
     /// Default: return `status()` unchanged -- correct for backends whose
-    /// in-memory status can't drift from reality (the dstack stub) or where a
+    /// in-memory status can't drift from reality (`NullBackend`) or where a
     /// hand-rolled `docker run` isn't reliably discoverable (`DockerBackend`,
     /// the best-effort fallback). The `runpy` backend -- the real one -- probes
     /// docker via its own `CommandRunner` and overrides this so `GET /status`
@@ -195,7 +169,7 @@ pub trait ServingBackend: Send + Sync {
     ///
     /// The default implementation is a no-op that succeeds -- the sane
     /// answer for backends with no serving container or board of their own
-    /// to clear (`DstackBackend`, still a stub) and for `DockerBackend`
+    /// to clear (`NullBackend`) and for `DockerBackend`
     /// (whose containers are addressed by model name, which a `reset` with
     /// no model in hand doesn't have; `/reset` still clears the agent's own
     /// tokens/status regardless). `RunPyBackend` is the one backend that
@@ -249,8 +223,7 @@ pub trait ServingBackend: Send + Sync {
     /// Default implementation reports an empty catalog with no known
     /// release version -- correct for any backend with no model spec of its
     /// own to read (`DockerBackend`, whose image/model are supplied
-    /// entirely via CLI flags with no catalog file, and `DstackBackend`,
-    /// still a stub). `RunPyBackend` is the one backend that overrides
+    /// entirely via CLI flags with no catalog file, and `NullBackend`). `RunPyBackend` is the one backend that overrides
     /// this, since `run.py`'s `model_spec.json` is an actual catalog to
     /// read.
     fn list_models(&self) -> Result<ModelsResponse> {
@@ -299,15 +272,34 @@ pub fn loopback_only(host: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// A backend that serves nothing: `start` fails, `stop` succeeds, status is
+/// always idle. For an agent (or a test) that needs the API without serving.
+/// It runs nothing, so it never takes a gozer lease either.
+pub struct NullBackend;
+
+impl ServingBackend for NullBackend {
+    fn start_forcing(&self, _model: &str, _force: bool) -> Result<Endpoint> {
+        Err(anyhow::anyhow!("this agent has no serving backend"))
+    }
+
+    fn stop(&self, _model: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn status(&self) -> Result<ServingStatus> {
+        Ok(ServingStatus::Idle)
+    }
+}
+
 /// Construct a `ServingBackend` for the given `--backend` CLI choice.
 ///
-/// `"runpy"`, `"docker"`, and `"dstack"` are the only recognized kinds;
+/// `"runpy"` and `"docker"` are the only recognized kinds;
 /// anything else is an error rather than a silent fallback, since a typo'd
 /// backend name should fail loudly at startup rather than quietly serving
 /// nothing.
 ///
 /// `docker_config`/`runpy_config` are each only meaningful for their own
-/// backend (dstack's stub needs neither); both are threaded through here
+/// backend; both are threaded through here
 /// rather than the individual fields being hardcoded so the CLI wiring in
 /// `main.rs` has a single function to call regardless of which backend was
 /// chosen, and so adding a new per-backend knob doesn't mean touching this
@@ -329,9 +321,6 @@ pub fn loopback_only(host: &str) -> bool {
 /// box ever leased a chip. Making the capability part of the one signature
 /// `main.rs` must call means a future backend can't be added to the match
 /// below without confronting the question.
-///
-/// `dstack` is the one arm that deliberately DROPS the capability -- see
-/// `serving/dstack.rs`'s "leasing is a deliberate no-op" note.
 pub fn make_backend(
     kind: &str,
     docker_config: docker::DockerConfig,
@@ -347,12 +336,6 @@ pub fn make_backend(
             docker::DockerBackend::new(docker_config, Box::new(docker::RealCommandRunner))
                 .with_gozer(gozer),
         )),
-        // Leasing is a no-op here ON PURPOSE, not an oversight: the dstack
-        // stub runs nothing, owns no `CommandRunner`, and could therefore
-        // neither pin a lease to a workload nor release one. Taking chips it
-        // cannot use -- and cannot hand back -- would strand them until
-        // agentd exits. See `serving/dstack.rs`.
-        "dstack" => Ok(Box::new(dstack::DstackBackend)),
         other => Err(anyhow::anyhow!("unknown serving backend: {other}")),
     }
 }
@@ -370,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn make_backend_constructs_runpy_docker_and_dstack() {
+    fn make_backend_constructs_runpy_and_docker() {
         assert!(make_backend(
             "runpy",
             docker::DockerConfig::default(),
@@ -380,13 +363,6 @@ mod tests {
         .is_ok());
         assert!(make_backend(
             "docker",
-            docker::DockerConfig::default(),
-            runpy::RunPyConfig::default(),
-            None
-        )
-        .is_ok());
-        assert!(make_backend(
-            "dstack",
             docker::DockerConfig::default(),
             runpy::RunPyConfig::default(),
             None
@@ -432,7 +408,7 @@ mod tests {
     /// in its pre-leasing state.
     #[test]
     fn make_backend_without_a_capability_leaves_leasing_off() {
-        for kind in ["runpy", "docker", "dstack"] {
+        for kind in ["runpy", "docker"] {
             let backend = make_backend(
                 kind,
                 docker::DockerConfig::default(),
@@ -446,21 +422,6 @@ mod tests {
                 "the {kind} backend must not lease without a capability"
             );
         }
-    }
-
-    /// dstack leasing is a deliberate no-op -- see `serving/dstack.rs`. A
-    /// capability handed to `make_backend` must not reach it, because it
-    /// could neither pin a lease to anything nor release one.
-    #[test]
-    fn make_backend_does_not_lease_for_dstack() {
-        let backend = make_backend(
-            "dstack",
-            docker::DockerConfig::default(),
-            runpy::RunPyConfig::default(),
-            Some(capability()),
-        )
-        .expect("dstack backend should construct");
-        assert_eq!(backend.gozer_capability(), None);
     }
 
     #[test]

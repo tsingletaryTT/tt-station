@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! Favorite models: any model a person stars (an official one, a community
-//! package, one of their bring-ups, a package in the community catalog), kept
-//! on the box so every app sees the same list.
+//! Favorite models: any model a person stars, kept on the box so every app
+//! sees the same list.
 //!
 //! - `GET /favorites`: `{ favorites: [{ key, name, kind, added }] }`, newest first.
 //! - `PUT /favorites`: `{ key, name, kind, on }` stars (`on: true`) or unstars a model.
 //!
-//! `key` is `<kind>:<id>` as the apps build it (`official:Qwen3-32B`,
-//! `community:tt-hous/muse-glimmer-30b`, ...); the box only stores it.
+//! `key` is `<kind>:<id>` as the apps build it (`official:Qwen3-32B`, ...);
+//! the box only stores it.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -148,11 +147,11 @@ mod tests {
     #[test]
     fn stars_and_unstars_once_per_key() {
         let l = apply(vec![], &body("official:Qwen3-32B", true), 1);
-        let l = apply(l, &body("community:tt-hous/muse", true), 2);
+        let l = apply(l, &body("official:FLUX.1-schnell", true), 2);
         let l = apply(l, &body("official:Qwen3-32B", true), 3);
         assert_eq!(
             l.iter().map(|f| f.key.as_str()).collect::<Vec<_>>(),
-            ["official:Qwen3-32B", "community:tt-hous/muse"]
+            ["official:Qwen3-32B", "official:FLUX.1-schnell"]
         );
         assert_eq!(l[0].name, "Qwen3-32B");
         let l = apply(l, &body("official:Qwen3-32B", false), 4);

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! WebSockets that take a token (`/toplike/term`) read it
-//! from a header -- `Authorization`, or a `tt-token.<token>` subprotocol for
-//! a browser -- never from the URL.
+//! WebSockets that take a token (`/logs/stream`, `/telemetry`) read it from a
+//! header -- `Authorization`, or a `tt-token.<token>` subprotocol for a
+//! browser -- never from the URL.
 
 use std::sync::Arc;
 
@@ -11,10 +11,10 @@ use serde_json::Value;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tt_station_agentd::routes::{app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 async fn harness() -> (String, String) {
-    let state = AppState::new("qb2".into(), "4xBH".into(), Arc::new(DstackBackend));
+    let state = AppState::new("qb2".into(), "4xBH".into(), Arc::new(NullBackend));
     let router = app(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -62,19 +62,15 @@ async fn status(url: String, header: Option<(&'static str, String)>) -> u16 {
 }
 
 #[tokio::test]
-async fn a_terminal_websocket_takes_its_token_from_a_header_not_the_url() {
-    // tt-toplike's view runs a stand-in that exits at once (this file's only
-    // test, so nothing else sees the variable).
-    std::env::set_var("TT_TOPLIKE_BIN", "/bin/true");
+async fn a_websocket_takes_its_token_from_a_header_not_the_url() {
     let (ws, token) = harness().await;
-    // An unknown view: past auth, the route's own answer is 400.
-    let term = format!("{ws}/toplike/term?mode=nope");
+    let logs = format!("{ws}/logs/stream");
     // In the URL: not accepted any more.
-    assert_eq!(status(format!("{term}&token={token}"), None).await, 401);
-    assert_eq!(status(term.clone(), None).await, 401);
+    assert_eq!(status(format!("{logs}?token={token}"), None).await, 401);
+    assert_eq!(status(logs.clone(), None).await, 401);
     assert_eq!(
         status(
-            term.clone(),
+            logs.clone(),
             Some((
                 "sec-websocket-protocol",
                 "tt-station, tt-token.wrong".into()
@@ -83,31 +79,18 @@ async fn a_terminal_websocket_takes_its_token_from_a_header_not_the_url() {
         .await,
         401
     );
-    // In a header, it gets past auth (to "unknown view").
+    // In a header, it opens.
     assert_eq!(
         status(
-            term.clone(),
+            logs.clone(),
             Some(("authorization", format!("Bearer {token}")))
         )
         .await,
-        400
+        101
     );
-    assert_eq!(
-        status(
-            term,
-            Some((
-                "sec-websocket-protocol",
-                format!("tt-station, tt-token.{token}")
-            ))
-        )
-        .await,
-        400
-    );
-    // A real view opens -- the handshake answering with the `tt-station`
+    // As a subprotocol, the handshake answers with the `tt-station`
     // subprotocol a browser insists on.
-    let top = format!("{ws}/toplike/term?mode=starfield");
-    assert_eq!(status(format!("{top}&token={token}"), None).await, 401);
-    let mut req = top.into_client_request().unwrap();
+    let mut req = logs.into_client_request().unwrap();
     req.headers_mut().insert(
         "sec-websocket-protocol",
         format!("tt-station, tt-token.{token}").parse().unwrap(),

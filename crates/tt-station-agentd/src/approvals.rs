@@ -14,10 +14,9 @@
 //! along on the box's events (`data.approval`), so a notification can answer.
 //!
 //! Any paired device may answer these: Code sessions and routines are the
-//! household's, and members use both. Bring-up's approvals -- commands on
-//! the box itself, with root when asked for -- are owners' (`crate::bringup`),
-//! and so are the questions of a Code session outside the sandbox: a member
-//! neither sees nor answers those (`crate::workspace`).
+//! household's, and members use both. The questions of a Code session
+//! outside the sandbox are owners': a member neither sees nor answers those
+//! (`crate::workspace`).
 
 use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;

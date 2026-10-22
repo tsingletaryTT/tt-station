@@ -149,13 +149,9 @@ struct ServeState: Decodable, Equatable {
     let servedId: String?
     let since: Int
     let error: String?
-    let kind: String // chat | image | video | speech | tts | other
-    /// The box is split: chat on one card, an image model on the other.
-    var split: Bool? = nil
+    let kind: String // chat | image | speech | tts | other
     /// How long this model usually takes to load here (while starting).
     var etaS: Int? = nil
-    /// The image half of a split box.
-    var companion: CompanionState? = nil
 
     var isStarting: Bool { phase == "starting" }
     var isServing: Bool { phase == "serving" }
@@ -164,28 +160,7 @@ struct ServeState: Decodable, Equatable {
     var displayModel: String? { (model ?? servedId).map(Brand.shortModel) }
 
     enum CodingKeys: String, CodingKey {
-        case phase, model, since, error, kind, split, companion
-        case servedId = "served_id"
-        case etaS = "eta_s"
-    }
-}
-
-/// The companion (second) serving slot of a split box.
-struct CompanionState: Decodable, Equatable {
-    let phase: String
-    let model: String?
-    let servedId: String?
-    let since: Int
-    let error: String?
-    var etaS: Int? = nil
-
-    var isStarting: Bool { phase == "starting" }
-    var isServing: Bool { phase == "serving" }
-    var isFailed: Bool { phase == "failed" }
-    var displayModel: String? { (model ?? servedId).map(Brand.shortModel) }
-
-    enum CodingKeys: String, CodingKey {
-        case phase, model, since, error
+        case phase, model, since, error, kind
         case servedId = "served_id"
         case etaS = "eta_s"
     }
@@ -268,29 +243,6 @@ struct WebClient: Decodable, Equatable, Identifiable {
     var id: String { tool }
 }
 
-/// `GET /coserve`: whether the box can run chat and images side by side.
-struct CoserveInfo: Decodable, Equatable {
-    struct Choice: Decodable, Equatable, Hashable {
-        let name: String
-        let ready: Bool
-        /// A known problem running it on half the box.
-        var note: String? = nil
-    }
-    struct Choices: Decodable, Equatable {
-        let chat: [Choice]
-        let image: [Choice]
-    }
-    struct Layout: Decodable, Equatable {
-        let chat: String
-        let image: String
-    }
-    let available: Bool
-    let reason: String?
-    let split: Bool
-    let layout: Layout
-    let choices: Choices
-}
-
 struct ImageRequest: Encodable {
     let prompt: String
     var negativePrompt: String?
@@ -316,49 +268,6 @@ struct ImageResult: Decodable {
         case images
         case generationTime = "generation_time"
     }
-}
-
-struct VideoRequest: Encodable {
-    let prompt: String
-    var negativePrompt: String?
-    var numInferenceSteps: Int
-    var seed: Int?
-
-    enum CodingKeys: String, CodingKey {
-        case prompt, seed
-        case negativePrompt = "negative_prompt"
-        case numInferenceSteps = "num_inference_steps"
-    }
-}
-
-/// A tt-media-server video job.
-struct VideoJob: Decodable, Equatable {
-    struct JobError: Decodable, Equatable {
-        let message: String?
-        let detail: String?
-        var text: String { message ?? detail ?? "The video failed." }
-    }
-
-    let id: String
-    let status: String // queued | in_progress | completed | failed | cancelled | cancelling
-    let createdAt: Int?
-    let completedAt: Int?
-    let error: JobError?
-
-    var isActive: Bool { ["queued", "in_progress", "cancelling"].contains(status) }
-
-    enum CodingKeys: String, CodingKey {
-        case id, status, error
-        case createdAt = "created_at"
-        case completedAt = "completed_at"
-    }
-}
-
-/// What submitting a video returns: a job to poll, or (if the server runs in
-/// synchronous mode) the finished MP4 itself.
-enum VideoSubmission {
-    case job(VideoJob)
-    case video(Data)
 }
 
 /// One moment of the box, from the agent's recorded history (`/metrics/*`).
@@ -487,41 +396,6 @@ struct ApprovalRef: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, kind, summary
         case canAlways = "can_always"
-    }
-}
-
-/// `/notify`: whether the box can send push notifications, and to which phones.
-struct NotifySettings: Decodable, Equatable {
-    struct Push: Decodable, Equatable {
-        struct Device: Decodable, Equatable, Hashable {
-            let name: String
-            let added: Double
-            let tokenHint: String
-            enum CodingKeys: String, CodingKey {
-                case name, added
-                case tokenHint = "token_hint"
-            }
-        }
-        let available: Bool
-        let problem: String?
-        let devices: [Device]
-    }
-    let push: Push
-    let latestEvent: Int
-    enum CodingKeys: String, CodingKey {
-        case push
-        case latestEvent = "latest_event"
-    }
-}
-
-/// `POST /notify/devices`'s answer.
-struct PushRegistration: Decodable, Equatable {
-    let registered: Bool
-    let pushAvailable: Bool
-    let problem: String?
-    enum CodingKeys: String, CodingKey {
-        case registered, problem
-        case pushAvailable = "push_available"
     }
 }
 
@@ -849,24 +723,6 @@ struct AgentClient {
         try await send("POST", "/generate/image", body: request, authed: true, timeout: 600)
     }
 
-    func submitVideo(_ request: VideoRequest) async throws -> VideoSubmission {
-        let (data, type) = try await raw("POST", "/generate/video", body: request, timeout: 900)
-        if type.hasPrefix("video/") { return .video(data) }
-        return .job(try JSONDecoder().decode(VideoJob.self, from: data))
-    }
-
-    func videoJob(id: String) async throws -> VideoJob {
-        try await send("GET", "/generate/video/\(id)", authed: true, timeout: 30)
-    }
-
-    func downloadVideo(id: String) async throws -> Data {
-        try await raw("GET", "/generate/video/\(id)/download", body: Optional<[String: String]>.none, timeout: 600).0
-    }
-
-    func cancelVideo(id: String) async throws {
-        _ = try await raw("POST", "/generate/video/\(id)/cancel", body: [String: String](), timeout: 30)
-    }
-
     /// A JPEG the assistant drew in chat.
     func creation(id: String) async throws -> Data {
         try await raw("GET", "/creations/\(id)", body: Optional<[String: String]>.none, timeout: 60).0
@@ -882,24 +738,6 @@ struct AgentClient {
         let response: Response = try await send("GET", "/events", query: [URLQueryItem(name: "since", value: String(since))],
                                                 authed: true, timeout: 15)
         return (response.events, response.latest)
-    }
-
-    func notifySettings() async throws -> NotifySettings {
-        try await send("GET", "/notify", authed: true, timeout: 15)
-    }
-
-    /// Give the box this phone's APNs device token.
-    func registerPush(token: String, sandbox: Bool, name: String) async throws -> PushRegistration {
-        struct Body: Encodable { let token: String; let sandbox: Bool; let name: String }
-        return try await send("POST", "/notify/devices", body: Body(token: token, sandbox: sandbox, name: name),
-                              authed: true, timeout: 15)
-    }
-
-    /// Push a test notification; returns how many phones got it.
-    func testNotification() async throws -> Int {
-        struct Response: Decodable { let sent: Int }
-        let response: Response = try await send("POST", "/notify/test", body: [String: String](), authed: true, timeout: 30)
-        return response.sent
     }
 
     func powerInfo() async throws -> PowerInfo {
@@ -1035,52 +873,6 @@ struct AgentClient {
                       body: Optional<[String: String]>.none, timeout: 60).0
     }
 
-    // MARK: orchard
-
-    func orchard(fresh: Bool = false) async throws -> OrchardStatus {
-        try await send("GET", "/orchard", query: fresh ? [URLQueryItem(name: "fresh", value: "1")] : [],
-                       authed: true, timeout: 60)
-    }
-
-    func orchardSetup() async throws {
-        let _: Ignored = try await send("POST", "/orchard/setup", body: [String: String](), authed: true, timeout: 30)
-    }
-
-    /// tt-orchard's own preflight. It can import torch to check the reference
-    /// environment, so it gets minutes, not seconds.
-    func orchardPreflight(model: String, acceptCredentials: Bool) async throws -> OrchardPreflight {
-        try await send("POST", "/orchard/preflight",
-                       body: OrchardRequest(model: model, stopServing: false, acceptCredentials: acceptCredentials),
-                       authed: true, timeout: 300)
-    }
-
-    /// Start a bring-up. `stopServing` is the user's consent to stop the model
-    /// that's serving (a bring-up needs every chip).
-    func startOrchard(model: String, stopServing: Bool, acceptCredentials: Bool) async throws {
-        let _: Ignored = try await send("POST", "/orchard/runs",
-                                        body: OrchardRequest(model: model, stopServing: stopServing,
-                                                             acceptCredentials: acceptCredentials),
-                                        authed: true, timeout: 120)
-    }
-
-    func orchardRun(_ name: String) async throws -> OrchardRun {
-        try await send("GET", "/orchard/runs/\(name)", authed: true, timeout: 30)
-    }
-
-    /// `pause`, `resume`, `abort` or `retry`.
-    func orchardControl(_ name: String, action: String, stopServing: Bool = false) async throws {
-        let _: Ignored = try await send("POST", "/orchard/runs/\(name)/\(action)",
-                                        body: OrchardRequest(model: "", stopServing: stopServing, acceptCredentials: false),
-                                        authed: true, timeout: 120)
-    }
-
-    /// `results`, `risks`, `card`, `publish`, `blocked` or `console`.
-    func orchardReport(_ name: String, _ which: String) async throws -> String {
-        let data = try await raw("GET", "/orchard/runs/\(name)/report/\(which)",
-                                 body: Optional<[String: String]>.none, timeout: 30).0
-        return String(decoding: data, as: UTF8.self)
-    }
-
     // MARK: household, schedules, SSH, energy
 
     func people() async throws -> PeopleList {
@@ -1153,19 +945,6 @@ struct AgentClient {
         try await send("GET", "/energy", authed: true, timeout: 15)
     }
 
-    /// Agent-driven bring-ups (Codex / Claude Code), newest first.
-    func bringupRuns() async throws -> [BringupRun] {
-        struct Runs: Decodable { let runs: [BringupRun] }
-        let r: Runs = try await send("GET", "/bringup/codex/runs", authed: true, timeout: 20)
-        return r.runs
-    }
-
-    /// Allow or deny what a bring-up is waiting on.
-    func decideBringup(run: String, approval: String, decision: String) async throws {
-        let _: Ignored = try await send("POST", "/bringup/codex/runs/\(run)/approvals/\(approval)",
-                                        body: ["decision": decision], authed: true, timeout: 20)
-    }
-
     /// A `wss://` WebSocket to `path` on the pinned session, with the bearer token
     /// in the `Authorization` header.
     func webSocket(_ path: String, query: [URLQueryItem] = []) -> URLSessionWebSocketTask? {
@@ -1195,77 +974,6 @@ struct AgentClient {
                              timeout: 60).0
     }
 
-    func serveOrchard(_ name: String, stopServing: Bool) async throws {
-        let _: Ignored = try await send("POST", "/orchard/runs/\(name)/serve",
-                                        body: OrchardRequest(model: "", stopServing: stopServing, acceptCredentials: false),
-                                        authed: true, timeout: 120)
-    }
-
-    func setOrchardPackaging(_ enabled: Bool) async throws {
-        struct Body: Encodable { let enabled: Bool }
-        let _: Ignored = try await send("POST", "/orchard/packaging", body: Body(enabled: enabled), authed: true, timeout: 30)
-    }
-
-    // MARK: lab
-
-    func lab() async throws -> LabStatus {
-        try await send("GET", "/lab", authed: true, timeout: 20)
-    }
-
-    func prepareLab(model: String) async throws {
-        let _: Ignored = try await send("POST", "/lab/prepare", body: ["model": model], authed: true, timeout: 30)
-    }
-
-    /// Run tt-lab, streaming its output. `stopServing` is the user's consent to
-    /// stop the model that's serving (Lab needs every chip).
-    func runLab(_ run: LabRunRequest) -> AsyncThrowingStream<LabEvent, Error> {
-        let request: URLRequest? = {
-            guard let token else { return nil }
-            var request = URLRequest(url: baseURL.appendingPathComponent("/lab/run"), timeoutInterval: 3600)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            request.httpBody = try? JSONEncoder().encode(run)
-            return request
-        }()
-        let address = self.address
-        let session = self.session
-        return AsyncThrowingStream { continuation in
-            let task = Task {
-                guard let request else {
-                    continuation.finish(throwing: AgentError.notPaired)
-                    return
-                }
-                do {
-                    let (bytes, response) = try await session.bytes(for: request)
-                    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-                    guard (200..<300).contains(code) else {
-                        var body = ""
-                        for try await line in bytes.lines { body += line }
-                        let message = (try? JSONDecoder().decode(ErrorBody.self, from: Data(body.utf8)))?.error
-                            ?? HTTPURLResponse.localizedString(forStatusCode: code)
-                        throw failure(code, message)
-                    }
-                    for try await line in bytes.lines {
-                        guard line.hasPrefix("data:") else { continue }
-                        let payload = Data(line.dropFirst(5).trimmingCharacters(in: .whitespaces).utf8)
-                        guard let event = try? JSONDecoder().decode(LabEvent.self, from: payload) else { continue }
-                        continuation.yield(event)
-                    }
-                    continuation.finish()
-                } catch let error as URLError where error.code == .cancelled {
-                    continuation.finish(throwing: CancellationError())
-                } catch let error as URLError {
-                    continuation.finish(throwing: AgentError.unreachable(address: address, reason: error.localizedDescription))
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
     // MARK: other apps
 
     func connectInfo() async throws -> ConnectInfo {
@@ -1281,19 +989,6 @@ struct AgentClient {
 
     func revokeAppKey(id: String) async throws {
         _ = try await raw("DELETE", "/keys/\(id)", body: Optional<[String: String]>.none, timeout: 15)
-    }
-
-    // MARK: co-serving
-
-    func coserve() async throws -> CoserveInfo {
-        try await send("GET", "/coserve", timeout: 20)
-    }
-
-    /// Chat on chips 0-1 and images on 2-3, side by side. Answers at once (`202`);
-    /// both come up in the background.
-    func startCoserve(chat: String, image: String) async throws {
-        let _: Ignored = try await send("POST", "/coserve", body: ["chat": chat, "image": image],
-                                        authed: true, timeout: 30)
     }
 
     // MARK: documents
@@ -1452,29 +1147,6 @@ private final class PinningDelegate: NSObject, URLSessionDelegate {
 }
 
 
-// MARK: - Lab wire types
-
-struct LabStats: Codable, Equatable {
-    struct Stage: Codable, Equatable, Hashable {
-        let stage: String
-        let cycles: Double?
-        let percent: Double?
-    }
-    var decodeTps: Double?
-    var prefillTps: Double?
-    var msPerToken: Double?
-    var preloadS: Double?
-    var dramGib: Double?
-    var tokens: Double?
-    var check: String?
-    var profile: [Stage]?
-    enum CodingKeys: String, CodingKey {
-        case tokens, check, profile
-        case decodeTps = "decode_tps", prefillTps = "prefill_tps", msPerToken = "ms_per_token"
-        case preloadS = "preload_s", dramGib = "dram_gib"
-    }
-}
-
 // MARK: - Household, schedules, SSH, energy
 
 struct Person: Decodable, Identifiable, Hashable {
@@ -1527,55 +1199,6 @@ struct SSHInfo: Decodable {
     let config: String?
 }
 
-struct BringupApproval: Decodable, Identifiable, Hashable {
-    let id: String
-    let kind: String
-    let why: String
-    let command: String?
-}
-
-struct BringupRun: Decodable, Identifiable {
-    let id: String
-    let engine: String
-    let model: String
-    let state: String
-    let live: Bool
-    let done: Int
-    let total: Int
-    let current: Int?
-    let approvals: [BringupApproval]
-    let chipsHeldBy: String?
-    let exitMeaning: String?
-    /// A stage the agent can't finish without a person's answer.
-    let blocked: Blocked?
-
-    struct Blocked: Decodable {
-        let stage: Int
-        let title: String
-        let reason: String?
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case id, engine, model, state, live, done, total, current, approvals, blocked
-        case chipsHeldBy = "chips_held_by"
-        case exitMeaning = "exit_meaning"
-    }
-
-    var agent: String { engine == "claude" ? "Claude Code" : "Codex" }
-    var title: String { model.split(separator: "/").last.map(String.init) ?? model }
-    var detail: String {
-        switch state {
-        case "waiting_for_you": return "\(agent) needs you"
-        case "waiting_for_chips": return "Waiting for the chips" + (chipsHeldBy.map { ": \($0) has them" } ?? "")
-        case "running": return "\(agent) · stage \(current ?? done + 1) of \(total)"
-        case "finished": return "Every stage passed"
-        default:
-            if let b = blocked { return "\(agent) needs an answer on stage \(b.stage): " + (b.reason ?? b.title) }
-            return exitMeaning ?? state.capitalized
-        }
-    }
-}
-
 struct BoxVoice: Decodable, Identifiable, Hashable {
     let id: String
     let name: String
@@ -1619,252 +1242,6 @@ struct EnergyReport: Decodable {
     let months: [Month]
     let days: [Day]
 }
-
-// MARK: - Orchard
-
-struct OrchardRequest: Encodable {
-    let model: String
-    let stopServing: Bool
-    let acceptCredentials: Bool
-    enum CodingKeys: String, CodingKey {
-        case model
-        case stopServing = "stop_serving"
-        case acceptCredentials = "accept_credentials_visible"
-    }
-}
-
-struct OrchardStep: Decodable, Hashable {
-    let name: String
-    let status: String // ok | warn | todo | fail
-    let detail: String
-}
-
-struct OrchardNote: Decodable, Hashable {
-    let text: String
-    let command: String?
-}
-
-struct OrchardStatus: Decodable {
-    struct Config: Decodable {
-        struct Coder: Decodable { let target: String; let port: Int; let chips: Int }
-        let path: String
-        let runsRoot: String
-        let coder: Coder
-        enum CodingKeys: String, CodingKey { case path, coder; case runsRoot = "runs_root" }
-    }
-    let installed: Bool
-    let version: String?
-    let ready: Bool
-    let setup: [OrchardStep]
-    let setupRunning: Bool
-    let setupLog: [String]
-    let config: Config?
-    let configError: String?
-    let busy: Bool
-    let runs: [OrchardRun]
-    let notes: [OrchardNote]
-    let packaging: Bool
-    enum CodingKeys: String, CodingKey {
-        case installed, version, ready, setup, config, busy, runs, notes, packaging
-        case setupRunning = "setup_running"
-        case setupLog = "setup_log"
-        case configError = "config_error"
-    }
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        installed = try c.decode(Bool.self, forKey: .installed)
-        version = try c.decodeIfPresent(String.self, forKey: .version)
-        ready = (try? c.decode(Bool.self, forKey: .ready)) ?? false
-        setup = (try? c.decode([OrchardStep].self, forKey: .setup)) ?? []
-        setupRunning = (try? c.decode(Bool.self, forKey: .setupRunning)) ?? false
-        setupLog = (try? c.decode([String].self, forKey: .setupLog)) ?? []
-        config = try? c.decodeIfPresent(Config.self, forKey: .config)
-        configError = try? c.decodeIfPresent(String.self, forKey: .configError)
-        busy = (try? c.decode(Bool.self, forKey: .busy)) ?? false
-        runs = (try? c.decode([OrchardRun].self, forKey: .runs)) ?? []
-        notes = (try? c.decode([OrchardNote].self, forKey: .notes)) ?? []
-        packaging = (try? c.decode(Bool.self, forKey: .packaging)) ?? false
-    }
-}
-
-struct OrchardRun: Decodable, Identifiable, Equatable {
-    struct Stage: Decodable, Equatable {
-        let stage: Int
-        let name: String
-        let status: String // pass | fail | skipped | running | escalated
-        let wallS: Double?
-        let attempts: Int?
-        enum CodingKeys: String, CodingKey { case stage, name, status, attempts; case wallS = "wall_s" }
-    }
-    struct Current: Decodable, Equatable { let current: Int?; let name: String? }
-    struct Reason: Decodable, Equatable { let code: String?; let reason: String? }
-    let runName: String
-    let model: String?
-    let state: String
-    let live: Bool
-    let stage: Current?
-    let stages: [Stage]
-    let blocked: Reason?
-    let pause: Reason?
-    let hint: String?
-    let started: Double
-    let restore: String?
-    let console: [String]?
-    let reports: [String]?
-    let progress: OrchardProgress?
-    let servable: Bool
-    var id: String { runName }
-    enum CodingKeys: String, CodingKey {
-        case model, state, live, stage, stages, blocked, pause, hint, started, restore, console, reports, progress, servable
-        case runName = "run_name"
-    }
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        runName = try c.decode(String.self, forKey: .runName)
-        model = try? c.decodeIfPresent(String.self, forKey: .model)
-        state = try c.decode(String.self, forKey: .state)
-        live = (try? c.decode(Bool.self, forKey: .live)) ?? false
-        stage = try? c.decodeIfPresent(Current.self, forKey: .stage)
-        stages = (try? c.decode([Stage].self, forKey: .stages)) ?? []
-        blocked = try? c.decodeIfPresent(Reason.self, forKey: .blocked)
-        pause = try? c.decodeIfPresent(Reason.self, forKey: .pause)
-        hint = try? c.decodeIfPresent(String.self, forKey: .hint)
-        started = (try? c.decode(Double.self, forKey: .started)) ?? 0
-        restore = try? c.decodeIfPresent(String.self, forKey: .restore)
-        console = try? c.decodeIfPresent([String].self, forKey: .console)
-        reports = try? c.decodeIfPresent([String].self, forKey: .reports)
-        progress = try? c.decodeIfPresent(OrchardProgress.self, forKey: .progress)
-        servable = (try? c.decode(Bool.self, forKey: .servable)) ?? false
-    }
-    var title: String { model.map(Brand.shortModel) ?? runName }
-}
-
-/// What a run is doing now and how far along it is (`orchard_progress.rs`).
-struct OrchardProgress: Decodable, Equatable {
-    let title: String
-    let detail: String
-    /// The current step's bar; `nil` when it can't be measured.
-    let fraction: Double?
-    let etaS: Double?
-    /// The whole run, estimated from typical stage times.
-    let overall: Double
-    let overallEtaS: Double?
-    /// Something the owner should do, when there is.
-    let needsYou: String?
-    /// "Nothing to do…" while it runs.
-    let hint: String?
-    let typicalS: [Double]
-    let estimateNote: String?
-    enum CodingKeys: String, CodingKey {
-        case title, detail, fraction, overall, hint
-        case etaS = "eta_s"
-        case overallEtaS = "overall_eta_s"
-        case needsYou = "needs_you"
-        case typicalS = "typical_s"
-        case estimateNote = "estimate_note"
-    }
-
-    /// "about 3 h 10 min", "about 12 min".
-    static func approx(_ seconds: Double) -> String {
-        let m = Int((seconds / 60).rounded())
-        if m < 1 { return "under a minute" }
-        if m < 60 { return "about \(m) min" }
-        return m % 60 == 0 ? "about \(m / 60) h" : "about \(m / 60) h \(m % 60) min"
-    }
-}
-
-struct OrchardPreflight: Decodable, Equatable {
-    struct Check: Decodable, Equatable, Hashable {
-        let name: String
-        let status: String // ok | warn | block
-        let detail: String
-        let reason: String?
-    }
-    let model: String
-    let runName: String
-    let resuming: Bool
-    let local: Bool
-    let downloadGb: Double
-    let license: String?
-    let checks: [Check]
-    let blocked: Bool
-    enum CodingKeys: String, CodingKey {
-        case model, resuming, local, license, checks, blocked
-        case runName = "run_name"
-        case downloadGb = "download_gb"
-    }
-}
-
-struct LabStatus: Decodable, Equatable {
-    struct Model: Decodable, Equatable, Identifiable {
-        struct Preparing: Decodable, Equatable {
-            let stage: String
-            let bytes: Int64
-            let total: Int64?
-            let error: String?
-        }
-        let id: String
-        let title: String
-        let downloadGb: Double
-        let tiles: [Int]
-        let downloaded: Bool
-        let ready: Bool
-        let preparing: Preparing?
-        enum CodingKeys: String, CodingKey {
-            case id, title, tiles, downloaded, ready, preparing
-            case downloadGb = "download_gb"
-        }
-    }
-    struct Job: Decodable, Equatable {
-        let model: String
-        let stage: String
-        let bytes: Int64
-        let total: Int64?
-        let error: String?
-    }
-    struct Run: Decodable, Equatable, Identifiable {
-        let model: String
-        let tiles: Int
-        let prompt: String
-        let check: Bool
-        let ok: Bool
-        let seconds: Double
-        let at: Double
-        let stats: LabStats
-        var id: Double { at }
-    }
-    let installed: Bool
-    let models: [Model]
-    let job: Job?
-    let history: [Run]
-    let serving: String?
-}
-
-struct LabRunRequest: Encodable {
-    let model: String
-    let prompt: String
-    let tokens: Int
-    let tiles: Int
-    let check: Bool
-    let profile: Bool
-    let stopServing: Bool
-    enum CodingKeys: String, CodingKey {
-        case model, prompt, tokens, tiles, check, profile
-        case stopServing = "stop_serving"
-    }
-}
-
-/// One server-sent event from a Lab run.
-struct LabEvent: Decodable {
-    let type: String // text | done
-    let stream: String?
-    let text: String?
-    let ok: Bool?
-    let seconds: Double?
-    let stats: LabStats?
-    let previous: String?
-}
-
 
 /// A queued job on the box (`/jobs`).
 struct BoxJob: Decodable, Equatable, Identifiable {

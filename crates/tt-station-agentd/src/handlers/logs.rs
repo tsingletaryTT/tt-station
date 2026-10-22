@@ -36,7 +36,7 @@ struct LogsResponse {
 /// `crate::logs::DEFAULT_TAIL`, capped at `crate::logs::MAX_TAIL`.
 ///
 /// Error contract: an unrecognized `source` is a `400` (caller's mistake); no
-/// `tt_inference_repo` configured (non-runpy backend, e.g. dstack) is a `409`
+/// `tt_inference_repo` configured (non-runpy backend, e.g. docker) is a `409`
 /// (this box simply has no such logs); no log file written yet is NOT an
 /// error -- it's a `200` with `lines: []` and `origin: null`, since "nothing
 /// served yet" is the normal state of an idle box, not a failure.

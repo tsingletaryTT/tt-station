@@ -2,10 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 //! What the owner wants to do, rather than which model to run: **Chat**,
-//! **Images**, **Chat + images**, **Video**, **Transcribe**. Each mode picks the
-//! best model this box has downloaded (or says what to download), knows how
-//! long it usually takes to load here, and starts with one request -- a whole-box
-//! serve or a co-serve (`crate::coserve`) as the mode needs.
+//! **Images**, **Transcribe**. Each mode picks the best model this box has
+//! downloaded (or says what to download), knows how long it usually takes to
+//! load here, and starts it on the whole box with one request.
 //!
 //! Load times are learned: every finished start records how long it took
 //! (`load-times.json`), and the median is what `GET /serve` and `GET /modes`
@@ -92,13 +91,8 @@ struct ModeDef {
     title: &'static str,
     blurb: &'static str,
     icon: &'static str,
-    /// One model on the whole box, or (chat, image) on half a box each.
-    models: Models,
-}
-
-enum Models {
-    Whole(&'static [&'static str]),
-    Pair(&'static [&'static str], &'static [&'static str]),
+    /// The models it could run on the whole box, best first.
+    models: &'static [&'static str],
 }
 
 /// A mode's title, by id (`None` for an unknown id).
@@ -106,50 +100,33 @@ pub fn mode_title(id: &str) -> Option<&'static str> {
     MODES.iter().find(|m| m.id == id).map(|m| m.title)
 }
 
-const MODES: [ModeDef; 5] = [
+const MODES: [ModeDef; 3] = [
     ModeDef {
         id: "chat",
         title: "Chat",
         blurb: "The best answers: one large model on the whole box.",
         icon: "sparkles",
-        models: Models::Whole(&[
+        models: &[
             "Qwen3-32B",
             "Llama-3.3-70B-Instruct",
             "gemma-4-31B-it",
             "Qwen3.6-27B",
             "Llama-3.1-8B-Instruct",
-        ]),
+        ],
     },
     ModeDef {
         id: "images",
         title: "Images",
         blurb: "Pictures from a prompt in a few seconds each.",
         icon: "photo.on.rectangle.angled",
-        models: Models::Whole(&["FLUX.1-schnell", "FLUX.1-dev"]),
-    },
-    ModeDef {
-        id: "chat_images",
-        title: "Chat + images",
-        blurb: "Chat and draw at the same time, with a smaller chat model.",
-        icon: "rectangle.split.2x1",
-        models: Models::Pair(
-            &["Llama-3.1-8B-Instruct"],
-            &["FLUX.1-schnell", "FLUX.1-dev"],
-        ),
-    },
-    ModeDef {
-        id: "video",
-        title: "Video",
-        blurb: "Short clips from a prompt; each takes several minutes.",
-        icon: "film",
-        models: Models::Whole(&["Wan2.2-T2V-A14B-Diffusers"]),
+        models: &["FLUX.1-schnell", "FLUX.1-dev"],
     },
     ModeDef {
         id: "transcribe",
         title: "Transcribe",
         blurb: "Speech to text for recordings and meetings.",
         icon: "waveform",
-        models: Models::Whole(&["whisper-large-v3", "distil-large-v3"]),
+        models: &["whisper-large-v3", "distil-large-v3"],
     },
 ];
 
@@ -160,7 +137,7 @@ pub struct Mode {
     pub title: &'static str,
     pub blurb: &'static str,
     pub icon: &'static str,
-    /// The models it would run (one, or chat + image).
+    /// The model it would run.
     pub models: Vec<String>,
     /// All of them are downloaded.
     pub ready: bool,
@@ -169,7 +146,6 @@ pub struct Mode {
     pub active: bool,
     /// Usual load time on this box.
     pub eta_s: Option<u64>,
-    pub note: Option<&'static str>,
 }
 
 /// (name, ready) of the catalog models that run on `device`.
@@ -227,7 +203,6 @@ fn choose(
 /// The modes this box offers right now (blocking: reads the tt catalog).
 pub fn modes_blocking(state: &AppState) -> Vec<Mode> {
     let whole = catalog(state, state.device_mesh());
-    let half = catalog(state, Some(crate::coserve::SLOT_DEVICE));
     let life = state.lifecycle();
     let serving = [
         life.model.clone(),
@@ -238,14 +213,8 @@ pub fn modes_blocking(state: &AppState) -> Vec<Mode> {
     .flatten()
     .map(|m| key(&m))
     .collect::<Vec<_>>();
-    let split = crate::coserve::is_split(state);
-    let companion_model = state.companion().and_then(|c| {
-        let l = c.lifecycle();
-        l.model.or(l.served_id).map(|m| key(&m))
-    });
     let times = state.load_times();
     let mine = crate::prefs::load(state);
-    let can_split = state.companion().is_some() && state.device_mesh() == Some("p300x2");
 
     MODES
         .iter()
@@ -254,45 +223,18 @@ pub fn modes_blocking(state: &AppState) -> Vec<Mode> {
                 "images" => "image",
                 other => other,
             };
-            let (picked, note): (Vec<(String, bool)>, Option<&'static str>) = match &def.models {
-                Models::Whole(prefs) => (vec![choose(mine.for_kind(kind), prefs, &whole)?], None),
-                Models::Pair(chat, image) => {
-                    if !can_split {
-                        return None;
-                    }
-                    let image = choose(mine.image.as_deref(), image, &half)?;
-                    let note = crate::coserve::half_box_note(&image.0);
-                    (
-                        vec![choose(mine.chat.as_deref(), chat, &half)?, image],
-                        note,
-                    )
-                }
-            };
-            let models: Vec<String> = picked.iter().map(|(n, _)| n.clone()).collect();
-            let active = match &def.models {
-                Models::Whole(_) => !split && serving.contains(&key(&models[0])),
-                Models::Pair(..) => {
-                    split
-                        && serving.contains(&key(&models[0]))
-                        && companion_model.as_deref() == Some(key(&models[1]).as_str())
-                }
-            };
-            let eta_s = models.iter().filter_map(|m| times.estimate(m)).max();
+            let (name, ready) = choose(mine.for_kind(kind), def.models, &whole)?;
+            let active = serving.contains(&key(&name));
             Some(Mode {
                 id: def.id,
                 title: def.title,
                 blurb: def.blurb,
                 icon: def.icon,
-                ready: picked.iter().all(|(_, r)| *r),
-                needs_download: picked
-                    .iter()
-                    .filter(|(_, r)| !r)
-                    .map(|(n, _)| n.clone())
-                    .collect(),
-                models,
+                ready,
+                needs_download: if ready { vec![] } else { vec![name.clone()] },
+                eta_s: times.estimate(&name),
+                models: vec![name],
                 active: active && life.phase == Phase::Serving,
-                eta_s,
-                note,
             })
         })
         .collect()
@@ -322,23 +264,9 @@ pub async fn start(state: &AppState, id: &str) -> Result<bool, String> {
             mode.needs_download.join(" and ")
         ));
     }
-    if mode.models.len() == 2 {
-        let _ = crate::coserve::post_coserve(
-            axum::extract::State(state.clone()),
-            BearerAuth,
-            Json(crate::coserve::CoserveRequest {
-                chat: mode.models[0].clone(),
-                image: Some(mode.models[1].clone()),
-                second: None,
-            }),
-        )
+    crate::routes::begin_serve(state, &mode.models[0], false)
         .await
-        .map_err(|e| e.error)?;
-    } else {
-        crate::routes::begin_serve(state, &mode.models[0], false)
-            .await
-            .map_err(|(_, e)| e.0.error)?;
-    }
+        .map_err(|(_, e)| e.0.error)?;
     Ok(true)
 }
 

@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use tt_station_agentd::routes::{local_http_app, AppState};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 
 #[tokio::test]
 async fn logs_stream_replays_tail_then_follows() {
@@ -28,7 +28,7 @@ async fn logs_stream_replays_tail_then_follows() {
     let logfile = dir.join("vllm_test.log");
     std::fs::write(&logfile, "boot1\nboot2\n").unwrap();
 
-    let state = AppState::new("qb2".into(), "4xBH".into(), Arc::new(DstackBackend))
+    let state = AppState::new("qb2".into(), "4xBH".into(), Arc::new(NullBackend))
         .with_log_source(repo.path());
     // The box's own plain-HTTP server: the stream answers it without pairing.
     let router = local_http_app(state);

@@ -35,7 +35,7 @@
 //! here passes an owner (`acquire_owned` is the one place that builds the
 //! call). It starts as this agent's pid -- the agent must take the lease
 //! before it knows which chips to launch on -- and is then HANDED TO THE
-//! WORKLOAD (`hand_off`, `lease_gated_unit`): gozer judges liveness by
+//! WORKLOAD (`hand_off`): gozer judges liveness by
 //! `/proc/<pid>` existing, which holds for a root-owned container process
 //! too. See the "Workload ownership" section below and
 //! `docs/reference/chip-leasing.md` §5.
@@ -1578,23 +1578,20 @@ impl Drop for LeaseGuard<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// Short leases: chip resets and Lab runs
+// Short leases: chip resets
 // ---------------------------------------------------------------------------
 //
-// A `tt-smi -r` and a tt-lab run both open every chip on the box, so both take
-// a whole-box lease (`--chips all`) for as long as they run. Other gozer users
-// then see the chips held -- named `tt-station:<port>:reset-chips` or
-// `tt-station:<port>:lab` -- instead of FREE chips that are about to be reset
-// or opened exclusively under them.
+// A `tt-smi -r` opens every chip on the box, so it takes a whole-box lease
+// (`--chips all`) for as long as it runs. Other gozer users then see the chips
+// held -- named `tt-station:<port>:reset-chips` -- instead of FREE chips that
+// are about to be reset under them.
 //
-// These leases are owned by this agent's pid (the agent itself runs the reset,
-// and is tt-lab's parent), never handed to a workload: [`plan_reconcile`]
-// leaves them alone while their owner lives.
+// These leases are owned by this agent's pid (the agent itself runs the
+// reset), never handed to a workload: [`plan_reconcile`] leaves them alone
+// while their owner lives.
 
 /// The `<model>` half of a reset's `who`: `tt-station:<port>:reset-chips`.
 pub const RESET_LEASE_TAG: &str = "reset-chips";
-/// The `<model>` half of a Lab run's `who`: `tt-station:<port>:lab`.
-pub const LAB_LEASE_TAG: &str = "lab";
 
 /// This agent's `who` for a lease tagged `tag` (a model id, or one of the
 /// utility tags above).
@@ -1602,10 +1599,10 @@ pub fn own_who(own_service_port: u16, tag: &str) -> String {
     format!("{WHO_PREFIX}{own_service_port}:{tag}")
 }
 
-/// Whether `who` is one of this agent's short utility leases (a reset or a Lab
-/// run) rather than a serve's -- never handed to a workload.
+/// Whether `who` is one of this agent's short utility leases (a reset) rather
+/// than a serve's -- never handed to a workload.
 pub fn is_utility_who(who: &str) -> bool {
-    split_who(who).is_some_and(|(_, tag)| tag == RESET_LEASE_TAG || tag == LAB_LEASE_TAG)
+    split_who(who).is_some_and(|(_, tag)| tag == RESET_LEASE_TAG)
 }
 
 /// Give a lease back WITHOUT gozer's reset: `gozer release <id> --no-reset
@@ -1762,12 +1759,6 @@ pub fn take_reset_lease(
 //   to the container's main pid (`docker inspect --format {{.State.Pid}}`). gozer
 //   judges liveness by `/proc/<pid>` existing, which works for a root-owned
 //   container process even though its fds are unreadable.
-// * a HOLDER UNIT (a systemd user unit running the server on the host): the
-//   unit starts behind a gate ([`gated_argv`]), the lease is acquired with the
-//   unit's main pid, and only then does the gate `exec` the server -- same pid,
-//   so the lease is the server's from its first instruction ([`lease_gated_unit`]).
-// * `gozer run` workloads (bring-up, Orchard's own runs) already are: gozer run
-//   owns the lease and the workload is its child.
 //
 // [`reconcile_own_leases`] then keeps it that way: it releases a lease whose
 // owner and workload are both gone, and re-attaches one whose workload is alive
@@ -2091,8 +2082,8 @@ pub fn plan_reconcile(
 }
 
 /// What one [`reconcile_own_leases`] pass changed. The caller updates whatever
-/// tracks these ids (the serving backend's slot, the community and holder
-/// lease files) from `released` and `rebound`.
+/// tracks these ids (the serving backend's slot) from `released` and
+/// `rebound`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcileReport {
     /// Lease ids given back.
@@ -2242,224 +2233,6 @@ pub fn reconcile_own_leases_while(
     Some(report)
 }
 
-// ---------------------------------------------------------------------------
-// Holder units: lease the unit's own main process
-// ---------------------------------------------------------------------------
-
-/// The gate a holder unit starts behind: wait (up to two minutes) for one line
-/// on the FIFO `$0`; `go` execs the real command in place -- same pid, so the
-/// lease taken on that pid meanwhile is the server's -- anything else (or
-/// nothing, if the agent died) exits 75 without having touched a chip.
-pub const GATE_SCRIPT: &str =
-    r#"go=$(timeout 120 head -n 1 -- "$0"); [ "$go" = go ] || exit 75; exec "$@""#;
-
-/// `argv` behind the gate on `fifo`: `sh -c GATE_SCRIPT <fifo> argv...`.
-pub fn gated_argv(fifo: &std::path::Path, argv: &[String]) -> Vec<String> {
-    let mut gated = vec![
-        "sh".to_string(),
-        "-c".to_string(),
-        GATE_SCRIPT.to_string(),
-        fifo.display().to_string(),
-    ];
-    gated.extend(argv.iter().cloned());
-    gated
-}
-
-/// Make a fresh owner-only FIFO at `path` for [`gated_argv`].
-pub fn make_gate(path: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let _ = std::fs::remove_file(path);
-    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    // SAFETY: `c` is a valid NUL-terminated path for the duration of the call.
-    if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Open the gate (`go`) or tell it to give up. Waits up to 10 s for the gate's
-/// reader to appear (a non-blocking open fails until then).
-pub fn signal_gate(path: &std::path::Path, go: bool) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(path)
-        {
-            Ok(mut f) => {
-                f.write_all(if go { b"go\n" } else { b"no\n" })?;
-                let _ = std::fs::remove_file(path);
-                return Ok(());
-            }
-            Err(e)
-                if std::time::Instant::now() < deadline
-                    && e.raw_os_error() == Some(libc::ENXIO) =>
-            {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-/// A systemd user unit's main pid, waiting briefly for it to be assigned.
-pub fn unit_main_pid(unit: &str) -> Option<u32> {
-    for _ in 0..50 {
-        let pid = std::process::Command::new("systemctl")
-            .args(["--user", "show", "-p", "MainPID", "--value", unit])
-            .stdin(std::process::Stdio::null())
-            .output()
-            .ok()
-            .and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse::<u32>()
-                    .ok()
-            })
-            .filter(|p| *p > 0);
-        if pid.is_some() {
-            return pid;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    None
-}
-
-/// Lease the chips for a holder unit started with [`gated_argv`] on `fifo`,
-/// OWNED BY THE UNIT'S MAIN PROCESS (`pid`, see [`unit_main_pid`]), then open
-/// the gate. On any failure the gate is told to give up -- the unit exits
-/// without opening a chip -- and the reason is returned.
-///
-/// The lease lives exactly as long as the server: the agent restarting changes
-/// nothing, and the server exiting (crash or `systemctl stop`) makes it
-/// reapable at once. Callers still RELEASE it explicitly after stopping the
-/// unit, because a release resets the chips and a reap does not.
-pub fn lease_gated_unit(
-    runner: &dyn CommandRunner,
-    capability: &Capability,
-    fifo: &std::path::Path,
-    pid: Option<u32>,
-    who: &str,
-    reason: &str,
-) -> std::result::Result<Grant, String> {
-    let refuse = |why: String| {
-        let _ = signal_gate(fifo, false);
-        Err(why)
-    };
-    let Some(pid) = pid else {
-        return refuse("the serving unit's main pid could not be read".into());
-    };
-    match acquire_owned(
-        runner,
-        capability,
-        DEFAULT_LEASE_CHIPS,
-        None,
-        pid,
-        who,
-        reason,
-    ) {
-        Outcome::Granted(grant) => {
-            if let Err(e) = signal_gate(fifo, true) {
-                // The server never started: give the chips straight back.
-                let _ = release(runner, capability, &grant.lease_id);
-                return Err(format!("couldn't start the serving unit: {e}"));
-            }
-            Ok(grant)
-        }
-        Outcome::Unavailable { holder, .. } => refuse(format!(
-            "the chips are leased to someone else{}",
-            holder.map(|h| format!(" ({h})")).unwrap_or_default()
-        )),
-        Outcome::Failed(message) => refuse(format!("gozer acquire failed: {message}")),
-    }
-}
-
-/// A JSON list of lease ids kept in a file -- how leases on holder units are
-/// remembered across agent restarts (`<config>/holder-leases.json`).
-///
-/// Every read-change-write runs under one process-wide lock (the handle is
-/// made afresh wherever it's needed, so the lock can't live in it), and the
-/// file is replaced atomically (`crate::fsio::write_atomic`): two changes at
-/// once can't drop an id, and a crash can't leave half a list.
-pub struct LeaseFile(pub std::path::PathBuf);
-
-static LEASE_FILES: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-impl LeaseFile {
-    pub fn ids(&self) -> Vec<String> {
-        let _held = LEASE_FILES.lock().unwrap_or_else(|p| p.into_inner());
-        self.read()
-    }
-
-    fn read(&self) -> Vec<String> {
-        std::fs::read(&self.0)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
-    }
-
-    fn write(&self, ids: &[String]) {
-        if ids.is_empty() {
-            let _ = std::fs::remove_file(&self.0);
-            return;
-        }
-        let bytes = serde_json::to_vec(ids).unwrap_or_default();
-        if let Err(e) = crate::fsio::write_atomic(&self.0, &bytes, crate::fsio::PRIVATE) {
-            crate::log::error(format!("couldn't save {}: {e}", self.0.display()));
-        }
-    }
-
-    /// Change the list under the lock.
-    fn change<T>(&self, f: impl FnOnce(&mut Vec<String>) -> T) -> T {
-        let _held = LEASE_FILES.lock().unwrap_or_else(|p| p.into_inner());
-        let mut ids = self.read();
-        let before = ids.clone();
-        let out = f(&mut ids);
-        if ids != before {
-            self.write(&ids);
-        }
-        out
-    }
-
-    pub fn add(&self, id: &str) {
-        self.change(|ids| {
-            if !ids.iter().any(|i| i == id) {
-                ids.push(id.to_string());
-            }
-        });
-    }
-
-    /// Every id, and the file emptied.
-    pub fn take(&self) -> Vec<String> {
-        self.change(std::mem::take)
-    }
-
-    /// Replace `old` with `new` (or drop it); `false` when `old` isn't here.
-    pub fn swap(&self, old: &str, new: Option<&str>) -> bool {
-        self.change(|ids| {
-            let Some(i) = ids.iter().position(|id| id == old) else {
-                return false;
-            };
-            match new {
-                Some(new) => ids[i] = new.to_string(),
-                None => {
-                    ids.remove(i);
-                }
-            }
-            true
-        })
-    }
-}
-
-/// Where holder-unit leases are remembered, under the agent's config dir.
-pub fn holder_lease_file(config_dir: &std::path::Path) -> LeaseFile {
-    LeaseFile(config_dir.join("holder-leases.json"))
-}
-
 /// [`hand_off`] to a serving CONTAINER: `container` if the caller knows it,
 /// else whatever publishes `port`. [`Handoff::Kept`] when its pid cannot be
 /// read -- the lease simply stays with this agent, and the reconciler retries.
@@ -2525,17 +2298,12 @@ pub fn record_handoff(
 /// this long -- gozer's own reap, which does not reset, is the fallback.
 pub const RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Point every lease tracker at the reconciler's changes: the serving
-/// backend's slot, the community package's lease file, and the holder-unit
-/// lease file. Each is compare-and-swap, so only the one that tracked `old`
-/// changes.
+/// Point the serving backend's lease slot at the reconciler's changes. It is
+/// compare-and-swap, so it changes only if it tracked `old`.
 pub fn apply_reconcile(state: &crate::routes::AppState, report: &ReconcileReport) {
     let backend = state.backend();
-    let holder = holder_lease_file(&state.config_dir());
     let swap = |old: &str, new: Option<&str>| {
-        let _ = backend.swap_held_lease(old, new)
-            || crate::community::swap_lease(state, old, new)
-            || holder.swap(old, new);
+        let _ = backend.swap_held_lease(old, new);
     };
     for id in report.released.iter().chain(&report.lost) {
         swap(id, None);
@@ -2646,98 +2414,4 @@ pub async fn reconcile_pass(
     .flatten()?;
     apply_reconcile(state, &report);
     Some(report)
-}
-
-/// For a holder unit about to be started: the gate FIFO to start it behind
-/// ([`gated_argv`]), freshly made under the agent's config dir -- or `None`
-/// when gozer is absent (the unit starts ungated, unleased, exactly as
-/// before) or the FIFO cannot be made (logged; same fallback).
-pub fn unit_gate(state: &crate::routes::AppState, name: &str) -> Option<std::path::PathBuf> {
-    // Only the box's own agent runs real units (a test's state never does).
-    if !state.manages_units() {
-        return None;
-    }
-    state.gozer()?;
-    let fifo = state.config_dir().join(format!("{name}.gate"));
-    match make_gate(&fifo) {
-        Ok(()) => Some(fifo),
-        Err(e) => {
-            eprintln!(
-                "tt-station-agentd: couldn't make the lease gate {}: {e}; starting the unit \
-                 without a lease",
-                fifo.display()
-            );
-            None
-        }
-    }
-}
-
-/// After `systemd-run` started `unit` behind `fifo`: lease the chips to the
-/// unit's main process and let it run. The lease id is returned for the caller
-/// to remember (and release after stopping the unit). On failure the gate
-/// makes the unit exit before it touches a chip, the unit is stopped to be
-/// sure, and the reason is returned.
-pub async fn lease_started_unit(
-    state: &crate::routes::AppState,
-    unit: &str,
-    fifo: std::path::PathBuf,
-    model: &str,
-) -> std::result::Result<String, String> {
-    let Some(capability) = state.gozer().cloned() else {
-        return Err("gozer is not available".into());
-    };
-    let who = format!("{WHO_PREFIX}{}:{model}", state.serving_port());
-    let reason = format!("serving {model} in {unit} via tt-station-agentd");
-    let u = unit.to_string();
-    let outcome = tokio::task::spawn_blocking(move || {
-        let pid = unit_main_pid(&u);
-        lease_gated_unit(
-            &crate::serving::docker::RealCommandRunner,
-            &capability,
-            &fifo,
-            pid,
-            &who,
-            &reason,
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-    match outcome {
-        Ok(grant) => {
-            eprintln!(
-                "tt-station-agentd: leased {} chip(s) as lease {} to {unit}'s main process",
-                grant.chips.len(),
-                grant.lease_id
-            );
-            Ok(grant.lease_id)
-        }
-        Err(why) => {
-            let _ = tokio::process::Command::new("systemctl")
-                .args(["--user", "stop", unit])
-                .stdin(std::process::Stdio::null())
-                .status()
-                .await;
-            Err(why)
-        }
-    }
-}
-
-/// Release `ids` after the unit that owned them has been stopped -- the
-/// release resets the chips, which gozer's reap of a dead owner would not.
-pub async fn release_after_stop(state: &crate::routes::AppState, ids: Vec<String>) {
-    let Some(capability) = state.gozer().cloned() else {
-        return;
-    };
-    if ids.is_empty() {
-        return;
-    }
-    let _ = tokio::task::spawn_blocking(move || {
-        for id in ids {
-            if let Err(err) = release(&crate::serving::docker::RealCommandRunner, &capability, &id)
-            {
-                eprintln!("tt-station-agentd: couldn't release lease '{id}': {err:#}");
-            }
-        }
-    })
-    .await;
 }

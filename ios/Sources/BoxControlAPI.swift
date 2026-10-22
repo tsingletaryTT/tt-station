@@ -138,23 +138,6 @@ extension AgentClient {
         let _: Ok = try await send("POST", "/research/\(id)/stop", body: [String: String](), authed: true, timeout: 15)
     }
 
-    // MARK: recording on the box
-
-    func recordStatus() async throws -> RecordStatus {
-        try await send("GET", "/record", authed: true, timeout: 15)
-    }
-
-    func startRecording(_ start: RecordStart) async throws {
-        struct Ok: Decodable {}
-        let _: Ok = try await send("POST", "/record/start", body: start, authed: true, timeout: 30)
-    }
-
-    /// Stop; the recording is queued for transcription unless `discard`.
-    func stopRecording(discard: Bool) async throws {
-        struct Ok: Decodable {}
-        let _: Ok = try await send("POST", "/record/stop", body: ["discard": discard], authed: true, timeout: 30)
-    }
-
     // MARK: routines, updates
 
     /// Pause or resume a routine (the rest of it sent back as it was).
@@ -250,11 +233,6 @@ extension BoxSession {
     func researchReport(_ id: String) async throws -> ResearchReport { try await client.researchReport(id) }
     func shareResearch(_ id: String, shared: Bool) async throws { try await client.shareResearch(id, shared: shared) }
     func stopResearch(_ id: String) async throws { try await client.stopResearch(id) }
-
-    // Recording on the box.
-    func recordStatus() async throws -> RecordStatus { try await client.recordStatus() }
-    func startBoxRecording(_ start: RecordStart) async throws { try await client.startRecording(start) }
-    func stopBoxRecording(discard: Bool) async throws { try await client.stopRecording(discard: discard) }
 
     // Routines, updates.
     func setRoutine(_ routine: Routine, enabled: Bool) async throws {

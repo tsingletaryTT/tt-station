@@ -75,7 +75,7 @@ final class AppModel {
             Task { await self.alerts.offer(for: next) }
         }
         next.startPolling()
-        Task { await alerts.registerIfAllowed(with: next) }
+        Task { await alerts.refreshPermission() }
         telemetry.start(client: telemetryClient)
         UserDefaults.standard.set(box.id, forKey: Self.activeKey)
     }
@@ -167,7 +167,7 @@ final class AppModel {
     /// Where to go once a model of `kind` is starting/serving.
     static func tab(for kind: String) -> AppTab {
         switch kind {
-        case "image", "video": return .create
+        case "image": return .create
         case "chat": return .assistant
         default: return .box
         }

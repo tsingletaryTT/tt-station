@@ -318,9 +318,9 @@ private struct NonChatCard: View {
             }
             GlassEffectContainer(spacing: 10) {
                 VStack(spacing: 10) {
-                    if kind == "image" || kind == "video" {
+                    if kind == "image" {
                         Button { app.selectedTab = .create } label: {
-                            Label(kind == "image" ? "Make images" : "Make videos", systemImage: "wand.and.stars")
+                            Label("Make images", systemImage: "wand.and.stars")
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.glassProminent)

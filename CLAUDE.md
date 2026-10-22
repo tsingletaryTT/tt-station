@@ -64,7 +64,7 @@ find-and-replaced into nonsense.
 can now be power-managed end to end — agent `POST /power` (authed: `reset-chips` via `tt-smi -r`
 keeps pairing → 200; `suspend`/`reboot`/`shutdown` machine ops → 202 then disconnect; polkit
 denial → 403), the NIC MAC is advertised in `/status` + mDNS TXT for **Wake-on-LAN**, `tt-station power`
-/ `tt-station wake` CLI subcommands, `libttstation` WoL magic-packet builder, GTK panel local power row
+/ `tt-station wake` CLI subcommands, `libttstation` WoL magic-packet builder, GTK panel local power row (the panel was removed in v0.12.0)
 (with confirm), macOS PowerMenu in the header + popover, and a polkit rule packaged as a conffile
 (`deploy/tt-station-power.rules`). Reference: `docs/reference/power-controls.md`.
 
@@ -138,6 +138,16 @@ of it. #23 also reads tt-smi **6.x**'s top-level `processes[]`; this box is on t
 
 Items marked "(branch)" are committed on `jberkowitz/mobile-voice` but not yet on `main`.
 
+**Removed before production (v0.12.0 hardening):** the Codex/Claude bring-up agents and their
+sandbox, Orchard and the lab box, Lab (tt-lab silicon check), community packages (tt-model),
+native vLLM bundles, co-serving and the `chat_images` split mode, Hermes, the OpenClaw store app,
+the tt-toplike terminal view (`/toplike*`; the `tt_toplike` key in `/telemetry` frames stays),
+the GTK box panel, box-microphone voice (`/voice/hear`, `/voice/say`) and the box-side meeting
+recorder (`/record*`; client recordings uploaded to `/jobs/transcribe` stay), Studio video,
+APNs push (in-app `/events` notifications stay), the GNOME extension, box-side desktop actions
+(`/desktop/*`; client actions through the Electron shell stay), and the dstack backend stub.
+Older entries below that mention them are history.
+
 **Agent (`crates/tt-station-agentd`)** — box-side daemon, default backend `runpy`:
 - Where things live (`src/`): `state.rs` is `AppState` (types, constructors, `with_*`
   builders, accessors) with its methods split by area under `state/` (`serving.rs` start/stop
@@ -150,7 +160,7 @@ Items marked "(branch)" are committed on `jberkowitz/mobile-voice` but not yet o
   `tests/access_control.rs` parse it). `handlers/` holds the core handlers, one file per area
   (`status`, `pairing`, `devices`, `serving`, `power`, `telemetry`, `logs`, `ssh`, `security`,
   `assistant`, `media`, `ttcli`, `memories`, `docs`); feature modules (`routines.rs`,
-  `community.rs`, ...) keep their own handlers. `error.rs` has `ApiError` (status + message,
+  `jobs.rs`, ...) keep their own handlers. `error.rs` has `ApiError` (status + message,
   answered as `{"error": ...}`) and `err()`; `served.rs` is the one `/v1/models` probe;
   `localhttp.rs` the shared client for the box's own services. `routes.rs` only re-exports all
   of these so old `crate::routes::X` paths still work: import from the defining module instead.
@@ -209,33 +219,26 @@ Items marked "(branch)" are committed on `jberkowitz/mobile-voice` but not yet o
   to hang on the box console); catalog `weights` = agent-measured completeness (tt's `cached`
   lies for partial repos) and starts of non-downloaded models are refused; serving lifecycle
   `GET/POST /serve` (starts survive client disconnect, failures keep their reason, startup
-  adopts an already-serving model); `/generate/image` + `/generate/video*` proxy the media
+  adopts an already-serving model); `/generate/image` proxies the media
   server; discovery now matches `tt-media-inference-server` images.
   **Beyond chat (branch):** `/assistant/stream` (SSE, think/reasoning, Markdown);
   `/metrics/history|now` (recorded telemetry + inference + energy); `/docs` + `search_documents`
   (BM25 over uploaded text); `web_search`/`read_webpage` (DuckDuckGo HTML; private networks
   refused); `remember`/`forget` + `/memories`; `create_image` + `/creations/{id}`; tools offered
-  only when usable (small models loop otherwise). **Co-serving** `/coserve`: chat on chips 0,1 +
-  image model on 2,3 via `ServingBackend::set_placement` and a companion runpy backend (port +1);
-  any ordinary start/stop leaves split mode. **OpenAI gateway** `/v1/*` (app keys via `/keys`,
+  only when usable (small models loop otherwise). **OpenAI gateway** `/v1/*` (app keys via `/keys`,
   `/connect`; follows whatever serves, images translated). `/bench`. QR pairing
   (`tt-station-agentd pair`, `/pair/offer` + 0600 `local-secret`). Media-server readiness via
   `/tt-liveness` (0.10 has no `/v1/models`) and a stall watchdog for its startup deadlock. See
   `docs/reference/{assistant,gateway,tt-cli}.md`.
-- **Orchard** `/orchard*`: model bring-ups with tt-orchard (`~/code/tt-orchard`, python3.12):
-  setup and preflight through `src/orchard_bridge.py`, status via `tt-orchard status --json`, runs as
-  `tt-orchard-<slug>` systemd user units, a watcher that notifies per stage and restores the old
-  model. While a run is live `AppState::chips_holder` (also Lab) blocks starts, resets, power,
-  co-serve, doctor fixes and tt-smi. See `docs/reference/orchard.md`.
 - **Desktop app** (`desktop/`, Electron + React + Vesper): the agent serves the built screens at `/app`
   (`app_ui.rs`); the shell signs in via `local-secret`, adds tray/notifications/hotkey/autostart; app
   catalogue `/apps` (`apps.rs`: LobeChat, Jupyter, Flowise, Langflow, SearXNG, Local Deep Research, Vane,
-  LightRAG, OpenHands, OpenClaw in Docker, each with its own app key). Connect lists only popular
+  LightRAG, OpenHands in Docker, each with its own app key). Connect lists only popular
   open-source tools that run on the box's own models.
   Build with Node 22 (`~/.local/share/node/current/bin`). See `desktop/README.md`.
 - **People / schedules / energy** (no accounts): `/people` (per-person memories,
   assistant knows who it's talking with), `/schedules` (switch modes at set times), `/energy`
-  (per-day kWh), and `/orchard/runs/{name}/serve`. (A WireGuard remote-access feature was
+  (per-day kWh). (A WireGuard remote-access feature was
   described here but **was never implemented**: no route, no module. Off-LAN access is via the
   owner's own VPN, e.g. Tailscale, whose address QR pairing carries.) See `docs/reference/household-schedules-remote.md`.
 - mDNS `_tenstorrent._tcp` status re-published on run/stop; graceful shutdown unregisters.
@@ -245,7 +248,7 @@ Items marked "(branch)" are committed on `jberkowitz/mobile-voice` but not yet o
   `--profile` (else `default_profile`, else the sole profile, else today's flag-only behavior).
   `--print-config` resolves and prints the redacted summary without binding the port. No config
   file at all = unchanged pre-feature behavior. Full schema/precedence/errors:
-  `docs/reference/agentd-config.md`; copy-paste starter: `box-panel/agentd.example.toml`.
+  `docs/reference/agentd-config.md`; copy-paste starter: `deploy/agentd.example.toml`.
 
 **CLI (`crates/tt-station`):** `discover` (`--host`/`--no-mdns`), `pair`/`pair-init`/`pair-complete`,
 `run`, `stop`, `status` (public), `endpoint`, `models`, `serving`, `reset`,
@@ -271,40 +274,15 @@ disconnect; survives reboot too once `loginctl enable-linger` is run for the use
 Stop/Restart under this model are just `systemctl --user start|stop|restart
 tt-station-agentd.service`.
 
-**Box panel (`box-panel/tt-station-panel.py`, GTK4):** the box's own screen — Start/Stop/
-Restart/Reset the agent, a **local power row** (reset-chips/suspend/reboot/shutdown, each behind
-a confirm dialog — pure builders in `panel_launchers.py`), **live 6-digit pairing code** (with TTL), status/endpoint,
-**profile dropdown** (reads `agentd.toml`'s profile list, passes `--profile` on Start/Restart;
-hidden when no config file exists). Config via `TTS_*` env (repo path, serving host/port,
-`TTS_IMAGE`, `TTS_AUTOSTART`, `TTS_CONFIG` for the profile dropdown's TOML path).
-**Shares `tt-station console`'s lifecycle state machine**: Start/Stop/Restart shell out to
-`systemctl --user <verb>` (no more child-process supervision — closing the panel doesn't
-kill the agent), and status/pairing/serving/profile all come from a single poll of `tt-station
-console --snapshot` (the same `BoxLifecycleSnapshot` JSON the TUI renders) — one source of
-truth the panel and the TUI can never disagree about. **Connect row** (shown only while
-serving): one-click **Open WebUI** (local `docker run` of `ghcr.io/open-webui/open-webui:main`
-wired to the box's own `/v1` via `host.docker.internal`, then `xdg-open`; `TTS_OPENWEBUI_PORT`,
-default 3000), **opencode** (writes a per-endpoint `opencode.json` under
-`~/.local/share/tt-station/opencode/`, opens a terminal emulator running `opencode` — resolves
-`x-terminal-emulator`/`gnome-terminal`(`--`)/`konsole`/`xterm`(`-e`)), plus **Copy /v1** /
-**Open endpoint**. Endpoint+model come from the snapshot's agent-source `serving` entry (not the
-unimplemented `/endpoint` route). Missing docker/opencode/terminal/xdg-open surface an inline
-message, never a crash. Pure builders live in `box-panel/panel_launchers.py`
-(`+ test_panel_launchers.py`, stdlib unittest); the panel is thin glue (worker thread +
-`GLib.idle_add`). Ported from the macOS Connect launchers, local (no SSH) since the panel runs
-on the box.
-
-**Linux packaging (`debian/`, `build-deb.sh`, v0.10.0):** two Ubuntu `.deb`s, modeled on
+**Linux packaging (`debian/`, `build-deb.sh`, v0.10.0):** one Ubuntu `.deb`, modeled on
 tt-toplike (debhelper compat 13 + `dpkg-buildpackage`, vendored offline crates via `cargo
 vendor` + `--frozen`; `vendor/`/`.cargo/config.toml` not committed). **`tt-station`** ships
 `/usr/bin/tt-station`, `/usr/bin/tt-station-agentd`, and the systemd **user** unit at
 `/usr/lib/systemd/user/tt-station-agentd.service` **installed but not enabled/started**
 (`dh_installsystemduser --no-enable` — this box's debhelper lacks `dh_installsystemd --user`;
-operator runs `systemctl --user enable --now`). **`tt-station-panel`** ships the GTK panel to
-`/usr/share/tt-station-panel/` (incl. `panel_launchers.py` + `assets/tt-logo.png`), a
-`/usr/bin/tt-station-panel` wrapper, a packaged `.desktop`, and hicolor icons (`Depends:
-tt-station, python3, gir1.2-gtk-4.0, python3-gi`). `install_desktop_icon()` no-ops when packaged.
-`tt-station` also ships the **polkit rule** for box power (`deploy/tt-station-power.rules` →
+operator runs `systemctl --user enable --now`), and the desktop app's built screens at
+`/usr/share/tt-station/app`. (The GTK box panel and its `tt-station-panel` package were removed
+in v0.12.0.) `tt-station` also ships the **polkit rule** for box power (`deploy/tt-station-power.rules` →
 `/etc/polkit-1/rules.d/49-tt-station-power.rules`) as a **conffile** — debhelper auto-registers
 `/etc` files as conffiles, so no `debian/*.conffiles` list is needed (a manual list double-registers).
 Workspace version unified at 0.10.0 (`[workspace.package]`, `scripts/bump-version.sh`); CI
@@ -319,9 +297,8 @@ core `tt-station` deb installs cleanly, `tt-station`/`tt-station-agentd` run, `t
 the systemd user unit is valid, and the polkit rule lands at `/etc/polkit-1/rules.d/` (root-readable,
 correct). That test **caught + fixed a duplicate-conffile defect** — `debian/tt-station.conffiles`
 manually listed the /etc rule that debhelper already auto-registers, so dpkg registered it twice;
-removed the file (fix on `main`, NOT in the released v0.10.0 deb — needs a v0.10.1). The GTK panel
-deb correctly refuses to configure without `gir1.2-gtk-4.0` (expected on a headless box). Still
-owner-gated: install on a **real** box + GTK click-through, and exercise the destructive power ops.
+removed the file (fix on `main`, NOT in the released v0.10.0 deb — needs a v0.10.1). Still
+owner-gated: install on a **real** box and exercise the destructive power ops.
 
 **macOS app (`macos/TTStation`, v0.5.0 — native control room):** window-first veneer over
 `tt-station --json` with a fast MenuBarExtra popover for glance + quick actions (the menu-bar icon
@@ -374,18 +351,20 @@ menubar, connect launchers), `docs/superpowers/cleanup-analysis.md`.
 
 ---
 
-## Activate the live box (:8765 agent, via the panel)
+## Activate the live box (:8765 agent)
 
-The panel launches `./target/release/tt-station-agentd`. To pick up the latest agent
-routes/fixes: **hit Restart on the panel** (or relaunch it). Box-local config it uses:
+The agent runs as the `tt-station-agentd` systemd user unit. To pick up the latest agent
+routes/fixes: `systemctl --user restart tt-station-agentd` (or `R`estart in `tt-station
+console`). Box-local config it uses:
 `--backend runpy --tt-inference-repo ~/code/tt-inference-server --serving-host qb2-lab.local
 --serving-port 8003 --serving-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.14.0-80180b9-7678b70`
-(device auto-detects; pass `TTS_IMAGE` to the panel). Only `/status` and the pairing handshake
-are public; everything else needs a pairing (code shows on the panel). Restarting the
+(device auto-detects). Only `/status` and the pairing handshake
+are public; everything else needs a pairing (code shows in TT Station on the box and in
+`tt-station console`). Restarting the
 agent is fine now — **persist-tokens** keeps the Mac paired across restarts.
 
 ## Run / test (Rust, on this box)
-- `cargo test --workspace --no-fail-fast` (about 1,310 pass). Tests must run with no-op
+- `cargo test --workspace --no-fail-fast` (about 1,170 pass). Tests must run with no-op
   `tt-smi`/`docker`/`systemctl`/`systemd-run`/`tt`/`gozer` stubs first on `PATH` (CI does this);
   some agentd tests otherwise run a real chip reset. The transcription tests need `ffmpeg`.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo fmt --all --check`
@@ -409,18 +388,6 @@ detailed log; this file is the current-state map.
   end to end — do a `.deb` install that lands `/etc/polkit-1/rules.d/` and confirm each op
   actually runs (and `reset-chips` keeps pairing). Wake-on-LAN needs WoL enabled in the box
   BIOS/NIC and a Mac on the same L2 broadcast domain. macOS `PowerMenuView` needs a click-through.
-- **Panel Connect launchers: finish the click-through WITH a serving model.** The GTK panel
-  now launches cleanly on this box (2026-07-10, via `/usr/bin/python3` on `DISPLAY=:0`):
-  `panel_launchers` imports, the Connect row is built, and `_refresh_connect` gating runs
-  error-free across poll cycles — with nothing serving, the Connect row is correctly HIDDEN.
-  Still unverified: the actual **button behavior** (Open WebUI `docker run` → browser, opencode
-  → terminal, copy/open) which needs a model serving. Do that next time a model is up.
-- **Wrapper needs `/usr/bin/python3` — fixed on main, ships v0.9.1 (NOT in the released v0.9.0
-  `.deb`).** The tt-smi venv (`~/.tenstorrent-venv`) is first on this box's PATH and lacks
-  `python3-gi`, so the v0.9.0 packaged wrapper's bare `python3` would `ModuleNotFoundError` from
-  a venv-activated shell (fine from the desktop menu's clean PATH). Wrapper now pins
-  `/usr/bin/python3`. To release: `scripts/bump-version.sh 0.9.1`, bump `MARKETING_VERSION` to
-  match, `git tag v0.9.1 && git push origin v0.9.1`.
 - **v0.9.0 is released** (2026-07-10): the GitHub Release carries all four `.deb`s
   (`tt-station`/`tt-station-panel` × noble/jammy) + `TTStation-0.9.0-arm64.dmg`. Collaborator
   first-run guide: `TESTING.md`. The manual `workflow_dispatch` `.deb` artifact flow is

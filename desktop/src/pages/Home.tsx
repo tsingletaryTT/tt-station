@@ -12,7 +12,7 @@ import type { IconKind } from "@tenstorrent/vesper/icons";
 import { ProgressBar } from "@tenstorrent/vesper/progress-bar";
 import { Admonition } from "@tenstorrent/vesper/admonition";
 import { Typography } from "@tenstorrent/vesper/typography";
-import { boxName, duration, get, type DoctorCheck, hardwareLabel, type Job, type MetricsNow, type Mode, type OrchardStatus, post,
+import { boxName, duration, get, type DoctorCheck, hardwareLabel, type Job, type MetricsNow, type Mode, post,
   type Pull, type Serve, short, type Status } from "../api";
 import { navigate } from "../App";
 import { WhatsNewCard } from "./WhatsNewCard";
@@ -26,10 +26,10 @@ import { firstRun, loadFirstRun, saveFirstRun, shouldShow, type FirstRunSaved, t
 import { smoothBehavior } from "../stickToBottom";
 
 const MODE_ICONS: Record<string, IconKind> = {
-  chat: "chat", images: "galaxy", chat_images: "ai", video: "ai-video-gen", transcribe: "microphone",
+  chat: "chat", images: "galaxy", transcribe: "microphone",
 };
 
-/** Where a mode's work happens: Chat for talking, Studio for pictures, video and transcripts. */
+/** Where a mode's work happens: Chat for talking, Studio for pictures and transcripts. */
 const placeFor = (m: Mode | null) => (m?.id === "chat" ? "chat" : "studio");
 
 export function Home() {
@@ -279,7 +279,7 @@ function Hero({ serve, error, modes, guided, switching, onSwitch, onStop, onRetr
     );
   }
   const elapsed = now - serve.since;
-  const kind = serve.kind === "image" ? "Making images" : serve.kind === "video" ? "Making video"
+  const kind = serve.kind === "image" ? "Making images"
     : serve.kind === "speech" ? "Speech to text" : "Chat";
   const idle = serve.phase === "idle" || serve.phase === "failed";
   // Nothing serving: start a mode right here (the ones already downloaded), not three screens away.
@@ -291,7 +291,6 @@ function Hero({ serve, error, modes, guided, switching, onSwitch, onStop, onRetr
           : serve.phase === "stopping" ? "Stopping" : serve.phase === "failed" ? "Didn't start" : "Idle"}</Eyebrow>
         <div className="hero-model">
           {serve.phase === "idle" ? "Nothing is serving" : short(serve.phase === "serving" ? (serve.served_id ?? serve.model) : (serve.model ?? serve.served_id))}
-          {serve.split && serve.companion?.model ? <span className="muted"> + {short(serve.companion.model)}</span> : null}
         </div>
         {serve.phase === "starting" && (
           <div className="stack" style={{ gap: 6, maxWidth: 480 }}>
@@ -311,9 +310,9 @@ function Hero({ serve, error, modes, guided, switching, onSwitch, onStop, onRetr
         {idle && startable.length > 0 && <Typography variant="copy-sm" className="muted">Pick what you want to do and the box sets itself up:</Typography>}
         {idle && guided && <Typography variant="copy-sm" className="muted">The steps above get your first model going.</Typography>}
         <div className="row wrap" style={{ marginTop: 6 }}>
-          {serve.phase === "serving" && serve.kind !== "image" && serve.kind !== "video" &&
+          {serve.phase === "serving" && serve.kind !== "image" &&
             <Button iconLeft={<Icon kind="chat" aria-hidden />} onClick={() => navigate("chat")}>Chat</Button>}
-          {serve.phase === "serving" && (serve.kind === "image" || serve.kind === "video" || serve.split) &&
+          {serve.phase === "serving" && serve.kind === "image" &&
             <Button iconLeft={<Icon kind="galaxy" aria-hidden />} onClick={() => navigate("studio")}>Open Studio</Button>}
           {idle && startable.map((m, i) => (
             <Button key={m.id} variant={i === 0 ? "primary" : "subtle"} iconLeft={<Icon kind={MODE_ICONS[m.id] ?? "ai"} aria-hidden />}
@@ -330,25 +329,15 @@ function Hero({ serve, error, modes, guided, switching, onSwitch, onStop, onRetr
   );
 }
 
-/** Long work in progress: a bring-up, transcriptions. Hidden when nothing is going. */
+/** Long work in progress: a recording, transcriptions. Hidden when nothing is going. */
 function HappeningNow() {
-  const orchard = usePoll(() => get<OrchardStatus>("/orchard").catch(() => null), 10000);
   const jobs = usePoll(() => get<{ jobs: Job[] }>("/jobs").catch(() => ({ jobs: [] })), 8000);
-  const run = orchard.data?.runs.find((r) => r.live);
   const active = (jobs.data?.jobs ?? []).filter((j) => ["queued", "waiting", "switching", "running"].includes(j.status));
   const recording = useRecorder().state?.recording;
-  if (!run && active.length === 0 && !recording) return null;
+  if (active.length === 0 && !recording) return null;
   return (
     <div className="grid grid-2">
       <RecordingNow />
-      {run && (
-        <Card onClick={() => navigate("bringup")}>
-          <div className="row-between"><Eyebrow>Bringing up {short(run.model)}</Eyebrow>
-            <Typography variant="copy-xs" className="muted mono">{run.progress?.overall_eta_s ? `about ${duration(run.progress.overall_eta_s)} left` : ""}</Typography></div>
-          <Typography variant="copy-md">{run.progress?.title || "Working"}</Typography>
-          <ProgressBar value={(run.progress?.overall ?? 0) * 100} aria-label="Bring-up progress" />
-        </Card>
-      )}
       {active.map((j) => (
         <Card key={j.id} onClick={openTranscribe}>
           <div className="row-between"><Eyebrow>Transcribing</Eyebrow><Typography variant="copy-xs" className="muted mono">{j.status}</Typography></div>

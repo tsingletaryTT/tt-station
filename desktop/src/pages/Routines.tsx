@@ -5,11 +5,11 @@
 // in plain words and when to run it; the served model works out the steps,
 // looks things up freely, asks before changing the box (unless the routine
 // was given that action ahead of time), and ends with a report. Runs that
-// need an answer show here, in Notifications, and as a push notification.
+// need an answer show here, in Notifications, and as a notification.
 //
 // A routine can also just switch the box's mode at set times (what Settings →
-// Schedules used to do): no model plans it, and it never interrupts a silicon
-// check, a bring-up or a transcription. `#run-<id>` opens a run.
+// Schedules used to do): no model plans it, and it never interrupts a
+// transcription. `#run-<id>` opens a run.
 
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@tenstorrent/vesper/button";
@@ -40,7 +40,6 @@ interface RunRow { id: string; status: string; trigger: string; started: number;
 const ACTION_LABELS: Record<string, [string, string]> = {
   start_model: ["Start a model", "Switches what's serving (stops the current model)."],
   stop_model: ["Stop the model", "Leaves the chips idle."],
-  download_model: ["Download a model", "Community models, with weights: can be hundreds of GB."],
   reset_chips: ["Reset the chips", "Stops whatever is serving."],
 };
 
@@ -52,14 +51,8 @@ const TEMPLATES: { name: string; goal: string; schedule: Schedule; allowed: stri
     allowed: [],
   },
   {
-    name: "Try a community model overnight",
-    goal: "Pick one community chat model from the catalog that fits this box's chips and isn't on the box yet (community_models): say which and why. Download it, start it, and once it's ready ask it three short questions (a coding task, a reasoning puzzle, a summary of a paragraph). Report its speed (tokens per second, time to first token) and how good its answers were. Then put the model that was serving before back.",
-    schedule: { kind: "manual" },
-    allowed: ["download_model", "start_model"],
-  },
-  {
     name: "Compare my chat models overnight",
-    goal: "Find the chat models on this box whose weights are all here and that fit (community_models and list_models). For each one in turn: start it, wait until it's ready, and run evaluate_model. Skip any that fail to start, and say why. At the end, put the model that was serving before back. Report a table of each model's overall score and speed, and which you'd use for Chat, for Code and for Research.",
+    goal: "Find the chat models on this box whose weights are all here and that fit (list_models). For each one in turn: start it, wait until it's ready, and run evaluate_model. Skip any that fail to start, and say why. At the end, put the model that was serving before back. Report a table of each model's overall score and speed, and which you'd use for Chat, for Code and for Research.",
     schedule: { kind: "manual" },
     allowed: ["start_model"],
   },
@@ -71,7 +64,7 @@ const TEMPLATES: { name: string; goal: string; schedule: Schedule; allowed: stri
   },
   {
     name: "Weekly model news",
-    goal: "Research what's new this week for running open models on Tenstorrent hardware (new community packages, tt-metal releases, notable model releases that would fit this box). Summarize the five most useful items with links.",
+    goal: "Research what's new this week for running open models on Tenstorrent hardware (tt-metal releases, notable model releases that would fit this box). Summarize the five most useful items with links.",
     schedule: { kind: "weekdays", time: "09:00" },
     allowed: [],
   },
@@ -331,7 +324,7 @@ function Editor({ start, onDone }: { start: Partial<Routine>; onDone: (saved: bo
           <select className="routine-select" value={mode ?? ""} onChange={(e) => setMode(e.target.value)}>
             {(modes.data?.modes ?? []).map((m) => <option key={m.id} value={m.id}>{m.title}{m.ready ? "" : " (needs a download)"}</option>)}
           </select>
-          <span className="muted" style={{ fontSize: 12 }}>No model needs to be serving for this. If the chips are busy with a silicon check, a bring-up or a transcription, it skips that time and tells you.</span>
+          <span className="muted" style={{ fontSize: 12 }}>No model needs to be serving for this. If the chips are busy with a transcription, it skips that time and tells you.</span>
         </label>
       )}
       <label className="stack" style={{ gap: 4 }}>
@@ -342,7 +335,7 @@ function Editor({ start, onDone }: { start: Partial<Routine>; onDone: (saved: bo
         <b>What should it do?</b>
         <textarea className="routine-goal-input" rows={6} value={goal} onChange={(e) => setGoal(e.target.value)}
           placeholder="In plain words, as you'd ask a colleague: what to check or do, and what you want to hear back." />
-        <span className="muted" style={{ fontSize: 12 }}>It can check the box, the chips, the logs and the models; search the web; ask the serving model questions; and start, stop or download models.</span>
+        <span className="muted" style={{ fontSize: 12 }}>It can check the box, the chips, the logs and the models; search the web; ask the serving model questions; and start or stop models.</span>
       </label>}
       <div className="stack" style={{ gap: 6 }}>
         <b>When</b>
@@ -418,8 +411,8 @@ function Detail({ r, run, setRun, busy, onRun, onEdit, onDelete }: { r: Routine;
 const TOOL_LABEL: Record<string, string> = {
   box_status: "Checked the box", list_models: "Listed models", recent_logs: "Read the logs", web_search: "Searched the web", read_webpage: "Read a page",
   research: "Started research", research_check: "Checked the research", search_documents: "Searched documents", remember: "Remembered something",
-  community_models: "Checked community models", ask_model: "Asked the model", wait_until_ready: "Waited for the model", wait_for_download: "Waited for the download",
-  start_model: "Started a model", stop_model: "Stopped the model", download_model: "Started a download", reset_chips: "Reset the chips",
+  ask_model: "Asked the model", wait_until_ready: "Waited for the model",
+  start_model: "Started a model", stop_model: "Stopped the model", reset_chips: "Reset the chips",
   switch_mode: "Switched mode",
 };
 
@@ -428,7 +421,6 @@ function stepTitle(s: Step) {
   const base = TOOL_LABEL[s.tool ?? ""] ?? s.tool ?? "";
   if (s.kind === "queued") return `Waiting for your OK: ${base}`;
   if (s.tool === "start_model") return `Started ${String(a.model ?? "a model")}`;
-  if (s.tool === "download_model") return `Started downloading ${String(a.id ?? "")}`;
   if (s.tool === "ask_model") return `Asked the model: “${String(a.prompt ?? "").slice(0, 80)}${String(a.prompt ?? "").length > 80 ? "…" : ""}”`;
   if (s.tool === "web_search") return `Searched the web for “${String(a.query ?? "")}”`;
   return base;

@@ -75,8 +75,6 @@ struct ChipProcess: Equatable, Identifiable {
     var name: String {
         if cmdline.contains("tt-smi") { return "tt-smi (TT Station reading telemetry)" }
         if cmdline.contains("container_app_user") || cmdline.contains("uvicorn") { return "inference server (Docker)" }
-        if cmdline.contains("tt-lab") || cmdline.contains("gpt-oss") { return "Lab (tt-lab)" }
-        if cmdline.contains("orchard") { return "Orchard bring-up" }
         return (cmdline.split(separator: " ").first.map { String($0.split(separator: "/").last ?? $0) }) ?? "pid \(pid)"
     }
 }
@@ -131,8 +129,7 @@ enum Temp {
 /// modes. Reconnects every few seconds if the socket drops.
 ///
 /// Readings are only shown as live while frames keep arriving: when the box
-/// can't read its chips (a Lab run or an Orchard bring-up owns them, or
-/// tt-smi failed) the agent sends an error frame, kept in `unavailable`, and
+/// can't read its chips (another program owns them, or tt-smi failed) the agent sends an error frame, kept in `unavailable`, and
 /// the last readings are marked stale rather than shown as current.
 @Observable
 final class TelemetryFeed {

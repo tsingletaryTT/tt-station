@@ -1,6 +1,6 @@
 # People, mode switches on a timetable, and energy (reference)
 
-Box features that need no account anywhere, plus serving an Orchard result. (Remote access
+Box features that need no account anywhere. (Remote access
 over WireGuard was documented here but never implemented; see below.)
 
 ## People (`/people`, `src/people.rs`)
@@ -29,7 +29,7 @@ Switching the box's mode at set times used to be Settings → Schedules; it is n
 the box to that mode. Its schedule is any routine schedule, plus `{kind: "days", time: "HH:MM",
 days: [0..6]}` (0 is Sunday) for chosen days. What schedules did, it keeps doing:
 
-- It never interrupts a Lab run, an Orchard bring-up or a transcription: the run is
+- It never interrupts a transcription: the run is
   `skipped`, with a notification ("Skipped switching to Images …"), and it tries next time.
 - It runs from its minute until ten minutes after; later than that (the box was off), it
   waits for its next time instead of switching late.
@@ -73,12 +73,3 @@ the code**: there is no such route in `crates/tt-station-agentd/src/router.rs` a
 module. Off-LAN access today means bringing your own VPN: when the box has a Tailscale address,
 QR pairing carries it so the phone can reach the box away from home (`pairqr.rs`), and pairing and
 TLS apply as on the LAN.
-
-## Serving an Orchard result (`POST /orchard/runs/{name}/serve`, `POST /orchard/packaging`)
-
-With packaging on (`package_format = "v6"`, added to tt-orchard's `bringup.toml` by
-`/orchard/packaging`, marked `# set by tt-station`), stage 7 leaves a boot-checked copy at
-`stages/7/verify/`. Serve stops what's serving (with consent), resets the chips, runs
-`bash run.sh --port <serving port>` as the `tt-orchard-serve` user unit with `HF_HOME` pointing at
-the copy's linked cache, and adopts it as the serving endpoint once `/v1/models` answers. Stopping
-the model (any way) stops that unit.

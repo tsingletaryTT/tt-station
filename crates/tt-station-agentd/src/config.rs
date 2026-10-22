@@ -125,7 +125,7 @@ pub struct ResolvedConfig {
     // active serving profile
     pub active_profile: Option<String>, // None = implicit default profile
     pub available_profiles: Vec<String>, // sorted; empty when no [profile.*]
-    pub backend: String,                // "runpy" | "docker" | "dstack"
+    pub backend: String,                // "runpy" | "docker"
     pub serve_with: String,             // "runpy" | "tt" (runpy backend's launcher)
     pub serving_host: String,
     pub serving_port: u16,

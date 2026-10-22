@@ -20,7 +20,7 @@ vi.mock("../ui", () => ({
 const { ModelPicker } = await import("./CodeSpeed");
 
 const opt = (o: Partial<CodeModel> & { key: string }): CodeModel => ({
-  group: "gpt-oss-20b", name: "gpt-oss-20b", model: "openai/gpt-oss-20b", source: "community", origin: "tt-hous/gpt-oss-20b-p150",
+  group: "gpt-oss-20b", name: "gpt-oss-20b", model: "openai/gpt-oss-20b", source: "catalog", origin: "tt catalog",
   profile: null, profile_label: null, profile_note: null, chips: 2, context: 131072,
   tools: { verified: true, how: "tool parser openai" }, prefix_cache: { state: "unknown", how: "not set in its launch flags" },
   params_b: null, served_id: null, speed: null, reliability: null, choice: { action: "switch" }, eta_s: null, serve: null, ...o,
@@ -31,14 +31,14 @@ const list = (models: CodeModel[]): CodeModels => ({
   catalog_error: null, models,
 });
 const BOX = [
-  opt({ key: "community:pkg#p150x2-throughput", profile: "p150x2-throughput", profile_label: "2 chips · throughput", choice: { action: "in_use" },
+  opt({ key: "catalog:gpt-oss-20b#p150x2", profile: "p150x2-throughput", profile_label: "2 chips · throughput", choice: { action: "in_use" },
     served_id: "openai/gpt-oss-20b", speed: { decode_tps: 69, ttft_s: 0.1, steps: 40 },
     reliability: { window: 65536, valid: 99, trials: 100, at: 0, setup_unrecorded: true } }),
-  opt({ key: "community:pkg#p150x4", profile: "p150x4", profile_label: "4 chips · low latency", chips: 4,
-    serve: { route: "/community/serve", body: { id: "tt-hous/gpt-oss-20b-p150", profile: "p150x4", stop_serving: true } } }),
-  opt({ key: "community:flash#qb2-256k", group: "qwen3.8-flash-next", name: "Qwen3.8-Flash-Next", profile: "qb2-256k", profile_label: "4 chips · qb2-256k",
-    chips: 4, tools: { verified: false, how: "its package doesn't name a tool parser" },
-    serve: { route: "/community/serve", body: { id: "x/flash", profile: "qb2-256k", stop_serving: true } } }),
+  opt({ key: "catalog:gpt-oss-20b#p150x4", profile: "p150x4", profile_label: "4 chips · low latency", chips: 4,
+    serve: { route: "/serve", body: { model: "gpt-oss-20b", chips: 4, force: true } } }),
+  opt({ key: "catalog:flash#qb2-256k", group: "qwen3.8-flash-next", name: "Qwen3.8-Flash-Next", profile: "qb2-256k", profile_label: "4 chips · qb2-256k",
+    chips: 4, tools: { verified: false, how: "its catalog entry doesn't name a tool parser" },
+    serve: { route: "/serve", body: { model: "Qwen3.8-Flash-Next", force: true } } }),
 ];
 
 let root: Root;
@@ -105,7 +105,7 @@ describe("Model for Code", () => {
 
     await click(buttons("Use for Code")[0]);
     await click(buttons("Stop gpt-oss-20b and switch")[0]);
-    expect(post).toHaveBeenCalledWith("/community/serve", { id: "tt-hous/gpt-oss-20b-p150", profile: "p150x4", stop_serving: true });
+    expect(post).toHaveBeenCalledWith("/serve", { model: "gpt-oss-20b", chips: 4, force: true });
   });
 
   it("says when nothing on the box can run Code, and when the list won't load", () => {

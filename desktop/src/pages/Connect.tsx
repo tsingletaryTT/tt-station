@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 // Connect: the most popular open-source tools a Tenstorrent box can serve,
-// each running on the box's own models. Chat apps, agents (Hermes, OpenClaw,
-// OpenHands), research apps and visual builders the box installs and wires to
+// each running on the box's own models. Chat apps, agents (OpenHands),
+// research apps and visual builders the box installs and wires to
 // its models; coding tools for your own computer that point at the box's
 // OpenAI API; and the box itself as a private OpenAI-compatible API (address,
 // models, app keys, code snippets) for everything else.
@@ -25,7 +25,6 @@ import anythingllmLogo from "../assets/logos/anythingllm.png";
 import lobechatLogo from "../assets/logos/lobechat.png";
 import jupyterLogo from "../assets/logos/jupyter.svg";
 import flowiseLogo from "../assets/logos/flowise.png";
-import hermesLogo from "../assets/logos/hermes.png";
 import searxngLogo from "../assets/logos/searxng.png";
 import langflowLogo from "../assets/logos/langflow.png";
 import continueLogo from "../assets/logos/continue.png";
@@ -36,7 +35,7 @@ import { boxOnlyReason } from "../boxapps";
 import { Card, copyText, Eyebrow, Page, Spark, toastError, toastOk, usePoll } from "../ui";
 import { Switch } from "@tenstorrent/vesper/switch";
 import { ask } from "../dialog";
-import { OWNER_ONLY, OWNER_ONLY_HOST, useOwner } from "../role";
+import { OWNER_ONLY, useOwner } from "../role";
 
 interface BoxApp {
   id: string; name: string; blurb: string; category: string; port: number; local_only: boolean; homepage: string;
@@ -141,16 +140,7 @@ function open(url: string, title: string) {
   else window.open(url, "_blank");
 }
 
-interface Hermes {
-  installed: boolean; installing: boolean; install_failed: boolean; log: string[];
-  configured_model: string | null; running: boolean; serving_model: string | null;
-  serving_context: number | null; context_too_small: boolean; has_session: boolean;
-  uses_box: boolean | null; provider: string | null; desktop_built: boolean; key_requests: number | null;
-}
-
-const shortName = (m: string | null) => (m ?? "").split("/").pop() ?? "";
-
-/** A value to paste into Hermes, with a copy button. */
+/** A value to paste into an app, with a copy button. */
 function PasteValue({ label, value, secret }: { label: string; value: string; secret?: boolean }) {
   const [shown, setShown] = useState(!secret);
   return (
@@ -162,138 +152,6 @@ function PasteValue({ label, value, secret }: { label: string; value: string; se
         <Button size="xs" variant="subtle" onClick={() => void copyText(value, `${label} copied.`)}>Copy</Button>
       </div>
     </div>
-  );
-}
-
-function Step({ n, title, done, active, children }: { n: number; title: string; done: boolean; active: boolean; children?: React.ReactNode }) {
-  return (
-    <div className={`finish-step ${done ? "done" : ""}`} style={{ opacity: !done && !active ? 0.55 : 1 }}>
-      <span className="finish-n">{done ? "✓" : n}</span>
-      <div className="grow stack" style={{ gap: 8 }}><b>{title}</b>{(active || done) && children}</div>
-    </div>
-  );
-}
-
-/**
- * Setting Hermes up, alongside Hermes Desktop's own first-run screens: TT
- * Station installs and opens it, hands over the box's address and a key to
- * paste in, and ticks each step off as it sees it happen.
- */
-function HermesGuide({ s, refresh }: { s: Hermes; refresh: () => void }) {
-  const owner = useOwner();
-  const [busy, setBusy] = useState<string | null>(null);
-  const [creds, setCreds] = useState<{ base_url: string; api_key: string } | null>(null);
-  const modelOk = !!s.serving_model && !s.context_too_small;
-  const connected = s.uses_box === true;
-  const talked = (s.key_requests ?? 0) > 0;
-  const act = async (what: string, fn: () => Promise<unknown>) => {
-    setBusy(what);
-    try { await fn(); refresh(); } catch (e) { toastError(e); } finally { setBusy(null); }
-  };
-  const install = async () => {
-    if (!(await ask("Install Hermes Agent?", {
-      body: "Runs Nous Research's official installer (hermes-agent.nousresearch.com) on the box, with its desktop app. It goes into your home folder, needs no admin password, and takes a few minutes.",
-      confirm: "Install",
-    }))) return;
-    act("install", () => post("/hermes/install"));
-  };
-  const step = !modelOk ? 1 : !s.installed ? 2 : !s.running && !connected ? 3 : !connected ? 4 : !talked ? 5 : 6;
-  return (
-    <div className="stack" style={{ gap: 14 }}>
-      <Step n={1} title="A chat model with a long memory" done={modelOk} active={step === 1}>
-        {modelOk ? <span className="muted" style={{ fontSize: 13 }}>{shortName(s.serving_model)} is serving{s.serving_context ? `, with ${Math.round(s.serving_context / 1024)}K of context` : ""}.</span>
-          : <>
-            <span className="muted" style={{ fontSize: 13 }}>
-              {s.serving_model ? `${shortName(s.serving_model)} remembers too little for Hermes, which needs at least 64K of context.` : "Hermes runs on the model the box is serving, and needs one that remembers at least 64K of context."}
-              {" "}Qwen3-32B is a good fit.
-            </span>
-            <div><Button size="sm" disabled={busy === "model"} onClick={() => act("model", () => post("/serve", { model: "Qwen3-32B", force: true }).then(() => toastOk("Starting Qwen3-32B. It takes a few minutes.")))}>Start Qwen3-32B</Button></div>
-          </>}
-      </Step>
-      <Step n={2} title="Install Hermes Desktop" done={s.installed} active={step === 2}>
-        {s.installed ? <span className="muted" style={{ fontSize: 13 }}>Installed.</span>
-          : s.installing ? <span className="muted mono" style={{ fontSize: 12 }}>{s.log[s.log.length - 1] ?? "Installing…"}</span>
-          : <>
-            <span className="muted" style={{ fontSize: 13 }}>Nous Research's official installer, with the desktop app. A few minutes.</span>
-            {s.install_failed && s.log.length > 0 && <div className="console" style={{ maxHeight: 100, fontSize: 11 }}>{s.log.join("\n")}</div>}
-            <div><Button size="sm" disabled={busy === "install"} onClick={install}>{s.install_failed ? "Try again" : "Install"}</Button></div>
-          </>}
-      </Step>
-      <Step n={3} title="Open Hermes Desktop" done={s.running || connected} active={step === 3}>
-        {s.running || connected ? <span className="muted" style={{ fontSize: 13 }}>{s.running ? "It's open on the box's screen." : "Done."}</span>
-          : <>
-            <span className="muted" style={{ fontSize: 13 }}>{s.desktop_built ? "It opens on the box's screen." : "The first time, it builds the app first (a few minutes), then opens on the box's screen."}</span>
-            <div><Button size="sm" disabled={busy === "open" || !s.has_session || !owner} title={owner ? undefined : OWNER_ONLY_HOST} onClick={() => act("open", () => post("/hermes/open"))}>Open Hermes</Button></div>
-          </>}
-      </Step>
-      <Step n={4} title="Connect it to your box" done={connected} active={step === 4}>
-        {connected ? <span className="muted" style={{ fontSize: 13 }}>Hermes is set to use this box.</span>
-          : <>
-            <ol className="guide-list">
-              <li>On Hermes's “Let's get you setup with Hermes Agent” screen, click <b>I have an API key</b>.</li>
-              <li>Choose <b>Local / custom endpoint</b>.</li>
-              <li>Paste these in, then click <b>Connect</b>. Hermes finds the model by itself.</li>
-            </ol>
-            {creds ? <>
-              <PasteValue label="Base URL" value={creds.base_url} />
-              <PasteValue label="API key" value={creds.api_key} secret />
-            </> : <div><Button size="sm" disabled={busy === "key"} onClick={() => act("key", () => post<{ base_url: string; api_key: string }>("/hermes/key").then(setCreds))}>Show what to paste</Button></div>}
-            <span className="muted" style={{ fontSize: 12 }}>Past that screen already? In Hermes, open Settings → Providers → Custom Endpoints → New endpoint, and use the same two values.</span>
-          </>}
-      </Step>
-      <Step n={5} title="Say hello" done={talked} active={step === 5}>
-        <span className="muted" style={{ fontSize: 13 }}>{talked ? `Hermes is talking to your box (${s.key_requests} requests so far).` : "Send Hermes a message. This ticks off when your box answers it."}</span>
-      </Step>
-      {step === 6 && <Admonition variant="success" subtle size="sm">Hermes Agent is set up, running on your box's {shortName(s.serving_model)}.</Admonition>}
-    </div>
-  );
-}
-
-/** Hermes Agent (Nous Research): its own desktop app, set up with a guide. */
-function HermesTile() {
-  const owner = useOwner();
-  const h = usePoll(() => get<Hermes>("/hermes"), 3000);
-  const guide = useSheet();
-  const s = h.data;
-  const ready = !!s && s.installed && s.uses_box === true;
-  const note = !s ? ""
-    : s.installing ? "Installing…"
-    : !s.installed ? ""
-    : s.uses_box === false ? `Set to use ${s.provider ?? "another service"}, not this box.`
-    : s.uses_box !== true ? "Installed, not connected to the box yet."
-    : `Uses this box's ${shortName(s.serving_model ?? s.configured_model)}`;
-  return (
-    <Card className="app-tile">
-      <div className="row-between">
-        <img className="app-logo img full" src={hermesLogo} alt="" />
-        <div className="row" style={{ gap: 6 }}>
-          <Badge size="sm" variant="contrast" subtle>Agent</Badge>
-          {s?.installed && <StatusIndicator label={s.running ? "Open" : ready ? "Ready" : "Set up"} state={s.running || ready ? "ready" : "queued"} />}
-          {s?.installing && <StatusIndicator label="Installing" state="progress" animated />}
-        </div>
-      </div>
-      <div><Typography variant="heading-xs">Hermes Agent</Typography><Typography variant="copy-sm" className="muted">Nous Research's AI agent: it remembers, learns skills and works through tasks with tools, in its own desktop app.</Typography></div>
-      {note && <Typography variant="copy-xs" className="muted">{note}</Typography>}
-      <div className="grow" />
-      <div className="row">
-        {ready ? <Button size="sm" disabled={!s?.has_session || !owner} title={!owner ? OWNER_ONLY_HOST : s?.running ? "Bring Hermes to the front on the box's screen" : "Open Hermes on the box's screen"} onClick={async () => {
-            try {
-              const r = await post<{ already_open?: boolean; building?: boolean }>("/hermes/open");
-              // Say what actually happened: a new window, or a running one asked to come forward
-              // (GNOME may show "Hermes is ready" at the top instead of switching on its own).
-              toastOk(r.already_open ? "Hermes is already open. If it doesn't come to the front, click “Hermes is ready” at the top of the screen."
-                : r.building ? "Building Hermes Desktop the first time (a few minutes), then it opens on the box's screen."
-                : "Opening Hermes on the box's screen.");
-              h.refresh();
-            } catch (e) { toastError(e); }
-          }}>{s?.running ? "Show Hermes" : "Open"}</Button>
-          : <Button size="sm" variant="subtle" disabled={!s} onClick={guide.open}>Set up</Button>}
-        {ready && <Button size="sm" variant="ghost" onClick={guide.open}>Setup guide</Button>}
-      </div>
-      <Sheet ref={guide.ref} popover title="Set up Hermes Agent" description="Follow along next to Hermes Desktop. Each step ticks off when TT Station sees it happen.">
-        {s && <HermesGuide s={s} refresh={h.refresh} />}
-      </Sheet>
-    </Card>
   );
 }
 
@@ -431,7 +289,6 @@ export function Connect() {
   const connect = usePoll(() => get<{ urls: { label: string; url: string }[]; models: { id: string }[] }>("/connect"), 30000);
   const keys = usePoll(() => get<{ keys: AppKey[] }>("/keys"), 15000);
   const owner = useOwner();
-  const hermes = usePoll(() => get<Hermes>("/hermes").catch(() => null), 15000);
   const [busy, setBusy] = useState<string | null>(null);
   const [newKey, setNewKey] = useState<{ name: string; key: string } | null>(null);
   const [keyName, setKeyName] = useState("");
@@ -448,7 +305,6 @@ export function Connect() {
   const base = connect.data?.urls?.[0]?.url ?? `http://${location.hostname}:${location.port}/v1`;
   const model = connect.data?.models?.[0]?.id ?? "the-served-model";
 
-  const hermesOn = !!hermes.data?.running;
   const entries: Entry[] = [
     ...(clients.data?.clients ?? []).map((c): Entry => ({
       key: c.tool, cat: "chat", on: c.running, text: `${c.name} ${BLURBS[c.tool] ?? ""}`,
@@ -472,7 +328,6 @@ export function Connect() {
         </Card>
       ),
     })),
-    { key: "hermes", cat: "agents", on: hermesOn, text: "Hermes Agent Nous Research agent memory skills tools", node: <HermesTile key="hermes" /> },
     ...(apps.data?.apps ?? []).map((a): Entry => ({
       key: a.id, cat: catOf(a.category), on: a.state === "running" || a.state === "installing", text: `${a.name} ${a.blurb} ${a.category}`,
       node: (

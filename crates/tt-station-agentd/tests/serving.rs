@@ -10,14 +10,14 @@
 //! `docs/reference/tt-inference-server-docker.md` -- the researched, real
 //! invocation of `tt-inference-server` -- not a guess.
 //!
-//! `DstackBackend` is exercised directly since it's a documented stub with
-//! no external dependencies to fake.
+//! `NullBackend` is exercised directly since it has no external
+//! dependencies to fake.
 
 use std::time::Duration;
 
 use libttstation::model::{Endpoint, ServingStatus};
 use tt_station_agentd::serving::docker::{DockerBackend, DockerConfig};
-use tt_station_agentd::serving::dstack::DstackBackend;
+use tt_station_agentd::serving::NullBackend;
 use tt_station_agentd::serving::ServingBackend;
 
 mod support;
@@ -1154,59 +1154,28 @@ fn docker_start_refuses_a_grant_with_no_device_indices() {
     );
 }
 
-/// `DstackBackend` is an intentional stub ahead of M4: `start` must fail
-/// loudly (never silently pretend to serve), naming dstack in the error so
-/// a caller trying to debug "why didn't my model start" isn't left
-/// guessing.
+/// `NullBackend` serves nothing: `start` fails loudly (never silently
+/// pretends to serve), `stop` is a harmless no-op, `status` is always idle,
+/// and it holds no gozer capability.
 #[test]
-fn dstack_start_returns_not_implemented_error() {
-    let backend = DstackBackend;
-    let err = backend
-        .start("llama3")
-        .expect_err("dstack start should fail");
-    assert!(
-        err.to_string().to_lowercase().contains("dstack"),
-        "error should mention dstack: {err}"
-    );
-}
-
-/// `stop`/`status` on the stub are harmless no-ops -- there's never
-/// anything running to stop, so `stop` succeeds trivially and `status` is
-/// always `Idle`.
-#[test]
-fn dstack_stop_is_ok_and_status_is_idle() {
-    let backend = DstackBackend;
+fn the_null_backend_serves_nothing_and_never_leases() {
+    let backend = NullBackend;
+    assert!(backend.start("llama3").is_err());
     assert!(backend.stop("llama3").is_ok());
     assert_eq!(backend.status().unwrap(), ServingStatus::Idle);
+    assert_eq!(backend.gozer_capability(), None);
 }
 
-/// Leasing is an explicit NO-OP on the dstack stub, and `make_backend` must
-/// not pretend otherwise: handing it a gozer capability changes nothing.
-///
-/// This is a real assertion, not a formality. `make_backend` now threads a
-/// probed capability into every backend it can build; if dstack ever grew a
-/// silent `with_gozer` that acquired a lease, the stub would take chips it
-/// can't use and never release them (its `start` fails before anything runs,
-/// and it has no `CommandRunner` to release through). See the "leasing is a
-/// deliberate no-op" note in `serving/dstack.rs`.
+/// `dstack` is no longer a serving backend: asking for it fails at startup.
 #[test]
-fn dstack_ignores_a_gozer_capability() {
-    let backend = tt_station_agentd::serving::make_backend(
+fn dstack_is_not_a_backend() {
+    assert!(tt_station_agentd::serving::make_backend(
         "dstack",
         DockerConfig::default(),
         tt_station_agentd::serving::runpy::RunPyConfig::default(),
         Some(gozer_capability()),
     )
-    .expect("dstack backend should construct");
-
-    assert_eq!(
-        backend.gozer_capability(),
-        None,
-        "the dstack stub must hold no capability: it can neither use nor \
-         release a lease"
-    );
-    assert!(backend.start("llama3").is_err());
-    assert!(backend.stop("llama3").is_ok());
+    .is_err());
 }
 
 // ---------------------------------------------------------------------

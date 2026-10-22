@@ -4,12 +4,9 @@
 
 Intent instead of model names: `chat` (Qwen3-32B → Llama-3.3-70B → gemma-4-31B-it →
 Qwen3.6-27B → Llama-3.1-8B-Instruct), `images` (FLUX.1-schnell → FLUX.1-dev),
-`chat_images` (co-serve: Llama-3.1-8B-Instruct + FLUX on one P300 each; carries the
-half-box known-issue note), `video` (Wan2.2), `transcribe` (whisper-large-v3 →
-distil-large-v3). Each mode picks a downloaded model before a better missing one, reports
+`transcribe` (whisper-large-v3 → distil-large-v3). Each mode picks a downloaded model before a better missing one, reports
 `ready`/`needs_download`/`active` and `eta_s` -- the median of this box's own past loads,
-recorded at every finished start in `$TT_CONFIG_DIR/load-times.json`. `GET /serve` (and its
-`companion`) carry `eta_s` while loading. `POST /modes/{id}`: `202` started, `200` already
+recorded at every finished start in `$TT_CONFIG_DIR/load-times.json`. `GET /serve` carries `eta_s` while loading. `POST /modes/{id}`: `202` started, `200` already
 active, `409` with the reason (e.g. what to download). The assistant's confirm-gated
 `switch_mode` tool uses the same path; `create_image` without an image model suggests it.
 Switching follows who may start and stop models (`model_control` in
@@ -20,11 +17,11 @@ Switching follows who may start and stop models (`model_control` in
 Pure checks over gathered facts (`doctor::checks`): chips found vs expected, cooling vs
 each chip's trip limit, firmware consistency and driver, disk free, 1 GB hugepages, Docker,
 the serving model actually answering (or loading > 45 min), stray inference containers,
-failures in the last day, start-at-boot (linger), headless power, push, a newer `tt`, and
+failures in the last day, start-at-boot (linger), headless power, a newer `tt`, and
 leftover old installs. Statuses `ok`/`info`/`warn`/`fail`; safe fixes the agent applies
 itself: `restart_model`, `stop_stray_containers`, `reset_chips` (idle only); otherwise a
-`command` to run on the box. Nightly at ~03:30 it runs and pushes "Box Doctor found N
-problems". `POST /diagnostics` builds a `.tar.gz` (Doctor report, tt-smi, events,
+`command` to run on the box. Nightly at ~03:30 it runs and sends a "Box Doctor found N
+problems" notification. `POST /diagnostics` builds a `.tar.gz` (Doctor report, tt-smi, events,
 versions, agent journal, serving logs; secrets redacted) under
 `$TT_CONFIG_DIR/diagnostics/`; `GET /diagnostics/{id}` downloads it.
 

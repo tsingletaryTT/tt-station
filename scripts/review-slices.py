@@ -42,7 +42,10 @@ SLICES = [
     ("00-hygiene", "Build, CI, packaging and licenses", [
         ".github/*", "scripts/*", "deny.toml", "NOTICE", "THIRD_PARTY_LICENSES.md",
         ".gitattributes", ".gitignore", "debian/*", "build-deb.sh", "deploy/*",
-        "README.md", "Cargo.toml", "Cargo.lock", "CLAUDE.md", "box-panel/*", "docs/landing-plan.md",
+        "README.md", "Cargo.toml", "Cargo.lock", "CLAUDE.md", "AGENTS.md", "TESTING.md",
+        "docs/landing-plan.md", "site/*", "macos/README.md",
+        # The GTK box panel is on main; this branch removes it.
+        "box-panel/*",
         *docs("installing", "releases", "pinned-dependencies", "box-hardening"),
     ]),
     ("01-cli", "CLI and client library", [
@@ -54,7 +57,7 @@ SLICES = [
         *src("lib.rs", "main.rs", "state.rs", "state/*", "router.rs", "routes.rs",
              "handlers/mod.rs", "auth.rs", "error.rs", "localpeer.rs", "sessions.rs",
              "pairing.rs", "pairqr.rs", "tls.rs", "web.rs", "audit.rs", "authkeys.rs",
-             "config.rs", "net.rs", "log.rs", "fsio.rs", "scope.rs", "health.rs",
+             "config.rs", "net.rs", "log.rs", "fsio.rs", "health.rs",
              "urltrust.rs", "model_control.rs", "people.rs",
              "handlers/status.rs", "handlers/pairing.rs", "handlers/devices.rs",
              "handlers/security.rs", "handlers/ssh.rs"),
@@ -67,16 +70,17 @@ SLICES = [
     ]),
     ("03-serving-chips", "Serving models and sharing the chips", [
         *src("serving/*", "served.rs", "localhttp.rs", "device.rs", "ttcli.rs",
-             "tttools.rs", "download.rs", "native_vllm.rs", "discover.rs", "history.rs",
+             "tttools.rs", "download.rs", "discover.rs", "history.rs",
              "inference.rs", "telemetry.rs", "procscan.rs", "gozer.rs", "prefs.rs",
-             "favorites.rs", "coserve.rs", "modes.rs", "liveness.rs", "logs.rs",
+             "favorites.rs", "modes.rs", "liveness.rs", "logs.rs",
              "handlers/serving.rs", "handlers/ttcli.rs", "handlers/telemetry.rs",
              "handlers/logs.rs"),
         *tests("serve.rs", "runpy.rs", "ttcli.rs", "metrics.rs", "serving.rs", "gozer.rs",
                "gozer_client.rs", "leases.rs", "lease_ownership.rs", "chip_leases.rs",
                "logs.rs", "logs_stream.rs", "reset.rs", "models.rs", "telemetry.rs",
-               "coserve.rs", "modes.rs", "native_vllm.rs", "liveness.rs"),
+               "modes.rs", "liveness.rs"),
         *docs("tt-cli", "tt-inference-server-docker", "chip-leasing", "logs", "tt-console"),
+        "docs/design/isolated-chips-per-user.md",
     ]),
     ("04-box-care", "Power, sleep and wake, updates, backups, doctor", [
         *src("power.rs", "idle.rs", "doctor.rs", "updates.rs", "release_keys.rs",
@@ -93,8 +97,7 @@ SLICES = [
         *docs("gateway", "assistant"),
     ]),
     ("06-household", "Notifications, voice, meetings and jobs", [
-        *src("notify.rs", "apns.rs", "schedules.rs", "jobs.rs", "recorder.rs", "voice.rs",
-             "chime.rs", "tori.rs"),
+        *src("notify.rs", "schedules.rs", "jobs.rs", "voice.rs", "tori.rs"),
         *tests("notify.rs", "jobs.rs", "voice.rs", "schedules.rs"),
         *docs("jobs", "voice-and-desktop", "household-schedules-remote"),
     ]),
@@ -104,25 +107,19 @@ SLICES = [
         *tests("research_jobs.rs", "routines.rs", "routines_api.rs", "evals_*"),
         "docs/notes/agent-reliability-*", "docs/tasks-framework.md",
     ]),
-    ("08-apps", "Store apps, desktop launches and community models", [
-        *src("apps.rs", "app_ui.rs", "desktop.rs", "hermes.rs", "community.rs",
-             "toplike_term.rs"),
-        *tests("apps.rs", "community_*"),
+    ("08-apps", "Store apps", [
+        *src("apps.rs", "app_ui.rs"),
+        *tests("apps.rs"),
     ]),
-    ("09-bringup-lab", "Orchard, Lab and model bring-up agents", [
-        *src("orchard*", "lab.rs", "lease_run.py", "bringup.rs", "*_bringup.py",
-             "permission_mcp.py", "sandbox.rs", "sandbox_exec.py", "test_*.py"),
-        *tests("orchard.rs", "bringup_*", "bringup_support/*", "fixtures/fake-orchard/*"),
-        *docs("orchard", "lab", "bringup-containment"),
-    ]),
+    # 09 (Orchard, Lab and bring-up agents) was removed with those features.
     ("10-code", "Code workspace (the agent builds from here)", [
-        *src("workspace.rs", "code_holder.py", "safegit.rs",
+        *src("workspace.rs", "code_holder.py", "test_code_holder.py", "safegit.rs",
              "coding.rs", "codespeed.rs", "codemodels.rs"),
         *tests("workspace_*", "code_*"),
         *docs("code-models"), "docs/design/code-serving.md", "docs/notes/tool-call-*",
     ]),
     ("11-desktop-shell", "Desktop app shell and shared pieces", [
-        "desktop/electron/*", "desktop/test/*", "desktop/mac/*", "desktop/linux/*", "desktop/gnome-extension/*",
+        "desktop/electron/*", "desktop/test/*", "desktop/mac/*", "desktop/linux/*",
         "desktop/assets/*", "desktop/public/*", "desktop/*.json", "desktop/*.ts",
         "desktop/*.html", "desktop/*.sh", "desktop/*.md", "desktop/.gitignore",
         "desktop/src/*.ts", "desktop/src/*.tsx", "desktop/src/app.css",
@@ -130,7 +127,7 @@ SLICES = [
     ]),
     ("12-desktop-pages", "Desktop pages", ["desktop/src/pages/*"]),
     ("13-ios-core", "iPhone app: connection, pairing, box control", [
-        "ios/project.yml", "ios/Info.plist", "ios/PrivacyInfo.xcprivacy", "ios/*.entitlements", "ios/README.md",
+        "ios/project.yml", "ios/Info.plist", "ios/PrivacyInfo.xcprivacy", "ios/README.md",
         "ios/Assets.xcassets/*", "ios/Resources/*", "ios/Shared/*", "ios/Tests/*",
         *["ios/Sources/" + n + ".swift" for n in (
             "AgentAPI", "AppModel", "BoxSession", "BoxStore", "BoxesView", "Discovery",
@@ -141,7 +138,7 @@ SLICES = [
             "GlanceViews", "BoxCare")],
     ]),
     ("14-ios-features", "iPhone app: features and extensions", [
-        "ios/Sources/*", "ios/ActivityExtension/*", "ios/NotificationService/*",
+        "ios/Sources/*", "ios/ActivityExtension/*",
         "docs/reference/mobile-parity.md",
     ]),
     ("15-docs", "Presentations, notes and the benchmark summary", [
@@ -166,10 +163,11 @@ def git(*args, cwd=None, check=True):
 
 def assign():
     changed = {}
-    for line in git("diff", "--numstat", f"{BASE}...{SOURCE}").splitlines():
+    # No rename detection: a moved file is its old path removed and its new one added.
+    for line in git("diff", "--no-renames", "--numstat", f"{BASE}...{SOURCE}").splitlines():
         a, d, path = line.split("\t")
         changed[path] = (0 if a == "-" else int(a)) + (0 if d == "-" else int(d))
-    deleted = {l.split("\t")[1] for l in git("diff", "--name-status", f"{BASE}...{SOURCE}").splitlines()
+    deleted = {l.split("\t")[1] for l in git("diff", "--no-renames", "--name-status", f"{BASE}...{SOURCE}").splitlines()
                if l.startswith("D")}
     plan = {name: [] for name, _, _ in SLICES}
     left = []
