@@ -12,7 +12,7 @@ jobs:
     name: Version consistency
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Assert version matches across Cargo.toml, changelog, and the panel
         run: |
           set -euo pipefail
@@ -38,8 +38,8 @@ jobs:
       # The Electron binary isn't needed to typecheck, test or build the UI.
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -63,7 +63,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # rustup is preinstalled on GitHub runners; with no argument it installs
       # the channel and components pinned in rust-toolchain.toml, so CI, release
       # builds and developer machines all use the same rustc/clippy/rustfmt.
@@ -83,8 +83,12 @@ jobs:
       # systemctl) real. No-op stubs that exit 0 keep every test hermetic.
       # They go on PATH for the test step only.
       # Transcription jobs cut recordings with ffmpeg; their tests make one with it.
+      # Only ffmpeg: its recommended packages took the runner 27 minutes.
       - name: Install ffmpeg
-        run: sudo apt-get install -y -qq ffmpeg >/dev/null
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg >/dev/null
       - name: Create no-op hardware stubs
         run: |
           mkdir -p "$RUNNER_TEMP/hw-stubs"
@@ -108,7 +112,7 @@ jobs:
     name: Package (.deb build, install, smoke)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install packaging prerequisites
         run: |
           sudo apt-get update
@@ -118,7 +122,7 @@ jobs:
           rustup toolchain install || rustup show
           rustup show active-toolchain
       # build-deb.sh builds the app that goes in the package.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
       # The same script the Release workflow builds with.
@@ -140,7 +144,7 @@ jobs:
     name: Dependencies (cargo-deny)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Licenses (allow-list in deny.toml), bans (duplicate majors warn,
       # wildcards deny) and sources (crates.io only): blocking.
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -160,7 +164,7 @@ jobs:
     name: Docs reference only real routes
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Every endpoint named in docs/reference/*.md must exist in the agent's
       # router (crates/tt-station-agentd/src/routes.rs), with the stated method.
       - name: Check docs/reference endpoints against the route table
@@ -170,7 +174,7 @@ jobs:
     name: Python helpers (unittest)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # The agent's Python helpers (Code holder and session, bring-up permission
       # policy, lease runner, Orchard bridge): standard library only, no hardware.
       - name: Run the helpers' tests
@@ -191,7 +195,7 @@ jobs:
       run:
         working-directory: ios
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Select the newest Xcode 26
         run: |
           XCODE=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
