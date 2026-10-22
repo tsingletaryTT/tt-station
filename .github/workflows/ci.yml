@@ -82,6 +82,9 @@ jobs:
       # mid-test; on a runner the binaries are missing or (docker,
       # systemctl) real. No-op stubs that exit 0 keep every test hermetic.
       # They go on PATH for the test step only.
+      # Transcription jobs cut recordings with ffmpeg; their tests make one with it.
+      - name: Install ffmpeg
+        run: sudo apt-get install -y -qq ffmpeg >/dev/null
       - name: Create no-op hardware stubs
         run: |
           mkdir -p "$RUNNER_TEMP/hw-stubs"

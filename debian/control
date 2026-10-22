@@ -12,7 +12,8 @@ Architecture: amd64
 Depends: ${shlibs:Depends}, ${misc:Depends}
 # tt-smi comes from Tenstorrent's apt repository (ppa.tenstorrent.com); it's a
 # Recommends so the package still installs where only the pip tt-smi is.
-Recommends: tt-smi, docker.io | docker-ce
+# ffmpeg: meeting recordings and voice notes are cut into pieces to transcribe.
+Recommends: tt-smi, docker.io | docker-ce, ffmpeg
 Suggests: tt-station-panel
 Description: Control plane for a Tenstorrent box (CLI + box agent)
  tt-station makes a Tenstorrent box (a QuietBox, Galaxy server or workstation
