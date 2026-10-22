@@ -12,8 +12,12 @@
   the development profile grants that value, and a hand-narrowed value risks a profile/entitlement
   mismatch. We are still scoped to Tenstorrent hardware twice over: Info.plist's personality matches
   only 0xb1401e52, and TTBlackholeDriver::Start re-checks vendor/device before touching anything.
-  There is no allow-any-userclient-access: clients get in through the host app's userclient-access
-  entitlement, which is why the probe is run as `TTStationDriver probe`.
+  Clients get in through allow-any-userclient-access, the "DriverKit Allow Any UserClient
+  (development)" capability on this identifier. 2026-10-21: on a new individual team the host app's
+  com.apple.developer.driverkit.userclient-access "requires approval from Apple", while the
+  development allow-any variant is self-service in the developer portal. Any local process may
+  open the service, but only one at a time (NewUserClient refuses a second), and the broker is
+  the one that normally holds it. Shipping (spec M6) switches back to userclient-access on the app.
 -->
 <plist version="1.0">
 <dict>
@@ -26,5 +30,7 @@
 			<string>0xFFFFFFFF&amp;0x00000000</string>
 		</dict>
 	</array>
+	<key>com.apple.developer.driverkit.allow-any-userclient-access</key>
+	<true/>
 </dict>
 </plist>

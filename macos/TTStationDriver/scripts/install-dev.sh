@@ -62,10 +62,15 @@ xcodegen generate --quiet
 
 if [[ "$MODE" == "team" ]]; then
   echo "── build (development-signed, team $TEAM)"
-  # -allowProvisioningUpdates lets xcodebuild register this Mac and fetch or create the
-  # development profiles (including the DriverKit development entitlements) for the team.
-  xcodebuild -project TTStationDriver.xcodeproj -alltargets -configuration Debug \
-    SYMROOT="$HERE/build" -allowProvisioningUpdates -quiet \
+  # -allowProvisioningUpdates fetches or creates the team's development profiles. It does NOT
+  # register this Mac: that takes -allowProvisioningDeviceRegistration, and that flag only acts on
+  # a run destination, which xcodebuild ignores unless a -scheme is given. (2026-10-21: with
+  # -alltargets alone a new paid team failed with "Your team has no devices"; with the scheme +
+  # destination the Mac was registered and its profile created.) The host app's scheme builds the
+  # dext it embeds, which is all an install needs. The standalone probe is an ad-hoc-mode extra.
+  xcodebuild -project TTStationDriver.xcodeproj -scheme TTStationDriver -configuration Debug \
+    -destination 'platform=macOS,arch=arm64' \
+    SYMROOT="$HERE/build" -allowProvisioningUpdates -allowProvisioningDeviceRegistration -quiet \
     CODE_SIGNING_ALLOWED=YES CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM="$TEAM" \
     CODE_SIGN_IDENTITY="Apple Development" TTBH_ENTITLEMENTS_FLAVOR=Team \
     build

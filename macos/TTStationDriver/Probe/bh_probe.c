@@ -26,6 +26,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <IOKit/IOKitLib.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 #include "../Shared/TTBlackholeABI.h"
 #include "bh_probe.h"
@@ -160,13 +163,84 @@ out_maps:
 
 // ── telemetry --json: what `tt-station local` asks for once our dext has claimed the card ─────
 // One JSON object on stdout: {"abi":N,"boot_status":…,"arc_ready":…,"asic_temp_c":…,"power_w":…,
-// "vcore_mv":…,"current_a":…,"aiclk_mhz":…}. A value is null when its read failed. Exit 0 if the
+// "vcore_mv":…,"current_a":…,"aiclk_mhz":…}, from a running broker's telemetry.sock when there is one
+// (then boot_status is null and "via":"broker" is added), else from the dext directly.
+// A value is null when its read failed. Exit 0 if the
 // ARC answered, 1 if the dext couldn't be reached, 2 if the card looks dead. The reads are
 // libttbh's, verified against tt-kmd hwmon on a real Blackhole (libttbh/tools/ttbh_kmd_check.c).
 static void json_u32(const char *k, int ok, uint32_t v, int comma) { if (ok) printf("\"%s\":%u", k, v); else printf("\"%s\":null", k); if (comma) putchar(','); }
 
+// ── telemetry through a running broker ───────────────────────────────────────────────────
+// While a broker (`TTStationDriver serve`, ttbh-broker-iokit) runs, it holds the dext's one user
+// client, so opening the dext here would fail exactly when the card is busy. The broker answers
+// read-only readers on telemetry.sock (bhpy/broker.c); use that first and map its line onto this
+// command's schema. Fall back to the dext only when no broker answers.
+
+// The value after "key": in a flat JSON object line. Returns 1 and sets *v for a number, 0 for
+// null/absent, and sets *b for true/false.
+static int json_field(const char *line, const char *key, double *v, int *b)
+{
+    char pat[48];
+    snprintf(pat, sizeof pat, "\"%s\":", key);
+    const char *p = strstr(line, pat);
+    if (!p) return 0;
+    p += strlen(pat);
+    if (b) *b = strncmp(p, "true", 4) == 0;
+    if (!strncmp(p, "null", 4) || !strncmp(p, "true", 4) || !strncmp(p, "false", 5)) return 0;
+    char *end;
+    double d = strtod(p, &end);
+    if (end == p) return 0;
+    *v = d;
+    return 1;
+}
+
+// -1: no broker answered (try the dext). Otherwise the exit code, having printed the JSON.
+static int telemetry_from_broker(void)
+{
+    char path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    const char *env = getenv("TTBH_TELEMETRY_SOCKET"), *home = getenv("HOME");
+    if (env) snprintf(path, sizeof path, "%s", env);
+    else snprintf(path, sizeof path, "%s/Library/Application Support/TTStation/telemetry.sock", home ? home : "");
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+    snprintf(addr.sun_path, sizeof addr.sun_path, "%s", path);
+    struct timeval tv = { .tv_sec = 2 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) { close(fd); return -1; }
+    char line[1024];
+    size_t n = 0;
+    ssize_t r;
+    while (n < sizeof line - 1 && (r = read(fd, line + n, sizeof line - 1 - n)) > 0) {
+        n += (size_t)r;
+        if (memchr(line, '\n', n)) break;
+    }
+    close(fd);
+    line[n] = 0;
+    if (n == 0 || line[0] != '{') return -1;                  // not a broker line: try the dext
+
+    double temp = 0, power = 0, vcore = 0, current = 0, aiclk = 0;
+    int ready = 0;
+    double ignored;
+    json_field(line, "arc_ready", &ignored, &ready);
+    int t_ok = json_field(line, "asic_temp_c", &temp, NULL), p_ok = json_field(line, "power_w", &power, NULL);
+    int v_ok = json_field(line, "vcore_mv", &vcore, NULL), c_ok = json_field(line, "current_a", &current, NULL);
+    int a_ok = json_field(line, "aiclk_mhz", &aiclk, NULL);
+    printf("{\"abi\":%u,\"boot_status\":null,\"arc_ready\":%s,", TTBH_ABI_VERSION, ready ? "true" : "false");
+    if (t_ok) printf("\"asic_temp_c\":%.3f,", temp); else printf("\"asic_temp_c\":null,");
+    json_u32("power_w", p_ok, (uint32_t)power, 1);
+    json_u32("vcore_mv", v_ok, (uint32_t)vcore, 1);
+    json_u32("current_a", c_ok, (uint32_t)current, 1);
+    json_u32("aiclk_mhz", a_ok, (uint32_t)aiclk, 0);
+    printf(",\"via\":\"broker\"}\n");
+    return ready ? 0 : 2;
+}
+
 int ttbh_telemetry_json(void)
 {
+    int via_broker = telemetry_from_broker();
+    if (via_broker >= 0) return via_broker;
+
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceNameMatching(TTBH_SERVICE_NAME));
     if (service == IO_OBJECT_NULL) { fprintf(stderr, "no '%s' service\n", TTBH_SERVICE_NAME); return 1; }
     io_connect_t conn = IO_OBJECT_NULL;

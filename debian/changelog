@@ -1,11 +1,17 @@
-tt-station (0.13.0) noble; urgency=medium
+tt-station (0.14.0) noble; urgency=medium
 
   * New package tt-station-tray: Linux tray icon and GTK4 window to start, stop
     and connect to models on this machine (official `tt` CLI) and on paired
-    QuietBoxes. Not yet run on a display.
+    QuietBoxes.
   * Agent: `--backend tt` and `POST /run` options with `GET /run/schema`.
 
- -- Tenstorrent <software@tenstorrent.com>  Mon, 05 Oct 2026 19:25:47 -0700
+ -- Tenstorrent <software@tenstorrent.com>  Thu, 22 Oct 2026 14:55:59 -0700
+
+tt-station (0.13.0) noble; urgency=medium
+
+  * Release 0.13.0.
+
+ -- Tenstorrent <software@tenstorrent.com>  Thu, 22 Oct 2026 11:41:31 -0700
 
 tt-station (0.12.0) noble; urgency=medium
 

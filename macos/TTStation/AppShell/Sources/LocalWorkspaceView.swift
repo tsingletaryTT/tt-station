@@ -87,6 +87,7 @@ struct LocalWorkspaceView: View {
                         Spacer()
                         if let ctx = m.contextLabel { Text(ctx).font(.caption).foregroundStyle(.secondary) }
                         if let status = m.status { statusBadge(status) }
+                        else if m.isCommunity { statusBadge(m.verified == true ? "COMMUNITY" : "UNVERIFIED") }
                     }
                 }
                 if let tt = report.officialTT {

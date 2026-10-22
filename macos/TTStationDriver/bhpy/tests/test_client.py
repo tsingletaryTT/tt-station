@@ -10,6 +10,7 @@ firmware, and the sysmem iATU plan over deliberately fragmented fake IOVAs.
 import inspect
 import os
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -81,17 +82,74 @@ class Protocol(BrokerCase):
         self.assertEqual((status, echo), (0, 0xBEF0))
 
 
-class OneOwner(BrokerCase):
-    def test_a_second_client_times_out_instead_of_hanging(self):
-        os.environ["TTBH_BROKER_TIMEOUT"] = "0.5"
+class TelemetryReaders(BrokerCase):
+    """Monitors (tt-toplike) read the card through telemetry.sock while a session owns ttbh.sock."""
+
+    def _read(self):
+        import json
+        path = os.path.join(self.tmp, "telemetry.sock")
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect(path)
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        s.close()
+        return json.loads(data)
+
+    def test_readers_see_live_values_while_a_session_holds_the_card(self):
+        t = self._read()                                       # self.c holds the session
+        self.assertEqual((t["v"], t["device_id"], t["subsystem_id"]), (1, 0xB140, 0x43))
+        self.assertTrue(t["arc_ready"])
+        live = self.c.call(wire.TELEMETRY, a0=11)[0]           # the session's own view of ASIC temp
+        self.assertAlmostEqual(t["asic_temp_c"], live / 65536.0, places=2)
+        for _ in range(3):                                     # many readers, one at a time
+            self.assertIn("aiclk_mhz", self._read())
+        self.assertEqual(self.c.call(wire.HELLO)[1] >> 16, 0xB140)   # the session is undisturbed
+
+
+class ManySessions(BrokerCase):
+    """Several sessions at once, as several opens of /dev/tenstorrent/N are under tt-kmd. tt-flash
+    reopens the card in-process and from forkserver workers while the parent still holds it."""
+
+    def test_a_second_session_is_served_while_the_first_stays_open(self):
+        second = wire.BrokerClient(self.sock)
         try:
-            second = wire.BrokerClient(self.sock)
-            with self.assertRaises(TimeoutError) as e:
-                second.call(wire.HELLO)
-            self.assertIn("busy with another client", str(e.exception))
-            second.close()
+            self.assertEqual(second.call(wire.HELLO)[1] >> 16, 0xB140)
+            self.assertEqual(self.c.call(wire.HELLO)[1] >> 16, 0xB140)
         finally:
-            del os.environ["TTBH_BROKER_TIMEOUT"]
+            second.close()
+
+    def test_windows_are_never_shared_and_a_closed_session_frees_only_its_own(self):
+        second = wire.BrokerClient(self.sock)
+        mine = [self.c.call(wire.TLB_ALLOC)[0] for _ in range(3)]
+        theirs = [second.call(wire.TLB_ALLOC)[0] for _ in range(3)]
+        self.assertFalse(set(mine) & set(theirs))
+        with self.assertRaises(wire.BrokerError):
+            second.call(wire.TLB_READ, mine[0], 0, 4)          # can't use another session's window
+        second.call(wire.TLB_FREE, mine[0])                    # nor free it
+        self.c.call(wire.TLB_TARGET, mine[0], 0, 1 | 2 << 8, 1 | 2 << 8)
+        second.close()
+        # The broker sees the hang-up on its next poll, and a request of ours can be served first
+        # in that same pass (sessions are polled in index order). Give it that pass before
+        # counting: this test is about what's freed, not when.
+        time.sleep(0.2)
+        # The second session's windows come back; ours stay ours.
+        again = [self.c.call(wire.TLB_ALLOC)[0] for _ in range(3)]
+        self.assertEqual(sorted(again), sorted(theirs))
+        self.c.call(wire.TLB_TARGET, mine[0], 0, 1 | 2 << 8, 1 | 2 << 8)
+
+    def test_sysmem_from_two_sessions_never_overlaps_on_the_chip(self):
+        pcie_darwin.Allocator = _MiniAllocator
+        second = wire.BrokerClient(self.sock)
+        a = pcie_darwin.Sysmem(self.c, 1 << 20)
+        b = pcie_darwin.Sysmem(second, 1 << 20)
+        self.assertNotEqual(a.noc_addr, b.noc_addr)
+        self.assertGreaterEqual(abs(a.noc_addr - b.noc_addr), 1 << 20)
+        b.close(), second.close(), a.close()
 
 
 class Windows(BrokerCase):
@@ -170,6 +228,29 @@ class HostMemory(BrokerCase):
         self.assertEqual(n.noc_addr, (4 << 58) + (1 << 20))    # adjacent chip-visible range
         m.close(), n.close()
 
+    def test_freed_chip_addresses_are_reused(self):
+        # A long-lived session (blackhole-py's chat switching models) frees and re-creates sysmem.
+        # The chip-visible range of a freed buffer must come back, or the session walks up the NOC
+        # address space for ever. (2026-10-22: a probe on the real card got 0x...00000000,
+        # 0x...04000000, 0x...14000000, … with each buffer freed before the next.)
+        base = 4 << 58                                         # TTBH_NOC_PCIE_OFFSET
+        for _ in range(3):
+            m = pcie_darwin.Sysmem(self.c, 1 << 20)
+            self.assertEqual(m.noc_addr, base)
+            m.close()
+        # A hole is reused first-fit, and a buffer that doesn't fit the hole goes after the others.
+        a = pcie_darwin.Sysmem(self.c, 1 << 20)
+        b = pcie_darwin.Sysmem(self.c, 1 << 20)
+        c = pcie_darwin.Sysmem(self.c, 1 << 20)
+        self.assertEqual((a.noc_addr, b.noc_addr, c.noc_addr), (base, base + (1 << 20), base + (2 << 20)))
+        b.close()
+        big = pcie_darwin.Sysmem(self.c, 2 << 20)              # too big for b's 1 MiB hole
+        self.assertEqual(big.noc_addr, base + (3 << 20))
+        small = pcie_darwin.Sysmem(self.c, 1 << 20)            # fits it exactly
+        self.assertEqual(small.noc_addr, base + (1 << 20))
+        for m in (a, c, big, small):
+            m.close()
+
     def test_a_dropped_client_releases_everything(self):
         pcie_darwin.Sysmem(self.c, 1 << 20)                     # leaked on purpose
         self.c.close()
@@ -196,6 +277,36 @@ class SocketPath(BrokerCase):
             self.assertEqual(f.read(), "not a socket")       # still there, untouched
 
 
+class AlignedReads(unittest.TestCase):
+    """TLBWindow.read sends the broker only aligned 32-bit spans and slices the bytes back out."""
+
+    def _window(self, memory):
+        calls = []
+
+        class FakeConn:
+            def call(self, cmd, id=0, a0=0, a1=0, a2=0, payload=b"", want_fd=False):
+                calls.append((cmd, a0, a1))
+                return 0, 0, bytes(memory[a0:a0 + a1]) if cmd == wire.TLB_READ else b"", None
+
+        w = object.__new__(pcie_darwin.TLBWindow)
+        w.fd, w.id, w.core = FakeConn(), 0, (1, 2)
+        return w, calls
+
+    def test_odd_reads_are_widened_to_aligned_words(self):
+        memory = bytes(range(256)) * 16
+        w, calls = self._window(memory)
+        for off, n in ((0x101, 3), (0x102, 1), (0x103, 6), (0x100, 4), (0x7, 0)):
+            self.assertEqual(w.read(off, n), memory[off:off + n], (off, n))
+            _, start, length = calls[-1]
+            self.assertEqual((start % 4, length % 4), (0, 0), (off, n))
+
+    def test_a_read_off_the_end_of_the_window_is_refused(self):
+        w, calls = self._window(b"")
+        with self.assertRaises(wire.BrokerError):
+            w.read(pcie_darwin.TLBWindow.SIZE - 2, 4)
+        self.assertEqual(calls, [])
+
+
 class CleanClose(unittest.TestCase):
     """PCIDevice.close() must close the broker connection even when the steps before it fail:
     the broker only frees the session (DMA mappings, iATU, the exclusive dext client) on hang-up."""
@@ -208,7 +319,10 @@ class CleanClose(unittest.TestCase):
                 events.append("sysmem")
                 raise wire.BrokerError(wire.SYSMEM_FREE, -1)
 
-        class FakeConn:
+        class FakeConn(wire.BrokerClient):
+            def __init__(self):
+                pass
+
             def call(self, cmd, *a, **k):
                 events.append("power")
                 raise wire.BrokerError(wire.ARC_MSG, -9)
@@ -224,9 +338,64 @@ class CleanClose(unittest.TestCase):
         # The last failure propagates; the earlier one rides along as its context.
         self.assertEqual(caught.exception.status, -9)
         self.assertEqual(caught.exception.__context__.status, -1)
-        self.assertIsNone(dev.fd)
+        self.assertEqual(dev.fd, -1)                           # blackhole-py's closed sentinel
         dev.close()                                            # idempotent afterwards
         self.assertEqual(events, ["sysmem", "power", "socket"])
+
+
+class FdSentinel(BrokerCase):
+    def test_the_client_compares_like_the_descriptor_blackhole_py_expects(self):
+        # device.py's Device.close() starts with `if self.pcie.fd < 0: return`.
+        self.assertFalse(self.c < 0)
+        self.assertTrue(self.c >= 0)
+        self.c.close()
+        self.assertTrue(self.c < 0)
+        self.assertFalse(self.c >= 0)
+
+
+class DartWindow(unittest.TestCase):
+    """Sysmem larger than the DART window: blackhole-py's 8B asks for 2 GiB, the Mac maps a bit less."""
+
+    def setUp(self):
+        if not BROKER:
+            self.skipTest("TTBH_BROKER_SIM not set (run via make test)")
+        self.tmp = tempfile.mkdtemp()
+        self.sock = os.path.join(self.tmp, "ttbh.sock")
+        pcie_darwin.Allocator = _MiniAllocator                 # blackhole-py's is used when installed
+        env = dict(os.environ, TTBH_SIM_DMA_LIMIT=str((64 << 20) - (1 << 20)))   # 64 MiB less 1 MiB
+        self.proc = subprocess.Popen([BROKER, self.sock], stderr=subprocess.PIPE, env=env)
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                self.c = wire.BrokerClient(self.sock)
+                break
+            except OSError:
+                if time.monotonic() > deadline or self.proc.poll() is not None:
+                    raise
+                time.sleep(0.02)
+
+    def tearDown(self):
+        self.c.close()
+        self.proc.terminate()
+        self.proc.wait(5)
+        self.proc.stderr.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_slightly_too_large_request_shrinks_by_a_step_and_says_so(self):
+        import contextlib, io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            mem = pcie_darwin.Sysmem(self.c, 64 << 20)
+        try:
+            self.assertEqual(mem.size, (64 << 20) - pcie_darwin.Sysmem.BACKOFF)
+            self.assertEqual(mem.allocator.end, mem.size)       # blackhole-py sizes staging from this
+            self.assertIn("can't be DMA-mapped", err.getvalue())
+        finally:
+            mem.close()
+
+    def test_a_request_far_beyond_the_window_still_fails(self):
+        with self.assertRaises(wire.BrokerError):
+            pcie_darwin.Sysmem(self.c, 256 << 20)               # would need to shrink by > 1/4
 
 
 class _MiniAllocator:

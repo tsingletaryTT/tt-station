@@ -81,14 +81,22 @@ pub struct OfficialTt {
     pub version: String,
 }
 
-/// One right-sized model, flattened from `tt model list`'s per-device entry.
+/// One right-sized model, flattened from a `tt model list` row. Two kinds of row come back:
+/// released-catalog models, with a per-device table (`devices.<mesh>.{status, max_context}`), and
+/// (from tt 1.2.0) community bundles from the Hugging Face Hub, with `hardware`, `kind`,
+/// `engines` and `verified` but no per-device table.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct RightSized {
     pub name: String,
     pub model_type: Option<String>,
     pub engines: Vec<String>,
+    /// Released-catalog status on this mesh (`COMPLETE`, `EXPERIMENTAL`, ...). None for a bundle.
     pub status: Option<String>,
     pub max_context: Option<u64>,
+    /// `"catalog"` (Tenstorrent's released catalog) or `"community"` (a tt-model-manager bundle).
+    pub source: String,
+    /// For a community bundle: whether Tenstorrent has verified it. None for catalog rows.
+    pub verified: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,9 +173,15 @@ pub fn parse_model_list(json: &[u8], mesh: &str) -> Result<Vec<RightSized>> {
             if per.and_then(|p| p.get("supported")).and_then(Value::as_bool) == Some(false) {
                 return None;
             }
+            // A catalog row has a `devices` table; a community bundle has `hardware` instead.
+            let community = m.get("devices").is_none() && m.get("hardware").is_some();
             Some(RightSized {
                 name: m.get("name")?.as_str()?.to_string(),
-                model_type: m.get("model_type").and_then(Value::as_str).map(str::to_string),
+                model_type: m
+                    .get("model_type")
+                    .or_else(|| m.get("type"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 engines: per
                     .and_then(|p| p.get("engines"))
                     .or_else(|| m.get("engines"))
@@ -176,6 +190,8 @@ pub fn parse_model_list(json: &[u8], mesh: &str) -> Result<Vec<RightSized>> {
                     .unwrap_or_default(),
                 status: per.and_then(|p| p.get("status")).and_then(Value::as_str).map(str::to_string),
                 max_context: per.and_then(|p| p.get("max_context")).and_then(Value::as_u64),
+                source: if community { "community" } else { "catalog" }.to_string(),
+                verified: if community { m.get("verified").and_then(Value::as_bool) } else { None },
             })
         })
         .collect())
@@ -286,13 +302,13 @@ fn print_human(r: &Report) {
                 println!("║    (none)");
             }
             for m in models {
-                println!(
-                    "║    {:<28} {:<5} {:<13} ctx {}",
-                    m.name,
-                    m.model_type.as_deref().unwrap_or("-"),
-                    m.status.as_deref().unwrap_or("-"),
-                    m.max_context.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
-                );
+                let status = match (m.source.as_str(), m.verified) {
+                    ("community", Some(true)) => "community".to_string(),
+                    ("community", _) => "community, unverified".to_string(),
+                    _ => m.status.clone().unwrap_or_else(|| "-".into()),
+                };
+                let ctx = m.max_context.map(|c| format!("  ctx {c}")).unwrap_or_default();
+                println!("║    {:<36} {:<5} {}{ctx}", m.name, m.model_type.as_deref().unwrap_or("-"), status);
             }
         }
         _ => {
@@ -388,6 +404,38 @@ mod tests {
         // ...and neither: say so rather than end in a blank.
         let err = right_sized(&fake_tt(dir.path(), "", "", 1), "p100").unwrap_err().to_string();
         assert!(err.contains("(no output)"), "{err}");
+    }
+
+    // Real `tt --json model list --hw p100` output from tt 1.2.0 (two of its seven rows). From 1.2.0
+    // the released catalog lists no model for p100 (its Llama-3.1-8B entries dropped p100); what
+    // remains are verified community bundles, which carry `hardware`/`kind`/`engines`/`verified`
+    // and no per-device `devices` table. 1.0.1's catalog-style rows are covered above.
+    const TT_1_2_P100: &str = r#"{"device":"p100","scope":"all","models":[
+      {"name":"stisiTT/llama-3.2-3b-blackhole-v51","source":"HuggingFace","kind":"container","engine":"vllm-plugin",
+       "arch":["blackhole"],"hardware":["p100","p150"],"downloads":null,"installed":false,"weights_repo":null,
+       "weights_bytes":null,"verified":true,"copy_of":null,"type":null,"engines":["vllm-plugin"],"cached":false,
+       "cache_size_bytes":null,"backends":["tt-model"]},
+      {"name":"tt-hous/ornith-1.0-35b","source":"HuggingFace","kind":"container","engine":"vllm-plugin",
+       "arch":["blackhole"],"hardware":["p100","p150","p150x2","p150x4"],"verified":false,"type":"llm",
+       "engines":["vllm-plugin"],"backends":["tt-model"]}]}"#;
+
+    #[test]
+    fn community_bundles_from_tt_1_2_are_labelled_as_such() {
+        let got = parse_model_list(TT_1_2_P100.as_bytes(), "p100").unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name, "stisiTT/llama-3.2-3b-blackhole-v51");
+        assert_eq!(got[0].source, "community");
+        assert_eq!(got[0].verified, Some(true));
+        assert_eq!(got[0].engines, vec!["vllm-plugin".to_string()]);
+        assert_eq!(got[0].status, None); // a bundle has no released-catalog status
+        assert_eq!(got[1].model_type.as_deref(), Some("llm")); // `type`, when the bundle sets it
+        assert_eq!(got[1].verified, Some(false));
+    }
+
+    #[test]
+    fn catalog_rows_are_labelled_catalog() {
+        let got = parse_model_list(P100_LIST.as_bytes(), "p100").unwrap();
+        assert!(got.iter().all(|m| m.source == "catalog" && m.verified.is_none()));
     }
 
     #[test]

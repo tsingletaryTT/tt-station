@@ -6,9 +6,12 @@
 #include "ttbh_sim.h"
 
 #include <assert.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #define PAGE TTBH_TLB_2M_SIZE
 #define NWIN (TTBH_TLB_2M_COUNT)
@@ -29,6 +32,8 @@ typedef struct { uint32_t x, y; uint64_t base; uint8_t *data; } page;
 
 struct ttbh_sim {
     uint8_t *bar0, *bar2;
+    int store_fd;                 // shared-memory backing store: page i at offset i * PAGE
+    uint8_t *store;               // the whole store, mapped once (what ttbh_sim_word and the firmware use)
     page pages[MAX_PAGES];
     int npages;
     int shown[NWIN];              // page index each window currently shows, -1 = none
@@ -42,22 +47,25 @@ static page *find_page(ttbh_sim *s, uint32_t x, uint32_t y, uint64_t base)
     for (int i = 0; i < s->npages; i++)
         if (s->pages[i].x == x && s->pages[i].y == y && s->pages[i].base == base) return &s->pages[i];
     assert(s->npages < MAX_PAGES);
-    page *p = &s->pages[s->npages++];
-    *p = (page){ x, y, base, calloc(1, PAGE) };
+    page *p = &s->pages[s->npages];
+    *p = (page){ x, y, base, s->store + (uint64_t)s->npages * PAGE };   // zero-filled by ftruncate
+    s->npages++;
     return p;
 }
 
 static uint8_t *window(ttbh_sim *s, uint32_t idx) { return s->bar0 + (uint64_t)idx * PAGE; }
 
-static void save_all(ttbh_sim *s)
+// Point window `idx` at backing page `pi` (a shared mapping of that page), or at private zero
+// memory when `pi` < 0.
+static void map_window(ttbh_sim *s, uint32_t idx, int pi)
 {
-    for (uint32_t i = 0; i < NWIN; i++)
-        if (s->shown[i] >= 0) memcpy(s->pages[s->shown[i]].data, window(s, i), PAGE);
-}
-static void load_all(ttbh_sim *s)
-{
-    for (uint32_t i = 0; i < NWIN; i++)
-        if (s->shown[i] >= 0) memcpy(window(s, i), s->pages[s->shown[i]].data, PAGE);
+    void *want = window(s, idx), *got;
+    if (pi >= 0)
+        got = mmap(want, PAGE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, s->store_fd, (off_t)pi * PAGE);
+    else
+        got = mmap(want, PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+    assert(got == want);
+    (void)got;
 }
 
 uint32_t *ttbh_sim_word(ttbh_sim *s, uint32_t x, uint32_t y, uint64_t addr)
@@ -66,7 +74,7 @@ uint32_t *ttbh_sim_word(ttbh_sim *s, uint32_t x, uint32_t y, uint64_t addr)
     return (uint32_t *)(p->data + (addr & (PAGE - 1)));
 }
 
-// One firmware step against the backing store (windows must be saved first).
+// One firmware step against the backing store (the same memory the windows map).
 static void firmware(ttbh_sim *s)
 {
     uint32_t *msi = ttbh_sim_word(s, 8, 0, TTBH_ARC_MSI_FIFO);
@@ -93,9 +101,7 @@ static void firmware(ttbh_sim *s)
 
 void ttbh_sim_sync(ttbh_sim *s)
 {
-    save_all(s);
     firmware(s);
-    load_all(s);
 }
 
 ttbh_sim_tlb ttbh_sim_decode_tlb(ttbh_sim *s, uint32_t idx)
@@ -108,15 +114,13 @@ ttbh_sim_tlb ttbh_sim_decode_tlb(ttbh_sim *s, uint32_t idx)
 void ttbh_sim_retarget(ttbh_sim *s, uint32_t idx)
 {
     assert(idx < NWIN);
-    save_all(s);
     firmware(s);
     ttbh_sim_tlb t = ttbh_sim_decode_tlb(s, idx);
     // A window only reaches memory with tt-kmd's settings: strict ordering. (Multicast writes land
     // on the end tile's page here; the sim doesn't fan them out.)
     if (t.ordering == 1) s->shown[idx] = (int)(find_page(s, t.x_end, t.y_end, t.addr) - s->pages);
     else s->shown[idx] = -1;
-    load_all(s);
-    if (s->shown[idx] < 0) memset(window(s, idx), 0, PAGE);
+    map_window(s, idx, s->shown[idx]);
 }
 
 typedef struct { ttbh_sim *sim; ttbh_bar0_ctx bar0; } sim_window_ctx;
@@ -141,6 +145,18 @@ ttbh_sim *ttbh_sim_new(uint32_t entries)
 {
     ttbh_sim *s = calloc(1, sizeof *s);
     s->bar0 = mmap(NULL, BAR0_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    // The backing store: anonymous shared memory (named only long enough to open it).
+    char name[64];
+    static int seq;
+    snprintf(name, sizeof name, "/ttbh-sim.%d.%d", (int)getpid(), seq++);
+    s->store_fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+    assert(s->store_fd >= 0);
+    shm_unlink(name);
+    int rc = ftruncate(s->store_fd, (off_t)MAX_PAGES * PAGE);
+    assert(rc == 0);
+    (void)rc;
+    s->store = mmap(NULL, (size_t)MAX_PAGES * PAGE, PROT_READ | PROT_WRITE, MAP_SHARED, s->store_fd, 0);
+    assert(s->store != MAP_FAILED);
     s->bar2 = calloc(1, BAR2_SIZE);
     assert(s->bar0 != MAP_FAILED && s->bar2);
     for (uint32_t i = 0; i < NWIN; i++) s->shown[i] = -1;
@@ -176,7 +192,8 @@ ttbh_sim *ttbh_sim_new(uint32_t entries)
 
 void ttbh_sim_free(ttbh_sim *s)
 {
-    for (int i = 0; i < s->npages; i++) free(s->pages[i].data);
+    munmap(s->store, (size_t)MAX_PAGES * PAGE);
+    close(s->store_fd);
     munmap(s->bar0, BAR0_SIZE);
     free(s->bar2);
     free(s);

@@ -187,6 +187,8 @@ kern_return_t TTBlackholeDriver::CopyBarMemory(uint8_t bar, IOMemoryDescriptor *
 kern_return_t TTBlackholeDriver::CfgRead(uint32_t offset, uint32_t width, uint32_t * value)
 {
     if (ivars->pci == nullptr || value == nullptr) return kIOReturnNotReady;
+    // Only 1, 2 or 4 bytes, checked first: `offset % width` below must never see a width of 0.
+    if (width != 1 && width != 2 && width != 4) return kIOReturnBadArgument;
     // Extended config space is 4 KiB; the access must fit and be naturally aligned.
     if (offset >= 4096 || offset + width > 4096 || (offset % width) != 0) return kIOReturnBadArgument;
 

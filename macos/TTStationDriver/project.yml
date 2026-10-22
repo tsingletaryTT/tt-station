@@ -12,8 +12,8 @@ options:
     macOS: "14.0"
 settings:
   base:
-    MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "2"
     # Signing is done after the build by scripts/install-dev.sh (ad-hoc, dev entitlements).
     CODE_SIGNING_ALLOWED: NO
     CODE_SIGN_IDENTITY: ""
