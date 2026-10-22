@@ -118,6 +118,9 @@ pub struct FakeRunner {
     /// How many `http_get` calls have been seen -- indexes into
     /// `http_get_sequence`.
     http_get_calls_seen: Arc<Mutex<usize>>,
+    /// Every URL a readiness probe (`health_ok`) or `http_get` was given, in order. Lets a test
+    /// assert WHICH host the backend polled.
+    probed_urls: Arc<Mutex<Vec<String>>>,
     /// Canned `run_capturing` response -- `(code, stdout, stderr)` -- for
     /// calls whose space-joined argv CONTAINS a registered substring, e.g.
     /// `("gozer --version", 0, "gozer 0.1.0", "")`. Checked in insertion
@@ -174,6 +177,7 @@ impl FakeRunner {
             http_get_response: Arc::new(Mutex::new(None)),
             http_get_sequence: Arc::new(Mutex::new(Vec::new())),
             http_get_calls_seen: Arc::new(Mutex::new(0)),
+            probed_urls: Arc::new(Mutex::new(Vec::new())),
             run_capturing_outputs: Arc::new(Mutex::new(Vec::new())),
             run_capturing_failures: Arc::new(Mutex::new(Vec::new())),
             child_envs: Arc::new(Mutex::new(Vec::new())),
@@ -213,6 +217,14 @@ impl FakeRunner {
     /// that `RunPyBackend::start` BAILED early (on a cancel or a dead
     /// container) instead of grinding its full health-poll ceiling -- the
     /// probe count is the observable "didn't run all `health_poll_attempts`".
+    #[allow(dead_code)]
+    pub fn probed_urls(&self) -> Vec<String> {
+        self.probed_urls
+            .lock()
+            .expect("probed_urls poisoned")
+            .clone()
+    }
+
     #[allow(dead_code)]
     pub fn health_calls(&self) -> u32 {
         *self
@@ -481,11 +493,9 @@ impl FakeGozerBox {
                 {
                     Some(board) => {
                         let who = board.holder.take().map(|(_, who)| who).unwrap_or_default();
-                        state.history.push((
-                            "released".to_string(),
-                            lease_id.to_string(),
-                            who,
-                        ));
+                        state
+                            .history
+                            .push(("released".to_string(), lease_id.to_string(), who));
                         ok(r#"{"released":true,"message":"released"}"#.to_string())
                     }
                     // Exit 13: "no such lease" -- release's idempotent case.
@@ -501,8 +511,11 @@ impl FakeGozerBox {
                     .boards
                     .iter()
                     .flat_map(|board| {
-                        board.chips.iter().zip(&board.dev_indices).map(move |(bdf, index)| {
-                            match &board.holder {
+                        board
+                            .chips
+                            .iter()
+                            .zip(&board.dev_indices)
+                            .map(move |(bdf, index)| match &board.holder {
                                 Some((_, who)) => serde_json::json!({
                                     "dev_index": index, "bdf": bdf, "board": board.serial,
                                     "state": "CLAIMED", "who": who, "reason": "serving",
@@ -511,8 +524,7 @@ impl FakeGozerBox {
                                     "dev_index": index, "bdf": bdf, "board": board.serial,
                                     "state": "FREE",
                                 }),
-                            }
-                        })
+                            })
                     })
                     .collect();
                 ok(serde_json::json!({"grain": "board", "chips": chips, "queue": []}).to_string())
@@ -672,7 +684,11 @@ impl CommandRunner for FakeRunner {
         })
     }
 
-    fn health_ok(&self, _url: &str) -> bool {
+    fn health_ok(&self, url: &str) -> bool {
+        self.probed_urls
+            .lock()
+            .expect("probed_urls poisoned")
+            .push(url.to_string());
         let mut seen = self
             .health_calls_seen
             .lock()
@@ -681,7 +697,11 @@ impl CommandRunner for FakeRunner {
         *seen > self.health_calls_before_ok
     }
 
-    fn http_get(&self, _url: &str) -> Result<String> {
+    fn http_get(&self, url: &str) -> Result<String> {
+        self.probed_urls
+            .lock()
+            .expect("probed_urls poisoned")
+            .push(url.to_string());
         // A configured sequence wins: consume one entry per call, sticking at
         // the last once exhausted (so a "ready" tail keeps answering ready).
         {

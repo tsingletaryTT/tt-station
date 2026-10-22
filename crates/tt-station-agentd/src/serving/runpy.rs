@@ -192,6 +192,13 @@ pub struct RunPyConfig {
     /// Host the serving container is reachable on -- baked into the
     /// returned `Endpoint`'s `base_url`, same role as `DockerConfig::host`.
     pub host: String,
+    /// Host the backend polls for readiness (and reconciles status against). `None` means the
+    /// same as `host`, which is what every operator-set host gets. `main` sets loopback when
+    /// `host` came from detection or the hostname fallback: that address is captured once at
+    /// start-up and may go stale, sit on a VPN tunnel, or not accept loopback-bound traffic,
+    /// while a poll on `127.0.0.1` reaches the published port regardless. The returned
+    /// `Endpoint`'s `base_url` always uses `host`.
+    pub probe_host: Option<String>,
     /// `--service-port`: the host port `run.py` publishes the OpenAI
     /// server on. Also what the health poll and `stop`'s `docker ps
     /// --filter publish=<port>` both key off of.
@@ -288,6 +295,13 @@ pub struct RunPyConfig {
     pub enable_tool_calling: bool,
 }
 
+impl RunPyConfig {
+    /// The host readiness polls use: `probe_host` when set, else `host`.
+    pub fn probe_host(&self) -> &str {
+        self.probe_host.as_deref().unwrap_or(&self.host)
+    }
+}
+
 impl Default for RunPyConfig {
     /// Defaults chosen to make hermetic tests concise (override only the
     /// field a given test cares about via struct-update syntax); NOT
@@ -308,6 +322,7 @@ impl Default for RunPyConfig {
         RunPyConfig {
             repo_dir: "tt-inference-server".to_string(),
             host: "127.0.0.1".to_string(),
+            probe_host: None,
             service_port: 8000,
             no_auth: true,
             model_source: "huggingface".to_string(),
@@ -1040,6 +1055,12 @@ impl RunPyBackend {
 }
 
 impl ServingBackend for RunPyBackend {
+    /// Name used in `OptionsUnsupported` errors. This backend keeps the
+    /// refusing default `start_with_options`, so it rejects any run option.
+    fn backend_name(&self) -> &'static str {
+        "runpy"
+    }
+
     /// See `ServingBackend::start_forcing`. `force` reaches exactly one
     /// decision in this whole function -- `acquire_lease`'s -- and that
     /// method's doc explains what it licenses. Every other guard below
@@ -1429,11 +1450,13 @@ impl ServingBackend for RunPyBackend {
         // loop, no lock held across any of it.
         let health_url = format!(
             "http://{}:{}/health",
-            self.config.host, self.config.service_port
+            self.config.probe_host(),
+            self.config.service_port
         );
         let models_url = format!(
             "http://{}:{}/v1/models",
-            self.config.host, self.config.service_port
+            self.config.probe_host(),
+            self.config.service_port
         );
 
         // On success this holds the served model id to report back. `run.py
@@ -1823,7 +1846,7 @@ impl ServingBackend for RunPyBackend {
         }
         let entries = crate::serving::discovery::discover_serving(
             self.runner.as_ref(),
-            &self.config.host,
+            self.config.probe_host(),
             self.config.service_port,
             &status,
         );

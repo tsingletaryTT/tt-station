@@ -23,6 +23,96 @@ installed on this box at `~/.tenstorrent-venv/bin/tt`.
 
 ## ▶ PICK UP HERE
 
+**Linux tray (`tt-station-tray`, v0.14.0, branch `feat/linux-tray`, 2026-10-05).** Original
+prompt: *"Branching off this current branch, imagine how tt-station on the linux side could also
+do what it does on the mac side. Tray app in gnome, kde, xfce, etc. Helpful connection to running
+llms. stop start them. use tt CLI, my machine franklinstower is connected and can be our guinea
+pig."* Spec: `docs/superpowers/specs/2026-10-05-linux-tray-design.md`; reference:
+`docs/reference/linux-tray.md`; per-task reports in `.superpowers/sdd/2026-10-05-linux-tray/`.
+Key decisions:
+- `Station` is an **enum** with two variants (`LocalStation` = official `tt --json`,
+  `RemoteStation` = agent API). The spec proposed a trait object; the kinds are fixed, and the
+  enum needs no `async-trait` dependency.
+- **Plain GTK4, no libadwaita**: `libadwaita-dev` is not installed here, and plain GTK4 should also fit
+  jammy (not yet built there). No `gtk4` `v4_*` feature is enabled. Restyle is a later swap.
+- **`--backend tt`** in agentd serves through the official `tt` CLI (`serving/tt.rs`); opt-in,
+  `runpy` stays the default.
+- **Run options** (`libttstation::run_options`) are a closed set with a vLLM-flag allowlist;
+  `GET /run/schema` describes them for UIs. Only the `tt` backend applies them; runpy, docker
+  and dstack answer 400 (`OptionsUnsupported`) to non-empty options. The schema offers only the
+  `server` workflow.
+- Networking, option 3: mDNS plus manually added hosts now; Tailscale auto-discovery later.
+- Open WebUI is published on `127.0.0.1` only.
+- `LocalStation::run` takes **no gozer lease** (owner decision pending: a shared box can collide).
+- Package `tt-station-tray` (own icon name, autostart runs default mode because a `--no-window` instance does not join single-instance).
+State: unit tests, clippy and `tt-station-tray --smoke` pass. **Run on a display only in part**
+(KDE Wayland, 2026-10-14: icon properties, opening the window, the Models page through AT-SPI);
+still unchecked: a physical click, `--no-window`, single-instance, ksni updates, the real
+docker/terminal/clipboard/notify-send/WoL runner. The `tt` backend is live-verified for one tt-model bundle
+(`changh95/qwen3.8-27b-p300x2`, Tasks 4 and 4c: 5 serves, ~2-4 min to `/v1/models`, nothing
+downloaded; `/serving` and restart rediscovery verified after e7c4c2c). Catalog models only
+`--dry-run`; `--offline` untested; `TT_VISIBLE_DEVICES` does not reach the container; an
+`options.port` serve is not rediscovered after a restart; `/tmp/tt-gozer/history.jsonl` is
+root-owned here, which blocks lease adoption (owner: `sudo chown ttuser
+/tmp/tt-gozer/history.jsonl`). Nothing tested on franklinstower. No `.deb` built from the
+new packaging; jammy not built. Gaps: Logs fetches on demand, no `tt model info` pane, no presets,
+no Queue button on 409, GNOME needs the AppIndicator extension.
+Final review fix wave (2026-10-05): the `tt` backend keeps its lease when a failed start cannot
+stop its container, refuses a second concurrent start (409, `/status` `starting: true`), and no
+longer rediscovers a just-stopped serve; the window stores poll answers by station id; the
+schema offers only the `server` workflow; the tray package Recommends (no longer Depends on)
+`tt-station`, so a tray-only workstation can skip the agent and its passwordless power rule.
+Agent defaults (2026-10-06, commits `a9ee660`..`94ac84b`): `tt-station-agentd --backend auto`
+needs no other flags on a typical box. `name` defaults to the short hostname, `ctrl_port` to 8765,
+`chips` to the detected hardware (Blackhole meshes only; other meshes keep `4xBH`),
+`serving_host` to the primary LAN IPv4 (then `<short>.local`, then `127.0.0.1`), and
+`serving_port` to 20000 for the `tt` backend and 8000 for the others. Each applies only when no
+flag, profile or `[global]` value sets it, so a box with a config file resolves as before (checked
+against this box's real `agentd.toml`). `auto` picks `tt` when a valid official `tt` is found and
+`runpy` otherwise; the default backend stays `runpy`. When the agent chose `serving_host` itself it
+polls readiness on `127.0.0.1` and advertises the LAN address in endpoints. `--print-config` and
+`/config` report each value's source. A `--backend tt` agent with no port now serves on 20000
+(was 8000). Reference: `docs/reference/agentd-config.md`.
+**Branches and review (as of 2026-10-22).** PR #1 (`experiments/egpu`) merged into `main` on
+2026-10-22, and PR #2 (https://github.com/tsingletaryTT/tt-station/pull/2) now targets `main`.
+`main` was merged into `feat/linux-tray` the same day. The only conflict was `debian/changelog`:
+both branches had written a 0.13.0 entry, and `main` released 0.13.0, so the tray work became
+0.14.0 (`scripts/bump-version.sh`, plus `MARKETING_VERSION`). The tray still parses tt 1.2.0's
+`tt --json model list` (rows keep `name`, `type`, `source`, `hardware`, `cached`). Community
+bundles name their weights `weights_repo` and have no `hf_repo`, so they get no reference
+performance, which is correct: the targets were measured on the catalog models. qb2-lab runs tt
+1.0.1. The PR description is kept in `.superpowers/sdd/2026-10-05-linux-tray/stacked-pr-body.md`
+on the box that built it.
+Pushing needs SSH or a token with the `workflow` scope (the branch edits `.github/workflows/`).
+**Models page reference performance and GtkPaned fix (2026-10-14, after `4596d11`).** The Models
+page shows tt-inference-server's `model_performance_reference.json` targets for this machine
+(`crate::perf`): a `target N tok/s/user` row suffix (catalog rows only), a legend on the count
+line, and a detail block labelled "not measured on this machine" with the tt-inference-server
+version. The checkout comes from one `tt serve --device <mesh> --dry-run` (5 s limit, fetched
+after the rows are shown; a miss is remembered for 5 minutes).
+Boxes show nothing until the agent's `/models` gains a `perf` field. The `GtkPaned ... minimum
+height` CRITICAL came from the wrapping detail label; it now sits in a vertical-only
+ScrolledWindow, and a live walk of all three pages logged none. Report:
+`.superpowers/sdd/2026-10-05-linux-tray/perf-and-paned-report.md`.
+Copilot review of PR #2 (2026-10-14): 7 inline comments plus the summary claim. Each matched
+the code and was fixed test-first (`c0ba10b`..`f47d0c5`), then an independent review added a
+second and third round (`14bf6da` onward). All pushed on 2026-10-14, and a reply was posted on
+each of the seven threads plus one PR comment for the summary claim (threads left open for the
+reviewer to resolve). Fixed: agentd `tt` backend
+stop/lease races (serve epoch; stops take turns with a 60 s wait, then 409; a stop requested
+before a start never acts on it), `/stop` route keeps a newer serve's status (all backends),
+`/run/schema` 404 = empty schema, token-change rebuild, local stop by exit status and tt's JSON
+error text, Models page station switch, pairing case, Start in-flight guard and Restart after a
+successful Start, Restart pre-check (`Station::replace`; a `tt`-backend box gets only `/run`).
+Still open (listed in docs/reference/linux-tray.md): a Restart loses the old serve when the new
+one fails for a reason no check sees; an aborting start's own stop runs outside the stop turn;
+`reconciled_status`'s unconditional `set_idle`; CLI-vs-tray host spelling; no window fix seen
+on a display. Draft replies:
+`.superpowers/sdd/2026-10-05-linux-tray/copilot-replies-draft.md` (not posted).
+Owner to do for franklinstower: install and start `tt-station-agentd` and send the pairing code;
+say whether the session is GNOME or KDE; authorize an SSH key if we are to test over SSH;
+`sudo apt install libadwaita-dev` only for a later restyle.
+
 **eGPU experiment: a local P100 on a Mac (branch `experiments/egpu`, 2026-09-28 → 10-01).**
 Goal (owner): *tt-station detects a Tenstorrent card attached to a Mac and has the official `tt`
 CLI / tt-model-manager deploy a model right-sized for it*, reached in small steps. Rig: the owner's

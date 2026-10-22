@@ -748,6 +748,7 @@ mod tests {
             serving_image: None,
             tt_inference_repo: None,
             tt_device: None,
+            ..Default::default()
         });
         let lines = header_lines(&s);
         assert!(lines.iter().any(|l| l.contains("profile: bleeding")));

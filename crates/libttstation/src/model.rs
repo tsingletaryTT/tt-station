@@ -275,6 +275,13 @@ pub struct StatusInfo {
     /// leasing-capable box as unleased purely because it was running an older
     /// agent.
     pub leasing: Option<LeasingSummary>,
+    /// `true` while the agent is bringing a model up (`/status`'s `starting`, sent only by a
+    /// `tt`-backend agent, and only while true). `status` stays `Idle` until the start ends,
+    /// so this tells "idle" from "starting". Additive: `#[serde(default)]` so an agent that
+    /// never sends it decodes as `false`, and skipped when `false` so the JSON that
+    /// `tt-station --json status` prints (which the Mac app reads) is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub starting: bool,
 }
 
 /// `GET /config`'s response body (see `tt-station-agentd::routes::get_config`,
@@ -285,7 +292,7 @@ pub struct StatusInfo {
 /// There is deliberately no `hf_token` (or any token-store) field here: the
 /// struct's shape enforces the "secrets never leave the box" constraint by
 /// construction rather than by convention.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConfigSummary {
     pub active_profile: Option<String>,
     pub available_profiles: Vec<String>,
@@ -295,6 +302,31 @@ pub struct ConfigSummary {
     pub serving_image: Option<String>,
     pub tt_inference_repo: Option<String>,
     pub tt_device: Option<String>, // None = auto-detected
+    // --- Additive fields (smarter defaults). Every one is optional on the wire and absent
+    // from an older agent's answer, so existing decoders (the Mac app, the tray, `tt-station
+    // config`) keep working unchanged. ---
+    /// The box name the agent resolved (flag, config, or the short hostname).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The control-plane port the agent resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctrl_port: Option<u16>,
+    /// The chip inventory string the agent resolved (the `chips` of `/status`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chips: Option<String>,
+    /// What the operator asked the backend to be, before resolution. Equals `backend` unless
+    /// the request was `auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_requested: Option<String>,
+    /// One sentence saying how `auto` chose `backend`. Present only when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_note: Option<String>,
+    /// Where each resolved value came from: `flag`, `profile`, `global`, `detected`, `auto`
+    /// or `default`. Keyed by setting name (`name`, `ctrl_port`, `chips`, `backend`,
+    /// `serving_host`, `serving_port`, `serving_image`, `tt_inference_repo`, `tt_device`).
+    /// Empty (and omitted) when the agent predates the field.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sources: std::collections::BTreeMap<String, String>,
 }
 
 /// `GET /logs`'s response body (Task 2's `tt-station-agentd::routes::LogsResponse`,
@@ -486,6 +518,37 @@ pub fn txt_decode(
 mod tests {
     use super::*;
 
+    /// `tt-station --json status` prints a serialized `StatusInfo`, and the Mac app reads it.
+    /// `starting: false` must leave that JSON exactly as it was (no new key), and JSON from
+    /// before the field existed must still decode.
+    #[test]
+    fn status_info_starting_is_additive() {
+        let info = StatusInfo {
+            status: ServingStatus::Idle,
+            device_mesh: Some("p300x2".into()),
+            mac: None,
+            leasing: None,
+            starting: false,
+        };
+        let value = serde_json::to_value(&info).unwrap();
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["device_mesh", "leasing", "mac", "status"], "{value}");
+
+        let starting = StatusInfo {
+            starting: true,
+            ..info.clone()
+        };
+        assert_eq!(serde_json::to_value(&starting).unwrap()["starting"], true);
+
+        let old: StatusInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(old, info);
+    }
+
     #[test]
     fn status_roundtrips_through_txt_string() {
         assert_eq!(ServingStatus::Idle.to_txt(), "idle");
@@ -559,11 +622,30 @@ mod tests {
             serving_image: Some("img:0.14.0".into()),
             tt_inference_repo: Some("/home/x/code/tt-inference-server".into()),
             tt_device: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("hf_token"), "summary must not carry secrets");
         let back: ConfigSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
+    }
+
+    /// The smarter-defaults fields are additive: an older agent's `/config` body (without them)
+    /// still decodes, and a summary that has none of them serialises to the old key set.
+    #[test]
+    fn config_summary_new_fields_are_additive() {
+        let old = r#"{"active_profile":null,"available_profiles":[],"backend":"runpy",
+            "serving_host":"127.0.0.1","serving_port":8000,"serving_image":null,
+            "tt_inference_repo":null,"tt_device":null}"#;
+        let s: ConfigSummary = serde_json::from_str(old).unwrap();
+        assert_eq!(s.name, None);
+        assert!(s.sources.is_empty());
+        let out = serde_json::to_value(&s).unwrap();
+        let keys: Vec<_> = out.as_object().unwrap().keys().cloned().collect();
+        assert!(
+            !keys.iter().any(|k| ["name", "ctrl_port", "chips", "sources", "backend_requested", "backend_note"].contains(&k.as_str())),
+            "{keys:?}"
+        );
     }
 
     #[test]

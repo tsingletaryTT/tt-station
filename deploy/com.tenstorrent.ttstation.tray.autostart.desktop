@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=tt-station Tray
+Comment=Tray icon for tt-station (starts the tray and its window host; the window opens from the tray menu)
+# Default mode on purpose: a --no-window instance does not take part in GApplication
+# single-instance, so a later launch from the menu would start a second process.
+Exec=/usr/bin/tt-station-tray
+Icon=com.tenstorrent.ttstation.tray
+Terminal=false
+Categories=Utility;System;
+X-GNOME-Autostart-enabled=true

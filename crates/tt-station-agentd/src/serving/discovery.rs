@@ -120,6 +120,22 @@ pub fn discover_serving(
     entries
 }
 
+/// Merge a backend's own `/serving` entries (`ServingBackend::serving_entries`) with docker
+/// discovery. The backend's entries come first in authority: a discovered entry on a host port
+/// the backend already reported is dropped, so one server is never listed twice. The result is
+/// sorted by `host_port`, like `discover_serving`'s.
+pub fn merge_serving(own: Vec<ServingEntry>, discovered: Vec<ServingEntry>) -> Vec<ServingEntry> {
+    let own_ports: std::collections::BTreeSet<u16> = own.iter().map(|e| e.host_port).collect();
+    let mut merged = own;
+    merged.extend(
+        discovered
+            .into_iter()
+            .filter(|e| !own_ports.contains(&e.host_port)),
+    );
+    merged.sort_by_key(|e| e.host_port);
+    merged
+}
+
 /// Every HOST port a running container publishes, or `None` when `docker
 /// ps` could not be read at all.
 ///
@@ -256,6 +272,23 @@ fn published_host_ports(ports: &str) -> Vec<u16> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn merge_serving_lists_a_server_seen_by_both_sources_once() {
+        let own = vec![entry("agent", "Qwen/Qwen3.8-27B", 20010)];
+        let discovered = vec![
+            entry("external", "Qwen/Qwen3.8-27B", 20010),
+            entry("external", "meta-llama/Llama-3.1-8B-Instruct", 8003),
+        ];
+        let merged = merge_serving(own, discovered);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].host_port, 8003);
+        assert_eq!(merged[1].host_port, 20010);
+        assert_eq!(merged[1].source, "agent", "the backend's entry wins");
+        // Nothing from the backend: discovery alone, unchanged.
+        let only = merge_serving(Vec::new(), vec![entry("external", "m", 8003)]);
+        assert_eq!(only, vec![entry("external", "m", 8003)]);
+    }
     use std::sync::Mutex;
 
     fn entry(source: &str, model: &str, host_port: u16) -> ServingEntry {

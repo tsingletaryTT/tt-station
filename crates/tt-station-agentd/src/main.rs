@@ -25,6 +25,7 @@ use tt_station_agentd::routes::{app, AppState, StatusAdvertiser};
 use tt_station_agentd::serving::docker::{CommandRunner, DockerConfig, RealCommandRunner};
 use tt_station_agentd::serving::make_backend;
 use tt_station_agentd::serving::runpy::RunPyConfig;
+use tt_station_agentd::serving::tt::TtConfig;
 
 /// Which serving backend to use for running models.
 ///
@@ -32,20 +33,29 @@ use tt_station_agentd::serving::runpy::RunPyConfig;
 /// launch LLMs (`tt-inference-server/run.py`, not a hand-rolled `docker
 /// run` -- see `docs/reference/tt-inference-server-docker.md`'s "⭐ Ground
 /// truth" section). `Docker` remains available as a best-effort fallback
-/// for when `run.py`/its repo checkout isn't available. `Dstack` is the M4
-/// direction and still an intentional stub.
+/// for when `run.py`/its repo checkout isn't available. `Tt` delegates to
+/// Tenstorrent's official `tt` CLI (`tt serve`, `tt model ps|stop`) and is the
+/// only backend that applies `POST /run` options; it is opt-in until it has
+/// been proven on real hardware. `Dstack` is the M4 direction and still an
+/// intentional stub. `Auto` is not a backend of its own: it resolves to `Tt` when a valid
+/// official `tt` is installed and to `Runpy` otherwise (see `config::resolve_with`). It is
+/// opt-in, and the default when nothing is set stays `Runpy`.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Backend {
+    Auto,
     Runpy,
     Docker,
+    Tt,
     Dstack,
 }
 
 impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Backend::Auto => write!(f, "auto"),
             Backend::Runpy => write!(f, "runpy"),
             Backend::Docker => write!(f, "docker"),
+            Backend::Tt => write!(f, "tt"),
             Backend::Dstack => write!(f, "dstack"),
         }
     }
@@ -59,15 +69,15 @@ impl std::fmt::Display for Backend {
 struct Cli {
     /// Box name; used as both the mDNS instance name and the `name` TXT/JSON key.
     ///
-    /// `Option` because it can also come from `[global].name` in the config
-    /// file -- `resolve` enforces that ONE of the two is present, so this
-    /// remains effectively required for an operator not using a config file.
+    /// Default: the machine's short hostname (the first label, no dots), used only when
+    /// this flag and `[global].name` are both absent. If the hostname is unusable
+    /// (empty, `localhost`), start-up fails and asks for `--name`.
     #[arg(long)]
     name: Option<String>,
 
     /// Control-plane HTTP port to listen on and advertise in the `ctrl` TXT key.
     ///
-    /// `Option` for the same reason as `--name` -- see its doc comment.
+    /// Default: 8765, used only when this flag and `[global].ctrl_port` are both absent.
     #[arg(long = "ctrl-port")]
     ctrl_port: Option<u16>,
 
@@ -75,16 +85,21 @@ struct Cli {
     /// into the real `ServingBackend` trait object `/run`/`/stop` delegate
     /// to. Defaults to `runpy` -- see `Backend`'s doc comment.
     ///
-    /// No clap default: `resolve` supplies `"runpy"` when this, the active
-    /// profile, and `[global]` are all absent.
+    /// `auto` picks `tt` when the official `tt` CLI is installed and answers
+    /// `tt --version` with `tt <semver>`, and `runpy` otherwise. `--print-config`
+    /// shows which one it chose. `auto` is never the default.
+    ///
+    /// No clap default: `resolve` supplies `"runpy"` when this and the active
+    /// profile are both absent.
     #[arg(long, value_enum)]
     backend: Option<Backend>,
 
     /// Chip inventory string advertised in the `chips` TXT key and returned
     /// from `/status`.
     ///
-    /// No clap default: `resolve` supplies `"4xBH"` when this and
-    /// `[global].chips` are both absent.
+    /// Default: derived from `tt-smi -s` (a `p300x2` box is `4xBH`) when this and
+    /// `[global].chips` are both absent. Falls back to `4xBH` when `tt-smi` fails
+    /// or the hardware has no known mapping.
     #[arg(long)]
     chips: Option<String>,
 
@@ -96,21 +111,21 @@ struct Cli {
     apiver: Option<u8>,
 
     /// Host the serving container/VM is reachable on, baked into the
-    /// `base_url` of any `Endpoint` `/run` returns. Only meaningful for the
-    /// Docker backend today. Defaults to loopback since the PoC's client and
-    /// agent are expected to run on the same box; a real deployment would
-    /// pass the box's LAN address.
+    /// `base_url` of any `Endpoint` `/run` returns and every `/serving` entry. Every
+    /// backend uses it.
     ///
-    /// No clap default: `resolve` supplies `"127.0.0.1"` when this and the
-    /// active profile's `serving_host` are both absent.
+    /// Default: the box's primary LAN IPv4 address, else `<short hostname>.local`, else
+    /// `127.0.0.1`, used only when this and the active profile's `serving_host` are
+    /// both absent. The agent still checks readiness on `127.0.0.1` when it chose the host
+    /// itself; a host you pass here is polled as given. Pass `127.0.0.1` to keep the
+    /// endpoint on loopback.
     #[arg(long = "serving-host")]
     serving_host: Option<String>,
 
-    /// Host port the serving container/VM's HTTP port is mapped to. Only
-    /// meaningful for the Docker backend today.
+    /// Host port the serving container/VM's HTTP port is mapped to.
     ///
-    /// No clap default: `resolve` supplies `8000` when this and the active
-    /// profile's `serving_port` are both absent.
+    /// Default: 20000 for the `tt` backend and 8000 for every other backend, used
+    /// only when this and the active profile's `serving_port` are both absent.
     #[arg(long = "serving-port")]
     serving_port: Option<u16>,
 
@@ -346,6 +361,19 @@ struct Cli {
     #[arg(long = "gozer-path")]
     gozer_path: Option<String>,
 
+    /// Tenstorrent's official CLI, run by `--backend tt`. Only meaningful for
+    /// that backend. It must answer `--version` with `tt <semver>`; anything
+    /// else is refused when a model is started.
+    ///
+    /// No clap default: when this and `[global].official_tt_bin` are both
+    /// absent, `libttstation::official_tt::resolve_bin` picks it
+    /// (`TTS_OFFICIAL_TT_BIN`, then `PATH`, then `~/.local/bin/tt`, where
+    /// `uv tool install tenstorrent` puts it). The `PATH` of a
+    /// `systemctl --user` unit usually lacks `~/.local/bin`; the fallback
+    /// covers that case.
+    #[arg(long = "official-tt-bin")]
+    official_tt_bin: Option<String>,
+
     /// Path to agentd.toml. Defaults to `$TT_CONFIG_DIR/agentd.toml` if
     /// `TT_CONFIG_DIR` is set, else `$HOME/.config/tt-station/agentd.toml`.
     /// An explicit path that is missing/unreadable is a hard error.
@@ -420,19 +448,31 @@ const DEFAULT_DOCKER_SERVING_IMAGE: &str =
 /// the device mesh itself; see `--tt-device`'s doc comment.
 const DEFAULT_DOCKER_TT_DEVICE: &str = "p300x2";
 
-/// Build the redacted `ConfigSummary` (Task 4 type) from a `ResolvedConfig`.
+/// Build the redacted `ConfigSummary` from a `ResolvedConfig` (see `ResolvedConfig::summary`).
 /// NEVER includes `hf_token` or token-store contents.
 fn config_summary(rc: &config::ResolvedConfig) -> libttstation::model::ConfigSummary {
-    libttstation::model::ConfigSummary {
-        active_profile: rc.active_profile.clone(),
-        available_profiles: rc.available_profiles.clone(),
-        backend: rc.backend.clone(),
-        serving_host: rc.serving_host.clone(),
-        serving_port: rc.serving_port,
-        serving_image: rc.serving_image.clone(),
-        tt_inference_repo: Some(rc.tt_inference_repo.clone()),
-        tt_device: rc.tt_device.clone(),
-    }
+    rc.summary()
+}
+
+/// A one-line start-up description of the resolved identity and serving settings, each with its
+/// source, e.g. `name=qb2 (detected) ctrl_port=8765 (default) backend=tt (auto) ...`.
+fn describe_choices(rc: &config::ResolvedConfig) -> String {
+    let src = |k: &str| rc.sources.get(k).map(|s| s.as_str()).unwrap_or("-");
+    format!(
+        "name={} ({}) ctrl_port={} ({}) chips={} ({}) backend={} ({}) serving={}:{} ({}, {})",
+        rc.name,
+        src("name"),
+        rc.ctrl_port,
+        src("ctrl_port"),
+        rc.chips,
+        src("chips"),
+        rc.backend,
+        src("backend"),
+        rc.serving_host,
+        rc.serving_port,
+        src("serving_host"),
+        src("serving_port"),
+    )
 }
 
 /// How long `detect_startup_device_mesh` waits for `<tt_smi_bin> -s` before
@@ -728,13 +768,20 @@ async fn build_serving_backend(
     gozer_path: Option<&str>,
     docker_config: DockerConfig,
     runpy_config: RunPyConfig,
+    tt_config: TtConfig,
 ) -> Result<(
     Box<dyn tt_station_agentd::serving::ServingBackend>,
     Option<gozer::Capability>,
 )> {
     let gozer_capability = detect_startup_gozer(gozer_path).await;
-    let backend = make_backend(kind, docker_config, runpy_config, gozer_capability.clone())
-        .context("failed to construct serving backend")?;
+    let backend = make_backend(
+        kind,
+        docker_config,
+        runpy_config,
+        tt_config,
+        gozer_capability.clone(),
+    )
+    .context("failed to construct serving backend")?;
     Ok((backend, gozer_capability))
 }
 
@@ -833,6 +880,7 @@ async fn main() -> Result<()> {
         telemetry_interval_ms: cli.telemetry_interval_ms,
         tt_smi_bin: cli.tt_smi_bin.clone(),
         gozer_path: cli.gozer_path.clone(),
+        official_tt_bin: cli.official_tt_bin.clone(),
         backend: cli.backend.map(|b| b.to_string()),
         tt_inference_repo: cli.tt_inference_repo.clone(),
         serving_image: cli.serving_image.clone(),
@@ -853,8 +901,16 @@ async fn main() -> Result<()> {
         model_source: cli.model_source.clone(),
         model_spec: cli.model_spec.clone(),
     };
-    let rc = config::resolve(overrides, env_hf_token, file, cli.profile.as_deref())
-        .context("failed to resolve configuration")?;
+    // Detection (hostname, LAN address, installed chips, official `tt`) runs only for the
+    // settings that no flag, profile or `[global]` entry supplies -- see `resolve_with`.
+    let rc = config::resolve_with(
+        overrides,
+        env_hf_token,
+        file,
+        cli.profile.as_deref(),
+        &tt_station_agentd::detect::SystemDetect,
+    )
+    .context("failed to resolve configuration")?;
 
     // `--print-config` is purely diagnostic: resolve, print the redacted
     // summary, exit -- WITHOUT binding the control port or touching mDNS.
@@ -865,6 +921,10 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&summary)?);
         return Ok(());
     }
+
+    // One line saying where the defaults came from, so the journal explains the agent's choices
+    // without a second `--print-config` run. Values only, never secrets.
+    println!("tt-station-agentd: {}", describe_choices(&rc));
 
     // `DockerBackend` (the manual escape hatch -- see `Backend`'s doc
     // comment) has no auto-resolution of its own the way `run.py` does, so
@@ -879,6 +939,7 @@ async fn main() -> Result<()> {
             .clone()
             .unwrap_or_else(|| DEFAULT_DOCKER_SERVING_IMAGE.to_string()),
         host: rc.serving_host.clone(),
+        probe_host: rc.probe_host.clone(),
         host_port: rc.serving_port,
         tt_device: rc
             .tt_device
@@ -900,6 +961,7 @@ async fn main() -> Result<()> {
     let runpy_config = RunPyConfig {
         repo_dir: rc.tt_inference_repo.clone(),
         host: rc.serving_host.clone(),
+        probe_host: rc.probe_host.clone(),
         service_port: rc.serving_port,
         no_auth: !rc.require_auth,
         model_source: rc.model_source.clone(),
@@ -944,6 +1006,20 @@ async fn main() -> Result<()> {
         enable_tool_calling: true,
     };
 
+    // `--backend tt`: the official CLI serves on the same host/port settings the
+    // other backends use. The binary is resolved here (not in `config::resolve`)
+    // because the fallback search reads `PATH`/`HOME`, and `resolve` is pure.
+    let tt_config = TtConfig {
+        tt_bin: rc
+            .official_tt_bin
+            .clone()
+            .unwrap_or_else(libttstation::official_tt::resolve_bin),
+        serving_host: rc.serving_host.clone(),
+        probe_host: rc.probe_host.clone(),
+        service_port: rc.serving_port,
+        ..TtConfig::default()
+    };
+
     // Probe for gozer and build the backend TOGETHER, in that order -- see
     // `build_serving_backend`'s doc comment for why the ordering is the
     // point. `gozer_capability` is carried down to `AppState::with_gozer`
@@ -953,6 +1029,7 @@ async fn main() -> Result<()> {
         rc.gozer_path.as_deref(),
         docker_config,
         runpy_config,
+        tt_config,
     )
     .await?;
 
@@ -1073,7 +1150,22 @@ async fn main() -> Result<()> {
     // wedged `tt-smi` can delay the socket bind below by at most that
     // ceiling, never indefinitely; startup then proceeds regardless of the
     // outcome. See `detect_startup_device_mesh`'s doc comment.
-    let device_mesh = detect_startup_device_mesh(&rc.tt_smi_bin).await;
+    // When `resolve_with` already ran `tt-smi -s` to detect `chips`, reuse that run: `tt-smi`
+    // runs once per start-up. Otherwise (chips came from a flag or `[global]`) this is the
+    // only run.
+    let device_mesh = match &rc.tt_smi_probe {
+        Some(snapshot) => {
+            let mesh = snapshot.as_deref().and_then(detect_device_mesh);
+            if mesh.is_none() {
+                eprintln!(
+                    "tt-station-agentd: the start-up '{} -s' run did not map to a known device mesh; device_mesh will report null",
+                    rc.tt_smi_bin
+                );
+            }
+            mesh
+        }
+        None => detect_startup_device_mesh(&rc.tt_smi_bin).await,
+    };
     let state = state.with_device_mesh(device_mesh.clone());
 
     // Record the `gozer` capability probed ONCE at startup, up in
@@ -1431,12 +1523,13 @@ mod startup_wiring_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let stub = write_stub_gozer(dir.path());
 
-        for kind in ["runpy", "docker"] {
+        for kind in ["runpy", "docker", "tt"] {
             let (backend, capability) = build_serving_backend(
                 kind,
                 Some(&stub),
                 DockerConfig::default(),
                 RunPyConfig::default(),
+                TtConfig::default(),
             )
             .await
             .expect("backend should construct");
@@ -1482,6 +1575,7 @@ mod startup_wiring_tests {
             Some("/nonexistent/tt-station-agentd-test/gozer"),
             DockerConfig::default(),
             RunPyConfig::default(),
+            TtConfig::default(),
         )
         .await
         .expect("an absent gozer must not fail startup");

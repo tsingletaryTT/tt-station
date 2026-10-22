@@ -8,8 +8,49 @@ The agent can be configured two ways, and they compose: **CLI flags** (as
 before) and an optional **`agentd.toml`** file with **named serving
 profiles** (e.g. a `stable` checkout/image pinned for daily use, and a
 `bleeding` one for testing a newer `tt-inference-server`). Neither is
-required — an agent with no config file and no flags behaves exactly as it
-always has (built-in defaults).
+required. A typical box starts with one flag:
+
+```
+tt-station-agentd --backend auto
+```
+
+The agent fills in everything else from the machine (see "Defaults and where they
+come from"), and `--print-config` shows each choice and its source. A box that already
+sets a value by flag, profile or `[global]` resolves exactly as before.
+
+## Defaults and where they come from
+
+A default applies only when no flag, no active profile and no `[global]` entry sets the
+setting. Detection runs only for the settings that need it, so a box that sets all of them
+runs no probe.
+
+| Setting | Default | Source label | Fallback if the probe fails |
+|---|---|---|---|
+| `name` | the short hostname (first label, no dots) | `detected` | none: start-up fails and asks for `--name`. A hostname is refused when it is empty, `localhost`, the kernel placeholder `(none)`, all digits (an IP-literal hostname such as `10.0.0.5` would become the name `10`), or contains anything other than letters, digits, `-` and `_` |
+| `ctrl_port` | `8765` | `default` | none needed |
+| `chips` | derived from `tt-smi -s` (`p300x2` is `4xBH`). The agent runs `tt-smi -s` once at start-up and uses that one run for both `chips` and the `device_mesh` of `/status`. When `chips` is set by flag or `[global]`, the one run is the `device_mesh` probe | `detected` | `4xBH` (`default`) |
+| `serving_host` | the primary LAN IPv4 address (the source address of `ip route get 1.1.1.1`). An address that is loopback, link-local (169.254/16), multicast, broadcast or in 100.64.0.0/10 (carrier-grade NAT, which Tailscale and similar VPNs use) counts as not found | `detected` | `<short hostname>.local` (`detected`; resolvable from a Mac through mDNS when avahi runs on the box), then `127.0.0.1` (`default`) |
+| `serving_port` | `20000` for the `tt` backend, `8000` for every other backend | `default` | none needed |
+| `backend` | `runpy`; `auto` is opt-in | `default` | none needed |
+
+`chips` is derived for Blackhole meshes only (`p100`, `p150[xN]`, `p300[xN]`, counting ASICs).
+Wormhole meshes such as `n300` have no confirmed mapping to the `NxBH` style, so they take the
+`4xBH` fallback.
+
+To keep the serving endpoint on loopback, pass `--serving-host 127.0.0.1` (or set it in a profile).
+
+**Readiness checks use loopback when the agent chose `serving_host`.** The detected address is read
+once at start-up, so it can go stale (DHCP renumbering, an agent started before the network was up)
+or point at a VPN tunnel. When `serving_host` came from detection, the hostname fallback or the
+loopback default, the `runpy`, `docker` and `tt` backends poll `/health` and `/v1/models` on
+`127.0.0.1`, and `/serving` probes loopback as it always has. Endpoint URLs (`base_url`) still carry
+`serving_host`. When a flag or profile sets `serving_host`, the agent polls that host exactly as
+before.
+
+**`--backend tt` with no port now serves on 20000** (it was 8000). A gozer lease tagged with the old
+port (`tt-station:8000:<model>`) does not match the start-up sweep for the new port, so a stale lease
+from before the change stays until it is released by hand (`gozer release`). Set
+`serving_port = 8000` in the profile to keep the old port.
 
 ## File location
 
@@ -45,15 +86,16 @@ all — see "Precedence").
 
 | Key | Type | Meaning |
 |---|---|---|
-| `name` | string | Box name; the mDNS instance name and the `name` TXT/JSON key. Required overall (via this, `--name`, or nothing — see "Precedence"). |
-| `ctrl_port` | integer (u16) | Control-plane HTTP port to bind/advertise. Required overall (via this, `--ctrl-port`, or nothing). |
-| `chips` | string | Chip inventory string advertised in the `chips` TXT key / `/status`. Default `"4xBH"`. |
+| `name` | string | Box name; the mDNS instance name and the `name` TXT/JSON key. Default: the short hostname. |
+| `ctrl_port` | integer (u16) | Control-plane HTTP port to bind/advertise. Default `8765`. |
+| `chips` | string | Chip inventory string advertised in the `chips` TXT key / `/status`. Default: detected from `tt-smi -s`, else `"4xBH"`. |
 | `apiver` | integer (u8) | API version advertised in the `apiver` TXT key. Default `1`. |
 | `token_store` | string (path) | Where to persist issued bearer tokens. Default `~/.config/tt-station/agentd-tokens.json`. Ignored when `no_token_persistence` is set. |
 | `no_token_persistence` | bool | Opt out of persisting bearer tokens across restarts (in-memory only). Default `false`. |
 | `telemetry_interval_ms` | integer (u64) | Interval between `tt-smi -s` snapshots pushed on `GET /telemetry`. Default `1000`. |
 | `tt_smi_bin` | string | `tt-smi` binary the telemetry stream runs. Default `"tt-smi"`. |
 | `gozer_path` | string (path) | `gozer` binary agentd probes for **once** at startup, to lease chips per board instead of serving whole-box. Optional and **no default string**: unset means "search `$PATH`", and finding nothing there means leasing is simply off (see [`chip-leasing.md`](chip-leasing.md)). Tilde-expanded. |
+| `official_tt_bin` | string (path) | Tenstorrent's official `tt` CLI, run by `backend = "tt"`. Flag: `--official-tt-bin`. It must answer `--version` with `tt <semver>`, or every serve is refused. **No default string**: unset means search `TTS_OFFICIAL_TT_BIN`, then `$PATH`, then `~/.local/bin/tt` (where `uv tool install tenstorrent` puts it; a `systemctl --user` unit's `$PATH` usually lacks that directory). Tilde-expanded. |
 
 ### `[profile.<name>]` — how a profile serves
 
@@ -62,13 +104,13 @@ complete, independently-selectable serving configuration.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `backend` | string | `"runpy"` \| `"docker"` \| `"dstack"`. Default `"runpy"`. |
+| `backend` | string | `"runpy"` \| `"docker"` \| `"tt"` \| `"dstack"` \| `"auto"`. Default `"runpy"`. `"auto"` picks `tt` when the official `tt` CLI is installed, else `runpy`. See "The `auto` backend" and "The `tt` backend" below. |
 | `tt_inference_repo` | string (path) | Local `tt-inference-server` checkout (the `runpy` backend). Default: `./vendor/tt-inference-server` if present, else `$HOME/code/tt-inference-server`. |
 | `serving_image` | string | Container image to serve (`run.py --override-docker-image`, or `docker run <image>` for the `docker` backend). No default for `runpy` (left unset so `run.py` can self-resolve via `model_spec.json`); the `docker` backend falls back to a hardcoded example tag if unset — pin this per box. |
 | `auto_image` | bool | `runpy` only: opt in to auto-picking the newest locally-present release image when `serving_image` is unset. Default `false` — image↔run.py compatibility is a curated matrix, so pinning is safer. |
 | `tt_device` | string | `--tt-device` value, e.g. `p300x2`, `n300`, `p150x4`. Optional — when unset, the `runpy` backend auto-detects from `tt-smi`; the `docker` backend falls back to `"p300x2"`. |
-| `serving_host` | string | Host the serving container/VM is reachable on. Default `"127.0.0.1"`. |
-| `serving_port` | integer (u16) | Host port the serving `/v1` is published on. Default `8000`. |
+| `serving_host` | string | Host the serving container/VM is reachable on. Default: the primary LAN IPv4 address, else the short hostname, else `"127.0.0.1"`. |
+| `serving_port` | integer (u16) | Host port the serving `/v1` is published on. Default `20000` for the `tt` backend, `8000` for every other backend. |
 | `host_hf_cache` | string (path) | Host path bind-mounted for the Hugging Face weights cache (`runpy`'s `--host-hf-cache`). Default `$HOME/.cache/huggingface`. |
 | `hf_token` | string (secret) | Hugging Face token for gated model repos. Falls back to the `HF_TOKEN` env var if unset here and on the CLI. **Never** exposed via `--print-config` or `GET /config`. |
 | `no_device_reset` | bool | `runpy` only: skip the `tt-smi -r` board reset before serving. Default `false` (reset runs by default). |
@@ -116,6 +158,116 @@ serving_image = "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-relea
 serving_port = 8004
 ```
 
+### The `auto` backend
+
+`--backend auto` (or `backend = "auto"` in a profile) chooses at start-up:
+
+1. It looks for the official `tt` CLI: `--official-tt-bin` or `[global].official_tt_bin` if set,
+   else `TTS_OFFICIAL_TT_BIN`, then `PATH`, then `~/.local/bin/tt`, `/opt/homebrew/bin/tt` and
+   `/usr/local/bin/tt`, in that order.
+2. It runs `<tt> --version` with a 5 second limit. The CLI counts as found only when the command
+   exits successfully and prints `tt <semver>`.
+3. Found: the backend is `tt`. Not found, or the check fails or times out: the backend is `runpy`.
+
+`auto` is never the default. With no backend set anywhere the agent uses `runpy`, as it always
+has. The `serving_port` default follows the resolved backend, so `auto` that finds `tt` listens on
+`20000`. `--print-config` and `GET /config` report the resolved backend in `backend`, the request
+in `backend_requested`, a sentence in `backend_note`, and `"auto"` as the source of `backend`.
+
+### The `tt` backend
+
+`backend = "tt"` serves through Tenstorrent's official CLI instead of calling
+`run.py` directly. It is opt-in: `runpy` stays the default until this backend
+has been proven on real hardware.
+
+```toml
+[global]
+name = "qb2-lab"
+ctrl_port = 8765
+# official_tt_bin = "~/.local/bin/tt"   # optional; found automatically otherwise
+
+[profile.tt]
+backend = "tt"
+serving_host = "qb2-lab.local"
+serving_port = 20000
+```
+
+What it runs, in order, for `POST /run` (the model name must match
+`[A-Za-z0-9][A-Za-z0-9._/-]{0,127}`, or the request is refused with a 400
+naming `model`):
+
+1. `tt --version`. Anything other than `tt <semver>` is refused.
+2. `tt --json serve <model> --dry-run`, which says whether `tt` will serve the
+   model from its catalog (through tt-inference-server) or as a tt-model bundle.
+   An unknown model is refused here, before any chips are leased.
+3. Stops what this backend was serving and releases its gozer lease. After an
+   agent restart, a lease adopted from the previous process is released only
+   once its server (found with `tt --json model ps`) has been stopped.
+4. Leases chips through gozer, when gozer is installed (same 409 behaviour as
+   the other backends). The lease does not restrict which chips the container
+   opens: tt-model ignores the grant's `TT_VISIBLE_DEVICES` and mounts
+   `/dev/tenstorrent/0` to `3` itself (seen on hardware, 2026-10-05). That is
+   harmless only while the lease covers every chip, which is today's setting.
+5. `tt --json serve <model> --port <serving_port> [options]`. Bundles also get
+   `--detach`, so the command returns once the container is up.
+6. Polls `http://<serving_host>:<port>/v1/models` until a model is listed.
+
+`POST /stop` runs `tt --json model stop <model>` and then releases the lease.
+If a start fails after `tt serve` ran, the backend runs `tt model stop <model>`
+before the lease is released. If that stop fails too, the container may still
+be running, so the lease is kept (a release resets the chips) and the serve is
+recorded; the error says so. The next `POST /stop` or `POST /run` retries the
+stop and releases the lease only after the stop succeeds.
+
+One start runs at a time. While a `POST /run` is bringing a model up,
+`GET /status` carries `"starting": true` (the key is absent otherwise, and
+`status` stays `idle` until the start ends), and a second `POST /run` answers
+409 ("a serve is already starting on this box; stop it first"). A `POST /stop`
+during the start still aborts it.
+
+`GET /serving` lists the backend's serves from `tt --json model ps` (docker
+discovery alone does not recognise tt-model containers), merged with docker
+discovery so one server is listed once. After an agent restart, a running
+`tt model ps` row on the agent's own serving port (the port in an adopted
+lease, else `serving_port`) is recorded as serving: `GET /status` and
+`GET /endpoint` report it, and `POST /stop` stops it by name before releasing
+any lease. A row on another port is not treated as the agent's.
+
+Two consequences of that rule. Only a serve on the agent's own port is
+rediscovered after a restart: a serve started with the `port` option on another
+port, whose lease was not adopted, stays invisible until the next `POST /run`.
+And any running row on the agent's own port is adopted, including one started
+by hand or by another tenant, so `POST /stop` will stop it.
+
+The idle checks behind `GET /status`, `GET /endpoint` and `GET /serving` reuse
+a `tt model ps` outcome (success or failure) for 2.5 s and share one run
+between concurrent requests. A `ps` that takes longer than 5 s is killed with
+its whole process group; then rows up to 10 s old are used, or none. Deciding
+what to stop before a lease release always reads `ps` fresh: a server found
+by an idle check is confirmed with a fresh read before `POST /stop` stops it
+(and before any lease release), with or without gozer. Fresh reads queue on
+the same lock as the idle checks, so behind a hung `tt` a `POST /run` or
+`POST /stop` that needs one can wait about 10 s (two 5 s timeouts) before it
+fails. A successful `tt model stop`, and every `tt serve`, empties that cache,
+so a `GET /status` right after `POST /stop` does not find the stopped server
+again. No rediscovery happens while a stop is running. A server found by an
+idle check whose row later disappears is forgotten, so a later serve on the
+agent's port is found again.
+
+`GET /models` reads `tt --json model list` and keeps the models with a vLLM
+engine.
+
+This is the only backend that applies `POST /run` `options` (see
+`GET /run/schema`). `tt serve` refuses some options for catalog models, and the
+agent refuses them first with a `400` naming the field: `profile` and
+`vllm_args` apply to tt-model bundles only. Only the `server` workflow is
+accepted, because `benchmarks` and `evals` run in the foreground and leave no
+`/v1` behind. The settings that only `runpy`/`docker` read
+(`tt_inference_repo`, `serving_image`, `auto_image`, `tt_device`,
+`host_hf_cache`, `no_device_reset`, and a profile's `hf_token`) are ignored by
+this backend; `tt` makes those decisions itself and reads its own environment,
+which it inherits from the agent.
+
 ## `~/` expansion
 
 The **only** path expansion supported: a leading `~/` on any path-valued
@@ -128,17 +280,20 @@ absolute or `$HOME`-relative path if you need something else.
 For every setting, highest wins:
 
 ```
-explicit CLI flag  >  active profile (serving-scoped) or [global] (global-scoped)  >  built-in default
+explicit CLI flag  >  active profile (serving-scoped) or [global] (global-scoped)  >  detected value  >  built-in default
 ```
+
+The "detected value" layer exists only for the settings in "Defaults and where they come from".
 
 - Every overridable CLI flag is `Option<T>` with **no clap default** — clap
   reports `None` when the operator didn't pass it, so "not passed" can be
   told apart from "passed the same value as the default." The hardcoded
   defaults (`"4xBH"`, `8000`, `"runpy"`, etc.) live in the resolver
-  (`config::resolve`), applied only after flag/profile/global all miss.
-- `name` and `ctrl_port` have **no built-in default** — one of `--name`/
-  `[global].name` and `--ctrl-port`/`[global].ctrl_port` must resolve to a
-  value or the agent hard-errors at startup.
+  (`config::resolve_with`), applied only after flag/profile/global (and, for
+  the settings that have one, detection) all miss.
+- `name` has no built-in default. When `--name` and `[global].name` are both
+  absent it comes from the hostname, and the agent hard-errors at startup only if
+  the hostname is unusable.
 - `[global]` only supplies global-scoped settings; the active profile only
   supplies serving-scoped settings — there is no cross-scope fallback.
 
@@ -179,9 +334,11 @@ defined in the file (empty if none).
 
 ## `--print-config`
 
-Resolves the full config (flags + file + precedence), prints the redacted
+Resolves the full config (flags + file + precedence + detection), prints the redacted
 `ConfigSummary` (see below) as pretty JSON to stdout, and **exits 0 without
-binding the control port or starting mDNS**. A debugging aid for checking
+binding the control port or starting mDNS**. It does run the detection probes the
+resolution needs (hostname, `ip route get`, `tt-smi -s`, `tt --version`), which read
+state and change nothing. A debugging aid for checking
 what a given combination of flags/env/file/`--profile` actually resolves to,
 without standing up the daemon:
 
@@ -204,11 +361,42 @@ was actually resolved at boot:
   "serving_port": 8003,
   "serving_image": "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.14.0-80180b9-7678b70",
   "tt_inference_repo": "/home/operator/code/tt-inference-server",
-  "tt_device": "p300x2"
+  "tt_device": "p300x2",
+  "name": "qb2-lab",
+  "ctrl_port": 8765,
+  "chips": "4xBH",
+  "backend_requested": "runpy",
+  "sources": {
+    "backend": "profile", "chips": "detected", "ctrl_port": "global", "name": "global",
+    "serving_host": "profile", "serving_port": "profile", "serving_image": "profile",
+    "tt_device": "profile", "tt_inference_repo": "default"
+  }
 }
 ```
 
-On an agent booted with no config file, this is
+The first eight keys are the original ones. `name`, `ctrl_port`, `chips`,
+`backend_requested`, `backend_note` and `sources` are additive: an older client ignores them,
+and the agent omits `backend_note` unless `auto` chose the backend. `sources` maps each setting
+to `flag`, `profile`, `global`, `detected`, `auto` or `default`. A box with nothing configured
+and `--backend auto` prints, for example:
+
+```jsonc
+{
+  "backend": "tt",
+  "serving_host": "192.168.5.119",
+  "serving_port": 20000,
+  "name": "qb2-lab",
+  "ctrl_port": 8765,
+  "chips": "4xBH",
+  "backend_requested": "auto",
+  "backend_note": "auto: found official tt 1.0.1 at /home/ttuser/.local/bin/tt, so the tt backend is used",
+  "sources": { "backend": "auto", "chips": "detected", "ctrl_port": "default",
+               "name": "detected", "serving_host": "detected", "serving_port": "default",
+               "tt_inference_repo": "default" }
+}
+```
+
+(other keys omitted). On an agent booted with no config file, this is
 `{"active_profile": null, "available_profiles": [], ...}` with the
 flag/env/default-resolved serving values.
 
@@ -248,5 +436,5 @@ half-serving:
 | `--profile X` (or `default_profile = "X"`) names a profile absent from the file | Hard error listing the available profile names. |
 | `--profile` given but the file defines no `[profile.*]` at all | Hard error. |
 | A serving-scoped key under `[global]`, or a global-scoped key under `[profile.*]` | Unknown-key rejection at parse (same as any other typo). |
-| `name`/`ctrl_port` unresolved after flag/`[global]` | Hard error (no built-in default for either). |
+| `name` unset by `--name`/`[global]` and the hostname is unusable (empty or `localhost`) | Hard error asking for `--name`. |
 | `GET /config` on an agent with no config file | Not an error — returns the implicit-default summary (`active_profile: null`, `available_profiles: []`). |

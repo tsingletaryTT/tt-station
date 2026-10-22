@@ -34,6 +34,7 @@ async fn get_config_returns_summary_without_secrets() {
         serving_image: Some("img:0.14.0".into()),
         tt_inference_repo: Some("/home/x/tt-inference-server".into()),
         tt_device: None,
+        ..Default::default()
     };
 
     // `/config` doesn't touch the serving backend at all -- `DstackBackend`'s

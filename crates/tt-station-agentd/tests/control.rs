@@ -374,3 +374,171 @@ async fn stop_notifies_status_advertiser_of_idle() {
         ]
     );
 }
+
+/// A backend whose first `stop` parks on two barriers, so a test can finish a `/run` while
+/// that stop is still inside the backend. It keeps the serve the newer `start` recorded, as
+/// the `tt` backend does (its serve epoch), and reports it from `status`.
+struct ParkingBackend {
+    serving: Mutex<Option<String>>,
+    stops: std::sync::atomic::AtomicUsize,
+    entered: Arc<std::sync::Barrier>,
+    resume: Arc<std::sync::Barrier>,
+}
+
+impl ServingBackend for ParkingBackend {
+    fn start_forcing(
+        &self,
+        model: &str,
+        _force: bool,
+    ) -> anyhow::Result<libttstation::model::Endpoint> {
+        *self.serving.lock().unwrap() = Some(model.to_string());
+        Ok(libttstation::model::Endpoint {
+            base_url: format!("http://127.0.0.1:20000/v1#{model}"),
+            model: model.to_string(),
+            requires_key: false,
+        })
+    }
+
+    fn stop(&self, _model: &str) -> anyhow::Result<()> {
+        if self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            self.entered.wait();
+            self.resume.wait();
+            // The serve recorded while this stop was parked belongs to the newer start.
+            return Ok(());
+        }
+        *self.serving.lock().unwrap() = None;
+        Ok(())
+    }
+
+    fn status(&self) -> anyhow::Result<ServingStatus> {
+        Ok(match self.serving.lock().unwrap().clone() {
+            Some(m) => ServingStatus::Serving(m),
+            None => ServingStatus::Idle,
+        })
+    }
+}
+
+/// Review of the Copilot fixes, Important 1: a slow `/stop` of serve A that finishes after
+/// `/run` B must not set the agent's status, endpoint and advertisement to idle while B
+/// serves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_stop_that_ends_after_a_new_run_keeps_the_new_serve_reported() {
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let resume = Arc::new(std::sync::Barrier::new(2));
+    let backend: Arc<dyn ServingBackend> = Arc::new(ParkingBackend {
+        serving: Mutex::new(None),
+        stops: std::sync::atomic::AtomicUsize::new(0),
+        entered: entered.clone(),
+        resume: resume.clone(),
+    });
+    let state = AppState::new("qb2-lab".to_string(), "4xBH".to_string(), backend);
+    let base = serve(state.clone()).await;
+    let client = reqwest::Client::new();
+    let token = pair(&client, &state, &base).await;
+    let run = |model: &'static str| {
+        let (client, base, token) = (client.clone(), base.clone(), token.clone());
+        async move {
+            client
+                .post(format!("{base}/run"))
+                .bearer_auth(token)
+                .json(&serde_json::json!({ "model": model }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    assert_eq!(run("model-a").await, reqwest::StatusCode::OK);
+
+    let stop_a = {
+        let (client, base, token) = (client.clone(), base.clone(), token.clone());
+        tokio::spawn(async move {
+            client
+                .post(format!("{base}/stop"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        })
+    };
+    let e = entered.clone();
+    tokio::task::spawn_blocking(move || e.wait()).await.unwrap();
+    assert_eq!(run("model-b").await, reqwest::StatusCode::OK);
+    let r = resume.clone();
+    tokio::task::spawn_blocking(move || r.wait()).await.unwrap();
+    assert_eq!(stop_a.await.unwrap(), reqwest::StatusCode::OK);
+
+    let status: serde_json::Value = client
+        .get(format!("{base}/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["status"], "serving:model-b", "{status}");
+    let ep: serde_json::Value = client
+        .get(format!("{base}/endpoint"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(ep["model"], "model-b", "{ep}");
+}
+
+/// A backend whose stop always answers "a stop is already in progress" as a contention.
+struct BusyStopBackend;
+
+impl ServingBackend for BusyStopBackend {
+    fn start_forcing(
+        &self,
+        _model: &str,
+        _force: bool,
+    ) -> anyhow::Result<libttstation::model::Endpoint> {
+        anyhow::bail!("not used")
+    }
+
+    fn stop(&self, _model: &str) -> anyhow::Result<()> {
+        Err(anyhow::Error::new(
+            tt_station_agentd::gozer::Contention::new(
+                "tt backend: a stop is already in progress (waited 60s); try again when it \
+                 finishes",
+            ),
+        ))
+    }
+
+    fn status(&self) -> anyhow::Result<ServingStatus> {
+        Ok(ServingStatus::Idle)
+    }
+}
+
+/// Review fix round 2, minor 2: a stop refused because another stop is still running is a
+/// conflict with the box's state, so `/stop` answers 409 with the reason (a retry can work),
+/// the way `/run` already answers a contention.
+#[tokio::test]
+async fn a_stop_refused_because_another_stop_runs_is_409() {
+    let backend: Arc<dyn ServingBackend> = Arc::new(BusyStopBackend);
+    let state = AppState::new("qb2-lab".to_string(), "4xBH".to_string(), backend);
+    let base = serve(state.clone()).await;
+    let client = reqwest::Client::new();
+    let token = pair(&client, &state, &base).await;
+    let resp = client
+        .post(format!("{base}/stop"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("a stop is already in progress"),
+        "{body}"
+    );
+}

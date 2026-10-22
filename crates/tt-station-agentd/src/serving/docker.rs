@@ -156,6 +156,43 @@ pub trait CommandRunner: Send + Sync {
             stderr: String::new(),
         })
     }
+
+    /// Like `run_capturing`, with `env` also set on the CHILD process (never on this process;
+    /// see `run_in_dir_with_env` for why that matters).
+    ///
+    /// Added for the `tt` backend (`serving/tt.rs`): it needs `tt serve`'s exit code and BOTH
+    /// streams, because `tt --json` prints its error object on stdout, and it needs to hand the
+    /// gozer grant's `TT_VISIBLE_DEVICES` to the child. `run_in_dir_with_env` keeps only stderr
+    /// on failure, and `run_capturing` takes no environment.
+    ///
+    /// Default implementation ignores `env` and calls `run_capturing`. That is right for fakes,
+    /// which never spawn anything; `RealCommandRunner` overrides it.
+    fn run_capturing_with_env(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<CapturedOutput> {
+        let _ = env;
+        self.run_capturing(args)
+    }
+
+    /// Like `run_capturing_with_env`, but gives up after `timeout`: the child is killed and an
+    /// error is returned. For read-only probes that an unauthenticated route triggers (the `tt`
+    /// backend's `tt --json model ps`), where a hung tool or a wedged docker must not hang the
+    /// request and hold a blocking-pool thread forever.
+    ///
+    /// Default implementation ignores `timeout` and calls `run_capturing_with_env`. That is right
+    /// for fakes that answer at once; a fake that simulates a hang overrides this.
+    /// `RealCommandRunner` overrides it with a real wait-with-timeout and `kill()`.
+    fn run_capturing_with_timeout(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        timeout: std::time::Duration,
+    ) -> Result<CapturedOutput> {
+        let _ = timeout;
+        self.run_capturing_with_env(args, env)
+    }
 }
 
 /// Exit code, stdout, and stderr from a `run_capturing` call -- the
@@ -235,11 +272,21 @@ impl CommandRunner for RealCommandRunner {
     }
 
     fn run_capturing(&self, args: &[&str]) -> Result<CapturedOutput> {
+        self.run_capturing_with_env(args, &[])
+    }
+
+    fn run_capturing_with_env(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<CapturedOutput> {
         let (program, rest) = args.split_first().ok_or_else(|| {
             anyhow::anyhow!("CommandRunner::run_capturing called with empty argv")
         })?;
         let output = std::process::Command::new(program)
             .args(rest)
+            // Child-only environment, as in `run_in_dir_with_env`. Empty for `run_capturing`.
+            .envs(env.iter().copied())
             .output()
             .with_context(|| format!("failed to spawn {}", args.join(" ")))?;
         Ok(CapturedOutput {
@@ -250,6 +297,117 @@ impl CommandRunner for RealCommandRunner {
             code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+    }
+
+    /// Spawns the child in its own process group with piped stdout and stderr, drains both on
+    /// helper threads (so a chatty child cannot block on a full pipe), and polls `try_wait`
+    /// until it exits or `timeout` passes.
+    ///
+    /// On timeout the WHOLE process group is killed (`kill(-pgid, SIGKILL)`), then the child is
+    /// reaped. Killing only the child would leave its own children, for example the `docker`
+    /// CLI that `tt model ps` runs, alive and holding the pipes, and the reader threads blocked
+    /// on them. With the group dead the pipes close and the readers finish.
+    ///
+    /// When the child exits in time, its output is collected by waiting for the readers. If a
+    /// background process it left behind still holds the pipes at the deadline (or a short
+    /// grace after the exit, whichever is later), the group is killed then too, and whatever
+    /// was written before is still returned.
+    fn run_capturing_with_timeout(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+        timeout: std::time::Duration,
+    ) -> Result<CapturedOutput> {
+        use std::io::Read;
+        use std::os::unix::process::CommandExt;
+        use std::time::{Duration, Instant};
+
+        let (program, rest) = args.split_first().ok_or_else(|| {
+            anyhow::anyhow!("CommandRunner::run_capturing_with_timeout called with empty argv")
+        })?;
+        let mut child = std::process::Command::new(program)
+            .args(rest)
+            .envs(env.iter().copied())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            // Its own process group (pgid = its pid), so a timeout can kill everything it started.
+            .process_group(0)
+            .spawn()
+            .with_context(|| format!("failed to spawn {}", args.join(" ")))?;
+        let pgid = child.id() as libc::pid_t;
+        let kill_group = || {
+            // SAFETY: plain syscall with integer arguments; a negative pid names the group we
+            // created above. An already-dead group just returns ESRCH, which is ignored.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        };
+        let drain = |pipe: Option<Box<dyn Read + Send>>| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut p) = pipe {
+                    let _ = p.read_to_end(&mut buf);
+                }
+                let _ = tx.send(buf);
+            });
+            rx
+        };
+        let out_rx = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+        let err_rx = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(err) => {
+                    kill_group();
+                    let _ = child.wait();
+                    return Err(err).context("waiting for child");
+                }
+            }
+            if Instant::now() >= deadline {
+                kill_group();
+                let _ = child.wait();
+                return Err(anyhow::anyhow!(
+                    "{} did not finish within {:?} and was killed",
+                    args.join(" "),
+                    timeout
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        // The child has exited. Collect its output: wait for both readers until the deadline
+        // (at least a short grace, so output written right at the deadline is not lost). If a
+        // leftover process still holds a pipe by then, kill the group so the readers finish.
+        let grace_end = deadline.max(Instant::now() + Duration::from_millis(250));
+        let (mut out, mut err) = (None, None);
+        while (out.is_none() || err.is_none()) && Instant::now() < grace_end {
+            if out.is_none() {
+                out = out_rx.try_recv().ok();
+            }
+            if err.is_none() {
+                err = err_rx.try_recv().ok();
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if out.is_none() || err.is_none() {
+            kill_group();
+        }
+        let finish = |got: Option<Vec<u8>>, rx: std::sync::mpsc::Receiver<Vec<u8>>| {
+            let bytes = got
+                .or_else(|| rx.recv_timeout(Duration::from_secs(1)).ok())
+                .unwrap_or_default();
+            String::from_utf8_lossy(&bytes).trim().to_string()
+        };
+        Ok(CapturedOutput {
+            code: status.code().unwrap_or(-1),
+            stdout: finish(out, out_rx),
+            stderr: finish(err, err_rx),
         })
     }
 
@@ -324,6 +482,12 @@ pub struct DockerConfig {
     /// `localhost`, since the agent and the client calling it aren't
     /// necessarily the same machine.
     pub host: String,
+    /// Host the backend polls for readiness. `None` means the same as `host`, which is what every
+    /// operator-set host gets. `main` sets loopback when `host` came from detection or the hostname
+    /// fallback: that address is captured once at start-up and may go stale or sit on a VPN
+    /// tunnel, while a poll on `127.0.0.1` reaches the published port regardless. The returned
+    /// `Endpoint`'s `base_url` always uses `host`.
+    pub probe_host: Option<String>,
     /// Host port mapped onto the container's fixed serving port (8000 --
     /// see `CONTAINER_PORT`). This is the only port that's actually
     /// configurable; the container always listens on 8000 internally.
@@ -367,6 +531,13 @@ pub struct DockerConfig {
     pub hugepages_src: String,
 }
 
+impl DockerConfig {
+    /// The host readiness polls use: `probe_host` when set, else `host`.
+    pub fn probe_host(&self) -> &str {
+        self.probe_host.as_deref().unwrap_or(&self.host)
+    }
+}
+
 impl Default for DockerConfig {
     /// Defaults chosen to make hermetic tests concise (override only the
     /// field a given test cares about via struct-update syntax); NOT
@@ -377,6 +548,7 @@ impl Default for DockerConfig {
         DockerConfig {
             image: "tenstorrent/tt-inference-server:unset".to_string(),
             host: "127.0.0.1".to_string(),
+            probe_host: None,
             host_port: 8000,
             tt_device: "p150x4".to_string(),
             hf_token: None,
@@ -1064,6 +1236,12 @@ fn sanitize_container_name(model: &str) -> String {
 }
 
 impl ServingBackend for DockerBackend {
+    /// Name used in `OptionsUnsupported` errors. This backend keeps the
+    /// refusing default `start_with_options`, so it rejects any run option.
+    fn backend_name(&self) -> &'static str {
+        "docker"
+    }
+
     /// Start a container serving `model`, taking a gozer chip lease first
     /// when leasing is available.
     ///
@@ -1215,7 +1393,8 @@ impl ServingBackend for DockerBackend {
         // see docs/reference/tt-inference-server-docker.md.
         let health_url = format!(
             "http://{}:{}/health",
-            self.config.host, self.config.host_port
+            self.config.probe_host(),
+            self.config.host_port
         );
         let healthy = super::poll_until_healthy(
             self.runner.as_ref(),
@@ -1500,6 +1679,91 @@ mod tests {
         fn health_ok(&self, _url: &str) -> bool {
             true
         }
+    }
+
+    /// The real timeout: a child that outlives it is killed and the call returns promptly.
+    #[test]
+    fn real_runner_kills_a_child_that_outlives_the_timeout() {
+        let started = std::time::Instant::now();
+        let err = RealCommandRunner
+            .run_capturing_with_timeout(
+                &["sleep", "5"],
+                &[],
+                std::time::Duration::from_millis(100),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("was killed"), "{err:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+        // A quick child is captured normally, with its exit code and both streams.
+        let out = RealCommandRunner
+            .run_capturing_with_timeout(
+                &["sh", "-c", "echo out; echo err >&2; exit 3"],
+                &[("X", "1")],
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!((out.code, out.stdout.as_str(), out.stderr.as_str()), (3, "out", "err"));
+    }
+
+    /// Whether a process is still alive (`kill -0`).
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks for existence.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// Poll for up to a second until `pid` is gone. (A killed process may be a zombie for a
+    /// moment until init reaps it; `kill -0` still succeeds on a zombie, so this waits.)
+    fn gone_within_a_second(pid: i32) -> bool {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < until {
+            if !alive(pid) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        !alive(pid)
+    }
+
+    /// A timeout kills the child's own children too, like the `docker` CLI under `tt model ps`.
+    #[test]
+    fn real_runner_timeout_kills_the_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("grandchild.pid");
+        let script = format!("sleep 7 & echo $! > {}; wait", pidfile.display());
+        let started = std::time::Instant::now();
+        let err = RealCommandRunner
+            .run_capturing_with_timeout(
+                &["sh", "-c", &script],
+                &[],
+                std::time::Duration::from_millis(200),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("was killed"), "{err:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        assert!(gone_within_a_second(pid), "grandchild {pid} survived the timeout");
+    }
+
+    /// The child exits at once but leaves a background process holding its stdout. The call
+    /// still returns by the deadline, with the output written before, and the leftover is killed.
+    #[test]
+    fn real_runner_collects_output_when_a_leftover_holds_the_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("leftover.pid");
+        let script = format!("echo out; sleep 7 & echo $! > {}", pidfile.display());
+        let started = std::time::Instant::now();
+        let got = RealCommandRunner
+            .run_capturing_with_timeout(
+                &["sh", "-c", &script],
+                &[],
+                std::time::Duration::from_millis(300),
+            )
+            .unwrap();
+        assert_eq!((got.code, got.stdout.as_str()), (0, "out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        assert!(gone_within_a_second(pid), "leftover {pid} survived");
     }
 
     /// The container name built from a slashed model id must be valid, but

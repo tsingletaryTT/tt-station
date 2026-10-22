@@ -1,7 +1,7 @@
 #!/usr/bin/make -f
 # debian/rules — debhelper build rules for tt-station.
 #
-# Rust workspace: builds two release binaries (tt-station, tt-station-agentd) with safe
+# Rust workspace: builds three release binaries (tt-station, tt-station-agentd, tt-station-tray) with safe
 # default features. Crates are vendored under vendor/ and .cargo/config.toml
 # redirects cargo there; --frozen enforces no network fetches. Run build-deb.sh
 # to vendor first.
@@ -25,13 +25,14 @@ override_dh_clean:
 	# and skip the *.orig sweep.
 	rm -f debian/debhelper-build-stamp
 	rm -rf debian/.debhelper/
-	rm -f debian/tt-station.substvars debian/tt-station-panel.substvars debian/files
-	rm -rf debian/tt-station/ debian/tt-station-panel/ debian/tmp/
+	rm -f debian/tt-station.substvars debian/tt-station-panel.substvars debian/tt-station-tray.substvars debian/files
+	rm -rf debian/tt-station/ debian/tt-station-panel/ debian/tt-station-tray/ debian/tmp/
 
 # ── Compile ────────────────────────────────────────────────────────────────
 override_dh_auto_build:
 	cargo build --release --frozen -p tt-station
 	cargo build --release --frozen -p tt-station-agentd
+	cargo build --release --frozen -p tt-station-tray
 
 # ── Install ────────────────────────────────────────────────────────────────
 override_dh_auto_install:
@@ -79,6 +80,27 @@ override_dh_auto_install:
 	install -d debian/tt-station-panel/usr/share/doc/tt-station-panel
 	install -m 644 box-panel/README.md \
 	    debian/tt-station-panel/usr/share/doc/tt-station-panel/README.md
+	# ── tt-station-tray (tray icon + GTK4 window) ──
+	install -d debian/tt-station-tray/usr/bin
+	install -m 755 debian/target/release/tt-station-tray \
+	    debian/tt-station-tray/usr/bin/tt-station-tray
+	install -d debian/tt-station-tray/usr/share/applications
+	install -m 644 deploy/com.tenstorrent.ttstation.tray.desktop \
+	    debian/tt-station-tray/usr/share/applications/com.tenstorrent.ttstation.tray.desktop
+	# Autostart (default mode, not --no-window). Under /etc, so debhelper registers it as a conffile.
+	install -d debian/tt-station-tray/etc/xdg/autostart
+	install -m 644 deploy/com.tenstorrent.ttstation.tray.autostart.desktop \
+	    debian/tt-station-tray/etc/xdg/autostart/com.tenstorrent.ttstation.tray.desktop
+	# Icons: the panel's PNGs, installed under the tray's own icon name so no file is shared
+	# between the two packages (dpkg would refuse a file owned by both).
+	for sz in 48x48 128x128 256x256; do \
+	    install -d debian/tt-station-tray/usr/share/icons/hicolor/$$sz/apps; \
+	    install -m 644 box-panel/assets/icons/hicolor/$$sz/apps/com.tenstorrent.ttstation.panel.png \
+	        debian/tt-station-tray/usr/share/icons/hicolor/$$sz/apps/com.tenstorrent.ttstation.tray.png; \
+	done
+	install -d debian/tt-station-tray/usr/share/doc/tt-station-tray
+	install -m 644 docs/reference/linux-tray.md \
+	    debian/tt-station-tray/usr/share/doc/tt-station-tray/linux-tray.md
 
 # ── systemd: install the user unit but do NOT enable/start it on install ─────
 # NOTE: this box's debhelper (13.14.1ubuntu5) splits system vs. --user unit

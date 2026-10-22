@@ -96,6 +96,35 @@ pub fn leased_mesh(tt_smi_snapshot: &str, granted_chips: usize, lease_id: &str) 
         })
 }
 
+/// The `chips` inventory string (`"4xBH"`: count, `x`, architecture tag) for a device-mesh label,
+/// so the agent can advertise the hardware that is installed, where it used to advertise a fixed `4xBH`.
+///
+/// The count is the number of ASICs, which is what `mesh_for` counts too, so the two stay
+/// consistent: `p300x2` is two p300 boards of two ASICs each, which is `4xBH`.
+///
+/// Only Blackhole meshes (`p100`, `p150[xN]`, `p300[xN]`) are mapped. The existing `4xBH` style
+/// has no confirmed Wormhole counterpart in this codebase: it is unknown whether an `n300` is
+/// advertised as one chip or two, and nothing here guesses. Any mesh outside that list returns
+/// `None`, and the caller keeps its fixed fallback (`4xBH`) and says so in `--print-config`.
+pub fn chips_for_mesh(mesh: &str) -> Option<String> {
+    // (board family, ASICs per board)
+    let (family, per_board) = if let Some(rest) = mesh.strip_prefix("p300") {
+        (rest, 2)
+    } else if let Some(rest) = mesh.strip_prefix("p150") {
+        (rest, 1)
+    } else if let Some(rest) = mesh.strip_prefix("p100") {
+        (rest, 1)
+    } else {
+        return None;
+    };
+    // "" -> one board; "xN" -> N boards. p300 as a mesh label already means one board of two ASICs.
+    let boards: usize = match family {
+        "" => 1,
+        rest => rest.strip_prefix('x')?.parse().ok().filter(|n| *n >= 1)?,
+    };
+    Some(format!("{}xBH", boards * per_board))
+}
+
 /// The `(board_type, count) -> mesh` table now lives in `libttstation::device_mesh` so the
 /// Mac-side local detection (`tt-station local`) and this agent share one copy. Re-exported
 /// here so every existing `crate::device::mesh_for` caller is unchanged.
@@ -153,5 +182,31 @@ mod tests {
         assert_eq!(detect_device_mesh(&f(2)).as_deref(), Some("p150x2"));
         assert_eq!(detect_device_mesh(&f(3)).as_deref(), Some("p150x3"));
         assert_eq!(detect_device_mesh(&f(4)).as_deref(), Some("p150x4"));
+    }
+
+    #[test]
+    fn chips_for_mesh_maps_blackhole_meshes_to_asic_counts() {
+        assert_eq!(chips_for_mesh("p300x2").as_deref(), Some("4xBH"));
+        assert_eq!(chips_for_mesh("p300").as_deref(), Some("2xBH"));
+        assert_eq!(chips_for_mesh("p150").as_deref(), Some("1xBH"));
+        assert_eq!(chips_for_mesh("p150x2").as_deref(), Some("2xBH"));
+        assert_eq!(chips_for_mesh("p150x4").as_deref(), Some("4xBH"));
+        assert_eq!(chips_for_mesh("p100").as_deref(), Some("1xBH"));
+    }
+
+    #[test]
+    fn chips_for_mesh_refuses_what_it_cannot_derive() {
+        for m in ["n300", "n300x4", "t3k", "galaxy", "", "p300x", "p300x0", "p150xfoo", "p3000"] {
+            assert_eq!(chips_for_mesh(m), None, "{m:?}");
+        }
+    }
+
+    #[test]
+    fn every_blackhole_mesh_in_the_shared_table_has_a_chips_string() {
+        // Guards against a new Blackhole row being added to `mesh_for` without a chips mapping.
+        for (board, n) in [("p300c", 4), ("p300c", 2), ("p150", 1), ("p150", 2), ("p150", 3), ("p150", 4), ("p100a", 1)] {
+            let mesh = mesh_for(board, n).unwrap();
+            assert!(chips_for_mesh(mesh).is_some(), "{mesh}");
+        }
     }
 }

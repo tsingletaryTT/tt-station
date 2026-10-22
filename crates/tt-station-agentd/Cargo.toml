@@ -28,6 +28,10 @@ toml = { workspace = true }
 # Box-side process listing/CPU%/mem for the `tt_toplike` telemetry
 # enrichment (src/procscan.rs).
 sysinfo = { workspace = true }
+# `kill(-pgid, SIGKILL)` for `RealCommandRunner::run_capturing_with_timeout`: a timed-out
+# `tt model ps` is killed with its whole process group, so an orphaned `docker` CLI cannot
+# survive it. Already in the dependency tree (through tokio and others).
+libc = "0.2"
 
 [features]
 # Compiled in for `cargo test` (see the self-dependency below) so

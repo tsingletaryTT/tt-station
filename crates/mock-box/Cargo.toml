@@ -27,3 +27,8 @@ rand = { workspace = true }
 # key parsing/dedupe/permission-hardening here -- this mock only supplies a
 # throwaway temp-dir path, never `~/.ssh` (see `serve`'s authorized-keys path).
 tt-station-agentd = { path = "../tt-station-agentd" }
+
+[dev-dependencies]
+# Reads `/status` raw in tests to see the mock-only `last_run_options` key,
+# which `libttstation`'s typed `StatusInfo` does not carry.
+reqwest = { workspace = true }

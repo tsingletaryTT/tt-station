@@ -1,0 +1,20 @@
+{
+  "served": [
+    {
+      "name": "Llama-3.1-8B-Instruct",
+      "backend": "inference-server",
+      "container": "tt-inference-server-abc",
+      "container_id": "0123456789ab",
+      "image": "ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.14.0",
+      "port": 20002,
+      "base_url": "http://127.0.0.1:20002/v1",
+      "status": "running",
+      "health": "healthy",
+      "started_at": "2026-10-05T12:00:00Z",
+      "uptime_s": 60,
+      "profile": null,
+      "served_id": "meta-llama/Llama-3.1-8B-Instruct"
+    }
+  ],
+  "probed": true
+}

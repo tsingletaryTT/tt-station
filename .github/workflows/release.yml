@@ -31,7 +31,7 @@ jobs:
       - name: Install packaging prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends devscripts debhelper rustc cargo
+          sudo apt-get install -y --no-install-recommends devscripts debhelper rustc cargo libgtk-4-dev pkg-config
 
       # rustup toolchain (>= 1.93) needed: apt's rustc is too old for the build-dep.
       - name: Install Rust toolchain
@@ -76,10 +76,11 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" \
             ../tt-station_*_amd64_${SUITE}.deb \
             ../tt-station-panel_*_amd64_${SUITE}.deb \
+            ../tt-station-tray_*_amd64_${SUITE}.deb \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
 
-      # Manual run (workflow_dispatch): no Release — upload the two .debs as a
+      # Manual run (workflow_dispatch): no Release — upload the .debs as a
       # downloadable Actions artifact instead. dpkg-buildpackage writes the .debs
       # to the parent dir; stage them into a dir INSIDE the workspace first, since
       # actions/upload-artifact derives its layout from the paths' common ancestor
@@ -90,7 +91,8 @@ jobs:
           SUITE="${{ matrix.suite }}"
           mkdir -p dist
           cp ../tt-station_*_amd64_${SUITE}.deb \
-             ../tt-station-panel_*_amd64_${SUITE}.deb dist/
+             ../tt-station-panel_*_amd64_${SUITE}.deb \
+             ../tt-station-tray_*_amd64_${SUITE}.deb dist/
           ls -lh dist/
 
       # One artifact per suite — v4 requires unique artifact names per job.

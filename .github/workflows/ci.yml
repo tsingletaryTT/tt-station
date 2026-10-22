@@ -22,3 +22,28 @@ jobs:
           [ "$PANEL" = "$CARGO" ] || { echo "::error::panel __version__ ($PANEL) != Cargo.toml ($CARGO)"; fail=1; }
           [ "$fail" -eq 0 ] || { echo "Run scripts/bump-version.sh <version> to fix."; exit 1; }
           echo "All version strings agree: $CARGO"
+
+  # Builds, lints and tests the whole workspace, including the Linux tray (GTK4). The tray
+  # tests that need hardware or a display are not part of cargo test; the smoke check below
+  # runs headless.
+  rust:
+    name: Build and test (Rust workspace)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK 4 development files
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev pkg-config
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Tray smoke check (headless)
+        run: env -u DISPLAY -u WAYLAND_DISPLAY ./target/debug/tt-station-tray --smoke

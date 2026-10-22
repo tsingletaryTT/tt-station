@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/libttstation", "crates/tt-station", "crates/tt-station-agentd", "crates/mock-box"]
+members = ["crates/libttstation", "crates/tt-station", "crates/tt-station-agentd", "crates/mock-box", "crates/tt-station-tray"]
 
 [workspace.package]
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 
 [workspace.dependencies]

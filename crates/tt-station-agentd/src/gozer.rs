@@ -1491,3 +1491,89 @@ impl Drop for LeaseGuard<'_> {
         }
     }
 }
+
+/// Take a gozer lease for one serve, with the same policy `RunPyBackend::acquire_lease` and
+/// `DockerBackend::acquire_lease` apply, as a free function a backend can call instead of
+/// carrying its own copy. The `tt` backend (`serving/tt.rs`) is the first caller.
+/// `RunPyBackend` and `DockerBackend` still have their own copies, which predate this function;
+/// moving them onto it is a separate change.
+///
+/// Returns `Ok(None)` when leasing is off (`capability` is `None`), which means "serve as if
+/// gozer did not exist". Otherwise:
+///
+/// * **Granted:** `Ok(Some(guard))`. The guard releases the lease on drop. The caller disarms it
+///   with `LeaseGuard::into_lease_id` only once the serve is up.
+/// * **Unavailable:** a [`Contention`] error (so `POST /run` answers 409) naming the holder,
+///   found the same way the other backends find it ([`own_lease_clause`], then
+///   [`contention_detail`]). With `force` it logs the override and returns `Ok(None)`: the serve
+///   proceeds without a lease. It never takes the holder's lease away, because then
+///   `gozer status` would report the holder's chips as ours while their container still runs.
+/// * **Failed** (gozer could not be asked): an error, or with `force` a logged `Ok(None)`.
+///
+/// `who` is `tt-station:<service_port>:<model>`. The prefix is what the startup sweep filters
+/// on, and the port is how that sweep matches a lease to a running server.
+///
+/// `backend` is the short backend name used in messages (`"tt"`), so an operator reading the
+/// journal knows which code path refused.
+pub fn acquire_for_serve<'a>(
+    runner: &'a dyn CommandRunner,
+    capability: Option<&Capability>,
+    backend: &str,
+    service_port: u16,
+    model: &str,
+    force: bool,
+) -> Result<Option<LeaseGuard<'a>>> {
+    let Some(capability) = capability else {
+        return Ok(None);
+    };
+
+    let who = format!("{WHO_PREFIX}{service_port}:{model}");
+    let reason = format!("serving {model} via tt-station-agentd ({backend} backend)");
+    match acquire(runner, capability, DEFAULT_LEASE_CHIPS, &who, &reason) {
+        Outcome::Granted(grant) => {
+            eprintln!(
+                "tt-station-agentd: leased {} chip(s) [{}] as lease {} for '{model}'",
+                grant.chips.len(),
+                grant.chips.join(", "),
+                grant.lease_id
+            );
+            Ok(Some(LeaseGuard::new(runner, capability.clone(), grant)))
+        }
+        Outcome::Unavailable { holder, .. } => {
+            // No duration: gozer's status carries `who` but no `since`, and agentd must not
+            // invent one (see `contention_detail`).
+            let detail = holder
+                .map(|who| own_lease_clause(&who, service_port).unwrap_or(who))
+                .or_else(|| contention_detail(runner, capability, service_port))
+                .unwrap_or_else(|| "gozer reports no free chips".to_string());
+            if force {
+                eprintln!(
+                    "tt-station-agentd: --force given: serving '{model}' WITHOUT a lease even \
+                     though {detail}. The holder's lease stays recorded and this serve's chips \
+                     will show as BUSY-UNTRACKED in `gozer status`. This is a deliberate \
+                     override."
+                );
+                return Ok(None);
+            }
+            Err(anyhow::Error::new(Contention::new(format!(
+                "{backend} backend: cannot serve '{model}' -- no chips are available: {detail}. \
+                 Pass `--force` to serve anyway (`tt-station run --force`) -- it is your box, \
+                 and the override is logged."
+            ))))
+        }
+        Outcome::Failed(message) => {
+            if force {
+                eprintln!(
+                    "tt-station-agentd: --force given: serving '{model}' WITHOUT a lease even \
+                     though gozer could not be asked ({message}). Whether another tenant holds \
+                     chips is unknown. This is a deliberate override."
+                );
+                return Ok(None);
+            }
+            Err(anyhow::anyhow!(
+                "{backend} backend: cannot serve '{model}' -- gozer acquire failed: {message}. \
+                 Pass `--force` to serve anyway, without a lease."
+            ))
+        }
+    }
+}
