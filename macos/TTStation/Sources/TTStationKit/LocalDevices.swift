@@ -189,17 +189,25 @@ public struct RightSizedModel: Codable, Equatable, Identifiable {
     public let engines: [String]
     public let status: String?
     public let maxContext: Int?
+    /// "catalog" (Tenstorrent's released catalog) or "community" (a tt-model-manager bundle, tt 1.2.0+).
+    /// Optional so output from older tt-station builds, which had no such field, still decodes.
+    public let source: String?
+    /// For a community bundle: whether Tenstorrent has verified it.
+    public let verified: Bool?
 
     public var id: String { name }
+    public var isCommunity: Bool { source == "community" }
 
     enum CodingKeys: String, CodingKey {
-        case name, engines, status
+        case name, engines, status, source, verified
         case modelType = "model_type"
         case maxContext = "max_context"
     }
 
-    public init(name: String, modelType: String?, engines: [String], status: String?, maxContext: Int?) {
+    public init(name: String, modelType: String?, engines: [String], status: String?, maxContext: Int?,
+                source: String? = nil, verified: Bool? = nil) {
         self.name = name; self.modelType = modelType; self.engines = engines; self.status = status; self.maxContext = maxContext
+        self.source = source; self.verified = verified
     }
 
     /// "64K context"
