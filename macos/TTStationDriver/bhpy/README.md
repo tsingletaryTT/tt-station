@@ -71,9 +71,13 @@ from one convention change that is valid on both):
 
 ## Why a broker
 
-A development-signed dext only opens for clients with the `userclient-access` entitlement, and
-`python3` can't have one. So the entitled host app runs `broker.c` on a Unix socket and Python
-talks to it, the same approach as tinygrad's TinyGPU:
+The dext serves one user client at a time. A client owns the BAR mappings, TLB windows and iATU,
+and two would silently overwrite each other. And in a shipping build only an app with the
+`userclient-access` entitlement may open it, which `python3` can't have. (The development build
+uses `allow-any-userclient-access` instead, because `userclient-access` needs Apple's approval on a
+new team.) So one process, `TTStationDriver serve` or the standalone `ttbh-broker-iokit`, owns the
+dext and runs `broker.c` on a Unix socket, and everything else talks to it. That's the same
+approach as tinygrad's TinyGPU:
 
 - **TLB windows** (`TLBWindow.target/read/write`) are proxied. BAR mappings can't be shared
   across processes (task self-ports have been immovable since macOS 12), and blackhole-py never
@@ -86,6 +90,55 @@ talks to it, the same approach as tinygrad's TinyGPU:
 
 All the chip logic is `../libttbh`, verified against tt-kmd on real silicon.
 
+### Sessions
+
+The session socket (`~/Library/Application Support/TTStation/ttbh.sock`, or `serve SOCKET`) serves
+up to 16 sessions at once, like several opens of `/dev/tenstorrent/N` under tt-kmd. tt-flash needs
+this, because it reopens the card in-process and from worker processes. The broker is
+single-threaded and handles each request whole. TLB windows and outbound iATU regions are owned
+broker-wide, so two sessions are never given the same one, and a session that disconnects has only
+what it held released. Coordinating use of the chip itself is up to the clients, as on Linux.
+
+### Telemetry socket (read-only, any number of readers)
+
+`telemetry.sock`, beside the session socket (or `TTBH_TELEMETRY_SOCKET`), is for monitors. Connect,
+read one JSON line, and the broker closes the connection:
+
+```json
+{"v":1,"device_id":45376,"subsystem_id":67,"arc_ready":true,"asic_temp_c":56.4,"power_w":38,
+ "vcore_mv":740,"current_a":51,"aiclk_mhz":800,"heartbeat":48141,"fan_rpm":null}
+```
+
+A field is `null` when its read failed. Readers are answered between session requests, through
+the broker's own TLB window, and nothing is written to the card. So a monitor works while a model
+or a flash runs.
+
+### tt-toplike
+
+`python3 -m ttstation_bhpy.toplike_bridge [--port 8766]` serves `tt-smi -s`-shaped frames on
+`ws://127.0.0.1:8766/telemetry`, built from `tt-station local` (identity) and `telemetry.sock`
+(readings). tt-toplike's existing remote mode then works unchanged:
+`tt-toplike --remote 127.0.0.1:8766 --mode arcade`.
+
+### The standalone broker
+
+`make -C macos/TTStationDriver/bhpy build/ttbh-broker-iokit` builds the same broker as
+`TTStationDriver serve`, as a plain ad-hoc-signed binary. The development dext accepts any client,
+so this is the quick way to test a broker change on the card without reinstalling the host app.
+
+### DMA-able host memory is capped at about 2 GiB
+
+The Mac maps at most **2,146,385,920 bytes** for the device, in total across all mappings
+(measured: a second 1 GiB buffer fails while the first is held, with `kIOReturnNoMemory`).
+blackhole-py's Llama 3 8B asks for exactly 2 GiB, so `Sysmem` retries in 16 MiB steps, never
+below 3/4 of the request, and prints the size it got. blackhole-py sizes its staging area from the
+allocator and raises `MemoryError` if a transfer doesn't fit.
+
+### pyluwen, tt-flash and the official tools
+
+Tools built on pyluwen (tt-flash, and in principle tt-smi) run against the broker through a small
+luwen fork: see `../luwen/README.md` and `docs/reference/macos-firmware-update.md`.
+
 ## Licensing
 
 blackhole-py has **no license**, so none of its code is copied here. `ttstation_bhpy.install()`
@@ -94,8 +147,9 @@ loads `Allocator`, `board_config` and the layout constants from *your* checkout.
 ## Tests (no hardware, macOS or Linux)
 
 ```bash
-make -C macos/TTStationDriver/bhpy test                       # 10 tests
+make -C macos/TTStationDriver/bhpy test                       # sim broker: protocol, sessions, sysmem, telemetry socket
 BHPY_DIR=~/code/blackhole-py make -C macos/TTStationDriver/bhpy test   # + interface parity + PCIDevice bring-up
+TTSIM_LIB=~/code/ttsim/src/_out/release_bh/libttsim.so make -C macos/TTStationDriver/bhpy test   # + ttsim (checked on v1.13.0)
 ```
 
 The Python client runs against the **real C broker** built over libttbh's simulated Blackhole

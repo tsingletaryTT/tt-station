@@ -1,0 +1,510 @@
+From c6c600a13419c2966749b5687ca8b08d27b0e182 Mon Sep 17 00:00:00 2001
+From: Taylor Singletary <tsingletary@tenstorrent.com>
+Date: Thu, 22 Oct 2026 10:06:14 -0700
+Subject: [PATCH] pyluwen: tt-station broker backend (macOS); ARC queue: MSI
+ doorbell, stale-reply drain, cross-process lock
+
+- bind/pyluwen/src/ttstation_broker.rs: a luwen chip backend over tt-station's ttbh broker, for a
+  Blackhole attached to a Mac over Thunderbolt (no tt-kmd). Opt-in via TTSTATION_BROKER. NOC
+  read/write through one 2 MiB window; every MMIO access widened to aligned 32-bit (a 3-byte read
+  of ARC_MISC_CNTL returned ffffff on the Mac).
+- PciChip/pci_scan/detect_chips use it when enabled; PciBlackhole pci_board_type/pci_interface_id
+  fall back to the backend's DeviceInfo.
+- blackhole/message.rs: also ring the MSI catcher FIFO (tt-kmd's doorbell; fw bundle 19.2.0
+  ignores irq0_trig), drain uncollected responses before sending (as tt-kmd does), and, when
+  TTSTATION_BROKER is set, hold a file lock for the whole exchange (concurrent processes crossed
+  replies without it).
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ bind/pyluwen/src/lib.rs                       |  60 +++-
+ bind/pyluwen/src/ttstation_broker.rs          | 290 ++++++++++++++++++
+ .../luwen-api/src/chip/blackhole/message.rs   |  46 +++
+ 3 files changed, 394 insertions(+), 2 deletions(-)
+ create mode 100644 bind/pyluwen/src/ttstation_broker.rs
+
+diff --git a/bind/pyluwen/src/lib.rs b/bind/pyluwen/src/lib.rs
+index c19506d..07ddcff 100644
+--- a/bind/pyluwen/src/lib.rs
++++ b/bind/pyluwen/src/lib.rs
+@@ -22,6 +22,10 @@ use pyo3::types::{PyDict, PyList};
+ use serde_json::Value;
+ use std::collections::HashMap;
+ 
++// tt-station's broker backend: lets pyluwen tools run on macOS, where a Thunderbolt-attached
++// Blackhole has no tt-kmd. Off unless TTSTATION_BROKER is set; see ttstation_broker.rs.
++mod ttstation_broker;
++
+ #[pyclass]
+ pub struct PciChip(luwen::api::chip::Chip);
+ 
+@@ -59,6 +63,17 @@ impl DerefMut for PciWormhole {
+ #[pyclass]
+ pub struct PciBlackhole(luwen::api::chip::Blackhole);
+ 
++impl PciBlackhole {
++    /// Device info from the chip's backend, when that backend is the tt-station broker (it has no
++    /// luwen PCI device to downcast to). `None` otherwise, so the tt-kmd path is unchanged.
++    fn broker_device_info(&self) -> Option<DeviceInfo> {
++        if ttstation_broker::broker_socket().is_none() {
++            return None;
++        }
++        self.0.get_device_info().ok().flatten()
++    }
++}
++
+ impl Deref for PciBlackhole {
+     type Target = luwen::api::chip::Blackhole;
+ 
+@@ -685,6 +700,34 @@ impl PciChip {
+     pub fn new(pci_interface: Option<usize>) -> PyResult<Self> {
+         let pci_interface = pci_interface.unwrap_or(0);
+ 
++        if ttstation_broker::broker_socket().is_some() {
++            let conn = ttstation_broker::open_wrapper(pci_interface).map_err(|v| {
++                PyException::new_err(format!(
++                    "Could not open chip {pci_interface} through the tt-station broker\n Failed with: {v}"
++                ))
++            })?;
++            let device_id = conn.lock().map(|c| c.device_id).unwrap_or(0);
++            let arch = match device_id {
++                0xb140 => Arch::Blackhole,
++                0x401e => Arch::Wormhole,
++                other => {
++                    return Err(PyException::new_err(format!(
++                        "tt-station broker serves device 0x{other:04x}, which luwen doesn't know"
++                    )))
++                }
++            };
++            return Ok(PciChip(
++                luwen::api::chip::Chip::open(
++                    arch,
++                    luwen::api::CallbackStorage {
++                        callback: ttstation_broker::comms_callback,
++                        user_data: conn,
++                    },
++                )
++                .map_err(|v| PyException::new_err(format!("Could not initialize chip: {v}")))?,
++            ));
++        }
++
+         let chip = luwen::pci::ExtendedPciDevice::open(pci_interface).map_err(|v| {
+             PyException::new_err(format!(
+                 "Could not open chip on pci interface {pci_interface}\n Failed with: {v}"
+@@ -1401,6 +1444,8 @@ impl PciBlackhole {
+         let value = PciInterface::from_bh(self);
+         if let Some(value) = value {
+             Ok(value.pci_interface.borrow().device.physical.subsystem_id)
++        } else if let Some(info) = self.broker_device_info() {
++            Ok(info.board_id)
+         } else {
+             Err(PyException::new_err(
+                 "Could not get PCI interface for this chip.",
+@@ -1412,6 +1457,8 @@ impl PciBlackhole {
+         let value = PciInterface::from_bh(self);
+         if let Some(value) = value {
+             Ok(value.pci_interface.borrow().device.id)
++        } else if let Some(info) = self.broker_device_info() {
++            Ok(info.interface_id as usize)
+         } else {
+             Err(PyException::new_err(
+                 "Could not get PCI interface for this chip.",
+@@ -1661,7 +1708,7 @@ pub fn detect_chips_fallible(
+ ) -> PyResult<Vec<UninitPciChip>> {
+     let interfaces = interfaces.unwrap_or_default();
+ 
+-    let all_devices = luwen::pci::PciDevice::scan();
++    let all_devices = scan_devices();
+     let interfaces = if interfaces.is_empty() {
+         all_devices
+     } else {
+@@ -1811,9 +1858,18 @@ pub fn detect_chips_for_flash(
+         .collect())
+ }
+ 
++/// Device interfaces to try: the broker's one card when TTSTATION_BROKER is set, else tt-kmd's.
++fn scan_devices() -> Vec<usize> {
++    if ttstation_broker::broker_socket().is_some() {
++        vec![0]
++    } else {
++        luwen::pci::PciDevice::scan()
++    }
++}
++
+ #[pyfunction]
+ pub fn pci_scan() -> Vec<usize> {
+-    luwen::pci::PciDevice::scan()
++    scan_devices()
+ }
+ 
+ #[pyfunction]
+diff --git a/bind/pyluwen/src/ttstation_broker.rs b/bind/pyluwen/src/ttstation_broker.rs
+new file mode 100644
+index 0000000..d750c26
+--- /dev/null
++++ b/bind/pyluwen/src/ttstation_broker.rs
+@@ -0,0 +1,290 @@
++// SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
++// SPDX-License-Identifier: Apache-2.0
++
++//! A luwen chip backend over tt-station's ttbh broker, for macOS (and anywhere else the broker runs).
++//!
++//! On Linux, pyluwen opens `/dev/tenstorrent/N` and talks to tt-kmd. macOS has no tt-kmd: a
++//! Blackhole attached over Thunderbolt is driven by tt-station's PCIDriverKit driver, and one
++//! userspace "broker" owns that driver and serves clients over a Unix socket
++//! (tt-station `macos/TTStationDriver/bhpy/broker.{h,c}`). The broker hands out 2 MiB TLB windows:
++//! aim a window at a NOC tile + address, then read or write through it.
++//!
++//! luwen needs nothing more for Blackhole. Every chip access (ARC messages, telemetry, SPI through
++//! the ARC firmware) reduces to `FnNoc::Read`/`FnNoc::Write` at the ARC tile on NOC 0 (see
++//! `luwen-api` `chip/creation.rs` `bh_open`: `NocIf { noc_id: 0, x: 8, y: 0 }`), so this backend
++//! implements those, plus `FnDriver::DeviceInfo`, and refuses the rest with a clear error.
++//!
++//! Enabled by setting `TTSTATION_BROKER` to the broker's session socket path (or to `1` for the
++//! default `~/Library/Application Support/TTStation/ttbh.sock`). Then `PciChip(N)`, `pci_scan()`
++//! and the `detect_chips*` functions use the broker instead of `/dev/tenstorrent`, so tools built
++//! on pyluwen (tt-flash, tt-smi) run unchanged.
++
++use std::io::{Read, Write};
++use std::os::unix::net::UnixStream;
++use std::sync::{Arc, Mutex};
++
++use luwen::api::{DeviceInfo, FnDriver, FnNoc, FnOptions};
++
++// ── wire protocol (broker.h: ttbh_broker_req / ttbh_broker_resp, little-endian, packed) ─────────
++const CMD_HELLO: u32 = 0;
++const CMD_TLB_ALLOC: u32 = 1;
++const CMD_TLB_FREE: u32 = 2;
++const CMD_TLB_TARGET: u32 = 3;
++const CMD_TLB_READ: u32 = 4;
++const CMD_TLB_WRITE: u32 = 5;
++
++const TLB_SIZE: u64 = 1 << 21; // 2 MiB windows (BAR4's 4 GiB windows aren't available over Thunderbolt)
++const MAX_IO: u64 = 1 << 21; // TTBH_BROKER_MAX_IO
++
++/// Default broker socket, as `TTStationDriver serve` and `ttbh-broker-iokit` use it.
++fn default_socket() -> String {
++    let home = std::env::var("HOME").unwrap_or_default();
++    format!("{home}/Library/Application Support/TTStation/ttbh.sock")
++}
++
++/// The broker socket if `TTSTATION_BROKER` selects the broker backend, else `None`.
++pub fn broker_socket() -> Option<String> {
++    match std::env::var("TTSTATION_BROKER") {
++        Ok(v) if v.is_empty() || v == "0" => None,
++        Ok(v) if v == "1" => Some(default_socket()),
++        Ok(v) => Some(v),
++        Err(_) => None,
++    }
++}
++
++#[derive(Debug)]
++pub struct BrokerError(String);
++impl std::fmt::Display for BrokerError {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "ttstation broker: {}", self.0)
++    }
++}
++impl std::error::Error for BrokerError {}
++
++fn err<T>(msg: impl Into<String>) -> Result<T, Box<dyn std::error::Error>> {
++    Err(Box::new(BrokerError(msg.into())))
++}
++
++/// One session with the broker: a socket and the one TLB window this session uses for all access.
++pub struct BrokerConn {
++    sock: UnixStream,
++    window: u32,
++    /// What the window is aimed at now: (x, y, 2 MiB-aligned base). Retargeting costs a round
++    /// trip, and luwen's accesses cluster at the ARC tile, so this saves most of them.
++    aimed: Option<(u32, u32, u64)>,
++    pub device_id: u16,
++    pub subsystem_id: u16,
++    pub interface_id: u32,
++}
++
++impl BrokerConn {
++    pub fn open(path: &str, interface_id: u32) -> Result<Self, Box<dyn std::error::Error>> {
++        let sock = UnixStream::connect(path)
++            .map_err(|e| BrokerError(format!("can't connect to {path}: {e} (is the broker running?)")))?;
++        sock.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
++        let mut c = BrokerConn {
++            sock,
++            window: 0,
++            aimed: None,
++            device_id: 0,
++            subsystem_id: 0,
++            interface_id,
++        };
++        let (_ver, ids, _) = c.call(CMD_HELLO, 0, 0, 0, 0, &[], 0)?;
++        c.device_id = (ids >> 16) as u16;
++        c.subsystem_id = (ids & 0xFFFF) as u16;
++        let (window, _, _) = c.call(CMD_TLB_ALLOC, 0, 0, 0, 0, &[], 0)?;
++        c.window = window as u32;
++        Ok(c)
++    }
++
++    /// One request and its response. Returns (r0, r1, payload).
++    #[allow(clippy::too_many_arguments)]
++    fn call(
++        &mut self,
++        cmd: u32,
++        id: u32,
++        a0: u64,
++        a1: u64,
++        a2: u64,
++        payload: &[u8],
++        want: usize,
++    ) -> Result<(u64, u64, Vec<u8>), Box<dyn std::error::Error>> {
++        let mut req = Vec::with_capacity(40 + payload.len());
++        req.extend_from_slice(&cmd.to_le_bytes());
++        req.extend_from_slice(&id.to_le_bytes());
++        req.extend_from_slice(&a0.to_le_bytes());
++        req.extend_from_slice(&a1.to_le_bytes());
++        req.extend_from_slice(&a2.to_le_bytes());
++        req.extend_from_slice(&(payload.len() as u32).to_le_bytes());
++        req.extend_from_slice(&0u32.to_le_bytes());
++        req.extend_from_slice(payload);
++        self.sock.write_all(&req)?;
++        let mut head = [0u8; 24];
++        self.sock.read_exact(&mut head)?;
++        let status = i32::from_le_bytes(head[0..4].try_into().unwrap());
++        let len = u32::from_le_bytes(head[4..8].try_into().unwrap()) as usize;
++        let r0 = u64::from_le_bytes(head[8..16].try_into().unwrap());
++        let r1 = u64::from_le_bytes(head[16..24].try_into().unwrap());
++        let mut data = vec![0u8; len];
++        self.sock.read_exact(&mut data)?;
++        if status != 0 {
++            return err(format!("command {cmd} failed with status {status}"));
++        }
++        if want != 0 && data.len() != want {
++            return err(format!("command {cmd}: expected {want} bytes, got {}", data.len()));
++        }
++        Ok((r0, r1, data))
++    }
++
++    /// Aim the window so `addr` on tile (x, y) is inside it; returns the offset of `addr` in it.
++    fn aim(&mut self, x: u32, y: u32, addr: u64) -> Result<u64, Box<dyn std::error::Error>> {
++        let base = addr & !(TLB_SIZE - 1);
++        if self.aimed != Some((x, y, base)) {
++            let xy = (x as u64) | ((y as u64) << 8); // unicast: start = end = the tile
++            self.aimed = None;
++            self.call(CMD_TLB_TARGET, self.window, base, xy, xy, &[], 0)?;
++            self.aimed = Some((x, y, base));
++        }
++        Ok(addr - base)
++    }
++
++    // MMIO through the BAR mapping must be naturally aligned 32-bit accesses. An odd-sized access
++    // is not reliably honoured: on an M-series Mac a 3-byte read of ARC_MISC_CNTL returned ffffff
++    // while the 4-byte read returned 00000000 (2026-10-22). luwen reads its 3-byte irq0_trig field
++    // that way, saw the doorbell "already set", and never rang it. luwen's Linux PCI layer widens
++    // small accesses to 32-bit reads/writes; these two do the same: reads widen to whole words and
++    // trim, writes read-modify-write only the partial words at either end.
++    pub fn noc_read(&mut self, x: u32, y: u32, addr: u64, out: &mut [u8]) -> Result<(), Box<dyn std::error::Error>> {
++        if out.is_empty() {
++            return Ok(());
++        }
++        let start = addr & !3;
++        let end = (addr + out.len() as u64 + 3) & !3;
++        if start == addr && end == addr + out.len() as u64 {
++            return self.raw_read(x, y, addr, out);
++        }
++        let mut wide = vec![0u8; (end - start) as usize];
++        self.raw_read(x, y, start, &mut wide)?;
++        let skip = (addr - start) as usize;
++        out.copy_from_slice(&wide[skip..skip + out.len()]);
++        Ok(())
++    }
++
++    pub fn noc_write(&mut self, x: u32, y: u32, addr: u64, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
++        if data.is_empty() {
++            return Ok(());
++        }
++        let end = addr + data.len() as u64;
++        let (wstart, wend) = (addr & !3, (end + 3) & !3);
++        if wstart == addr && wend == end {
++            return self.raw_write(x, y, addr, data);
++        }
++        // Whole aligned span, with the bytes outside [addr, end) taken from the device first.
++        let mut wide = vec![0u8; (wend - wstart) as usize];
++        let head_partial = wstart != addr;
++        let tail_partial = wend != end;
++        let one_word = wend - wstart == 4;
++        if head_partial {
++            self.raw_read(x, y, wstart, &mut wide[..4])?;
++        }
++        if tail_partial && !(one_word && head_partial) {
++            // (When the span is one word and the head read already fetched it, don't read twice.)
++            let n = wide.len();
++            self.raw_read(x, y, wend - 4, &mut wide[n - 4..])?;
++        }
++        let skip = (addr - wstart) as usize;
++        wide[skip..skip + data.len()].copy_from_slice(data);
++        self.raw_write(x, y, wstart, &wide)
++    }
++
++    fn raw_read(&mut self, x: u32, y: u32, mut addr: u64, out: &mut [u8]) -> Result<(), Box<dyn std::error::Error>> {
++        let mut done = 0usize;
++        while done < out.len() {
++            let off = self.aim(x, y, addr)?;
++            let n = ((TLB_SIZE - off).min(MAX_IO) as usize).min(out.len() - done);
++            let (_, _, data) = self.call(CMD_TLB_READ, self.window, off, n as u64, 0, &[], n)?;
++            out[done..done + n].copy_from_slice(&data);
++            done += n;
++            addr += n as u64;
++        }
++        Ok(())
++    }
++
++    fn raw_write(&mut self, x: u32, y: u32, mut addr: u64, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
++        let mut done = 0usize;
++        while done < data.len() {
++            let off = self.aim(x, y, addr)?;
++            let n = ((TLB_SIZE - off).min(MAX_IO) as usize).min(data.len() - done);
++            self.call(CMD_TLB_WRITE, self.window, off, 0, 0, &data[done..done + n], 0)?;
++            done += n;
++            addr += n as u64;
++        }
++        Ok(())
++    }
++}
++
++impl Drop for BrokerConn {
++    fn drop(&mut self) {
++        // The broker frees a closed session's windows anyway; this just returns it promptly.
++        let _ = self.call(CMD_TLB_FREE, self.window, 0, 0, 0, &[], 0);
++    }
++}
++
++/// The user data luwen's `CallbackStorage` carries: shared, because luwen clones it per interface.
++pub type BrokerWrapper = Arc<Mutex<BrokerConn>>;
++
++pub fn open_wrapper(interface_id: usize) -> Result<BrokerWrapper, Box<dyn std::error::Error>> {
++    let path = broker_socket().ok_or_else(|| BrokerError("TTSTATION_BROKER is not set".into()))?;
++    if interface_id != 0 {
++        return err(format!("the broker serves one card (interface 0), not interface {interface_id}"));
++    }
++    Ok(Arc::new(Mutex::new(BrokerConn::open(&path, interface_id as u32)?)))
++}
++
++/// luwen's chip callback (`LuwenInterfaceCallback`), over the broker.
++pub fn comms_callback(ud: &BrokerWrapper, op: FnOptions) -> Result<(), Box<dyn std::error::Error>> {
++    let mut c = ud.lock().map_err(|_| BrokerError("connection lock poisoned".into()))?;
++    match op {
++        FnOptions::Driver(FnDriver::DeviceInfo(info)) => {
++            if !info.is_null() {
++                // Bus/slot/function: the card's location on the Mac's PCIe tree is not exposed by
++                // the broker. luwen uses these only for Linux sysfs paths (resets), which a macOS
++                // flow skips (tt-flash --no-reset; power-cycle the enclosure instead).
++                unsafe {
++                    *info = Some(DeviceInfo {
++                        interface_id: c.interface_id,
++                        domain: 0,
++                        bus: 0,
++                        slot: 0,
++                        function: 0,
++                        vendor: 0x1e52,
++                        device_id: c.device_id,
++                        board_id: c.subsystem_id,
++                        bar_size: Some(512 << 20),
++                    });
++                }
++            }
++            Ok(())
++        }
++        FnOptions::Noc(FnNoc::Read { noc_id, x, y, addr, data, len }) => {
++            if noc_id != 0 {
++                return err(format!("NOC {noc_id} read: the broker's windows use NOC 0"));
++            }
++            let out = unsafe { std::slice::from_raw_parts_mut(data, len as usize) };
++            c.noc_read(x, y, addr, out)
++        }
++        FnOptions::Noc(FnNoc::Write { noc_id, x, y, addr, data, len }) => {
++            if noc_id != 0 {
++                return err(format!("NOC {noc_id} write: the broker's windows use NOC 0"));
++            }
++            let src = unsafe { std::slice::from_raw_parts(data, len as usize) };
++            c.noc_write(x, y, addr, src)
++        }
++        FnOptions::Noc(other) => err(format!("unsupported NOC operation over the broker: {other:?}")),
++        FnOptions::Axi(op) => err(format!(
++            "direct BAR access ({op:?}) isn't available over the broker; Blackhole uses NOC access"
++        )),
++        FnOptions::Eth(op) => err(format!("remote (ethernet) access isn't available over the broker: {op:?}")),
++    }
++}
+diff --git a/crates/luwen-api/src/chip/blackhole/message.rs b/crates/luwen-api/src/chip/blackhole/message.rs
+index 5e6e78d..0508ced 100644
+--- a/crates/luwen-api/src/chip/blackhole/message.rs
++++ b/crates/luwen-api/src/chip/blackhole/message.rs
+@@ -26,6 +26,37 @@ pub struct MessageQueue<const N: usize> {
+     pub fw_int: AxiData,
+ }
+ 
++/// The ARC's MSI catcher FIFO. Pushing any value to it wakes the message-queue handler. tt-kmd
++/// rings this doorbell (and so does tt-station's libttbh). Current firmware services both this and
++/// `ARC_MISC_CNTL.irq0_trig`; older firmware (seen: bundle 19.2.0 on a P100A, 2026-10-22) wakes only
++/// on this one. With irq0_trig alone, its requests sat unread until something else rang the FIFO.
++const ARC_MSI_FIFO: u64 = 0x800B_0000;
++
++/// A file lock that makes one ARC message exchange (drain, push, pop) atomic across processes, when
++/// the card is reached through tt-station's broker (`TTSTATION_BROKER` set; macOS). Nothing in the
++/// queue protocol stops two processes from interleaving on one queue: on the Mac, 4 forkserver
++/// workers sending TEST on queue 2 at once got each other's replies (2026-10-22). Not taken
++/// otherwise, so luwen over tt-kmd behaves as before.
++fn broker_arc_lock() -> Option<std::fs::File> {
++    let v = std::env::var("TTSTATION_BROKER").ok()?;
++    if v.is_empty() || v == "0" {
++        return None;
++    }
++    let dir = if v == "1" {
++        std::path::PathBuf::from(std::env::var("HOME").ok()?).join("Library/Application Support/TTStation")
++    } else {
++        std::path::Path::new(&v).parent()?.to_path_buf()
++    };
++    let file = std::fs::OpenOptions::new()
++        .create(true)
++        .truncate(false)
++        .write(true)
++        .open(dir.join("arc-msg.lock"))
++        .ok()?;
++    file.lock().ok()?; // released when the File drops, at the end of the exchange
++    Some(file)
++}
++
+ impl<const N: usize> MessageQueue<N> {
+     fn get_base(&self, index: u8) -> u64 {
+         let msg_queue_size = 2 * self.queue_size * (self.entry_size * 4) + (self.header_size * 4);
+@@ -68,6 +99,10 @@ impl<const N: usize> MessageQueue<N> {
+         mvalue[0] |= 1;
+ 
+         crate::chip::HlCommsInterface::axi_write_field(&chip, &self.fw_int, mvalue.as_slice())?;
++        // Also ring the MSI FIFO doorbell, as tt-kmd does, so firmware that ignores irq0_trig
++        // still wakes (see ARC_MSI_FIFO). For firmware that services both, it's one extra wake.
++        chip.arc_if
++            .axi_write32(&chip.chip_if, ARC_MSI_FIFO, 0)?;
+ 
+         Ok(true)
+     }
+@@ -168,6 +203,17 @@ impl<const N: usize> MessageQueue<N> {
+             })?;
+         }
+ 
++        let _exchange = broker_arc_lock();
++
++        // Discard responses nobody collected (an earlier exchange that timed out on our side but
++        // that the firmware answered later). Otherwise the next pop returns that stale answer as
++        // the reply to this request. tt-kmd drains the same way before sending.
++        let response_queue_rptr = self.qread32(chip, index, 1)?;
++        let response_queue_wptr = self.qread32(chip, index, 5)?;
++        if response_queue_rptr != response_queue_wptr {
++            self.qwrite32(chip, index, 1, response_queue_wptr)?;
++        }
++
+         self.push_request(chip, index, &request, timeout)?;
+         self.pop_response(chip, index, &mut request, timeout)?;
+ 
+-- 
+2.54.0 (Apple Git-157)
+

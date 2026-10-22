@@ -133,6 +133,10 @@ class ManySessions(BrokerCase):
         second.call(wire.TLB_FREE, mine[0])                    # nor free it
         self.c.call(wire.TLB_TARGET, mine[0], 0, 1 | 2 << 8, 1 | 2 << 8)
         second.close()
+        # The broker sees the hang-up on its next poll, and a request of ours can be served first
+        # in that same pass (sessions are polled in index order). Give it that pass before
+        # counting: this test is about what's freed, not when.
+        time.sleep(0.2)
         # The second session's windows come back; ours stay ours.
         again = [self.c.call(wire.TLB_ALLOC)[0] for _ in range(3)]
         self.assertEqual(sorted(again), sorted(theirs))
