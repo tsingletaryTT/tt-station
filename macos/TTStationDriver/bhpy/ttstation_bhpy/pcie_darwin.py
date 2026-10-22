@@ -15,6 +15,7 @@ the layout constants come from the user's own checkout (see ttstation_bhpy.insta
 import ctypes
 import mmap
 import os
+import sys
 import struct
 
 from . import client as wire
@@ -78,11 +79,33 @@ class Sysmem:
     SIZE = 256 << 20
     PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
 
+    # macOS can map only a bounded total for the device through the DART: on an M-series Mac with the
+    # P100A over Thunderbolt that's 2,146,385,920 bytes (2 GiB less ~1 MiB, measured 2026-10-22),
+    # and blackhole-py's Llama 3 8B asks for exactly 2 GiB. So a request that can't be mapped is
+    # retried in BACKOFF steps, never below MIN_FRACTION of it, and the shrink is announced on
+    # stderr. That's safe because blackhole-py sizes its staging region from allocator.end and
+    # raises MemoryError if a transfer doesn't fit: a real shortfall still fails loudly.
+    BACKOFF = 16 << 20
+    MIN_FRACTION = 0.75
+
     def __init__(self, fd, size=None):
         self.fd = fd
         size = self.SIZE if size is None else size
-        self.size = (size + self.PAGE_SIZE - 1) & -self.PAGE_SIZE
-        noc, handle, _, mfd = fd.call(wire.SYSMEM, a0=self.size, want_fd=True)
+        requested = (size + self.PAGE_SIZE - 1) & -self.PAGE_SIZE
+        floor = int(requested * self.MIN_FRACTION)
+        self.size = requested
+        while True:
+            try:
+                noc, handle, _, mfd = fd.call(wire.SYSMEM, a0=self.size, want_fd=True)
+                break
+            except wire.BrokerError:
+                smaller = (self.size - self.BACKOFF) & -self.PAGE_SIZE
+                if smaller < floor:
+                    raise
+                self.size = smaller
+        if self.size != requested:
+            print(f"ttstation_bhpy: sysmem {requested} bytes can't be DMA-mapped here; using {self.size} "
+                  f"({(requested - self.size) >> 20} MiB less)", file=sys.stderr)
         if mfd is None:
             raise OSError("ttbh broker returned no sysmem fd")
         try:

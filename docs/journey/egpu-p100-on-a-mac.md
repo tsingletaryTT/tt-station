@@ -1177,7 +1177,24 @@ and the telemetry, and the official CLI named Llama-3.1-8B and Llama-3.1-8B-Inst
 right-sized models for `p100`. blackhole-py booted the chip over the broker and ran a 512³ bf16
 matmul on its Tensix cores. It passed full validation at 9.63 TFLOP/s.
 
-Getting there took four runs on top of last night's two. The raw records follow in order.
+Getting there took four runs on top of last night's two.
+
+The one manual step, approving the driver:
+
+![System Settings, Login Items & Extensions, the Driver Extensions sheet: TTStationDriver.app (com.tenstorrent.ttstation.driver) with its switch on](images/2026-10-22-driver-extension-approved.png)
+
+And the app afterwards. The "This Mac" pane now has a Live telemetry card fed through TTStationDriver
+(61.4 °C, 66 W, 864 mV, 77 A, AICLK 1350 MHz, ARC ready). These readings are higher than the idle
+56 °C / 38 W / 800 MHz in the run log, which suggests the card was busy when the screenshot was
+taken. The Driver row says TTStationDriver.
+
+![The TTStation window with This Mac selected: P100A over Thunderbolt, the IORegistry card listing Driver: TTStationDriver, a Live telemetry card, the two right-sized Llama-3.1-8B models, and a status list with Detected, Right-sized and Live telemetry checked and "Serving on this Mac: not yet"](images/2026-10-22-window-live-telemetry.png)
+
+Two things in that window are now out of date. The card heading still says "What macOS can see (no
+driver)" while the row below it names the driver. And "Serving on this Mac: not yet" says the
+driver is still needed, which is no longer true. Serving is the next step.
+
+The raw records follow in order.
 
 ### Run 3: signed and installed, then nobody approved it in time
 
@@ -1739,3 +1756,63 @@ bf16 512x512x512, padded 560x512x528, bf16acc
 | 10 | Kernels compile (host only) | PASS | 0s |
 | 11 | Matmul on the P100A | PASS | 1s |
 
+
+## 2026-10-22 (later): Llama 3 8B answers, on a Mac
+
+Taylor asked to run the model. The official `tt` CLI was the first thing to check, and its dry run
+explains why it can't serve here yet. `tt serve Llama-3.1-8B-Instruct --device p100 --dry-run`
+resolves to tt-inference-server's `run.py --docker-server` with an `ubuntu-22.04-amd64` vLLM +
+tt-metal image. That container expects Linux, tt-kmd and `/dev/tenstorrent`, and Docker on this Mac
+runs in a VM that can't see a Thunderbolt card. So `tt` stays the source of *which* model fits, and
+blackhole-py is what runs it.
+
+blackhole-py's Llama code targets the original Llama 3 8B Instruct (RoPE theta 500000, no scaling,
+an 8192 context). Its FP8 path wants a "published, calibrated" checkpoint with per-tensor
+`input_scale`/`weight_scale`. `RedHatAI/Meta-Llama-3-8B-Instruct-FP8` matches it tensor for tensor:
+public, 9.08 GB, `activation_scheme: static`. Getting from download to an answer took five tries:
+
+1. `No module named ttstation_bhpy`: I hadn't put our shim on `PYTHONPATH` (first-light does).
+2. `apply_chat_template requires jinja2`: blackhole-py's requirements don't list it.
+3. `invalid shard filename: 'model-00002-of-00002.safetensors'`: blackhole-py rejects a shard whose
+   resolved path is outside the checkpoint folder, and every file in the Hugging Face cache is a
+   symlink into `blobs/`. Fixed with a real folder of hard links (`~/models/llama3-8b-fp8`, no
+   extra space).
+4. `ttbh broker command 8 failed: invalid argument`, the first failure on the card side. The
+   broker's log had the real cause, `PrepareDMA failed 0xe00002bd`, which is `kIOReturnNoMemory`.
+   The 8B model asks for exactly 2 GiB of DMA-able host memory. A binary search over the broker's
+   SYSMEM command found the ceiling: **2,146,385,920 bytes, in total, across all mappings** (a
+   second 1 GiB buffer fails while the first is held). That's the DART's 2 GiB window for this
+   device (our first IOVA was `0x80000000`) less about 1 MiB already in use. The shim now backs off
+   in 16 MiB steps, never below 3/4 of the request, and says so on stderr. That's safe because
+   blackhole-py sizes its staging region from the allocator and raises `MemoryError` when a
+   transfer doesn't fit. The simulated broker gained `TTBH_SIM_DMA_LIMIT` so a test can show the
+   shrink (and showed it failing without the backoff).
+5. It answered.
+
+```
+ttstation_bhpy: sysmem 2147483648 bytes can't be DMA-mapped here; using 2130706432 (16 MiB less)
+Paris!
+22.40 decode tok/s
+startup total            5061.34 ms
+  device init            1160.13 ms
+  host read/stage        1927.49 ms
+  full weight upload     2468.60 ms  (10.159 GB, 4.12 GB/s, includes prepare/stage)
+  program build          1413.19 ms
+prompt decode            670.41 ms  (15 tokens)
+generated-token average (3 replays)
+  device/CQ interval    44572.22 us
+  full decode call      44648.22 us
+  wall - device            76.00 us
+```
+
+The prompt was "The capital of France is", through Llama 3's chat template. Five seconds from
+start to a model resident in the card's DRAM. 10.16 GB went up at 4.12 GB/s, about half the
+tunnel's raw Gen4 x4 rate. Decode ran at 44.6 ms per token. blackhole-py's own notes report about
+20 ms per token on Linux. Those numbers aren't comparable: a different card and a full x16 slot
+with direct BAR mmap, against a P100A over Thunderbolt through a socket broker. The profile does
+say where our time goes: wall minus device is 76 µs per token, so the host side, broker included,
+isn't the cost. The device/command-queue interval is. One untested guess: the command queue lives
+in Mac memory and the card fetches it across the x4 link. That's the next thing to measure.
+
+Also noticed: the broker's NOC address allocator only bumps upward and never reuses freed ranges,
+so a long-lived session leaks chip-visible address space. It's harmless at this scale; logged to fix.

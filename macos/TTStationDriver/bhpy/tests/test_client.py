@@ -242,6 +242,51 @@ class FdSentinel(BrokerCase):
         self.assertFalse(self.c >= 0)
 
 
+class DartWindow(unittest.TestCase):
+    """Sysmem larger than the DART window: blackhole-py's 8B asks for 2 GiB, the Mac maps a bit less."""
+
+    def setUp(self):
+        if not BROKER:
+            self.skipTest("TTBH_BROKER_SIM not set (run via make test)")
+        self.tmp = tempfile.mkdtemp()
+        self.sock = os.path.join(self.tmp, "ttbh.sock")
+        pcie_darwin.Allocator = _MiniAllocator                 # blackhole-py's is used when installed
+        env = dict(os.environ, TTBH_SIM_DMA_LIMIT=str((64 << 20) - (1 << 20)))   # 64 MiB less 1 MiB
+        self.proc = subprocess.Popen([BROKER, self.sock], stderr=subprocess.PIPE, env=env)
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                self.c = wire.BrokerClient(self.sock)
+                break
+            except OSError:
+                if time.monotonic() > deadline or self.proc.poll() is not None:
+                    raise
+                time.sleep(0.02)
+
+    def tearDown(self):
+        self.c.close()
+        self.proc.terminate()
+        self.proc.wait(5)
+        self.proc.stderr.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_slightly_too_large_request_shrinks_by_a_step_and_says_so(self):
+        import contextlib, io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            mem = pcie_darwin.Sysmem(self.c, 64 << 20)
+        try:
+            self.assertEqual(mem.size, (64 << 20) - pcie_darwin.Sysmem.BACKOFF)
+            self.assertEqual(mem.allocator.end, mem.size)       # blackhole-py sizes staging from this
+            self.assertIn("can't be DMA-mapped", err.getvalue())
+        finally:
+            mem.close()
+
+    def test_a_request_far_beyond_the_window_still_fails(self):
+        with self.assertRaises(wire.BrokerError):
+            pcie_darwin.Sysmem(self.c, 256 << 20)               # would need to shrink by > 1/4
+
+
 class _MiniAllocator:
     def __init__(self, start, end, alignment=1):
         self.next, self.end, self.alignment = start, end, alignment
