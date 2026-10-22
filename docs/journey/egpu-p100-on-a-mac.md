@@ -1906,3 +1906,54 @@ The full SPI is backed up to
 The compat result needs saying plainly. 19.16.0 requires the SPI part ID (telemetry tag 80) to be
 `0x20bb20`. 19.2.0 predates that tag, so tt-flash can't check it and proceeds. The same is true on
 Linux for any card upgraded from 19.2.
+
+### The flash
+
+Taylor said go. Everything else that talks to the card was stopped (the bridge, tt-toplike), and
+the run was recorded with `script -r` (`~/tenstorrent/firmware/flash-log/08-flash.script`):
+
+```
+TTSTATION_BROKER=1 tt-flash flash fw_pack-19.16.0.fwbundle --no-reset
+Verifying fw-package can be flashed: complete
+Boot-critical image 'cmfw' is described differently by the firmware bundle than by the chip; it will be rewritten. Do not power off the board until the update completes.
+Boot-critical image 'safeimg' is described differently ... it will be rewritten.
+Boot-critical image 'failover' is described differently ... it will be rewritten.
+ROM version is: (19, 2, 0, 0). tt-flash version is: (19, 16, 0, 0)
+FW bundle version > ROM version. ROM is being updated.
+SPI EEPROM could not be read from this board, so it was not checked
+Blackhole[0] {P100A-1}  Writing new firmware... SUCCESS
+Firmware verification... SUCCESS
+Would have reset to force m3 recovery, but did not due to --no-reset
+FLASH SUCCESS
+```
+
+Nine seconds, 10:39:05 to 10:39:14. One correction to what I'd said beforehand: tt-flash *did*
+rewrite the boot-critical images (`cmfw`, `safeimg`, `failover`) without `--update-boot-images`.
+Their descriptions differed from the bundle's, presumably because 19.2 predates the current
+layout. Before the power cycle, an independent read-back agreed: 19 of the 23 image regions
+matched the bundle byte for byte. The other four were the boot table and board config (tt-flash
+writes the board's own values back) and the two `ccfgovr` banks (skipped by design). `boardcfg`
+still decoded to board ID 4613626507349 (`0x4323191b055`).
+
+The enclosure power cycle didn't bring the card back by itself. The enclosure returned to
+Thunderbolt, but the card never appeared on PCIe until Taylor replugged the Thunderbolt cable, 25
+minutes later. Then it attached at once (`11:27:48 card back on the bus`, `11:27:49 TTStationDriver
+attached`). Before the flash, every power cycle had brought the card back alone. I don't know
+whether the first boot of new firmware took longer than macOS's hot-plug window, or whether
+something else was going on.
+
+After:
+
+| | before | after |
+|---|---|---|
+| firmware bundle (tag 28) | 19.2.0 | **19.16.0** |
+| CMFW (tag 29) | 0.24.0 | **0.38.0** |
+| DMFW (tag 26) | 0.18.0 | **0.32.0** (the M3 updated on its first boot, with no reset message) |
+| GDDR firmware (tag 25) | 0.2.0.9 | **0.2.0.17** |
+| SPI EEPROM id (tag 80) | not reported | **`0x20bb20`**, the value the bundle requires |
+| idle | 64 W, 1350 MHz (cores left running by a killed process) | 29 W, 800 MHz, fan 1777 RPM |
+
+tt-flash now reads `running=(19, 16, 0, 0), spi=(19, 16, 0, 0)`. The compatibility check it had to
+skip passes after the fact ("SPI EEPROM is 0x20bb20, which this firmware supports"). luwen's
+`TEST` answers in 0.4 to 0.6 ms. The link is still Gen4 x4 and BAR4 is still unassigned: new
+firmware doesn't change what the Thunderbolt bridge gives the card.
