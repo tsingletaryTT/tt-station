@@ -1979,3 +1979,33 @@ being written. Two had moved:
 - **ttsim: v1.10.12 → v1.13.0.** Built and checked. Our ttsim tests pass. Of the drafted issues,
   the strided-TLB write and the TLB register read still fail fatally (now in `pcie_bar0_wr` and
   `pcie_bar0_rd`), and ARC `TEST` still answers zeros. The drafts stay valid.
+
+### Benchmarks on the new firmware
+
+Taylor asked whether 19.16.0 is faster. I repeated this morning's Llama run exactly (same
+checkpoint, prompt, `--steps 32 --profile`), then ran it three more times to measure the spread:
+
+| | 19.2.0 (this morning, 1 run) | 19.16.0 (4 runs) |
+|---|---|---|
+| decode | 22.40 tok/s | **23.31–23.33 tok/s** |
+| device/CQ interval per token | 44,572 µs | 42,800–42,806 µs |
+| wall minus device | 76 µs | 63 µs |
+| weight upload | 4.12 GB/s | 4.10–4.20 GB/s |
+| startup | 5.06 s | 5.29 s |
+
+The 19.16.0 runs agree within about 6 µs per token, and the gap is 1.77 ms, so the speedup
+(about 4%) is real for this setup. Two caveats. The 19.2.0 number is a single run. The broker has
+also changed since (sessions, the telemetry socket), but that's host-side, and the interval that
+moved is measured on the device. The ARC firmware went from 0.24 to 0.38, which is the likelier
+cause; I haven't isolated it further.
+
+blackhole-py's peak matmul (5000³, 5 runs each, validated):
+
+| | TFLOP/s (mean, min–max) |
+|---|---|
+| bf16, bf16 accumulation | **179.90** (179.72–180.00) |
+| FP8 (`--fp8-fast`), fp16 accumulation | **331.32** (330.81–332.26) |
+
+Thunderbolt doesn't limit these: the operands live in the card's DRAM and only the commands cross
+the link. There's no pre-update matmul at this size to compare with (first light ran a 512³
+correctness check), so these numbers aren't evidence for or against the firmware.
