@@ -145,7 +145,7 @@ class PCIDevice:
                 except OSError:
                     pass
             self.fd.close()
-            self.fd = None
+            self.fd = -1                         # blackhole-py's "closed" sentinel
             raise
 
     def _read_enabled_masks(self):
@@ -162,7 +162,7 @@ class PCIDevice:
         # broker holds the exclusive dext client and frees this session's DMA mappings and iATU
         # regions only when the connection drops. If several steps fail, the last
         # error propagates with the earlier ones chained as its __context__.
-        if self.fd is None:
+        if not isinstance(self.fd, wire.BrokerClient):    # already closed: fd is -1
             return
         try:
             if self.sysmem is not None:
@@ -174,5 +174,5 @@ class PCIDevice:
                     self.powered = False
                     self._set_power(0)
             finally:
-                fd, self.fd = self.fd, None
+                fd, self.fd = self.fd, -1        # blackhole-py's "closed" sentinel
                 fd.close()

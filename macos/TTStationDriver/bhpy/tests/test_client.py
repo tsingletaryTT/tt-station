@@ -208,7 +208,10 @@ class CleanClose(unittest.TestCase):
                 events.append("sysmem")
                 raise wire.BrokerError(wire.SYSMEM_FREE, -1)
 
-        class FakeConn:
+        class FakeConn(wire.BrokerClient):
+            def __init__(self):
+                pass
+
             def call(self, cmd, *a, **k):
                 events.append("power")
                 raise wire.BrokerError(wire.ARC_MSG, -9)
@@ -224,9 +227,19 @@ class CleanClose(unittest.TestCase):
         # The last failure propagates; the earlier one rides along as its context.
         self.assertEqual(caught.exception.status, -9)
         self.assertEqual(caught.exception.__context__.status, -1)
-        self.assertIsNone(dev.fd)
+        self.assertEqual(dev.fd, -1)                           # blackhole-py's closed sentinel
         dev.close()                                            # idempotent afterwards
         self.assertEqual(events, ["sysmem", "power", "socket"])
+
+
+class FdSentinel(BrokerCase):
+    def test_the_client_compares_like_the_descriptor_blackhole_py_expects(self):
+        # device.py's Device.close() starts with `if self.pcie.fd < 0: return`.
+        self.assertFalse(self.c < 0)
+        self.assertTrue(self.c >= 0)
+        self.c.close()
+        self.assertTrue(self.c < 0)
+        self.assertFalse(self.c >= 0)
 
 
 class _MiniAllocator:

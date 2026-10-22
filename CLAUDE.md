@@ -26,9 +26,17 @@ installed on this box at `~/.tenstorrent-venv/bin/tt`.
 **eGPU experiment: a local P100 on a Mac (branch `experiments/egpu`, 2026-09-28 → 10-01).**
 Goal (owner): *tt-station detects a Tenstorrent card attached to a Mac and has the official `tt`
 CLI / tt-model-manager deploy a model right-sized for it*, reached in small steps. Rig: the owner's
-P100A in a Razer Core X V2 (USB4 v2) on a TB5 MacBook Pro, macOS 26.7. **Blocked only on a PAID
-Apple Developer team** (dev-signing is the only SIP-on way to load a dext; free teams can't; dev
-mode refuses with SIP on; ad-hoc apps are killed by AMFI).
+P100A in a Razer Core X V2 (USB4 v2) on a TB5 MacBook Pro, macOS 26.7.
+**FIRST LIGHT 2026-10-22: all 11 steps green with SIP on.** The dext is dev-signed by Taylor's
+individual paid team `ATX529F8UR`. Attached, ARC ready, live telemetry, DMA both ways, `tt-station
+local` lists the right-sized models, and blackhole-py's 512³ bf16 matmul validated on the card at
+~9.6 TFLOP/s. What it took (journey 2026-10-21/22): a PAID team (the free Personal Team can't
+provision DriverKit); in the developer portal, enable "DriverKit PCI (development)" and "DriverKit
+Allow Any UserClient (development)" on `com.tenstorrent.ttstation.driver` (the app-side
+`userclient-access` needs Apple's approval, so the team build uses the dext's allow-any instead);
+`install-dev.sh` must build with `-scheme` + destination + `-allowProvisioningDeviceRegistration`
+or the Mac never gets registered; then one approval click in System Settings > Login Items &
+Extensions > Driver Extensions.
 
 State, top to bottom (details: spec `docs/superpowers/specs/2026-09-28-macos-blackhole-dext-design.md`,
 milestones M0–M6; story: **journey log `docs/journey/egpu-p100-on-a-mac.md` — append a dated entry
@@ -61,7 +69,7 @@ every session, keep dead ends, quote real output, it becomes a blog post**):
 - **Signing day = `macos/TTStationDriver/scripts/first-light.sh --team <ID> --bhpy <dir> --python <venv>`**
   (11 gated steps through M1–M4 to a validated matmul on the card; logs into the journey; `--sim`
   rehearses today). `install-dev.sh --team` preflights Xcode with `-checkFirstLaunchStatus`.
-- **Next after first light:** blackhole-py Llama 3 8B locally; then the serving leg of the goal
+- **Next (first light is done):** blackhole-py Llama 3 8B locally; then the serving leg of the goal
   (blackhole-py as the Mac runtime short-term, or a Containerization/`VZCustomVirtioDevice` Linux VM
   with a virtio-tt device on macOS 27 long-term; "possible paths forward" in the spec); M6 = Apple's
   distribution entitlement for vendor 0x1e52.

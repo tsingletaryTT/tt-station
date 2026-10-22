@@ -84,3 +84,16 @@ class BrokerClient:
 
     def close(self):
         self.sock.close()
+
+    # blackhole-py treats `pcie.fd` as an integer descriptor and tests it as one: `fd < 0` means
+    # closed (device.py's Device.close, pcie.py's PCIDevice.close). This client stands in for that
+    # descriptor, so it compares the way the real one would: as its socket's fileno while open, and
+    # as -1 once closed. (2026-10-22, the first matmul on the card: it ran and validated, then
+    # Device.close() died on `'<' not supported between instances of 'BrokerClient' and 'int'`.)
+    def _as_fd(self):
+        return self.sock.fileno()       # -1 after close(), like the -1 blackhole-py stores
+
+    def __lt__(self, other): return self._as_fd() < other
+    def __le__(self, other): return self._as_fd() <= other
+    def __gt__(self, other): return self._as_fd() > other
+    def __ge__(self, other): return self._as_fd() >= other
