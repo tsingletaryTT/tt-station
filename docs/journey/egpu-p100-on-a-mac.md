@@ -2009,3 +2009,82 @@ blackhole-py's peak matmul (5000³, 5 runs each, validated):
 Thunderbolt doesn't limit these: the operands live in the card's DRAM and only the commands cross
 the link. There's no pre-update matmul at this size to compare with (first light ran a 512³
 correctness check), so these numbers aren't evidence for or against the firmware.
+
+### tt-smi on the Mac, by building tt-umd here
+
+Taylor asked whether we could build tt-umd on the Mac ourselves instead of waiting for wheels, and
+to do it "mainly as a way to measure difficulty". tt-smi 6.8.0 pins `tt-umd==0.9.12`, which PyPI
+only has for Linux, and it imports `tt_umd` at the top level. I started from tt-umd v0.9.14
+(`56bf00cf`) on a local branch. The patch is in `macos/TTStationDriver/umd/`.
+
+**How long it took.** About 18 minutes of wall-clock time, from 13:32 to 13:50, in three parts:
+
+| part | time | what it took |
+|---|---|---|
+| compile and link | ~3 min | 7 small edits, 2 new files |
+| tt-kmd emulation | ~14 min | one new C file (630 lines), call sites in 2 files |
+| tt-smi | ~1 min | a 25-line launcher |
+
+**What broke, in order.**
+
+1. `ioctl.h` includes `<linux/types.h>` for `__u32` and friends. On Apple it now uses
+   `<sys/ioccom.h>` plus typedefs.
+2. `RobustMutex` is built on robust process-shared pthread mutexes in POSIX shared memory. macOS
+   has none of `PTHREAD_MUTEX_ROBUST`, `pthread_mutex_consistent` or `pthread_mutex_timedlock`. I
+   rewrote it on `flock`, which the kernel releases when the holder dies. That's the same
+   guarantee by a different route.
+3. Small things: `-lrt` doesn't exist, `MAP_POPULATE` and `MAP_HUGETLB` don't exist, and one file
+   relied on Linux headers pulling in `<unistd.h>`. After these, `libtt-umd.0.9.14.dylib` linked.
+4. **The real work: there is no tt-kmd.** UMD talks to the kernel module through
+   `/dev/tenstorrent/N`: ioctls, and `mmap` of offsets the driver hands out. It also reads sysfs
+   for the kmd version, the chip revision and the IOMMU type, and lists the `/dev/tenstorrent`
+   directory to find cards. I wrote `tt_kmd_darwin.c`, which answers all of that from the dext.
+   It reuses libttbh, already checked against tt-kmd on the QuietBox: TLB encoding, the iATU, DMA
+   planning, and the ARC power message. The ioctls UMD needs for discovery and telemetry
+   are device info, driver info, mappings, TLB allocate/configure/free, page pinning, locks and
+   power state. They all map onto what the dext already does. Reset doesn't, and returns
+   `ENOTSUP`.
+5. A sysfs lookup of `/sys/bus/pci/slots` iterates the directory without checking that it
+   exists, which throws when there's no `/sys`. It now returns no slot.
+6. The wheel build switches on simulation support, which uses `sigtimedwait` (Linux realtime
+   signals). Building with simulation off was enough.
+7. tt-smi itself checked for the driver by reading `/sys/module/tenstorrent/version` and
+   stopped:
+
+   ```
+   No Tenstorrent driver detected! Please install driver using tt-kmd: https://github.com/tenstorrent/tt-kmd
+   ```
+
+   tt-tools-common has its own copy of the same check, which failed next with
+   `TypeError: can only concatenate str (not "NoneType") to str`. `ttsmi_darwin.py` replaces both
+   functions with the emulated version and calls tt-smi's `main()`. The installed package isn't
+   modified.
+
+**It worked the first time it ran on the card.** The shim compiled without errors, and its first
+run on the card printed:
+
+```
+tt-kmd-darwin: connected: 1e52:b140 subsys 0043, BAR0 512 MiB, BAR2 1024 KiB, PCIe tile x=2
+tt-kmd-darwin: DMA map 540672 bytes -> iova 0x80000000 (1 segment(s))
+tt-kmd-darwin: SET_POWER_STATE flags=0xe validity=0x4 -> ok
+```
+
+`tt-smi -s`, in its default UMD mode, then returned the full snapshot:
+
+```
+"host_sw_vers": { "tt_smi": "6.8.0", "pyluwen": "0.10.0", "tt_umd": "0.9.14" },
+"board_info": { "bus_id": "0000:03:00.0", "board_type": "p100a", "board_id": "000004323191b055", ... },
+"telemetry": { "voltage": "0.71", "power": " 27.0", "aiclk": " 800", "asic_temperature": "48.2", ... },
+"firmwares": { "fw_bundle_version": "19.16.0.0", "cm_fw": "0.38.0.0", "dm_app_fw": "0.32.0.0", "gddr_fw": "2.17" }
+```
+
+The firmware versions match what pyluwen read after the flash. All eight GDDR channels report
+training and BIST passing.
+
+**What this says about difficulty.** Most of tt-umd is already portable C++. What is
+Linux-specific sits in two places: the kernel-module interface, and a handful of sysfs reads in
+UMD and in tt-smi. The kernel-module interface was the only large piece of work, and it was quick
+here because the dext and libttbh already existed. Without them, that step is the whole eGPU
+project. `pcie_speed` and `pcie_width` show `N/A` because there's no sysfs for them. The
+emulation has one client at a time, because the dext does, so tt-smi and the broker can't run at
+once yet.

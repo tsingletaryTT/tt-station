@@ -1,0 +1,1503 @@
+From 70b84b4ed35accc35caa4b23a249240238ecb5d0 Mon Sep 17 00:00:00 2001
+From: Taylor Singletary <tsingletary@tenstorrent.com>
+Date: Thu, 22 Oct 2026 13:50:32 -0700
+Subject: [PATCH] macOS: build tt-umd and emulate tt-kmd over tt-station's
+ PCIDriverKit driver
+
+tt-kmd-lib gains tt_kmd_darwin.c, a user-space stand-in for the kernel module's
+character device (open/ioctl/mmap) on top of TTStationDriver and libttbh. UMD's
+own device access, sysfs reads and /dev/tenstorrent enumeration go through it on
+Apple. RobustMutex uses flock on macOS. A few Linux-only headers and flags are
+guarded. tt-smi 6.8.0 -s runs against a P100A over Thunderbolt.
+---
+ tt-kmd-lib/CMakeLists.txt                     |  21 +
+ tt-kmd-lib/api/tt-kmd-lib/tt_kmd_darwin.h     |  55 ++
+ tt-kmd-lib/src/ioctl.h                        |  16 +
+ tt-kmd-lib/src/tt_kmd_darwin.c                | 633 ++++++++++++++++++
+ tt-kmd-lib/src/tt_kmd_lib.c                   |  58 +-
+ tt-umd-utils/CMakeLists.txt                   |   9 +-
+ tt-umd-utils/src/robust_mutex_darwin.cpp      | 182 +++++
+ tt-umd/CMakeLists.txt                         |   2 +-
+ .../chip_helpers/silicon_sysmem_manager.cpp   |   4 +
+ .../simulation_sysmem_manager.cpp             |   3 +
+ tt-umd/src/darwin_compat.hpp                  |  31 +
+ tt-umd/src/pcie/pci_device.cpp                |  67 +-
+ tt-umd/src/soc_descriptor.cpp                 |   1 +
+ 13 files changed, 1048 insertions(+), 34 deletions(-)
+ create mode 100644 tt-kmd-lib/api/tt-kmd-lib/tt_kmd_darwin.h
+ create mode 100644 tt-kmd-lib/src/tt_kmd_darwin.c
+ create mode 100644 tt-umd-utils/src/robust_mutex_darwin.cpp
+ create mode 100644 tt-umd/src/darwin_compat.hpp
+
+diff --git a/tt-kmd-lib/CMakeLists.txt b/tt-kmd-lib/CMakeLists.txt
+index ec3a1e4c..8618b3b7 100644
+--- a/tt-kmd-lib/CMakeLists.txt
++++ b/tt-kmd-lib/CMakeLists.txt
+@@ -16,6 +16,27 @@ add_library(tt-kmd-lib::tt-kmd-lib ALIAS tt-kmd-lib)
+ 
+ target_sources(tt-kmd-lib PRIVATE src/tt_kmd_lib.c)
+ 
++# macOS: no kernel module. tt_kmd_darwin.c emulates tt-kmd over tt-station's PCIDriverKit driver,
++# using that project's driver ABI header and libttbh (TLB/iATU encoding, ARC messages).
++if(APPLE)
++    set(TTSTATION_DRIVER_DIR
++        "$ENV{HOME}/code/tt-station/macos/TTStationDriver"
++        CACHE PATH
++        "tt-station's macos/TTStationDriver directory"
++    )
++    if(NOT EXISTS "${TTSTATION_DRIVER_DIR}/libttbh/ttbh.c")
++        message(FATAL_ERROR "TTSTATION_DRIVER_DIR (${TTSTATION_DRIVER_DIR}) has no libttbh/ttbh.c")
++    endif()
++    target_sources(tt-kmd-lib PRIVATE src/tt_kmd_darwin.c "${TTSTATION_DRIVER_DIR}/libttbh/ttbh.c")
++    target_include_directories(
++        tt-kmd-lib
++        PRIVATE
++            "${TTSTATION_DRIVER_DIR}/libttbh"
++            "${TTSTATION_DRIVER_DIR}/Shared"
++    )
++    target_link_libraries(tt-kmd-lib PUBLIC "-framework IOKit" "-framework CoreFoundation")
++endif()
++
+ target_include_directories(
+     tt-kmd-lib
+     PUBLIC
+diff --git a/tt-kmd-lib/api/tt-kmd-lib/tt_kmd_darwin.h b/tt-kmd-lib/api/tt-kmd-lib/tt_kmd_darwin.h
+new file mode 100644
+index 00000000..0a3401bf
+--- /dev/null
++++ b/tt-kmd-lib/api/tt-kmd-lib/tt_kmd_darwin.h
+@@ -0,0 +1,55 @@
++// SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
++//
++// SPDX-License-Identifier: Apache-2.0
++
++// tt-kmd on macOS, emulated in user space (tt-station's TTStationDriver instead of the kernel module).
++//
++// Linux UMD talks to tt-kmd through a character device: open("/dev/tenstorrent/N"), ioctl() with the
++// TENSTORRENT_IOCTL_* structs, and mmap() of offsets the driver hands out (BARs, TLB windows, DMA
++// buffers). macOS has no tt-kmd. A Blackhole attached over Thunderbolt is driven by tt-station's
++// PCIDriverKit extension, which maps BAR0/BAR2 into a client process and DMA-maps client memory
++// through the DART (github.com/tsingletaryTT/tt-station, macos/TTStationDriver).
++//
++// These functions stand in for open/close/ioctl/mmap/munmap. For a /dev/tenstorrent/N path or a
++// descriptor they returned, they answer the way tt-kmd would, from the driver; for anything else
++// they call through to the real system call. UMD and tt-kmd-lib call them in place of the system
++// calls (see darwin_compat.hpp), so everything above the device layer runs unchanged.
++//
++// Limits, from the hardware path: one card (interface 0); BAR4 isn't assigned through the
++// Thunderbolt bridge, so there are no 4 GiB TLB windows; the DART maps about 2 GiB in total; no
++// reset (tt-kmd's reset ioctls need the kernel). Unsupported requests fail with ENOTSUP.
++#ifndef TT_KMD_DARWIN_H_
++#define TT_KMD_DARWIN_H_
++
++#if defined(__APPLE__)
++
++#include <stddef.h>
++#include <stdint.h>
++#include <sys/types.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++int tt_darwin_open(const char* path, int flags);
++int tt_darwin_close(int fd);
++int tt_darwin_ioctl(int fd, unsigned long request, void* arg);
++void* tt_darwin_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t offset);
++int tt_darwin_munmap(void* addr, size_t len);
++
++// Device ids present (0 or 1 of them: the card our driver has claimed).
++int tt_darwin_device_count(void);
++
++// A sysfs-style attribute of the card ("revision", "current_link_width", "iommu_group/type", ...)
++// as text, or -1 when the attribute has no macOS equivalent.
++int tt_darwin_sysfs_read(const char* attribute, char* out, size_t out_len);
++
++// The tt-kmd version this emulation corresponds to (e.g. "2.11.0").
++const char* tt_darwin_kmd_version(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif  // __APPLE__
++#endif  // TT_KMD_DARWIN_H_
+diff --git a/tt-kmd-lib/src/ioctl.h b/tt-kmd-lib/src/ioctl.h
+index ae8d963c..f51ef994 100644
+--- a/tt-kmd-lib/src/ioctl.h
++++ b/tt-kmd-lib/src/ioctl.h
+@@ -8,8 +8,24 @@
+ #ifndef TTDRIVER_IOCTL_H_INCLUDED
+ #define TTDRIVER_IOCTL_H_INCLUDED
+ 
++#if defined(__APPLE__)
++/* macOS has no Linux uapi headers. The structs below need only the fixed-width __uN/__sN names, and the _IO
++ * request macros come from BSD's <sys/ioccom.h>. tt-station's macOS backend (tt_kmd_lib_darwin.c)
++ * never issues these ioctls; it reuses the structs so the API stays the same. */
++#include <stdint.h>
++#include <sys/ioccom.h>
++typedef uint8_t __u8;
++typedef uint16_t __u16;
++typedef uint32_t __u32;
++typedef uint64_t __u64;
++typedef int8_t __s8;
++typedef int16_t __s16;
++typedef int32_t __s32;
++typedef int64_t __s64;
++#else
+ #include <linux/types.h>
+ #include <linux/ioctl.h>
++#endif
+ 
+ #define TENSTORRENT_DRIVER_VERSION 2
+ 
+diff --git a/tt-kmd-lib/src/tt_kmd_darwin.c b/tt-kmd-lib/src/tt_kmd_darwin.c
+new file mode 100644
+index 00000000..80aa9851
+--- /dev/null
++++ b/tt-kmd-lib/src/tt_kmd_darwin.c
+@@ -0,0 +1,633 @@
++// SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
++//
++// SPDX-License-Identifier: Apache-2.0
++
++// tt-kmd on macOS, emulated in user space over tt-station's TTStationDriver. See tt_kmd_darwin.h.
++//
++// One process-wide connection to the driver (it takes one client at a time), shared by every
++// descriptor this file hands out. BAR0 and BAR2 are mapped once; "mmap offsets" are this file's own
++// convention and resolve to pointers into those mappings or into DMA buffers it allocated:
++//
++//   [0, BAR0 size)                 BAR0 (both UC and WC; the dext maps it once)
++//   OFF_BAR2 + [0, BAR2 size)      BAR2
++//   OFF_DMABUF + k * DMABUF_STRIDE DMA buffer k (TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF)
++//
++// TLB windows are BAR0's 2 MiB windows: window i is at BAR0 + i * 2 MiB, programmed with libttbh's
++// encoder (the same one verified against tt-kmd on silicon). Host memory for the card goes through
++// the dext's PrepareDMA (DART IOVAs). NOC-visible buffers also get outbound iATU regions, planned
++// with libttbh as tt-kmd does in its PIN_PAGES/ALLOCATE_DMA_BUF NOC_DMA paths.
++
++#if defined(__APPLE__)
++
++#include "tt-kmd-lib/tt_kmd_darwin.h"
++
++#include <CoreFoundation/CoreFoundation.h>
++#include <IOKit/IOKitLib.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <stdarg.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include "TTBlackholeABI.h"  // tt-station: selectors, memory types, TTBHDMASegment
++#include "ioctl.h"           // tt-kmd's request structs
++#include "ttbh.h"            // tt-station libttbh: TLB encoding, iATU, DMA plan, ARC messages
++
++#define OFF_BAR2 (1ull << 36)
++#define OFF_DMABUF (2ull << 36)
++#define DMABUF_STRIDE (1ull << 32)
++#define MAX_FDS 64
++#define MAX_DMA 64
++#define NUM_USER_TLBS TTBH_DRIVER_TLB_INDEX  // 0..200; 201 is this file's own (ARC, power)
++#define KMD_VERSION_MAJOR 2
++#define KMD_VERSION_MINOR 11
++#define KMD_VERSION_PATCH 0
++
++static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
++
++static struct {
++    int refs;
++    io_connect_t conn;
++    volatile uint8_t* bar0;
++    uint64_t bar0_size;
++    volatile uint8_t* bar2;
++    uint64_t bar2_size;
++    uint16_t vendor, device, subsys_vendor, subsys;
++    uint16_t bus, dev, fn;
++    uint32_t pcie_x;  // the PCIe tile's NOC x (2 or 11)
++    bool tlb_used[NUM_USER_TLBS];
++    bool region_used[TTBH_IATU_REGIONS];
++} g;
++
++static struct {
++    bool used;
++    int fd;
++    uint64_t locks;  // resource locks held through this descriptor (TENSTORRENT_IOCTL_LOCK_CTL)
++} g_fds[MAX_FDS];
++
++// A DMA mapping: a pinned user range or an allocated buffer.
++static struct {
++    bool used, allocated;
++    void* addr;
++    uint64_t len;
++    uint64_t dma_id;  // dext mapping id for CompleteDMA
++    uint64_t iova;    // first segment's IOVA ("physical address" for the caller)
++    bool noc;
++    uint32_t first_region, nregions;
++    uint64_t noc_base;  // offset above TTBH_NOC_PCIE_OFFSET
++} g_dma[MAX_DMA];
++
++static uint64_t g_lock_owner_bits;  // resource locks held by any descriptor of this process
++
++static void trace(const char* fmt, ...) {
++    if (!getenv("TT_DARWIN_TRACE")) {
++        return;
++    }
++    va_list ap;
++    va_start(ap, fmt);
++    fprintf(stderr, "tt-kmd-darwin: ");
++    vfprintf(stderr, fmt, ap);
++    fprintf(stderr, "\n");
++    va_end(ap);
++}
++
++static void bar0_wr32(void* ctx, uint32_t off, uint32_t v) {
++    (void)ctx;
++    *(volatile uint32_t*)(g.bar0 + off) = v;
++}
++static void bar2_wr32(void* ctx, uint32_t off, uint32_t v) {
++    (void)ctx;
++    *(volatile uint32_t*)(g.bar2 + off) = v;
++}
++
++// The card's location from the IORegistry ("pcidebug" = "bus:dev:fn" on the IOPCIDevice).
++static void read_location(io_service_t service) {
++    io_registry_entry_t parent = 0;
++    if (IORegistryEntryGetParentEntry(service, kIOServicePlane, &parent) != KERN_SUCCESS) {
++        return;
++    }
++    CFTypeRef p = IORegistryEntryCreateCFProperty(parent, CFSTR("pcidebug"), kCFAllocatorDefault, 0);
++    if (p && CFGetTypeID(p) == CFStringGetTypeID()) {
++        char buf[64] = {0};
++        unsigned b = 0, d = 0, f = 0;
++        if (CFStringGetCString(p, buf, sizeof buf, kCFStringEncodingUTF8) && sscanf(buf, "%u:%u:%u", &b, &d, &f) == 3) {
++            g.bus = (uint16_t)b;
++            g.dev = (uint16_t)d;
++            g.fn = (uint16_t)f;
++        }
++    }
++    if (p) {
++        CFRelease(p);
++    }
++    IOObjectRelease(parent);
++}
++
++// Open the process-wide connection (first opener) or take another reference.
++static int connect_driver(void) {
++    if (g.refs++ > 0) {
++        return 0;
++    }
++    io_service_t service =
++        IOServiceGetMatchingService(kIOMainPortDefault, IOServiceNameMatching(TTBH_SERVICE_NAME));
++    if (service == IO_OBJECT_NULL) {
++        g.refs = 0;
++        return -ENOENT;
++    }
++    read_location(service);
++    kern_return_t kr = IOServiceOpen(service, mach_task_self(), 0, &g.conn);
++    IOObjectRelease(service);
++    if (kr != KERN_SUCCESS) {
++        // kIOReturnExclusiveAccess: another process (a broker, tt-smi elsewhere) holds the card.
++        trace("IOServiceOpen failed 0x%08x", kr);
++        g.refs = 0;
++        return kr == kIOReturnExclusiveAccess ? -EBUSY : -EIO;
++    }
++    uint64_t info[kTTBHInfoCount] = {0};
++    uint32_t n = kTTBHInfoCount;
++    if (IOConnectCallScalarMethod(g.conn, kTTBHGetInfo, NULL, 0, info, &n) != KERN_SUCCESS ||
++        info[kTTBHInfoABIVersion] != TTBH_ABI_VERSION) {
++        IOServiceClose(g.conn);
++        g.refs = 0;
++        return -EPROTO;
++    }
++    g.vendor = (uint16_t)info[kTTBHInfoVendorID];
++    g.device = (uint16_t)info[kTTBHInfoDeviceID];
++    g.subsys_vendor = (uint16_t)info[kTTBHInfoSubsysVendorID];
++    g.subsys = (uint16_t)info[kTTBHInfoSubsysID];
++    mach_vm_address_t a0 = 0, a2 = 0;
++    mach_vm_size_t s0 = 0, s2 = 0;
++    if (IOConnectMapMemory64(g.conn, kTTBHMemoryBar0, mach_task_self(), &a0, &s0, kIOMapAnywhere) != KERN_SUCCESS ||
++        IOConnectMapMemory64(g.conn, kTTBHMemoryBar2, mach_task_self(), &a2, &s2, kIOMapAnywhere) != KERN_SUCCESS) {
++        IOServiceClose(g.conn);
++        g.refs = 0;
++        return -EIO;
++    }
++    g.bar0 = (volatile uint8_t*)(uintptr_t)a0;
++    g.bar0_size = s0;
++    g.bar2 = (volatile uint8_t*)(uintptr_t)a2;
++    g.bar2_size = s2;
++    if (ttbh_pcie_noc_x(g.bar0, g.bar0_size, &g.pcie_x) != TTBH_OK) {
++        g.pcie_x = 2;
++    }
++    trace("connected: %04x:%04x subsys %04x, BAR0 %llu MiB, BAR2 %llu KiB, PCIe tile x=%u", g.vendor, g.device,
++          g.subsys, (unsigned long long)(s0 >> 20), (unsigned long long)(s2 >> 10), g.pcie_x);
++    return 0;
++}
++
++static void dma_release(int i);
++
++static void disconnect_driver(void) {
++    if (--g.refs > 0) {
++        return;
++    }
++    for (int i = 0; i < MAX_DMA; i++) {
++        if (g_dma[i].used) {
++            dma_release(i);
++        }
++    }
++    IOConnectUnmapMemory64(g.conn, kTTBHMemoryBar0, mach_task_self(), (mach_vm_address_t)(uintptr_t)g.bar0);
++    IOConnectUnmapMemory64(g.conn, kTTBHMemoryBar2, mach_task_self(), (mach_vm_address_t)(uintptr_t)g.bar2);
++    IOServiceClose(g.conn);
++    memset(&g, 0, sizeof g);
++}
++
++static int fd_slot(int fd) {
++    for (int i = 0; i < MAX_FDS; i++) {
++        if (g_fds[i].used && g_fds[i].fd == fd) {
++            return i;
++        }
++    }
++    return -1;
++}
++
++// ── DMA ────────────────────────────────────────────────────────────────────────────────────
++
++// Lowest NOC offset where `size` fits between live NOC buffers, never straddling 1 TiB (an iATU
++// region can't; see ttbh.h).
++static uint64_t noc_first_fit(uint64_t size) {
++    uint64_t best = UINT64_MAX;
++    for (int c = -1; c < MAX_DMA; c++) {
++        if (c >= 0 && !(g_dma[c].used && g_dma[c].noc)) {
++            continue;
++        }
++        uint64_t base = c < 0 ? 0 : g_dma[c].noc_base + g_dma[c].len;
++        if ((base >> 40) != ((base + size - 1) >> 40)) {
++            base = (base + (1ull << 40)) & ~((1ull << 40) - 1);
++        }
++        bool clear = true;
++        for (int o = 0; o < MAX_DMA && clear; o++) {
++            if (g_dma[o].used && g_dma[o].noc && base < g_dma[o].noc_base + g_dma[o].len &&
++                g_dma[o].noc_base < base + size) {
++                clear = false;
++            }
++        }
++        if (clear && base < best) {
++            best = base;
++        }
++    }
++    return best;
++}
++
++// DMA-map [addr, addr + len) for the card; with `noc`, also make it NOC-visible through the iATU.
++static int dma_create(void* addr, uint64_t len, bool noc, bool allocated, int* out) {
++    int slot = -1;
++    for (int i = 0; i < MAX_DMA; i++) {
++        if (!g_dma[i].used) {
++            slot = i;
++            break;
++        }
++    }
++    if (slot < 0) {
++        return -ENOMEM;
++    }
++    if (len <= 4096) {
++        // The dext receives the buffer as a memory descriptor, which IOKit only builds for
++        // structure inputs larger than 4 KiB. A smaller pin can't be mapped this way.
++        trace("PrepareDMA: %llu bytes is too small (needs > 4096)", (unsigned long long)len);
++        return -EINVAL;
++    }
++    TTBHDMASegment segs[TTBH_MAX_DMA_SEGMENTS];
++    size_t segs_size = sizeof segs;
++    uint64_t scalars[2] = {0};
++    uint32_t nscalars = 2;
++    kern_return_t kr =
++        IOConnectCallMethod(g.conn, kTTBHPrepareDMA, NULL, 0, addr, (size_t)len, scalars, &nscalars, segs, &segs_size);
++    if (kr != KERN_SUCCESS) {
++        trace("PrepareDMA %llu bytes failed 0x%08x", (unsigned long long)len, kr);
++        return kr == kIOReturnNoMemory ? -ENOMEM : -EIO;
++    }
++    uint32_t nseg = (uint32_t)scalars[1];
++    g_dma[slot] = (typeof(g_dma[0])){true, allocated, addr, len, scalars[0], segs[0].address, false, 0, 0, 0};
++    if (nseg != 1 && !noc) {
++        // Without NOC mapping the caller gets one "physical address" for the whole range, which
++        // only means something if the IOVA range is contiguous.
++        dma_release(slot);
++        return -EFBIG;
++    }
++    if (noc) {
++        ttbh_dma_segment plan_in[TTBH_MAX_DMA_SEGMENTS];
++        for (uint32_t i = 0; i < nseg; i++) {
++            plan_in[i] = (ttbh_dma_segment){segs[i].address, segs[i].length};
++        }
++        uint32_t first = TTBH_IATU_REGIONS;
++        for (uint32_t r = 0; r + nseg <= TTBH_IATU_REGIONS && first == TTBH_IATU_REGIONS; r++) {
++            uint32_t k = 0;
++            while (k < nseg && !g.region_used[r + k]) {
++                k++;
++            }
++            if (k == nseg) {
++                first = r;
++            }
++        }
++        uint64_t base = noc_first_fit(len);
++        ttbh_iatu_plan_entry plan[TTBH_IATU_REGIONS];
++        if (first == TTBH_IATU_REGIONS || ttbh_dma_plan(plan_in, nseg, base, first, plan) != TTBH_OK) {
++            dma_release(slot);
++            return -ENOSPC;
++        }
++        for (uint32_t i = 0; i < nseg; i++) {
++            ttbh_iatu_regs r;
++            ttbh_iatu_outbound_encode(plan[i].base, plan[i].limit, plan[i].target, &r);
++            ttbh_iatu_outbound_write_with(bar2_wr32, NULL, plan[i].region, &r);
++            g.region_used[plan[i].region] = true;
++        }
++        g_dma[slot].noc = true;
++        g_dma[slot].first_region = first;
++        g_dma[slot].nregions = nseg;
++        g_dma[slot].noc_base = base;
++    }
++    trace("DMA map %llu bytes -> iova 0x%llx (%u segment(s))%s", (unsigned long long)len,
++          (unsigned long long)segs[0].address, nseg, noc ? ", NOC-visible" : "");
++    *out = slot;
++    return 0;
++}
++
++static void dma_release(int i) {
++    for (uint32_t k = 0; k < g_dma[i].nregions; k++) {  // stop the chip reaching it first
++        ttbh_iatu_regs off;
++        ttbh_iatu_outbound_encode(0, 0, 0, &off);
++        ttbh_iatu_outbound_write_with(bar2_wr32, NULL, g_dma[i].first_region + k, &off);
++        g.region_used[g_dma[i].first_region + k] = false;
++    }
++    uint64_t id = g_dma[i].dma_id;
++    IOConnectCallScalarMethod(g.conn, kTTBHCompleteDMA, &id, 1, NULL, NULL);
++    if (g_dma[i].allocated) {
++        munmap(g_dma[i].addr, g_dma[i].len);
++    }
++    memset(&g_dma[i], 0, sizeof g_dma[i]);
++}
++
++// ── the ioctls ─────────────────────────────────────────────────────────────────────────────
++
++static int do_ioctl(int slot, unsigned long request, void* arg) {
++    switch (request) {
++        case TENSTORRENT_IOCTL_GET_DEVICE_INFO: {
++            struct tenstorrent_get_device_info* d = arg;
++            d->out = (struct tenstorrent_get_device_info_out){
++                .output_size_bytes = sizeof d->out,
++                .vendor_id = g.vendor,
++                .device_id = g.device,
++                .subsystem_vendor_id = g.subsys_vendor,
++                .subsystem_id = g.subsys,
++                .bus_dev_fn = (uint16_t)((g.bus << 8) | (g.dev << 3) | g.fn),
++                .max_dma_buf_size_log2 = 28,  // 256 MiB: well inside the DART's ~2 GiB
++                .pci_domain = 0,
++            };
++            return 0;
++        }
++        case TENSTORRENT_IOCTL_GET_DRIVER_INFO: {
++            struct tenstorrent_get_driver_info* d = arg;
++            d->out = (struct tenstorrent_get_driver_info_out){
++                .output_size_bytes = sizeof d->out,
++                .driver_version = TENSTORRENT_DRIVER_VERSION,
++                .driver_version_major = KMD_VERSION_MAJOR,
++                .driver_version_minor = KMD_VERSION_MINOR,
++                .driver_version_patch = KMD_VERSION_PATCH,
++            };
++            return 0;
++        }
++        case TENSTORRENT_IOCTL_QUERY_MAPPINGS: {
++            struct tenstorrent_query_mappings* q = arg;
++            const struct tenstorrent_mapping m[] = {
++                {TENSTORRENT_MAPPING_RESOURCE0_UC, 0, 0, g.bar0_size},
++                {TENSTORRENT_MAPPING_RESOURCE0_WC, 0, 0, g.bar0_size},
++                {TENSTORRENT_MAPPING_RESOURCE1_UC, 0, OFF_BAR2, g.bar2_size},
++                {TENSTORRENT_MAPPING_RESOURCE1_WC, 0, OFF_BAR2, g.bar2_size},
++                // RESOURCE2 (BAR4) isn't assigned through the Thunderbolt bridge.
++            };
++            for (uint32_t i = 0; i < q->in.output_mapping_count; i++) {
++                q->out.mappings[i] = i < sizeof m / sizeof m[0] ? m[i] : (struct tenstorrent_mapping){0};
++            }
++            return 0;
++        }
++        case TENSTORRENT_IOCTL_ALLOCATE_TLB: {
++            struct tenstorrent_allocate_tlb* t = arg;
++            if (t->in.size != TTBH_TLB_2M_SIZE) {
++                return -ENOSPC;  // no 4 GiB windows without BAR4
++            }
++            for (uint32_t id = 0; id < NUM_USER_TLBS; id++) {
++                if (!g.tlb_used[id]) {
++                    g.tlb_used[id] = true;
++                    t->out.id = id;
++                    t->out.mmap_offset_uc = t->out.mmap_offset_wc = (uint64_t)id * TTBH_TLB_2M_SIZE;
++                    return 0;
++                }
++            }
++            return -ENOSPC;
++        }
++        case TENSTORRENT_IOCTL_FREE_TLB: {
++            struct tenstorrent_free_tlb* t = arg;
++            if (t->in.id >= NUM_USER_TLBS || !g.tlb_used[t->in.id]) {
++                return -EINVAL;
++            }
++            g.tlb_used[t->in.id] = false;
++            return 0;
++        }
++        case TENSTORRENT_IOCTL_CONFIGURE_TLB: {
++            struct tenstorrent_configure_tlb* t = arg;
++            const struct tenstorrent_noc_tlb_config* c = &t->in.config;
++            if (t->in.id >= NUM_USER_TLBS || !g.tlb_used[t->in.id]) {
++                return -EINVAL;
++            }
++            ttbh_tlb_config cfg = {
++                .addr = c->addr,
++                .x_end = (uint8_t)c->x_end,
++                .y_end = (uint8_t)c->y_end,
++                .x_start = (uint8_t)c->x_start,
++                .y_start = (uint8_t)c->y_start,
++                .noc = c->noc,
++                .multicast = c->mcast,
++                .ordering = c->ordering,
++                .linked = c->linked,
++                .use_static_vc = c->static_vc ? 1 : 0,
++                .static_vc = c->static_vc,
++            };
++            return ttbh_tlb2m_program_with(bar0_wr32, NULL, t->in.id, &cfg) == TTBH_OK ? 0 : -EINVAL;
++        }
++        case TENSTORRENT_IOCTL_PIN_PAGES: {
++            struct tenstorrent_pin_pages* p = arg;
++            bool noc = p->in.flags & (TENSTORRENT_PIN_PAGES_NOC_DMA | TENSTORRENT_PIN_PAGES_NOC_TOP_DOWN);
++            int i;
++            int err = dma_create((void*)(uintptr_t)p->in.virtual_address, p->in.size, noc, false, &i);
++            if (err) {
++                return err;
++            }
++            if (p->in.output_size_bytes >= sizeof(struct tenstorrent_pin_pages_out_extended)) {
++                struct tenstorrent_pin_pages_out_extended* o = (void*)&p->out;
++                o->physical_address = g_dma[i].iova;
++                o->noc_address = noc ? TTBH_NOC_PCIE_OFFSET + g_dma[i].noc_base : 0;
++            } else {
++                p->out.physical_address = g_dma[i].iova;
++            }
++            return 0;
++        }
++        case TENSTORRENT_IOCTL_UNPIN_PAGES: {
++            struct tenstorrent_unpin_pages* u = arg;
++            for (int i = 0; i < MAX_DMA; i++) {
++                if (g_dma[i].used && !g_dma[i].allocated && (uintptr_t)g_dma[i].addr == u->in.virtual_address) {
++                    dma_release(i);
++                    return 0;
++                }
++            }
++            return -EINVAL;
++        }
++        case TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF: {
++            struct tenstorrent_allocate_dma_buf* a = arg;
++            uint64_t len = ((uint64_t)a->in.requested_size + 0x3FFF) & ~0x3FFFull;  // 16 KiB DART pages
++            void* mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
++            if (mem == MAP_FAILED) {
++                return -ENOMEM;
++            }
++            memset(mem, 0, len);  // fault the pages in before the card can see them
++            int i;
++            int err = dma_create(mem, len, a->in.flags & TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA, true, &i);
++            if (err) {
++                munmap(mem, len);
++                return err;
++            }
++            a->out.physical_address = g_dma[i].iova;
++            a->out.mapping_offset = OFF_DMABUF + (uint64_t)i * DMABUF_STRIDE;
++            a->out.size = (uint32_t)len;
++            a->out.noc_address = g_dma[i].noc ? TTBH_NOC_PCIE_OFFSET + g_dma[i].noc_base : 0;
++            return 0;
++        }
++        case TENSTORRENT_IOCTL_FREE_DMA_BUF:
++            return 0;  // buffers go when the descriptor closes, as with tt-kmd
++        case TENSTORRENT_IOCTL_LOCK_CTL: {
++            struct tenstorrent_lock_ctl* l = arg;
++            if (l->in.index >= TENSTORRENT_RESOURCE_LOCK_COUNT) {
++                return -EINVAL;
++            }
++            uint64_t bit = 1ull << l->in.index;
++            switch (l->in.flags) {
++                case TENSTORRENT_LOCK_CTL_ACQUIRE:
++                    l->out.value = !(g_lock_owner_bits & bit);
++                    if (l->out.value) {
++                        g_lock_owner_bits |= bit;
++                        g_fds[slot].locks |= bit;
++                    }
++                    return 0;
++                case TENSTORRENT_LOCK_CTL_RELEASE:
++                    l->out.value = (g_fds[slot].locks & bit) != 0;
++                    g_fds[slot].locks &= ~bit;
++                    if (l->out.value) {
++                        g_lock_owner_bits &= ~bit;
++                    }
++                    return 0;
++                case TENSTORRENT_LOCK_CTL_TEST:
++                    l->out.value = (uint8_t)(((g_fds[slot].locks & bit) ? 1 : 0) | ((g_lock_owner_bits & bit) ? 2 : 0));
++                    return 0;
++                default:
++                    return -EINVAL;
++            }
++        }
++        case TENSTORRENT_IOCTL_SET_POWER_STATE: {
++            const struct tenstorrent_power_state* ps = arg;
++            ttbh_bar0_ctx ctx = {g.bar0, g.bar0_size, TTBH_DRIVER_TLB_INDEX};
++            ttbh_window w = ttbh_bar0_window(&ctx);
++            int err = ttbh_arc_set_power(&w, ps->validity, ps->power_flags, ps->power_settings);
++            trace("SET_POWER_STATE flags=0x%x validity=0x%x -> %s", ps->power_flags, ps->validity, ttbh_strerror(err));
++            return err == TTBH_OK ? 0 : -EIO;
++        }
++        case TENSTORRENT_IOCTL_SET_NOC_CLEANUP:
++            return 0;  // accepted; this emulation has no fd-close hook into the card
++        default:
++            trace("ioctl 0x%lx not supported on macOS", request);
++            return -ENOTSUP;  // reset, harvesting, peer BAR, dma-buf export, scalar NOC
++    }
++}
++
++// ── the system-call stand-ins ────────────────────────────────────────────────────────────
++
++static bool is_tt_path(const char* path) { return strncmp(path, "/dev/tenstorrent/", 17) == 0; }
++
++int tt_darwin_open(const char* path, int flags) {
++    if (!is_tt_path(path)) {
++        return open(path, flags);
++    }
++    if (atoi(path + 17) != 0) {
++        errno = ENOENT;  // one card: interface 0
++        return -1;
++    }
++    pthread_mutex_lock(&g_lock);
++    int err = connect_driver();
++    int fd = err ? -1 : open("/dev/null", O_RDONLY | O_CLOEXEC);  // a real, unique descriptor number
++    if (fd >= 0) {
++        int i = 0;
++        while (i < MAX_FDS && g_fds[i].used) {
++            i++;
++        }
++        if (i == MAX_FDS) {
++            close(fd);
++            fd = -1;
++            err = -EMFILE;
++            disconnect_driver();
++        } else {
++            g_fds[i] = (typeof(g_fds[0])){true, fd, 0};
++        }
++    }
++    pthread_mutex_unlock(&g_lock);
++    if (fd < 0) {
++        errno = -err;
++    }
++    return fd;
++}
++
++int tt_darwin_close(int fd) {
++    pthread_mutex_lock(&g_lock);
++    int i = fd_slot(fd);
++    if (i >= 0) {
++        g_lock_owner_bits &= ~g_fds[i].locks;  // tt-kmd drops a descriptor's locks on close
++        g_fds[i].used = false;
++        disconnect_driver();
++    }
++    pthread_mutex_unlock(&g_lock);
++    return close(fd);
++}
++
++int tt_darwin_ioctl(int fd, unsigned long request, void* arg) {
++    pthread_mutex_lock(&g_lock);
++    int i = fd_slot(fd);
++    int ret = i < 0 ? -ENOTTY : do_ioctl(i, request, arg);
++    pthread_mutex_unlock(&g_lock);
++    if (ret < 0) {
++        errno = -ret;
++        return -1;
++    }
++    return ret;
++}
++
++void* tt_darwin_mmap(void* addr, size_t len, int prot, int flags, int fd, off_t offset) {
++    pthread_mutex_lock(&g_lock);
++    int i = fd < 0 ? -1 : fd_slot(fd);
++    pthread_mutex_unlock(&g_lock);
++    if (i < 0) {
++        return mmap(addr, len, prot, flags, fd, offset);
++    }
++    uint64_t off = (uint64_t)offset;
++    if (off + len <= g.bar0_size) {
++        return (void*)(g.bar0 + off);
++    }
++    if (off >= OFF_BAR2 && off - OFF_BAR2 + len <= g.bar2_size) {
++        return (void*)(g.bar2 + (off - OFF_BAR2));
++    }
++    if (off >= OFF_DMABUF) {
++        uint64_t k = (off - OFF_DMABUF) / DMABUF_STRIDE;
++        if (k < MAX_DMA && g_dma[k].used && g_dma[k].allocated && len <= g_dma[k].len) {
++            return g_dma[k].addr;
++        }
++    }
++    errno = EINVAL;
++    return MAP_FAILED;
++}
++
++int tt_darwin_munmap(void* addr, size_t len) {
++    uintptr_t a = (uintptr_t)addr;
++    if (g.bar0 && a >= (uintptr_t)g.bar0 && a < (uintptr_t)g.bar0 + g.bar0_size) {
++        return 0;  // part of the BAR0 mapping, which lives until the last descriptor closes
++    }
++    if (g.bar2 && a >= (uintptr_t)g.bar2 && a < (uintptr_t)g.bar2 + g.bar2_size) {
++        return 0;
++    }
++    for (int i = 0; i < MAX_DMA; i++) {
++        if (g_dma[i].used && g_dma[i].allocated && g_dma[i].addr == addr) {
++            return 0;  // released with its descriptor
++        }
++    }
++    return munmap(addr, len);
++}
++
++int tt_darwin_device_count(void) {
++    io_service_t s = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceNameMatching(TTBH_SERVICE_NAME));
++    if (s == IO_OBJECT_NULL) {
++        return 0;
++    }
++    IOObjectRelease(s);
++    return 1;
++}
++
++int tt_darwin_sysfs_read(const char* attribute, char* out, size_t out_len) {
++    if (!strcmp(attribute, "iommu_group/type")) {
++        snprintf(out, out_len, "DMA");  // the DART translates every device access
++        return 0;
++    }
++    if (!strcmp(attribute, "revision")) {
++        uint64_t in[2] = {0x08, 1}, val = 0;  // config space revision ID
++        uint32_t n = 1;
++        if (!g.conn || IOConnectCallScalarMethod(g.conn, kTTBHCfgRead, in, 2, &val, &n) != KERN_SUCCESS) {
++            return -1;
++        }
++        snprintf(out, out_len, "0x%02llx", (unsigned long long)val);
++        return 0;
++    }
++    return -1;  // numa_node, link speed/width, ...: no sysfs; callers use their defaults
++}
++
++const char* tt_darwin_kmd_version(void) { return "2.11.0"; }
++
++#endif  // __APPLE__
+diff --git a/tt-kmd-lib/src/tt_kmd_lib.c b/tt-kmd-lib/src/tt_kmd_lib.c
+index bbebc6bb..f0c45bb8 100644
+--- a/tt-kmd-lib/src/tt_kmd_lib.c
++++ b/tt-kmd-lib/src/tt_kmd_lib.c
+@@ -18,6 +18,22 @@
+ #include "ioctl.h"
+ #include "tt-kmd-lib/pci_ids.h"
+ 
++// On macOS there is no tt-kmd: device descriptors go to the user-space emulation in tt_kmd_darwin.c.
++#if defined(__APPLE__)
++#include "tt-kmd-lib/tt_kmd_darwin.h"
++#define kmd_open tt_darwin_open
++#define kmd_close tt_darwin_close
++#define kmd_ioctl tt_darwin_ioctl
++#define kmd_mmap tt_darwin_mmap
++#define kmd_munmap tt_darwin_munmap
++#else
++#define kmd_open open
++#define kmd_close close
++#define kmd_ioctl ioctl
++#define kmd_mmap mmap
++#define kmd_munmap munmap
++#endif
++
+ #define MIN(a, b) ((a) < (b) ? (a) : (b))
+ #define DEBUG(fmt, ...)                                                        \
+     do {                                                                       \
+@@ -80,7 +96,7 @@ int tt_device_open(const char* chardev_path, tt_device_t** out_dev, int extra_fl
+         return -ENOMEM;
+     }
+ 
+-    dev->fd = open(chardev_path, O_RDWR | O_CLOEXEC | extra_flags);
++    dev->fd = kmd_open(chardev_path, O_RDWR | O_CLOEXEC | extra_flags);
+     if (dev->fd == -1) {
+         int e = errno;
+         free(dev);
+@@ -93,7 +109,7 @@ int tt_device_open(const char* chardev_path, tt_device_t** out_dev, int extra_fl
+ }
+ 
+ int tt_device_close(tt_device_t* dev) {
+-    if (close(dev->fd) != 0) {
++    if (kmd_close(dev->fd) != 0) {
+         return -errno;
+     }
+ 
+@@ -106,7 +122,7 @@ int tt_device_get_attrs(tt_device_t* dev, tt_device_attrs_t* out_attrs) {
+ 
+     get_device_info.in.output_size_bytes = sizeof(get_device_info.out);
+ 
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_GET_DEVICE_INFO, &get_device_info) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_GET_DEVICE_INFO, &get_device_info) != 0) {
+         return -errno;
+     }
+ 
+@@ -196,7 +212,7 @@ int tt_driver_get_attr(tt_device_t* dev, enum tt_driver_attr attr, uint64_t* out
+ 
+     /* OK to call with NULL dev, but can't return semver without a device. */
+     if (dev) {
+-        if (ioctl(dev->fd, TENSTORRENT_IOCTL_GET_DRIVER_INFO, &get_driver_info) != 0) {
++        if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_GET_DRIVER_INFO, &get_driver_info) != 0) {
+             return -errno;
+         }
+     }
+@@ -230,7 +246,7 @@ int tt_device_query_bar_mappings(tt_device_t* dev, tt_bar_mappings_t* out_mappin
+     memset(&mappings, 0, sizeof(mappings));
+     mappings.query_mappings.in.output_mapping_count = 8;
+ 
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_QUERY_MAPPINGS, &mappings.query_mappings) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_QUERY_MAPPINGS, &mappings.query_mappings) != 0) {
+         return -errno;
+     }
+ 
+@@ -325,7 +341,7 @@ static int scalar_noc_access(
+     noc_io.addr = addr;
+     noc_io.value = *value;
+ 
+-    if (ioctl(dev->fd, request, &noc_io) != 0) {
++    if (kmd_ioctl(dev->fd, request, &noc_io) != 0) {
+         return -errno;
+     }
+ 
+@@ -518,7 +534,7 @@ int tt_pin_pages(tt_device_t* dev, void* addr, size_t len, int flags, uint64_t*
+         pin_pages.in.flags |= TENSTORRENT_PIN_PAGES_READ_ONLY;
+     }
+ 
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_PIN_PAGES, &pin_pages) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_PIN_PAGES, &pin_pages) != 0) {
+         return -errno;
+     }
+ 
+@@ -538,7 +554,7 @@ int tt_unpin_pages(tt_device_t* dev, void* addr, size_t len) {
+     unpin.in.virtual_address = (uint64_t)addr;
+     unpin.in.size = len;
+ 
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_UNPIN_PAGES, &unpin) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_UNPIN_PAGES, &unpin) != 0) {
+         return -errno;
+     }
+ 
+@@ -629,11 +645,11 @@ int tt_allocate_dma_buf(
+         dma_buf.in.flags |= TENSTORRENT_ALLOCATE_DMA_BUF_NOC_DMA;
+     }
+ 
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF, &dma_buf) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_ALLOCATE_DMA_BUF, &dma_buf) != 0) {
+         return -errno;
+     }
+ 
+-    void* mapping = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, dev->fd, dma_buf.out.mapping_offset);
++    void* mapping = kmd_mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, dev->fd, dma_buf.out.mapping_offset);
+     if (mapping == MAP_FAILED) {
+         return -errno;
+     }
+@@ -663,7 +679,7 @@ int tt_tlb_alloc(tt_device_t* dev, size_t size, enum tt_tlb_cache_mode cache, tt
+     struct tenstorrent_allocate_tlb alloc_tlb = {0};
+     alloc_tlb.in.size = size;
+ 
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_ALLOCATE_TLB, &alloc_tlb) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_ALLOCATE_TLB, &alloc_tlb) != 0) {
+         int e = errno;
+         free(tlb);
+         return -e;
+@@ -672,13 +688,13 @@ int tt_tlb_alloc(tt_device_t* dev, size_t size, enum tt_tlb_cache_mode cache, tt
+     off_t offset = cache == TT_MMIO_CACHE_MODE_UC ? alloc_tlb.out.mmap_offset_uc : alloc_tlb.out.mmap_offset_wc;
+     tlb->id = alloc_tlb.out.id;
+     tlb->size = size;
+-    tlb->mmio = mmap(NULL, tlb->size, PROT_READ | PROT_WRITE, MAP_SHARED, dev->fd, offset);
++    tlb->mmio = kmd_mmap(NULL, tlb->size, PROT_READ | PROT_WRITE, MAP_SHARED, dev->fd, offset);
+ 
+     if (tlb->mmio == MAP_FAILED) {
+         struct tenstorrent_free_tlb free_tlb = {0};
+         int e = errno;
+         free_tlb.in.id = tlb->id;
+-        if (ioctl(dev->fd, TENSTORRENT_IOCTL_FREE_TLB, &free_tlb) != 0) {
++        if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_FREE_TLB, &free_tlb) != 0) {
+             fprintf(stderr, "Leaked TLB %u: after mmap failure: %s\n", tlb->id, strerror(errno));
+         }
+ 
+@@ -696,12 +712,12 @@ int tt_tlb_free(tt_device_t* dev, tt_tlb_t* tlb) {
+     int ret = 0;
+ 
+     /* Unmap the userspace view of the TLB. This is required by the driver. */
+-    munmap(tlb->mmio, tlb->size);
++    kmd_munmap(tlb->mmio, tlb->size);
+ 
+     /* Tell the driver to release the backing hardware resource. */
+     struct tenstorrent_free_tlb free_tlb = {0};
+     free_tlb.in.id = tlb->id;
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_FREE_TLB, &free_tlb) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_FREE_TLB, &free_tlb) != 0) {
+         ret = -errno;
+     }
+ 
+@@ -738,7 +754,7 @@ int tt_tlb_map(tt_device_t* dev, tt_tlb_t* tlb, tt_noc_addr_config_t* config) {
+     configure_tlb.in.config.ordering = config->ordering;
+     configure_tlb.in.config.static_vc = config->static_vc;
+ 
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_CONFIGURE_TLB, &configure_tlb) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_CONFIGURE_TLB, &configure_tlb) != 0) {
+         return -errno;
+     }
+ 
+@@ -757,7 +773,7 @@ int tt_tlb_map_unicast(tt_device_t* dev, tt_tlb_t* tlb, uint8_t x, uint8_t y, ui
+     configure_tlb.in.config.x_end = x;
+     configure_tlb.in.config.y_end = y;
+ 
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_CONFIGURE_TLB, &configure_tlb) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_CONFIGURE_TLB, &configure_tlb) != 0) {
+         return -errno;
+     }
+ 
+@@ -783,7 +799,7 @@ int tt_tlb_export_dmabuf(tt_device_t* dev, tt_tlb_t* tlb, uint64_t offset, uint6
+     export_dmabuf.offset = offset;
+     export_dmabuf.size = size;
+ 
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_EXPORT_TLB_DMABUF, &export_dmabuf) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_EXPORT_TLB_DMABUF, &export_dmabuf) != 0) {
+         return -errno;
+     }
+ 
+@@ -799,7 +815,7 @@ int tt_device_set_power_state(tt_device_t* dev, uint16_t power_flags) {
+     ps.validity = TT_POWER_VALIDITY(4, 0);
+     ps.power_flags = power_flags;
+ 
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_SET_POWER_STATE, &ps) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_SET_POWER_STATE, &ps) != 0) {
+         return -errno;
+     }
+ 
+@@ -819,7 +835,7 @@ int tt_device_reset(tt_device_t* dev, uint32_t reset_flags) {
+     reset_info.out.output_size_bytes = 0;
+     reset_info.out.result = 0;
+ 
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_RESET_DEVICE, &reset_info) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_RESET_DEVICE, &reset_info) != 0) {
+         return -errno;
+     }
+ 
+@@ -838,7 +854,7 @@ static int lock_ctl(tt_device_t* dev, uint8_t index, uint32_t flags, uint8_t* ou
+     ctl.in.flags = flags;
+     ctl.in.index = index;
+ 
+-    if (ioctl(dev->fd, TENSTORRENT_IOCTL_LOCK_CTL, &ctl) != 0) {
++    if (kmd_ioctl(dev->fd, TENSTORRENT_IOCTL_LOCK_CTL, &ctl) != 0) {
+         return -errno;
+     }
+ 
+diff --git a/tt-umd-utils/CMakeLists.txt b/tt-umd-utils/CMakeLists.txt
+index 92764aff..a0ba3ea6 100644
+--- a/tt-umd-utils/CMakeLists.txt
++++ b/tt-umd-utils/CMakeLists.txt
+@@ -6,7 +6,12 @@
+ add_library(tt-umd-utils STATIC)
+ add_library(tt-umd-utils::tt-umd-utils ALIAS tt-umd-utils)
+ 
+-target_sources(tt-umd-utils PRIVATE src/robust_mutex.cpp)
++# macOS has no robust pthread mutexes; its RobustMutex uses flock(2) instead (robust_mutex_darwin.cpp).
++if(APPLE)
++    target_sources(tt-umd-utils PRIVATE src/robust_mutex_darwin.cpp)
++else()
++    target_sources(tt-umd-utils PRIVATE src/robust_mutex.cpp)
++endif()
+ 
+ target_include_directories(
+     tt-umd-utils
+@@ -20,7 +25,7 @@ target_link_libraries(
+     PUBLIC
+         fmt::fmt-header-only
+     PRIVATE
+-        rt
++        $<$<NOT:$<PLATFORM_ID:Darwin>>:rt>
+         tt-logger::tt-logger
+ )
+ 
+diff --git a/tt-umd-utils/src/robust_mutex_darwin.cpp b/tt-umd-utils/src/robust_mutex_darwin.cpp
+new file mode 100644
+index 00000000..789cf55a
+--- /dev/null
++++ b/tt-umd-utils/src/robust_mutex_darwin.cpp
+@@ -0,0 +1,182 @@
++// SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
++//
++// SPDX-License-Identifier: Apache-2.0
++
++// RobustMutex on macOS.
++//
++// The Linux implementation (robust_mutex.cpp) keeps a process-shared *robust* pthread mutex in POSIX
++// shared memory: if the holder dies, the next locker gets EOWNERDEAD and recovers it. macOS has no
++// robust mutexes (no PTHREAD_MUTEX_ROBUST, pthread_mutex_consistent or pthread_mutex_timedlock), so
++// this version uses flock(2) on a lock file instead. That gives the same guarantee by a different
++// route: the kernel drops a flock when the holding process exits or crashes, so a dead holder
++// never leaves the lock stuck.
++//
++// flock locks belong to an open file description, so two threads sharing one RobustMutex (one fd)
++// wouldn't exclude each other through flock alone. A process-wide timed mutex per lock name covers
++// threads; flock covers processes. The holder's PID is written into the file so probe_lock() can
++// report who holds it, as the Linux version does.
++//
++// The class layout is the shared header's: shm_fd_ holds the lock file, mutex_wrapper_ptr_ is unused.
++
++#include "tt-umd-utils/robust_mutex.hpp"
++
++#include <fcntl.h>
++#include <fmt/format.h>
++#include <sys/file.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <cerrno>
++#include <chrono>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <tt-logger/tt-logger.hpp>
++
++#include "tt-umd-utils/error.hpp"
++
++namespace tt::umd {
++
++pthread_mutex_t RobustMutex::multithread_mutex_ = PTHREAD_MUTEX_INITIALIZER;
++
++namespace {
++
++// One timed mutex per lock name, for the threads of this process.
++std::timed_mutex& thread_mutex_for(const std::string& name) {
++    static std::mutex registry_guard;
++    static std::map<std::string, std::unique_ptr<std::timed_mutex>> registry;
++    std::lock_guard<std::mutex> g(registry_guard);
++    auto& slot = registry[name];
++    if (!slot) {
++        slot = std::make_unique<std::timed_mutex>();
++    }
++    return *slot;
++}
++
++std::string lock_file_path(const std::string& name) {
++    std::string safe = name;
++    for (char& c : safe) {
++        if (c == '/') {
++            c = '_';
++        }
++    }
++    const char* tmp = getenv("TMPDIR");
++    std::string dir = tmp && *tmp ? tmp : "/tmp/";
++    if (dir.back() != '/') {
++        dir += '/';
++    }
++    return dir + std::string(RobustMutex::SHM_FILE_PREFIX) + safe;
++}
++
++}  // namespace
++
++RobustMutex::RobustMutex(std::string_view mutex_name) : mutex_name_(mutex_name) {}
++
++RobustMutex::~RobustMutex() noexcept { close_mutex(); }
++
++RobustMutex::RobustMutex(RobustMutex&& other) noexcept :
++    shm_fd_(std::exchange(other.shm_fd_, -1)),
++    mutex_wrapper_ptr_(std::exchange(other.mutex_wrapper_ptr_, nullptr)),
++    mutex_name_(std::move(other.mutex_name_)),
++    active_locks_(other.active_locks_.load()) {}
++
++RobustMutex& RobustMutex::operator=(RobustMutex&& other) noexcept {
++    if (this != &other) {
++        close_mutex();
++        shm_fd_ = std::exchange(other.shm_fd_, -1);
++        mutex_wrapper_ptr_ = std::exchange(other.mutex_wrapper_ptr_, nullptr);
++        mutex_name_ = std::move(other.mutex_name_);
++        active_locks_.store(other.active_locks_.load());
++    }
++    return *this;
++}
++
++void RobustMutex::initialize() { open_shm_file(); }
++
++void RobustMutex::open_shm_file() {
++    const std::string path = lock_file_path(mutex_name_);
++    shm_fd_ = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0666);
++    if (shm_fd_ == -1) {
++        UMD_THROW(error::RuntimeError, fmt::format("open({}) failed for mutex {} errno: {}", path, mutex_name_, errno));
++    }
++    fchmod(shm_fd_, 0666);  // shared between users, as the Linux shm files are (ALL_RW_PERMISSION)
++}
++
++// Unused on macOS: there is no shared-memory mutex to size, map or initialise.
++bool RobustMutex::resize_shm_file() { return false; }
++void RobustMutex::open_pthread_mutex() {}
++size_t RobustMutex::get_file_size(int) { return 0; }
++void RobustMutex::initialize_pthread_mutex_first_use() {}
++
++void RobustMutex::close_mutex() noexcept {
++    if (shm_fd_ != -1) {
++        close(shm_fd_);  // also releases any flock this descriptor still holds
++        shm_fd_ = -1;
++    }
++}
++
++void RobustMutex::record_acquisition() {
++    // Leave the holder's PID in the file for probe_lock() callers to report.
++    char buf[32];
++    int n = snprintf(buf, sizeof buf, "%d\n", static_cast<int>(getpid()));
++    if (ftruncate(shm_fd_, 0) == 0) {
++        (void)!pwrite(shm_fd_, buf, static_cast<size_t>(n), 0);
++    }
++    active_locks_.fetch_add(1, std::memory_order_relaxed);
++}
++
++void RobustMutex::unlock() {
++    active_locks_.fetch_sub(1, std::memory_order_relaxed);
++    (void)!ftruncate(shm_fd_, 0);
++    if (flock(shm_fd_, LOCK_UN) != 0) {
++        UMD_THROW(error::RuntimeError, fmt::format("flock(LOCK_UN) failed for mutex {} errno: {}", mutex_name_, errno));
++    }
++    thread_mutex_for(mutex_name_).unlock();
++}
++
++std::optional<std::pair<pid_t, pid_t>> RobustMutex::probe_lock(std::chrono::seconds timeout) {
++    using clock = std::chrono::steady_clock;
++    const auto deadline = clock::now() + timeout;
++    std::timed_mutex& tm = thread_mutex_for(mutex_name_);
++    if (!tm.try_lock_until(deadline)) {
++        return std::make_pair(getpid(), 0);  // held by another thread of this process
++    }
++    for (;;) {
++        if (flock(shm_fd_, LOCK_EX | LOCK_NB) == 0) {
++            record_acquisition();
++            return std::nullopt;
++        }
++        if (errno != EWOULDBLOCK && errno != EINTR) {
++            tm.unlock();
++            UMD_THROW(error::RuntimeError, fmt::format("flock() failed for mutex {} errno: {}", mutex_name_, errno));
++        }
++        if (clock::now() >= deadline) {
++            break;
++        }
++        std::this_thread::sleep_for(std::chrono::milliseconds(10));
++    }
++    tm.unlock();
++    // Best-effort owner report: the PID the holder wrote. There is no portable TID; report 0.
++    char buf[32] = {0};
++    pid_t owner = 0;
++    if (pread(shm_fd_, buf, sizeof buf - 1, 0) > 0) {
++        owner = static_cast<pid_t>(atoi(buf));
++    }
++    return std::make_pair(owner, 0);
++}
++
++void RobustMutex::lock() {
++    if (auto owner = probe_lock(std::chrono::seconds(1))) {
++        log_warning(LogUMD, "Waiting for lock '{}' which is currently held by PID: {}", mutex_name_, owner->first);
++        thread_mutex_for(mutex_name_).lock();
++        if (flock(shm_fd_, LOCK_EX) != 0) {
++            thread_mutex_for(mutex_name_).unlock();
++            UMD_THROW(error::RuntimeError, fmt::format("flock(LOCK_EX) failed for mutex {} errno: {}", mutex_name_, errno));
++        }
++        record_acquisition();
++    }
++}
++
++}  // namespace tt::umd
+diff --git a/tt-umd/CMakeLists.txt b/tt-umd/CMakeLists.txt
+index 1a33b879..a1025b92 100644
+--- a/tt-umd/CMakeLists.txt
++++ b/tt-umd/CMakeLists.txt
+@@ -442,7 +442,7 @@ target_link_libraries(
+         fmt::fmt-header-only
+     PRIVATE
+         hwloc
+-        rt
++        $<$<NOT:$<PLATFORM_ID:Darwin>>:rt>
+         spdlog::spdlog_header_only
+         tt-logger::tt-logger
+         yaml-cpp::yaml-cpp
+diff --git a/tt-umd/src/chip_helpers/silicon_sysmem_manager.cpp b/tt-umd/src/chip_helpers/silicon_sysmem_manager.cpp
+index 068b978f..4f68d77c 100644
+--- a/tt-umd/src/chip_helpers/silicon_sysmem_manager.cpp
++++ b/tt-umd/src/chip_helpers/silicon_sysmem_manager.cpp
+@@ -7,7 +7,11 @@
+ #include "tt-umd/chip_helpers/silicon_sysmem_manager.hpp"
+ 
+ #include <fmt/format.h>
++#if defined(__APPLE__)
++#include "darwin_compat.hpp"  // MAP_HUGE_* etc. as ordinary pages
++#else
+ #include <linux/mman.h>  // for MAP_HUGE_1GB, MAP_HUGE_512MB, MAP_HUGE_2MB
++#endif
+ #include <sys/mman.h>    // for mmap, munmap
+ #include <sys/stat.h>    // for fstat
+ #include <unistd.h>
+diff --git a/tt-umd/src/chip_helpers/simulation_sysmem_manager.cpp b/tt-umd/src/chip_helpers/simulation_sysmem_manager.cpp
+index ee149225..0c7e59b4 100644
+--- a/tt-umd/src/chip_helpers/simulation_sysmem_manager.cpp
++++ b/tt-umd/src/chip_helpers/simulation_sysmem_manager.cpp
+@@ -2,6 +2,7 @@
+ //
+ // SPDX-License-Identifier: Apache-2.0
+ 
++#include "darwin_compat.hpp"  // MAP_POPULATE on macOS
+ #include "tt-umd/chip_helpers/simulation_sysmem_manager.hpp"
+ 
+ #include <fmt/format.h>
+@@ -78,7 +79,9 @@ bool SimulationSysmemManager::init_sysmem(uint32_t num_host_mem_channels) {
+     system_memory_ =
+         static_cast<uint8_t*>(mmap(nullptr, total_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+     UMD_ASSERT(system_memory_ != MAP_FAILED, error::RuntimeError, "system_memory mmap() failed");
++#ifdef MADV_HUGEPAGE
+     madvise(system_memory_, total_size, MADV_HUGEPAGE);
++#endif
+     system_memory_size_ = total_size;
+ 
+     // The mapped-buffer arena starts immediately after the hugepage region so
+diff --git a/tt-umd/src/darwin_compat.hpp b/tt-umd/src/darwin_compat.hpp
+new file mode 100644
+index 00000000..1dde86bf
+--- /dev/null
++++ b/tt-umd/src/darwin_compat.hpp
+@@ -0,0 +1,31 @@
++// SPDX-FileCopyrightText: © 2026 Tenstorrent Inc.
++//
++// SPDX-License-Identifier: Apache-2.0
++
++// Linux-only mmap/madvise flags, given their macOS meaning so the shared code compiles unchanged.
++//
++// macOS has no hugetlbfs, no MAP_HUGETLB/MAP_HUGE_* and no MAP_POPULATE. Defined as 0 they ask for
++// ordinary pages, which is all a Mac can give: the card reaches host memory through the DART (an
++// IOMMU), which maps 16 KiB pages to one contiguous device-visible range, so UMD's need for
++// physically contiguous hugepages doesn't apply. MADV_HUGEPAGE has no counterpart; callers skip it.
++#pragma once
++
++#include <sys/mman.h>
++
++#if defined(__APPLE__)
++#ifndef MAP_POPULATE
++#define MAP_POPULATE 0
++#endif
++#ifndef MAP_HUGETLB
++#define MAP_HUGETLB 0
++#endif
++#ifndef MAP_HUGE_1GB
++#define MAP_HUGE_1GB 0
++#endif
++#ifndef MAP_HUGE_512MB
++#define MAP_HUGE_512MB 0
++#endif
++#ifndef MAP_HUGE_2MB
++#define MAP_HUGE_2MB 0
++#endif
++#endif
+diff --git a/tt-umd/src/pcie/pci_device.cpp b/tt-umd/src/pcie/pci_device.cpp
+index e1069a14..7dd27f24 100644
+--- a/tt-umd/src/pcie/pci_device.cpp
++++ b/tt-umd/src/pcie/pci_device.cpp
+@@ -2,6 +2,7 @@
+ //
+ // SPDX-License-Identifier: Apache-2.0
+ 
++#include "darwin_compat.hpp"  // MAP_POPULATE on macOS
+ #include "tt-umd/pcie/pci_device.hpp"
+ 
+ #include <fcntl.h>  // for ::open
+@@ -33,6 +34,9 @@
+ #include "tracy.hpp"
+ #include "tt-kmd-lib/pci_ids.h"
+ #include "tt-kmd-lib/tt_kmd_lib.h"
++#if defined(__APPLE__)
++#include "tt-kmd-lib/tt_kmd_darwin.h"
++#endif
+ #include "tt-umd/arch/architecture_tlbs.hpp"
+ #include "tt-umd/pcie/silicon_tlb_handle.hpp"
+ #include "tt-umd/types/arch.hpp"
+@@ -44,6 +48,25 @@
+ 
+ namespace tt::umd {
+ 
++// The device descriptor and its BAR mappings. On Linux these are the system calls on tt-kmd's
++// character device. On macOS they go to tt-kmd-lib's user-space emulation (tt_kmd_darwin.h), which
++// also stands in for the sysfs attributes and the /dev/tenstorrent directory below.
++#if defined(__APPLE__)
++static int dev_open(const char *path, int flags) { return tt_darwin_open(path, flags); }
++static int dev_close(int fd) { return tt_darwin_close(fd); }
++static void *dev_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
++    return tt_darwin_mmap(addr, len, prot, flags, fd, off);
++}
++static int dev_munmap(void *addr, size_t len) { return tt_darwin_munmap(addr, len); }
++#else
++static int dev_open(const char *path, int flags) { return ::open(path, flags); }
++static int dev_close(int fd) { return ::close(fd); }
++static void *dev_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
++    return ::mmap(addr, len, prot, flags, fd, off);
++}
++static int dev_munmap(void *addr, size_t len) { return ::munmap(addr, len); }
++#endif
++
+ template <typename T>
+ static std::optional<T> try_read_sysfs(const PciDeviceInfo &device_info, const std::string &attribute_name) {
+     const auto sysfs_path = fmt::format(
+@@ -53,13 +76,21 @@ static std::optional<T> try_read_sysfs(const PciDeviceInfo &device_info, const s
+         device_info.pci_device,
+         device_info.pci_function,
+         attribute_name);
+-    std::ifstream attribute_file(sysfs_path);
+     std::string value_str;
+     T value;
+ 
++#if defined(__APPLE__)
++    char buf[64];
++    if (tt_darwin_sysfs_read(attribute_name.c_str(), buf, sizeof buf) != 0) {
++        return std::nullopt;
++    }
++    value_str = buf;
++#else
++    std::ifstream attribute_file(sysfs_path);
+     if (!attribute_file.is_open() || !std::getline(attribute_file, value_str)) {
+         return std::nullopt;
+     }
++#endif
+ 
+     std::istringstream iss(value_str);
+ 
+@@ -136,6 +167,10 @@ static std::string get_pci_bdf(
+ 
+ static std::optional<int> get_physical_slot_for_pcie_bdf(const std::string &target_bdf) {
+     std::string base_path = "/sys/bus/pci/slots";
++    std::error_code ec;
++    if (!std::filesystem::is_directory(base_path, ec)) {
++        return std::nullopt;  // no sysfs (macOS), or no slot information
++    }
+ 
+     for (const auto &entry : std::filesystem::directory_iterator(base_path)) {
+         if (!entry.is_directory()) {
+@@ -246,9 +281,11 @@ std::vector<int> PCIDevice::enumerate_devices() {
+     std::vector<int> device_ids;
+     std::string path = "/dev/tenstorrent/";
+ 
++#if !defined(__APPLE__)  // the emulation has no device directory; get_all_device_ids asks it
+     if (!std::filesystem::exists(path)) {
+         return device_ids;
+     }
++#endif
+ 
+     const char *tt_visible_devices_env = std::getenv("TT_VISIBLE_DEVICES");
+     if (!tt_visible_devices_env) {
+@@ -390,7 +427,7 @@ static int open_pci_device(const std::string &device_path) {
+     // https://github.com/tenstorrent/tt-umd/issues/2531.
+     int flags = O_RDWR | O_CLOEXEC;
+     log_debug(LogUMD, fmt::format("Opening device {} in legacy mode regarding device power.", device_path));
+-    return open(device_path.c_str(), flags);
++    return dev_open(device_path.c_str(), flags);
+ }
+ 
+ PCIDevice::PCIDevice(int pci_device_number) :
+@@ -476,7 +513,7 @@ PCIDevice::PCIDevice(int pci_device_number) :
+         UMD_THROW(error::RuntimeError, fmt::format("Device {} has no BAR0 UC mapping.", pci_device_num));
+     }
+ 
+-    bar0 = mmap(
++    bar0 = dev_mmap(
+         nullptr,
+         PCIDevice::bar0_size,
+         PROT_READ | PROT_WRITE,
+@@ -491,7 +528,7 @@ PCIDevice::PCIDevice(int pci_device_number) :
+     // Map TLB configuration registers. Wormhole has up to 186 TLBs and Blackhole up to 202 TLBs; with
+     // approximately 8–12 bytes per TLB configuration register, the maximum required space is about
+     // 202 * 12 = 2424 bytes, which fits comfortably in a single 4 KB page.
+-    tlb_config_space = mmap(
++    tlb_config_space = dev_mmap(
+         nullptr,
+         tlb_config_space_size,
+         PROT_READ | PROT_WRITE,
+@@ -511,7 +548,7 @@ PCIDevice::PCIDevice(int pci_device_number) :
+         }
+ 
+         bar2_uc_size = bar2_uc_mapping.size;
+-        bar2_uc = mmap(
++        bar2_uc = dev_mmap(
+             nullptr,
+             bar2_uc_mapping.size,
+             PROT_READ | PROT_WRITE,
+@@ -529,7 +566,7 @@ PCIDevice::PCIDevice(int pci_device_number) :
+ 
+         // Using UnCachable memory mode. This is used for accessing registers on Blackhole.
+         bar2_uc_size = bar2_uc_mapping.size;
+-        bar2_uc = mmap(
++        bar2_uc = dev_mmap(
+             nullptr,
+             bar2_uc_mapping.size,
+             PROT_READ | PROT_WRITE,
+@@ -556,18 +593,18 @@ PCIDevice::~PCIDevice() {
+             pci_device_num);
+     }
+ 
+-    close(pci_device_file_desc);
++    dev_close(pci_device_file_desc);
+ 
+     if (bar0 != nullptr && bar0 != MAP_FAILED) {
+-        munmap(bar0, bar0_size);
++        dev_munmap(bar0, bar0_size);
+     }
+ 
+     if (tlb_config_space != nullptr && tlb_config_space != MAP_FAILED) {
+-        munmap(tlb_config_space, tlb_config_space_size);
++        dev_munmap(tlb_config_space, tlb_config_space_size);
+     }
+ 
+     if (bar2_uc != nullptr && bar2_uc != MAP_FAILED) {
+-        munmap(bar2_uc, bar2_uc_size);
++        dev_munmap(bar2_uc, bar2_uc_size);
+     }
+ 
+     if (dma_buffer.buffer != nullptr && dma_buffer.buffer != MAP_FAILED) {
+@@ -768,6 +805,9 @@ void PCIDevice::unmap_for_dma(void *buffer, size_t size) {
+ }
+ 
+ SemVer PCIDevice::read_kmd_version() {
++#if defined(__APPLE__)
++    return SemVer(tt_darwin_kmd_version());
++#endif
+     static const std::string path = "/sys/module/tenstorrent/version";
+     std::ifstream file(path);
+ 
+@@ -1200,6 +1240,13 @@ std::vector<int> PCIDevice::get_all_device_ids() {
+     std::vector<int> device_ids;
+     std::string path = "/dev/tenstorrent/";
+ 
++#if defined(__APPLE__)
++    for (int id = 0; id < tt_darwin_device_count(); id++) {
++        device_ids.push_back(id);
++    }
++    return device_ids;
++#endif
++
+     if (!std::filesystem::exists(path)) {
+         return device_ids;
+     }
+diff --git a/tt-umd/src/soc_descriptor.cpp b/tt-umd/src/soc_descriptor.cpp
+index 98f9338f..b4d71fa3 100644
+--- a/tt-umd/src/soc_descriptor.cpp
++++ b/tt-umd/src/soc_descriptor.cpp
+@@ -5,6 +5,7 @@
+ #include "tt-umd/soc_descriptor.hpp"
+ 
+ #include <fmt/format.h>
++#include <unistd.h>  // mkdtemp (in <unistd.h> on macOS, <stdlib.h> on glibc)
+ #include <yaml-cpp/yaml.h>
+ 
+ #include <algorithm>
+-- 
+2.54.0 (Apple Git-157)
+
