@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 import SwiftUI
 
 /// Settings → Devices and security: who is paired with the box and as what,

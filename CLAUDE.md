@@ -4,10 +4,10 @@ Plug-and-play Tenstorrent from a Mac: discover a QuietBox on the LAN, pair once,
 `tt-station run <model>`, get one OpenAI-compatible `/v1`. **No llama.cpp** — usability rides
 on the `/v1` that `tt-inference-server` (vLLM, via `run.py`) exposes.
 
-Repo: github.com/tsingletaryTT/tt-station (private). `main` (last: `8daa46e`, v0.11.0) is the
-released line. Current work happens on feature branches named `jberkowitz/<feature>`, merged
-into the integration branch **`jberkowitz/mobile-voice`**, which is ~94K lines ahead of
-`origin/main` and not merged yet (see `docs/landing-plan.md` for how it lands as PRs).
+Repo: github.com/tsingletaryTT/tt-station (public). `main` (last: `8daa46e`, v0.11.0) is the
+released line. The integration branch **`jberkowitz/mobile-voice`** (v0.12.0, about 150K lines
+ahead of `origin/main`) is shared for review in `jberkowitzTT/tt-station-mobile`, cut into
+review branches by area; `docs/landing-plan.md` says how it lands.
 This box (`tsingletaryTT-quietbox`) IS a real QuietBox: 4× Blackhole (`p300c`),
 `tt-smi`, docker, `~/code/tt-inference-server`. Real serving has been proven here.
 
@@ -165,9 +165,11 @@ Items marked "(branch)" are committed on `jberkowitz/mobile-voice` but not yet o
 - Pairing: 6-digit code (TTL + `MAX_PAIR_ATTEMPTS` lockout), **tokens persisted**
   (`--token-store`, default `~/.config/tt-station/agentd-tokens.json`) so pairing survives
   restarts. Two-step `pair-init`/`pair-complete` for the app.
-- Routes: `GET /status` (unauthed), `GET /models` (unauthed, **vLLM-servable only**),
+- Sign-in is required on every route except `auth::PUBLIC_ROUTES` (`/status`, `/healthz`,
+  `/tls`, `/ssh/host-keys`, the pairing handshake and `/app`); a test walks every route.
+- Routes: `GET /status` (public), `GET /models` (**vLLM-servable only**),
   `POST /pair/init|complete`, `POST /run|stop`, `GET /endpoint`, `POST /reset` (authed),
-  `GET /telemetry` (**WebSocket**, unauthed — streams `tt-smi -s` for remote tt-toplike;
+  `GET /telemetry` (**WebSocket** — streams `tt-smi -s` for remote tt-toplike;
   frames now carry an OPTIONAL ADDITIVE `tt_toplike` key alongside the verbatim tt-smi JSON —
   `{ schema: 1, processes: [{pid,name,cmd,uses_tt,cpu_pct,mem_bytes}], inference: [...] }`,
   `uses_tt` best-effort (only processes the agent's uid can inspect). `inference` is
@@ -176,7 +178,7 @@ Items marked "(branch)" are committed on `jberkowitz/mobile-voice` but not yet o
   (`tt_media_server_*`, e.g. SkyReels) → a `media` object, mutually exclusive. The key is
   OMITTED when agentd has no authoritative opinion, which is what makes tt-toplike fall back
   to its local view for that panel — see `TT_TOPLIKE_STREAM.md`),
-  `GET /serving` (unauthed — every running `tt-inference-server` `/v1`, `source: agent|external`),
+  `GET /serving` (every running `tt-inference-server` `/v1`, `source: agent|external`),
   `GET /config` (box itself or paired — redacted resolved config, no secrets),
   `GET /logs` (box itself or paired — `?source=container|run&tail=N` tail of a `workflow_logs/` file;
   `container`=serving-container stdout/stderr where failures actually live, `run`=run.py's
@@ -246,7 +248,7 @@ Items marked "(branch)" are committed on `jberkowitz/mobile-voice` but not yet o
   `docs/reference/agentd-config.md`; copy-paste starter: `box-panel/agentd.example.toml`.
 
 **CLI (`crates/tt-station`):** `discover` (`--host`/`--no-mdns`), `pair`/`pair-init`/`pair-complete`,
-`run`, `stop`, `status` (unauthed), `endpoint`, `models`, `serving`, `reset`,
+`run`, `stop`, `status` (public), `endpoint`, `models`, `serving`, `reset`,
 **`power`** (authed — `reset-chips`/`suspend`/`reboot`/`shutdown`) and **`wake`** (broadcasts a
 Wake-on-LAN magic packet from this machine using the MAC learned at discovery, or `--mac`; needs
 WoL enabled in the box BIOS/NIC — see `docs/reference/power-controls.md`),
@@ -378,18 +380,18 @@ The panel launches `./target/release/tt-station-agentd`. To pick up the latest a
 routes/fixes: **hit Restart on the panel** (or relaunch it). Box-local config it uses:
 `--backend runpy --tt-inference-repo ~/code/tt-inference-server --serving-host qb2-lab.local
 --serving-port 8003 --serving-image ghcr.io/tenstorrent/tt-inference-server/vllm-tt-metal-src-release-ubuntu-22.04-amd64:0.14.0-80180b9-7678b70`
-(device auto-detects; pass `TTS_IMAGE` to the panel). Telemetry/serving/status are unauthed;
-`run`/`stop`/`endpoint`/`reset` need a pairing (code shows on the panel). Restarting the
+(device auto-detects; pass `TTS_IMAGE` to the panel). Only `/status` and the pairing handshake
+are public; everything else needs a pairing (code shows on the panel). Restarting the
 agent is fine now — **persist-tokens** keeps the Mac paired across restarts.
 
 ## Run / test (Rust, on this box)
-- `cargo test --workspace` (871 pass on `jberkowitz/mobile-voice` @ `8d1725c`). Tests must run with
-  no-op `tt-smi`/`docker`/`systemctl`/`systemd-run`/`tt` stubs first on `PATH` (CI does this); some
-  agentd tests otherwise run a real chip reset.
-- `cargo clippy --workspace --all-targets` is **not** clean: 38 warnings in `tt-station-agentd`
-  (2026-10-15), and `cargo fmt --check` differs in most files. CI reports both without failing until
-  a one-shot cleanup lands after the in-flight branches merge; then both become blocking
-  (`-D warnings`). Don't reformat the whole tree in a feature branch.
+- `cargo test --workspace --no-fail-fast` (about 1,310 pass). Tests must run with no-op
+  `tt-smi`/`docker`/`systemctl`/`systemd-run`/`tt`/`gozer` stubs first on `PATH` (CI does this);
+  some agentd tests otherwise run a real chip reset. The transcription tests need `ffmpeg`.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` and `cargo fmt --all --check`
+  are clean and blocking in CI, as are the Python helper tests
+  (`cd crates/tt-station-agentd/src && python3 -m unittest`), `scripts/check-doc-routes.py`, the
+  desktop typecheck/tests/build, the iOS simulator build and the `.deb` install smoke test.
 - `cargo deny check` (config `deny.toml`); `scripts/check-doc-routes.py` (docs name only real
   routes); `scripts/gen-third-party-licenses.py` (regenerates `THIRD_PARTY_LICENSES.md`).
 - CLI e2e (no hardware): `cargo test -p tt-station --test e2e_mock -- --ignored`.

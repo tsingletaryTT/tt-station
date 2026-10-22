@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Running git on the box, in a project a Code sandbox can write.
 //!
 //! The sandbox gets the project read-write, and git takes a lot of its

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 import SwiftUI
 
 /// The Box tab: what the active box is doing, in order of how often you need

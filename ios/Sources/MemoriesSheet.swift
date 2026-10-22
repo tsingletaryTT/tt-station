@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 import SwiftUI
 
 /// What the assistant remembers about you: facts it saved when you told it

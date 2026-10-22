@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 import Foundation
 
 /// One line in a chat transcript. A struct with a role (rather than an enum with

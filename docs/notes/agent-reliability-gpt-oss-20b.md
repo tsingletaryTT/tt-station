@@ -1,8 +1,8 @@
 # Agent reliability: gpt-oss-20b tool calls vs. session length
 
 **Date:** 2026-10-15 · **Model:** `openai/gpt-oss-20b` (vLLM 0.26.0.dev4, `--tool-call-parser openai`,
-max_model_len 131072, prefix caching on) on the QuietBox at `localhost:8003` · **Code:** branch
-`jberkowitz/reliability-eval`, commit `9ca80c1` · **Raw data:** [`agent-reliability-gpt-oss-20b.json`](agent-reliability-gpt-oss-20b.json)
+max_model_len 131072, prefix caching on) on the QuietBox at `localhost:8003` · **Code:** commit
+`9ca80c1` · **Raw data:** [`agent-reliability-gpt-oss-20b.json`](agent-reliability-gpt-oss-20b.json)
 (report + all 300 graded requests)
 
 > **Update (same day): recovery-aware scoring.** The first-reply metric below undercounts what a
@@ -117,7 +117,7 @@ What the data does show:
 ## Recovery: what a Code session actually gets
 
 **Date:** 2026-10-15 (afternoon) · same model, server, box and eval sessions as above · **Code:**
-branch `jberkowitz/eval-recovery`, commit `366434d` · **Raw data:**
+commit `366434d` · **Raw data:**
 [`agent-reliability-gpt-oss-20b-recovery.json`](agent-reliability-gpt-oss-20b-recovery.json)
 (seed 1, all six sizes: 300 trials with every retry) and
 [`agent-reliability-gpt-oss-20b-recovery-seed2.json`](agent-reliability-gpt-oss-20b-recovery-seed2.json)
@@ -266,7 +266,7 @@ What the data shows:
 cargo run --release -p tt-station-agentd --example agent_reliability -- \
   --url http://localhost:8003/v1 --histories 10 --tasks 5 --concurrency 4 --seed 1 \
   --out agent-reliability.json
-# recovery run (branch jberkowitz/eval-recovery): retries default to 2; the second set of sessions
+# recovery run (commit 366434d): retries default to 2; the second set of sessions
 #   ... --seed 2 --lengths 65536,98304
 ```
 

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 import Foundation
 
 /// One chip's live readings from a `tt-smi -s` frame. The lite frame carries

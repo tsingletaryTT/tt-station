@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 import SwiftUI
 
 /// "Waiting for you": everything on the box that needs the person's OK -- a

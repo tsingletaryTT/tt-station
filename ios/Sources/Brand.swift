@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 import SwiftUI
 
 /// Vesper, Tenstorrent's design system (`@tenstorrent/vesper`), dark theme:

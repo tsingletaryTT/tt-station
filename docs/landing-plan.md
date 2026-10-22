@@ -91,6 +91,10 @@ merges that don't split cleanly. Two things keep that from breaking the build:
   on their own, but the apps need a box running this branch's agent: older agents don't serve
   HTTPS on 8766, QR pairing or the version check the apps read.
 
+Versions: this branch is 0.12.0 and `origin/experiments/egpu` is 0.13.0. Whichever lands second
+takes the next number (`scripts/bump-version.sh`) and adds its `debian/changelog` entry on top,
+so the packaged version never goes backwards on a box that installed the other.
+
 `origin/experiments/egpu` touches 12 of the same files, so expect conflicts there:
 `Cargo.toml`, `Cargo.lock`, `CLAUDE.md`, `.gitignore`, `debian/changelog`,
 `box-panel/tt-station-panel.py`, `crates/libttstation/{Cargo.toml,src/lib.rs,src/secrets.rs}`,
@@ -108,3 +112,23 @@ Where it works around a gap, the gap is a candidate for tt-cli:
 | The agent maps `tt-smi -s` board counts to a mesh (`p300x2`) itself, because `run.py`'s auto-detect fails on 4 × p300c | `device.rs` | A hardware query (boards, chips, mesh) the agent and `run.py` could share |
 | Open WebUI and AnythingLLM start through `tt launch` | `tttools.rs`, `apps.rs` | Nothing; the other store apps are the agent's own Docker apps (`apps.rs`) |
 | Community packages, native vLLM bundles and Orchard use their own tools (`tt-model`, `tt-kernel`, `tt-orchard`) | `community.rs`, `native_vllm.rs`, `orchard.rs` | Decide which of these tt-cli should front |
+
+## Toward TT-Studio
+
+`docs/tt-studio-integration.md` (July) studied how the two fit on one box. Where that stands
+with this branch:
+
+- **TT-Studio's models already show up.** `GET /serving` (`serving/discovery.rs`) finds every
+  running tt-inference-server `/v1`, whoever started it, marked `source: external` when TT
+  Station didn't, and the apps list them.
+- **The chips are the conflict.** TT Station takes a gozer lease for every workload (model,
+  Lab, bring-up, chip resets: `docs/reference/chip-leasing.md`); TT-Studio deploys with
+  `run.py` and Docker and takes none, so either can start a model on chips the other holds.
+  Fix before running both on one box: TT-Studio leases through gozer, or both go through
+  tt-cli once it can serve on leased chips (see the table above).
+- **TT-Studio can use a TT Station box as its model.** The gateway serves OpenAI's API over
+  HTTPS on 8766 with app keys made in Connect (`docs/reference/gateway.md`), which is what
+  TT-Studio's remote-endpoint mode (`CLOUD_*`, `VITE_ENABLE_DEPLOYED=true`) expects; the
+  certificate is the box's own, so that client has to trust or pin it.
+- **Shared weights, not shared compiles.** Both use `~/.cache/huggingface` when TT-Studio's
+  `HOST_HF_HOME` points there; the tt-metal kernel caches stay separate.

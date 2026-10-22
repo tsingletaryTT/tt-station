@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 //! Secrets handed to model servers as files, not environment variables.
 //!
 //! A container's environment is readable by anyone who can run `docker

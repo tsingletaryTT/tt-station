@@ -1,8 +1,8 @@
 # iPhone parity: controlling the box from the phone
 
 What the desktop app (`desktop/src/pages`) lets you do to control or inspect a QuietBox,
-and whether the iPhone app (`ios/`) can do it. "Before" is the iPhone app at `6976289`
-(`jberkowitz/mobile-voice`), "After" is the branch `jberkowitz/mobile`. Routes are the
+and whether the iPhone app (`ios/`) can do it. "Before" is the iPhone app at commit `6976289`,
+before the parity work; "After" is what ships now. Routes are the
 agent's (`crates/tt-station-agentd/src/router.rs`); "owner" means the box refuses
 members (`OwnerAuth`), "model rule" means the owners' model-control setting applies.
 
